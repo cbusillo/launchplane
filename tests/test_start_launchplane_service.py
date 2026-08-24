@@ -584,10 +584,44 @@ class StartLaunchplanePrivilegedOperationWorkersScriptTests(unittest.TestCase):
         uv_path.write_text(
             """#!/bin/sh
 printf '%s\\n' \"$@\" >>\"$UV_CAPTURE_FILE\"
+if [ -n "${UV_CAPTURE_EVIDENCE_FILE:-}" ]; then
+    cat <&3 >"$UV_CAPTURE_EVIDENCE_FILE"
+fi
 """,
             encoding="utf-8",
         )
         uv_path.chmod(uv_path.stat().st_mode | stat.S_IXUSR)
+
+    def _write_fake_timeout(self, bin_dir: Path) -> None:
+        timeout_path = bin_dir / "timeout"
+        timeout_path.write_text(
+            """#!/bin/sh
+if [ -n "${TIMEOUT_EXIT_CODE:-}" ]; then
+    exit "$TIMEOUT_EXIT_CODE"
+fi
+shift 2
+exec "$@"
+""",
+            encoding="utf-8",
+        )
+        timeout_path.chmod(timeout_path.stat().st_mode | stat.S_IXUSR)
+
+    def _write_fake_python(
+        self,
+        bin_dir: Path,
+        *,
+        environment_capture_file: Path,
+        exit_code: int = 0,
+    ) -> None:
+        python_path = bin_dir / "python"
+        python_path.write_text(
+            f"""#!/bin/sh
+env | sort >"{environment_capture_file}"
+exit {exit_code}
+""",
+            encoding="utf-8",
+        )
+        python_path.chmod(python_path.stat().st_mode | stat.S_IXUSR)
 
     def test_requires_database_url_for_worker_startup(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -617,9 +651,16 @@ printf '%s\\n' \"$@\" >>\"$UV_CAPTURE_FILE\"
             app_root = temporary_directory / "app"
             bin_dir = temporary_directory / "bin"
             capture_file = temporary_directory / "uv-args.txt"
+            probe_environment_file = temporary_directory / "worker-probe-env.txt"
+            evidence_capture_file = temporary_directory / "worker-probe-evidence.txt"
             app_root.mkdir()
             bin_dir.mkdir()
             self._write_fake_uv(bin_dir)
+            self._write_fake_timeout(bin_dir)
+            self._write_fake_python(
+                bin_dir,
+                environment_capture_file=probe_environment_file,
+            )
 
             result = subprocess.run(
                 [str(self.script_path)],
@@ -629,6 +670,7 @@ printf '%s\\n' \"$@\" >>\"$UV_CAPTURE_FILE\"
                     **os.environ,
                     "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
                     "UV_CAPTURE_FILE": str(capture_file),
+                    "UV_CAPTURE_EVIDENCE_FILE": str(evidence_capture_file),
                     "LAUNCHPLANE_APP_ROOT": str(app_root),
                     "LAUNCHPLANE_STATE_DIR": str(temporary_directory / "runtime"),
                     "LAUNCHPLANE_DATABASE_URL": "postgresql+psycopg://launchplane:test@db/launchplane",
@@ -639,18 +681,34 @@ printf '%s\\n' \"$@\" >>\"$UV_CAPTURE_FILE\"
                     "LAUNCHPLANE_PRIVILEGED_OPERATION_WORKER_OPERATION_ID": "must-not-forward",
                     "LAUNCHPLANE_PRIVILEGED_OPERATION_WORKER_PLAN_DIGEST": "must-not-forward",
                     "LAUNCHPLANE_PRIVILEGED_OPERATION_WORKER_EXECUTE_PAYLOAD": "must-not-forward",
+                    "PGSSLROOTCERT": "/tmp/root.crt",
                 },
                 check=False,
             )
 
             captured_args = capture_file.read_text(encoding="utf-8").splitlines()
+            probe_environment = probe_environment_file.read_text(encoding="utf-8")
+            probe_evidence = evidence_capture_file.read_text(encoding="utf-8")
 
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         self.assertEqual(
             captured_args[:5],
             ["run", "launchplane", "service", "privileged-operation-workers", "run"],
         )
+        self.assertEqual(
+            probe_evidence,
+            "launchplane-privileged-operation-worker-schema-probe-completed-v1\n",
+        )
+        self.assertIn(
+            "LAUNCHPLANE_DATABASE_URL=postgresql+psycopg://launchplane:test@db/launchplane",
+            probe_environment,
+        )
+        self.assertIn("PGSSLROOTCERT=/tmp/root.crt", probe_environment)
+        self.assertNotIn("must-not-forward", probe_environment)
+        self.assertNotIn("LAUNCHPLANE_PRIVILEGED_OPERATION_WORKER_", probe_environment)
         self.assertIn("--state-dir", captured_args)
+        self.assertIn("--schema-probe-fd", captured_args)
+        self.assertIn("3", captured_args)
         self.assertNotIn("--database-url", captured_args)
         self.assertIn("--poll-seconds", captured_args)
         self.assertIn("5", captured_args)
@@ -661,6 +719,103 @@ printf '%s\\n' \"$@\" >>\"$UV_CAPTURE_FILE\"
         self.assertIn("--max-consecutive-errors", captured_args)
         self.assertIn("3", captured_args)
         self.assertNotIn("must-not-forward", captured_args)
+
+    def test_worker_startup_fails_closed_when_probe_times_out(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_directory = Path(temporary_directory_name)
+            app_root = temporary_directory / "app"
+            bin_dir = temporary_directory / "bin"
+            capture_file = temporary_directory / "uv-args.txt"
+            app_root.mkdir()
+            bin_dir.mkdir()
+            self._write_fake_uv(bin_dir)
+            self._write_fake_timeout(bin_dir)
+
+            result = subprocess.run(
+                [str(self.script_path)],
+                capture_output=True,
+                text=True,
+                env={
+                    **os.environ,
+                    "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+                    "TIMEOUT_EXIT_CODE": "124",
+                    "UV_CAPTURE_FILE": str(capture_file),
+                    "LAUNCHPLANE_APP_ROOT": str(app_root),
+                    "LAUNCHPLANE_STATE_DIR": str(temporary_directory / "runtime"),
+                    "LAUNCHPLANE_DATABASE_URL": (
+                        "postgresql+psycopg://launchplane:test@db/launchplane"
+                    ),
+                },
+                check=False,
+            )
+
+        self.assertEqual(result.returncode, 1, msg=result.stderr)
+        self.assertIn("privileged_operation_worker_startup_probe_failed", result.stdout)
+        self.assertIn('"error_type":"timeout"', result.stdout)
+        self.assertFalse(capture_file.exists())
+
+    def test_worker_startup_reports_killed_probe_separately(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_directory = Path(temporary_directory_name)
+            app_root = temporary_directory / "app"
+            bin_dir = temporary_directory / "bin"
+            app_root.mkdir()
+            bin_dir.mkdir()
+            self._write_fake_timeout(bin_dir)
+
+            result = subprocess.run(
+                [str(self.script_path)],
+                capture_output=True,
+                text=True,
+                env={
+                    **os.environ,
+                    "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+                    "TIMEOUT_EXIT_CODE": "137",
+                    "LAUNCHPLANE_APP_ROOT": str(app_root),
+                    "LAUNCHPLANE_STATE_DIR": str(temporary_directory / "runtime"),
+                    "LAUNCHPLANE_DATABASE_URL": (
+                        "postgresql+psycopg://launchplane:test@db/launchplane"
+                    ),
+                },
+                check=False,
+            )
+
+        self.assertEqual(result.returncode, 1, msg=result.stderr)
+        self.assertIn('"error_type":"killed"', result.stdout)
+
+    def test_worker_startup_reports_probe_failure(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_directory = Path(temporary_directory_name)
+            app_root = temporary_directory / "app"
+            bin_dir = temporary_directory / "bin"
+            probe_environment_file = temporary_directory / "worker-probe-env.txt"
+            app_root.mkdir()
+            bin_dir.mkdir()
+            self._write_fake_timeout(bin_dir)
+            self._write_fake_python(
+                bin_dir,
+                environment_capture_file=probe_environment_file,
+                exit_code=2,
+            )
+
+            result = subprocess.run(
+                [str(self.script_path)],
+                capture_output=True,
+                text=True,
+                env={
+                    **os.environ,
+                    "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+                    "LAUNCHPLANE_APP_ROOT": str(app_root),
+                    "LAUNCHPLANE_STATE_DIR": str(temporary_directory / "runtime"),
+                    "LAUNCHPLANE_DATABASE_URL": (
+                        "postgresql+psycopg://launchplane:test@db/launchplane"
+                    ),
+                },
+                check=False,
+            )
+
+        self.assertEqual(result.returncode, 1, msg=result.stderr)
+        self.assertIn('"error_type":"probe_failed"', result.stdout)
 
     def test_compose_includes_supervised_privileged_operation_worker_service(self) -> None:
         compose_text = self.compose_path.read_text(encoding="utf-8")

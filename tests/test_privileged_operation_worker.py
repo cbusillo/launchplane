@@ -205,6 +205,16 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
 
         service_help = runner.invoke(main, ["service", "privileged-operation-workers", "--help"])
         run_help = runner.invoke(main, ["service", "privileged-operation-workers", "run", "--help"])
+        direct_run = runner.invoke(
+            main,
+            [
+                "service",
+                "privileged-operation-workers",
+                "run",
+                "--database-url",
+                "sqlite+pysqlite:///:memory:",
+            ],
+        )
         top_level = runner.invoke(main, ["privileged-operations", "--help"])
 
         self.assertEqual(service_help.exit_code, 0)
@@ -216,6 +226,8 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
         self.assertNotIn("--operation-id", run_help.output)
         self.assertNotIn("--plan-digest", run_help.output)
         self.assertNotIn("--execute-payload", run_help.output)
+        self.assertNotEqual(direct_run.exit_code, 0)
+        self.assertIn("--schema-probe-fd", direct_run.output)
         self.assertNotEqual(top_level.exit_code, 0)
 
     def test_worker_loop_retries_redacts_and_exits_at_threshold(self) -> None:
@@ -253,6 +265,9 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
                     RuntimeError("execute-payload must not be emitted"),
                 ],
             ),
+            patch(
+                "control_plane.cli_service._consume_privileged_operation_worker_schema_probe_evidence"
+            ),
             patch("control_plane.cli_service.signal.signal", return_value=object()),
         ):
             result = runner.invoke(
@@ -263,6 +278,8 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
                     "run",
                     "--database-url",
                     "sqlite+pysqlite:///:memory:",
+                    "--schema-probe-fd",
+                    "3",
                     "--poll-seconds",
                     "7",
                     "--limit",
@@ -352,6 +369,9 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
                     SimpleNamespace(operation_id="operation-secret-id", status="executed")
                 ],
             ),
+            patch(
+                "control_plane.cli_service._consume_privileged_operation_worker_schema_probe_evidence"
+            ),
             patch("control_plane.cli_service.signal.signal", side_effect=record_signal),
         ):
             result = runner.invoke(
@@ -362,6 +382,8 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
                     "run",
                     "--database-url",
                     "sqlite+pysqlite:///:memory:",
+                    "--schema-probe-fd",
+                    "3",
                 ],
             )
 
@@ -414,6 +436,9 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
                 "control_plane.cli_service.execute_approved_privileged_operations_once",
                 side_effect=FatalWorkerError("operation-secret-id must not be emitted"),
             ),
+            patch(
+                "control_plane.cli_service._consume_privileged_operation_worker_schema_probe_evidence"
+            ),
             patch("control_plane.cli_service.signal.signal", side_effect=record_signal),
             patch("control_plane.cli_service.click.echo") as echo,
         ):
@@ -426,6 +451,8 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
                         "run",
                         "--database-url",
                         "sqlite+pysqlite:///:memory:",
+                        "--schema-probe-fd",
+                        "3",
                     ],
                 )
 
@@ -470,6 +497,9 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
                 "control_plane.cli_service.execute_approved_privileged_operations_once",
                 return_value=[],
             ) as execute_once,
+            patch(
+                "control_plane.cli_service._consume_privileged_operation_worker_schema_probe_evidence"
+            ),
             patch("control_plane.cli_service.signal.signal", return_value=object()),
         ):
             result = runner.invoke(
@@ -480,6 +510,8 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
                     "run",
                     "--database-url",
                     "sqlite+pysqlite:///:memory:",
+                    "--schema-probe-fd",
+                    "3",
                 ],
             )
 
