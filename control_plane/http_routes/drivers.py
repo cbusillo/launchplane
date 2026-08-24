@@ -805,6 +805,9 @@ def register_dokploy_target_inspect_read_routes(
         instance: Annotated[str, Query()] = "",
         target_type: Annotated[str, Query()] = "",
         target_id: Annotated[str, Query()] = "",
+        service: Annotated[str, Query()] = "",
+        event: Annotated[str, Query()] = "",
+        expected_image: Annotated[str, Query()] = "",
     ) -> DokployTargetInspectResponse:
         trace_id = common.next_trace_id()
         if not common.authorization_allows(
@@ -837,6 +840,9 @@ def register_dokploy_target_inspect_read_routes(
                     "instance": instance,
                     "target_type": target_type,
                     "target_id": target_id,
+                    "service": service,
+                    "event": event,
+                    "expected_image": expected_image,
                 }
             )
             host, token = dokploy_source.read_dokploy_config(
@@ -862,6 +868,13 @@ def register_dokploy_target_inspect_read_routes(
                 trace_id=trace_id,
                 code="not_found",
                 message=str(error),
+            ) from error
+        except click.ClickException as error:
+            raise common.http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="dokploy_target_inspect_unavailable",
+                message="Dokploy target inspect evidence is unavailable from the provider.",
             ) from error
         return DokployTargetInspectResponse(trace_id=trace_id, inspect=inspect_result)
 

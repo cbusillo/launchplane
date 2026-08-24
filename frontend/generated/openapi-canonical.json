@@ -40583,6 +40583,36 @@
             }
           },
           {
+            "in": "query",
+            "name": "service",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Service",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "event",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Event",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "expected_image",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Expected Image",
+              "type": "string"
+            }
+          },
+          {
             "in": "header",
             "name": "Authorization",
             "required": false,

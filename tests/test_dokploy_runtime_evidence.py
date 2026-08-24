@@ -1,0 +1,165 @@
+from __future__ import annotations
+
+import unittest
+from unittest.mock import patch
+
+import click
+
+from control_plane.dokploy import runtime_evidence
+
+
+class DokployRuntimeEvidenceTests(unittest.TestCase):
+    def test_expected_image_requires_immutable_digest_reference(self) -> None:
+        with self.assertRaisesRegex(click.ClickException, "immutable repository@sha256"):
+            runtime_evidence.normalize_expected_image_reference("example:latest")
+
+    def test_structured_event_requires_allow_list_membership(self) -> None:
+        with self.assertRaisesRegex(click.ClickException, "allow-listed"):
+            runtime_evidence.normalize_structured_event_name("arbitrary_event")
+
+    def test_fetch_compose_service_runtime_returns_bounded_image_and_state(self) -> None:
+        requests: list[dict[str, object]] = []
+        image_digest = "a" * 64
+        image_id = "b" * 64
+
+        def capture_request(**kwargs: object) -> object:
+            requests.append(kwargs)
+            if kwargs["path"] == "/api/docker.getContainersByAppNameMatch":
+                return [
+                    {
+                        "containerId": "worker-container",
+                        "serviceName": "launchplane-privileged-operation-workers",
+                        "state": "running",
+                        "status": "Up 5 minutes",
+                    }
+                ]
+            return {
+                "Image": f"sha256:{image_id}",
+                "Config": {
+                    "Image": f"ghcr.io/example/launchplane@sha256:{image_digest}",
+                    "Env": ["LAUNCHPLANE_DATABASE_URL=secret"],
+                },
+            }
+
+        with patch(
+            "control_plane.dokploy.api.dokploy_request",
+            side_effect=capture_request,
+        ):
+            runtime = runtime_evidence.fetch_compose_service_runtime(
+                host="https://dokploy.example.com",
+                token="secret-token",
+                compose_id="compose-123",
+                app_name="launchplane",
+                server_id="server-1",
+                service_name="launchplane-privileged-operation-workers",
+            )
+
+        self.assertEqual(
+            [request["path"] for request in requests],
+            [
+                "/api/docker.getContainersByAppNameMatch",
+                "/api/docker.getConfig",
+            ],
+        )
+        self.assertEqual(
+            requests[1]["query"],
+            {"containerId": "worker-container", "serverId": "server-1"},
+        )
+        self.assertTrue(runtime["running"])
+        self.assertTrue(runtime["image_reference_immutable"])
+        self.assertEqual(
+            runtime["immutable_image_reference"],
+            f"ghcr.io/example/launchplane@sha256:{image_digest}",
+        )
+        self.assertEqual(runtime["image_id"], f"sha256:{image_id}")
+        self.assertNotIn("Env", runtime)
+        self.assertNotIn("secret", str(runtime))
+
+    def test_fetch_compose_service_runtime_marks_mutable_reference_unverified(self) -> None:
+        with patch(
+            "control_plane.dokploy.api.dokploy_request",
+            side_effect=[
+                [
+                    {
+                        "containerId": "worker-container",
+                        "serviceName": "worker",
+                        "state": "running",
+                    }
+                ],
+                {"Image": f"sha256:{'b' * 64}", "Config": {"Image": "example:latest"}},
+            ],
+        ):
+            runtime = runtime_evidence.fetch_compose_service_runtime(
+                host="https://dokploy.example.com",
+                token="secret-token",
+                compose_id="compose-123",
+                app_name="launchplane",
+                service_name="worker",
+            )
+
+        self.assertFalse(runtime["image_reference_immutable"])
+        self.assertEqual(runtime["immutable_image_reference"], "")
+
+    def test_fetch_compose_service_runtime_selects_exact_container_name(self) -> None:
+        with patch(
+            "control_plane.dokploy.runtime_evidence.dokploy_api.dokploy_request",
+            side_effect=[
+                [
+                    {"containerId": "database", "name": "launchplane_database_1"},
+                    {"containerId": "worker", "name": "launchplane_worker_1"},
+                ],
+                [
+                    {
+                        "Image": f"sha256:{'b' * 64}",
+                        "Config": {"Image": f"example@sha256:{'a' * 64}"},
+                    }
+                ],
+            ],
+        ):
+            runtime = runtime_evidence.fetch_compose_service_runtime(
+                host="https://dokploy.example.com",
+                token="secret-token",
+                compose_id="compose-123",
+                app_name="launchplane",
+                service_name="worker",
+            )
+
+        self.assertEqual(runtime["service"], "worker")
+
+    def test_fetch_compose_service_runtime_rejects_ambiguous_service(self) -> None:
+        with (
+            patch(
+                "control_plane.dokploy.runtime_evidence.dokploy_api.dokploy_request",
+                return_value=[
+                    {"containerId": "worker-1", "name": "launchplane_worker_1"},
+                    {"containerId": "worker-2", "name": "launchplane_worker_2"},
+                ],
+            ),
+            self.assertRaisesRegex(click.ClickException, "ambiguous"),
+        ):
+            runtime_evidence.fetch_compose_service_runtime(
+                host="https://dokploy.example.com",
+                token="secret-token",
+                compose_id="compose-123",
+                app_name="launchplane",
+                service_name="worker",
+            )
+
+    def test_count_structured_log_events_requires_exact_json_event(self) -> None:
+        event_name = "privileged_operation_worker_poll_succeeded"
+
+        matching_event_count = runtime_evidence.count_structured_log_events(
+            (
+                f'2026-08-24T00:00:00Z {{"event":"{event_name}","processed":0}} trailing',
+                '{"event":"privileged_operation_worker_retry"}',
+                f"plain text mentioning {event_name}",
+                "not-json {broken",
+            ),
+            event_name=event_name,
+        )
+
+        self.assertEqual(matching_event_count, 1)
+
+
+if __name__ == "__main__":
+    unittest.main()

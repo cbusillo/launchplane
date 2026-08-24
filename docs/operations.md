@@ -3003,7 +3003,16 @@ does not accept operation IDs, plan digests, targets, or execution payloads.
 
 Before any canary-rule activation, prove the privileged-operation worker
 container is running the expected image and record one successful DB-backed poll
-from its structured redacted telemetry. Activate only
+from its structured redacted telemetry. Dispatch the protected `Dokploy Target
+Inspect` workflow with the deployed target identity, exact service
+`launchplane-privileged-operation-workers`, and event
+`privileged_operation_worker_poll_succeeded`, plus the exact immutable image
+reference retained from the deployment as `expected_image`. Retain its redacted
+artifact for both success and failure diagnosis, but treat it as activation
+evidence only when `runtime_evidence.proof_ready` is true. The artifact contains
+image/state identity, exact image-match state, and a structured-event count, not
+raw logs or container config.
+Activate only
 `privileged_secret_operation.plan`, `privileged_secret_operation.read`, and
 `privileged_secret_operation.cancel` first. Add
 `privileged_secret_operation.approve` and `privileged_secret_operation.revoke`
