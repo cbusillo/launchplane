@@ -304,6 +304,7 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
             [entry["event"] for entry in telemetry],
             [
                 "privileged_operation_worker_started",
+                "privileged_operation_worker_store_build_started",
                 "privileged_operation_worker_retry",
                 "privileged_operation_worker_schema_probe_succeeded",
                 "privileged_operation_worker_store_initialized",
@@ -313,18 +314,18 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
                 "privileged_operation_worker_threshold_exit",
             ],
         )
-        self.assertEqual(telemetry[1]["consecutive_errors"], 1)
-        self.assertEqual(telemetry[1]["error_type"], "RuntimeError")
+        self.assertEqual(telemetry[2]["consecutive_errors"], 1)
+        self.assertEqual(telemetry[2]["error_type"], "RuntimeError")
         self.assertEqual(
-            telemetry[5],
+            telemetry[6],
             {
                 "event": "privileged_operation_worker_poll_succeeded",
                 "processed": 1,
                 "statuses": ["executed"],
             },
         )
-        self.assertEqual(telemetry[6]["consecutive_errors"], 1)
-        self.assertEqual(telemetry[7]["consecutive_errors"], 2)
+        self.assertEqual(telemetry[7]["consecutive_errors"], 1)
+        self.assertEqual(telemetry[8]["consecutive_errors"], 2)
 
     def test_worker_loop_stops_cleanly_after_sigterm(self) -> None:
         signal_handlers: dict[int, object] = {}
@@ -396,6 +397,7 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
             [entry["event"] for entry in telemetry],
             [
                 "privileged_operation_worker_started",
+                "privileged_operation_worker_store_build_started",
                 "privileged_operation_worker_schema_probe_succeeded",
                 "privileged_operation_worker_store_initialized",
                 "privileged_operation_worker_first_poll_attempted",
@@ -465,6 +467,7 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
                     "limit": 20,
                     "poll_seconds": 15,
                 },
+                {"event": "privileged_operation_worker_store_build_started"},
                 {"event": "privileged_operation_worker_schema_probe_succeeded"},
                 {"event": "privileged_operation_worker_store_initialized"},
                 {"event": "privileged_operation_worker_first_poll_attempted"},
@@ -523,6 +526,7 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
             [entry["event"] for entry in telemetry],
             [
                 "privileged_operation_worker_started",
+                "privileged_operation_worker_store_build_started",
                 "privileged_operation_worker_schema_probe_succeeded",
                 "privileged_operation_worker_store_initialized",
                 "privileged_operation_worker_first_poll_attempted",

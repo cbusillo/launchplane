@@ -82,7 +82,10 @@ request service `launchplane-privileged-operation-workers` and event
 `privileged_operation_worker_poll_succeeded`, supply the exact immutable
 deployment reference as `expected_image`, and proceed only when
 `runtime_evidence.proof_ready` is true. Do not retain or expose raw runtime logs,
-container configuration, or environment values as canary evidence.
+container configuration, or environment values as canary evidence. The
+allow-listed `privileged_operation_worker_started` and
+`privileged_operation_worker_store_build_started` events are diagnostic-only
+localization markers and can never make the response proof-ready.
 
 ## Records And Lifecycle
 

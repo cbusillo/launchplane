@@ -14,6 +14,8 @@ _IMMUTABLE_IMAGE_REFERENCE_PATTERN = re.compile(r"^[^\s@]+@sha256:[a-f0-9]{64}$"
 _MAX_RUNTIME_TEXT_LENGTH = 500
 _ALLOWED_STRUCTURED_EVENTS = frozenset(
     {
+        "privileged_operation_worker_started",
+        "privileged_operation_worker_store_build_started",
         "privileged_operation_worker_schema_probe_succeeded",
         "privileged_operation_worker_store_initialized",
         "privileged_operation_worker_first_poll_attempted",
