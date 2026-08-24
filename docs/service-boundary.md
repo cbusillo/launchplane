@@ -2233,6 +2233,11 @@ manual workflow treats a requested runtime proof as failed unless the service is
 running, its immutable configured image exactly matches the operator-supplied
 expected image, and the requested event was observed.
 
+Provider failures expose only a bounded operation stage such as
+`provider-config`, `target-inspect`, `container-list`, `service-select`,
+`container-config`, `image-identity`, or `runtime-log-read`; raw provider
+messages remain excluded.
+
 Runtime-event evidence remains under `dokploy_target.inspect` because the
 service accepts only code-owned allow-listed event names and returns counts, not
 log content. It is not an alternate arbitrary log-read surface; caller-selected
