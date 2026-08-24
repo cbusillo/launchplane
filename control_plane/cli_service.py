@@ -547,15 +547,32 @@ def service_privileged_operation_workers_run(
             )
         )
         store: PrivilegedOperationExecutionStore | None = None
+        schema_probe_succeeded = False
         store_initialized = False
         first_poll_attempted = False
         consecutive_errors = 0
+
+        def report_schema_probe_succeeded() -> None:
+            nonlocal schema_probe_succeeded
+            if schema_probe_succeeded:
+                return
+            click.echo(
+                json.dumps(
+                    {"event": "privileged_operation_worker_schema_probe_succeeded"},
+                    sort_keys=True,
+                )
+            )
+            schema_probe_succeeded = True
+
         while not stop_event.is_set():
             try:
                 if store is None:
                     store = cast(
                         PrivilegedOperationExecutionStore,
-                        build_privileged_operation_worker_store(database_url=database_url),
+                        build_privileged_operation_worker_store(
+                            database_url=database_url,
+                            on_schema_probe_succeeded=report_schema_probe_succeeded,
+                        ),
                     )
                 if not store_initialized:
                     click.echo(

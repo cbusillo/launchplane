@@ -3702,6 +3702,7 @@ class PostgresRecordStoreTests(unittest.TestCase):
 
     def test_privileged_operation_worker_store_uses_bounded_runtime_check(self) -> None:
         runtime_store = Mock()
+        schema_probe_succeeded = Mock()
         database_url = "postgresql+psycopg://launchplane.invalid/launchplane"
 
         with (
@@ -3725,7 +3726,10 @@ class PostgresRecordStoreTests(unittest.TestCase):
                 return_value=runtime_store,
             ) as store_type,
         ):
-            result = build_privileged_operation_worker_store(database_url=database_url)
+            result = build_privileged_operation_worker_store(
+                database_url=database_url,
+                on_schema_probe_succeeded=schema_probe_succeeded,
+            )
 
         self.assertIs(result, runtime_store)
         store_type.assert_called_once_with(
@@ -3753,6 +3757,7 @@ class PostgresRecordStoreTests(unittest.TestCase):
         self.assertNotIn("UNRELATED_SECRET", probe_kwargs["env"])
         self.assertEqual(probe_kwargs["stdout"], subprocess.DEVNULL)
         self.assertEqual(probe_kwargs["stderr"], subprocess.DEVNULL)
+        schema_probe_succeeded.assert_called_once_with()
 
     def test_privileged_operation_worker_store_closes_incompatible_schema(self) -> None:
         startup_probe = Mock()

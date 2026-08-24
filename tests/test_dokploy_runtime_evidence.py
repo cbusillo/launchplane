@@ -19,6 +19,7 @@ class DokployRuntimeEvidenceTests(unittest.TestCase):
 
     def test_structured_event_accepts_bounded_worker_lifecycle_markers(self) -> None:
         for event_name in (
+            "privileged_operation_worker_schema_probe_succeeded",
             "privileged_operation_worker_store_initialized",
             "privileged_operation_worker_first_poll_attempted",
             "privileged_operation_worker_poll_succeeded",
@@ -28,6 +29,18 @@ class DokployRuntimeEvidenceTests(unittest.TestCase):
                     runtime_evidence.normalize_structured_event_name(event_name),
                     event_name,
                 )
+
+    def test_only_successful_poll_is_activation_proof(self) -> None:
+        self.assertFalse(
+            runtime_evidence.structured_event_is_activation_proof(
+                "privileged_operation_worker_schema_probe_succeeded"
+            )
+        )
+        self.assertTrue(
+            runtime_evidence.structured_event_is_activation_proof(
+                "privileged_operation_worker_poll_succeeded"
+            )
+        )
 
     def test_fetch_compose_service_runtime_returns_bounded_image_and_state(self) -> None:
         requests: list[dict[str, object]] = []

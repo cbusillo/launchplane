@@ -14,11 +14,13 @@ _IMMUTABLE_IMAGE_REFERENCE_PATTERN = re.compile(r"^[^\s@]+@sha256:[a-f0-9]{64}$"
 _MAX_RUNTIME_TEXT_LENGTH = 500
 _ALLOWED_STRUCTURED_EVENTS = frozenset(
     {
+        "privileged_operation_worker_schema_probe_succeeded",
         "privileged_operation_worker_store_initialized",
         "privileged_operation_worker_first_poll_attempted",
         "privileged_operation_worker_poll_succeeded",
     }
 )
+_ACTIVATION_PROOF_STRUCTURED_EVENTS = frozenset({"privileged_operation_worker_poll_succeeded"})
 type DokployEvidenceProviderOperation = Literal[
     "provider-config",
     "target-inspect",
@@ -47,6 +49,10 @@ def normalize_structured_event_name(raw_event_name: str) -> str:
             "Dokploy runtime evidence supports only allow-listed structured events."
         )
     return event_name
+
+
+def structured_event_is_activation_proof(event_name: str) -> bool:
+    return event_name in _ACTIVATION_PROOF_STRUCTURED_EVENTS
 
 
 def normalize_expected_image_reference(raw_image_reference: str) -> str:
