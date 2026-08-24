@@ -3012,6 +3012,9 @@ artifact for both success and failure diagnosis, but treat it as activation
 evidence only when `runtime_evidence.proof_ready` is true. The artifact contains
 image/state identity, exact image-match state, and a structured-event count, not
 raw logs or container config.
+The allow-listed `privileged_operation_worker_started` and
+`privileged_operation_worker_store_build_started` events may be queried for
+diagnostic localization, but they are not activation-proof eligible.
 Activate only
 `privileged_secret_operation.plan`, `privileged_secret_operation.read`, and
 `privileged_secret_operation.cancel` first. Add

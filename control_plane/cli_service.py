@@ -574,6 +574,12 @@ def service_privileged_operation_workers_run(
                 sort_keys=True,
             )
         )
+        click.echo(
+            json.dumps(
+                {"event": "privileged_operation_worker_store_build_started"},
+                sort_keys=True,
+            )
+        )
         store: PrivilegedOperationExecutionStore | None = None
         schema_probe_succeeded = False
         store_initialized = False

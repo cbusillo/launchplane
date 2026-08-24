@@ -19,6 +19,8 @@ class DokployRuntimeEvidenceTests(unittest.TestCase):
 
     def test_structured_event_accepts_bounded_worker_lifecycle_markers(self) -> None:
         for event_name in (
+            "privileged_operation_worker_started",
+            "privileged_operation_worker_store_build_started",
             "privileged_operation_worker_schema_probe_succeeded",
             "privileged_operation_worker_store_initialized",
             "privileged_operation_worker_first_poll_attempted",
@@ -31,11 +33,15 @@ class DokployRuntimeEvidenceTests(unittest.TestCase):
                 )
 
     def test_only_successful_poll_is_activation_proof(self) -> None:
-        self.assertFalse(
-            runtime_evidence.structured_event_is_activation_proof(
-                "privileged_operation_worker_schema_probe_succeeded"
-            )
-        )
+        for event_name in (
+            "privileged_operation_worker_started",
+            "privileged_operation_worker_store_build_started",
+            "privileged_operation_worker_schema_probe_succeeded",
+            "privileged_operation_worker_store_initialized",
+            "privileged_operation_worker_first_poll_attempted",
+        ):
+            with self.subTest(event_name=event_name):
+                self.assertFalse(runtime_evidence.structured_event_is_activation_proof(event_name))
         self.assertTrue(
             runtime_evidence.structured_event_is_activation_proof(
                 "privileged_operation_worker_poll_succeeded"

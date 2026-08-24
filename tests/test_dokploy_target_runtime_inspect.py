@@ -145,33 +145,37 @@ class DokployTargetRuntimeInspectTests(unittest.TestCase):
         self.assertNotIn("secret", str(runtime_evidence))
 
     def test_diagnostic_worker_event_is_observed_but_not_proof_ready(self) -> None:
-        def fetch_diagnostic_logs(**kwargs: object) -> tuple[str, ...]:
-            del kwargs
-            return ('{"event":"privileged_operation_worker_schema_probe_succeeded"}',)
+        for event_name in (
+            "privileged_operation_worker_started",
+            "privileged_operation_worker_store_build_started",
+            "privileged_operation_worker_schema_probe_succeeded",
+            "privileged_operation_worker_store_initialized",
+            "privileged_operation_worker_first_poll_attempted",
+        ):
+            with self.subTest(event_name=event_name):
+                result = inspect_dokploy_target(
+                    record_store=_UNUSED_STORE,
+                    host="https://dokploy.example.invalid",
+                    token="token",
+                    request=DokployTargetInspectRequest(
+                        target_type="compose",
+                        target_id="compose-123",
+                        service="launchplane-privileged-operation-workers",
+                        event=event_name,
+                        expected_image=f"ghcr.io/example/launchplane@sha256:{'a' * 64}",
+                    ),
+                    fetch_target_payload=_fetch_target_payload,
+                    fetch_compose_service_runtime=_fetch_service_runtime,
+                    fetch_compose_logs=lambda **_kwargs: (f'{{"event":"{event_name}"}}',),
+                )
 
-        result = inspect_dokploy_target(
-            record_store=_UNUSED_STORE,
-            host="https://dokploy.example.invalid",
-            token="token",
-            request=DokployTargetInspectRequest(
-                target_type="compose",
-                target_id="compose-123",
-                service="launchplane-privileged-operation-workers",
-                event="privileged_operation_worker_schema_probe_succeeded",
-                expected_image=f"ghcr.io/example/launchplane@sha256:{'a' * 64}",
-            ),
-            fetch_target_payload=_fetch_target_payload,
-            fetch_compose_service_runtime=_fetch_service_runtime,
-            fetch_compose_logs=fetch_diagnostic_logs,
-        )
-
-        runtime_evidence = result["runtime_evidence"]
-        assert isinstance(runtime_evidence, dict)
-        structured_event = runtime_evidence["structured_event"]
-        assert isinstance(structured_event, dict)
-        self.assertTrue(structured_event["observed"])
-        self.assertFalse(structured_event["activation_proof_eligible"])
-        self.assertFalse(runtime_evidence["proof_ready"])
+                runtime_evidence = result["runtime_evidence"]
+                assert isinstance(runtime_evidence, dict)
+                structured_event = runtime_evidence["structured_event"]
+                assert isinstance(structured_event, dict)
+                self.assertTrue(structured_event["observed"])
+                self.assertFalse(structured_event["activation_proof_eligible"])
+                self.assertFalse(runtime_evidence["proof_ready"])
 
     def test_expected_image_mismatch_is_not_proof_ready(self) -> None:
         result = inspect_dokploy_target(
