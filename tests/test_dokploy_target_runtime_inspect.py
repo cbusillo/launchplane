@@ -3,7 +3,10 @@ from __future__ import annotations
 import unittest
 from typing import cast
 
+import click
+
 from control_plane.dokploy import api as dokploy_api
+from control_plane.dokploy import runtime_evidence as dokploy_runtime_evidence
 from control_plane.dokploy_target_inspect import (
     DokployTargetInspectRequest,
     DokployTargetInspectStore,
@@ -66,6 +69,26 @@ def _fetch_logs(
 
 
 class DokployTargetRuntimeInspectTests(unittest.TestCase):
+    def test_target_fetch_failure_identifies_target_stage(self) -> None:
+        def fetch_target_failure(**kwargs: str) -> dokploy_api.JsonObject:
+            del kwargs
+            raise click.ClickException("provider TOKEN=secret")
+
+        with self.assertRaisesRegex(
+            dokploy_runtime_evidence.DokployEvidenceProviderError,
+            "target-inspect",
+        ):
+            inspect_dokploy_target(
+                record_store=_UNUSED_STORE,
+                host="https://dokploy.example.invalid",
+                token="token",
+                request=DokployTargetInspectRequest(
+                    target_type="compose",
+                    target_id="compose-123",
+                ),
+                fetch_target_payload=fetch_target_failure,
+            )
+
     def test_request_requires_service_for_runtime_event_evidence(self) -> None:
         with self.assertRaisesRegex(ValueError, "requires a compose service"):
             DokployTargetInspectRequest(
@@ -195,6 +218,31 @@ class DokployTargetRuntimeInspectTests(unittest.TestCase):
                     expected_image=f"example@sha256:{'a' * 64}",
                 ),
                 fetch_target_payload=_fetch_target_payload,
+            )
+
+    def test_log_fetch_failure_identifies_runtime_log_stage(self) -> None:
+        def fetch_log_failure(**kwargs: str | int) -> tuple[str, ...]:
+            del kwargs
+            raise click.ClickException("provider TOKEN=secret")
+
+        with self.assertRaisesRegex(
+            dokploy_runtime_evidence.DokployEvidenceProviderError,
+            "runtime-log-read",
+        ):
+            inspect_dokploy_target(
+                record_store=_UNUSED_STORE,
+                host="https://dokploy.example.invalid",
+                token="token",
+                request=DokployTargetInspectRequest(
+                    target_type="compose",
+                    target_id="compose-123",
+                    service="launchplane-privileged-operation-workers",
+                    event="privileged_operation_worker_poll_succeeded",
+                    expected_image=f"ghcr.io/example/launchplane@sha256:{'a' * 64}",
+                ),
+                fetch_target_payload=_fetch_target_payload,
+                fetch_compose_service_runtime=_fetch_service_runtime,
+                fetch_compose_logs=fetch_log_failure,
             )
 
 

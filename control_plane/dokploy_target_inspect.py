@@ -161,12 +161,15 @@ def inspect_dokploy_target(
         target_id = target_id_record.target_id
 
     payload_fetcher = fetch_target_payload or dokploy_api.fetch_dokploy_target_payload
-    provider_payload = payload_fetcher(
-        host=host,
-        token=token,
-        target_type=target_type,
-        target_id=target_id,
-    )
+    try:
+        provider_payload = payload_fetcher(
+            host=host,
+            token=token,
+            target_type=target_type,
+            target_id=target_id,
+        )
+    except click.ClickException as error:
+        raise dokploy_runtime_evidence.DokployEvidenceProviderError("target-inspect") from error
     provider_summary = summarize_dokploy_target_payload(
         target_type=target_type,
         target_id=target_id,
@@ -196,17 +199,22 @@ def inspect_dokploy_target(
             service_name=request.service,
         )
         logs_fetcher = fetch_compose_logs or dokploy_api.fetch_dokploy_compose_logs
-        logs = logs_fetcher(
-            host=host,
-            token=token,
-            compose_id=target_id,
-            app_name=app_name,
-            server_id=server_id,
-            service_name=request.service,
-            line_count=_RUNTIME_EVIDENCE_LOG_LINE_COUNT,
-            since=_RUNTIME_EVIDENCE_LOG_SINCE,
-            search=request.event,
-        )
+        try:
+            logs = logs_fetcher(
+                host=host,
+                token=token,
+                compose_id=target_id,
+                app_name=app_name,
+                server_id=server_id,
+                service_name=request.service,
+                line_count=_RUNTIME_EVIDENCE_LOG_LINE_COUNT,
+                since=_RUNTIME_EVIDENCE_LOG_SINCE,
+                search=request.event,
+            )
+        except click.ClickException as error:
+            raise dokploy_runtime_evidence.DokployEvidenceProviderError(
+                "runtime-log-read"
+            ) from error
         matching_event_count = dokploy_runtime_evidence.count_structured_log_events(
             logs,
             event_name=request.event,

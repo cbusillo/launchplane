@@ -22,6 +22,7 @@ from control_plane.contracts.odoo_stable_target_replacement_operation import (
     OdooStableTargetReplacementOperationRecord,
 )
 from control_plane.dokploy import api as dokploy_api
+from control_plane.dokploy import runtime_evidence as dokploy_runtime_evidence
 from control_plane.dokploy import source as dokploy_source
 from control_plane.dokploy_target_inspect import (
     DokployTargetInspectRequest,
@@ -845,10 +846,15 @@ def register_dokploy_target_inspect_read_routes(
                     "expected_image": expected_image,
                 }
             )
-            host, token = dokploy_source.read_dokploy_config(
-                control_plane_root=dependencies.control_plane_root,
-                database_url=dependencies.database_url,
-            )
+            try:
+                host, token = dokploy_source.read_dokploy_config(
+                    control_plane_root=dependencies.control_plane_root,
+                    database_url=dependencies.database_url,
+                )
+            except click.ClickException as error:
+                raise dokploy_runtime_evidence.DokployEvidenceProviderError(
+                    "provider-config"
+                ) from error
             inspect_result = inspect_dokploy_target(
                 record_store=inspect_store,
                 host=host,
@@ -869,12 +875,14 @@ def register_dokploy_target_inspect_read_routes(
                 code="not_found",
                 message=str(error),
             ) from error
-        except click.ClickException as error:
+        except dokploy_runtime_evidence.DokployEvidenceProviderError as error:
             raise common.http_error(
                 status_code=503,
                 trace_id=trace_id,
                 code="dokploy_target_inspect_unavailable",
-                message="Dokploy target inspect evidence is unavailable from the provider.",
+                message=(
+                    f"Dokploy target inspect evidence is unavailable during {error.operation}."
+                ),
             ) from error
         return DokployTargetInspectResponse(trace_id=trace_id, inspect=inspect_result)
 

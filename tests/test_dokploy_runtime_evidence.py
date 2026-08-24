@@ -135,13 +135,92 @@ class DokployRuntimeEvidenceTests(unittest.TestCase):
                     {"containerId": "worker-2", "name": "launchplane_worker_2"},
                 ],
             ),
-            self.assertRaisesRegex(click.ClickException, "ambiguous"),
+            self.assertRaisesRegex(
+                runtime_evidence.DokployEvidenceProviderError,
+                "service-select",
+            ),
         ):
             runtime_evidence.fetch_compose_service_runtime(
                 host="https://dokploy.example.com",
                 token="secret-token",
                 compose_id="compose-123",
                 app_name="launchplane",
+                service_name="worker",
+            )
+
+    def test_fetch_compose_service_runtime_identifies_config_stage(self) -> None:
+        with (
+            patch(
+                "control_plane.dokploy.runtime_evidence.dokploy_api.dokploy_request",
+                side_effect=[
+                    [{"containerId": "worker", "serviceName": "worker"}],
+                    click.ClickException("provider secret detail"),
+                ],
+            ),
+            self.assertRaisesRegex(
+                runtime_evidence.DokployEvidenceProviderError,
+                "container-config",
+            ),
+        ):
+            runtime_evidence.fetch_compose_service_runtime(
+                host="https://dokploy.example.com",
+                token="secret-token",
+                compose_id="compose-123",
+                app_name="launchplane",
+                service_name="worker",
+            )
+
+    def test_fetch_compose_service_runtime_identifies_container_list_stage(self) -> None:
+        with (
+            patch(
+                "control_plane.dokploy.runtime_evidence.dokploy_api.dokploy_request",
+                return_value={"unexpected": "shape"},
+            ),
+            self.assertRaisesRegex(
+                runtime_evidence.DokployEvidenceProviderError,
+                "container-list",
+            ),
+        ):
+            runtime_evidence.fetch_compose_service_runtime(
+                host="https://dokploy.example.com",
+                token="secret-token",
+                compose_id="compose-123",
+                app_name="launchplane",
+                service_name="worker",
+            )
+
+    def test_fetch_compose_service_runtime_identifies_image_stage(self) -> None:
+        with (
+            patch(
+                "control_plane.dokploy.runtime_evidence.dokploy_api.dokploy_request",
+                side_effect=[
+                    [{"containerId": "worker", "serviceName": "worker"}],
+                    {"Image": "", "Config": {"Image": "example:latest"}},
+                ],
+            ),
+            self.assertRaisesRegex(
+                runtime_evidence.DokployEvidenceProviderError,
+                "image-identity",
+            ),
+        ):
+            runtime_evidence.fetch_compose_service_runtime(
+                host="https://dokploy.example.com",
+                token="secret-token",
+                compose_id="compose-123",
+                app_name="launchplane",
+                service_name="worker",
+            )
+
+    def test_fetch_compose_service_runtime_identifies_target_stage(self) -> None:
+        with self.assertRaisesRegex(
+            runtime_evidence.DokployEvidenceProviderError,
+            "target-inspect",
+        ):
+            runtime_evidence.fetch_compose_service_runtime(
+                host="https://dokploy.example.com",
+                token="secret-token",
+                compose_id="compose-123",
+                app_name="",
                 service_name="worker",
             )
 

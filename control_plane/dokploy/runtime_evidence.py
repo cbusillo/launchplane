@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from typing import Literal
 
 import click
 
@@ -12,6 +13,21 @@ _IMAGE_ID_PATTERN = re.compile(r"^sha256:[a-f0-9]{64}$")
 _IMMUTABLE_IMAGE_REFERENCE_PATTERN = re.compile(r"^[^\s@]+@sha256:[a-f0-9]{64}$")
 _MAX_RUNTIME_TEXT_LENGTH = 500
 _ALLOWED_STRUCTURED_EVENTS = frozenset({"privileged_operation_worker_poll_succeeded"})
+type DokployEvidenceProviderOperation = Literal[
+    "provider-config",
+    "target-inspect",
+    "container-list",
+    "service-select",
+    "container-config",
+    "image-identity",
+    "runtime-log-read",
+]
+
+
+class DokployEvidenceProviderError(RuntimeError):
+    def __init__(self, operation: DokployEvidenceProviderOperation) -> None:
+        self.operation = operation
+        super().__init__(operation)
 
 
 def normalize_structured_event_name(raw_event_name: str) -> str:
@@ -51,16 +67,17 @@ def fetch_compose_service_runtime(
 ) -> dokploy_api.JsonObject:
     normalized_compose_id = compose_id.strip()
     if not normalized_compose_id:
-        raise click.ClickException("Dokploy compose runtime evidence requires a compose id.")
+        raise DokployEvidenceProviderError("target-inspect")
     normalized_app_name = app_name.strip()
     if not normalized_app_name:
-        raise click.ClickException(
-            "Dokploy compose runtime evidence requires tracked application metadata."
-        )
+        raise DokployEvidenceProviderError("target-inspect")
     normalized_server_id = server_id.strip()
-    normalized_service_name = dokploy_api.normalize_dokploy_compose_service_name(service_name)
+    try:
+        normalized_service_name = dokploy_api.normalize_dokploy_compose_service_name(service_name)
+    except click.ClickException as error:
+        raise DokployEvidenceProviderError("service-select") from error
     if not normalized_service_name:
-        raise click.ClickException("Dokploy compose runtime evidence requires a service name.")
+        raise DokployEvidenceProviderError("service-select")
 
     container_query: dict[str, str | int] = {
         "appName": normalized_app_name,
@@ -68,50 +85,53 @@ def fetch_compose_service_runtime(
     }
     if normalized_server_id:
         container_query["serverId"] = normalized_server_id
-    containers_payload = dokploy_api.dokploy_request(
-        host=host,
-        token=token,
-        path="/api/docker.getContainersByAppNameMatch",
-        query=container_query,
-    )
+    try:
+        containers_payload = dokploy_api.dokploy_request(
+            host=host,
+            token=token,
+            path="/api/docker.getContainersByAppNameMatch",
+            query=container_query,
+        )
+    except click.ClickException as error:
+        raise DokployEvidenceProviderError("container-list") from error
     if not isinstance(containers_payload, list):
-        raise click.ClickException("Dokploy returned an invalid compose container list.")
-    selected_container = dokploy_api.select_dokploy_compose_container(
-        dokploy_api.collect_dokploy_object_items(containers_payload),
-        app_name=normalized_app_name,
-        service_name=normalized_service_name,
-    )
+        raise DokployEvidenceProviderError("container-list")
+    try:
+        selected_container = dokploy_api.select_dokploy_compose_container(
+            dokploy_api.collect_dokploy_object_items(containers_payload),
+            app_name=normalized_app_name,
+            service_name=normalized_service_name,
+        )
+    except click.ClickException as error:
+        raise DokployEvidenceProviderError("service-select") from error
     container_id = str(selected_container.get("containerId") or "").strip()
     if not container_id:
-        raise click.ClickException(
-            f"Dokploy compose service {normalized_service_name!r} has no container id."
-        )
+        raise DokployEvidenceProviderError("service-select")
 
     config_query: dict[str, str | int] = {"containerId": container_id}
     if normalized_server_id:
         config_query["serverId"] = normalized_server_id
-    config_payload = dokploy_api.dokploy_request(
-        host=host,
-        token=token,
-        path="/api/docker.getConfig",
-        query=config_query,
-    )
+    try:
+        config_payload = dokploy_api.dokploy_request(
+            host=host,
+            token=token,
+            path="/api/docker.getConfig",
+            query=config_query,
+        )
+    except click.ClickException as error:
+        raise DokployEvidenceProviderError("container-config") from error
     container_config = _normalize_container_config(config_payload)
     if container_config is None:
-        raise click.ClickException("Dokploy returned invalid compose container configuration.")
+        raise DokployEvidenceProviderError("container-config")
     raw_config = container_config.get("Config")
     configured_image = (
         str(raw_config.get("Image") or "").strip() if isinstance(raw_config, dict) else ""
     )
     if not configured_image:
-        raise click.ClickException(
-            f"Dokploy compose service {normalized_service_name!r} has no configured image."
-        )
+        raise DokployEvidenceProviderError("image-identity")
     image_id = str(container_config.get("Image") or "").strip().lower()
     if not _IMAGE_ID_PATTERN.fullmatch(image_id):
-        raise click.ClickException(
-            f"Dokploy compose service {normalized_service_name!r} has no immutable image id."
-        )
+        raise DokployEvidenceProviderError("image-identity")
     state = dokploy_api.redact_dokploy_log_line(
         str(selected_container.get("state") or selected_container.get("State") or "")
     )
