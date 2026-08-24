@@ -3,9 +3,11 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
+import subprocess
+import sys
 from tempfile import TemporaryDirectory
 from typing import Literal
-from unittest.mock import MagicMock, Mock, call, patch
+from unittest.mock import MagicMock, Mock, patch
 
 from alembic import command as alembic_command
 from alembic.config import Config as AlembicConfig
@@ -220,11 +222,20 @@ from control_plane.tenant_repository_classification import (
 )
 from control_plane.storage.factory import (
     PRIVILEGED_OPERATION_WORKER_CONNECT_TIMEOUT_SECONDS,
+    PRIVILEGED_OPERATION_WORKER_PROBE_FAILED_EXIT_CODE,
+    PRIVILEGED_OPERATION_WORKER_PROBE_SCHEMA_INCOMPATIBLE_EXIT_CODE,
+    PRIVILEGED_OPERATION_WORKER_PROBE_SUCCESS_EXIT_CODE,
     PRIVILEGED_OPERATION_WORKER_REQUIRED_RELATIONS,
+    PRIVILEGED_OPERATION_WORKER_STARTUP_TIMEOUT_SECONDS,
     PRIVILEGED_OPERATION_WORKER_STATEMENT_TIMEOUT_MILLISECONDS,
     PrivilegedOperationWorkerSchemaError,
+    PrivilegedOperationWorkerProbeError,
+    PrivilegedOperationWorkerStartupTimeoutError,
     build_privileged_operation_worker_store,
     build_shared_record_store,
+)
+from control_plane.storage.privileged_operation_worker_probe import (
+    run_privileged_operation_worker_schema_probe,
 )
 from control_plane.storage.postgres import (
     Base,
@@ -3690,56 +3701,100 @@ class PostgresRecordStoreTests(unittest.TestCase):
         self.assertEqual(loaded.artifact_id, manifest.artifact_id)
 
     def test_privileged_operation_worker_store_uses_bounded_runtime_check(self) -> None:
-        startup_probe = Mock()
         runtime_store = Mock()
         database_url = "postgresql+psycopg://launchplane.invalid/launchplane"
 
-        with patch(
-            "control_plane.storage.factory.PostgresRecordStore",
-            side_effect=[startup_probe, runtime_store],
-        ) as store_type:
+        with (
+            patch.dict(
+                "os.environ",
+                {
+                    "HOME": "/tmp/launchplane-home",
+                    "PGSSLROOTCERT": "/tmp/root.crt",
+                    "UNRELATED_SECRET": "must-not-be-inherited",
+                },
+                clear=True,
+            ),
+            patch(
+                "control_plane.storage.factory.subprocess.run",
+                return_value=subprocess.CompletedProcess(
+                    args=(), returncode=PRIVILEGED_OPERATION_WORKER_PROBE_SUCCESS_EXIT_CODE
+                ),
+            ) as run_probe,
+            patch(
+                "control_plane.storage.factory.PostgresRecordStore",
+                return_value=runtime_store,
+            ) as store_type,
+        ):
             result = build_privileged_operation_worker_store(database_url=database_url)
 
         self.assertIs(result, runtime_store)
+        store_type.assert_called_once_with(
+            database_url=database_url,
+            postgres_connect_timeout_seconds=(PRIVILEGED_OPERATION_WORKER_CONNECT_TIMEOUT_SECONDS),
+            postgres_statement_timeout_milliseconds=(
+                PRIVILEGED_OPERATION_WORKER_STATEMENT_TIMEOUT_MILLISECONDS
+            ),
+        )
+        probe_args, probe_kwargs = run_probe.call_args
         self.assertEqual(
-            store_type.call_args_list,
+            probe_args[0],
             [
-                call(
-                    database_url=database_url,
-                    postgres_connect_timeout_seconds=(
-                        PRIVILEGED_OPERATION_WORKER_CONNECT_TIMEOUT_SECONDS
-                    ),
-                    postgres_statement_timeout_milliseconds=(
-                        PRIVILEGED_OPERATION_WORKER_STATEMENT_TIMEOUT_MILLISECONDS
-                    ),
-                ),
-                call(
-                    database_url=database_url,
-                    postgres_connect_timeout_seconds=(
-                        PRIVILEGED_OPERATION_WORKER_CONNECT_TIMEOUT_SECONDS
-                    ),
-                    postgres_statement_timeout_milliseconds=(
-                        PRIVILEGED_OPERATION_WORKER_STATEMENT_TIMEOUT_MILLISECONDS
-                    ),
-                ),
+                sys.executable,
+                "-m",
+                "control_plane.storage.privileged_operation_worker_probe",
             ],
         )
-        startup_probe.verify_runtime_schema_compatibility.assert_called_once_with(
-            required_relations=PRIVILEGED_OPERATION_WORKER_REQUIRED_RELATIONS
+        self.assertEqual(
+            probe_kwargs["timeout"], PRIVILEGED_OPERATION_WORKER_STARTUP_TIMEOUT_SECONDS
         )
-        startup_probe.verify_schema.assert_not_called()
-        startup_probe.close.assert_called_once_with()
+        self.assertEqual(probe_kwargs["env"]["LAUNCHPLANE_DATABASE_URL"], database_url)
+        self.assertEqual(probe_kwargs["env"]["HOME"], "/tmp/launchplane-home")
+        self.assertEqual(probe_kwargs["env"]["PGSSLROOTCERT"], "/tmp/root.crt")
+        self.assertNotIn("UNRELATED_SECRET", probe_kwargs["env"])
+        self.assertEqual(probe_kwargs["stdout"], subprocess.DEVNULL)
+        self.assertEqual(probe_kwargs["stderr"], subprocess.DEVNULL)
 
     def test_privileged_operation_worker_store_closes_incompatible_schema(self) -> None:
         startup_probe = Mock()
         startup_probe.verify_runtime_schema_compatibility.side_effect = RuntimeError(
             "schema detail must remain internal"
         )
+        database_url = "postgresql+psycopg://launchplane.invalid/launchplane"
 
         with (
             patch(
-                "control_plane.storage.factory.PostgresRecordStore",
+                "control_plane.storage.privileged_operation_worker_probe.PostgresRecordStore",
                 return_value=startup_probe,
+            ) as store_type,
+            patch.dict(
+                "os.environ",
+                {"LAUNCHPLANE_DATABASE_URL": database_url},
+                clear=True,
+            ),
+        ):
+            result = run_privileged_operation_worker_schema_probe()
+
+        self.assertEqual(result, PRIVILEGED_OPERATION_WORKER_PROBE_SCHEMA_INCOMPATIBLE_EXIT_CODE)
+        store_type.assert_called_once_with(
+            database_url=database_url,
+            postgres_connect_timeout_seconds=(PRIVILEGED_OPERATION_WORKER_CONNECT_TIMEOUT_SECONDS),
+            postgres_statement_timeout_milliseconds=(
+                PRIVILEGED_OPERATION_WORKER_STATEMENT_TIMEOUT_MILLISECONDS
+            ),
+        )
+        startup_probe.verify_runtime_schema_compatibility.assert_called_once_with(
+            required_relations=PRIVILEGED_OPERATION_WORKER_REQUIRED_RELATIONS
+        )
+        startup_probe.close.assert_called_once_with()
+
+    def test_privileged_operation_worker_store_rejects_failed_schema_probe(self) -> None:
+        with (
+            patch(
+                "control_plane.storage.factory.subprocess.run",
+                return_value=subprocess.CompletedProcess(
+                    args=(),
+                    returncode=PRIVILEGED_OPERATION_WORKER_PROBE_SCHEMA_INCOMPATIBLE_EXIT_CODE,
+                ),
             ),
             self.assertRaisesRegex(PrivilegedOperationWorkerSchemaError, "not runtime-compatible"),
         ):
@@ -3747,7 +3802,54 @@ class PostgresRecordStoreTests(unittest.TestCase):
                 database_url="postgresql+psycopg://launchplane.invalid/launchplane"
             )
 
-        startup_probe.close.assert_called_once_with()
+    def test_privileged_operation_worker_store_rejects_failed_probe_process(self) -> None:
+        with (
+            patch(
+                "control_plane.storage.factory.subprocess.run",
+                return_value=subprocess.CompletedProcess(
+                    args=(), returncode=PRIVILEGED_OPERATION_WORKER_PROBE_FAILED_EXIT_CODE
+                ),
+            ),
+            self.assertRaisesRegex(PrivilegedOperationWorkerProbeError, "schema probe failed"),
+        ):
+            build_privileged_operation_worker_store(
+                database_url="postgresql+psycopg://launchplane.invalid/launchplane"
+            )
+
+    def test_privileged_operation_worker_store_times_out_blocked_schema_probe(self) -> None:
+        with (
+            patch(
+                "control_plane.storage.factory.subprocess.run",
+                side_effect=subprocess.TimeoutExpired(
+                    cmd=(sys.executable, "-m", "worker-probe"),
+                    timeout=PRIVILEGED_OPERATION_WORKER_STARTUP_TIMEOUT_SECONDS,
+                ),
+            ),
+            self.assertRaisesRegex(
+                PrivilegedOperationWorkerStartupTimeoutError,
+                "store initialization timed out",
+            ),
+        ):
+            build_privileged_operation_worker_store(
+                database_url="postgresql+psycopg://launchplane.invalid/launchplane"
+            )
+
+    def test_privileged_operation_worker_probe_module_is_silent_without_database_url(self) -> None:
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "control_plane.storage.privileged_operation_worker_probe",
+            ],
+            capture_output=True,
+            check=False,
+            env={},
+            text=True,
+        )
+
+        self.assertEqual(completed.returncode, PRIVILEGED_OPERATION_WORKER_PROBE_FAILED_EXIT_CODE)
+        self.assertEqual(completed.stdout, "")
+        self.assertEqual(completed.stderr, "")
 
     def test_postgres_engine_applies_bounded_connection_options(self) -> None:
         database_url = (

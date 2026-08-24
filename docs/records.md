@@ -1600,12 +1600,14 @@ run` is the foreground loop intended for an external process supervisor, and
   schema verification and health gate, this worker performs a bounded two-query
   compatibility probe: the exact runtime-compatible Alembic revision and the
   worker-domain tables and safety indexes required before claim or execution.
-  It does not repeat the API's catalog-wide schema audit. Both the startup probe
-  and runtime store use bounded PostgreSQL connect and per-statement waits; the
-  timeout does not cap the total operation and any timed-out DB statement fails
-  through the existing reservation, transaction, retry, and reconciliation
-  boundaries. An unavailable or blocked poll therefore enters the redacted
-  retry/threshold-exit path instead of hanging silently.
+  It does not repeat the API's catalog-wide schema audit. The startup probe runs
+  in an isolated child process with a hard wall-clock deadline, and both the
+  probe and runtime store use bounded PostgreSQL connect and per-statement
+  waits. A timed-out startup probe returns control to the supervised worker
+  retry/threshold-exit path; a timed-out runtime DB statement fails through the
+  existing reservation, transaction, retry, and reconciliation boundaries.
+  An unavailable or blocked startup probe or poll therefore cannot hang the
+  worker loop silently.
   The one-time structured events
   `privileged_operation_worker_store_initialized` and
   `privileged_operation_worker_first_poll_attempted` provide bounded lifecycle
