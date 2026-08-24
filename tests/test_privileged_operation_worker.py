@@ -52,6 +52,13 @@ from tests.support.stores import _sqlite_database_url
 FIXED_NOW = datetime(2026, 8, 22, 20, 10, tzinfo=timezone.utc)
 
 
+def _build_worker_store_with_successful_probe(**kwargs: object) -> object:
+    report_probe_succeeded = kwargs["on_schema_probe_succeeded"]
+    assert callable(report_probe_succeeded)
+    report_probe_succeeded()
+    return object()
+
+
 def _fernet_key(offset: int) -> str:
     return base64.urlsafe_b64encode(bytes((offset + index) % 256 for index in range(32))).decode()
 
@@ -221,13 +228,22 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
                 return False
 
         wait_durations: list[int] = []
+        store_attempts = 0
+
+        def build_store(**kwargs: object) -> object:
+            nonlocal store_attempts
+            store_attempts += 1
+            if store_attempts == 1:
+                raise RuntimeError("database-url-secret must not be emitted")
+            return _build_worker_store_with_successful_probe(**kwargs)
+
         runner = CliRunner()
         records = [SimpleNamespace(operation_id="operation-secret-id", status="executed")]
         with (
             patch("control_plane.cli_service.Event", return_value=TestStopEvent()),
             patch(
                 "control_plane.cli_service.build_privileged_operation_worker_store",
-                side_effect=[RuntimeError("database-url-secret must not be emitted"), object()],
+                side_effect=build_store,
             ),
             patch(
                 "control_plane.cli_service.execute_approved_privileged_operations_once",
@@ -272,6 +288,7 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
             [
                 "privileged_operation_worker_started",
                 "privileged_operation_worker_retry",
+                "privileged_operation_worker_schema_probe_succeeded",
                 "privileged_operation_worker_store_initialized",
                 "privileged_operation_worker_first_poll_attempted",
                 "privileged_operation_worker_poll_succeeded",
@@ -282,15 +299,15 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
         self.assertEqual(telemetry[1]["consecutive_errors"], 1)
         self.assertEqual(telemetry[1]["error_type"], "RuntimeError")
         self.assertEqual(
-            telemetry[4],
+            telemetry[5],
             {
                 "event": "privileged_operation_worker_poll_succeeded",
                 "processed": 1,
                 "statuses": ["executed"],
             },
         )
-        self.assertEqual(telemetry[5]["consecutive_errors"], 1)
-        self.assertEqual(telemetry[6]["consecutive_errors"], 2)
+        self.assertEqual(telemetry[6]["consecutive_errors"], 1)
+        self.assertEqual(telemetry[7]["consecutive_errors"], 2)
 
     def test_worker_loop_stops_cleanly_after_sigterm(self) -> None:
         signal_handlers: dict[int, object] = {}
@@ -327,7 +344,7 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
             patch("control_plane.cli_service.Event", return_value=TestStopEvent()),
             patch(
                 "control_plane.cli_service.build_privileged_operation_worker_store",
-                return_value=object(),
+                side_effect=_build_worker_store_with_successful_probe,
             ),
             patch(
                 "control_plane.cli_service.execute_approved_privileged_operations_once",
@@ -357,6 +374,7 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
             [entry["event"] for entry in telemetry],
             [
                 "privileged_operation_worker_started",
+                "privileged_operation_worker_schema_probe_succeeded",
                 "privileged_operation_worker_store_initialized",
                 "privileged_operation_worker_first_poll_attempted",
                 "privileged_operation_worker_poll_succeeded",
@@ -390,7 +408,7 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
             patch("control_plane.cli_service.Event", return_value=TestStopEvent()),
             patch(
                 "control_plane.cli_service.build_privileged_operation_worker_store",
-                return_value=object(),
+                side_effect=_build_worker_store_with_successful_probe,
             ),
             patch(
                 "control_plane.cli_service.execute_approved_privileged_operations_once",
@@ -420,6 +438,7 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
                     "limit": 20,
                     "poll_seconds": 15,
                 },
+                {"event": "privileged_operation_worker_schema_probe_succeeded"},
                 {"event": "privileged_operation_worker_store_initialized"},
                 {"event": "privileged_operation_worker_first_poll_attempted"},
             ],
@@ -445,7 +464,7 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
             patch("control_plane.cli_service.Event", return_value=TestStopEvent()),
             patch(
                 "control_plane.cli_service.build_privileged_operation_worker_store",
-                return_value=object(),
+                side_effect=_build_worker_store_with_successful_probe,
             ),
             patch(
                 "control_plane.cli_service.execute_approved_privileged_operations_once",
@@ -472,6 +491,7 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
             [entry["event"] for entry in telemetry],
             [
                 "privileged_operation_worker_started",
+                "privileged_operation_worker_schema_probe_succeeded",
                 "privileged_operation_worker_store_initialized",
                 "privileged_operation_worker_first_poll_attempted",
                 "privileged_operation_worker_poll_succeeded",

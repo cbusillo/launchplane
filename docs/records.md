@@ -1609,7 +1609,8 @@ run` is the foreground loop intended for an external process supervisor, and
   An unavailable or blocked startup probe or poll therefore cannot hang the
   worker loop silently.
   The one-time structured events
-  `privileged_operation_worker_store_initialized` and
+  `privileged_operation_worker_schema_probe_succeeded`,
+  `privileged_operation_worker_store_initialized`, and
   `privileged_operation_worker_first_poll_attempted` provide bounded lifecycle
   localization only; activation evidence still requires
   `privileged_operation_worker_poll_succeeded`.

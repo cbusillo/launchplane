@@ -214,9 +214,13 @@ def inspect_dokploy_target(
             event_name=request.event,
         )
         event_observed = matching_event_count > 0
+        activation_proof_eligible = dokploy_runtime_evidence.structured_event_is_activation_proof(
+            request.event
+        )
         event_evidence: dict[str, object] = {
             "name": request.event,
             "observed": event_observed,
+            "activation_proof_eligible": activation_proof_eligible,
             "matching_line_count": matching_event_count,
             "candidate_line_count": len(logs),
         }
@@ -238,7 +242,11 @@ def inspect_dokploy_target(
             "image_matches_expected": image_matches_expected,
             "structured_event": event_evidence,
             "proof_ready": (
-                running and image_reference_immutable and image_matches_expected and event_observed
+                running
+                and image_reference_immutable
+                and image_matches_expected
+                and event_observed
+                and activation_proof_eligible
             ),
         }
     if target_record is not None and target_id_record is not None:

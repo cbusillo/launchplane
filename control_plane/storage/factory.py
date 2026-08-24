@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from collections.abc import Callable
 
 from control_plane.storage.postgres import PostgresRecordStore
 
@@ -100,7 +101,9 @@ def build_shared_record_store(*, database_url: str | None = None) -> PostgresRec
 
 
 def build_privileged_operation_worker_store(
-    *, database_url: str | None = None
+    *,
+    database_url: str | None = None,
+    on_schema_probe_succeeded: Callable[[], None] | None = None,
 ) -> PostgresRecordStore:
     resolved_database_url = resolve_database_url(database_url)
     if resolved_database_url is None:
@@ -138,6 +141,8 @@ def build_privileged_operation_worker_store(
         raise PrivilegedOperationWorkerProbeError(
             "Launchplane privileged-operation worker schema probe failed."
         )
+    if on_schema_probe_succeeded is not None:
+        on_schema_probe_succeeded()
     return PostgresRecordStore(
         database_url=resolved_database_url,
         postgres_connect_timeout_seconds=PRIVILEGED_OPERATION_WORKER_CONNECT_TIMEOUT_SECONDS,
