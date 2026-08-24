@@ -2224,8 +2224,11 @@ Callers may additionally provide an exact compose `service`, expected immutable
 `expected_image`, and the allow-listed structured `event` name. That bounded
 runtime-evidence mode resolves exactly one service container for both image and
 log evidence, reads only its state and immutable image identity, and searches at
-most 1,000 redacted candidate log lines from the last day for the exact JSON
-event field. It returns image-match state, event counts, bounded JSON/non-JSON
+most 1,000 redacted candidate log lines from the last day twice: one unfiltered
+read for independent provider-error classification and one read using the
+code-owned allow-listed event name as the provider-side fixed-string filter
+before requiring an exact JSON event field match. It returns image-match state,
+event counts, bounded JSON/non-JSON
 line counts, fixed provider-error classification, and a `proof_ready` decision;
 it never returns container IDs, container config, environment values,
 configured mutable image text, or raw log lines. Provider-error kinds are

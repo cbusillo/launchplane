@@ -194,23 +194,28 @@ def fetch_compose_container_logs(
     compose_id: str,
     container_id: str,
     line_count: int,
+    search_text: str = "",
 ) -> tuple[str, ...]:
     normalized_compose_id = compose_id.strip()
     normalized_container_id = container_id.strip()
     if not normalized_compose_id or not normalized_container_id:
         raise DokployEvidenceProviderError("runtime-log-read")
     normalized_line_count = dokploy_api.normalize_dokploy_log_line_count(line_count)
+    normalized_search_text = normalize_structured_event_name(search_text)
+    query: dict[str, str | int] = {
+        "composeId": normalized_compose_id,
+        "containerId": normalized_container_id,
+        "tail": normalized_line_count,
+        "since": "1d",
+    }
+    if normalized_search_text:
+        query["search"] = normalized_search_text
     try:
         payload = dokploy_api.dokploy_request(
             host=host,
             token=token,
             path="/api/compose.readLogs",
-            query={
-                "composeId": normalized_compose_id,
-                "containerId": normalized_container_id,
-                "tail": normalized_line_count,
-                "since": "1d",
-            },
+            query=query,
         )
     except click.ClickException as error:
         raise DokployEvidenceProviderError("runtime-log-read") from error
