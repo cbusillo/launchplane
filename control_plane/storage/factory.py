@@ -1,11 +1,34 @@
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
+
 from control_plane.storage.postgres import PostgresRecordStore
 
 DATABASE_URL_ENV_VARS = ("LAUNCHPLANE_DATABASE_URL",)
 PRIVILEGED_OPERATION_WORKER_CONNECT_TIMEOUT_SECONDS = 10
 PRIVILEGED_OPERATION_WORKER_STATEMENT_TIMEOUT_MILLISECONDS = 30_000
+PRIVILEGED_OPERATION_WORKER_STARTUP_TIMEOUT_SECONDS = 90
+PRIVILEGED_OPERATION_WORKER_PROBE_SUCCESS_EXIT_CODE = 0
+PRIVILEGED_OPERATION_WORKER_PROBE_SCHEMA_INCOMPATIBLE_EXIT_CODE = 2
+PRIVILEGED_OPERATION_WORKER_PROBE_FAILED_EXIT_CODE = 3
+PRIVILEGED_OPERATION_WORKER_PROBE_ENVIRONMENT_KEYS = frozenset(
+    {
+        "DYLD_LIBRARY_PATH",
+        "HOME",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "LD_LIBRARY_PATH",
+        "PYTHONHOME",
+        "PYTHONPATH",
+        "SSL_CERT_DIR",
+        "SSL_CERT_FILE",
+        "TMPDIR",
+        "TZ",
+    }
+)
 PRIVILEGED_OPERATION_WORKER_REQUIRED_RELATIONS = (
     "launchplane_privileged_operations",
     "launchplane_privileged_operations_status_idx",
@@ -36,6 +59,14 @@ class PrivilegedOperationWorkerSchemaError(RuntimeError):
     pass
 
 
+class PrivilegedOperationWorkerStartupTimeoutError(RuntimeError):
+    pass
+
+
+class PrivilegedOperationWorkerProbeError(RuntimeError):
+    pass
+
+
 def resolve_database_url(database_url: str | None = None) -> str | None:
     if database_url is not None and database_url.strip():
         return database_url.strip()
@@ -44,6 +75,16 @@ def resolve_database_url(database_url: str | None = None) -> str | None:
         if environment_value:
             return environment_value
     return None
+
+
+def _privileged_operation_worker_probe_environment(*, database_url: str) -> dict[str, str]:
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if key in PRIVILEGED_OPERATION_WORKER_PROBE_ENVIRONMENT_KEYS or key.startswith("PG")
+    }
+    environment[DATABASE_URL_ENV_VARS[0]] = database_url
+    return environment
 
 
 def build_shared_record_store(*, database_url: str | None = None) -> PostgresRecordStore:
@@ -67,23 +108,36 @@ def build_privileged_operation_worker_store(
             "Launchplane privileged-operation workers require --database-url or "
             "LAUNCHPLANE_DATABASE_URL."
         )
-    startup_probe = PostgresRecordStore(
-        database_url=resolved_database_url,
-        postgres_connect_timeout_seconds=PRIVILEGED_OPERATION_WORKER_CONNECT_TIMEOUT_SECONDS,
-        postgres_statement_timeout_milliseconds=(
-            PRIVILEGED_OPERATION_WORKER_STATEMENT_TIMEOUT_MILLISECONDS
-        ),
+    probe_environment = _privileged_operation_worker_probe_environment(
+        database_url=resolved_database_url
     )
     try:
-        startup_probe.verify_runtime_schema_compatibility(
-            required_relations=PRIVILEGED_OPERATION_WORKER_REQUIRED_RELATIONS
+        completed_probe = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "control_plane.storage.privileged_operation_worker_probe",
+            ],
+            env=probe_environment,
+            stderr=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            timeout=PRIVILEGED_OPERATION_WORKER_STARTUP_TIMEOUT_SECONDS,
         )
-    except RuntimeError as error:
+    except subprocess.TimeoutExpired as error:
+        raise PrivilegedOperationWorkerStartupTimeoutError(
+            "Launchplane privileged-operation worker store initialization timed out."
+        ) from error
+    if (
+        completed_probe.returncode
+        == PRIVILEGED_OPERATION_WORKER_PROBE_SCHEMA_INCOMPATIBLE_EXIT_CODE
+    ):
         raise PrivilegedOperationWorkerSchemaError(
             "Launchplane privileged-operation worker schema is not runtime-compatible."
-        ) from error
-    finally:
-        startup_probe.close()
+        )
+    if completed_probe.returncode != PRIVILEGED_OPERATION_WORKER_PROBE_SUCCESS_EXIT_CODE:
+        raise PrivilegedOperationWorkerProbeError(
+            "Launchplane privileged-operation worker schema probe failed."
+        )
     return PostgresRecordStore(
         database_url=resolved_database_url,
         postgres_connect_timeout_seconds=PRIVILEGED_OPERATION_WORKER_CONNECT_TIMEOUT_SECONDS,
