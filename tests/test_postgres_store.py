@@ -220,6 +220,7 @@ from control_plane.tenant_repository_classification import (
 )
 from control_plane.storage.factory import (
     PRIVILEGED_OPERATION_WORKER_CONNECT_TIMEOUT_SECONDS,
+    PRIVILEGED_OPERATION_WORKER_REQUIRED_RELATIONS,
     PRIVILEGED_OPERATION_WORKER_STARTUP_TIMEOUT_MILLISECONDS,
     PrivilegedOperationWorkerSchemaError,
     build_privileged_operation_worker_store,
@@ -3720,13 +3721,15 @@ class PostgresRecordStoreTests(unittest.TestCase):
                 ),
             ],
         )
-        startup_probe.verify_runtime_schema_invariants.assert_called_once_with()
+        startup_probe.verify_runtime_schema_compatibility.assert_called_once_with(
+            required_relations=PRIVILEGED_OPERATION_WORKER_REQUIRED_RELATIONS
+        )
         startup_probe.verify_schema.assert_not_called()
         startup_probe.close.assert_called_once_with()
 
     def test_privileged_operation_worker_store_closes_incompatible_schema(self) -> None:
         startup_probe = Mock()
-        startup_probe.verify_runtime_schema_invariants.side_effect = RuntimeError(
+        startup_probe.verify_runtime_schema_compatibility.side_effect = RuntimeError(
             "schema detail must remain internal"
         )
 
@@ -3789,25 +3792,46 @@ class PostgresRecordStoreTests(unittest.TestCase):
         )
         store.close()
 
-    def test_runtime_schema_invariants_require_postgres(self) -> None:
+    def test_runtime_schema_compatibility_requires_postgres(self) -> None:
         store = object.__new__(PostgresRecordStore)
         store._engine = Mock()
         store._engine.url.get_backend_name.return_value = "sqlite"
 
         with self.assertRaisesRegex(RuntimeError, "requires PostgreSQL"):
-            store.verify_runtime_schema_invariants()
+            store.verify_runtime_schema_compatibility(required_relations=("required_table",))
 
-    def test_runtime_schema_invariants_delegate_to_bounded_invariant_set(self) -> None:
+    def test_runtime_schema_compatibility_checks_revision_and_relations(self) -> None:
         store = object.__new__(PostgresRecordStore)
-        store._engine = Mock()
+        store._engine = MagicMock()
         store._engine.url.get_backend_name.return_value = "postgresql"
+        connection = store._engine.connect.return_value.__enter__.return_value
+        connection.execute.return_value.scalars.return_value.all.return_value = []
 
-        with patch(
-            "control_plane.storage.postgres.verify_postgres_schema_invariants"
-        ) as verify_invariants:
-            store.verify_runtime_schema_invariants()
+        with patch.object(store, "schema_revision", return_value="c2221a0b1c2d"):
+            store.verify_runtime_schema_compatibility(
+                required_relations=("required_table", "required_index")
+            )
 
-        verify_invariants.assert_called_once_with(store._engine)
+        connection.execute.assert_called_once()
+        self.assertEqual(
+            connection.execute.call_args.args[1],
+            {"relation_0": "required_table", "relation_1": "required_index"},
+        )
+
+    def test_runtime_schema_compatibility_rejects_missing_relations(self) -> None:
+        store = object.__new__(PostgresRecordStore)
+        store._engine = MagicMock()
+        store._engine.url.get_backend_name.return_value = "postgresql"
+        connection = store._engine.connect.return_value.__enter__.return_value
+        connection.execute.return_value.scalars.return_value.all.return_value = ["missing_index"]
+
+        with (
+            patch.object(store, "schema_revision", return_value="c2221a0b1c2d"),
+            self.assertRaisesRegex(RuntimeError, "missing_index"),
+        ):
+            store.verify_runtime_schema_compatibility(
+                required_relations=("required_table", "missing_index")
+            )
 
     def test_postgres_engine_rejects_nonpositive_timeouts(self) -> None:
         database_url = "postgresql+psycopg://launchplane.invalid/launchplane"

@@ -330,7 +330,10 @@ from control_plane.storage.product_authority_bundle import (
     ProductAuthorityBundle,
     ProviderTargetWrite,
 )
-from control_plane.storage.schema_invariants import verify_postgres_schema_invariants
+from control_plane.storage.schema_invariants import (
+    RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS,
+    verify_postgres_schema_invariants,
+)
 
 RecordModel = TypeVar("RecordModel", bound=BaseModel)
 
@@ -3664,10 +3667,38 @@ class PostgresRecordStore(HumanSessionStore):
         if backend_name == "postgresql":
             verify_postgres_schema_invariants(self._engine)
 
-    def verify_runtime_schema_invariants(self) -> None:
+    def verify_runtime_schema_compatibility(
+        self,
+        *,
+        required_relations: Sequence[str],
+    ) -> None:
         if self._engine.url.get_backend_name() != "postgresql":
             raise RuntimeError("Launchplane runtime schema verification requires PostgreSQL.")
-        verify_postgres_schema_invariants(self._engine)
+        revision = self.schema_revision()
+        if revision not in RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS:
+            raise RuntimeError("Launchplane database revision is not runtime-compatible.")
+        normalized_relations = tuple(
+            dict.fromkeys(relation.strip() for relation in required_relations if relation.strip())
+        )
+        if not normalized_relations:
+            raise ValueError("Launchplane runtime schema verification requires relations.")
+        values_sql = ", ".join(f"(:relation_{index})" for index in range(len(normalized_relations)))
+        parameters = {
+            f"relation_{index}": relation for index, relation in enumerate(normalized_relations)
+        }
+        statement = text(
+            "SELECT required.relation_name "
+            f"FROM (VALUES {values_sql}) AS required(relation_name) "
+            "WHERE to_regclass(required.relation_name) IS NULL "
+            "ORDER BY required.relation_name"
+        )
+        with self._engine.connect() as connection:
+            missing_relations = tuple(connection.execute(statement, parameters).scalars().all())
+        if missing_relations:
+            raise RuntimeError(
+                "Launchplane runtime schema is missing required relation(s): "
+                + ", ".join(str(relation) for relation in missing_relations)
+            )
 
     def schema_revision(self) -> str:
         if self._engine.url.get_backend_name() != "postgresql":
