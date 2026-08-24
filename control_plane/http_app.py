@@ -28,6 +28,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from requests.exceptions import RequestException
 from sqlalchemy.exc import SQLAlchemyError
 from control_plane import authz_grant_service as control_plane_authz_grant_service
+from control_plane import authz_activation_preflight as control_plane_authz_activation_preflight
 from control_plane import authz_diagnostics as control_plane_authz_diagnostics
 from control_plane import authz_repository_scope as control_plane_authz_repository_scope
 from control_plane import ingress_route_scope as control_plane_ingress_route_scope
@@ -79,6 +80,8 @@ from control_plane.contracts.authz_access_read import (
     AUTHZ_DENIAL_EXPLANATION_READ_ACTION,
     AUTHZ_POLICY_CANDIDATE_PREVIEW_READ_ACTION,
     AUTHZ_POLICY_HEALTH_READ_ACTION,
+    AuthzActivationPreflightRequest,
+    AuthzActivationPreflightResponse,
     AUTHZ_REPOSITORY_SCOPE_READ_ACTION,
     EFFECTIVE_ACCESS_READ_ACTION,
     AuthzDenialExplanationResponse,
@@ -1034,6 +1037,7 @@ _AUTHZ_POLICY_ACTIVE_ROUTE = "/v1/authz-policies/active"
 _AUTHZ_DIAGNOSTIC_EVALUATE_ROUTE = "/v1/authz-diagnostics/github-actions/evaluate"
 _AUTHZ_EFFECTIVE_ACCESS_EVALUATE_ROUTE = "/v1/authz-diagnostics/effective-access/evaluate"
 _AUTHZ_POLICY_HEALTH_ROUTE = "/v1/authz-diagnostics/active-policy/health"
+_AUTHZ_ACTIVATION_PREFLIGHT_ROUTE = "/v1/authz-diagnostics/activation-preflight/read"
 _AUTHZ_POLICY_CANDIDATE_PREVIEW_ROUTE = "/v1/authz-diagnostics/candidate-policy/preview"
 _AUTHZ_REPOSITORY_SCOPE_READ_ROUTE = "/v1/authz-diagnostics/repository-scope/read"
 _AUTHZ_DENIAL_EXPLANATION_ROUTE = "/v1/authz-diagnostics/denials/{trace_id}"
@@ -14562,6 +14566,93 @@ def create_launchplane_fastapi_app(
             **snapshot.model_dump(),
         )
 
+    async def read_authz_activation_preflight(
+        preflight_request: AuthzActivationPreflightRequest,
+        response: Response,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_bearer_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+    ) -> AuthzActivationPreflightResponse:
+        trace_id = next_trace_id()
+        no_store_headers = {"Cache-Control": "no-store"}
+        response.headers.update(no_store_headers)
+        if not isinstance(identity, LocalAdminIdentity):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Activation preflight requires a local administrator identity.",
+                headers=no_store_headers,
+            )
+        try:
+            for action in (AUTHZ_POLICY_HEALTH_READ_ACTION, EFFECTIVE_ACCESS_READ_ACTION):
+                preflight_evaluation = resolved_authz_policy_runtime.policy.evaluate(
+                    identity=identity,
+                    action=action,
+                    product=_LAUNCHPLANE_SERVICE_CONTEXT,
+                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
+                    record_context=False,
+                )
+                if preflight_evaluation.decision != "allowed":
+                    raise _launchplane_http_error(
+                        status_code=403,
+                        trace_id=trace_id,
+                        code="authorization_denied",
+                        message="Identity cannot read Launchplane activation preflight evidence.",
+                        headers=no_store_headers,
+                    )
+            database_store = require_authz_policy_database_store(
+                record_store=record_store,
+                trace_id=trace_id,
+                message="Activation preflight reads require Launchplane database storage.",
+            )
+            active_record = read_single_active_authz_policy_record(
+                database_store=database_store,
+                trace_id=trace_id,
+            )
+            for action in (AUTHZ_POLICY_HEALTH_READ_ACTION, EFFECTIVE_ACCESS_READ_ACTION):
+                active_evaluation = active_record.policy.evaluate(
+                    identity=identity,
+                    action=action,
+                    product=_LAUNCHPLANE_SERVICE_CONTEXT,
+                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
+                    record_context=False,
+                )
+                if active_evaluation.decision != "allowed":
+                    raise _launchplane_http_error(
+                        status_code=403,
+                        trace_id=trace_id,
+                        code="authorization_denied",
+                        message="Identity cannot read Launchplane activation preflight evidence.",
+                        headers=no_store_headers,
+                        authz_policy_provenance=AuthzPolicyProvenance.from_record(active_record),
+                    )
+            return control_plane_authz_activation_preflight.resolve_activation_preflight(
+                store=database_store,
+                active_record=active_record,
+                github_id=preflight_request.github_id,
+                now=datetime.now(timezone.utc),
+                trace_id=trace_id,
+            )
+        except control_plane_authz_activation_preflight.ActivationPreflightFailure as error:
+            raise _launchplane_http_error(
+                status_code=error.status_code,
+                trace_id=trace_id,
+                code=error.code,
+                message=str(error),
+                headers=no_store_headers,
+            ) from error
+        except LaunchplaneHTTPException as error:
+            error.headers = {**(error.headers or {}), **no_store_headers}
+            raise
+        except Exception as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="activation_preflight_unavailable",
+                message="Activation preflight evidence is unavailable.",
+                headers=no_store_headers,
+            ) from error
+
     async def read_authz_repository_scope(
         scope_request: AuthzRepositoryScopeReadRequest,
         response: Response,
@@ -22574,6 +22665,20 @@ def create_launchplane_fastapi_app(
     )
 
     app.add_api_route(
+        _AUTHZ_ACTIVATION_PREFLIGHT_ROUTE,
+        read_authz_activation_preflight,
+        methods=["POST"],
+        response_model=AuthzActivationPreflightResponse,
+        response_model_exclude_none=True,
+        operation_id="read_authz_activation_preflight",
+        summary="Read bounded authorization activation preflight evidence",
+        responses={
+            **authz_diagnostic_route_responses,
+            409: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
         _AUTHZ_REPOSITORY_SCOPE_READ_ROUTE,
         read_authz_repository_scope,
         methods=["POST"],
@@ -22944,7 +23049,14 @@ def create_launchplane_fastapi_app(
         response = JSONResponse(
             status_code=http_error.status_code,
             content=payload.model_dump(mode="json", exclude_none=True),
-            headers=http_error.headers,
+            headers={
+                **(http_error.headers or {}),
+                **(
+                    {"Cache-Control": "no-store"}
+                    if request.url.path == _AUTHZ_ACTIVATION_PREFLIGHT_ROUTE
+                    else {}
+                ),
+            },
         )
         preserve_renewed_session_cookie(request, response)
         return response
@@ -22979,7 +23091,14 @@ def create_launchplane_fastapi_app(
         response = JSONResponse(
             status_code=status_code,
             content=payload.model_dump(mode="json", exclude_none=True),
-            headers=http_error.headers,
+            headers={
+                **(http_error.headers or {}),
+                **(
+                    {"Cache-Control": "no-store"}
+                    if request.url.path == _AUTHZ_ACTIVATION_PREFLIGHT_ROUTE
+                    else {}
+                ),
+            },
         )
         preserve_renewed_session_cookie(request, response)
         return response
@@ -23001,7 +23120,8 @@ def create_launchplane_fastapi_app(
             content=payload.model_dump(mode="json", exclude_none=True),
             headers=(
                 {"Cache-Control": "no-store"}
-                if request.url.path == _AUTHZ_REPOSITORY_SCOPE_READ_ROUTE
+                if request.url.path
+                in {_AUTHZ_REPOSITORY_SCOPE_READ_ROUTE, _AUTHZ_ACTIVATION_PREFLIGHT_ROUTE}
                 else None
             ),
         )

@@ -16,11 +16,13 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
+    DateTime,
     JSON,
     Index,
     Integer,
     String,
     create_engine,
+    cast as sql_cast,
     delete,
     desc,
     false,
@@ -3360,6 +3362,10 @@ class LaunchplaneVeriReelProdBackupGateOperationRow(Base):
 class LaunchplaneHumanSessionRow(Base):
     __tablename__ = "launchplane_human_sessions"
     __table_args__ = (
+        Index(
+            "launchplane_human_sessions_github_id_idx",
+            "github_id",
+        ),
         Index("launchplane_human_sessions_login_idx", "login", desc("created_at")),
         Index("launchplane_human_sessions_expires_idx", desc("expires_at")),
     )
@@ -8307,6 +8313,44 @@ class PostgresRecordStore(HumanSessionStore):
             if payload is None:
                 return None
             return _human_session_from_payload(payload)
+
+    def read_human_sessions_for_github_id_without_cleanup(
+        self,
+        github_id: int,
+        *,
+        limit: int,
+        created_at_not_after: datetime,
+    ) -> tuple[LaunchplaneHumanSession, ...]:
+        normalized_limit = max(limit, 0)
+        if normalized_limit == 0:
+            return ()
+        sqlite = self._engine.dialect.name == "sqlite"
+        created_at_order = (
+            func.julianday(LaunchplaneHumanSessionRow.created_at)
+            if sqlite
+            else sql_cast(
+                LaunchplaneHumanSessionRow.created_at,
+                DateTime(timezone=True),
+            )
+        )
+        created_at_upper_bound = (
+            func.julianday(created_at_not_after.isoformat()) if sqlite else created_at_not_after
+        )
+        statement = (
+            select(LaunchplaneHumanSessionRow)
+            .where(
+                LaunchplaneHumanSessionRow.github_id == github_id,
+                created_at_order <= created_at_upper_bound,
+            )
+            .order_by(
+                created_at_order.desc(),
+                LaunchplaneHumanSessionRow.session_id.desc(),
+            )
+            .limit(normalized_limit)
+        )
+        with self._session_factory() as session:
+            rows = session.scalars(statement).all()
+            return tuple(_human_session_from_payload(row.payload) for row in rows)
 
     def delete_session(self, session_id: str) -> None:
         with self._session_factory() as session:

@@ -2694,7 +2694,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(payload["normalization_version"], 1)
         self.assertRegex(payload["semantic_digest_sha256"], r"^[0-9a-f]{64}$")
         self.assertEqual(payload["provenance"]["source_commit_sha"], "a" * 40)
-        self.assertEqual(len(payload["contract"]["operations"]), 12)
+        self.assertEqual(len(payload["contract"]["operations"]), 13)
 
     def test_product_onboarding_endpoint_writes_full_launchplane_owned_bundle(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
