@@ -37,6 +37,7 @@ class FastApiDokployRuntimeEvidenceTests(unittest.IsolatedAsyncioTestCase):
                 patch(
                     "control_plane.dokploy_target_inspect.dokploy_runtime_evidence.fetch_compose_service_runtime",
                     return_value={
+                        "container_id": "worker-container",
                         "state": "running",
                         "status": "Up 5 minutes",
                         "running": True,
@@ -49,7 +50,7 @@ class FastApiDokployRuntimeEvidenceTests(unittest.IsolatedAsyncioTestCase):
                     },
                 ),
                 patch(
-                    "control_plane.dokploy_target_inspect.dokploy_api.fetch_dokploy_compose_logs",
+                    "control_plane.dokploy_target_inspect.dokploy_runtime_evidence.fetch_compose_container_logs",
                     return_value=(
                         '{"event":"privileged_operation_worker_poll_succeeded",'
                         '"processed":0,"statuses":[]}',

@@ -39,6 +39,7 @@ def _fetch_service_runtime(
 ) -> dokploy_api.JsonObject:
     del host, token, compose_id, app_name, server_id, service_name
     return {
+        "container_id": "worker-container",
         "state": "running",
         "status": "Up 5 minutes",
         "running": True,
@@ -54,14 +55,10 @@ def _fetch_logs(
     host: str,
     token: str,
     compose_id: str,
-    app_name: str,
-    server_id: str,
-    service_name: str,
+    container_id: str,
     line_count: int,
-    since: str,
-    search: str,
 ) -> tuple[str, ...]:
-    del host, token, compose_id, app_name, server_id, service_name, line_count, since, search
+    del host, token, compose_id, container_id, line_count
     return (
         '{"event":"privileged_operation_worker_poll_succeeded","processed":0,"statuses":[]}',
         "LAUNCHPLANE_DATABASE_URL=secret",

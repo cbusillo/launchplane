@@ -14,7 +14,6 @@ from control_plane.dokploy import runtime_evidence as dokploy_runtime_evidence
 
 DokployTargetType = Literal["application", "compose"]
 _RUNTIME_EVIDENCE_LOG_LINE_COUNT = dokploy_api.MAX_DOKPLOY_LOG_LINE_COUNT
-_RUNTIME_EVIDENCE_LOG_SINCE = "1d"
 
 
 class FetchDokployTargetPayload(Protocol):
@@ -43,12 +42,8 @@ class FetchDokployComposeLogs(Protocol):
         host: str,
         token: str,
         compose_id: str,
-        app_name: str,
-        server_id: str,
-        service_name: str,
+        container_id: str,
         line_count: int,
-        since: str,
-        search: str,
     ) -> tuple[str, ...]: ...
 
 
@@ -198,18 +193,17 @@ def inspect_dokploy_target(
             server_id=server_id,
             service_name=request.service,
         )
-        logs_fetcher = fetch_compose_logs or dokploy_api.fetch_dokploy_compose_logs
+        container_id = str(runtime_payload.get("container_id") or "").strip()
+        if not container_id:
+            raise dokploy_runtime_evidence.DokployEvidenceProviderError("service-select")
+        logs_fetcher = fetch_compose_logs or dokploy_runtime_evidence.fetch_compose_container_logs
         try:
             logs = logs_fetcher(
                 host=host,
                 token=token,
                 compose_id=target_id,
-                app_name=app_name,
-                server_id=server_id,
-                service_name=request.service,
+                container_id=container_id,
                 line_count=_RUNTIME_EVIDENCE_LOG_LINE_COUNT,
-                since=_RUNTIME_EVIDENCE_LOG_SINCE,
-                search=request.event,
             )
         except click.ClickException as error:
             raise dokploy_runtime_evidence.DokployEvidenceProviderError(
@@ -357,15 +351,7 @@ def _domain_summaries(payload: Mapping[str, object]) -> list[dict[str, object]]:
 
 
 def _present(value: object) -> bool:
-    if value is None:
-        return False
-    if value == "":
-        return False
-    if value == []:
-        return False
-    if value == {}:
-        return False
-    return True
+    return value not in (None, "", [], {})
 
 
 def _object_field(payload: Mapping[str, object], key: str) -> dict[str, object]:
@@ -378,7 +364,7 @@ def _object_field(payload: Mapping[str, object], key: str) -> dict[str, object]:
 def _string_field(payload: Mapping[str, object], *keys: str) -> str:
     for key in keys:
         value = payload.get(key)
-        if value is None:
+        if not isinstance(value, (str, int, float, bool)):
             continue
         normalized_value = str(value).strip()
         if normalized_value:
