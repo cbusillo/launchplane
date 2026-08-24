@@ -2221,34 +2221,53 @@ workflow is the supported shared and production caller when operators need
 provider evidence without mutating Dokploy or Launchplane records.
 
 Callers may additionally provide an exact compose `service`, expected immutable
-`expected_image`, and the allow-listed structured `event` name. That bounded
+`expected_image`, and an optional allow-listed structured `event` name for
+diagnostics. That bounded
 runtime-evidence mode resolves exactly one service container for both image and
-log evidence, reads only its state and immutable image identity, and searches at
-most 1,000 redacted candidate log lines from the last day twice: one unfiltered
-read for independent provider-error classification and one read using the
-code-owned allow-listed event name as the provider-side fixed-string filter
-before requiring an exact JSON event field match. It returns image-match state,
-event counts, bounded JSON/non-JSON
-line counts, fixed provider-error classification, and a `proof_ready` decision;
+bounded internal identity evidence, reads only its state and immutable image
+identity, and searches at most 1,000 redacted candidate log lines from the last
+day for independent provider-error classification. When `event` is present, it
+performs a second read using the code-owned allow-listed event name as the
+provider-side fixed-string filter before requiring an exact JSON event field
+match. It also reads the DB-backed
+privileged-operation worker heartbeat projection and internally compares the
+heartbeat's hashed runtime hostname with the hash of Dokploy's provider-observed
+container hostname. The provider hostname is accepted only when it is a
+Docker-assigned hexadecimal prefix of the selected container ID; configured
+custom hostnames fail closed. It returns image-match state, bounded
+heartbeat freshness/identity status, event counts, bounded JSON/non-JSON line
+counts, fixed provider-error classification, and a `proof_ready` decision;
 it never returns container IDs, container config, environment values,
-configured mutable image text, or raw log lines. Provider-error kinds are
+configured mutable image text, worker identity digests, hostnames, or raw log
+lines. Provider-error kinds are
 `unsupported_logging_driver`, `container_not_found`, `docker_daemon_error`, and
 `provider_command_failed`. The first recognized non-JSON provider error sets the
 reported kind while every recognized provider-error line is counted. Missing or
 ambiguous containers, invalid image identity, and provider failures fail closed.
 The manual workflow treats a requested runtime proof as failed unless the
 service is running, its immutable configured image exactly matches the
-operator-supplied expected image, the requested event was observed, and no
-provider error was classified.
+operator-supplied expected image, and a fresh heartbeat matches the same
+provider-observed container identity and image. Heartbeat timestamps more
+than 60 seconds in the future fail closed; freshness is bounded to four poll
+intervals with a 120-second floor and 900-second ceiling. Missing, stale,
+future-dated, identity-mismatched, or image-mismatched heartbeat records fail
+closed. Other fresh worker rows remain diagnostic because only the exact
+provider-selected container identity can satisfy proof. Structured events and
+provider log classification are diagnostic only. A log-read failure produces
+bounded `unavailable` diagnostics instead of a 503 and does not override a
+valid heartbeat proof.
 
 Provider failures expose only a bounded operation stage such as
 `provider-config`, `target-inspect`, `container-list`, `service-select`,
-`container-config`, `image-identity`, or `runtime-log-read`; raw provider
+`container-config`, `container-identity`, or `image-identity`; raw provider
 messages remain excluded.
 
-Runtime-event evidence remains under `dokploy_target.inspect` because the
+Runtime-event diagnostics and heartbeat proof remain under
+`dokploy_target.inspect` because the
 service accepts only code-owned allow-listed event names and returns counts, not
-log content. It is not an alternate arbitrary log-read surface; caller-selected
+log content, while the DB heartbeat is read-only evidence from existing
+Launchplane records rather than a new authorization surface. It is not an
+alternate arbitrary log-read surface; caller-selected
 log text and raw lines remain exclusively behind `target_logs.read` and exact
 context/instance authorization.
 

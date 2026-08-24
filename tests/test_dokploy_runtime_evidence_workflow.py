@@ -39,7 +39,7 @@ class DokployRuntimeEvidenceWorkflowTests(unittest.TestCase):
         self.assertIsNotNone(validate_inputs)
         assert validate_inputs is not None
         self.assertIn("runtime proof requires the expected immutable image", validate_inputs.run)
-        self.assertIn("runtime proof requires the structured event name", validate_inputs.run)
+        self.assertNotIn("requires the structured event name", validate_inputs.run)
         self.assertEqual(upload_evidence.data.get("if"), "always()")
 
 

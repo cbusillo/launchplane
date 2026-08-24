@@ -27,6 +27,9 @@ from control_plane.contracts.privileged_operation import (
     PrivilegedOperationRecord,
     privileged_operation_pre_state_digest,
 )
+from control_plane.contracts.privileged_operation_worker_heartbeat import (
+    PrivilegedOperationWorkerHeartbeatRecord,
+)
 from control_plane.privileged_operation_registry import (
     MANAGED_SECRET_REENCRYPTION_DESCRIPTOR,
     RegisteredPrivilegedOperationDescriptor,
@@ -41,6 +44,7 @@ from control_plane.privileged_operation_worker import (
     privileged_operation_execution_fingerprint,
     privileged_operation_execution_token,
     privileged_operation_provider_target_key,
+    record_privileged_operation_worker_poll_heartbeat,
     require_privileged_operation_execution_store,
 )
 from control_plane.service_auth import LaunchplaneAuthzPolicy
@@ -52,11 +56,29 @@ from tests.support.stores import _sqlite_database_url
 FIXED_NOW = datetime(2026, 8, 22, 20, 10, tzinfo=timezone.utc)
 
 
+class _WorkerStore:
+    def __init__(self, *, fail_heartbeat: bool = False) -> None:
+        self.heartbeat_records: list[PrivilegedOperationWorkerHeartbeatRecord] = []
+        self.fail_heartbeat = fail_heartbeat
+
+    def write_privileged_operation_worker_heartbeat_record(
+        self,
+        record: PrivilegedOperationWorkerHeartbeatRecord,
+        *,
+        prune_before: str,
+        prune_after: str,
+    ) -> None:
+        del prune_before, prune_after
+        if self.fail_heartbeat:
+            raise RuntimeError("heartbeat write failed")
+        self.heartbeat_records.append(record)
+
+
 def _build_worker_store_with_successful_probe(**kwargs: object) -> object:
     report_probe_succeeded = kwargs["on_schema_probe_succeeded"]
     assert callable(report_probe_succeeded)
     report_probe_succeeded()
-    return object()
+    return _WorkerStore()
 
 
 def _fernet_key(offset: int) -> str:
@@ -200,6 +222,56 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
             with self.assertRaisesRegex(TypeError, "PostgreSQL mutation storage"):
                 require_privileged_operation_execution_store(FilesystemRecordStore(Path(directory)))
 
+    def test_successful_poll_heartbeat_is_hashed_upserted_and_pruned(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = self._store(directory)
+            try:
+                stale_record = PrivilegedOperationWorkerHeartbeatRecord(
+                    worker_identity_sha256="a" * 64,
+                    image_reference=f"example@sha256:{'c' * 64}",
+                    poll_interval_seconds=15,
+                    last_poll_succeeded_at="2026-08-14T20:00:15+00:00",
+                )
+                store.write_privileged_operation_worker_heartbeat_record(
+                    stale_record,
+                    prune_before="2026-08-01T00:00:00+00:00",
+                    prune_after="2026-09-01T00:00:00+00:00",
+                )
+                future_record = stale_record.model_copy(
+                    update={
+                        "worker_identity_sha256": "d" * 64,
+                        "last_poll_succeeded_at": "2030-08-24T20:00:15+00:00",
+                    }
+                )
+                store.write_privileged_operation_worker_heartbeat_record(
+                    future_record,
+                    prune_before="2026-08-01T00:00:00+00:00",
+                    prune_after="2031-09-01T00:00:00+00:00",
+                )
+
+                first = record_privileged_operation_worker_poll_heartbeat(
+                    record_store=store,
+                    runtime_identity="worker-container-hostname",
+                    image_reference=f"example@sha256:{'c' * 64}",
+                    poll_interval_seconds=15,
+                    now=lambda: FIXED_NOW,
+                )
+                second = record_privileged_operation_worker_poll_heartbeat(
+                    record_store=store,
+                    runtime_identity="worker-container-hostname",
+                    image_reference=f"example@sha256:{'c' * 64}",
+                    poll_interval_seconds=15,
+                    now=lambda: FIXED_NOW,
+                )
+
+                records = store.list_privileged_operation_worker_heartbeat_records()
+            finally:
+                store.close()
+
+        self.assertEqual(first.worker_identity_sha256, second.worker_identity_sha256)
+        self.assertEqual(len(records), 1)
+        self.assertNotIn("worker-container-hostname", str(records[0].model_dump()))
+
     def test_worker_commands_are_service_internal(self) -> None:
         runner = CliRunner()
 
@@ -326,6 +398,55 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
         )
         self.assertEqual(telemetry[7]["consecutive_errors"], 1)
         self.assertEqual(telemetry[8]["consecutive_errors"], 2)
+
+    def test_heartbeat_write_failure_counts_as_poll_failure(self) -> None:
+        class TestStopEvent:
+            def is_set(self) -> bool:
+                return False
+
+            def wait(self, _timeout: int) -> bool:
+                return False
+
+        runner = CliRunner()
+        with (
+            patch("control_plane.cli_service.Event", return_value=TestStopEvent()),
+            patch(
+                "control_plane.cli_service.build_privileged_operation_worker_store",
+                side_effect=lambda **kwargs: (
+                    kwargs["on_schema_probe_succeeded"](),
+                    _WorkerStore(fail_heartbeat=True),
+                )[1],
+            ),
+            patch(
+                "control_plane.cli_service.execute_approved_privileged_operations_once",
+                return_value=[],
+            ),
+            patch(
+                "control_plane.cli_service._consume_privileged_operation_worker_schema_probe_evidence"
+            ),
+            patch("control_plane.cli_service.signal.signal", return_value=object()),
+        ):
+            result = runner.invoke(
+                main,
+                [
+                    "service",
+                    "privileged-operation-workers",
+                    "run",
+                    "--database-url",
+                    "sqlite+pysqlite:///:memory:",
+                    "--schema-probe-fd",
+                    "3",
+                    "--max-consecutive-errors",
+                    "1",
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 1, result.output)
+        telemetry = [
+            json.loads(line) for line in result.output.splitlines() if line.startswith("{")
+        ]
+        self.assertIn("privileged_operation_worker_threshold_exit", str(telemetry))
+        self.assertNotIn("privileged_operation_worker_poll_succeeded", str(telemetry))
 
     def test_worker_loop_stops_cleanly_after_sigterm(self) -> None:
         signal_handlers: dict[int, object] = {}

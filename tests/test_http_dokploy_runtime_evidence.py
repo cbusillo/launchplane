@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 import click
 
+from control_plane.contracts.privileged_operation_worker_heartbeat import (
+    PrivilegedOperationWorkerHeartbeatRecord,
+    privileged_operation_worker_identity_sha256,
+)
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.http_app_test_support import _asgi_get, _record_read_policy
@@ -21,6 +26,18 @@ class FastApiDokployRuntimeEvidenceTests(unittest.IsolatedAsyncioTestCase):
             database_url = sqlite_database_url(root / "launchplane.sqlite3")
             store = PostgresRecordStore(database_url=database_url)
             store.ensure_schema()
+            recorded_at = datetime.now(timezone.utc)
+            container_identity_sha256 = privileged_operation_worker_identity_sha256("a" * 12)
+            store.write_privileged_operation_worker_heartbeat_record(
+                PrivilegedOperationWorkerHeartbeatRecord(
+                    worker_identity_sha256=container_identity_sha256,
+                    image_reference=f"ghcr.io/example/launchplane@sha256:{'a' * 64}",
+                    poll_interval_seconds=15,
+                    last_poll_succeeded_at=recorded_at.isoformat(),
+                ),
+                prune_before=(recorded_at - timedelta(days=7)).isoformat(),
+                prune_after=(recorded_at + timedelta(seconds=60)).isoformat(),
+            )
             with (
                 patch(
                     "control_plane.http_routes.drivers.dokploy_source.read_dokploy_config",
@@ -37,7 +54,8 @@ class FastApiDokployRuntimeEvidenceTests(unittest.IsolatedAsyncioTestCase):
                 patch(
                     "control_plane.dokploy_target_inspect.dokploy_runtime_evidence.fetch_compose_service_runtime",
                     return_value={
-                        "container_id": "worker-container",
+                        "container_id": "a" * 64,
+                        "container_identity_sha256": container_identity_sha256,
                         "state": "running",
                         "status": "Up 5 minutes",
                         "running": True,
@@ -82,7 +100,10 @@ class FastApiDokployRuntimeEvidenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200)
         runtime_payload = response.json()["inspect"]["runtime_evidence"]
         self.assertTrue(runtime_payload["proof_ready"])
+        self.assertEqual(runtime_payload["proof_source"], "worker_heartbeat_record")
+        self.assertEqual(runtime_payload["worker_heartbeat"]["status"], "ready")
         self.assertTrue(runtime_payload["structured_event"]["observed"])
+        self.assertNotIn(container_identity_sha256, str(runtime_payload))
 
     async def test_dokploy_target_inspect_redacts_provider_runtime_failure(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
