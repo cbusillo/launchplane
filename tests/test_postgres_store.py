@@ -1,3 +1,4 @@
+import base64
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
@@ -28,6 +29,7 @@ from control_plane.contracts.agent_write_intent import (
     AgentWriteIntentRequest,
     build_agent_write_intent_record_id,
 )
+from control_plane.authorization_recovery import AuthorizationRecoveryService
 from control_plane.contracts.authz_policy_record import (
     LaunchplaneAuthzPolicyRecord,
     authz_policy_sha256,
@@ -228,6 +230,7 @@ from control_plane.storage.factory import (
     build_privileged_operation_worker_store,
     build_shared_record_store,
 )
+from control_plane.storage.schema_invariants import EXPECTED_ALEMBIC_HEAD_REVISION
 from control_plane.storage.privileged_operation_worker_probe import (
     PRIVILEGED_OPERATION_WORKER_PROBE_FAILED_EXIT_CODE,
     PRIVILEGED_OPERATION_WORKER_PROBE_SCHEMA_INCOMPATIBLE_EXIT_CODE,
@@ -1645,6 +1648,55 @@ def _merge_train_stack_collapse_plan_record(
     )
 
 
+_RECOVERY_KEY_TYPE = "sk-ssh-ed25519@openssh.com"
+
+
+def _recovery_key(material: str) -> str:
+    key_type = _RECOVERY_KEY_TYPE.encode("ascii")
+    key_blob = len(key_type).to_bytes(4, "big") + key_type + material.encode("utf-8")
+    return f"{_RECOVERY_KEY_TYPE} {base64.b64encode(key_blob).decode('ascii')} recovery@example"
+
+
+def _empty_authz_policy_record() -> LaunchplaneAuthzPolicyRecord:
+    policy = LaunchplaneAuthzPolicy(schema_version=2)
+    digest = authz_policy_sha256(policy)
+    return LaunchplaneAuthzPolicyRecord(
+        record_id=build_authz_policy_record_id(revision=1, policy_sha256=digest),
+        revision=1,
+        source="test:authorization-recovery",
+        updated_at="2026-08-25T00:00:00Z",
+        policy_sha256=digest,
+        policy=policy,
+    )
+
+
+def _authorization_recovery_service(store: PostgresRecordStore) -> AuthorizationRecoveryService:
+    return AuthorizationRecoveryService(
+        record_store=store,
+        service_identity="launchplane.test",
+        now=lambda: datetime(2026, 8, 25, tzinfo=timezone.utc),
+        random_token=lambda byte_count: f"token-{byte_count}-abcdefghijklmnopqrstuvwx",
+    )
+
+
+def _activate_recovery_key(
+    service: AuthorizationRecoveryService,
+    *,
+    key_id: str,
+    custody_slot: str,
+) -> None:
+    service.enroll_key(
+        key_id=key_id,
+        custody_slot=custody_slot,
+        public_key=_recovery_key(key_id),
+    )
+    with patch("control_plane.authorization_recovery._verify_sshsig"):
+        service.verify_key_proof(
+            key_id=key_id,
+            signature=b"-----BEGIN SSH SIGNATURE-----\nfixture",
+        )
+
+
 class PostgresRecordStoreTests(unittest.TestCase):
     def test_owner_acceptance_projection_lock_does_not_consume_record_pool(self) -> None:
         store = PostgresRecordStore(
@@ -1733,6 +1785,106 @@ class PostgresRecordStoreTests(unittest.TestCase):
         )
 
         self.assertEqual(too_long_index_names, ())
+
+    def test_authorization_recovery_apply_is_atomic_in_sqlite_rehearsal(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            store.seed_authz_policy_if_absent(_empty_authz_policy_record())
+            service = _authorization_recovery_service(store)
+            _activate_recovery_key(service, key_id="key-one", custody_slot="custody-a")
+            _activate_recovery_key(service, key_id="key-two", custody_slot="custody-b")
+            prepared = service.prepare(
+                operation="initial_bootstrap",
+                intended_github_id=101,
+                signing_key_id="key-one",
+            )
+
+            with patch("control_plane.authorization_recovery._verify_sshsig"):
+                result = service.apply(
+                    challenge_id=prepared.challenge.challenge_id,
+                    key_id="key-one",
+                    signature=b"-----BEGIN SSH SIGNATURE-----\nfixture",
+                    trace_id="trace-recovery",
+                )
+
+            self.assertEqual(result.status, "applied")
+            bootstrap_state = store.read_authorization_bootstrap_state()
+            self.assertIsNotNone(bootstrap_state)
+            assert bootstrap_state is not None
+            self.assertEqual(bootstrap_state.completed_by_github_id, 101)
+            challenge = store.read_authorization_recovery_challenge(prepared.challenge.challenge_id)
+            self.assertIsNotNone(challenge)
+            assert challenge is not None
+            self.assertEqual(challenge.used_at, "2026-08-25T00:00:00Z")
+            active_records = store.list_authz_policy_records(status="active", limit=2)
+            self.assertEqual(len(active_records), 1)
+            self.assertEqual(active_records[0].policy.github_humans[0].github_ids, (101,))
+            outbox_rows = store.list_outbox_delivery_records(states=("pending",))
+            self.assertEqual(len(outbox_rows), 1)
+            self.assertEqual(outbox_rows[0].kind, "operator_authorization_recovery_alert")
+            self.assertNotIn("signature", json.dumps(outbox_rows[0].payload, sort_keys=True))
+            self.assertNotIn("public_key", json.dumps(outbox_rows[0].payload, sort_keys=True))
+
+            with patch("control_plane.authorization_recovery._verify_sshsig"):
+                with self.assertRaisesRegex(ValueError, "already been consumed"):
+                    service.apply(
+                        challenge_id=prepared.challenge.challenge_id,
+                        key_id="key-one",
+                        signature=b"-----BEGIN SSH SIGNATURE-----\nfixture",
+                        trace_id="trace-replay",
+                    )
+
+    def test_authorization_recovery_apply_rolls_back_split_state_on_failure(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            seed_record = store.seed_authz_policy_if_absent(_empty_authz_policy_record())
+            service = _authorization_recovery_service(store)
+            _activate_recovery_key(service, key_id="key-one", custody_slot="custody-a")
+            _activate_recovery_key(service, key_id="key-two", custody_slot="custody-b")
+            prepared = service.prepare(
+                operation="initial_bootstrap",
+                intended_github_id=101,
+                signing_key_id="key-one",
+            )
+
+            with (
+                patch("control_plane.authorization_recovery._verify_sshsig"),
+                patch.object(
+                    store,
+                    "_after_authz_policy_write_step",
+                    side_effect=lambda step_name: (
+                        (_ for _ in ()).throw(RuntimeError("injected failure"))
+                        if step_name == "authorization_recovery_insert_active"
+                        else None
+                    ),
+                ),
+                self.assertRaisesRegex(RuntimeError, "injected failure"),
+            ):
+                service.apply(
+                    challenge_id=prepared.challenge.challenge_id,
+                    key_id="key-one",
+                    signature=b"-----BEGIN SSH SIGNATURE-----\nfixture",
+                    trace_id="trace-fail",
+                )
+
+            self.assertIsNone(store.read_authorization_bootstrap_state())
+            challenge = store.read_authorization_recovery_challenge(prepared.challenge.challenge_id)
+            self.assertIsNotNone(challenge)
+            assert challenge is not None
+            self.assertEqual(challenge.used_at, "")
+            active_records = store.list_authz_policy_records(status="active", limit=2)
+            self.assertEqual(active_records, (seed_record,))
+            self.assertEqual(store.list_outbox_delivery_records(states=("pending",)), ())
 
     def test_tenant_repository_classifications_are_immutable_revision_history(
         self,
@@ -3877,7 +4029,7 @@ class PostgresRecordStoreTests(unittest.TestCase):
         connection = store._engine.connect.return_value.__enter__.return_value
         connection.execute.return_value.scalars.return_value.all.return_value = []
 
-        with patch.object(store, "schema_revision", return_value="e2221b0c2d3e"):
+        with patch.object(store, "schema_revision", return_value=EXPECTED_ALEMBIC_HEAD_REVISION):
             store.verify_runtime_schema_compatibility(
                 required_relations=("required_table", "required_index")
             )
@@ -3896,7 +4048,7 @@ class PostgresRecordStoreTests(unittest.TestCase):
         connection.execute.return_value.scalars.return_value.all.return_value = ["missing_index"]
 
         with (
-            patch.object(store, "schema_revision", return_value="e2221b0c2d3e"),
+            patch.object(store, "schema_revision", return_value=EXPECTED_ALEMBIC_HEAD_REVISION),
             self.assertRaisesRegex(RuntimeError, "missing_index"),
         ):
             store.verify_runtime_schema_compatibility(

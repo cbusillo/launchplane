@@ -69,6 +69,13 @@ cleanup scope so the store is always closed.
 - server runtime: FastAPI served directly by Uvicorn
 - native FastAPI health route: `GET /v1/health`, backed by a Pydantic response
   model and included in OpenAPI as a service contract proof
+- authorization recovery: browser-human lifecycle under
+  `/v1/authorization-recovery/*` and credential-free total-lockout
+  `/v1/authorization-recovery/public/{prepare,challenges,apply}` operations.
+  Every response and error for this family is `Cache-Control: no-store`.
+  Public apply is authorized exclusively by the exact bounded hardware SSHSIG;
+  it does not accept a bearer, session cookie, policy payload, or generic
+  execution request.
 - native FastAPI Launchplane service runtime reads:
   - `GET /v1/service/runtime`, requiring `launchplane_service.read` for the
     Launchplane service context and returning runtime metadata only

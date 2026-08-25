@@ -102,6 +102,14 @@ def run_outbox_worker_once(
                 )
             ),
         )
+    elif record.kind == "operator_authorization_recovery_alert":
+        result = record.model_copy(
+            update={
+                "state": "delivered",
+                "action": "recorded_local_authorization_recovery_alert",
+                "error_code": "",
+            }
+        )
     else:
         result = record.model_copy(
             update={"state": "failed", "error_code": "unsupported_outbox_kind"}

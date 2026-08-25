@@ -1,3 +1,5 @@
+import base64
+import binascii
 import json
 import os
 from collections.abc import Callable
@@ -6,6 +8,9 @@ from datetime import UTC, datetime
 from json import JSONDecodeError
 from pathlib import Path
 from typing import Protocol
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
+from urllib.request import Request, urlopen
 from uuid import uuid4
 
 import click
@@ -62,6 +67,7 @@ def register_policy_profile_commands(
     global _callbacks
     _callbacks = callbacks
     main.add_command(authz_policies)
+    main.add_command(authorization_recovery)
     main.add_command(runtime_key_safety)
     main.add_command(merge_train_policies)
     main.add_command(product_profiles)
@@ -90,6 +96,53 @@ def _launchplane_action_slug(value: str) -> str:
 
 def _post_launchplane_service_json(**kwargs: object) -> dict[str, object]:
     return _policy_profile_callbacks().post_launchplane_service_json(**kwargs)
+
+
+def _authorization_recovery_service_url(service_url: str) -> str:
+    normalized = service_url.strip().rstrip("/")
+    parsed = urlsplit(normalized)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise click.ClickException("Launchplane service URL must be an absolute HTTP(S) URL.")
+    return normalized
+
+
+def _authorization_recovery_http_json(
+    *,
+    service_url: str,
+    path: str,
+    method: str,
+    payload: dict[str, object] | None = None,
+) -> dict[str, object]:
+    body = json.dumps(payload, separators=(",", ":")).encode("utf-8") if payload else None
+    request = Request(
+        f"{_authorization_recovery_service_url(service_url)}{path}",
+        data=body,
+        method=method,
+        headers={
+            "Accept": "application/json",
+            **({"Content-Type": "application/json"} if body else {}),
+        },
+    )
+    try:
+        with urlopen(request, timeout=15) as response:
+            raw_response = response.read(64 * 1024 + 1)
+    except HTTPError as error:
+        raise click.ClickException(
+            f"Authorization recovery service request was rejected (HTTP {error.code})."
+        ) from error
+    except (URLError, TimeoutError, OSError) as error:
+        raise click.ClickException("Authorization recovery service is unavailable.") from error
+    if len(raw_response) > 64 * 1024:
+        raise click.ClickException("Authorization recovery service response exceeded its limit.")
+    try:
+        decoded = json.loads(raw_response.decode("utf-8"))
+    except (UnicodeDecodeError, JSONDecodeError) as error:
+        raise click.ClickException(
+            "Authorization recovery service returned invalid JSON."
+        ) from error
+    if not isinstance(decoded, dict):
+        raise click.ClickException("Authorization recovery service returned an invalid response.")
+    return decoded
 
 
 class _PolicyRecordSummaryFields(Protocol):
@@ -262,6 +315,134 @@ def _load_authz_repository_scope_request(request_file: Path) -> AuthzRepositoryS
 @click.group("authz-policies")
 def authz_policies() -> None:
     """DB-backed Launchplane authorization policy commands."""
+
+
+@click.group("authorization-recovery")
+def authorization_recovery() -> None:
+    """Use the deployed public hardware-signature recovery service only."""
+
+
+@authorization_recovery.command("prepare")
+@click.option("--service-url", required=True, help="Deployed Launchplane service base URL.")
+@click.option(
+    "--operation",
+    type=click.Choice(
+        ["initial_bootstrap", "restore_known_administrator", "replace_recovery_key"],
+        case_sensitive=True,
+    ),
+    required=True,
+)
+@click.option("--github-id", type=click.IntRange(min=1), required=True)
+@click.option("--signing-key-id", required=True)
+@click.option("--compromised-key-id", default="")
+@click.option("--replacement-key-id", default="")
+@click.option("--output", type=click.Path(path_type=Path, dir_okay=False), required=True)
+def authorization_recovery_prepare(
+    service_url: str,
+    operation: str,
+    github_id: int,
+    signing_key_id: str,
+    compromised_key_id: str,
+    replacement_key_id: str,
+    output: Path,
+) -> None:
+    """Prepare an unsigned exact challenge and write its signing bytes locally."""
+    payload = _authorization_recovery_http_json(
+        service_url=service_url,
+        path="/v1/authorization-recovery/public/prepare",
+        method="POST",
+        payload={
+            "operation": operation,
+            "intended_github_id": github_id,
+            "signing_key_id": signing_key_id,
+            "compromised_key_id": compromised_key_id,
+            "replacement_key_id": replacement_key_id,
+        },
+    )
+    signing_input = payload.get("signing_input_base64")
+    if not isinstance(signing_input, str):
+        raise click.ClickException("Authorization recovery response omitted exact signing bytes.")
+    try:
+        signing_bytes = base64.b64decode(signing_input, validate=True)
+    except (ValueError, binascii.Error) as error:
+        raise click.ClickException(
+            "Authorization recovery response contained invalid signing bytes."
+        ) from error
+    if not signing_bytes or len(signing_bytes) > 32 * 1024:
+        raise click.ClickException("Authorization recovery signing input exceeded its limit.")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_bytes(signing_bytes)
+    challenge_id = payload.get("challenge_id")
+    namespace = "launchplane.authorization-recovery.v1"
+    click.echo(json.dumps({"challenge_id": challenge_id, "output": str(output)}, sort_keys=True))
+    click.echo(
+        f"Sign with: ssh-keygen -Y sign -n {namespace} -f <hardware-key> {output}",
+        err=True,
+    )
+
+
+@authorization_recovery.command("status")
+@click.option("--service-url", required=True, help="Deployed Launchplane service base URL.")
+@click.option("--challenge-id", required=True)
+def authorization_recovery_status(service_url: str, challenge_id: str) -> None:
+    """Read redacted status for one prepared challenge."""
+    payload = _authorization_recovery_http_json(
+        service_url=service_url,
+        path=f"/v1/authorization-recovery/public/challenges/{challenge_id}",
+        method="GET",
+    )
+    safe_fields = (
+        "status",
+        "trace_id",
+        "challenge_id",
+        "operation",
+        "signing_key_id",
+        "signing_key_fingerprint_sha256",
+        "expires_at",
+    )
+    click.echo(
+        json.dumps({field: payload.get(field) for field in safe_fields}, indent=2, sort_keys=True)
+    )
+
+
+@authorization_recovery.command("apply")
+@click.option("--service-url", required=True, help="Deployed Launchplane service base URL.")
+@click.option("--challenge-id", required=True)
+@click.option("--signing-key-id", required=True)
+@click.option(
+    "--signature-file", type=click.Path(path_type=Path, exists=True, dir_okay=False), required=True
+)
+def authorization_recovery_apply(
+    service_url: str,
+    challenge_id: str,
+    signing_key_id: str,
+    signature_file: Path,
+) -> None:
+    """Submit only one hardware SSHSIG envelope for the exact prepared challenge."""
+    signature = signature_file.read_bytes()
+    if not signature or len(signature) > 16 * 1024:
+        raise click.ClickException("Authorization recovery signature file exceeds its limit.")
+    payload = _authorization_recovery_http_json(
+        service_url=service_url,
+        path="/v1/authorization-recovery/public/apply",
+        method="POST",
+        payload={
+            "challenge_id": challenge_id,
+            "signing_key_id": signing_key_id,
+            "signature": base64.b64encode(signature).decode("ascii"),
+        },
+    )
+    click.echo(
+        json.dumps(
+            {
+                "status": payload.get("status"),
+                "trace_id": payload.get("trace_id"),
+                "challenge_id": payload.get("challenge_id"),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
 
 
 @click.group("runtime-key-safety")

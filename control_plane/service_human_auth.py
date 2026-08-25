@@ -369,10 +369,12 @@ class HumanSessionManager:
         config: GitHubOAuthConfig,
         session_store: HumanSessionStore,
         now: CallableNow | None = None,
+        authorization_bootstrap_state_provider: Callable[[], object | None] | None = None,
     ) -> None:
         self._config = config
         self._session_store = session_store
         self._now = now or _utc_now
+        self._authorization_bootstrap_state_provider = authorization_bootstrap_state_provider
 
     @property
     def public_origin(self) -> str:
@@ -392,10 +394,20 @@ class HumanSessionManager:
         )
         if role is not None or _has_db_backed_human_policy_administrator(authz_policy):
             return role
+        if not self._config.bootstrap_admin_emails:
+            return None
+        if not self._authorization_bootstrap_is_pending():
+            return None
         email = identity.email.strip().lower()
         if email and email in self._config.bootstrap_admin_emails:
             return "admin"
         return None
+
+    def _authorization_bootstrap_is_pending(self) -> bool:
+        if self._authorization_bootstrap_state_provider is None:
+            return False
+        state = self._authorization_bootstrap_state_provider()
+        return state is None or getattr(state, "status", "pending") == "pending"
 
     def issue(self, identity: GitHubHumanIdentity) -> LaunchplaneHumanSession:
         now = self._now()

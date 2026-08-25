@@ -10,7 +10,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
 AUTHZ_COMPATIBILITY_FLOOR_REVISION = "f3b5d7e9a1c2"
-EXPECTED_ALEMBIC_HEAD_REVISION = "e2221b0c2d3e"
+EXPECTED_ALEMBIC_HEAD_REVISION = "f2239a0b1c2d"
 RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS = (EXPECTED_ALEMBIC_HEAD_REVISION,)
 _AUTHZ_POLICY_TABLE = "launchplane_authz_policies"
 _AUTHZ_POLICY_WRITE_FENCE_TRIGGER = "launchplane_authz_policy_write_fence"
@@ -205,6 +205,26 @@ CRITICAL_POSTGRES_COLUMN_TYPES: tuple[CriticalColumnType, ...] = (
         "launchplane_outbox_deliveries",
         "max_attempts",
         ("integer", "int4"),
+    ),
+    CriticalColumnType(
+        "launchplane_authorization_recovery_keys",
+        "payload",
+        ("jsonb",),
+    ),
+    CriticalColumnType(
+        "launchplane_authorization_bootstrap",
+        "payload",
+        ("jsonb",),
+    ),
+    CriticalColumnType(
+        "launchplane_authorization_recovery_challenges",
+        "payload",
+        ("jsonb",),
+    ),
+    CriticalColumnType(
+        "launchplane_authorization_recovery_audits",
+        "payload",
+        ("jsonb",),
     ),
     CriticalColumnType(
         "launchplane_public_ingress_incidents",
@@ -682,6 +702,40 @@ CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
         ("state", "next_attempt_at", "lease_expires_at", "created_at"),
     ),
     CriticalIndex(
+        "launchplane_authorization_recovery_keys",
+        "launchplane_authorization_recovery_keys_live_slot_uidx",
+        ("custody_slot",),
+        unique=True,
+        predicate_expression="status in ('pending','active')",
+    ),
+    CriticalIndex(
+        "launchplane_authorization_recovery_keys",
+        "launchplane_authorization_recovery_keys_live_fingerprint_uidx",
+        ("fingerprint_sha256",),
+        unique=True,
+        predicate_expression="status in ('pending','active')",
+    ),
+    CriticalIndex(
+        "launchplane_authorization_recovery_keys",
+        "launchplane_authorization_recovery_keys_status_idx",
+        ("status", "enrolled_at"),
+    ),
+    CriticalIndex(
+        "launchplane_authorization_recovery_challenges",
+        "launchplane_authorization_recovery_challenges_open_signer_idx",
+        ("signing_key_id", "expires_at", "used_at"),
+    ),
+    CriticalIndex(
+        "launchplane_authorization_recovery_challenges",
+        "launchplane_authorization_recovery_challenges_expiry_idx",
+        ("expires_at", "used_at"),
+    ),
+    CriticalIndex(
+        "launchplane_authorization_recovery_audits",
+        "launchplane_authorization_recovery_audits_recorded_idx",
+        ("recorded_at",),
+    ),
+    CriticalIndex(
         "launchplane_public_ingress_observations",
         "launchplane_public_ingress_observations_incident_idx",
         ("incident_id", "observed_at"),
@@ -1017,6 +1071,22 @@ CRITICAL_PRIMARY_KEYS: tuple[CriticalPrimaryKey, ...] = (
     CriticalPrimaryKey(
         "launchplane_product_owner_routing",
         ("record_id",),
+    ),
+    CriticalPrimaryKey(
+        "launchplane_authorization_recovery_keys",
+        ("key_id",),
+    ),
+    CriticalPrimaryKey(
+        "launchplane_authorization_bootstrap",
+        ("record_id",),
+    ),
+    CriticalPrimaryKey(
+        "launchplane_authorization_recovery_challenges",
+        ("challenge_id",),
+    ),
+    CriticalPrimaryKey(
+        "launchplane_authorization_recovery_audits",
+        ("audit_id",),
     ),
     CriticalPrimaryKey(
         "launchplane_change_impact_policies",
@@ -1367,6 +1437,17 @@ def _canonical_predicate_expression(value: str) -> str:
     normalized = value.lower().replace('"', "")
     if " where " in normalized:
         normalized = normalized.split(" where ", maxsplit=1)[1]
+    normalized = re.sub(r"::character\s+varying(?:\[\])?", "", normalized)
     normalized = re.sub(r"::[a-z0-9_]+", "", normalized)
+    normalized = re.sub(
+        r"\b([a-z_][a-z0-9_.]*)\s*=\s*any\s*\(\s*array\s*\[(.*?)\]\s*\)",
+        lambda match: f"{match.group(1)} in ({match.group(2)})",
+        normalized,
+    )
     normalized = normalized.replace("(", "").replace(")", "")
-    return "".join(normalized.split())
+    compact = "".join(normalized.split())
+    return re.sub(
+        r"\b([a-z_][a-z0-9_.]*)=anyarray\[(.*?)\](?:\[\])?",
+        lambda match: f"{match.group(1)}in{match.group(2)}",
+        compact,
+    )

@@ -31,6 +31,7 @@ from control_plane.storage.schema_invariants import (
     CRITICAL_PRIMARY_KEYS,
     CRITICAL_SCHEMA_INDEXES,
     EXPECTED_ALEMBIC_HEAD_REVISION,
+    _canonical_predicate_expression,
 )
 from control_plane.storage.schema_migration import (
     alembic_config,
@@ -40,6 +41,19 @@ from control_plane.storage.schema_migration import (
 
 
 class SchemaMigrationTests(unittest.TestCase):
+    def test_postgres_any_array_predicate_matches_equivalent_in_expression(self) -> None:
+        observed_expressions = (
+            "status = ANY (ARRAY['pending'::character varying, 'active'::character varying])",
+            "(status = ANY ((ARRAY['pending'::character varying, "
+            "'active'::character varying])::character varying[]))",
+        )
+        expected = _canonical_predicate_expression("status IN ('pending', 'active')")
+
+        self.assertEqual(
+            tuple(_canonical_predicate_expression(value) for value in observed_expressions),
+            (expected, expected),
+        )
+
     def test_material_incident_migration_links_evidence_without_duplicate_opening(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
@@ -1491,7 +1505,7 @@ class SchemaMigrationTests(unittest.TestCase):
             for primary_key in CRITICAL_PRIMARY_KEYS
         }
 
-        self.assertEqual(EXPECTED_ALEMBIC_HEAD_REVISION, "e2221b0c2d3e")
+        self.assertEqual(EXPECTED_ALEMBIC_HEAD_REVISION, "f2239a0b1c2d")
         self.assertNotIn(
             ("launchplane_human_sessions", "launchplane_human_sessions_github_id_idx"),
             indexes,

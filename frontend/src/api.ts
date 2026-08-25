@@ -7,12 +7,16 @@ import type {
 import type {
   ApplyProductEnvironmentConfigData,
   ApplyProductEnvironmentConfigResponse,
+  AuthorizationRecoveryBrowserStatusResponse,
+  AuthorizationRecoveryKeyResponse,
+  AuthorizationRecoveryProofResponse,
   ApproveHumanPrivilegedOperationData,
   ApproveHumanPrivilegedOperationResponse,
   DispatchProductPromotionWorkflowData,
   DispatchProductPromotionWorkflowResponse,
   DryRunProductPromotionData,
   DryRunProductPromotionResponse,
+  EnrollAuthorizationRecoveryKeyData,
   EveryCodeSummaryResponse,
   EvaluateOwnerAcceptanceResponse,
   GovernanceProjectionResponse,
@@ -44,11 +48,13 @@ import type {
   ReadTenantAdmissionEvaluationData,
   RevokeHumanPrivilegedOperationData,
   RevokeHumanPrivilegedOperationResponse,
+  RevokeAuthorizationRecoveryKeyData,
   TenantAdmissionEvaluationReadResponse,
   WorkGraphIssueInboxResponse,
   WorkGraphSnapshot,
   WorkGraphSnapshotResponse,
   WriteOwnerAcceptanceEventData,
+  VerifyAuthorizationRecoveryKeyData,
 } from "./generated/openapi.ts";
 import type { BrowserOperationOptions } from "./browser-operation";
 import {
@@ -617,6 +623,76 @@ export function readPrivilegedOperationPlans(
   );
 }
 
+export type {
+  AuthorizationRecoveryBrowserStatusResponse,
+  AuthorizationRecoveryKeyResponse,
+  AuthorizationRecoveryProofResponse,
+};
+
+export function readAuthorizationRecoveryStatus(
+  signal?: AbortSignal,
+): Promise<AuthorizationRecoveryBrowserStatusResponse> {
+  return requestJson<AuthorizationRecoveryBrowserStatusResponse>(
+    "/v1/authorization-recovery/status",
+    "GET",
+    undefined,
+    signal,
+  );
+}
+
+export function readAuthorizationRecoveryKeyProof(
+  keyId: string,
+  signal?: AbortSignal,
+): Promise<AuthorizationRecoveryProofResponse> {
+  return requestJson<AuthorizationRecoveryProofResponse>(
+    `/v1/authorization-recovery/keys/${encodeURIComponent(keyId)}/proof`,
+    "GET",
+    undefined,
+    signal,
+  );
+}
+
+export function enrollAuthorizationRecoveryKey(
+  body: EnrollAuthorizationRecoveryKeyData["body"],
+): Promise<AuthorizationRecoveryKeyResponse> {
+  const request: EnrollAuthorizationRecoveryKeyData = {
+    url: BROWSER_WRITE_ROUTES.authorizationRecoveryEnroll,
+    body,
+  };
+  return requestGeneratedPost<AuthorizationRecoveryKeyResponse>(request);
+}
+
+export function verifyAuthorizationRecoveryKey(
+  keyId: string,
+  signature: string,
+): Promise<AuthorizationRecoveryKeyResponse> {
+  const request: VerifyAuthorizationRecoveryKeyData = {
+    url: BROWSER_WRITE_ROUTES.authorizationRecoveryVerify,
+    path: { key_id: keyId },
+    body: { signature },
+  };
+  return requestJson<AuthorizationRecoveryKeyResponse>(
+    `/v1/authorization-recovery/keys/${encodeURIComponent(keyId)}/verify`,
+    "POST",
+    request.body,
+  );
+}
+
+export function revokeAuthorizationRecoveryKey(
+  keyId: string,
+): Promise<AuthorizationRecoveryKeyResponse> {
+  const request: RevokeAuthorizationRecoveryKeyData = {
+    url: BROWSER_WRITE_ROUTES.authorizationRecoveryRevoke,
+    path: { key_id: keyId },
+    body: {},
+  };
+  return requestJson<AuthorizationRecoveryKeyResponse>(
+    `/v1/authorization-recovery/keys/${encodeURIComponent(keyId)}/revoke`,
+    "POST",
+    request.body,
+  );
+}
+
 export function approvePrivilegedOperation(
   operationId: string,
   reason: string,
@@ -625,7 +701,10 @@ export function approvePrivilegedOperation(
   const request: ApproveHumanPrivilegedOperationData = {
     url: BROWSER_WRITE_ROUTES.privilegedOperationApprove,
     path: { operation_id: operationId },
-    body: { source_event_id: `ui:approve:${operationId}:${Date.now()}`, reason },
+    body: {
+      source_event_id: `ui:approve:${operationId}:${Date.now()}`,
+      reason,
+    },
   };
   return requestJson<ApproveHumanPrivilegedOperationResponse>(
     `/v1/privileged-operations/plans/${encodeURIComponent(request.path.operation_id)}/approve`,
