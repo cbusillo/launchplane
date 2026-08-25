@@ -25,11 +25,17 @@ def _table_exists(table_name: str) -> bool:
 
 
 def _index_exists(table_name: str, index_name: str) -> bool:
-    return index_name in {str(index["name"]) for index in sa.inspect(op.get_bind()).get_indexes(table_name)}
+    return index_name in {
+        str(index["name"]) for index in sa.inspect(op.get_bind()).get_indexes(table_name)
+    }
 
 
 def _payload_column() -> sa.Column[object]:
-    return sa.Column("payload", sa.JSON().with_variant(postgresql.JSONB(astext_type=sa.Text()), "postgresql"), nullable=False)
+    return sa.Column(
+        "payload",
+        sa.JSON().with_variant(postgresql.JSONB(astext_type=sa.Text()), "postgresql"),
+        nullable=False,
+    )
 
 
 def upgrade() -> None:
@@ -43,11 +49,41 @@ def upgrade() -> None:
             sa.Column("enrolled_at", sa.String(), nullable=False),
             _payload_column(),
             sa.PrimaryKeyConstraint("key_id"),
+            sa.CheckConstraint(
+                "status in ('pending', 'active', 'revoked')",
+                name="launchplane_authorization_recovery_keys_status_ck",
+            ),
         )
-    if not _index_exists("launchplane_authorization_recovery_keys", "launchplane_authorization_recovery_keys_slot_idx"):
-        op.create_index("launchplane_authorization_recovery_keys_slot_idx", "launchplane_authorization_recovery_keys", ["custody_slot"])
-    if not _index_exists("launchplane_authorization_recovery_keys", "launchplane_authorization_recovery_keys_status_idx"):
-        op.create_index("launchplane_authorization_recovery_keys_status_idx", "launchplane_authorization_recovery_keys", ["status", "enrolled_at"])
+    if not _index_exists(
+        "launchplane_authorization_recovery_keys",
+        "launchplane_authorization_recovery_keys_live_slot_uidx",
+    ):
+        op.create_index(
+            "launchplane_authorization_recovery_keys_live_slot_uidx",
+            "launchplane_authorization_recovery_keys",
+            ["custody_slot"],
+            unique=True,
+            postgresql_where=sa.text("status in ('pending', 'active')"),
+            sqlite_where=sa.text("status in ('pending', 'active')"),
+        )
+    if not _index_exists(
+        "launchplane_authorization_recovery_keys",
+        "launchplane_authorization_recovery_keys_slot_idx",
+    ):
+        op.create_index(
+            "launchplane_authorization_recovery_keys_slot_idx",
+            "launchplane_authorization_recovery_keys",
+            ["custody_slot"],
+        )
+    if not _index_exists(
+        "launchplane_authorization_recovery_keys",
+        "launchplane_authorization_recovery_keys_status_idx",
+    ):
+        op.create_index(
+            "launchplane_authorization_recovery_keys_status_idx",
+            "launchplane_authorization_recovery_keys",
+            ["status", "enrolled_at"],
+        )
     if not _table_exists("launchplane_authorization_bootstrap"):
         op.create_table(
             "launchplane_authorization_bootstrap",
@@ -56,6 +92,14 @@ def upgrade() -> None:
             sa.Column("completed_at", sa.String(), nullable=False, server_default=""),
             _payload_column(),
             sa.PrimaryKeyConstraint("record_id"),
+            sa.CheckConstraint(
+                "record_id = 'authorization-recovery-bootstrap'",
+                name="launchplane_authorization_bootstrap_singleton_ck",
+            ),
+            sa.CheckConstraint(
+                "status = 'complete'",
+                name="launchplane_authorization_bootstrap_complete_ck",
+            ),
         )
     if not _table_exists("launchplane_authorization_recovery_challenges"):
         op.create_table(
@@ -66,9 +110,20 @@ def upgrade() -> None:
             sa.Column("used_at", sa.String(), nullable=False, server_default=""),
             _payload_column(),
             sa.PrimaryKeyConstraint("challenge_id"),
+            sa.CheckConstraint(
+                "operation in ('initial_bootstrap', 'restore_known_administrator', 'replace_recovery_key')",
+                name="launchplane_authorization_recovery_challenges_operation_ck",
+            ),
         )
-    if not _index_exists("launchplane_authorization_recovery_challenges", "launchplane_authorization_recovery_challenges_expiry_idx"):
-        op.create_index("launchplane_authorization_recovery_challenges_expiry_idx", "launchplane_authorization_recovery_challenges", ["expires_at", "used_at"])
+    if not _index_exists(
+        "launchplane_authorization_recovery_challenges",
+        "launchplane_authorization_recovery_challenges_expiry_idx",
+    ):
+        op.create_index(
+            "launchplane_authorization_recovery_challenges_expiry_idx",
+            "launchplane_authorization_recovery_challenges",
+            ["expires_at", "used_at"],
+        )
     if not _table_exists("launchplane_authorization_recovery_audits"):
         op.create_table(
             "launchplane_authorization_recovery_audits",
@@ -78,16 +133,40 @@ def upgrade() -> None:
             sa.Column("recorded_at", sa.String(), nullable=False),
             _payload_column(),
             sa.PrimaryKeyConstraint("audit_id"),
+            sa.CheckConstraint(
+                "status in ('accepted', 'rejected', 'completed')",
+                name="launchplane_authorization_recovery_audits_status_ck",
+            ),
         )
-    if not _index_exists("launchplane_authorization_recovery_audits", "launchplane_authorization_recovery_audits_recorded_idx"):
-        op.create_index("launchplane_authorization_recovery_audits_recorded_idx", "launchplane_authorization_recovery_audits", [sa.text("recorded_at DESC")])
+    if not _index_exists(
+        "launchplane_authorization_recovery_audits",
+        "launchplane_authorization_recovery_audits_recorded_idx",
+    ):
+        op.create_index(
+            "launchplane_authorization_recovery_audits_recorded_idx",
+            "launchplane_authorization_recovery_audits",
+            [sa.text("recorded_at DESC")],
+        )
 
 
 def downgrade() -> None:
     for table_name, indexes in (
-        ("launchplane_authorization_recovery_audits", ("launchplane_authorization_recovery_audits_recorded_idx",)),
-        ("launchplane_authorization_recovery_challenges", ("launchplane_authorization_recovery_challenges_expiry_idx",)),
-        ("launchplane_authorization_recovery_keys", ("launchplane_authorization_recovery_keys_status_idx", "launchplane_authorization_recovery_keys_slot_idx")),
+        (
+            "launchplane_authorization_recovery_audits",
+            ("launchplane_authorization_recovery_audits_recorded_idx",),
+        ),
+        (
+            "launchplane_authorization_recovery_challenges",
+            ("launchplane_authorization_recovery_challenges_expiry_idx",),
+        ),
+        (
+            "launchplane_authorization_recovery_keys",
+            (
+                "launchplane_authorization_recovery_keys_status_idx",
+                "launchplane_authorization_recovery_keys_slot_idx",
+                "launchplane_authorization_recovery_keys_live_slot_uidx",
+            ),
+        ),
     ):
         if _table_exists(table_name):
             for index_name in indexes:

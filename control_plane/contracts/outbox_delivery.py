@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 OutboxDeliveryKind = Literal[
     "github_workflow_dispatch",
+    "operator_authorization_recovery_alert",
     "public_ingress_notification",
 ]
 OutboxDeliveryState = Literal[

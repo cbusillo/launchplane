@@ -47,9 +47,13 @@ from control_plane.contracts.authz_policy_record import (
 )
 from control_plane.authorization_recovery import (
     AuthorizationBootstrapState,
+    AuthorizationRecoveryApplyStatus,
+    AuthorizationRecoveryApplyRequest,
+    AuthorizationRecoveryApplyResult,
     AuthorizationRecoveryAudit,
     AuthorizationRecoveryChallenge,
     AuthorizationRecoveryKey,
+    AUTHORIZATION_RECOVERY_MAX_OPEN_CHALLENGES,
 )
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.change_impact import ChangeImpactPolicyRecord
@@ -2050,8 +2054,19 @@ class LaunchplaneAuthzDenialRow(Base):
 class LaunchplaneAuthorizationRecoveryKeyRow(Base):
     __tablename__ = "launchplane_authorization_recovery_keys"
     __table_args__ = (
+        Index(
+            "launchplane_authorization_recovery_keys_live_slot_uidx",
+            "custody_slot",
+            unique=True,
+            sqlite_where=text("status in ('pending', 'active')"),
+            postgresql_where=text("status in ('pending', 'active')"),
+        ),
         Index("launchplane_authorization_recovery_keys_slot_idx", "custody_slot"),
         Index("launchplane_authorization_recovery_keys_status_idx", "status", "enrolled_at"),
+        CheckConstraint(
+            "status in ('pending', 'active', 'revoked')",
+            name="launchplane_authorization_recovery_keys_status_ck",
+        ),
     )
 
     key_id: Mapped[str] = mapped_column(String, primary_key=True)
@@ -2064,6 +2079,16 @@ class LaunchplaneAuthorizationRecoveryKeyRow(Base):
 
 class LaunchplaneAuthorizationBootstrapRow(Base):
     __tablename__ = "launchplane_authorization_bootstrap"
+    __table_args__ = (
+        CheckConstraint(
+            "record_id = 'authorization-recovery-bootstrap'",
+            name="launchplane_authorization_bootstrap_singleton_ck",
+        ),
+        CheckConstraint(
+            "status = 'complete'",
+            name="launchplane_authorization_bootstrap_complete_ck",
+        ),
+    )
 
     record_id: Mapped[str] = mapped_column(String, primary_key=True)
     status: Mapped[str] = mapped_column(String, nullable=False)
@@ -2075,6 +2100,10 @@ class LaunchplaneAuthorizationRecoveryChallengeRow(Base):
     __tablename__ = "launchplane_authorization_recovery_challenges"
     __table_args__ = (
         Index("launchplane_authorization_recovery_challenges_expiry_idx", "expires_at", "used_at"),
+        CheckConstraint(
+            "operation in ('initial_bootstrap', 'restore_known_administrator', 'replace_recovery_key')",
+            name="launchplane_authorization_recovery_challenges_operation_ck",
+        ),
     )
 
     challenge_id: Mapped[str] = mapped_column(String, primary_key=True)
@@ -2086,7 +2115,13 @@ class LaunchplaneAuthorizationRecoveryChallengeRow(Base):
 
 class LaunchplaneAuthorizationRecoveryAuditRow(Base):
     __tablename__ = "launchplane_authorization_recovery_audits"
-    __table_args__ = (Index("launchplane_authorization_recovery_audits_recorded_idx", "recorded_at"),)
+    __table_args__ = (
+        Index("launchplane_authorization_recovery_audits_recorded_idx", "recorded_at"),
+        CheckConstraint(
+            "status in ('accepted', 'rejected', 'completed')",
+            name="launchplane_authorization_recovery_audits_status_ck",
+        ),
+    )
 
     audit_id: Mapped[str] = mapped_column(String, primary_key=True)
     event: Mapped[str] = mapped_column(String, nullable=False)
@@ -14166,6 +14201,153 @@ class PostgresRecordStore(HumanSessionStore):
             {"lock_name": "launchplane:active-authz-policy"},
         )
 
+    def _lock_authorization_recovery(self, session: Any) -> None:
+        if self.database_url.startswith("sqlite"):
+            return
+        session.execute(
+            text("select pg_advisory_xact_lock(hashtextextended(:lock_name, 0))"),
+            {"lock_name": "launchplane:authorization-recovery"},
+        )
+
+    def _active_authz_policy_statement(self, *, for_update: bool) -> Any:
+        statement = (
+            select(LaunchplaneAuthzPolicyRow)
+            .where(LaunchplaneAuthzPolicyRow.status == "active")
+            .order_by(desc(LaunchplaneAuthzPolicyRow.revision))
+        )
+        if for_update and not self.database_url.startswith("sqlite"):
+            statement = statement.with_for_update()
+        return statement
+
+    def _authorization_recovery_key_statement(
+        self,
+        *,
+        status: str = "",
+        for_update: bool = False,
+    ) -> Any:
+        statement = select(LaunchplaneAuthorizationRecoveryKeyRow)
+        if status:
+            statement = statement.where(LaunchplaneAuthorizationRecoveryKeyRow.status == status)
+        if for_update and not self.database_url.startswith("sqlite"):
+            statement = statement.with_for_update()
+        return statement
+
+    def _authorization_recovery_key_row_locked(
+        self,
+        session: Any,
+        *,
+        key_id: str,
+    ) -> LaunchplaneAuthorizationRecoveryKeyRow | None:
+        statement = select(LaunchplaneAuthorizationRecoveryKeyRow).where(
+            LaunchplaneAuthorizationRecoveryKeyRow.key_id == key_id
+        )
+        if not self.database_url.startswith("sqlite"):
+            statement = statement.with_for_update()
+        row = session.scalar(statement)
+        return cast(LaunchplaneAuthorizationRecoveryKeyRow | None, row)
+
+    def _authorization_recovery_challenge_row_locked(
+        self,
+        session: Any,
+        *,
+        challenge_id: str,
+    ) -> LaunchplaneAuthorizationRecoveryChallengeRow | None:
+        statement = select(LaunchplaneAuthorizationRecoveryChallengeRow).where(
+            LaunchplaneAuthorizationRecoveryChallengeRow.challenge_id == challenge_id
+        )
+        if not self.database_url.startswith("sqlite"):
+            statement = statement.with_for_update()
+        row = session.scalar(statement)
+        return cast(LaunchplaneAuthorizationRecoveryChallengeRow | None, row)
+
+    def _sync_authorization_recovery_key_row(
+        self,
+        row: LaunchplaneAuthorizationRecoveryKeyRow,
+        key: AuthorizationRecoveryKey,
+    ) -> None:
+        row.custody_slot = key.custody_slot
+        row.status = key.status
+        row.fingerprint_sha256 = key.fingerprint_sha256
+        row.enrolled_at = key.enrolled_at
+        row.payload = self._payload_dict(key)
+
+    def _validate_authorization_recovery_operation_locked(
+        self,
+        *,
+        session: Any,
+        request: AuthorizationRecoveryApplyRequest,
+        signing_key: AuthorizationRecoveryKey,
+    ) -> AuthorizationRecoveryApplyStatus | None:
+        challenge = request.challenge
+        if challenge.operation == "initial_bootstrap":
+            if (
+                session.get(
+                    LaunchplaneAuthorizationBootstrapRow, "authorization-recovery-bootstrap"
+                )
+                is not None
+            ):
+                return "bootstrap_already_complete"
+            return None
+        if (
+            session.get(LaunchplaneAuthorizationBootstrapRow, "authorization-recovery-bootstrap")
+            is None
+        ):
+            return "operation_invariant_failed"
+        if challenge.operation == "restore_known_administrator":
+            return None
+        if challenge.operation != "replace_recovery_key":
+            return "operation_invariant_failed"
+        if challenge.signing_key_id == challenge.compromised_key_id:
+            return "compromised_key_signed"
+        replacement_row = self._authorization_recovery_key_row_locked(
+            session,
+            key_id=challenge.replacement_key_id,
+        )
+        if replacement_row is None:
+            return "replacement_key_unavailable"
+        replacement_key = AuthorizationRecoveryKey.model_validate(replacement_row.payload)
+        if replacement_key.status != "pending":
+            return "replacement_key_not_pending"
+        if (
+            replacement_key.custody_slot != challenge.replacement_custody_slot
+            or replacement_key.fingerprint_sha256 != challenge.replacement_key_fingerprint_sha256
+            or replacement_key.public_key != challenge.replacement_public_key
+        ):
+            return "replacement_key_slot_mismatch"
+        compromised_row = self._authorization_recovery_key_row_locked(
+            session,
+            key_id=challenge.compromised_key_id,
+        )
+        if compromised_row is None:
+            return "compromised_key_unavailable"
+        compromised_key = AuthorizationRecoveryKey.model_validate(compromised_row.payload)
+        if compromised_key.status != "active":
+            return "compromised_key_not_active"
+        if signing_key.key_id in {replacement_key.key_id, compromised_key.key_id}:
+            return "compromised_key_signed"
+        active_after_rotation = [
+            key
+            for key in (
+                AuthorizationRecoveryKey.model_validate(row.payload)
+                for row in session.scalars(
+                    self._authorization_recovery_key_statement(status="active", for_update=True)
+                ).all()
+            )
+            if key.key_id != compromised_key.key_id
+        ] + [
+            replacement_key.model_copy(
+                update={
+                    "status": "active",
+                    "activated_at": request.completed_at,
+                    "proof_challenge": "",
+                    "proof_expires_at": "",
+                }
+            )
+        ]
+        if len({key.custody_slot for key in active_after_rotation}) < 2:
+            return "custody_not_independent"
+        return None
+
     @staticmethod
     def _authz_policy_payload(record: LaunchplaneAuthzPolicyRecord) -> PayloadDict:
         payload = record.model_dump(mode="json")
@@ -14468,38 +14650,38 @@ class PostgresRecordStore(HumanSessionStore):
 
     def read_authorization_bootstrap_state(self) -> AuthorizationBootstrapState | None:
         with self._session_factory() as session:
-            row = session.get(LaunchplaneAuthorizationBootstrapRow, "authorization-recovery-bootstrap")
-            return AuthorizationBootstrapState.model_validate(row.payload) if row is not None else None
+            row = session.get(
+                LaunchplaneAuthorizationBootstrapRow, "authorization-recovery-bootstrap"
+            )
+            return (
+                AuthorizationBootstrapState.model_validate(row.payload) if row is not None else None
+            )
 
-    def write_authorization_bootstrap_state(self, state: AuthorizationBootstrapState) -> None:
+    def complete_authorization_bootstrap_once(self, state: AuthorizationBootstrapState) -> bool:
         with self._session_factory() as session:
             self._begin_serialized_write(session)
             row = session.get(LaunchplaneAuthorizationBootstrapRow, state.record_id)
             if row is not None:
                 current = AuthorizationBootstrapState.model_validate(row.payload)
-                if current.status == "complete" and state.status != "complete":
-                    raise ValueError("Authorization bootstrap completion is monotonic.")
-                if current.status == "complete" and current != state:
-                    raise ValueError("Authorization bootstrap completion cannot be replaced.")
-            else:
-                row = LaunchplaneAuthorizationBootstrapRow(
+                session.rollback()
+                return current == state
+            session.add(
+                LaunchplaneAuthorizationBootstrapRow(
                     record_id=state.record_id,
                     status=state.status,
                     completed_at=state.completed_at,
                     payload=self._payload_dict(state),
                 )
-                session.add(row)
-                session.commit()
-                return
-            row.status = state.status
-            row.completed_at = state.completed_at
-            row.payload = self._payload_dict(state)
+            )
             session.commit()
+            return True
 
     def list_authorization_recovery_keys(self) -> tuple[AuthorizationRecoveryKey, ...]:
         with self._session_factory() as session:
             rows = session.scalars(
-                select(LaunchplaneAuthorizationRecoveryKeyRow).order_by(LaunchplaneAuthorizationRecoveryKeyRow.custody_slot)
+                select(LaunchplaneAuthorizationRecoveryKeyRow).order_by(
+                    LaunchplaneAuthorizationRecoveryKeyRow.custody_slot
+                )
             )
             return tuple(AuthorizationRecoveryKey.model_validate(row.payload) for row in rows)
 
@@ -14513,11 +14695,16 @@ class PostgresRecordStore(HumanSessionStore):
             self._begin_serialized_write(session)
             row = session.get(LaunchplaneAuthorizationRecoveryKeyRow, key.key_id)
             if row is None:
-                session.add(LaunchplaneAuthorizationRecoveryKeyRow(
-                    key_id=key.key_id, custody_slot=key.custody_slot, status=key.status,
-                    fingerprint_sha256=key.fingerprint_sha256, enrolled_at=key.enrolled_at,
-                    payload=self._payload_dict(key),
-                ))
+                session.add(
+                    LaunchplaneAuthorizationRecoveryKeyRow(
+                        key_id=key.key_id,
+                        custody_slot=key.custody_slot,
+                        status=key.status,
+                        fingerprint_sha256=key.fingerprint_sha256,
+                        enrolled_at=key.enrolled_at,
+                        payload=self._payload_dict(key),
+                    )
+                )
             else:
                 row.custody_slot = key.custody_slot
                 row.status = key.status
@@ -14526,10 +14713,16 @@ class PostgresRecordStore(HumanSessionStore):
                 row.payload = self._payload_dict(key)
             session.commit()
 
-    def read_authorization_recovery_challenge(self, challenge_id: str) -> AuthorizationRecoveryChallenge | None:
+    def read_authorization_recovery_challenge(
+        self, challenge_id: str
+    ) -> AuthorizationRecoveryChallenge | None:
         with self._session_factory() as session:
             row = session.get(LaunchplaneAuthorizationRecoveryChallengeRow, challenge_id)
-            return AuthorizationRecoveryChallenge.model_validate(row.payload) if row is not None else None
+            return (
+                AuthorizationRecoveryChallenge.model_validate(row.payload)
+                if row is not None
+                else None
+            )
 
     def list_authorization_recovery_challenges(self) -> tuple[AuthorizationRecoveryChallenge, ...]:
         with self._session_factory() as session:
@@ -14540,12 +14733,36 @@ class PostgresRecordStore(HumanSessionStore):
             )
             return tuple(AuthorizationRecoveryChallenge.model_validate(row.payload) for row in rows)
 
-    def write_authorization_recovery_challenge(self, challenge: AuthorizationRecoveryChallenge) -> None:
-        self._write_row(LaunchplaneAuthorizationRecoveryChallengeRow(
-            challenge_id=challenge.challenge_id, operation=challenge.operation,
-            expires_at=challenge.expires_at, used_at=challenge.used_at,
-            payload=self._payload_dict(challenge),
-        ))
+    def write_authorization_recovery_challenge(
+        self, challenge: AuthorizationRecoveryChallenge
+    ) -> None:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            existing = session.get(
+                LaunchplaneAuthorizationRecoveryChallengeRow, challenge.challenge_id
+            )
+            if existing is not None:
+                raise ValueError("Authorization recovery challenge ID already exists.")
+            open_count = session.scalar(
+                select(func.count())
+                .select_from(LaunchplaneAuthorizationRecoveryChallengeRow)
+                .where(
+                    LaunchplaneAuthorizationRecoveryChallengeRow.used_at == "",
+                    LaunchplaneAuthorizationRecoveryChallengeRow.expires_at > challenge.issued_at,
+                )
+            )
+            if int(open_count or 0) >= AUTHORIZATION_RECOVERY_MAX_OPEN_CHALLENGES:
+                raise ValueError("Recovery challenge rate limit exceeded.")
+            session.add(
+                LaunchplaneAuthorizationRecoveryChallengeRow(
+                    challenge_id=challenge.challenge_id,
+                    operation=challenge.operation,
+                    expires_at=challenge.expires_at,
+                    used_at=challenge.used_at,
+                    payload=self._payload_dict(challenge),
+                )
+            )
+            session.commit()
 
     def consume_authorization_recovery_challenge(self, *, challenge_id: str, used_at: str) -> bool:
         with self._session_factory() as session:
@@ -14562,14 +14779,249 @@ class PostgresRecordStore(HumanSessionStore):
             session.commit()
             return True
 
+    def apply_authorization_recovery(
+        self,
+        request: AuthorizationRecoveryApplyRequest,
+    ) -> AuthorizationRecoveryApplyResult:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_active_authz_policy(session)
+            self._lock_authorization_recovery(session)
+            self._lock_outbox_dedupe_keys(
+                session,
+                dedupe_keys=(request.outbox_delivery.dedupe_key,),
+            )
+            challenge_row = self._authorization_recovery_challenge_row_locked(
+                session,
+                challenge_id=request.challenge.challenge_id,
+            )
+            if challenge_row is None:
+                session.rollback()
+                return AuthorizationRecoveryApplyResult(status="challenge_unavailable")
+            stored_challenge = AuthorizationRecoveryChallenge.model_validate(challenge_row.payload)
+            if stored_challenge != request.challenge:
+                session.rollback()
+                return AuthorizationRecoveryApplyResult(
+                    status="conflict", challenge=stored_challenge
+                )
+            if stored_challenge.used_at:
+                session.rollback()
+                return AuthorizationRecoveryApplyResult(
+                    status="replayed", challenge=stored_challenge
+                )
+            if stored_challenge.expires_at <= request.completed_at:
+                session.rollback()
+                return AuthorizationRecoveryApplyResult(
+                    status="challenge_expired", challenge=stored_challenge
+                )
+
+            signing_key_row = self._authorization_recovery_key_row_locked(
+                session,
+                key_id=request.signing_key_id,
+            )
+            if signing_key_row is None:
+                session.rollback()
+                return AuthorizationRecoveryApplyResult(
+                    status="signing_key_unavailable", challenge=stored_challenge
+                )
+            signing_key = AuthorizationRecoveryKey.model_validate(signing_key_row.payload)
+            if signing_key.status != "active":
+                session.rollback()
+                return AuthorizationRecoveryApplyResult(
+                    status="signing_key_inactive", challenge=stored_challenge
+                )
+            if signing_key.fingerprint_sha256 != request.signing_key_fingerprint_sha256:
+                session.rollback()
+                return AuthorizationRecoveryApplyResult(
+                    status="signing_key_mismatch", challenge=stored_challenge
+                )
+
+            active_keys = tuple(
+                AuthorizationRecoveryKey.model_validate(row.payload)
+                for row in session.scalars(
+                    self._authorization_recovery_key_statement(status="active", for_update=True)
+                ).all()
+            )
+            if len({key.custody_slot for key in active_keys}) < 2:
+                session.rollback()
+                return AuthorizationRecoveryApplyResult(
+                    status="custody_not_independent", challenge=stored_challenge
+                )
+
+            active_rows = tuple(
+                session.scalars(self._active_authz_policy_statement(for_update=True)).all()
+            )
+            if not active_rows:
+                session.rollback()
+                return AuthorizationRecoveryApplyResult(
+                    status="active_policy_missing", challenge=stored_challenge
+                )
+            if len(active_rows) > 1:
+                session.rollback()
+                return AuthorizationRecoveryApplyResult(
+                    status="active_policy_ambiguous", challenge=stored_challenge
+                )
+            active_row = active_rows[0]
+            active_record = self._read_authz_policy_row(active_row)
+            if (
+                active_record.record_id != stored_challenge.active_policy_record_id
+                or active_record.revision != stored_challenge.active_policy_revision
+                or active_record.policy_sha256 != stored_challenge.active_policy_sha256
+            ):
+                session.rollback()
+                return AuthorizationRecoveryApplyResult(
+                    status="active_policy_stale",
+                    challenge=stored_challenge,
+                    current_record=active_record,
+                )
+            if request.candidate_record.policy_sha256 != stored_challenge.candidate_policy_sha256:
+                session.rollback()
+                return AuthorizationRecoveryApplyResult(
+                    status="candidate_digest_mismatch", challenge=stored_challenge
+                )
+
+            operation_status = self._validate_authorization_recovery_operation_locked(
+                session=session,
+                request=request,
+                signing_key=signing_key,
+            )
+            if operation_status is not None:
+                session.rollback()
+                return AuthorizationRecoveryApplyResult(
+                    status=operation_status, challenge=stored_challenge
+                )
+
+            if request.candidate_record.revision != active_record.revision + 1:
+                session.rollback()
+                return AuthorizationRecoveryApplyResult(
+                    status="candidate_digest_mismatch", challenge=stored_challenge
+                )
+            changed = request.candidate_record.policy_sha256 != active_record.policy_sha256
+            status: Literal["applied", "adopted"] = "adopted"
+            stored_record = active_record
+            if changed:
+                superseded_record = active_record.model_copy(update={"status": "superseded"})
+                active_row.status = "superseded"
+                active_row.payload = self._authz_policy_payload(superseded_record)
+                session.flush()
+                self._after_authz_policy_write_step("authorization_recovery_supersede_active")
+                session.add(self._authz_policy_row(request.candidate_record))
+                session.flush()
+                self._after_authz_policy_write_step("authorization_recovery_insert_active")
+                stored_record = request.candidate_record
+                status = "applied"
+
+            completed_challenge = stored_challenge.model_copy(
+                update={"used_at": request.completed_at}
+            )
+            challenge_row.used_at = request.completed_at
+            challenge_row.payload = self._payload_dict(completed_challenge)
+            bootstrap_state: AuthorizationBootstrapState | None = None
+            if stored_challenge.operation == "initial_bootstrap":
+                if (
+                    session.get(
+                        LaunchplaneAuthorizationBootstrapRow, "authorization-recovery-bootstrap"
+                    )
+                    is not None
+                ):
+                    session.rollback()
+                    return AuthorizationRecoveryApplyResult(
+                        status="bootstrap_already_complete", challenge=stored_challenge
+                    )
+                bootstrap_state = AuthorizationBootstrapState(
+                    completed_at=request.completed_at,
+                    completed_by_github_id=stored_challenge.intended_github_id,
+                    completion_challenge_id=stored_challenge.challenge_id,
+                )
+                session.add(
+                    LaunchplaneAuthorizationBootstrapRow(
+                        record_id=bootstrap_state.record_id,
+                        status=bootstrap_state.status,
+                        completed_at=bootstrap_state.completed_at,
+                        payload=self._payload_dict(bootstrap_state),
+                    )
+                )
+            if stored_challenge.operation == "replace_recovery_key":
+                replacement_row = self._authorization_recovery_key_row_locked(
+                    session,
+                    key_id=stored_challenge.replacement_key_id,
+                )
+                compromised_row = self._authorization_recovery_key_row_locked(
+                    session,
+                    key_id=stored_challenge.compromised_key_id,
+                )
+                if replacement_row is None or compromised_row is None:
+                    session.rollback()
+                    return AuthorizationRecoveryApplyResult(
+                        status="operation_invariant_failed", challenge=stored_challenge
+                    )
+                replacement_key = AuthorizationRecoveryKey.model_validate(replacement_row.payload)
+                compromised_key = AuthorizationRecoveryKey.model_validate(compromised_row.payload)
+                activated_replacement = replacement_key.model_copy(
+                    update={
+                        "status": "active",
+                        "activated_at": request.completed_at,
+                        "proof_challenge": "",
+                        "proof_expires_at": "",
+                    }
+                )
+                revoked_compromised = compromised_key.model_copy(
+                    update={
+                        "status": "revoked",
+                        "revoked_at": request.completed_at,
+                        "proof_challenge": "",
+                        "proof_expires_at": "",
+                    }
+                )
+                self._sync_authorization_recovery_key_row(replacement_row, activated_replacement)
+                self._sync_authorization_recovery_key_row(compromised_row, revoked_compromised)
+            session.add(
+                LaunchplaneAuthorizationRecoveryAuditRow(
+                    audit_id=request.audit.audit_id,
+                    event=request.audit.event,
+                    status=request.audit.status,
+                    recorded_at=request.audit.recorded_at,
+                    payload=self._payload_dict(request.audit),
+                )
+            )
+            existing_outbox = session.scalar(
+                select(LaunchplaneOutboxDeliveryRow)
+                .where(
+                    LaunchplaneOutboxDeliveryRow.dedupe_key == request.outbox_delivery.dedupe_key
+                )
+                .limit(1)
+            )
+            outbox_delivery = request.outbox_delivery
+            if existing_outbox is None:
+                session.add(self._outbox_delivery_row(outbox_delivery))
+            else:
+                outbox_delivery = self._read_payload(
+                    model_type=OutboxDeliveryRecord,
+                    payload=existing_outbox.payload,
+                )
+            session.commit()
+            return AuthorizationRecoveryApplyResult(
+                status=status,
+                authz_policy_record=stored_record,
+                bootstrap_state=bootstrap_state,
+                challenge=completed_challenge,
+                audit=request.audit,
+                outbox_delivery=outbox_delivery,
+            )
+
     def write_authorization_recovery_audit(self, audit: AuthorizationRecoveryAudit) -> None:
         with self._session_factory() as session:
             existing = session.get(LaunchplaneAuthorizationRecoveryAuditRow, audit.audit_id)
             if existing is None:
-                session.add(LaunchplaneAuthorizationRecoveryAuditRow(
-                    audit_id=audit.audit_id, event=audit.event, status=audit.status,
-                    recorded_at=audit.recorded_at, payload=self._payload_dict(audit),
-                ))
+                session.add(
+                    LaunchplaneAuthorizationRecoveryAuditRow(
+                        audit_id=audit.audit_id,
+                        event=audit.event,
+                        status=audit.status,
+                        recorded_at=audit.recorded_at,
+                        payload=self._payload_dict(audit),
+                    )
+                )
                 session.commit()
 
     def write_authz_denial_record(self, record: AuthzDenialRecord) -> None:
