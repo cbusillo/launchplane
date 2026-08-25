@@ -3,10 +3,14 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 from tempfile import TemporaryDirectory
 import unittest
 
+from pydantic import ValidationError
+
+from control_plane.authz_grant_service import AuthzManagedPolicyReconcileEnvelope
 from tests.support.workflows import load_workflow
 
 
@@ -32,6 +36,7 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
             [
                 "primary",
                 "authz-policy-reconcile",
+                "privileged-operation-bootstrap",
                 "generic-web-onboarding",
                 "manager-preview-approval",
                 "owner-acceptance",
@@ -62,6 +67,10 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
             "reconcile-authz-policy-reconcile": (
                 "${{ inputs.managed_set == 'authz-policy-reconcile' }}",
                 "${{ secrets.LAUNCHPLANE_AUTHZ_POLICY_RECONCILE_MANAGED_SET_JSON }}",
+            ),
+            "reconcile-privileged-operation-bootstrap": (
+                "${{ inputs.managed_set == 'privileged-operation-bootstrap' }}",
+                None,
             ),
             "reconcile-manager-preview-approval": (
                 "${{ inputs.managed_set == 'manager-preview-approval' }}",
@@ -174,6 +183,9 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
                 expected_managed_set_ids = {
                     "reconcile-primary": "operator.primary",
                     "reconcile-authz-policy-reconcile": "operator.authz-policy-reconcile",
+                    "reconcile-privileged-operation-bootstrap": (
+                        "operator.privileged-operation-bootstrap"
+                    ),
                     "reconcile-generic-web-onboarding": "operator.generic-web-onboarding",
                     "reconcile-manager-preview-approval": "operator.manager-preview-approval",
                     "reconcile-owner-acceptance": "operator.owner-acceptance",
@@ -213,7 +225,98 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
                 )
                 dispatch_secrets = dispatch_job["secrets"]
                 assert isinstance(dispatch_secrets, dict)
-                self.assertEqual(dispatch_secrets["managed_set_json"], expected_secret)
+                managed_set_json = dispatch_secrets["managed_set_json"]
+                assert isinstance(managed_set_json, str)
+                if expected_secret is None:
+                    self.assertIn("github.event.repository.owner.id", managed_set_json)
+                    self.assertIn(
+                        "toJSON(vars.LAUNCHPLANE_TERMINAL_AGENT_SUBJECT || null)",
+                        managed_set_json,
+                    )
+                    self.assertIn(
+                        "toJSON(vars.LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL || null)",
+                        managed_set_json,
+                    )
+                    self.assertIn("authz_policy_operation.propose", managed_set_json)
+                    self.assertIn("authz_policy_operation.read", managed_set_json)
+                    self.assertIn("authz_policy_operation.cancel", managed_set_json)
+                    self.assertIn("authz_policy_operation.approve", managed_set_json)
+                    self.assertIn("authz_policy_operation.revoke", managed_set_json)
+                    self.assertNotIn("authz_policy_grant.write", managed_set_json)
+                    self.assertNotIn("privileged_secret_operation", managed_set_json)
+                    self.assertNotIn("privileged_policy_operation_summary", managed_set_json)
+                    self.assertNotIn("secrets.LAUNCHPLANE_AUTHZ_", managed_set_json)
+                else:
+                    self.assertEqual(managed_set_json, expected_secret)
+
+    def test_privileged_operation_bootstrap_is_exact_and_fails_closed(self) -> None:
+        job = self.dispatch_workflow.job("reconcile-privileged-operation-bootstrap")
+        secrets = job["secrets"]
+        assert isinstance(secrets, dict)
+        managed_set_json = secrets["managed_set_json"]
+        assert isinstance(managed_set_json, str)
+        match = re.search(
+            r"format\(\s*'(.*)',\s*github\.event\.repository\.owner\.type",
+            managed_set_json,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(match)
+        assert match is not None
+        template = match.group(1)
+
+        def render(owner_id: str, subject: str, token_label: str) -> dict[str, object]:
+            payload = template.replace("{{", "\x00").replace("}}", "\x01")
+            payload = payload.replace("{0}", owner_id)
+            payload = payload.replace("{1}", subject)
+            payload = payload.replace("{2}", token_label)
+            payload = payload.replace("\x00", "{").replace("\x01", "}")
+            parsed = json.loads(payload)
+            assert isinstance(parsed, dict)
+            return parsed
+
+        configuration = render("123", json.dumps("terminal-agent"), json.dumps("owner"))
+        envelope = AuthzManagedPolicyReconcileEnvelope.model_validate(
+            {
+                **configuration,
+                "mode": "dry_run",
+                "reason": "Review the explicit bootstrap canary.",
+                "related_issue": "cbusillo/launchplane#2204",
+            }
+        )
+        self.assertEqual(
+            set(envelope.desired_policy.github_humans[0].actions),
+            {
+                "authz_policy_operation.read",
+                "authz_policy_operation.cancel",
+                "authz_policy_operation.approve",
+                "authz_policy_operation.revoke",
+            },
+        )
+        self.assertEqual(envelope.desired_policy.github_humans[0].github_ids, (123,))
+        self.assertEqual(
+            set(envelope.desired_policy.terminal_agents[0].actions),
+            {"authz_policy_operation.propose"},
+        )
+        self.assertEqual(
+            envelope.desired_policy.terminal_agents[0].subjects,
+            ("terminal-agent",),
+        )
+        self.assertEqual(envelope.desired_policy.terminal_agents[0].token_labels, ("owner",))
+
+        for values in (
+            ("null", json.dumps("terminal-agent"), json.dumps("owner")),
+            ("123", "null", json.dumps("owner")),
+            ("123", json.dumps("terminal-agent"), "null"),
+        ):
+            with self.subTest(values=values), self.assertRaises(ValidationError):
+                AuthzManagedPolicyReconcileEnvelope.model_validate(
+                    {
+                        **render(*values),
+                        "mode": "dry_run",
+                        "reason": "Reject incomplete bootstrap selectors.",
+                        "related_issue": "cbusillo/launchplane#2204",
+                    }
+                )
 
     def test_deploy_workflow_does_not_administer_authorization(self) -> None:
         deploy_job = self.deploy_workflow.job("deploy")

@@ -20,6 +20,7 @@ name: Manage Launchplane Authorization
         options:
           - primary
           - authz-policy-reconcile
+          - privileged-operation-bootstrap
           - generic-web-onboarding
           - manager-preview-approval
           - owner-acceptance
@@ -81,6 +82,48 @@ jobs:
       related_issue: ${{ inputs.related_issue }}
     secrets:
       managed_set_json: ${{ secrets.LAUNCHPLANE_AUTHZ_POLICY_RECONCILE_MANAGED_SET_JSON }}
+
+  reconcile-privileged-operation-bootstrap:
+    if: ${{ inputs.managed_set == 'privileged-operation-bootstrap' }}
+    uses: cbusillo/launchplane/.github/workflows/reusable-authz-policy-reconcile.yml@39aecc250d6dee91204e24673725bd1ea1ca6bda # main
+    with:
+      mode: ${{ inputs.mode }}
+      expected_managed_set_id: operator.privileged-operation-bootstrap
+      reviewed_plan_sha256: ${{ inputs.reviewed_plan_sha256 }}
+      reason: ${{ inputs.reason }}
+      related_issue: ${{ inputs.related_issue }}
+    secrets:
+      managed_set_json: >-
+        ${{ format(
+          '{{"schema_version":2,
+          "product":"launchplane",
+          "managed_set_id":"operator.privileged-operation-bootstrap",
+          "schema_migration":"reject",
+          "unmanaged_adoption":"reject",
+          "desired_policy":{{"schema_version":2,
+          "github_humans":[{{
+          "managed_set_id":"operator.privileged-operation-bootstrap",
+          "managed_rule_id":"github-owner-policy-operation-review",
+          "github_ids":[{0}],
+          "roles":["admin"],
+          "products":["launchplane"],
+          "contexts":["launchplane"],
+          "actions":["authz_policy_operation.read",
+          "authz_policy_operation.cancel",
+          "authz_policy_operation.approve",
+          "authz_policy_operation.revoke"]}}],
+          "terminal_agents":[{{
+          "managed_set_id":"operator.privileged-operation-bootstrap",
+          "managed_rule_id":"terminal-agent-policy-operation-propose",
+          "subjects":[{1}],
+          "token_labels":[{2}],
+          "products":["launchplane"],
+          "contexts":["launchplane"],
+          "actions":["authz_policy_operation.propose"]}}]}}}}',
+          github.event.repository.owner.type == 'User' &&
+            github.event.repository.owner.id || null,
+          toJSON(vars.LAUNCHPLANE_TERMINAL_AGENT_SUBJECT || null),
+          toJSON(vars.LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL || null)) }}
 
   reconcile-manager-preview-approval:
     if: ${{ inputs.managed_set == 'manager-preview-approval' }}
