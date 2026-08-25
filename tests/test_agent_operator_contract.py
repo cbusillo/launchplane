@@ -33,10 +33,6 @@ class AgentOperatorContractTests(unittest.TestCase):
         )
         expected_operation_ids = {
             ("GET", "/v1/agent/context"): "read_agent_context",
-            (
-                "POST",
-                "/v1/authz-diagnostics/activation-preflight/read",
-            ): "read_authz_activation_preflight",
             ("POST", "/v1/agent/write-intents/evaluate"): "evaluate_agent_write_intent",
             ("POST", "/v1/product-config/apply"): "apply_product_config",
             ("POST", "/v1/change-impact/policies/apply"): "apply_change_impact_policy",
@@ -60,7 +56,6 @@ class AgentOperatorContractTests(unittest.TestCase):
         }
         expected_dependencies = {
             "read_agent_context": ["read_identity"],
-            "read_authz_activation_preflight": ["read_bearer_identity"],
             "evaluate_agent_write_intent": ["read_browser_mutation_identity"],
             "apply_product_config": ["read_browser_mutation_identity"],
             "apply_change_impact_policy": ["read_write_identity"],

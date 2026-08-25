@@ -9,13 +9,12 @@ contract before rebuilding the browser UI. The current React UI is transitional;
 do not spend time refining its context picker or product-config layout except
 for secret-safety regressions.
 
-Owner-local authorization activation uses the service API rather than the
-browser. The supported `authz-policies activation-preflight` helper accepts a
-service URL, GitHub numeric ID, and the name of an environment variable holding
-the local-admin bearer token. It does not accept cookies or token values on the
-command line and has no direct-database fallback. The returned evidence is
-bounded and suitable for operator review; a denial remains a truthful blocked
-state and does not trigger a grant or mutation.
+Owner authorization activation uses the signed-in browser session directly.
+The parameterless activation self-check returns only whether that exact
+immutable GitHub identity may administer policy now, plus bounded evaluation
+and opaque policy-generation evidence. It has no local-admin bearer helper,
+caller-selected identity, or direct-database fallback. A denial remains a
+truthful blocked state and does not trigger a grant or mutation.
 
 The rebuilt UI should be a product-delivery and operations surface, not a raw
 record browser. The first screen should show products, their stable

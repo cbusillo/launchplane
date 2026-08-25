@@ -80,8 +80,7 @@ from control_plane.contracts.authz_access_read import (
     AUTHZ_DENIAL_EXPLANATION_READ_ACTION,
     AUTHZ_POLICY_CANDIDATE_PREVIEW_READ_ACTION,
     AUTHZ_POLICY_HEALTH_READ_ACTION,
-    AuthzActivationPreflightRequest,
-    AuthzActivationPreflightResponse,
+    AuthzActivationPreflightSelfResponse,
     AUTHZ_REPOSITORY_SCOPE_READ_ACTION,
     EFFECTIVE_ACCESS_READ_ACTION,
     AuthzDenialExplanationResponse,
@@ -1037,7 +1036,7 @@ _AUTHZ_POLICY_ACTIVE_ROUTE = "/v1/authz-policies/active"
 _AUTHZ_DIAGNOSTIC_EVALUATE_ROUTE = "/v1/authz-diagnostics/github-actions/evaluate"
 _AUTHZ_EFFECTIVE_ACCESS_EVALUATE_ROUTE = "/v1/authz-diagnostics/effective-access/evaluate"
 _AUTHZ_POLICY_HEALTH_ROUTE = "/v1/authz-diagnostics/active-policy/health"
-_AUTHZ_ACTIVATION_PREFLIGHT_ROUTE = "/v1/authz-diagnostics/activation-preflight/read"
+_AUTHZ_ACTIVATION_PREFLIGHT_ROUTE = "/v1/authz-diagnostics/activation-preflight/self"
 _AUTHZ_POLICY_CANDIDATE_PREVIEW_ROUTE = "/v1/authz-diagnostics/candidate-policy/preview"
 _AUTHZ_REPOSITORY_SCOPE_READ_ROUTE = "/v1/authz-diagnostics/repository-scope/read"
 _AUTHZ_DENIAL_EXPLANATION_ROUTE = "/v1/authz-diagnostics/denials/{trace_id}"
@@ -3979,7 +3978,10 @@ def create_launchplane_fastapi_app(
     ) -> Response:
         clear_authz_evaluation()
         try:
-            return cast(Response, await call_next(request))
+            response = cast(Response, await call_next(request))
+            if request.url.path == _AUTHZ_ACTIVATION_PREFLIGHT_ROUTE:
+                response.headers["Cache-Control"] = "no-store"
+            return response
         finally:
             clear_authz_evaluation()
 
@@ -4073,6 +4075,61 @@ def create_launchplane_fastapi_app(
             session,
             identity=replace(session.identity, role=resolved_role),
         )
+
+    def read_authz_activation_preflight_session(
+        response: Response,
+        authorization: Annotated[str | None, Header(alias="Authorization")] = None,
+        cookie: Annotated[str, Header(alias="Cookie")] = "",
+    ) -> LaunchplaneHumanSession:
+        no_store_headers = {"Cache-Control": "no-store"}
+        response.headers.update(no_store_headers)
+        if authorization is not None:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=next_trace_id(),
+                code="authorization_denied",
+                message="Activation preflight requires a signed Launchplane session cookie.",
+                headers=no_store_headers,
+            )
+        if human_session_manager is None:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=next_trace_id(),
+                code="activation_preflight_unavailable",
+                message="Activation preflight evidence is unavailable.",
+                headers=no_store_headers,
+            )
+        try:
+            session = human_session_manager.read_cookie_without_renewal(cookie)
+            claims_are_current = (
+                session is not None
+                and human_session_manager.authorization_claims_are_current(session)
+            )
+        except Exception as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=next_trace_id(),
+                code="activation_preflight_unavailable",
+                message="Activation preflight evidence is unavailable.",
+                headers=no_store_headers,
+            ) from error
+        if session is None or session.identity.github_id <= 0:
+            raise _launchplane_http_error(
+                status_code=401,
+                trace_id=next_trace_id(),
+                code="authentication_required",
+                message="A signed Launchplane session cookie is required.",
+                headers=no_store_headers,
+            )
+        if not claims_are_current:
+            raise _launchplane_http_error(
+                status_code=401,
+                trace_id=next_trace_id(),
+                code="authentication_required",
+                message="A signed Launchplane session cookie is required.",
+                headers=no_store_headers,
+            )
+        return session
 
     def human_identity_response(identity: GitHubHumanIdentity) -> GitHubHumanIdentityResponse:
         return GitHubHumanIdentityResponse(
@@ -14566,40 +14623,23 @@ def create_launchplane_fastapi_app(
             **snapshot.model_dump(),
         )
 
-    async def read_authz_activation_preflight(
-        preflight_request: AuthzActivationPreflightRequest,
+    async def read_authz_activation_preflight_self(
+        request: Request,
         response: Response,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_bearer_identity)],
+        session: Annotated[
+            LaunchplaneHumanSession, Depends(read_authz_activation_preflight_session)
+        ],
         record_store: Annotated[object, Depends(get_record_store)],
-    ) -> AuthzActivationPreflightResponse:
+    ) -> AuthzActivationPreflightSelfResponse:
         trace_id = next_trace_id()
-        no_store_headers = {"Cache-Control": "no-store"}
-        response.headers.update(no_store_headers)
-        if not isinstance(identity, LocalAdminIdentity):
-            raise _launchplane_http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="authorization_denied",
-                message="Activation preflight requires a local administrator identity.",
-                headers=no_store_headers,
-            )
+        response.headers["Cache-Control"] = "no-store"
         try:
-            for action in (AUTHZ_POLICY_HEALTH_READ_ACTION, EFFECTIVE_ACCESS_READ_ACTION):
-                preflight_evaluation = resolved_authz_policy_runtime.policy.evaluate(
-                    identity=identity,
-                    action=action,
-                    product=_LAUNCHPLANE_SERVICE_CONTEXT,
-                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
-                    record_context=False,
+            if request.query_params or await request.body():
+                raise control_plane_authz_activation_preflight.ActivationPreflightFailure(
+                    "activation_preflight_parameters_not_allowed",
+                    "Activation preflight does not accept request parameters.",
+                    status_code=400,
                 )
-                if preflight_evaluation.decision != "allowed":
-                    raise _launchplane_http_error(
-                        status_code=403,
-                        trace_id=trace_id,
-                        code="authorization_denied",
-                        message="Identity cannot read Launchplane activation preflight evidence.",
-                        headers=no_store_headers,
-                    )
             database_store = require_authz_policy_database_store(
                 record_store=record_store,
                 trace_id=trace_id,
@@ -14609,29 +14649,13 @@ def create_launchplane_fastapi_app(
                 database_store=database_store,
                 trace_id=trace_id,
             )
-            for action in (AUTHZ_POLICY_HEALTH_READ_ACTION, EFFECTIVE_ACCESS_READ_ACTION):
-                active_evaluation = active_record.policy.evaluate(
-                    identity=identity,
-                    action=action,
-                    product=_LAUNCHPLANE_SERVICE_CONTEXT,
-                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
-                    record_context=False,
+            return (
+                control_plane_authz_activation_preflight.build_activation_preflight_self_response(
+                    trace_id=trace_id,
+                    session=session,
+                    active_record=active_record,
+                    now=datetime.now(timezone.utc),
                 )
-                if active_evaluation.decision != "allowed":
-                    raise _launchplane_http_error(
-                        status_code=403,
-                        trace_id=trace_id,
-                        code="authorization_denied",
-                        message="Identity cannot read Launchplane activation preflight evidence.",
-                        headers=no_store_headers,
-                        authz_policy_provenance=AuthzPolicyProvenance.from_record(active_record),
-                    )
-            return control_plane_authz_activation_preflight.resolve_activation_preflight(
-                store=database_store,
-                active_record=active_record,
-                github_id=preflight_request.github_id,
-                now=datetime.now(timezone.utc),
-                trace_id=trace_id,
             )
         except control_plane_authz_activation_preflight.ActivationPreflightFailure as error:
             raise _launchplane_http_error(
@@ -14639,10 +14663,10 @@ def create_launchplane_fastapi_app(
                 trace_id=trace_id,
                 code=error.code,
                 message=str(error),
-                headers=no_store_headers,
+                headers={"Cache-Control": "no-store"},
             ) from error
         except LaunchplaneHTTPException as error:
-            error.headers = {**(error.headers or {}), **no_store_headers}
+            error.headers = {**(error.headers or {}), "Cache-Control": "no-store"}
             raise
         except Exception as error:
             raise _launchplane_http_error(
@@ -14650,7 +14674,7 @@ def create_launchplane_fastapi_app(
                 trace_id=trace_id,
                 code="activation_preflight_unavailable",
                 message="Activation preflight evidence is unavailable.",
-                headers=no_store_headers,
+                headers={"Cache-Control": "no-store"},
             ) from error
 
     async def read_authz_repository_scope(
@@ -22666,12 +22690,12 @@ def create_launchplane_fastapi_app(
 
     app.add_api_route(
         _AUTHZ_ACTIVATION_PREFLIGHT_ROUTE,
-        read_authz_activation_preflight,
-        methods=["POST"],
-        response_model=AuthzActivationPreflightResponse,
+        read_authz_activation_preflight_self,
+        methods=["GET"],
+        response_model=AuthzActivationPreflightSelfResponse,
         response_model_exclude_none=True,
-        operation_id="read_authz_activation_preflight",
-        summary="Read bounded authorization activation preflight evidence",
+        operation_id="read_authz_activation_preflight_self",
+        summary="Read the signed Launchplane activation preflight self-check",
         responses={
             **authz_diagnostic_route_responses,
             409: {"model": LaunchplaneErrorResponse},

@@ -91,15 +91,6 @@ OPERATION_SPECS = (
     ),
     OperationSpec(
         "POST",
-        "/v1/authz-diagnostics/activation-preflight/read",
-        "Read bounded authorization activation preflight evidence for one GitHub human.",
-        ("agent_helper", "operator_cli", "read_only_service"),
-        ("read",),
-        "none",
-        (),
-    ),
-    OperationSpec(
-        "POST",
         "/v1/agent/write-intents/evaluate",
         "Evaluate a bounded agent write intent before mutation.",
         ("agent_helper", "service_api"),

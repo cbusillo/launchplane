@@ -99,15 +99,13 @@ authorize, constrain, display regularly, or act on should be promoted into ORM
 columns/tables and migrated explicitly while keeping the payload copy as
 historical evidence.
 
-Human sessions are DB-backed authentication records with indexed lookup by
-immutable `github_id`. The activation-preflight read fetches at most the 257
-most recently created matching rows using database-native timestamp ordering,
-then admits at most eight claims-current sessions. Timestamp parsing, expiry
-filtering, claims-freshness ordering, and ambiguity checks happen in application
-code. The read never cleans up expired rows, renews sessions,
-rotates CSRF state, commits, or writes session or authorization evidence. The
-indexed row identity and payload identity must agree; session role, name, email,
-session ID, and cookie values are not authorization authority.
+Human sessions are DB-backed authentication records. The activation-preflight
+self-check resolves exactly the session named by the verified browser cookie,
+without cleanup or renewal, and requires that session to be unexpired with
+current authorization claims and a positive immutable GitHub ID. The service
+re-derives the role from the active policy; session role, name, email, session
+ID, and cookie values are not authorization authority. The read never rotates
+CSRF state, commits, or writes session or authorization evidence.
 
 The production schema proof runs against real PostgreSQL, not SQLite:
 
