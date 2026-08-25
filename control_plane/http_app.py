@@ -111,7 +111,6 @@ from control_plane.owner_acceptance_projection import (
 )
 from control_plane.http_routes import (
     AcceptedEvidenceResponse as AcceptedEvidenceResponse,
-    AuthorizationRecoveryRouteDependencies,
     DriverReadRouteDependencies,
     EVIDENCE_INGRESS_ROUTES as _EVIDENCE_INGRESS_ROUTES,
     EvidenceWriteRouteDependencies,
@@ -141,7 +140,6 @@ from control_plane.http_routes import (
     idempotency_scope as idempotency_scope,
     provider_operation_response_payload as _provider_operation_response_payload,
     register_agent_context_read_routes,
-    register_authorization_recovery_routes,
     register_change_impact_read_routes,
     register_change_impact_write_routes,
     register_deployment_promotion_read_routes,
@@ -3987,16 +3985,6 @@ def create_launchplane_fastapi_app(
         finally:
             clear_authz_evaluation()
 
-    @app.middleware("http")
-    async def enforce_authorization_recovery_no_store(
-        request: Request,
-        call_next: Callable[[Request], Any],
-    ) -> Response:
-        response = cast(Response, await call_next(request))
-        if request.url.path.startswith("/v1/authorization-recovery/"):
-            response.headers["Cache-Control"] = "no-store"
-        return response
-
     resolved_oauth_login_state_store = (
         oauth_login_state_store if oauth_login_state_store is not None else OAuthLoginStateStore()
     )
@@ -4416,18 +4404,6 @@ def create_launchplane_fastapi_app(
     ) -> GitHubHumanIdentity:
         return require_github_human_identity(identity)
 
-    def reject_authorization_recovery_credentials(
-        authorization: Annotated[str, Header(alias="Authorization")] = "",
-        cookie: Annotated[str, Header(alias="Cookie")] = "",
-    ) -> None:
-        if authorization.strip() or cookie.strip():
-            raise _launchplane_http_error(
-                status_code=403,
-                trace_id=next_trace_id(),
-                code="credentials_not_accepted",
-                message="Authorization recovery accepts hardware signatures, not request credentials.",
-            )
-
     def read_nonpersisting_sensitive_identity(
         request: Request,
         authorization: Annotated[str, Header(alias="Authorization")] = "",
@@ -4750,12 +4726,6 @@ def create_launchplane_fastapi_app(
         read_github_human_mutation_identity=(read_github_human_browser_mutation_identity),
         policy_reader=lambda: resolved_authz_policy_runtime.policy,
         policy_record_reader=lambda: read_active_authz_policy_record(get_record_store()),
-    )
-    authorization_recovery_route_dependencies = AuthorizationRecoveryRouteDependencies(
-        common=read_route_dependencies,
-        read_github_human_identity=read_github_human_identity,
-        read_github_human_mutation_identity=read_github_human_browser_mutation_identity,
-        reject_public_credentials=reject_authorization_recovery_credentials,
     )
     product_owner_write_route_dependencies = ProductOwnerWriteRouteDependencies(
         read_write_identity=read_write_identity,
@@ -21854,10 +21824,6 @@ def create_launchplane_fastapi_app(
     register_privileged_operation_routes(
         app,
         dependencies=privileged_operation_route_dependencies,
-    )
-    register_authorization_recovery_routes(
-        app,
-        dependencies=authorization_recovery_route_dependencies,
     )
     register_governance_projection_routes(
         app,

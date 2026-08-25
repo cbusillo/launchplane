@@ -1182,34 +1182,6 @@ test.describe("operator journeys", () => {
     diagnostics.assertClean();
   });
 
-  test("authorization recovery exposes hardware-key lifecycle without recovery execution", async ({
-    page,
-  }) => {
-    const diagnostics = monitorBrowser(page);
-
-    await page.goto("/ui/engineering/authorization-recovery?fixture=products");
-
-    await expect(
-      page.getByRole("heading", {
-        level: 1,
-        name: "Engineering Authorization Recovery",
-      }),
-    ).toBeVisible();
-    await expect(
-      page.getByRole("link", { name: "Authorization recovery", exact: true }),
-    ).toHaveAttribute("aria-current", "page");
-    await expect(page.getByText("Hardware signatures are recovery authority")).toBeVisible();
-    await expect(page.getByRole("heading", { level: 2, name: "Readiness" })).toBeVisible();
-    await expect(page.getByRole("button", { name: "Enroll pending key" })).toBeDisabled();
-    await expect(page.getByRole("button", { name: "Verify proof" })).toBeDisabled();
-    await expect(page.getByRole("button", { name: "Revoke selected key" })).toBeDisabled();
-    await expect(
-      page.getByRole("button", { name: /\b(apply|execute|recover)\b/i }),
-    ).toHaveCount(0);
-    await assertDocumentBasics(page);
-    diagnostics.assertClean();
-  });
-
   test("privileged-operation approval remains human-governed and redacted", async ({
     page,
   }, testInfo) => {
