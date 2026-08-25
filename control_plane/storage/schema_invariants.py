@@ -1437,6 +1437,12 @@ def _canonical_predicate_expression(value: str) -> str:
     normalized = value.lower().replace('"', "")
     if " where " in normalized:
         normalized = normalized.split(" where ", maxsplit=1)[1]
+    normalized = re.sub(r"::character\s+varying(?:\[\])?", "", normalized)
     normalized = re.sub(r"::[a-z0-9_]+", "", normalized)
+    normalized = re.sub(
+        r"\b([a-z_][a-z0-9_.]*)\s*=\s*any\s*\(\s*array\s*\[(.*?)\]\s*\)",
+        lambda match: f"{match.group(1)} in ({match.group(2)})",
+        normalized,
+    )
     normalized = normalized.replace("(", "").replace(")", "")
     return "".join(normalized.split())
