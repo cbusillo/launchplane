@@ -42,12 +42,17 @@ from control_plane.storage.schema_migration import (
 
 class SchemaMigrationTests(unittest.TestCase):
     def test_postgres_any_array_predicate_matches_equivalent_in_expression(self) -> None:
-        observed = _canonical_predicate_expression(
-            "status = ANY (ARRAY['pending'::character varying, 'active'::character varying])"
+        observed_expressions = (
+            "status = ANY (ARRAY['pending'::character varying, 'active'::character varying])",
+            "(status = ANY ((ARRAY['pending'::character varying, "
+            "'active'::character varying])::character varying[]))",
         )
         expected = _canonical_predicate_expression("status IN ('pending', 'active')")
 
-        self.assertEqual(observed, expected)
+        self.assertEqual(
+            tuple(_canonical_predicate_expression(value) for value in observed_expressions),
+            (expected, expected),
+        )
 
     def test_material_incident_migration_links_evidence_without_duplicate_opening(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

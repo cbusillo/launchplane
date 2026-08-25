@@ -1445,4 +1445,9 @@ def _canonical_predicate_expression(value: str) -> str:
         normalized,
     )
     normalized = normalized.replace("(", "").replace(")", "")
-    return "".join(normalized.split())
+    compact = "".join(normalized.split())
+    return re.sub(
+        r"\b([a-z_][a-z0-9_.]*)=anyarray\[(.*?)\](?:\[\])?",
+        lambda match: f"{match.group(1)}in{match.group(2)}",
+        compact,
+    )
