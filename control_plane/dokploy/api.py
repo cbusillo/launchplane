@@ -1142,6 +1142,186 @@ def upsert_dokploy_schedule(
     return resolved_schedule
 
 
+_DOKPLOY_APPLICATION_SCHEDULE_READBACK_FIELDS = (
+    "name",
+    "cronExpression",
+    "scheduleType",
+    "shellType",
+    "command",
+    "applicationId",
+    "enabled",
+    "timezone",
+)
+
+
+def read_dokploy_application_schedule(
+    *,
+    host: str,
+    token: str,
+    application_id: str,
+    schedule_name: str,
+) -> JsonObject | None:
+    matching_schedules = tuple(
+        schedule
+        for schedule in list_dokploy_schedules(
+            host=host,
+            token=token,
+            target_id=application_id,
+            schedule_type="application",
+        )
+        if str(schedule.get("name") or "").strip() == schedule_name
+    )
+    if len(matching_schedules) > 1:
+        schedule_ids = ", ".join(
+            schedule_key(schedule) or "missing-id" for schedule in matching_schedules
+        )
+        raise click.ClickException(
+            "Dokploy application schedule duplicate detected for "
+            f"application {application_id!r} and name {schedule_name!r}: {schedule_ids}."
+        )
+    return matching_schedules[0] if matching_schedules else None
+
+
+def assert_dokploy_application_schedule_exact(
+    *,
+    application_id: str,
+    schedule: JsonObject,
+    expected_payload: JsonObject,
+) -> None:
+    mismatches: list[str] = []
+    for field_name in _DOKPLOY_APPLICATION_SCHEDULE_READBACK_FIELDS:
+        expected_value = expected_payload.get(field_name)
+        observed_value = schedule.get(field_name)
+        if observed_value != expected_value:
+            mismatches.append(
+                f"{field_name} expected={expected_value!r} observed={observed_value!r}"
+            )
+    if mismatches:
+        schedule_name = str(expected_payload.get("name") or "").strip()
+        raise click.ClickException(
+            "Dokploy application schedule readback did not exactly match the managed "
+            f"schedule for application {application_id!r}, name {schedule_name!r}: "
+            + "; ".join(mismatches)
+        )
+
+
+def upsert_dokploy_application_schedule(
+    *,
+    host: str,
+    token: str,
+    application_id: str,
+    schedule_payload: JsonObject,
+) -> JsonObject:
+    schedule_name = str(schedule_payload.get("name") or "").strip()
+    if not schedule_name:
+        raise click.ClickException("Dokploy application schedule upsert requires a name.")
+    if schedule_payload.get("applicationId") != application_id:
+        raise click.ClickException(
+            "Dokploy application schedule payload applicationId must exactly match its target."
+        )
+    if schedule_payload.get("scheduleType") != "application":
+        raise click.ClickException(
+            "Dokploy application schedule payload scheduleType must be 'application'."
+        )
+    existing_schedule = read_dokploy_application_schedule(
+        host=host,
+        token=token,
+        application_id=application_id,
+        schedule_name=schedule_name,
+    )
+    if existing_schedule is None:
+        dokploy_request(
+            host=host,
+            token=token,
+            path="/api/schedule.create",
+            method="POST",
+            payload=schedule_payload,
+        )
+    else:
+        existing_schedule_id = schedule_key(existing_schedule)
+        if not existing_schedule_id:
+            raise click.ClickException(
+                f"Dokploy application schedule {schedule_name!r} did not expose a schedule id."
+            )
+        dokploy_request(
+            host=host,
+            token=token,
+            path="/api/schedule.update",
+            method="POST",
+            payload={"scheduleId": existing_schedule_id, **schedule_payload},
+        )
+
+    resolved_schedule = read_dokploy_application_schedule(
+        host=host,
+        token=token,
+        application_id=application_id,
+        schedule_name=schedule_name,
+    )
+    if resolved_schedule is None:
+        raise click.ClickException(
+            f"Dokploy application schedule {schedule_name!r} could not be resolved after upsert."
+        )
+    if not schedule_key(resolved_schedule):
+        raise click.ClickException(
+            f"Dokploy application schedule {schedule_name!r} did not expose a schedule id."
+        )
+    assert_dokploy_application_schedule_exact(
+        application_id=application_id,
+        schedule=resolved_schedule,
+        expected_payload=schedule_payload,
+    )
+    return resolved_schedule
+
+
+def delete_dokploy_application_schedule(
+    *,
+    host: str,
+    token: str,
+    application_id: str,
+    schedule_payload: JsonObject,
+) -> None:
+    schedule_name = str(schedule_payload.get("name") or "").strip()
+    if not schedule_name:
+        raise click.ClickException("Dokploy application schedule delete requires a name.")
+    existing_schedule = read_dokploy_application_schedule(
+        host=host,
+        token=token,
+        application_id=application_id,
+        schedule_name=schedule_name,
+    )
+    if existing_schedule is None:
+        return
+    assert_dokploy_application_schedule_exact(
+        application_id=application_id,
+        schedule=existing_schedule,
+        expected_payload=schedule_payload,
+    )
+    schedule_id = schedule_key(existing_schedule)
+    if not schedule_id:
+        raise click.ClickException(
+            f"Dokploy application schedule {schedule_name!r} did not expose a schedule id."
+        )
+    dokploy_request(
+        host=host,
+        token=token,
+        path="/api/schedule.delete",
+        method="POST",
+        payload={"scheduleId": schedule_id},
+    )
+    if (
+        read_dokploy_application_schedule(
+            host=host,
+            token=token,
+            application_id=application_id,
+            schedule_name=schedule_name,
+        )
+        is not None
+    ):
+        raise click.ClickException(
+            f"Dokploy application schedule {schedule_name!r} remained after delete."
+        )
+
+
 def deployment_key(deployment: JsonObject | None) -> str:
     if deployment is None:
         return ""

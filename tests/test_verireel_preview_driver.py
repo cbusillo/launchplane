@@ -33,7 +33,12 @@ from control_plane.workflows.verireel_preview_driver import _run_application_com
 from control_plane.workflows.verireel_preview_driver import _run_application_command_with_retries
 from control_plane.workflows.verireel_preview_driver import _wait_for_preview_health
 from control_plane.workflows.verireel_preview_driver import _verireel_template_runtime_secret_keys
+from control_plane.workflows.verireel_preview_driver import execute_verireel_preview_destroy
 from control_plane.workflows.verireel_preview_driver import execute_verireel_preview_refresh
+from control_plane.workflows.preview_resource_destroy import PreviewResourceDestroyResult
+from control_plane.workflows.verireel_billing_recovery_schedule import (
+    VeriReelRecoveryScheduleSnapshot,
+)
 
 
 class _RuntimeKeySafetyStore:
@@ -190,6 +195,29 @@ def _refresh_request() -> VeriReelPreviewRefreshRequest:
 
 
 class VeriReelPreviewDriverTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.quiesce_recovery_schedule = self.enterContext(
+            patch(
+                "control_plane.workflows.verireel_preview_driver.quiesce_verireel_billing_recovery_schedule",
+                return_value=VeriReelRecoveryScheduleSnapshot(existed=False),
+            )
+        )
+        self.finalize_recovery_schedule = self.enterContext(
+            patch(
+                "control_plane.workflows.verireel_preview_driver.finalize_verireel_billing_recovery_schedule"
+            )
+        )
+        self.restore_recovery_schedule = self.enterContext(
+            patch(
+                "control_plane.workflows.verireel_preview_driver.restore_verireel_billing_recovery_schedule"
+            )
+        )
+        self.delete_recovery_schedule = self.enterContext(
+            patch(
+                "control_plane.workflows.verireel_preview_driver.delete_verireel_billing_recovery_schedule"
+            )
+        )
+
     def test_preview_runtime_identity_uses_launchplane_preview_binding(self) -> None:
         identity = _build_preview_runtime_identity(
             request=_refresh_request(),
@@ -202,6 +230,62 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
             identity.preview_generation_id,
             "preview-verireel-testing-verireel-pr-71-generation-0003",
         )
+
+    def test_destroy_continues_when_recovery_schedule_cleanup_detects_drift(self) -> None:
+        request = VeriReelPreviewDestroyRequest.model_validate(
+            {
+                "anchor_pr_number": 71,
+                "destroy_reason": "pull request closed",
+                "preview_slug": "pr-71",
+            }
+        )
+        self.delete_recovery_schedule.side_effect = click.ClickException(
+            "schedule readback drifted"
+        )
+
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch(
+                "control_plane.workflows.verireel_preview_driver.dokploy_source.read_dokploy_config",
+                return_value=("https://dokploy.example.com", "token-123"),
+            ),
+            patch(
+                "control_plane.workflows.verireel_preview_driver._template_application_payload",
+                return_value=(
+                    _template_target(),
+                    {"env": "DATABASE_URL=postgresql://admin:password@db:5432/verireel"},
+                ),
+            ),
+            patch(
+                "control_plane.workflows.verireel_preview_driver._resolve_preview_url_for_destroy",
+                return_value="https://pr-71.ver-preview.shinycomputers.com",
+            ),
+            patch(
+                "control_plane.workflows.verireel_preview_driver._find_application_by_name",
+                return_value={"applicationId": "app-preview"},
+            ),
+            patch(
+                "control_plane.workflows.verireel_preview_driver._fetch_application",
+                return_value={
+                    "env": "DATABASE_URL=postgresql://preview:password@db:5432/verireel_pr_71"
+                },
+            ),
+            patch(
+                "control_plane.workflows.verireel_preview_driver.destroy_dokploy_preview_resource",
+                return_value=PreviewResourceDestroyResult(status="pass"),
+            ) as destroy_resource,
+            patch(
+                "control_plane.workflows.verireel_preview_driver._run_application_command_with_retries"
+            ),
+        ):
+            result = execute_verireel_preview_destroy(
+                control_plane_root=Path(temporary_directory_name),
+                request=request,
+            )
+
+        destroy_resource.assert_called_once()
+        self.assertEqual(result.destroy_status, "pass")
+        self.assertEqual(result.error_message, "")
 
     def test_ensure_application_uses_default_server_when_template_omits_server_id(self) -> None:
         requests: list[dict[str, object]] = []
@@ -727,6 +811,49 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
         )
         self.assertEqual(len(base64.b64decode(captured_env["VERIREEL_SECRETS_MASTER_KEY"])), 32)
         self.assertIn("/verireel_preview_pr_71?", captured_env["DATABASE_URL"])
+        self.finalize_recovery_schedule.assert_called_once()
+        self.assertEqual(
+            self.finalize_recovery_schedule.call_args.kwargs["instance"],
+            "preview",
+        )
+
+    def test_new_preview_early_failure_rolls_back_database_without_unbound_application_id(
+        self,
+    ) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch(
+                "control_plane.workflows.verireel_preview_driver.dokploy_source.read_dokploy_config",
+                return_value=("https://dokploy.example", "token"),
+            ),
+            patch(
+                "control_plane.workflows.verireel_preview_driver._template_application_payload",
+                return_value=(
+                    _template_target(),
+                    {
+                        "applicationId": "app-template",
+                        "env": "DATABASE_URL=postgresql://template:template-pass@db.example/verireel_testing\n",
+                    },
+                ),
+            ),
+            patch(
+                "control_plane.workflows.verireel_preview_driver._find_application_by_name",
+                return_value=None,
+            ),
+            patch(
+                "control_plane.workflows.verireel_preview_driver._run_application_command",
+                side_effect=[click.ClickException("bootstrap failed"), None],
+            ) as run_command,
+        ):
+            result = execute_verireel_preview_refresh(
+                control_plane_root=Path(temporary_directory_name),
+                request=_refresh_request(),
+                record_store=None,
+            )
+
+        self.assertEqual(result.refresh_status, "fail")
+        self.assertIn("bootstrap failed", result.error_message)
+        self.assertEqual(run_command.call_count, 2)
 
     def test_preview_refresh_reuses_existing_preview_runtime_secrets(self) -> None:
         captured_env: dict[str, str] = {}
@@ -806,6 +933,8 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
             )
 
         self.assertEqual(result.refresh_status, "pass")
+        self.quiesce_recovery_schedule.assert_called_once()
+        self.finalize_recovery_schedule.assert_called_once()
         self.assertEqual(
             result.runtime_identity, _build_preview_runtime_identity(request=_refresh_request())
         )

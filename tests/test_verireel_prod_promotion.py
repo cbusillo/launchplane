@@ -15,9 +15,42 @@ from control_plane.workflows.verireel_prod_promotion import (
 )
 from control_plane.workflows.verireel_rollout import VeriReelRolloutVerificationResult
 from control_plane.workflows.verireel_stable_deploy import VeriReelStableDeployResult
+from control_plane.workflows.verireel_billing_recovery_schedule import (
+    VeriReelRecoveryScheduleSnapshot,
+)
 
 
 class VeriReelProdPromotionWorkflowTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.enterContext(
+            patch(
+                "control_plane.workflows.verireel_prod_promotion.dokploy_source.read_dokploy_config",
+                return_value=("https://dokploy.example.com", "token-123"),
+            )
+        )
+        self.enterContext(
+            patch(
+                "control_plane.workflows.verireel_prod_promotion._resolve_prod_recovery_schedule_application_id",
+                return_value="prod-app-123",
+            )
+        )
+        self.quiesce_recovery_schedule = self.enterContext(
+            patch(
+                "control_plane.workflows.verireel_prod_promotion.quiesce_verireel_billing_recovery_schedule",
+                return_value=VeriReelRecoveryScheduleSnapshot(existed=False),
+            )
+        )
+        self.finalize_recovery_schedule = self.enterContext(
+            patch(
+                "control_plane.workflows.verireel_prod_promotion.finalize_verireel_billing_recovery_schedule"
+            )
+        )
+        self.restore_recovery_schedule = self.enterContext(
+            patch(
+                "control_plane.workflows.verireel_prod_promotion.restore_verireel_billing_recovery_schedule"
+            )
+        )
+
     def test_execute_writes_promotion_record_after_passing_backup_gate(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -154,6 +187,8 @@ class VeriReelProdPromotionWorkflowTests(unittest.TestCase):
             self.assertEqual(promotion.deploy.finished_at, "2026-04-21T18:21:15Z")
             self.assertEqual(promotion.post_deploy_update.status, "pass")
             self.assertEqual(promotion.destination_health.status, "pass")
+            self.quiesce_recovery_schedule.assert_called_once()
+            self.finalize_recovery_schedule.assert_called_once()
             self.assertEqual(
                 promotion.destination_health.urls,
                 ("https://ver-prod.shinycomputers.com/api/health",),
@@ -366,6 +401,8 @@ class VeriReelProdPromotionWorkflowTests(unittest.TestCase):
             self.assertEqual(result.deploy_status, "pass")
             self.assertEqual(result.rollout_status, "pass")
             self.assertEqual(result.migration_status, "fail")
+            self.restore_recovery_schedule.assert_called_once()
+            self.finalize_recovery_schedule.assert_not_called()
             self.assertEqual(result.health_status, "skipped")
             self.assertEqual(result.target_category, "application")
             self.assertEqual(result.provider_id, "dokploy")
@@ -526,6 +563,8 @@ class VeriReelProdPromotionWorkflowTests(unittest.TestCase):
 
             self.assertEqual(result.deploy_status, "pass")
             self.assertEqual(result.rollout_status, "fail")
+            self.restore_recovery_schedule.assert_called_once()
+            self.finalize_recovery_schedule.assert_not_called()
             self.assertEqual(result.target_category, "application")
             self.assertEqual(result.provider_id, "dokploy")
             self.assertEqual(result.provider_target_type, "application")
