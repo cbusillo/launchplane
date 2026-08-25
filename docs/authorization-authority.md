@@ -109,25 +109,25 @@ and fails closed when active policy state is missing or ambiguous. It performs
 no policy, provider, runtime, bootstrap, secret, or deployment mutation. Landing
 the action and route does not grant production access to them.
 
-The activation preflight is a separate, read-only service-native proof at
-`POST /v1/authz-diagnostics/activation-preflight/read`. It accepts only one
-positive immutable GitHub numeric ID and requires a bearer-authenticated
-`LocalAdminIdentity` already authorized by both
-`authz_policy_health.read` and `authz_policy_effective_access.read`. It resolves
-the human only from unexpired server-side sessions, re-derives the role from
-the active DB policy, and evaluates the fixed
-`authz_policy_grant.write`/`launchplane`/`launchplane` context scope through the
-ordinary evaluator. A missing, stale, divergent, payload-mismatched, or
-bounded-truncated session result fails closed. No new authorization action or
-grant is introduced.
+The activation preflight is a separate, read-only self-check at
+`GET /v1/authz-diagnostics/activation-preflight/self`. It accepts only the
+signed Launchplane browser-session cookie and rejects every Authorization
+header. The route accepts no body or query parameters, uses the immutable
+GitHub ID and current claims already stored in the session, ignores the
+persisted session role, re-derives the role from the single active DB policy,
+and evaluates the fixed global
+`authz_policy_grant.write`/`launchplane`/`launchplane` request through the
+ordinary evaluator. Missing, invalid, expired, or claims-stale sessions return
+`401`; missing or ambiguous active policy state fails closed.
 
-The response contains only active-policy provenance, bounded session freshness,
-a keyed identity fingerprint, the fixed scope, the ordinary decision/reason,
-and unmanaged action-empty rule counts. It never returns session IDs, cookies,
-tokens, names, emails, logins, memberships, persisted roles, selectors, rule
-contents, managed IDs, hashes, or permission lists. The route and its errors
-are `Cache-Control: no-store`; its bearer-only path performs no session renewal,
-CSRF rotation, denial, audit, idempotency, outbox, policy, or operation write.
+The response contains only the allowed/denied decision, an hour-bounded UTC
+evaluation time, an opaque keyed purpose-separated policy-generation digest, and a
+trace ID. It never returns policy identity, policy rules, session or human
+identity, selectors, memberships, managed IDs, reason codes, permission lists,
+or action inventory. The route and all of its errors are
+`Cache-Control: no-store`; it performs no session renewal, CSRF rotation,
+denial, audit, idempotency, outbox, policy, operation, provider, runtime, or
+secret write. No additional diagnostic grant or credential is required.
 
 The next read-only administration slice adds
 `authz_policy_candidate_preview.read` for an authenticated GitHub administrator

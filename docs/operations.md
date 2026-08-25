@@ -593,7 +593,7 @@ Current implementation scope:
 - `POST /v1/authz-policies/managed-rule-sets/reconcile`
 - `POST /v1/authz-diagnostics/github-actions/evaluate`
 - `GET /v1/authz-diagnostics/active-policy/health`
-- `POST /v1/authz-diagnostics/activation-preflight/read`
+- `GET /v1/authz-diagnostics/activation-preflight/self`
 - `POST /v1/authz-diagnostics/candidate-policy/preview`
 - `GET /v1/route-bindings/records/current`
 - `POST /v1/route-bindings/reconcile`
@@ -672,21 +672,16 @@ counts. It never returns managed rule IDs, rule hashes, selectors, actions, or
 principal identities. Missing or multiple active records fail closed, and the
 read does not authorize a policy write or production grant.
 
-`POST /v1/authz-diagnostics/activation-preflight/read` is the supported
-owner-local activation preflight. The operator helper command
-`uv run launchplane authz-policies activation-preflight --service-url ...
---github-id ...` reads its bearer token only from
-`LAUNCHPLANE_LOCAL_ADMIN_TOKEN` (or the explicitly named environment variable)
-and has no browser-cookie, token-argv, or direct-DB mode. The service requires
-a local-admin bearer identity with both existing diagnostic read permissions,
-then reads at most the 257 most recently created server-side session rows for
-the supplied GitHub ID and admits at most eight claims-current sessions.
-Timestamp parsing, expiry filtering, claims-freshness ordering, and ambiguity
-checks happen in application code. It
-re-derives role authority from the active DB policy and returns only bounded
-policy, session, fixed-scope, decision, fingerprint, and unmanaged action-empty
-evidence. Missing, stale, ambiguous, mismatched, or truncated sessions fail
-closed; no grant is created by this route.
+`GET /v1/authz-diagnostics/activation-preflight/self` is the supported owner
+activation self-check. A signed-in browser human calls it with the Launchplane
+session cookie; Authorization headers, bodies, query parameters, and
+caller-selected identities are rejected. The service verifies the cookie
+without renewal, requires current stored claims, ignores the persisted session
+role, re-derives authority from the single active DB policy, and returns only
+the fixed policy-administration decision, an hour-bounded evaluation time, an
+opaque keyed policy generation, and a trace ID. Missing or invalid sessions and
+missing or ambiguous policy state fail closed. No CLI bearer helper or direct
+database fallback exists, and no grant or other durable record is created.
 
 `POST /v1/authz-diagnostics/candidate-policy/preview` is the non-persisting
 administrator preview for one exact schema-v2 candidate policy. The caller must

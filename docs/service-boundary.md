@@ -735,16 +735,17 @@ workflows, or principal identifiers. Missing active state returns `503`, and
 multiple active records return `409`; the service never falls back to cached
 policy state for the response.
 
-`POST /v1/authz-diagnostics/activation-preflight/read` is the bearer-only
-service boundary for one owner-local activation proof. It accepts only a
-positive GitHub numeric ID, requires a `LocalAdminIdentity` with the existing
-`authz_policy_health.read` and `authz_policy_effective_access.read` permissions,
-and resolves the subject from unexpired DB-backed human sessions rather than
-caller-supplied claims or browser cookies. The server re-derives the human role
-from the active policy and evaluates the fixed context-scoped
-`authz_policy_grant.write` request. The route is read-only, fail-closed, and
-`Cache-Control: no-store` for both success and error responses; it does not add
-an authorization action or expose session, identity, selector, or rule data.
+`GET /v1/authz-diagnostics/activation-preflight/self` is the signed-in
+browser-human self-check for policy-administration authority. It rejects every
+Authorization header and accepts no body, query parameter, caller-selected
+identity, role, organization, team, session identifier, or cookie value. The
+service verifies the signed session cookie without renewal, requires current
+stored claims, re-derives the human role from the single active DB policy, and
+evaluates the fixed global `authz_policy_grant.write` request. The response is
+limited to allowed/denied, an hour-bounded evaluation time, an opaque keyed policy
+generation, and a trace ID. The route and all errors are
+`Cache-Control: no-store`; the path performs no durable write and requires no
+separate diagnostic authorization grant.
 
 `POST /v1/authz-diagnostics/candidate-policy/preview` is a separate
 administrator-read contract protected by `authz_policy_candidate_preview.read`.

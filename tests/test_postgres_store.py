@@ -3877,7 +3877,7 @@ class PostgresRecordStoreTests(unittest.TestCase):
         connection = store._engine.connect.return_value.__enter__.return_value
         connection.execute.return_value.scalars.return_value.all.return_value = []
 
-        with patch.object(store, "schema_revision", return_value="d2219a0b1c2d"):
+        with patch.object(store, "schema_revision", return_value="e2221b0c2d3e"):
             store.verify_runtime_schema_compatibility(
                 required_relations=("required_table", "required_index")
             )
@@ -3896,7 +3896,7 @@ class PostgresRecordStoreTests(unittest.TestCase):
         connection.execute.return_value.scalars.return_value.all.return_value = ["missing_index"]
 
         with (
-            patch.object(store, "schema_revision", return_value="d2219a0b1c2d"),
+            patch.object(store, "schema_revision", return_value="e2221b0c2d3e"),
             self.assertRaisesRegex(RuntimeError, "missing_index"),
         ):
             store.verify_runtime_schema_compatibility(

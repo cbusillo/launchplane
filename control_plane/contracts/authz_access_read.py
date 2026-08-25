@@ -21,8 +21,6 @@ AUTHZ_DENIAL_EXPLANATION_READ_ACTION = "authz_denial_explanation.read"
 AUTHZ_POLICY_HEALTH_READ_ACTION = "authz_policy_health.read"
 AUTHZ_POLICY_CANDIDATE_PREVIEW_READ_ACTION = "authz_policy_candidate_preview.read"
 AUTHZ_REPOSITORY_SCOPE_READ_ACTION = "authz_repository_scope.read"
-AUTHZ_ACTIVATION_PREFLIGHT_MAX_SESSIONS = 8
-AUTHZ_ACTIVATION_PREFLIGHT_GITHUB_ID_MAX = 2**63 - 1
 AUTHZ_POLICY_CANDIDATE_PREVIEW_MAX_PROBES = 25
 AUTHZ_POLICY_CANDIDATE_PREVIEW_MAX_RULES = 500
 AUTHZ_REPOSITORY_SCOPE_MAX_CANDIDATES = 100
@@ -670,69 +668,11 @@ class AuthzRepositoryScopeResponse(BaseModel):
     candidates: tuple[AuthzRepositoryScopeCandidateResult, ...]
 
 
-class AuthzActivationPreflightRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-
-    github_id: int = Field(
-        gt=0,
-        le=AUTHZ_ACTIVATION_PREFLIGHT_GITHUB_ID_MAX,
-        strict=True,
-    )
-
-
-class AuthzActivationPreflightPolicySummary(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    record_id: str
-    revision: int = Field(ge=1)
-    policy_sha256: str
-    schema_version: Literal[1, 2]
-
-
-class AuthzActivationPreflightSessionSummary(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    session_count: int = Field(ge=1, le=AUTHZ_ACTIVATION_PREFLIGHT_MAX_SESSIONS)
-    claims_current: bool
-    claims_age_bucket_hours: int = Field(ge=0)
-    expiry_bucket_hours: int = Field(ge=0)
-    identity_fingerprint: str
-
-
-class AuthzActivationPreflightScope(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    action: Literal["authz_policy_grant.write"] = "authz_policy_grant.write"
-    product: Literal["launchplane"] = "launchplane"
-    context: Literal["launchplane"] = "launchplane"
-    target_scope: Literal["context"] = "context"
-
-
-class AuthzActivationPreflightDecision(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    decision: Literal["allowed", "denied"]
-    reason_code: AuthzDecisionReason
-
-
-class AuthzUnmanagedActionEmptyRuleCounts(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    total: int = Field(ge=0)
-    github_actions: int = Field(ge=0)
-    github_humans: int = Field(ge=0)
-    terminal_agents: int = Field(ge=0)
-    local_operators: int = Field(ge=0)
-    local_admins: int = Field(ge=0)
-
-
-class AuthzActivationPreflightResponse(BaseModel):
+class AuthzActivationPreflightSelfResponse(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     status: Literal["ok"] = "ok"
     trace_id: str
-    policy: AuthzActivationPreflightPolicySummary
-    session: AuthzActivationPreflightSessionSummary
-    scope: AuthzActivationPreflightScope
-    evaluation: AuthzActivationPreflightDecision
-    unmanaged_action_empty_rules: AuthzUnmanagedActionEmptyRuleCounts
+    decision: Literal["allowed", "denied"]
+    evaluated_at: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}T\d{2}:00:00Z$")
+    policy_generation: str = Field(pattern=r"^[0-9a-f]{64}$")
