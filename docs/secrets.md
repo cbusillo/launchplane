@@ -201,6 +201,17 @@ before provider mutation. It may remove the migration-only legacy root only
 when the remaining canonical configuration is valid; malformed, mismatched, or
 rootless target state fails closed before deployment.
 
+The `Deploy Launchplane` workflow accepts the canonical key ring only from the
+repository secret `LAUNCHPLANE_SECRET_KEYS_JSON`. Manual dispatch chooses an
+explicit `bootstrap_secret_operation` of `preserve`, `install`, or `remove`.
+Automatic deployments always preserve the target value; a missing repository
+secret never removes the active key ring. `install` requires non-empty JSON,
+minifies it before the private self-deploy request is written, and may use an
+operator-reviewed `self_deploy_idempotency_key`. `remove` is an explicit
+rollback or retirement action and never follows merely from secret absence.
+The workflow removes private self-deploy payload files at job completion and
+must not copy the key-ring value into outputs, summaries, artifacts, or logs.
+
 Old ciphertext versions and audit metadata retain the old/new key ids and
 version ids as rollback evidence. To roll back before destroying an old root,
 restore that root as an allowed active key and run the same audited dry-run/apply

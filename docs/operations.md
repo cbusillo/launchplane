@@ -1648,6 +1648,19 @@ DB-backed Launchplane records:
   provider-target authority changes should use the deployed service route or
   operator workflow.
 
+For a reviewed canonical key-ring install or rollback, manually dispatch
+`Deploy Launchplane` from the default branch with the exact immutable current
+image, an explicit `bootstrap_secret_operation`, and a bounded
+`self_deploy_idempotency_key`. `install` reads only the repository secret
+`LAUNCHPLANE_SECRET_KEYS_JSON`; `remove` explicitly removes that target env key;
+`preserve` changes neither state. Automatic deploys always preserve bootstrap
+secret state. Keep `LAUNCHPLANE_MASTER_ENCRYPTION_KEY` present through the
+migration and rollback window, verify health/runtime and a new privileged
+re-encryption dry-run after restart, and stop before re-encryption apply unless
+the owner approves the exact new plan digest. If install verification fails,
+dispatch `remove` against the same immutable image with a distinct rollback
+idempotency key, then require the legacy-only dry-run baseline to return clean.
+
 For an invalid tracked Dokploy target domain authority, use the `Dokploy Target
 Setup` workflow with `operation=repair-domain-authority`. Supply the exact
 tracked target type and target ID, a comma-separated tuple of bare DNS hosts,
