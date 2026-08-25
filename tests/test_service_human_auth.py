@@ -9,7 +9,6 @@ from control_plane.service_auth import (
     GitHubHumanPolicyRule,
     LaunchplaneAuthzPolicy,
 )
-from control_plane.authorization_recovery import AuthorizationBootstrapState
 from control_plane.service_human_auth import (
     GITHUB_EMAILS_URL,
     GITHUB_ORGS_URL,
@@ -94,9 +93,6 @@ def _oauth_session() -> _FakeOAuthSession:
 
 
 class HumanSessionManagerTests(unittest.TestCase):
-    def _pending_bootstrap_state(self) -> None:
-        return None
-
     def test_bootstrap_admin_role_applies_before_db_human_policy_exists(self) -> None:
         manager = HumanSessionManager(
             config=GitHubOAuthConfig(
@@ -107,7 +103,6 @@ class HumanSessionManagerTests(unittest.TestCase):
                 bootstrap_admin_emails=frozenset({"alice@example.com"}),
             ),
             session_store=InMemoryHumanSessionStore(),
-            authorization_bootstrap_state_provider=self._pending_bootstrap_state,
         )
 
         self.assertEqual(
@@ -128,7 +123,6 @@ class HumanSessionManagerTests(unittest.TestCase):
                 bootstrap_admin_emails=frozenset({"alice@example.com"}),
             ),
             session_store=InMemoryHumanSessionStore(),
-            authorization_bootstrap_state_provider=self._pending_bootstrap_state,
         )
         policy = LaunchplaneAuthzPolicy(
             github_humans=(
@@ -154,7 +148,6 @@ class HumanSessionManagerTests(unittest.TestCase):
                 bootstrap_admin_emails=frozenset({"alice@example.com"}),
             ),
             session_store=InMemoryHumanSessionStore(),
-            authorization_bootstrap_state_provider=self._pending_bootstrap_state,
         )
         policy = LaunchplaneAuthzPolicy(
             github_humans=(
@@ -167,62 +160,6 @@ class HumanSessionManagerTests(unittest.TestCase):
 
         self.assertEqual(
             manager.authorized_role(identity=_identity(), authz_policy=policy), "admin"
-        )
-
-    def test_bootstrap_admin_email_requires_state_provider(self) -> None:
-        manager = HumanSessionManager(
-            config=GitHubOAuthConfig(
-                client_id="client-id",
-                client_secret="client-secret",
-                public_url="https://launchplane.example",
-                session_secret="session-secret",
-                bootstrap_admin_emails=frozenset({"alice@example.com"}),
-            ),
-            session_store=InMemoryHumanSessionStore(),
-        )
-
-        self.assertIsNone(
-            manager.authorized_role(identity=_identity(), authz_policy=LaunchplaneAuthzPolicy())
-        )
-
-    def test_bootstrap_admin_email_provider_failure_fails_closed(self) -> None:
-        def failing_provider() -> object:
-            raise RuntimeError("bootstrap store unavailable")
-
-        manager = HumanSessionManager(
-            config=GitHubOAuthConfig(
-                client_id="client-id",
-                client_secret="client-secret",
-                public_url="https://launchplane.example",
-                session_secret="session-secret",
-                bootstrap_admin_emails=frozenset({"alice@example.com"}),
-            ),
-            session_store=InMemoryHumanSessionStore(),
-            authorization_bootstrap_state_provider=failing_provider,
-        )
-
-        with self.assertRaisesRegex(RuntimeError, "bootstrap store unavailable"):
-            manager.authorized_role(identity=_identity(), authz_policy=LaunchplaneAuthzPolicy())
-
-    def test_bootstrap_admin_email_stops_after_completion_record(self) -> None:
-        manager = HumanSessionManager(
-            config=GitHubOAuthConfig(
-                client_id="client-id",
-                client_secret="client-secret",
-                public_url="https://launchplane.example",
-                session_secret="session-secret",
-                bootstrap_admin_emails=frozenset({"alice@example.com"}),
-            ),
-            session_store=InMemoryHumanSessionStore(),
-            authorization_bootstrap_state_provider=lambda: AuthorizationBootstrapState(
-                completed_at="2026-08-25T00:00:00Z",
-                completed_by_github_id=123,
-                completion_challenge_id="authz-recovery-complete",
-            ),
-        )
-
-        self.assertIsNone(
-            manager.authorized_role(identity=_identity(), authz_policy=LaunchplaneAuthzPolicy())
         )
 
     def test_oauth_legacy_human_policy_preserves_bootstrap_admin(self) -> None:

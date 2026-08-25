@@ -207,26 +207,6 @@ CRITICAL_POSTGRES_COLUMN_TYPES: tuple[CriticalColumnType, ...] = (
         ("integer", "int4"),
     ),
     CriticalColumnType(
-        "launchplane_authorization_recovery_keys",
-        "payload",
-        ("jsonb",),
-    ),
-    CriticalColumnType(
-        "launchplane_authorization_bootstrap",
-        "payload",
-        ("jsonb",),
-    ),
-    CriticalColumnType(
-        "launchplane_authorization_recovery_challenges",
-        "payload",
-        ("jsonb",),
-    ),
-    CriticalColumnType(
-        "launchplane_authorization_recovery_audits",
-        "payload",
-        ("jsonb",),
-    ),
-    CriticalColumnType(
         "launchplane_public_ingress_incidents",
         "state_version",
         ("integer", "int4"),
@@ -702,40 +682,6 @@ CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
         ("state", "next_attempt_at", "lease_expires_at", "created_at"),
     ),
     CriticalIndex(
-        "launchplane_authorization_recovery_keys",
-        "launchplane_authorization_recovery_keys_live_slot_uidx",
-        ("custody_slot",),
-        unique=True,
-        predicate_expression="status in ('pending','active')",
-    ),
-    CriticalIndex(
-        "launchplane_authorization_recovery_keys",
-        "launchplane_authorization_recovery_keys_live_fingerprint_uidx",
-        ("fingerprint_sha256",),
-        unique=True,
-        predicate_expression="status in ('pending','active')",
-    ),
-    CriticalIndex(
-        "launchplane_authorization_recovery_keys",
-        "launchplane_authorization_recovery_keys_status_idx",
-        ("status", "enrolled_at"),
-    ),
-    CriticalIndex(
-        "launchplane_authorization_recovery_challenges",
-        "launchplane_authorization_recovery_challenges_open_signer_idx",
-        ("signing_key_id", "expires_at", "used_at"),
-    ),
-    CriticalIndex(
-        "launchplane_authorization_recovery_challenges",
-        "launchplane_authorization_recovery_challenges_expiry_idx",
-        ("expires_at", "used_at"),
-    ),
-    CriticalIndex(
-        "launchplane_authorization_recovery_audits",
-        "launchplane_authorization_recovery_audits_recorded_idx",
-        ("recorded_at",),
-    ),
-    CriticalIndex(
         "launchplane_public_ingress_observations",
         "launchplane_public_ingress_observations_incident_idx",
         ("incident_id", "observed_at"),
@@ -1071,22 +1017,6 @@ CRITICAL_PRIMARY_KEYS: tuple[CriticalPrimaryKey, ...] = (
     CriticalPrimaryKey(
         "launchplane_product_owner_routing",
         ("record_id",),
-    ),
-    CriticalPrimaryKey(
-        "launchplane_authorization_recovery_keys",
-        ("key_id",),
-    ),
-    CriticalPrimaryKey(
-        "launchplane_authorization_bootstrap",
-        ("record_id",),
-    ),
-    CriticalPrimaryKey(
-        "launchplane_authorization_recovery_challenges",
-        ("challenge_id",),
-    ),
-    CriticalPrimaryKey(
-        "launchplane_authorization_recovery_audits",
-        ("audit_id",),
     ),
     CriticalPrimaryKey(
         "launchplane_change_impact_policies",

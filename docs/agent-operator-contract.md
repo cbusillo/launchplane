@@ -65,12 +65,6 @@ The browser-only activation self-check is intentionally absent from this
 agent/operator allow-list. It accepts only the signed-in human's Launchplane
 session cookie and has no bearer helper or agent surface.
 
-Authorization recovery is intentionally split: public prepare and redacted
-challenge status are inert allow-listed operations so an agent or operator can
-inspect an unsigned exact challenge. The hardware-signature apply operation and
-all browser key lifecycle operations are absent. The contract grants no
-authorization and cannot mint, sign, upload, or apply policy material.
-
 ## Normalization Version 1
 
 The structural projection follows these rules:

@@ -33,9 +33,6 @@ class FastApiBrowserMutationBoundaryTests(unittest.IsolatedAsyncioTestCase):
         )
         expected_routes = {
             "/auth/logout",
-            "/v1/authorization-recovery/keys/enroll",
-            "/v1/authorization-recovery/keys/{key_id}/revoke",
-            "/v1/authorization-recovery/keys/{key_id}/verify",
             "/v1/agent/write-intents/evaluate",
             "/v1/authz-diagnostics/effective-access/evaluate",
             "/v1/authz-policies/managed-rule-sets/reconcile",

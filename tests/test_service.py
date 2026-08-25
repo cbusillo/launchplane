@@ -2668,6 +2668,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
             "/v1/products/{product}/environments/{environment}/config-status",
             payload["paths"],
         )
+        self.assertFalse(
+            any(path.startswith("/v1/authorization-recovery") for path in payload["paths"])
+        )
         self.assertNotIn('"examples"', json.dumps(payload, sort_keys=True))
 
     def test_service_export_agent_contract_writes_public_semantic_artifact(self) -> None:
@@ -2694,7 +2697,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(payload["normalization_version"], 1)
         self.assertRegex(payload["semantic_digest_sha256"], r"^[0-9a-f]{64}$")
         self.assertEqual(payload["provenance"]["source_commit_sha"], "a" * 40)
-        self.assertEqual(len(payload["contract"]["operations"]), 14)
+        self.assertEqual(len(payload["contract"]["operations"]), 12)
 
     def test_product_onboarding_endpoint_writes_full_launchplane_owned_bundle(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

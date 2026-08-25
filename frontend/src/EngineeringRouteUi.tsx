@@ -27,7 +27,6 @@ const ENGINEERING_VIEWS: Exclude<EngineeringView, "hub">[] = [
   "governance-projection",
   "owner-acceptance",
   "privileged-operations",
-  "authorization-recovery",
 ];
 
 export function EngineeringRouteFrame({
@@ -49,13 +48,16 @@ export function EngineeringRouteFrame({
 
   useLayoutEffect(() => {
     const navigation = navigationRef.current;
-    const activeLink = navigation?.querySelector<HTMLElement>('[aria-current="page"]');
+    const activeLink = navigation?.querySelector<HTMLElement>(
+      '[aria-current="page"]',
+    );
     if (!navigation || !activeLink) {
       return;
     }
     navigation.scrollLeft = Math.max(
       0,
-      activeLink.offsetLeft - (navigation.clientWidth - activeLink.offsetWidth) / 2,
+      activeLink.offsetLeft -
+        (navigation.clientWidth - activeLink.offsetWidth) / 2,
     );
   }, [view]);
 
