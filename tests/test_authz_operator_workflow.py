@@ -242,7 +242,7 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
                     self.assertIn("authz_policy_operation.cancel", managed_set_json)
                     self.assertIn("authz_policy_operation.approve", managed_set_json)
                     self.assertIn("authz_policy_operation.revoke", managed_set_json)
-                    self.assertNotIn("authz_policy_grant.write", managed_set_json)
+                    self.assertIn("authz_policy_grant.write", managed_set_json)
                     self.assertNotIn("privileged_secret_operation", managed_set_json)
                     self.assertNotIn("privileged_policy_operation_summary", managed_set_json)
                     self.assertNotIn("secrets.LAUNCHPLANE_AUTHZ_", managed_set_json)
@@ -290,6 +290,7 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
                 "authz_policy_operation.cancel",
                 "authz_policy_operation.approve",
                 "authz_policy_operation.revoke",
+                "authz_policy_grant.write",
             },
         )
         self.assertEqual(envelope.desired_policy.github_humans[0].github_ids, (123,))

@@ -757,7 +757,10 @@ protected wrapper derives the immutable repository-owner GitHub ID from the
 dispatch event and reads the existing terminal-agent subject and token label
 bootstrap variables. Its exact `operator.privileged-operation-bootstrap` set
 grants only terminal-agent policy proposal plus GitHub-owner policy
-read/cancel/approve/revoke. It grants no `authz_policy_grant.write`, secret
+read/cancel/approve/revoke. After the initial owner-approved attempt proved that
+the existing self-preflight authority was not an immutable-ID policy
+administrator rule, the owner explicitly approved adding
+`authz_policy_grant.write` to that same exact-ID rule. The set grants no secret
 operation action, execute action, summary read, product/runtime action, or
 workflow identity. Missing owner or terminal-agent selectors fail request
 validation rather than widening a rule. Use dry-run and exact reviewed-digest
