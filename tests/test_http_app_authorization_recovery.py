@@ -197,6 +197,14 @@ class AuthorizationRecoveryHttpTests(unittest.IsolatedAsyncioTestCase):
                     "policy": {"github_humans": []},
                 },
             )
+            invalid_signature = await client.post(
+                "/v1/authorization-recovery/public/apply",
+                json={
+                    "challenge_id": "challenge",
+                    "signing_key_id": "key-one",
+                    "signature": "not-base64!",
+                },
+            )
 
         self.assertEqual(malformed.status_code, 400)
         self.assertEqual(malformed.json()["error"]["code"], "invalid_body")
@@ -204,7 +212,9 @@ class AuthorizationRecoveryHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(oversized.json()["error"]["code"], "body_too_large")
         self.assertEqual(caller_policy.status_code, 400)
         self.assertEqual(caller_policy.json()["error"]["code"], "invalid_body")
-        for response in (malformed, oversized, caller_policy):
+        self.assertEqual(invalid_signature.status_code, 400)
+        self.assertEqual(invalid_signature.json()["error"]["code"], "invalid_signature")
+        for response in (malformed, oversized, caller_policy, invalid_signature):
             self.assertEqual(response.headers["cache-control"], "no-store")
 
     async def test_public_apply_succeeds_once_and_replay_is_rejected(self) -> None:

@@ -46,6 +46,18 @@ _MAX_RECENT_EVIDENCE = 20
 _TModel = TypeVar("_TModel", bound=BaseModel)
 
 
+class _BodyTooLargeError(ValueError):
+    pass
+
+
+class _InvalidBodyError(ValueError):
+    pass
+
+
+class _InvalidSignatureError(ValueError):
+    pass
+
+
 @dataclass(frozen=True, slots=True)
 class AuthorizationRecoveryRouteDependencies:
     common: ReadRouteDependencies
@@ -274,19 +286,18 @@ def register_authorization_recovery_routes(
     async def parse_body(request: Request, model_type: type[_TModel]) -> _TModel:
         content_length = request.headers.get("Content-Length", "")
         try:
-            if content_length and int(content_length) > _MAX_BODY_BYTES:
-                raise ValueError("body_too_large")
+            parsed_content_length = int(content_length) if content_length else 0
         except ValueError as exception:
-            if str(exception) == "body_too_large":
-                raise
-            raise ValueError("invalid_body") from exception
+            raise _InvalidBodyError from exception
+        if parsed_content_length > _MAX_BODY_BYTES:
+            raise _BodyTooLargeError
         body = await request.body()
         if len(body) > _MAX_BODY_BYTES:
-            raise ValueError("body_too_large")
+            raise _BodyTooLargeError
         try:
             return model_type.model_validate_json(body)
         except ValidationError as exception:
-            raise ValueError("invalid_body") from exception
+            raise _InvalidBodyError from exception
 
     def key_view(key: AuthorizationRecoveryKey) -> AuthorizationRecoveryKeyView:
         return AuthorizationRecoveryKeyView.model_validate(key.redacted())
@@ -345,9 +356,9 @@ def register_authorization_recovery_routes(
             try:
                 signature = base64.b64decode(normalized, validate=True)
             except (binascii.Error, ValueError) as exception:
-                raise ValueError("invalid_signature") from exception
+                raise _InvalidSignatureError from exception
         if not signature or len(signature) > AUTHORIZATION_RECOVERY_SIGNATURE_MAX_BYTES:
-            raise ValueError("invalid_signature")
+            raise _InvalidSignatureError
         return signature
 
     async def read_browser_status(
@@ -426,14 +437,12 @@ def register_authorization_recovery_routes(
                 allow_after_bootstrap=True,
             )
             return response(AuthorizationRecoveryKeyResponse(trace_id=trace_id, key=key_view(key)))
-        except ValueError as exception:
-            return error(
-                trace_id=trace_id,
-                status_code=413 if str(exception) == "body_too_large" else 400,
-                code=str(exception)
-                if str(exception) in {"body_too_large", "invalid_body"}
-                else "invalid_request",
-            )
+        except _BodyTooLargeError:
+            return error(trace_id=trace_id, status_code=413, code="body_too_large")
+        except _InvalidBodyError:
+            return error(trace_id=trace_id, status_code=400, code="invalid_body")
+        except ValueError:
+            return error(trace_id=trace_id, status_code=400, code="invalid_request")
         except PermissionError:
             return error(trace_id=trace_id, status_code=403, code="authorization_denied")
         except RuntimeError:
@@ -491,14 +500,12 @@ def register_authorization_recovery_routes(
                 key_id=key_id, signature=decode_signature(envelope.signature)
             )
             return response(AuthorizationRecoveryKeyResponse(trace_id=trace_id, key=key_view(key)))
-        except ValueError as exception:
-            return error(
-                trace_id=trace_id,
-                status_code=413 if str(exception) == "body_too_large" else 400,
-                code=str(exception)
-                if str(exception) in {"body_too_large", "invalid_body"}
-                else "proof_rejected",
-            )
+        except _BodyTooLargeError:
+            return error(trace_id=trace_id, status_code=413, code="body_too_large")
+        except _InvalidBodyError:
+            return error(trace_id=trace_id, status_code=400, code="invalid_body")
+        except (ValueError, _InvalidSignatureError):
+            return error(trace_id=trace_id, status_code=400, code="proof_rejected")
         except PermissionError:
             return error(trace_id=trace_id, status_code=403, code="authorization_denied")
         except RuntimeError:
@@ -524,14 +531,12 @@ def register_authorization_recovery_routes(
             )
             key = service.revoke_key(key_id=key_id)
             return response(AuthorizationRecoveryKeyResponse(trace_id=trace_id, key=key_view(key)))
-        except ValueError as exception:
-            return error(
-                trace_id=trace_id,
-                status_code=413 if str(exception) == "body_too_large" else 400,
-                code=str(exception)
-                if str(exception) in {"body_too_large", "invalid_body"}
-                else "revoke_rejected",
-            )
+        except _BodyTooLargeError:
+            return error(trace_id=trace_id, status_code=413, code="body_too_large")
+        except _InvalidBodyError:
+            return error(trace_id=trace_id, status_code=400, code="invalid_body")
+        except ValueError:
+            return error(trace_id=trace_id, status_code=400, code="revoke_rejected")
         except PermissionError:
             return error(trace_id=trace_id, status_code=403, code="authorization_denied")
         except RuntimeError:
@@ -557,14 +562,12 @@ def register_authorization_recovery_routes(
             )
         except PermissionError:
             return error(trace_id=trace_id, status_code=403, code="credentials_not_accepted")
-        except ValueError as exception:
-            return error(
-                trace_id=trace_id,
-                status_code=413 if str(exception) == "body_too_large" else 400,
-                code=str(exception)
-                if str(exception) in {"body_too_large", "invalid_body"}
-                else "prepare_rejected",
-            )
+        except _BodyTooLargeError:
+            return error(trace_id=trace_id, status_code=413, code="body_too_large")
+        except _InvalidBodyError:
+            return error(trace_id=trace_id, status_code=400, code="invalid_body")
+        except ValueError:
+            return error(trace_id=trace_id, status_code=400, code="prepare_rejected")
         except RuntimeError:
             return error(trace_id=trace_id, status_code=503, code="recovery_unavailable")
 
@@ -613,14 +616,14 @@ def register_authorization_recovery_routes(
             )
         except PermissionError:
             return error(trace_id=trace_id, status_code=403, code="credentials_not_accepted")
-        except ValueError as exception:
-            return error(
-                trace_id=trace_id,
-                status_code=413 if str(exception) == "body_too_large" else 400,
-                code=str(exception)
-                if str(exception) in {"body_too_large", "invalid_body", "invalid_signature"}
-                else "apply_rejected",
-            )
+        except _BodyTooLargeError:
+            return error(trace_id=trace_id, status_code=413, code="body_too_large")
+        except _InvalidBodyError:
+            return error(trace_id=trace_id, status_code=400, code="invalid_body")
+        except _InvalidSignatureError:
+            return error(trace_id=trace_id, status_code=400, code="invalid_signature")
+        except ValueError:
+            return error(trace_id=trace_id, status_code=400, code="apply_rejected")
         except RuntimeError:
             return error(trace_id=trace_id, status_code=503, code="recovery_unavailable")
 
