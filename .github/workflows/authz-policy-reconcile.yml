@@ -111,7 +111,8 @@ jobs:
           "actions":["authz_policy_operation.read",
           "authz_policy_operation.cancel",
           "authz_policy_operation.approve",
-          "authz_policy_operation.revoke"]}}],
+          "authz_policy_operation.revoke",
+          "authz_policy_grant.write"]}}],
           "terminal_agents":[{{
           "managed_set_id":"operator.privileged-operation-bootstrap",
           "managed_rule_id":"terminal-agent-policy-operation-propose",
