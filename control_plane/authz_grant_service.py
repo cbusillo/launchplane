@@ -2081,6 +2081,7 @@ def execute_managed_authz_policy_reconcile(
     trace_id: str,
     now_timestamp: TimestampProvider,
     authorized_policy_sha256: str = "",
+    allow_recovery_single_admin: bool = False,
 ) -> AuthzManagedPolicyRouteResult:
     active_records = record_store.list_authz_policy_records(status="active", limit=1)
     if not active_records:
@@ -2109,9 +2110,13 @@ def execute_managed_authz_policy_reconcile(
         policy_safety_blockers.append(
             _managed_policy_safety_blocker("authz_policy_applying_admin_removed")
         )
-    if managed_diff.changed and not _authz_policy_retains_independent_administration(
-        policy=updated_policy,
-        applying_identity=identity,
+    if (
+        managed_diff.changed
+        and not allow_recovery_single_admin
+        and not _authz_policy_retains_independent_administration(
+            policy=updated_policy,
+            applying_identity=identity,
+        )
     ):
         policy_safety_blockers.append(
             _managed_policy_safety_blocker("authz_policy_independent_admin_unreachable")
@@ -2122,7 +2127,7 @@ def execute_managed_authz_policy_reconcile(
             "policy_safety_blockers": tuple(policy_safety_blockers),
         }
     )
-    if request.mode == "apply" and managed_diff.changed:
+    if request.mode == "apply" and managed_diff.changed and not allow_recovery_single_admin:
         blockers_by_code = {
             blocker.code: blocker for blocker in managed_diff.policy_safety_blockers
         }

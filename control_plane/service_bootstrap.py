@@ -184,6 +184,9 @@ def create_launchplane_service_application(
         HumanSessionManager(
             config=github_oauth_config,
             session_store=service_record_store,
+            authorization_bootstrap_state_provider=(
+                service_record_store.read_authorization_bootstrap_state
+            ),
         )
         if github_oauth_config is not None
         else None

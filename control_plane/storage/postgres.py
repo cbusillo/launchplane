@@ -45,6 +45,12 @@ from control_plane.contracts.authz_policy_record import (
     LaunchplaneAuthzPolicyRecord,
     build_authz_policy_record_id,
 )
+from control_plane.authorization_recovery import (
+    AuthorizationBootstrapState,
+    AuthorizationRecoveryAudit,
+    AuthorizationRecoveryChallenge,
+    AuthorizationRecoveryKey,
+)
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.change_impact import ChangeImpactPolicyRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
@@ -2038,6 +2044,54 @@ class LaunchplaneAuthzDenialRow(Base):
     trace_id: Mapped[str] = mapped_column(String, primary_key=True)
     recorded_at: Mapped[str] = mapped_column(String, nullable=False)
     expires_at: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneAuthorizationRecoveryKeyRow(Base):
+    __tablename__ = "launchplane_authorization_recovery_keys"
+    __table_args__ = (
+        Index("launchplane_authorization_recovery_keys_slot_idx", "custody_slot"),
+        Index("launchplane_authorization_recovery_keys_status_idx", "status", "enrolled_at"),
+    )
+
+    key_id: Mapped[str] = mapped_column(String, primary_key=True)
+    custody_slot: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    fingerprint_sha256: Mapped[str] = mapped_column(String, nullable=False)
+    enrolled_at: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneAuthorizationBootstrapRow(Base):
+    __tablename__ = "launchplane_authorization_bootstrap"
+
+    record_id: Mapped[str] = mapped_column(String, primary_key=True)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    completed_at: Mapped[str] = mapped_column(String, nullable=False, server_default="")
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneAuthorizationRecoveryChallengeRow(Base):
+    __tablename__ = "launchplane_authorization_recovery_challenges"
+    __table_args__ = (
+        Index("launchplane_authorization_recovery_challenges_expiry_idx", "expires_at", "used_at"),
+    )
+
+    challenge_id: Mapped[str] = mapped_column(String, primary_key=True)
+    operation: Mapped[str] = mapped_column(String, nullable=False)
+    expires_at: Mapped[str] = mapped_column(String, nullable=False)
+    used_at: Mapped[str] = mapped_column(String, nullable=False, server_default="")
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneAuthorizationRecoveryAuditRow(Base):
+    __tablename__ = "launchplane_authorization_recovery_audits"
+    __table_args__ = (Index("launchplane_authorization_recovery_audits_recorded_idx", "recorded_at"),)
+
+    audit_id: Mapped[str] = mapped_column(String, primary_key=True)
+    event: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    recorded_at: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -14411,6 +14465,112 @@ class PostgresRecordStore(HumanSessionStore):
             statement = statement.limit(max(limit, 0))
         with self._session_factory() as session:
             return tuple(self._read_authz_policy_row(row) for row in session.scalars(statement))
+
+    def read_authorization_bootstrap_state(self) -> AuthorizationBootstrapState | None:
+        with self._session_factory() as session:
+            row = session.get(LaunchplaneAuthorizationBootstrapRow, "authorization-recovery-bootstrap")
+            return AuthorizationBootstrapState.model_validate(row.payload) if row is not None else None
+
+    def write_authorization_bootstrap_state(self, state: AuthorizationBootstrapState) -> None:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            row = session.get(LaunchplaneAuthorizationBootstrapRow, state.record_id)
+            if row is not None:
+                current = AuthorizationBootstrapState.model_validate(row.payload)
+                if current.status == "complete" and state.status != "complete":
+                    raise ValueError("Authorization bootstrap completion is monotonic.")
+                if current.status == "complete" and current != state:
+                    raise ValueError("Authorization bootstrap completion cannot be replaced.")
+            else:
+                row = LaunchplaneAuthorizationBootstrapRow(
+                    record_id=state.record_id,
+                    status=state.status,
+                    completed_at=state.completed_at,
+                    payload=self._payload_dict(state),
+                )
+                session.add(row)
+                session.commit()
+                return
+            row.status = state.status
+            row.completed_at = state.completed_at
+            row.payload = self._payload_dict(state)
+            session.commit()
+
+    def list_authorization_recovery_keys(self) -> tuple[AuthorizationRecoveryKey, ...]:
+        with self._session_factory() as session:
+            rows = session.scalars(
+                select(LaunchplaneAuthorizationRecoveryKeyRow).order_by(LaunchplaneAuthorizationRecoveryKeyRow.custody_slot)
+            )
+            return tuple(AuthorizationRecoveryKey.model_validate(row.payload) for row in rows)
+
+    def read_authorization_recovery_key(self, key_id: str) -> AuthorizationRecoveryKey | None:
+        with self._session_factory() as session:
+            row = session.get(LaunchplaneAuthorizationRecoveryKeyRow, key_id)
+            return AuthorizationRecoveryKey.model_validate(row.payload) if row is not None else None
+
+    def write_authorization_recovery_key(self, key: AuthorizationRecoveryKey) -> None:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            row = session.get(LaunchplaneAuthorizationRecoveryKeyRow, key.key_id)
+            if row is None:
+                session.add(LaunchplaneAuthorizationRecoveryKeyRow(
+                    key_id=key.key_id, custody_slot=key.custody_slot, status=key.status,
+                    fingerprint_sha256=key.fingerprint_sha256, enrolled_at=key.enrolled_at,
+                    payload=self._payload_dict(key),
+                ))
+            else:
+                row.custody_slot = key.custody_slot
+                row.status = key.status
+                row.fingerprint_sha256 = key.fingerprint_sha256
+                row.enrolled_at = key.enrolled_at
+                row.payload = self._payload_dict(key)
+            session.commit()
+
+    def read_authorization_recovery_challenge(self, challenge_id: str) -> AuthorizationRecoveryChallenge | None:
+        with self._session_factory() as session:
+            row = session.get(LaunchplaneAuthorizationRecoveryChallengeRow, challenge_id)
+            return AuthorizationRecoveryChallenge.model_validate(row.payload) if row is not None else None
+
+    def list_authorization_recovery_challenges(self) -> tuple[AuthorizationRecoveryChallenge, ...]:
+        with self._session_factory() as session:
+            rows = session.scalars(
+                select(LaunchplaneAuthorizationRecoveryChallengeRow).order_by(
+                    LaunchplaneAuthorizationRecoveryChallengeRow.expires_at
+                )
+            )
+            return tuple(AuthorizationRecoveryChallenge.model_validate(row.payload) for row in rows)
+
+    def write_authorization_recovery_challenge(self, challenge: AuthorizationRecoveryChallenge) -> None:
+        self._write_row(LaunchplaneAuthorizationRecoveryChallengeRow(
+            challenge_id=challenge.challenge_id, operation=challenge.operation,
+            expires_at=challenge.expires_at, used_at=challenge.used_at,
+            payload=self._payload_dict(challenge),
+        ))
+
+    def consume_authorization_recovery_challenge(self, *, challenge_id: str, used_at: str) -> bool:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            row = session.get(LaunchplaneAuthorizationRecoveryChallengeRow, challenge_id)
+            if row is None or row.used_at:
+                return False
+            challenge = AuthorizationRecoveryChallenge.model_validate(row.payload)
+            if challenge.used_at:
+                return False
+            updated = challenge.model_copy(update={"used_at": used_at})
+            row.used_at = used_at
+            row.payload = self._payload_dict(updated)
+            session.commit()
+            return True
+
+    def write_authorization_recovery_audit(self, audit: AuthorizationRecoveryAudit) -> None:
+        with self._session_factory() as session:
+            existing = session.get(LaunchplaneAuthorizationRecoveryAuditRow, audit.audit_id)
+            if existing is None:
+                session.add(LaunchplaneAuthorizationRecoveryAuditRow(
+                    audit_id=audit.audit_id, event=audit.event, status=audit.status,
+                    recorded_at=audit.recorded_at, payload=self._payload_dict(audit),
+                ))
+                session.commit()
 
     def write_authz_denial_record(self, record: AuthzDenialRecord) -> None:
         with self._session_factory() as session:
