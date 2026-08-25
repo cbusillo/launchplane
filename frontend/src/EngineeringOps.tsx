@@ -144,7 +144,7 @@ function EngineeringOpsHub() {
       view="hub"
     >
       <div className="engineering-hub-intro">
-        <strong>Eight independent evidence routes</strong>
+        <strong>Nine independent evidence routes</strong>
         <p>
           Each surface owns its own request lifecycle, direct link, stale-data
           disclosure, refresh failure, and cancellation state. Browser controls

@@ -118,7 +118,10 @@ def _authorization_recovery_http_json(
         f"{_authorization_recovery_service_url(service_url)}{path}",
         data=body,
         method=method,
-        headers={"Accept": "application/json", **({"Content-Type": "application/json"} if body else {})},
+        headers={
+            "Accept": "application/json",
+            **({"Content-Type": "application/json"} if body else {}),
+        },
     )
     try:
         with urlopen(request, timeout=15) as response:
@@ -134,7 +137,9 @@ def _authorization_recovery_http_json(
     try:
         decoded = json.loads(raw_response.decode("utf-8"))
     except (UnicodeDecodeError, JSONDecodeError) as error:
-        raise click.ClickException("Authorization recovery service returned invalid JSON.") from error
+        raise click.ClickException(
+            "Authorization recovery service returned invalid JSON."
+        ) from error
     if not isinstance(decoded, dict):
         raise click.ClickException("Authorization recovery service returned an invalid response.")
     return decoded
@@ -360,7 +365,9 @@ def authorization_recovery_prepare(
     try:
         signing_bytes = base64.b64decode(signing_input, validate=True)
     except (ValueError, binascii.Error) as error:
-        raise click.ClickException("Authorization recovery response contained invalid signing bytes.") from error
+        raise click.ClickException(
+            "Authorization recovery response contained invalid signing bytes."
+        ) from error
     if not signing_bytes or len(signing_bytes) > 32 * 1024:
         raise click.ClickException("Authorization recovery signing input exceeded its limit.")
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -393,14 +400,18 @@ def authorization_recovery_status(service_url: str, challenge_id: str) -> None:
         "signing_key_fingerprint_sha256",
         "expires_at",
     )
-    click.echo(json.dumps({field: payload.get(field) for field in safe_fields}, indent=2, sort_keys=True))
+    click.echo(
+        json.dumps({field: payload.get(field) for field in safe_fields}, indent=2, sort_keys=True)
+    )
 
 
 @authorization_recovery.command("apply")
 @click.option("--service-url", required=True, help="Deployed Launchplane service base URL.")
 @click.option("--challenge-id", required=True)
 @click.option("--signing-key-id", required=True)
-@click.option("--signature-file", type=click.Path(path_type=Path, exists=True, dir_okay=False), required=True)
+@click.option(
+    "--signature-file", type=click.Path(path_type=Path, exists=True, dir_okay=False), required=True
+)
 def authorization_recovery_apply(
     service_url: str,
     challenge_id: str,

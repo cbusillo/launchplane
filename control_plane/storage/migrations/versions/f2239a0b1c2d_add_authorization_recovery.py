@@ -26,7 +26,9 @@ def _table_exists(table_name: str) -> bool:
 
 def _index_exists(table_name: str, index_name: str) -> bool:
     return index_name in {
-        str(index["name"]) for index in sa.inspect(op.get_bind()).get_indexes(table_name)
+        name
+        for index in sa.inspect(op.get_bind()).get_indexes(table_name)
+        if isinstance((name := index.get("name")), str)
     }
 
 
@@ -77,6 +79,18 @@ def upgrade() -> None:
         )
     if not _index_exists(
         "launchplane_authorization_recovery_keys",
+        "launchplane_authorization_recovery_keys_live_fingerprint_uidx",
+    ):
+        op.create_index(
+            "launchplane_authorization_recovery_keys_live_fingerprint_uidx",
+            "launchplane_authorization_recovery_keys",
+            ["fingerprint_sha256"],
+            unique=True,
+            postgresql_where=sa.text("status in ('pending', 'active')"),
+            sqlite_where=sa.text("status in ('pending', 'active')"),
+        )
+    if not _index_exists(
+        "launchplane_authorization_recovery_keys",
         "launchplane_authorization_recovery_keys_status_idx",
     ):
         op.create_index(
@@ -106,6 +120,7 @@ def upgrade() -> None:
             "launchplane_authorization_recovery_challenges",
             sa.Column("challenge_id", sa.String(), nullable=False),
             sa.Column("operation", sa.String(), nullable=False),
+            sa.Column("signing_key_id", sa.String(), nullable=False),
             sa.Column("expires_at", sa.String(), nullable=False),
             sa.Column("used_at", sa.String(), nullable=False, server_default=""),
             _payload_column(),
@@ -114,6 +129,15 @@ def upgrade() -> None:
                 "operation in ('initial_bootstrap', 'restore_known_administrator', 'replace_recovery_key')",
                 name="launchplane_authorization_recovery_challenges_operation_ck",
             ),
+        )
+    if not _index_exists(
+        "launchplane_authorization_recovery_challenges",
+        "launchplane_authorization_recovery_challenges_open_signer_idx",
+    ):
+        op.create_index(
+            "launchplane_authorization_recovery_challenges_open_signer_idx",
+            "launchplane_authorization_recovery_challenges",
+            ["signing_key_id", "expires_at", "used_at"],
         )
     if not _index_exists(
         "launchplane_authorization_recovery_challenges",
@@ -157,13 +181,17 @@ def downgrade() -> None:
         ),
         (
             "launchplane_authorization_recovery_challenges",
-            ("launchplane_authorization_recovery_challenges_expiry_idx",),
+            (
+                "launchplane_authorization_recovery_challenges_open_signer_idx",
+                "launchplane_authorization_recovery_challenges_expiry_idx",
+            ),
         ),
         (
             "launchplane_authorization_recovery_keys",
             (
                 "launchplane_authorization_recovery_keys_status_idx",
                 "launchplane_authorization_recovery_keys_slot_idx",
+                "launchplane_authorization_recovery_keys_live_fingerprint_uidx",
                 "launchplane_authorization_recovery_keys_live_slot_uidx",
             ),
         ),

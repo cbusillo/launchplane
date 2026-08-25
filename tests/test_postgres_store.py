@@ -1,3 +1,4 @@
+import base64
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
@@ -1647,7 +1648,13 @@ def _merge_train_stack_collapse_plan_record(
     )
 
 
-_RECOVERY_KEY = "sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29tZml4dHVyZS1tYXRlcmlhbC1mb3ItcGFyc2VyLW9ubHk= recovery@example"
+_RECOVERY_KEY_TYPE = "sk-ssh-ed25519@openssh.com"
+
+
+def _recovery_key(material: str) -> str:
+    key_type = _RECOVERY_KEY_TYPE.encode("ascii")
+    key_blob = len(key_type).to_bytes(4, "big") + key_type + material.encode("utf-8")
+    return f"{_RECOVERY_KEY_TYPE} {base64.b64encode(key_blob).decode('ascii')} recovery@example"
 
 
 def _empty_authz_policy_record() -> LaunchplaneAuthzPolicyRecord:
@@ -1678,7 +1685,11 @@ def _activate_recovery_key(
     key_id: str,
     custody_slot: str,
 ) -> None:
-    service.enroll_key(key_id=key_id, custody_slot=custody_slot, public_key=_RECOVERY_KEY)
+    service.enroll_key(
+        key_id=key_id,
+        custody_slot=custody_slot,
+        public_key=_recovery_key(key_id),
+    )
     with patch("control_plane.authorization_recovery._verify_sshsig"):
         service.verify_key_proof(
             key_id=key_id,

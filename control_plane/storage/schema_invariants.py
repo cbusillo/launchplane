@@ -710,8 +710,20 @@ CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
     ),
     CriticalIndex(
         "launchplane_authorization_recovery_keys",
+        "launchplane_authorization_recovery_keys_live_fingerprint_uidx",
+        ("fingerprint_sha256",),
+        unique=True,
+        predicate_expression="status in ('pending','active')",
+    ),
+    CriticalIndex(
+        "launchplane_authorization_recovery_keys",
         "launchplane_authorization_recovery_keys_status_idx",
         ("status", "enrolled_at"),
+    ),
+    CriticalIndex(
+        "launchplane_authorization_recovery_challenges",
+        "launchplane_authorization_recovery_challenges_open_signer_idx",
+        ("signing_key_id", "expires_at", "used_at"),
     ),
     CriticalIndex(
         "launchplane_authorization_recovery_challenges",

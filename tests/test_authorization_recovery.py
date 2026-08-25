@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import base64
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import shutil
 import subprocess
@@ -31,7 +32,16 @@ from control_plane.contracts.outbox_delivery import OutboxDeliveryRecord
 from control_plane.service_auth import LaunchplaneAuthzPolicy
 
 
-_HARDWARE_KEY = "sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29tZml4dHVyZS1tYXRlcmlhbC1mb3ItcGFyc2VyLW9ubHk= recovery@example"
+_HARDWARE_KEY_TYPE = "sk-ssh-ed25519@openssh.com"
+
+
+def _hardware_key(material: str) -> str:
+    key_type = _HARDWARE_KEY_TYPE.encode("ascii")
+    key_blob = len(key_type).to_bytes(4, "big") + key_type + material.encode("utf-8")
+    return f"{_HARDWARE_KEY_TYPE} {base64.b64encode(key_blob).decode('ascii')} recovery@example"
+
+
+_HARDWARE_KEY = _hardware_key("fixture-material-for-parser-only")
 
 
 def _record() -> LaunchplaneAuthzPolicyRecord:
@@ -97,7 +107,8 @@ class _Store:
         return True
 
     def write_authorization_recovery_audit(self, audit: AuthorizationRecoveryAudit) -> None:
-        self.audits.append(audit)
+        if all(existing.audit_id != audit.audit_id for existing in self.audits):
+            self.audits.append(audit)
 
     def list_authz_policy_records(
         self,
@@ -196,7 +207,11 @@ class AuthorizationRecoveryServiceTests(unittest.TestCase):
         )
 
     def _activate(self, key_id: str, custody_slot: str) -> None:
-        self.service.enroll_key(key_id=key_id, custody_slot=custody_slot, public_key=_HARDWARE_KEY)
+        self.service.enroll_key(
+            key_id=key_id,
+            custody_slot=custody_slot,
+            public_key=_hardware_key(key_id),
+        )
         with patch("control_plane.authorization_recovery._verify_sshsig"):
             self.service.verify_key_proof(
                 key_id=key_id, signature=b"-----BEGIN SSH SIGNATURE-----\nfixture"
@@ -242,6 +257,201 @@ class AuthorizationRecoveryServiceTests(unittest.TestCase):
                     trace_id="trace-2",
                 )
 
+    def test_apply_verifies_the_exact_prepared_canonical_bytes(self) -> None:
+        self._activate("key-one", "custody-a")
+        self._activate("key-two", "custody-b")
+        prepared = self.service.prepare(
+            operation="initial_bootstrap", intended_github_id=101, signing_key_id="key-one"
+        )
+        signature = b"-----BEGIN SSH SIGNATURE-----\nfixture"
+
+        with patch("control_plane.authorization_recovery._verify_sshsig") as verifier:
+            self.service.apply(
+                challenge_id=prepared.challenge.challenge_id,
+                key_id="key-one",
+                signature=signature,
+                trace_id="trace-exact-payload",
+            )
+
+        verifier.assert_called_once_with(
+            public_key=self.store.keys["key-one"].public_key,
+            payload=prepared.canonical_request,
+            signature=signature,
+        )
+
+    def test_unknown_challenge_does_not_create_unbounded_audit_rows(self) -> None:
+        initial_audit_count = len(self.store.audits)
+
+        with self.assertRaisesRegex(ValueError, "unavailable"):
+            self.service.apply(
+                challenge_id="unknown-challenge",
+                key_id="unknown-key",
+                signature=b"invalid",
+                trace_id="trace-unknown",
+            )
+
+        self.assertEqual(len(self.store.audits), initial_audit_count)
+
+    def test_invalid_apply_signature_is_audited_once_per_challenge(self) -> None:
+        current_time = [datetime(2026, 8, 25, tzinfo=timezone.utc)]
+        self.service = AuthorizationRecoveryService(
+            record_store=self.store,
+            service_identity="launchplane.test",
+            now=lambda: current_time[0],
+            random_token=lambda byte_count: (
+                f"token-{byte_count}-{len(self.store.challenges)}-abcdefghijklmnopqrstuvwx"
+            ),
+        )
+        self._activate("key-one", "custody-a")
+        self._activate("key-two", "custody-b")
+        prepared = self.service.prepare(
+            operation="initial_bootstrap", intended_github_id=101, signing_key_id="key-one"
+        )
+
+        for _ in range(2):
+            current_time[0] += timedelta(seconds=2)
+            with (
+                patch(
+                    "control_plane.authorization_recovery._verify_sshsig",
+                    side_effect=ValueError("invalid signature"),
+                ),
+                self.assertRaisesRegex(ValueError, "invalid signature"),
+            ):
+                self.service.apply(
+                    challenge_id=prepared.challenge.challenge_id,
+                    key_id="key-one",
+                    signature=b"invalid",
+                    trace_id="trace-invalid-signature",
+                )
+
+        signature_audits = [
+            audit for audit in self.store.audits if audit.reason_code == "signature_invalid"
+        ]
+        self.assertEqual(len(signature_audits), 1)
+
+    def test_invalid_key_proof_signature_is_audited_once(self) -> None:
+        current_time = [datetime(2026, 8, 25, tzinfo=timezone.utc)]
+        self.service = AuthorizationRecoveryService(
+            record_store=self.store,
+            service_identity="launchplane.test",
+            now=lambda: current_time[0],
+            random_token=lambda byte_count: (
+                f"token-{byte_count}-{len(self.store.challenges)}-abcdefghijklmnopqrstuvwx"
+            ),
+        )
+        self.service.enroll_key(
+            key_id="key-one",
+            custody_slot="custody-a",
+            public_key=_hardware_key("key-one"),
+        )
+
+        for _ in range(2):
+            current_time[0] += timedelta(seconds=2)
+            with (
+                patch(
+                    "control_plane.authorization_recovery._verify_sshsig",
+                    side_effect=ValueError("invalid signature"),
+                ),
+                self.assertRaisesRegex(ValueError, "invalid signature"),
+            ):
+                self.service.verify_key_proof(key_id="key-one", signature=b"invalid")
+
+        signature_audits = [
+            audit for audit in self.store.audits if audit.reason_code == "signature_invalid"
+        ]
+        self.assertEqual(len(signature_audits), 1)
+
+    def test_expired_key_proof_rejection_is_audited_once(self) -> None:
+        current_time = [datetime(2026, 8, 25, tzinfo=timezone.utc)]
+        self.service = AuthorizationRecoveryService(
+            record_store=self.store,
+            service_identity="launchplane.test",
+            now=lambda: current_time[0],
+            random_token=lambda byte_count: (
+                f"token-{byte_count}-{len(self.store.challenges)}-abcdefghijklmnopqrstuvwx"
+            ),
+        )
+        self.service.enroll_key(
+            key_id="key-one",
+            custody_slot="custody-a",
+            public_key=_hardware_key("key-one"),
+        )
+        current_time[0] += timedelta(minutes=11)
+
+        for _ in range(2):
+            current_time[0] += timedelta(seconds=2)
+            with self.assertRaisesRegex(ValueError, "unavailable"):
+                self.service.verify_key_proof(key_id="key-one", signature=b"invalid")
+
+        expired_audits = [
+            audit for audit in self.store.audits if audit.reason_code == "proof_expired"
+        ]
+        self.assertEqual(len(expired_audits), 1)
+
+    def test_prepare_capacity_is_scoped_per_key_and_does_not_block_enrollment(self) -> None:
+        self._activate("key-one", "custody-a")
+        self._activate("key-two", "custody-b")
+        self.service.prepare(
+            operation="initial_bootstrap", intended_github_id=101, signing_key_id="key-one"
+        )
+        self.service.prepare(
+            operation="initial_bootstrap", intended_github_id=102, signing_key_id="key-one"
+        )
+
+        for _ in range(2):
+            with self.assertRaisesRegex(ValueError, "rate limit"):
+                self.service.prepare(
+                    operation="initial_bootstrap",
+                    intended_github_id=103,
+                    signing_key_id="key-one",
+                )
+
+        prepared_with_other_key = self.service.prepare(
+            operation="initial_bootstrap", intended_github_id=103, signing_key_id="key-two"
+        )
+        enrolled = self.service.enroll_key(
+            key_id="key-three",
+            custody_slot="custody-c",
+            public_key=_hardware_key("key-three"),
+        )
+        rate_limit_audits = [
+            audit for audit in self.store.audits if audit.reason_code == "challenge_rate_limited"
+        ]
+
+        self.assertEqual(prepared_with_other_key.challenge.signing_key_id, "key-two")
+        self.assertEqual(enrolled.status, "pending")
+        self.assertEqual(len(rate_limit_audits), 1)
+
+    def test_restore_known_administrator_can_replace_the_fixed_recovery_identity(self) -> None:
+        self._activate("key-one", "custody-a")
+        self._activate("key-two", "custody-b")
+        initial = self.service.prepare(
+            operation="initial_bootstrap", intended_github_id=101, signing_key_id="key-one"
+        )
+        with patch("control_plane.authorization_recovery._verify_sshsig"):
+            self.service.apply(
+                challenge_id=initial.challenge.challenge_id,
+                key_id="key-one",
+                signature=b"-----BEGIN SSH SIGNATURE-----\nfixture",
+                trace_id="trace-bootstrap",
+            )
+        restore = self.service.prepare(
+            operation="restore_known_administrator",
+            intended_github_id=202,
+            signing_key_id="key-two",
+        )
+
+        with patch("control_plane.authorization_recovery._verify_sshsig"):
+            restored = self.service.apply(
+                challenge_id=restore.challenge.challenge_id,
+                key_id="key-two",
+                signature=b"-----BEGIN SSH SIGNATURE-----\nfixture",
+                trace_id="trace-restore",
+            )
+
+        assert restored.authz_policy_record is not None
+        self.assertEqual(restored.authz_policy_record.policy.github_humans[0].github_ids, (202,))
+
     def test_revocation_fails_closed_before_signature_verification(self) -> None:
         self._activate("key-one", "custody-a")
         self._activate("key-two", "custody-b")
@@ -273,12 +483,26 @@ class AuthorizationRecoveryServiceTests(unittest.TestCase):
             recovery_key_fingerprint(key_with_second_comment),
         )
 
+    def test_duplicate_live_key_fingerprint_cannot_claim_independent_custody(self) -> None:
+        self.service.enroll_key(
+            key_id="key-one",
+            custody_slot="custody-a",
+            public_key=_HARDWARE_KEY,
+        )
+
+        with self.assertRaisesRegex(ValueError, "already has a non-revoked enrollment"):
+            self.service.enroll_key(
+                key_id="key-two",
+                custody_slot="custody-b",
+                public_key=_HARDWARE_KEY,
+            )
+
     def test_rotation_binds_replacement_and_revokes_compromised_key(self) -> None:
         self._activate("key-one", "custody-a")
         self._activate("key-two", "custody-b")
         self._activate("key-three", "custody-c")
         self.service.enroll_key(
-            key_id="key-four", custody_slot="custody-d", public_key=_HARDWARE_KEY
+            key_id="key-four", custody_slot="custody-d", public_key=_hardware_key("key-four")
         )
         self.store.state = AuthorizationBootstrapState(
             completed_at="2026-08-25T00:00:00Z",

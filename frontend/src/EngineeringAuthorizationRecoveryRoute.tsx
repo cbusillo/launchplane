@@ -152,8 +152,8 @@ export function EngineeringAuthorizationRecoveryRoute({
                   />
                 </label>
               </div>
-              <label>
-                Hardware public key
+                <label className="engineering-form-field-wide">
+                  Hardware public key
                 <textarea
                   value={publicKey}
                   onChange={(event) => setPublicKey(event.target.value)}
@@ -289,6 +289,15 @@ export function EngineeringAuthorizationRecoveryRoute({
 
 function keyRows(data: AuthorizationRecoveryBrowserStatusResponse) {
   const keys = Array.isArray(data.readiness.keys) ? data.readiness.keys : [];
+  if (!keys.length) {
+    return (
+      <tr>
+        <td className="engineering-table-empty" colSpan={5}>
+          No recovery keys enrolled.
+        </td>
+      </tr>
+    );
+  }
   return keys.map((value) => {
     const key = value as Record<string, string>;
     return (

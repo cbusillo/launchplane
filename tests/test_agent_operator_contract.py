@@ -66,9 +66,7 @@ class AgentOperatorContractTests(unittest.TestCase):
             "read_agent_context": ["read_identity"],
             "evaluate_agent_write_intent": ["read_browser_mutation_identity"],
             "prepare_authorization_recovery": ["reject_authorization_recovery_credentials"],
-            "read_authorization_recovery_challenge": [
-                "reject_authorization_recovery_credentials"
-            ],
+            "read_authorization_recovery_challenge": ["reject_authorization_recovery_credentials"],
             "apply_product_config": ["read_browser_mutation_identity"],
             "apply_change_impact_policy": ["read_write_identity"],
             "read_change_impact_policy": ["read_identity"],

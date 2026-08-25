@@ -287,9 +287,12 @@ also binds the selected compromised key plus replacement key ID, replacement
 canonical public key, replacement fingerprint, and replacement custody slot, and
 must be signed by a different active recovery key.
 
-Preparation is nonauthorizing and bounded: it requires two independently
-labelled active custody slots, rate-limits open challenges, writes no policy,
-and stores only the server-computed plan and candidate digests. Apply re-plans
+Preparation is nonauthorizing and bounded: it requires two active keys with
+distinct custody slots and distinct canonical public-key fingerprints,
+rate-limits open challenges independently per signing key, writes no policy,
+and stores only the server-computed plan and candidate digests. Authenticated
+browser enrollment does not consume or depend on public challenge capacity.
+Apply re-plans
 the fixed recovery managed set, validates zero unrelated managed-rule changes,
 verifies SSHSIG, and then delegates to one atomic storage method. That method
 uses one serialized transaction with row locks to recheck challenge open/expiry,
@@ -303,9 +306,11 @@ applied, adopted, conflict, stale, replay, or reconciliation-required status.
 
 The recovery rule is fixed to one immutable GitHub human administrator for
 `launchplane/launchplane` global scope with only
-`authz_policy_grant.write`. Recovery does not accept policy uploads, GitHub
-Actions, agents, local-admin identities, provider mutations, secrets, or the
-generic managed-policy executor. Initial bootstrap writes a singleton monotonic
+`authz_policy_grant.write`. `restore_known_administrator` may replace only that
+fixed rule's immutable GitHub ID; initial bootstrap and key rotation may only
+add or preserve it. Recovery does not accept policy uploads, GitHub Actions,
+agents, local-admin identities, provider mutations, secrets, or the generic
+managed-policy executor. Initial bootstrap writes a singleton monotonic
 completion record; absent means pending, and completion inserts once and cannot
 be reset or overwritten. After completion,
 `LAUNCHPLANE_GITHUB_OAUTH_BOOTSTRAP_ADMIN_EMAILS` cannot elevate a session even

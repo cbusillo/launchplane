@@ -53,7 +53,7 @@ from control_plane.authorization_recovery import (
     AuthorizationRecoveryAudit,
     AuthorizationRecoveryChallenge,
     AuthorizationRecoveryKey,
-    AUTHORIZATION_RECOVERY_MAX_OPEN_CHALLENGES,
+    AUTHORIZATION_RECOVERY_MAX_OPEN_CHALLENGES_PER_SIGNING_KEY,
 )
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.change_impact import ChangeImpactPolicyRecord
@@ -2061,6 +2061,13 @@ class LaunchplaneAuthorizationRecoveryKeyRow(Base):
             sqlite_where=text("status in ('pending', 'active')"),
             postgresql_where=text("status in ('pending', 'active')"),
         ),
+        Index(
+            "launchplane_authorization_recovery_keys_live_fingerprint_uidx",
+            "fingerprint_sha256",
+            unique=True,
+            sqlite_where=text("status in ('pending', 'active')"),
+            postgresql_where=text("status in ('pending', 'active')"),
+        ),
         Index("launchplane_authorization_recovery_keys_slot_idx", "custody_slot"),
         Index("launchplane_authorization_recovery_keys_status_idx", "status", "enrolled_at"),
         CheckConstraint(
@@ -2099,6 +2106,12 @@ class LaunchplaneAuthorizationBootstrapRow(Base):
 class LaunchplaneAuthorizationRecoveryChallengeRow(Base):
     __tablename__ = "launchplane_authorization_recovery_challenges"
     __table_args__ = (
+        Index(
+            "launchplane_authorization_recovery_challenges_open_signer_idx",
+            "signing_key_id",
+            "expires_at",
+            "used_at",
+        ),
         Index("launchplane_authorization_recovery_challenges_expiry_idx", "expires_at", "used_at"),
         CheckConstraint(
             "operation in ('initial_bootstrap', 'restore_known_administrator', 'replace_recovery_key')",
@@ -2108,6 +2121,7 @@ class LaunchplaneAuthorizationRecoveryChallengeRow(Base):
 
     challenge_id: Mapped[str] = mapped_column(String, primary_key=True)
     operation: Mapped[str] = mapped_column(String, nullable=False)
+    signing_key_id: Mapped[str] = mapped_column(String, nullable=False)
     expires_at: Mapped[str] = mapped_column(String, nullable=False)
     used_at: Mapped[str] = mapped_column(String, nullable=False, server_default="")
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
@@ -2116,7 +2130,7 @@ class LaunchplaneAuthorizationRecoveryChallengeRow(Base):
 class LaunchplaneAuthorizationRecoveryAuditRow(Base):
     __tablename__ = "launchplane_authorization_recovery_audits"
     __table_args__ = (
-        Index("launchplane_authorization_recovery_audits_recorded_idx", "recorded_at"),
+        Index("launchplane_authorization_recovery_audits_recorded_idx", desc("recorded_at")),
         CheckConstraint(
             "status in ('accepted', 'rejected', 'completed')",
             name="launchplane_authorization_recovery_audits_status_ck",
@@ -14344,7 +14358,13 @@ class PostgresRecordStore(HumanSessionStore):
                 }
             )
         ]
-        if len({key.custody_slot for key in active_after_rotation}) < 2:
+        if (
+            len(active_after_rotation) < 2
+            or len(active_after_rotation)
+            != len({key.custody_slot for key in active_after_rotation})
+            or len(active_after_rotation)
+            != len({key.fingerprint_sha256 for key in active_after_rotation})
+        ):
             return "custody_not_independent"
         return None
 
@@ -14748,15 +14768,18 @@ class PostgresRecordStore(HumanSessionStore):
                 .select_from(LaunchplaneAuthorizationRecoveryChallengeRow)
                 .where(
                     LaunchplaneAuthorizationRecoveryChallengeRow.used_at == "",
+                    LaunchplaneAuthorizationRecoveryChallengeRow.signing_key_id
+                    == challenge.signing_key_id,
                     LaunchplaneAuthorizationRecoveryChallengeRow.expires_at > challenge.issued_at,
                 )
             )
-            if int(open_count or 0) >= AUTHORIZATION_RECOVERY_MAX_OPEN_CHALLENGES:
+            if int(open_count or 0) >= AUTHORIZATION_RECOVERY_MAX_OPEN_CHALLENGES_PER_SIGNING_KEY:
                 raise ValueError("Recovery challenge rate limit exceeded.")
             session.add(
                 LaunchplaneAuthorizationRecoveryChallengeRow(
                     challenge_id=challenge.challenge_id,
                     operation=challenge.operation,
+                    signing_key_id=challenge.signing_key_id,
                     expires_at=challenge.expires_at,
                     used_at=challenge.used_at,
                     payload=self._payload_dict(challenge),
@@ -14842,7 +14865,11 @@ class PostgresRecordStore(HumanSessionStore):
                     self._authorization_recovery_key_statement(status="active", for_update=True)
                 ).all()
             )
-            if len({key.custody_slot for key in active_keys}) < 2:
+            if (
+                len(active_keys) < 2
+                or len(active_keys) != len({key.custody_slot for key in active_keys})
+                or len(active_keys) != len({key.fingerprint_sha256 for key in active_keys})
+            ):
                 session.rollback()
                 return AuthorizationRecoveryApplyResult(
                     status="custody_not_independent", challenge=stored_challenge

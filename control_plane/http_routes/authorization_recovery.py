@@ -17,6 +17,7 @@ from control_plane.authorization_recovery import (
     AuthorizationRecoveryService,
     RecoveryOperation,
 )
+from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.contracts.outbox_delivery import OutboxDeliveryRecord
 from control_plane.http_routes.support import (
     ApiRouteRegistrar,
@@ -26,7 +27,6 @@ from control_plane.http_routes.support import (
 from control_plane.service_auth import (
     AuthorizationTarget,
     GitHubHumanIdentity,
-    LaunchplaneIdentity,
 )
 
 
@@ -36,7 +36,9 @@ AUTHORIZATION_RECOVERY_BROWSER_PROOF_ROUTE = "/v1/authorization-recovery/keys/{k
 AUTHORIZATION_RECOVERY_BROWSER_VERIFY_ROUTE = "/v1/authorization-recovery/keys/{key_id}/verify"
 AUTHORIZATION_RECOVERY_BROWSER_REVOKE_ROUTE = "/v1/authorization-recovery/keys/{key_id}/revoke"
 AUTHORIZATION_RECOVERY_PUBLIC_PREPARE_ROUTE = "/v1/authorization-recovery/public/prepare"
-AUTHORIZATION_RECOVERY_PUBLIC_STATUS_ROUTE = "/v1/authorization-recovery/public/challenges/{challenge_id}"
+AUTHORIZATION_RECOVERY_PUBLIC_STATUS_ROUTE = (
+    "/v1/authorization-recovery/public/challenges/{challenge_id}"
+)
 AUTHORIZATION_RECOVERY_PUBLIC_APPLY_ROUTE = "/v1/authorization-recovery/public/apply"
 
 _MAX_BODY_BYTES = 32 * 1024
@@ -224,7 +226,11 @@ def register_authorization_recovery_routes(
                 message="The active authorization policy record is unavailable.",
             )
         try:
-            records = tuple(reader(status="active", limit=2))
+            policy_reader = cast(
+                Callable[..., tuple[LaunchplaneAuthzPolicyRecord, ...]],
+                reader,
+            )
+            records = tuple(policy_reader(status="active", limit=2))
         except (RuntimeError, TypeError, ValueError):
             records = ()
         if len(records) != 1:
@@ -345,9 +351,7 @@ def register_authorization_recovery_routes(
         return signature
 
     async def read_browser_status(
-        identity: Annotated[
-            GitHubHumanIdentity, Depends(dependencies.read_github_human_identity)
-        ],
+        identity: Annotated[GitHubHumanIdentity, Depends(dependencies.read_github_human_identity)],
         record_store: Annotated[object, Depends(common.get_record_store)],
     ) -> JSONResponse:
         trace_id = common.next_trace_id()
@@ -361,10 +365,22 @@ def register_authorization_recovery_routes(
             )
             audit_reader = getattr(record_store, "list_authorization_recovery_audits", None)
             alert_reader = getattr(record_store, "list_outbox_delivery_records", None)
-            audits = tuple(audit_reader(limit=_MAX_RECENT_EVIDENCE)) if callable(audit_reader) else ()
+            audits = (
+                tuple(
+                    cast(
+                        Callable[..., tuple[AuthorizationRecoveryAudit, ...]],
+                        audit_reader,
+                    )(limit=_MAX_RECENT_EVIDENCE)
+                )
+                if callable(audit_reader)
+                else ()
+            )
             alerts = (
                 tuple(
-                    alert_reader(
+                    cast(
+                        Callable[..., tuple[OutboxDeliveryRecord, ...]],
+                        alert_reader,
+                    )(
                         kind="operator_authorization_recovery_alert",
                         aggregate_type="authorization_recovery",
                         limit=_MAX_RECENT_EVIDENCE,
@@ -414,7 +430,9 @@ def register_authorization_recovery_routes(
             return error(
                 trace_id=trace_id,
                 status_code=413 if str(exception) == "body_too_large" else 400,
-                code=str(exception) if str(exception) in {"body_too_large", "invalid_body"} else "invalid_request",
+                code=str(exception)
+                if str(exception) in {"body_too_large", "invalid_body"}
+                else "invalid_request",
             )
         except PermissionError:
             return error(trace_id=trace_id, status_code=403, code="authorization_denied")
@@ -423,9 +441,7 @@ def register_authorization_recovery_routes(
 
     async def read_browser_proof(
         key_id: str,
-        identity: Annotated[
-            GitHubHumanIdentity, Depends(dependencies.read_github_human_identity)
-        ],
+        identity: Annotated[GitHubHumanIdentity, Depends(dependencies.read_github_human_identity)],
         record_store: Annotated[object, Depends(common.get_record_store)],
     ) -> JSONResponse:
         trace_id = common.next_trace_id()
@@ -471,13 +487,17 @@ def register_authorization_recovery_routes(
                 record_store=record_store,
                 trace_id=trace_id,
             )
-            key = service.verify_key_proof(key_id=key_id, signature=decode_signature(envelope.signature))
+            key = service.verify_key_proof(
+                key_id=key_id, signature=decode_signature(envelope.signature)
+            )
             return response(AuthorizationRecoveryKeyResponse(trace_id=trace_id, key=key_view(key)))
         except ValueError as exception:
             return error(
                 trace_id=trace_id,
                 status_code=413 if str(exception) == "body_too_large" else 400,
-                code=str(exception) if str(exception) in {"body_too_large", "invalid_body"} else "proof_rejected",
+                code=str(exception)
+                if str(exception) in {"body_too_large", "invalid_body"}
+                else "proof_rejected",
             )
         except PermissionError:
             return error(trace_id=trace_id, status_code=403, code="authorization_denied")
@@ -508,7 +528,9 @@ def register_authorization_recovery_routes(
             return error(
                 trace_id=trace_id,
                 status_code=413 if str(exception) == "body_too_large" else 400,
-                code=str(exception) if str(exception) in {"body_too_large", "invalid_body"} else "revoke_rejected",
+                code=str(exception)
+                if str(exception) in {"body_too_large", "invalid_body"}
+                else "revoke_rejected",
             )
         except PermissionError:
             return error(trace_id=trace_id, status_code=403, code="authorization_denied")
@@ -530,14 +552,18 @@ def register_authorization_recovery_routes(
                 compromised_key_id=envelope.compromised_key_id,
                 replacement_key_id=envelope.replacement_key_id,
             )
-            return response(public_challenge_response(challenge=prepared.challenge, trace_id=trace_id))
+            return response(
+                public_challenge_response(challenge=prepared.challenge, trace_id=trace_id)
+            )
         except PermissionError:
             return error(trace_id=trace_id, status_code=403, code="credentials_not_accepted")
         except ValueError as exception:
             return error(
                 trace_id=trace_id,
                 status_code=413 if str(exception) == "body_too_large" else 400,
-                code=str(exception) if str(exception) in {"body_too_large", "invalid_body"} else "prepare_rejected",
+                code=str(exception)
+                if str(exception) in {"body_too_large", "invalid_body"}
+                else "prepare_rejected",
             )
         except RuntimeError:
             return error(trace_id=trace_id, status_code=503, code="recovery_unavailable")
@@ -552,7 +578,10 @@ def register_authorization_recovery_routes(
             reader = getattr(record_store, "read_authorization_recovery_challenge", None)
             if not callable(reader):
                 raise RuntimeError("authorization_recovery_store_unavailable")
-            challenge = reader(challenge_id)
+            challenge = cast(
+                Callable[[str], AuthorizationRecoveryChallenge | None],
+                reader,
+            )(challenge_id)
             if challenge is None:
                 return error(trace_id=trace_id, status_code=404, code="challenge_not_found")
             return response(public_challenge_response(challenge=challenge, trace_id=trace_id))
@@ -588,7 +617,9 @@ def register_authorization_recovery_routes(
             return error(
                 trace_id=trace_id,
                 status_code=413 if str(exception) == "body_too_large" else 400,
-                code=str(exception) if str(exception) in {"body_too_large", "invalid_body", "invalid_signature"} else "apply_rejected",
+                code=str(exception)
+                if str(exception) in {"body_too_large", "invalid_body", "invalid_signature"}
+                else "apply_rejected",
             )
         except RuntimeError:
             return error(trace_id=trace_id, status_code=503, code="recovery_unavailable")

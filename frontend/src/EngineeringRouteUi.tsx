@@ -7,7 +7,7 @@ import {
   X,
   type LucideIcon,
 } from "lucide-react";
-import { useEffect, useRef, type ReactNode } from "react";
+import { useLayoutEffect, useRef, type ReactNode } from "react";
 
 import { formatTime } from "./format";
 import {
@@ -47,14 +47,16 @@ export function EngineeringRouteFrame({
 }) {
   const navigationRef = useRef<HTMLElement>(null);
 
-  useEffect(() => {
-    navigationRef.current
-      ?.querySelector<HTMLElement>('[aria-current="page"]')
-      ?.scrollIntoView({
-        behavior: "instant",
-        block: "nearest",
-        inline: "center",
-      });
+  useLayoutEffect(() => {
+    const navigation = navigationRef.current;
+    const activeLink = navigation?.querySelector<HTMLElement>('[aria-current="page"]');
+    if (!navigation || !activeLink) {
+      return;
+    }
+    navigation.scrollLeft = Math.max(
+      0,
+      activeLink.offsetLeft - (navigation.clientWidth - activeLink.offsetWidth) / 2,
+    );
   }, [view]);
 
   return (

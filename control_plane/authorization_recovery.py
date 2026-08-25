@@ -48,7 +48,7 @@ AUTHORIZATION_RECOVERY_CONTEXT = "launchplane"
 AUTHORIZATION_RECOVERY_KEY_TYPES = frozenset({"sk-ssh-ed25519@openssh.com"})
 AUTHORIZATION_RECOVERY_CHALLENGE_TTL = timedelta(minutes=10)
 AUTHORIZATION_RECOVERY_POP_TTL = timedelta(minutes=10)
-AUTHORIZATION_RECOVERY_MAX_OPEN_CHALLENGES = 8
+AUTHORIZATION_RECOVERY_MAX_OPEN_CHALLENGES_PER_SIGNING_KEY = 2
 AUTHORIZATION_RECOVERY_SIGNATURE_MAX_BYTES = 16 * 1024
 AUTHORIZATION_RECOVERY_VERIFY_TIMEOUT_SECONDS = 5
 _AUTHORIZATION_RECOVERY_SOURCE = "service:authorization-recovery"
@@ -514,11 +514,12 @@ class AuthorizationRecoveryService:
     def readiness(self) -> dict[str, object]:
         keys = self._record_store.list_authorization_recovery_keys()
         active = [key for key in keys if key.status == "active"]
+        independent_key_count = _independent_active_key_count(active)
         return {
             "bootstrap_status": self.bootstrap_state(),
             "active_key_count": len(active),
-            "independent_custody_slot_count": len({key.custody_slot for key in active}),
-            "ready": _active_custody_slot_count(active) >= 2,
+            "independent_custody_slot_count": independent_key_count,
+            "ready": independent_key_count >= 2,
             "keys": [key.redacted() for key in keys],
         }
 
@@ -538,17 +539,21 @@ class AuthorizationRecoveryService:
         if self._record_store.read_authorization_recovery_key(normalized_key_id) is not None:
             raise ValueError("Recovery key ID already exists.")
         normalized_key, key_type = validate_recovery_public_key(public_key)
+        fingerprint_sha256 = recovery_key_fingerprint(normalized_key)
         normalized_slot = _require_record_token(custody_slot, field_name="custody_slot")
         for existing_key in self._record_store.list_authorization_recovery_keys():
-            if existing_key.custody_slot == normalized_slot and existing_key.status != "revoked":
+            if existing_key.status == "revoked":
+                continue
+            if existing_key.custody_slot == normalized_slot:
                 raise ValueError("Recovery key custody slot already has a non-revoked key.")
-        self._require_prepare_capacity()
+            if existing_key.fingerprint_sha256 == fingerprint_sha256:
+                raise ValueError("Recovery public key already has a non-revoked enrollment.")
         now = self._now()
         record = AuthorizationRecoveryKey(
             key_id=normalized_key_id,
             custody_slot=normalized_slot,
             public_key=normalized_key,
-            fingerprint_sha256=recovery_key_fingerprint(normalized_key),
+            fingerprint_sha256=fingerprint_sha256,
             key_type=key_type,
             enrolled_at=_timestamp(now),
             proof_challenge=self._random_token(32),
@@ -579,11 +584,29 @@ class AuthorizationRecoveryService:
     def verify_key_proof(self, *, key_id: str, signature: bytes) -> AuthorizationRecoveryKey:
         key = self._require_key(key_id)
         if key.status != "pending" or _parse_timestamp(key.proof_expires_at) <= self._now():
-            self._audit(event="key_proof", status="rejected", key=key, reason_code="proof_expired")
+            self._audit(
+                event="key_proof",
+                status="rejected",
+                key=key,
+                reason_code="proof_expired",
+                deduplicate=True,
+            )
             raise ValueError("Recovery key proof-of-possession challenge is unavailable.")
-        _verify_sshsig(
-            public_key=key.public_key, payload=self.proof_bytes(key_id=key_id), signature=signature
-        )
+        try:
+            _verify_sshsig(
+                public_key=key.public_key,
+                payload=self.proof_bytes(key_id=key_id),
+                signature=signature,
+            )
+        except ValueError:
+            self._audit(
+                event="key_proof",
+                status="rejected",
+                key=key,
+                reason_code="signature_invalid",
+                deduplicate=True,
+            )
+            raise
         activated = key.model_copy(
             update={
                 "status": "active",
@@ -606,7 +629,7 @@ class AuthorizationRecoveryService:
             if candidate.status == "active"
         ]
         remaining = [candidate for candidate in active if candidate.key_id != key.key_id]
-        if key.status == "active" and _active_custody_slot_count(remaining) < 2:
+        if key.status == "active" and _independent_active_key_count(remaining) < 2:
             raise ValueError(
                 "Recovery key revocation cannot leave fewer than two independent active keys."
             )
@@ -633,8 +656,8 @@ class AuthorizationRecoveryService:
     ) -> RecoveryPrepareResult:
         self._require_operation_allowed(operation)
         self._require_recovery_readiness()
-        self._require_prepare_capacity()
         signing_key = self._require_active_key(signing_key_id)
+        self._require_prepare_capacity(signing_key=signing_key)
         replacement_key: AuthorizationRecoveryKey | None = None
         compromised_key: AuthorizationRecoveryKey | None = None
         if operation == "replace_recovery_key":
@@ -658,7 +681,7 @@ class AuthorizationRecoveryService:
                     }
                 )
             ]
-            if _active_custody_slot_count(active_after_rotation) < 2:
+            if _independent_active_key_count(active_after_rotation) < 2:
                 raise ValueError(
                     "Recovery key rotation cannot leave fewer than two independent active keys."
                 )
@@ -670,7 +693,7 @@ class AuthorizationRecoveryService:
             intended_github_id=intended_github_id,
             trace_id="prepare",
         )
-        self._validate_fixed_recovery_policy_diff(diff)
+        self._validate_fixed_recovery_policy_diff(diff, operation=operation)
         now = self._now()
         challenge = AuthorizationRecoveryChallenge(
             challenge_id=f"authz-recovery-{self._random_token(24)}",
@@ -712,12 +735,24 @@ class AuthorizationRecoveryService:
         trace_id: str,
     ) -> AuthorizationRecoveryApplyResult:
         challenge = self._record_store.read_authorization_recovery_challenge(challenge_id.strip())
-        if challenge is None or _parse_timestamp(challenge.expires_at) <= self._now():
-            self._audit(event="apply", status="rejected", reason_code="challenge_unavailable")
+        if challenge is None:
+            raise ValueError("Recovery challenge is unavailable.")
+        if _parse_timestamp(challenge.expires_at) <= self._now():
+            self._audit(
+                event="apply",
+                status="rejected",
+                challenge=challenge,
+                reason_code="challenge_unavailable",
+                deduplicate=True,
+            )
             raise ValueError("Recovery challenge is unavailable.")
         if challenge.used_at:
             self._audit(
-                event="apply", status="rejected", challenge=challenge, reason_code="replayed"
+                event="apply",
+                status="rejected",
+                challenge=challenge,
+                reason_code="replayed",
+                deduplicate=True,
             )
             raise ValueError("Recovery challenge has already been consumed.")
         if key_id.strip() != challenge.signing_key_id:
@@ -726,6 +761,7 @@ class AuthorizationRecoveryService:
                 status="rejected",
                 challenge=challenge,
                 reason_code="signing_key_mismatch",
+                deduplicate=True,
             )
             raise ValueError("Recovery signing key does not match the prepared challenge.")
         key = self._require_active_key(key_id)
@@ -736,23 +772,36 @@ class AuthorizationRecoveryService:
                 challenge=challenge,
                 key=key,
                 reason_code="signing_key_mismatch",
+                deduplicate=True,
             )
             raise ValueError(
                 "Recovery signing key fingerprint does not match the prepared challenge."
             )
         self._require_recovery_readiness()
-        _verify_sshsig(
-            public_key=key.public_key,
-            payload=challenge.canonical_bytes(service_identity=self._service_identity),
-            signature=signature,
-        )
+        signing_payload = challenge.canonical_bytes(service_identity=self._service_identity)
+        try:
+            _verify_sshsig(
+                public_key=key.public_key,
+                payload=signing_payload,
+                signature=signature,
+            )
+        except ValueError:
+            self._audit(
+                event="apply",
+                status="rejected",
+                challenge=challenge,
+                key=key,
+                reason_code="signature_invalid",
+                deduplicate=True,
+            )
+            raise
         active_record = self._require_single_active_policy()
         plan, candidate_record, diff = self._candidate_record(
             active_record=active_record,
             intended_github_id=challenge.intended_github_id,
             trace_id=trace_id,
         )
-        self._validate_fixed_recovery_policy_diff(diff)
+        self._validate_fixed_recovery_policy_diff(diff, operation=challenge.operation)
         if diff.plan_sha256 != challenge.plan_sha256:
             self._audit(
                 event="apply",
@@ -760,6 +809,7 @@ class AuthorizationRecoveryService:
                 challenge=challenge,
                 key=key,
                 reason_code="plan_drift",
+                deduplicate=True,
             )
             raise ValueError("Recovery plan drifted after challenge preparation.")
         if candidate_record.policy_sha256 != challenge.candidate_policy_sha256:
@@ -769,6 +819,7 @@ class AuthorizationRecoveryService:
                 challenge=challenge,
                 key=key,
                 reason_code="candidate_drift",
+                deduplicate=True,
             )
             raise ValueError("Recovery candidate drifted after challenge preparation.")
         completed_at = _timestamp(self._now())
@@ -807,6 +858,7 @@ class AuthorizationRecoveryService:
                     challenge=challenge,
                     key=key,
                     reason_code=result.status,
+                    deduplicate=True,
                 )
             )
             raise ValueError(f"Recovery apply did not complete safely: {result.status}.")
@@ -866,8 +918,8 @@ class AuthorizationRecoveryService:
         )
         return plan, candidate_record, diff
 
+    @staticmethod
     def _recovery_plan(
-        self,
         *,
         active_policy: LaunchplaneAuthzPolicy,
         intended_github_id: int,
@@ -900,11 +952,23 @@ class AuthorizationRecoveryService:
             desired_policy=desired_policy,
         )
 
-    def _validate_fixed_recovery_policy_diff(self, diff: AuthzManagedPolicyDiff) -> None:
+    @staticmethod
+    def _validate_fixed_recovery_policy_diff(
+        diff: AuthzManagedPolicyDiff,
+        *,
+        operation: RecoveryOperation,
+    ) -> None:
         if diff.managed_set_id != AUTHORIZATION_RECOVERY_MANAGED_SET_ID:
             raise ValueError("Recovery plan targeted the wrong managed authz set.")
-        if diff.adopted_rule_count or diff.updated_rule_count or diff.removed_rule_count:
-            raise ValueError("Recovery plan may only add or preserve the fixed managed rule.")
+        if diff.adopted_rule_count or diff.removed_rule_count:
+            raise ValueError("Recovery plan may not adopt or remove managed rules.")
+        if operation == "restore_known_administrator":
+            if diff.added_rule_count + diff.updated_rule_count > 1:
+                raise ValueError("Administrator recovery may change only the fixed managed rule.")
+        elif diff.updated_rule_count:
+            raise ValueError(
+                "This recovery operation may only add or preserve the fixed managed rule."
+            )
         if diff.added_rule_count not in {0, 1}:
             raise ValueError("Recovery plan must add at most one managed rule.")
         changed_rule_ids = {change.managed_rule_id for change in diff.changes}
@@ -928,14 +992,23 @@ class AuthorizationRecoveryService:
                 "Recovery cannot run before initial authorization bootstrap completes."
             )
 
-    def _require_prepare_capacity(self) -> None:
+    def _require_prepare_capacity(self, *, signing_key: AuthorizationRecoveryKey) -> None:
         now = self._now()
         open_challenge_count = sum(
-            challenge.used_at == "" and _parse_timestamp(challenge.expires_at) > now
+            challenge.signing_key_id == signing_key.key_id
+            and challenge.used_at == ""
+            and _parse_timestamp(challenge.expires_at) > now
             for challenge in self._record_store.list_authorization_recovery_challenges()
         )
-        if open_challenge_count >= AUTHORIZATION_RECOVERY_MAX_OPEN_CHALLENGES:
-            self._audit(event="prepare", status="rejected", reason_code="challenge_rate_limited")
+        if open_challenge_count >= AUTHORIZATION_RECOVERY_MAX_OPEN_CHALLENGES_PER_SIGNING_KEY:
+            self._audit(
+                event="prepare",
+                status="rejected",
+                key=signing_key,
+                reason_code="challenge_rate_limited",
+                deduplicate=True,
+                dedupe_bucket=now.strftime("%Y-%m-%dT%H:00:00Z"),
+            )
             raise ValueError("Recovery challenge rate limit exceeded.")
 
     def _require_single_active_policy(self) -> LaunchplaneAuthzPolicyRecord:
@@ -968,6 +1041,8 @@ class AuthorizationRecoveryService:
         challenge: AuthorizationRecoveryChallenge | None = None,
         key: AuthorizationRecoveryKey | None = None,
         reason_code: str = "",
+        deduplicate: bool = False,
+        dedupe_bucket: str = "",
     ) -> None:
         self._record_store.write_authorization_recovery_audit(
             self._audit_record(
@@ -976,6 +1051,8 @@ class AuthorizationRecoveryService:
                 challenge=challenge,
                 key=key,
                 reason_code=reason_code,
+                deduplicate=deduplicate,
+                dedupe_bucket=dedupe_bucket,
             )
         )
 
@@ -989,16 +1066,22 @@ class AuthorizationRecoveryService:
         key: AuthorizationRecoveryKey | None = None,
         reason_code: str = "",
         payload: dict[str, object] | None = None,
+        deduplicate: bool = False,
+        dedupe_bucket: str = "",
     ) -> AuthorizationRecoveryAudit:
         now = recorded_at or _timestamp(self._now())
         audit_material: dict[str, object] = {
             "event": event,
             "status": status,
-            "recorded_at": now,
             "challenge_id": challenge.challenge_id if challenge else "",
+            "key_id": key.key_id if key else "",
             "reason_code": reason_code,
-            "nonce": self._random_token(16),
         }
+        if dedupe_bucket:
+            audit_material["dedupe_bucket"] = dedupe_bucket
+        if not deduplicate:
+            audit_material["recorded_at"] = now
+            audit_material["nonce"] = self._random_token(16)
         return AuthorizationRecoveryAudit(
             audit_id=f"authz-recovery-audit-{hashlib.sha256(_canonical_bytes(audit_material)).hexdigest()[:32]}",
             event=event,
@@ -1014,8 +1097,13 @@ class AuthorizationRecoveryService:
         )
 
 
-def _active_custody_slot_count(keys: Sequence[AuthorizationRecoveryKey]) -> int:
-    return len({key.custody_slot for key in keys if key.status == "active"})
+def _independent_active_key_count(keys: Sequence[AuthorizationRecoveryKey]) -> int:
+    active = tuple(key for key in keys if key.status == "active")
+    if len(active) != len({key.custody_slot for key in active}):
+        return 0
+    if len(active) != len({key.fingerprint_sha256 for key in active}):
+        return 0
+    return len(active)
 
 
 def _recovered_identity(github_id: int) -> GitHubHumanIdentity:
@@ -1083,13 +1171,11 @@ def _verify_sshsig(
     with tempfile.TemporaryDirectory(prefix="launchplane-sshsig-") as directory:
         base = Path(directory)
         allowed_signers = base / "allowed_signers"
-        payload_file = base / "payload"
         signature_file = base / "signature"
         allowed_signers.write_text(
             f"{AUTHORIZATION_RECOVERY_SIGNER_IDENTITY} {canonical_key}\n",
             encoding="utf-8",
         )
-        payload_file.write_bytes(payload)
         signature_file.write_bytes(signature)
         try:
             completed = subprocess.run(

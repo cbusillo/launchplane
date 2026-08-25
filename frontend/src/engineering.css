@@ -259,6 +259,137 @@
   color: var(--accent-strong);
 }
 
+.engineering-stack {
+  display: grid;
+  gap: 16px;
+}
+
+.engineering-card {
+  display: grid;
+  gap: 12px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  padding: 20px;
+}
+
+.engineering-card > h2,
+.engineering-card > h3,
+.engineering-card > p,
+.engineering-card > label {
+  margin: 0;
+}
+
+.engineering-card > p,
+.engineering-card li {
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.engineering-card label {
+  display: grid;
+  min-width: 0;
+  gap: 7px;
+  color: var(--text-strong);
+  font-size: 13px;
+  font-weight: 680;
+}
+
+.engineering-card input,
+.engineering-card textarea {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface-raised);
+  color: var(--text);
+  font: inherit;
+  padding: 10px 11px;
+}
+
+.engineering-card textarea {
+  resize: vertical;
+}
+
+.engineering-card input:focus,
+.engineering-card textarea:focus {
+  outline: 2px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  outline-offset: 1px;
+}
+
+.engineering-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: end;
+  gap: 12px;
+}
+
+.engineering-form-grid > button {
+  justify-self: start;
+}
+
+.engineering-form-field-wide {
+  grid-column: 1 / -1;
+}
+
+.engineering-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--border-soft);
+  border-radius: 9px;
+}
+
+.engineering-table-wrap table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.engineering-table-wrap th,
+.engineering-table-wrap td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-soft);
+  text-align: left;
+  white-space: nowrap;
+}
+
+.engineering-table-wrap th {
+  background: var(--surface-muted);
+  color: var(--faint);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.engineering-table-wrap tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.engineering-table-empty {
+  color: var(--muted);
+  text-align: center !important;
+}
+
+@media (max-width: 640px) {
+  .engineering-card {
+    padding: 16px;
+  }
+
+  .engineering-form-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .engineering-form-field-wide {
+    grid-column: auto;
+  }
+
+  .engineering-form-grid > button,
+  .engineering-card > button {
+    width: 100%;
+    min-height: 44px;
+  }
+}
+
 .engineering-empty {
   display: flex;
   align-items: flex-start;
