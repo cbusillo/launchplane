@@ -1641,6 +1641,32 @@ def _authz_policy_retains_independent_administration(
     )
 
 
+def _authz_policy_allows_immutable_github_id_administration(
+    *,
+    policy: LaunchplaneAuthzPolicy,
+    github_id: int,
+) -> bool:
+    return github_id > 0 and any(
+        isinstance(rule, GitHubHumanPolicyRule) and github_id in rule.github_ids
+        for rule in _authz_policy_administrator_rules(policy)
+    )
+
+
+def _authz_policy_retains_independent_github_id_administration(
+    *,
+    policy: LaunchplaneAuthzPolicy,
+    applying_github_id: int,
+) -> bool:
+    return any(
+        (
+            any(github_id != applying_github_id for github_id in rule.github_ids)
+            if isinstance(rule, GitHubHumanPolicyRule)
+            else True
+        )
+        for rule in _authz_policy_administrator_rules(policy)
+    )
+
+
 def _reconcile_managed_policy(
     *,
     current_policy: LaunchplaneAuthzPolicy,
@@ -2081,6 +2107,7 @@ def execute_managed_authz_policy_reconcile(
     trace_id: str,
     now_timestamp: TimestampProvider,
     authorized_policy_sha256: str = "",
+    immutable_applying_github_id: int = 0,
 ) -> AuthzManagedPolicyRouteResult:
     active_records = record_store.list_authz_policy_records(status="active", limit=1)
     if not active_records:
@@ -2100,19 +2127,35 @@ def execute_managed_authz_policy_reconcile(
         expected_policy_sha256=authorized_policy_sha256,
     )
     policy_safety_blockers = list(managed_diff.policy_safety_blockers)
-    if managed_diff.changed and not updated_policy.allows(
-        identity=identity,
-        action=_AUTHZ_POLICY_ADMIN_ACTION,
-        product=request.product,
-        context="launchplane",
-    ):
+    applying_admin_retained = (
+        _authz_policy_allows_immutable_github_id_administration(
+            policy=updated_policy,
+            github_id=immutable_applying_github_id,
+        )
+        if immutable_applying_github_id
+        else updated_policy.allows(
+            identity=identity,
+            action=_AUTHZ_POLICY_ADMIN_ACTION,
+            product=request.product,
+            context="launchplane",
+        )
+    )
+    if managed_diff.changed and not applying_admin_retained:
         policy_safety_blockers.append(
             _managed_policy_safety_blocker("authz_policy_applying_admin_removed")
         )
-    if managed_diff.changed and not _authz_policy_retains_independent_administration(
-        policy=updated_policy,
-        applying_identity=identity,
-    ):
+    independent_admin_retained = (
+        _authz_policy_retains_independent_github_id_administration(
+            policy=updated_policy,
+            applying_github_id=immutable_applying_github_id,
+        )
+        if immutable_applying_github_id
+        else _authz_policy_retains_independent_administration(
+            policy=updated_policy,
+            applying_identity=identity,
+        )
+    )
+    if managed_diff.changed and not independent_admin_retained:
         policy_safety_blockers.append(
             _managed_policy_safety_blocker("authz_policy_independent_admin_unreachable")
         )

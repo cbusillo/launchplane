@@ -8916,7 +8916,7 @@ class PostgresRecordStore(HumanSessionStore):
     ) -> None:
         row.descriptor_id = record.descriptor_id
         row.status = record.status
-        row.requester_github_id = record.requested_by.github_id
+        row.requester_github_id = getattr(record.requested_by, "github_id", 0)
         row.created_at = record.created_at
         row.updated_at = record.updated_at
         row.expires_at = record.expires_at
@@ -8974,7 +8974,7 @@ class PostgresRecordStore(HumanSessionStore):
                         operation_id=record.operation_id,
                         descriptor_id=record.descriptor_id,
                         status=record.status,
-                        requester_github_id=record.requested_by.github_id,
+                        requester_github_id=getattr(record.requested_by, "github_id", 0),
                         created_at=record.created_at,
                         updated_at=record.updated_at,
                         expires_at=record.expires_at,

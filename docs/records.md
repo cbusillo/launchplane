@@ -2627,16 +2627,22 @@ append-only lifecycle ledger. PostgreSQL stores them in
 names for local/test/rehearsal use only.
 
 `PrivilegedOperationRecord` stores the typed descriptor/version, safety class,
-GitHub-human requester, normalized request and digests, bounded redacted human
-evidence, current lifecycle status, and timestamps.
+GitHub-human or opaque terminal-agent requester, normalized request and digests,
+bounded human evidence, current lifecycle status, and timestamps. The indexed
+`requester_github_id` column uses `0` for terminal-agent proposals; the payload
+contains only the domain-separated requester fingerprint, never the raw agent
+subject or token label.
 `PrivilegedOperationEventRecord` binds each transition to the exact resulting
 record digest. Creation is replay-safe; changed replay payloads and all
 transitions from terminal state fail closed. Approved records can be claimed by
 the supervised worker immediately; a revocation is possible only before claim.
 
 The payload excludes managed-secret IDs, secret-version IDs, ciphertext,
-plaintext, and raw planner errors. See `docs/privileged-operations.md` for the
-full evidence and authorization boundary.
+plaintext, raw terminal-agent identity values, and raw planner errors.
+Managed-policy records retain the exact desired policy for authorized human
+review plus bounded diff and CAS/read-back evidence. See
+`docs/privileged-operations.md` for the full evidence and authorization
+boundary.
 
 **Preserved history:** references to Phase 1 planning records describe the
 pre-worker lifecycle and do not constrain the current Phase 2 statuses.

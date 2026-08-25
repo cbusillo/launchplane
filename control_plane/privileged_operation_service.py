@@ -6,21 +6,26 @@ from datetime import datetime, timedelta, timezone
 from typing import Protocol, cast
 
 from control_plane.contracts.privileged_operation import (
+    ManagedAuthzPolicySetHumanEvidence,
     ManagedSecretReencryptionPlanInput,
     PrivilegedOperationActor,
     PrivilegedOperationApproval,
     PrivilegedOperationConflictError,
     PrivilegedOperationEventRecord,
     PrivilegedOperationEventWriteStatus,
+    PrivilegedOperationDescriptorId,
     PrivilegedOperationRecord,
+    PrivilegedOperationRequest,
+    PrivilegedOperationRequester,
+    PrivilegedOperationSourceKind,
     build_privileged_operation_event_id,
     build_privileged_operation_id,
+    build_privileged_operation_id_for_actor,
     privileged_operation_evidence_digest,
     privileged_operation_record_digest,
     privileged_operation_request_digest,
 )
 from control_plane.privileged_operation_registry import (
-    MANAGED_SECRET_REENCRYPTION_DESCRIPTOR,
     read_privileged_operation_descriptor,
 )
 
@@ -135,9 +140,11 @@ def _replay_existing_plan(
     *,
     store: PrivilegedOperationStore,
     operation_id: str,
-    actor: PrivilegedOperationActor,
+    actor: PrivilegedOperationRequester,
+    descriptor_id: PrivilegedOperationDescriptorId,
+    source_kind: PrivilegedOperationSourceKind,
     source_event_id: str,
-    request: ManagedSecretReencryptionPlanInput,
+    request: PrivilegedOperationRequest,
     expires_in_seconds: int,
 ) -> PrivilegedOperationWriteResult | None:
     try:
@@ -147,10 +154,11 @@ def _replay_existing_plan(
     expected_expiry = datetime.fromisoformat(record.created_at) + timedelta(
         seconds=expires_in_seconds
     )
+    registration = read_privileged_operation_descriptor(descriptor_id)
     if (
-        record.descriptor_id != MANAGED_SECRET_REENCRYPTION_DESCRIPTOR.descriptor_id
-        or record.descriptor_version != MANAGED_SECRET_REENCRYPTION_DESCRIPTOR.descriptor_version
-        or record.safety_class != MANAGED_SECRET_REENCRYPTION_DESCRIPTOR.safety_class
+        record.descriptor_id != registration.descriptor.descriptor_id
+        or record.descriptor_version != registration.descriptor.descriptor_version
+        or record.safety_class != registration.descriptor.safety_class
         or record.source_event_id != source_event_id
         or record.requested_by != actor
         or record.request_digest != privileged_operation_request_digest(request)
@@ -162,7 +170,7 @@ def _replay_existing_plan(
     event_id = build_privileged_operation_event_id(
         operation_id=operation_id,
         action="planned",
-        source_kind="browser_api",
+        source_kind=source_kind,
         source_event_id=source_event_id,
     )
     event = _read_privileged_operation_event(
@@ -181,13 +189,14 @@ def _replay_existing_plan(
     )
 
 
-def create_privileged_operation_plan(
+def create_typed_privileged_operation_plan(
     *,
     record_store: object,
-    requester_github_id: int,
-    requester_login: str,
+    descriptor_id: PrivilegedOperationDescriptorId,
+    actor: PrivilegedOperationRequester,
+    source_kind: PrivilegedOperationSourceKind,
     source_event_id: str,
-    request: ManagedSecretReencryptionPlanInput,
+    request: PrivilegedOperationRequest,
     expires_in_seconds: int = DEFAULT_PRIVILEGED_OPERATION_TTL_SECONDS,
     now: Callable[[], datetime] = _utc_now,
 ) -> PrivilegedOperationWriteResult:
@@ -197,27 +206,28 @@ def create_privileged_operation_plan(
         <= MAX_PRIVILEGED_OPERATION_TTL_SECONDS
     ):
         raise ValueError("Privileged-operation plan expiry must be between 300 and 86400 seconds.")
+    expected_source_kind = "agent_api" if actor.identity_type == "terminal_agent" else "browser_api"
+    if source_kind != expected_source_kind:
+        raise ValueError("Privileged-operation plan source does not match requester identity.")
     store = require_privileged_operation_store(record_store)
-    actor = PrivilegedOperationActor(
-        identity_type="github_human",
-        github_id=requester_github_id,
-        login=requester_login,
-    )
-    operation_id = build_privileged_operation_id(
-        github_id=requester_github_id,
+    operation_id = build_privileged_operation_id_for_actor(
+        descriptor_id=descriptor_id,
+        actor=actor,
         source_event_id=source_event_id,
     )
     replay = _replay_existing_plan(
         store=store,
         operation_id=operation_id,
         actor=actor,
+        descriptor_id=descriptor_id,
+        source_kind=source_kind,
         source_event_id=source_event_id,
         request=request,
         expires_in_seconds=expires_in_seconds,
     )
     if replay is not None:
         return replay
-    registration = read_privileged_operation_descriptor("managed-secret-reencryption")
+    registration = read_privileged_operation_descriptor(descriptor_id)
     evidence = registration.planner(record_store, request)
     created_at = now().astimezone(timezone.utc)
     record = PrivilegedOperationRecord(
@@ -241,7 +251,7 @@ def create_privileged_operation_plan(
         sequence=1,
         action="planned",
         occurred_at=record.created_at,
-        source_kind="browser_api",
+        source_kind=source_kind,
         source_event_id=source_event_id,
         actor=actor,
         resulting_record_digest=privileged_operation_record_digest(record),
@@ -253,6 +263,8 @@ def create_privileged_operation_plan(
             store=store,
             operation_id=operation_id,
             actor=actor,
+            descriptor_id=descriptor_id,
+            source_kind=source_kind,
             source_event_id=source_event_id,
             request=request,
             expires_in_seconds=expires_in_seconds,
@@ -277,6 +289,44 @@ def create_privileged_operation_plan(
         record=persisted_record,
         event=persisted_event,
     )
+
+
+def create_privileged_operation_plan(
+    *,
+    record_store: object,
+    requester_github_id: int,
+    requester_login: str,
+    source_event_id: str,
+    request: ManagedSecretReencryptionPlanInput,
+    expires_in_seconds: int = DEFAULT_PRIVILEGED_OPERATION_TTL_SECONDS,
+    now: Callable[[], datetime] = _utc_now,
+) -> PrivilegedOperationWriteResult:
+    """Preserve the original managed-secret planning API and deterministic IDs."""
+
+    actor = PrivilegedOperationActor(
+        identity_type="github_human",
+        github_id=requester_github_id,
+        login=requester_login,
+    )
+    expected_operation_id = build_privileged_operation_id(
+        github_id=requester_github_id,
+        source_event_id=source_event_id,
+    )
+    result = create_typed_privileged_operation_plan(
+        record_store=record_store,
+        descriptor_id="managed-secret-reencryption",
+        actor=actor,
+        source_kind="browser_api",
+        source_event_id=source_event_id,
+        request=request,
+        expires_in_seconds=expires_in_seconds,
+        now=now,
+    )
+    if result.record.operation_id != expected_operation_id:
+        raise PrivilegedOperationConflictError(
+            "Managed-secret privileged-operation identity compatibility was not preserved."
+        )
+    return result
 
 
 def expire_privileged_operation_if_due(
@@ -350,6 +400,7 @@ def list_privileged_operations(
     *,
     record_store: object,
     status: str = "",
+    descriptor_id: str = "",
     limit: int | None = None,
     now: Callable[[], datetime] = _utc_now,
 ) -> tuple[PrivilegedOperationRecord, ...]:
@@ -361,12 +412,12 @@ def list_privileged_operations(
         for expiry_status in expiry_statuses:
             for record in store.list_privileged_operation_records(
                 status=expiry_status,
-                descriptor_id=MANAGED_SECRET_REENCRYPTION_DESCRIPTOR.descriptor_id,
+                descriptor_id=descriptor_id,
             ):
                 expire_privileged_operation_if_due(record_store=store, record=record, now=now)
     return store.list_privileged_operation_records(
         status=status,
-        descriptor_id=MANAGED_SECRET_REENCRYPTION_DESCRIPTOR.descriptor_id,
+        descriptor_id=descriptor_id,
         limit=limit,
     )
 
@@ -507,6 +558,13 @@ def approve_privileged_operation(
     if record.status != "planned":
         raise PrivilegedOperationNotApprovableError(
             f"Privileged-operation plan is already {record.status}."
+        )
+    if (
+        isinstance(record.evidence, ManagedAuthzPolicySetHumanEvidence)
+        and record.evidence.result_status == "blocked"
+    ):
+        raise PrivilegedOperationNotApprovableError(
+            "Managed authz policy operations with blockers cannot be approved."
         )
     occurred_at = _timestamp(now().astimezone(timezone.utc))
     approved = record.model_copy(

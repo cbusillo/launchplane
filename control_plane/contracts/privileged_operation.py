@@ -4,9 +4,15 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import re
-from typing import Literal
+from typing import Literal, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from control_plane.authz_grant_service import (
+    AuthzManagedPolicyDiff,
+    AuthzManagedPolicyReconcileEnvelope,
+)
+from control_plane.service_auth import LaunchplaneAuthzPolicy
 
 
 PRIVILEGED_SECRET_OPERATION_PLAN_ACTION = "privileged_secret_operation.plan"
@@ -15,9 +21,18 @@ PRIVILEGED_SECRET_OPERATION_CANCEL_ACTION = "privileged_secret_operation.cancel"
 PRIVILEGED_SECRET_OPERATION_APPROVE_ACTION = "privileged_secret_operation.approve"
 PRIVILEGED_SECRET_OPERATION_REVOKE_ACTION = "privileged_secret_operation.revoke"
 PRIVILEGED_OPERATION_SUMMARY_READ_ACTION = "privileged_operation_summary.read"
+AUTHZ_POLICY_OPERATION_PROPOSE_ACTION = "authz_policy_operation.propose"
+AUTHZ_POLICY_OPERATION_READ_ACTION = "authz_policy_operation.read"
+AUTHZ_POLICY_OPERATION_CANCEL_ACTION = "authz_policy_operation.cancel"
+AUTHZ_POLICY_OPERATION_APPROVE_ACTION = "authz_policy_operation.approve"
+AUTHZ_POLICY_OPERATION_REVOKE_ACTION = "authz_policy_operation.revoke"
+PRIVILEGED_POLICY_OPERATION_SUMMARY_READ_ACTION = "privileged_policy_operation_summary.read"
 
-PrivilegedOperationDescriptorId = Literal["managed-secret-reencryption"]
-PrivilegedOperationSafetyClass = Literal["secret_backed"]
+PrivilegedOperationDescriptorId = Literal[
+    "managed-secret-reencryption",
+    "managed-authz-policy-set",
+]
+PrivilegedOperationSafetyClass = Literal["secret_backed", "policy_admin"]
 PrivilegedOperationStatus = Literal[
     "planned",
     "approved",
@@ -39,7 +54,7 @@ PrivilegedOperationEventAction = Literal[
     "cancelled",
 ]
 PrivilegedOperationEventWriteStatus = Literal["written", "replayed"]
-PrivilegedOperationSourceKind = Literal["browser_api", "system"]
+PrivilegedOperationSourceKind = Literal["agent_api", "browser_api", "system"]
 
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _SOURCE_EVENT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
@@ -102,11 +117,32 @@ class PrivilegedOperationActor(BaseModel):
     @model_validator(mode="after")
     def _validate_actor(self) -> "PrivilegedOperationActor":
         object.__setattr__(self, "login", _required_token(self.login, "login"))
-        if self.identity_type == "github_human" and self.github_id < 1:
-            raise ValueError("GitHub-human privileged-operation actors require github_id")
-        if self.identity_type == "system" and (self.github_id != 0 or self.login != "system"):
+        if self.identity_type == "github_human":
+            if self.github_id < 1:
+                raise ValueError("GitHub-human privileged-operation actors require github_id")
+        elif self.github_id != 0 or self.login != "system":
             raise ValueError("System privileged-operation actors must use the system identity")
         return self
+
+
+class PrivilegedOperationAgentActor(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    identity_type: Literal["terminal_agent"] = "terminal_agent"
+    login: Literal["terminal-agent"] = "terminal-agent"
+    principal_sha256: str
+
+    @model_validator(mode="after")
+    def _validate_actor(self) -> "PrivilegedOperationAgentActor":
+        object.__setattr__(
+            self,
+            "principal_sha256",
+            _sha256(self.principal_sha256, "principal_sha256"),
+        )
+        return self
+
+
+PrivilegedOperationRequester: TypeAlias = PrivilegedOperationActor | PrivilegedOperationAgentActor
 
 
 class ManagedSecretReencryptionPlanInput(BaseModel):
@@ -177,6 +213,82 @@ class ManagedSecretReencryptionHumanEvidence(BaseModel):
         return self
 
 
+class ManagedAuthzPolicySetProposalInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: int = Field(default=1, ge=1)
+    managed_set_id: str = Field(min_length=1, max_length=96)
+    desired_policy: LaunchplaneAuthzPolicy
+    reason: str = Field(min_length=1, max_length=240)
+    related_issue: str = Field(default="", max_length=128)
+
+    @model_validator(mode="after")
+    def _validate_input(self) -> "ManagedAuthzPolicySetProposalInput":
+        if self.schema_version != 1:
+            raise ValueError("Unsupported managed authz policy proposal schema version.")
+        reason = _required_token(self.reason, "reason")
+        related_issue = self.related_issue.strip()
+        reconcile_request = AuthzManagedPolicyReconcileEnvelope(
+            schema_version=2,
+            product="launchplane",
+            mode="dry_run",
+            managed_set_id=self.managed_set_id,
+            schema_migration="reject",
+            unmanaged_adoption="reject",
+            reason=reason,
+            related_issue=related_issue,
+            desired_policy=self.desired_policy,
+        )
+        object.__setattr__(self, "managed_set_id", reconcile_request.managed_set_id)
+        object.__setattr__(self, "desired_policy", reconcile_request.desired_policy)
+        object.__setattr__(self, "reason", reason)
+        object.__setattr__(self, "related_issue", related_issue)
+        return self
+
+    def reconcile_request(
+        self,
+        *,
+        mode: Literal["dry_run", "apply"] = "dry_run",
+        reviewed_plan_sha256: str = "",
+    ) -> AuthzManagedPolicyReconcileEnvelope:
+        return AuthzManagedPolicyReconcileEnvelope(
+            schema_version=2,
+            product="launchplane",
+            mode=mode,
+            managed_set_id=self.managed_set_id,
+            schema_migration="reject",
+            unmanaged_adoption="reject",
+            reason=self.reason,
+            related_issue=self.related_issue,
+            reviewed_plan_sha256=reviewed_plan_sha256,
+            desired_policy=self.desired_policy,
+        )
+
+
+class ManagedAuthzPolicySetHumanEvidence(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: int = Field(default=1, ge=1)
+    result_status: Literal["ok", "blocked"]
+    plan_digest: str
+    diff: AuthzManagedPolicyDiff
+
+    @model_validator(mode="after")
+    def _validate_evidence(self) -> "ManagedAuthzPolicySetHumanEvidence":
+        if self.schema_version != 1:
+            raise ValueError("Unsupported managed authz policy evidence schema version.")
+        object.__setattr__(self, "plan_digest", _sha256(self.plan_digest, "plan_digest"))
+        if self.plan_digest != self.diff.plan_sha256:
+            raise ValueError("Managed authz policy evidence must bind the exact plan digest.")
+        blocked = bool(
+            self.diff.policy_safety_blocker_count
+            or self.diff.operational_readiness_blocked_rule_count
+        )
+        if blocked != (self.result_status == "blocked"):
+            raise ValueError("Managed authz policy evidence status does not match blockers.")
+        return self
+
+
 class PrivilegedOperationApproval(BaseModel):
     """Immutable browser-human authorization for a single planned operation."""
 
@@ -198,7 +310,7 @@ class PrivilegedOperationApproval(BaseModel):
     managed_rule_id: str
     expires_at: str
     reason: str = Field(min_length=1, max_length=4000)
-    rollback_class: Literal["key_retained"] = "key_retained"
+    rollback_class: Literal["key_retained", "policy_cas"] = "key_retained"
 
     @model_validator(mode="after")
     def _validate_approval(self) -> "PrivilegedOperationApproval":
@@ -263,6 +375,67 @@ class PrivilegedOperationExecutionEvidence(BaseModel):
         return self
 
 
+class ManagedAuthzPolicySetExecutionEvidence(BaseModel):
+    """Redacted policy-record evidence written by the service-internal worker."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: int = Field(default=1, ge=1)
+    result_status: Literal["ok", "error"]
+    result_digest: str
+    changed: bool
+    previous_record_id: str = ""
+    previous_revision: int = Field(default=0, ge=0)
+    previous_policy_sha256: str = ""
+    resulting_record_id: str = ""
+    resulting_revision: int = Field(default=0, ge=0)
+    resulting_policy_sha256: str = ""
+    reconciliation_required: bool
+    failure_code: str = Field(default="", max_length=160)
+
+    @model_validator(mode="after")
+    def _validate_execution_evidence(self) -> "ManagedAuthzPolicySetExecutionEvidence":
+        if self.schema_version != 1:
+            raise ValueError("Unsupported managed authz policy execution evidence schema version.")
+        object.__setattr__(self, "result_digest", _sha256(self.result_digest, "result_digest"))
+        failure_code = self.failure_code.strip()
+        object.__setattr__(self, "failure_code", failure_code)
+        if self.result_status == "ok":
+            if failure_code or self.reconciliation_required:
+                raise ValueError(
+                    "Successful policy execution evidence cannot require reconciliation"
+                )
+            for field_name in (
+                "previous_record_id",
+                "previous_policy_sha256",
+                "resulting_record_id",
+                "resulting_policy_sha256",
+            ):
+                value = str(getattr(self, field_name))
+                normalized = (
+                    _sha256(value, field_name)
+                    if field_name.endswith("sha256")
+                    else _required_token(value, field_name)
+                )
+                object.__setattr__(self, field_name, normalized)
+            if self.previous_revision < 1 or self.resulting_revision < 1:
+                raise ValueError("Successful policy execution evidence requires policy revisions")
+        elif not failure_code:
+            raise ValueError("Failed policy execution evidence requires a bounded failure code")
+        return self
+
+
+PrivilegedOperationRequest: TypeAlias = (
+    ManagedSecretReencryptionPlanInput | ManagedAuthzPolicySetProposalInput
+)
+PrivilegedOperationHumanEvidence: TypeAlias = (
+    ManagedSecretReencryptionHumanEvidence | ManagedAuthzPolicySetHumanEvidence
+)
+PrivilegedOperationTerminalEvidence: TypeAlias = (
+    PrivilegedOperationExecutionEvidence | ManagedAuthzPolicySetExecutionEvidence
+)
+
+
 class PrivilegedOperationRecord(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -273,16 +446,16 @@ class PrivilegedOperationRecord(BaseModel):
     safety_class: PrivilegedOperationSafetyClass
     status: PrivilegedOperationStatus
     source_event_id: str = Field(min_length=1, max_length=128)
-    requested_by: PrivilegedOperationActor
-    request: ManagedSecretReencryptionPlanInput
+    requested_by: PrivilegedOperationRequester
+    request: PrivilegedOperationRequest
     request_digest: str
-    evidence: ManagedSecretReencryptionHumanEvidence
+    evidence: PrivilegedOperationHumanEvidence
     evidence_digest: str
     created_at: str
     updated_at: str
     expires_at: str
     approval: PrivilegedOperationApproval | None = None
-    execution: PrivilegedOperationExecutionEvidence | None = None
+    execution: PrivilegedOperationTerminalEvidence | None = None
     terminal_at: str = ""
     terminal_reason: str = Field(default="", max_length=4000)
 
@@ -298,8 +471,36 @@ class PrivilegedOperationRecord(BaseModel):
         object.__setattr__(self, "operation_id", operation_id)
         source_event_id = normalize_privileged_operation_source_event_id(self.source_event_id)
         object.__setattr__(self, "source_event_id", source_event_id)
-        if self.requested_by.identity_type != "github_human":
-            raise ValueError("Privileged-operation plans require a GitHub-human requester")
+        if self.descriptor_id == "managed-secret-reencryption":
+            if self.safety_class != "secret_backed":
+                raise ValueError("Managed-secret operations require secret-backed safety")
+            if self.requested_by.identity_type != "github_human":
+                raise ValueError("Managed-secret operations require a GitHub-human requester")
+            if not isinstance(self.request, ManagedSecretReencryptionPlanInput) or not isinstance(
+                self.evidence, ManagedSecretReencryptionHumanEvidence
+            ):
+                raise ValueError("Managed-secret operation payload types do not match descriptor")
+            if self.execution is not None and not isinstance(
+                self.execution, PrivilegedOperationExecutionEvidence
+            ):
+                raise ValueError("Managed-secret execution evidence does not match descriptor")
+            if self.approval is not None and self.approval.rollback_class != "key_retained":
+                raise ValueError("Managed-secret approvals require key-retained rollback")
+        else:
+            if self.safety_class != "policy_admin":
+                raise ValueError("Managed-policy operations require policy-admin safety")
+            if self.requested_by.identity_type not in {"github_human", "terminal_agent"}:
+                raise ValueError("Managed-policy operations require a human or agent requester")
+            if not isinstance(self.request, ManagedAuthzPolicySetProposalInput) or not isinstance(
+                self.evidence, ManagedAuthzPolicySetHumanEvidence
+            ):
+                raise ValueError("Managed-policy operation payload types do not match descriptor")
+            if self.execution is not None and not isinstance(
+                self.execution, ManagedAuthzPolicySetExecutionEvidence
+            ):
+                raise ValueError("Managed-policy execution evidence does not match descriptor")
+            if self.approval is not None and self.approval.rollback_class != "policy_cas":
+                raise ValueError("Managed-policy approvals require policy-CAS rollback")
         object.__setattr__(self, "request_digest", _sha256(self.request_digest, "request_digest"))
         object.__setattr__(
             self,
@@ -410,7 +611,7 @@ class PrivilegedOperationEventRecord(BaseModel):
     occurred_at: str
     source_kind: PrivilegedOperationSourceKind
     source_event_id: str = Field(min_length=1, max_length=128)
-    actor: PrivilegedOperationActor
+    actor: PrivilegedOperationRequester
     reason: str = Field(default="", max_length=4000)
     resulting_record_digest: str
 
@@ -433,10 +634,13 @@ class PrivilegedOperationEventRecord(BaseModel):
             _sha256(self.resulting_record_digest, "resulting_record_digest"),
         )
         if self.action == "planned":
-            if self.sequence != 1 or self.source_kind != "browser_api":
-                raise ValueError("Planned events must be the first browser-authored event")
-            if self.actor.identity_type != "github_human" or reason:
-                raise ValueError("Planned events require a GitHub human and no event reason")
+            expected_source_kind = (
+                "agent_api" if self.actor.identity_type == "terminal_agent" else "browser_api"
+            )
+            if self.sequence != 1 or self.source_kind != expected_source_kind:
+                raise ValueError("Planned events must use the requester's API surface")
+            if self.actor.identity_type not in {"github_human", "terminal_agent"} or reason:
+                raise ValueError("Planned events require a human or agent and no event reason")
         elif self.action in {"approved", "revoked", "cancelled"}:
             if self.sequence not in {2, 3} or self.source_kind != "browser_api":
                 raise ValueError("Human privileged-operation events must be browser-authored")
@@ -487,22 +691,56 @@ class PrivilegedOperationAgentSummary(BaseModel):
     expires_at: str
 
 
-def privileged_operation_request_digest(request: ManagedSecretReencryptionPlanInput) -> str:
+class ManagedAuthzPolicySetAgentSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: int = Field(default=1, ge=1)
+    operation_id: str
+    descriptor_id: Literal["managed-authz-policy-set"] = "managed-authz-policy-set"
+    descriptor_version: int
+    status: PrivilegedOperationStatus
+    result_status: Literal["ok", "blocked"]
+    changed: bool
+    added_rule_count: int = Field(ge=0)
+    adopted_rule_count: int = Field(ge=0)
+    updated_rule_count: int = Field(ge=0)
+    removed_rule_count: int = Field(ge=0)
+    unchanged_rule_count: int = Field(ge=0)
+    policy_safety_blocker_count: int = Field(ge=0)
+    operational_readiness_blocked_rule_count: int = Field(ge=0)
+    created_at: str
+    expires_at: str
+
+
+PrivilegedOperationSummary: TypeAlias = (
+    PrivilegedOperationAgentSummary | ManagedAuthzPolicySetAgentSummary
+)
+
+
+def privileged_operation_request_digest(request: PrivilegedOperationRequest) -> str:
     return _digest_payload(request.model_dump(mode="json"))
 
 
 def privileged_operation_evidence_digest(
-    evidence: ManagedSecretReencryptionHumanEvidence,
+    evidence: PrivilegedOperationHumanEvidence,
 ) -> str:
     return _digest_payload(evidence.model_dump(mode="json"))
 
 
 def privileged_operation_pre_state_digest(
-    evidence: ManagedSecretReencryptionHumanEvidence,
+    evidence: PrivilegedOperationHumanEvidence,
 ) -> str:
-    payload = evidence.model_dump(mode="json")
-    payload.pop("plan_digest")
-    return _digest_payload(payload)
+    if isinstance(evidence, ManagedSecretReencryptionHumanEvidence):
+        payload = evidence.model_dump(mode="json")
+        payload.pop("plan_digest")
+        return _digest_payload(payload)
+    return _digest_payload(
+        {
+            "previous_record_id": evidence.diff.previous_record_id,
+            "previous_revision": evidence.diff.previous_revision,
+            "previous_policy_sha256": evidence.diff.previous_policy_sha256,
+        }
+    )
 
 
 def privileged_operation_record_digest(record: PrivilegedOperationRecord) -> str:
@@ -539,6 +777,42 @@ def build_privileged_operation_id(*, github_id: int, source_event_id: str) -> st
     normalized_source_event_id = normalize_privileged_operation_source_event_id(source_event_id)
     digest = _digest_payload([github_id, normalized_source_event_id])[:32]
     return f"privileged-operation-{digest}"
+
+
+def build_privileged_operation_id_for_actor(
+    *,
+    descriptor_id: PrivilegedOperationDescriptorId,
+    actor: PrivilegedOperationRequester,
+    source_event_id: str,
+) -> str:
+    if descriptor_id == "managed-secret-reencryption":
+        if not isinstance(actor, PrivilegedOperationActor) or actor.identity_type != "github_human":
+            raise ValueError("Managed-secret operation IDs require a GitHub-human actor")
+        return build_privileged_operation_id(
+            github_id=actor.github_id,
+            source_event_id=source_event_id,
+        )
+    normalized_source_event_id = normalize_privileged_operation_source_event_id(source_event_id)
+    if isinstance(actor, PrivilegedOperationAgentActor):
+        principal = f"agent:{actor.principal_sha256}"
+    elif actor.identity_type == "github_human":
+        principal = f"github:{actor.github_id}"
+    else:
+        raise ValueError("Managed-policy operation IDs require a human or agent actor")
+    digest = _digest_payload(["managed-authz-policy-set", principal, normalized_source_event_id])[
+        :32
+    ]
+    return f"privileged-operation-{digest}"
+
+
+def terminal_agent_principal_sha256(*, subject: str, token_label: str) -> str:
+    return _digest_payload(
+        [
+            "launchplane-terminal-agent-privileged-operation-v1",
+            _required_token(subject, "subject"),
+            _required_token(token_label, "token_label"),
+        ]
+    )
 
 
 def build_privileged_operation_event_id(
@@ -626,8 +900,27 @@ def validate_privileged_operation_transition(
 
 def privileged_operation_agent_summary(
     record: PrivilegedOperationRecord,
-) -> PrivilegedOperationAgentSummary:
+) -> PrivilegedOperationSummary:
     evidence = record.evidence
+    if isinstance(evidence, ManagedAuthzPolicySetHumanEvidence):
+        return ManagedAuthzPolicySetAgentSummary(
+            operation_id=record.operation_id,
+            descriptor_version=record.descriptor_version,
+            status=record.status,
+            result_status=evidence.result_status,
+            changed=evidence.diff.changed,
+            added_rule_count=evidence.diff.added_rule_count,
+            adopted_rule_count=evidence.diff.adopted_rule_count,
+            updated_rule_count=evidence.diff.updated_rule_count,
+            removed_rule_count=evidence.diff.removed_rule_count,
+            unchanged_rule_count=evidence.diff.unchanged_rule_count,
+            policy_safety_blocker_count=evidence.diff.policy_safety_blocker_count,
+            operational_readiness_blocked_rule_count=(
+                evidence.diff.operational_readiness_blocked_rule_count
+            ),
+            created_at=record.created_at,
+            expires_at=record.expires_at,
+        )
     return PrivilegedOperationAgentSummary(
         operation_id=record.operation_id,
         descriptor_id=record.descriptor_id,

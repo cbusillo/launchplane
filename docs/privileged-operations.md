@@ -19,11 +19,15 @@ route, execute action, static execution credential, or agent execution path.
   and planners are compiled into the service registry.
 - Registry validation runs at import/startup and prevents service startup when
   a descriptor or action-safety classification is invalid.
-- The first descriptor is `managed-secret-reencryption` version 1.
-- Its planner calls the existing managed-secret re-encryption computation with
-  `apply=False` only.
+- `managed-secret-reencryption` version 1 calls the existing managed-secret
+  re-encryption computation with `apply=False` only.
+- `managed-authz-policy-set` version 1 calls the existing managed-rule-set
+  reconciliation planner with `mode="dry_run"` only. Its request contains one
+  managed set, the exact desired schema-v2 policy fragment, reason, and optional
+  related issue. Planning never writes the active authorization policy.
 - The Engineering UI lists redacted human evidence and may offer browser-human
-  approve/revoke controls. It never offers an execute control.
+  approve/revoke controls. Policy proposals include an explicit exact-policy
+  review disclosure. The UI never offers an execute control.
 
 The registry is not an arbitrary route, command, SQL, or payload proxy. New
 descriptors require code, schemas, tests, documentation, and review.
@@ -52,6 +56,12 @@ The planning and approval actions are:
 | `privileged_secret_operation.approve` | `secret_backed` | GitHub-human browser approval |
 | `privileged_secret_operation.revoke` | `secret_backed` | GitHub-human browser revocation |
 | `privileged_operation_summary.read` | `read` | Counts-only agent projection |
+| `authz_policy_operation.propose` | `policy_admin` | Inert GitHub-human or terminal-agent proposal |
+| `authz_policy_operation.read` | `policy_admin` | GitHub-human policy-plan reads |
+| `authz_policy_operation.cancel` | `policy_admin` | GitHub-human policy-plan cancellation |
+| `authz_policy_operation.approve` | `policy_admin` | GitHub-human browser approval |
+| `authz_policy_operation.revoke` | `policy_admin` | GitHub-human browser revocation |
+| `privileged_policy_operation_summary.read` | `read` | Proposal-owner agent projection |
 
 Approval requires exactly one managed GitHub-human rule that is pinned to
 non-empty immutable `github_ids`. Login, organization, team, or role selectors
@@ -61,6 +71,21 @@ policy rule or grant. The routes fail closed until a later, separately approved
 DB-native managed-rule activation. GitHub secrets,
 workflows, borrowed identities, and local-admin bearer credentials are not
 bootstrap paths.
+
+Policy-operation approval additionally requires that the signed-in approver is
+already authorized for `authz_policy_grant.write` by an active schema-v2 rule
+with the same immutable GitHub ID. Execution checks that immutable pre-existing
+administrator authority again, then requires the candidate policy to retain the
+applying administrator and at least one distinct reachable policy
+administrator. An approval-only rule cannot bootstrap its holder into policy
+administration.
+
+The dry-run planner does not know which human will approve, so its evidence
+cannot include the identity-dependent applying-administrator and independent-
+administrator checks. Those checks run at approval and execution and may still
+reject an otherwise blocker-free plan. Worker safety uses immutable GitHub-ID
+semantics and treats GitHub-human administrator rules without a distinct
+immutable ID as possibly covering the approver rather than as independent.
 
 Canary activation is staged and DB-native: first activate exactly
 `privileged_secret_operation.plan`, `privileged_secret_operation.read`, and
@@ -146,11 +171,17 @@ The persisted human evidence may include:
 - active and retirement key IDs needed for human root-rotation review;
 - legacy-compatibility state;
 - bounded request reason, source, actor, and lifecycle timestamps.
+- managed-policy previous/candidate revisions and policy digests, bounded rule
+  change counts, blocker codes, and exact desired policy input for authorized
+  human review.
 
 It never persists managed-secret IDs, secret-version IDs, ciphertext,
-plaintext, or raw planner error strings. The agent projection is narrower: it
-contains counts, status, descriptor/version, timestamps, and compatibility
-state only; it excludes key IDs, request data, and human identity.
+plaintext, raw terminal-agent subjects/token labels, or raw planner error
+strings. A terminal-agent requester is persisted only as a domain-separated
+SHA-256 principal fingerprint. Agent projections are narrower: they contain
+counts, status, descriptor/version, and timestamps only; they exclude request
+data, desired policy bodies, key IDs, and human identity. A terminal agent may
+read only the policy proposal created by its own fingerprint.
 
 ## HTTP, UI, And Worker
 
@@ -165,6 +196,7 @@ Human routes:
 
 Agent route:
 
+- `POST /v1/agent/privileged-operations/plans`
 - `GET /v1/agent/privileged-operations/plans/{operation_id}`
 
 The UI is at `/ui/engineering/privileged-operations`. It exposes bounded
@@ -175,11 +207,17 @@ Approval may make an operation immediately claimable by the worker. A browser
 human can revoke only before that claim; after claim, the worker owns terminal
 execution and performs its required fresh authorization check.
 
+Human and agent proposal request bodies are capped at 256 KiB before parsing or
+persistence.
+
 `launchplane service privileged-operation-workers run` is the service-internal worker loop.
 It claims approved records, re-plans with `apply=False`, rejects plan/pre-state
 drift, reads the fresh active policy, reauthorizes only the immutable approver
-GitHub ID against the exact managed rule, constructs approver-bound durable
-authorization provenance, then invokes the typed executor with `apply=True`.
+GitHub ID against the exact approval rule, and invokes the descriptor's typed
+executor. Managed-policy execution also proves the approver's pre-existing
+immutable-ID policy-admin authority, constructs the exact reviewed apply
+envelope, and uses the existing atomic authorization-policy CAS plus
+idempotency completion before reading the active record back.
 The operation-record ID derives the deterministic token passed to the existing
 managed-secret reservation/single-flight path. All managed-secret re-encryption
 operations share one global provider-target fence even when their operation IDs
@@ -189,6 +227,11 @@ completed rotation or fail closed with reconciliation still required. Results
 and failures write only redacted counts, digests, bounded failure codes, and
 reconciliation state.
 
+Managed-policy recovery does not recompute against the already-applied policy.
+It verifies the completed inner CAS reservation and exact active-policy
+revision/SHA read-back, then adopts the outer privileged-operation result. A
+stale or ambiguous read-back remains reconciliation-required.
+
 ## Legacy Re-encryption Route
 
 `POST /v1/secrets/reencrypt` is retained only as an explicit migration boundary:
@@ -196,6 +239,15 @@ reconciliation state.
 `mode="apply"` refuses with `privileged_operation_approval_required`. The
 legacy `secret.reencrypt.dry-run` and `secret.reencrypt.apply` actions cannot
 approve or execute an operation.
+
+## Transitional Managed-Policy Route
+
+`POST /v1/authz-policies/managed-rule-sets/reconcile` remains temporarily
+available for existing protected workflows, but accepts only GitHub Actions
+OIDC workload transport. Browser sessions, terminal agents, local operators,
+local administrators, and other bearer identities fail closed. Signed-in
+humans review and approve `managed-authz-policy-set` records; they cannot call a
+public policy execute route.
 
 ## Completion Holds
 

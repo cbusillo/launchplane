@@ -6325,7 +6325,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(active_records[0].revision, 1)
         self.assertEqual(superseded_records, ())
 
-    def test_managed_authz_reconcile_allows_admin_human_session(self) -> None:
+    def test_managed_authz_reconcile_rejects_admin_human_session(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
             database_url = _sqlite_database_url(root / "launchplane.sqlite3")
@@ -6369,9 +6369,8 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 headers=_fastapi_browser_mutation_headers(session_manager, cookie),
             )
 
-        self.assertEqual(status_code, 202)
-        self.assertFalse(payload["result"]["changed"])
-        self.assertEqual(payload["result"]["audit"]["operator"], {"type": "github_human"})
+        self.assertEqual(status_code, 401)
+        self.assertEqual(payload["error"]["code"], "authentication_required")
 
     def test_managed_authz_reconcile_rejects_non_admin_workflow_authority(self) -> None:
         for action in ("product_profile.read", "launchplane_service_deploy.execute"):

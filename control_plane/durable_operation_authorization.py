@@ -256,6 +256,33 @@ def managed_github_id_rule_allows(
     )
 
 
+def managed_github_id_action_allows(
+    *,
+    policy: LaunchplaneAuthzPolicy,
+    github_id: int,
+    action: str,
+    product: str,
+    context: str,
+    target: AuthorizationTarget,
+) -> bool:
+    if policy.schema_version != 2 or github_id < 1:
+        return False
+    return any(
+        rule.managed_set_id
+        and rule.managed_rule_id
+        and rule.github_ids
+        and github_id in rule.github_ids
+        and rule.allows_scope(
+            action=action,
+            product=product,
+            context=context,
+            target=target,
+            schema_version=policy.schema_version,
+        )
+        for rule in policy.github_humans
+    )
+
+
 def durable_operation_authorization_allows(
     *,
     authorization: DurableOperationAuthorization,

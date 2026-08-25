@@ -8,6 +8,8 @@ import unittest
 from unittest.mock import patch
 
 from control_plane.contracts.privileged_operation import (
+    AUTHZ_POLICY_OPERATION_APPROVE_ACTION,
+    AUTHZ_POLICY_OPERATION_PROPOSE_ACTION,
     ManagedSecretReencryptionHumanEvidence,
     ManagedSecretReencryptionPlanInput,
     PRIVILEGED_OPERATION_SUMMARY_READ_ACTION,
@@ -15,10 +17,12 @@ from control_plane.contracts.privileged_operation import (
     PRIVILEGED_SECRET_OPERATION_PLAN_ACTION,
     PRIVILEGED_SECRET_OPERATION_READ_ACTION,
     PrivilegedOperationActor,
+    PrivilegedOperationAgentActor,
     PrivilegedOperationConflictError,
     PrivilegedOperationEventRecord,
     PrivilegedOperationRecord,
     build_privileged_operation_id,
+    build_privileged_operation_id_for_actor,
     privileged_operation_agent_summary,
     privileged_operation_evidence_digest,
     privileged_operation_record_digest,
@@ -106,6 +110,28 @@ class PrivilegedOperationContractTests(unittest.TestCase):
         self.assertEqual(action_safety(PRIVILEGED_SECRET_OPERATION_READ_ACTION), "secret_backed")
         self.assertEqual(action_safety(PRIVILEGED_SECRET_OPERATION_CANCEL_ACTION), "secret_backed")
         self.assertEqual(action_safety(PRIVILEGED_OPERATION_SUMMARY_READ_ACTION), "read")
+        self.assertEqual(action_safety(AUTHZ_POLICY_OPERATION_PROPOSE_ACTION), "policy_admin")
+        self.assertEqual(action_safety(AUTHZ_POLICY_OPERATION_APPROVE_ACTION), "policy_admin")
+
+    def test_secret_actor_json_and_id_remain_compatible_while_policy_ids_are_namespaced(
+        self,
+    ) -> None:
+        record = _record()
+        self.assertNotIn("principal_sha256", record.model_dump_json())
+        self.assertEqual(
+            build_privileged_operation_id_for_actor(
+                descriptor_id="managed-secret-reencryption",
+                actor=record.requested_by,
+                source_event_id=record.source_event_id,
+            ),
+            record.operation_id,
+        )
+        policy_operation_id = build_privileged_operation_id_for_actor(
+            descriptor_id="managed-authz-policy-set",
+            actor=PrivilegedOperationAgentActor(principal_sha256="d" * 64),
+            source_event_id=record.source_event_id,
+        )
+        self.assertNotEqual(policy_operation_id, record.operation_id)
 
     def test_agent_summary_is_counts_only(self) -> None:
         rendered = privileged_operation_agent_summary(_record()).model_dump_json()

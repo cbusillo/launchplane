@@ -2,22 +2,36 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane import secrets as control_plane_secrets
+from control_plane.authz_grant_service import (
+    AuthzPolicyConflictError,
+    plan_managed_authz_policy_reconcile,
+)
 from control_plane.contracts.privileged_operation import (
+    AUTHZ_POLICY_OPERATION_APPROVE_ACTION,
+    AUTHZ_POLICY_OPERATION_CANCEL_ACTION,
+    AUTHZ_POLICY_OPERATION_PROPOSE_ACTION,
+    AUTHZ_POLICY_OPERATION_READ_ACTION,
+    AUTHZ_POLICY_OPERATION_REVOKE_ACTION,
+    ManagedAuthzPolicySetHumanEvidence,
+    ManagedAuthzPolicySetProposalInput,
     ManagedSecretReencryptionHumanEvidence,
     ManagedSecretReencryptionPlanInput,
     PRIVILEGED_OPERATION_SUMMARY_READ_ACTION,
+    PRIVILEGED_POLICY_OPERATION_SUMMARY_READ_ACTION,
     PRIVILEGED_SECRET_OPERATION_APPROVE_ACTION,
     PRIVILEGED_SECRET_OPERATION_CANCEL_ACTION,
     PRIVILEGED_SECRET_OPERATION_PLAN_ACTION,
     PRIVILEGED_SECRET_OPERATION_READ_ACTION,
     PRIVILEGED_SECRET_OPERATION_REVOKE_ACTION,
     PrivilegedOperationDescriptorId,
+    PrivilegedOperationHumanEvidence,
+    PrivilegedOperationRequest,
     PrivilegedOperationSafetyClass,
 )
 from control_plane.service_auth import AgentConsumerActionSafety, action_safety
@@ -53,11 +67,11 @@ class PrivilegedOperationDescriptor(BaseModel):
         if len(set(actions)) != len(actions):
             raise ValueError("Privileged-operation descriptor actions must be unique")
         expected_safety: tuple[AgentConsumerActionSafety, ...] = (
-            "secret_backed",
-            "secret_backed",
-            "secret_backed",
-            "secret_backed",
-            "secret_backed",
+            self.safety_class,
+            self.safety_class,
+            self.safety_class,
+            self.safety_class,
+            self.safety_class,
             "read",
         )
         actual_safety = tuple(action_safety(action) for action in actions)
@@ -78,8 +92,8 @@ class PrivilegedOperationPlanningStoreError(TypeError):
 
 
 PrivilegedOperationPlanner = Callable[
-    [object, ManagedSecretReencryptionPlanInput],
-    ManagedSecretReencryptionHumanEvidence,
+    [object, PrivilegedOperationRequest],
+    PrivilegedOperationHumanEvidence,
 ]
 
 
@@ -99,6 +113,18 @@ MANAGED_SECRET_REENCRYPTION_DESCRIPTOR = PrivilegedOperationDescriptor(
     approve_action=PRIVILEGED_SECRET_OPERATION_APPROVE_ACTION,
     revoke_action=PRIVILEGED_SECRET_OPERATION_REVOKE_ACTION,
     agent_summary_read_action=PRIVILEGED_OPERATION_SUMMARY_READ_ACTION,
+)
+
+MANAGED_AUTHZ_POLICY_SET_DESCRIPTOR = PrivilegedOperationDescriptor(
+    descriptor_id="managed-authz-policy-set",
+    descriptor_version=1,
+    safety_class="policy_admin",
+    plan_action=AUTHZ_POLICY_OPERATION_PROPOSE_ACTION,
+    human_read_action=AUTHZ_POLICY_OPERATION_READ_ACTION,
+    cancel_action=AUTHZ_POLICY_OPERATION_CANCEL_ACTION,
+    approve_action=AUTHZ_POLICY_OPERATION_APPROVE_ACTION,
+    revoke_action=AUTHZ_POLICY_OPERATION_REVOKE_ACTION,
+    agent_summary_read_action=PRIVILEGED_POLICY_OPERATION_SUMMARY_READ_ACTION,
 )
 
 
@@ -142,8 +168,12 @@ def _required_string_tuple(result: Mapping[str, object], field_name: str) -> tup
 
 def plan_managed_secret_reencryption(
     record_store: object,
-    request: ManagedSecretReencryptionPlanInput,
+    request: PrivilegedOperationRequest,
 ) -> ManagedSecretReencryptionHumanEvidence:
+    if not isinstance(request, ManagedSecretReencryptionPlanInput):
+        raise PrivilegedOperationPlannerError(
+            "Managed-secret re-encryption planner received an invalid request type."
+        )
     list_records = getattr(record_store, "list_secret_records", None)
     read_version = getattr(record_store, "read_secret_version", None)
     if not callable(list_records) or not callable(read_version):
@@ -198,11 +228,46 @@ def plan_managed_secret_reencryption(
     )
 
 
+def plan_managed_authz_policy_set(
+    record_store: object,
+    request: PrivilegedOperationRequest,
+) -> ManagedAuthzPolicySetHumanEvidence:
+    if not isinstance(request, ManagedAuthzPolicySetProposalInput):
+        raise PrivilegedOperationPlannerError(
+            "Managed authz policy planner received an invalid request type."
+        )
+    if not callable(getattr(record_store, "list_authz_policy_records", None)):
+        raise PrivilegedOperationPlanningStoreError(
+            "Managed authz policy planning requires authorization policy storage."
+        )
+    try:
+        _, _, _, diff = plan_managed_authz_policy_reconcile(
+            record_store=cast(Any, record_store),
+            request=request.reconcile_request(),
+        )
+    except (AuthzPolicyConflictError, LookupError, TypeError, ValueError) as error:
+        raise PrivilegedOperationPlannerError(
+            "Managed authz policy planning failed before evidence was produced."
+        ) from error
+    blocked = bool(
+        diff.policy_safety_blocker_count or diff.operational_readiness_blocked_rule_count
+    )
+    return ManagedAuthzPolicySetHumanEvidence(
+        result_status="blocked" if blocked else "ok",
+        plan_digest=diff.plan_sha256,
+        diff=diff,
+    )
+
+
 _REGISTRY: dict[PrivilegedOperationDescriptorId, RegisteredPrivilegedOperationDescriptor] = {
     "managed-secret-reencryption": RegisteredPrivilegedOperationDescriptor(
         descriptor=MANAGED_SECRET_REENCRYPTION_DESCRIPTOR,
         planner=plan_managed_secret_reencryption,
-    )
+    ),
+    "managed-authz-policy-set": RegisteredPrivilegedOperationDescriptor(
+        descriptor=MANAGED_AUTHZ_POLICY_SET_DESCRIPTOR,
+        planner=plan_managed_authz_policy_set,
+    ),
 }
 
 

@@ -91,6 +91,7 @@ from control_plane.http_routes.owner_acceptance import (
     register_owner_acceptance_routes,
 )
 from control_plane.http_routes.privileged_operations import (
+    PRIVILEGED_OPERATION_AGENT_PLANS_ROUTE,
     PRIVILEGED_OPERATION_AGENT_SUMMARY_ROUTE,
     PRIVILEGED_OPERATION_CANCEL_ROUTE,
     PRIVILEGED_OPERATION_PLAN_ROUTE,
@@ -154,6 +155,7 @@ __all__ = (
     "OWNER_ACCEPTANCE_EVENTS_ROUTE",
     "OWNER_ACCEPTANCE_PROJECT_ROUTE",
     "OwnerAcceptanceRouteDependencies",
+    "PRIVILEGED_OPERATION_AGENT_PLANS_ROUTE",
     "PRIVILEGED_OPERATION_AGENT_SUMMARY_ROUTE",
     "PRIVILEGED_OPERATION_CANCEL_ROUTE",
     "PRIVILEGED_OPERATION_PLAN_ROUTE",

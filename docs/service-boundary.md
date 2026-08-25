@@ -2124,7 +2124,12 @@ The authz planning route requires `generic_web_preview_authz.plan`, reads the
 active DB-backed policy, retains unrelated managed rules, and returns a complete
 dry-run reconcile envelope. It never writes policy. The existing
 `POST /v1/authz-policies/managed-rule-sets/reconcile` route remains the sole
-writer and requires `authz_policy_grant.write` for apply. The advanced
+transitional workflow writer, accepts only GitHub Actions OIDC workload
+transport, and requires `authz_policy_grant.write` for apply. Browser-human,
+terminal-agent, and local bearer identities fail closed. Signed-in humans use
+the separate `managed-authz-policy-set` privileged-operation lifecycle for
+proposal review and approval; only the service-internal worker executes that
+approved path. The advanced
 `Product Onboarding Manifest (Advanced)` workflow preserves operator-supplied
 manifest support for non-conventional products. Manifests must use neutral
 `provider_targets`; obsolete `dokploy_targets` input is rejected. Product

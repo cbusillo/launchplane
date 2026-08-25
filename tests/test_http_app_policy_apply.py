@@ -80,6 +80,118 @@ from tests.support.stores import (
 )
 
 
+class FastApiManagedAuthzReconcileTransportTests(unittest.IsolatedAsyncioTestCase):
+    async def test_legacy_managed_authz_reconcile_accepts_only_github_actions_transport(
+        self,
+    ) -> None:
+        github_identity = _identity()
+        github_policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "schema_version": 2,
+                "github_actions": [
+                    {
+                        "managed_set_id": "test.legacy-authz-transport",
+                        "managed_rule_id": "github-actions-policy-writer",
+                        "repository": github_identity.repository,
+                        "repository_id": github_identity.repository_id,
+                        "repository_owner_id": github_identity.repository_owner_id,
+                        "workflow_refs": [github_identity.workflow_ref],
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": ["authz_policy_grant.write"],
+                    }
+                ],
+            }
+        )
+        github_app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(github_identity),
+            authz_policy=github_policy,
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+        github_response = await _asgi_request(
+            github_app,
+            "POST",
+            "/v1/authz-policies/managed-rule-sets/reconcile",
+            headers={
+                "Authorization": "Bearer valid-token",
+                "Content-Type": "application/json",
+            },
+            raw_body=b"not-json",
+        )
+
+        terminal_policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "schema_version": 2,
+                "terminal_agents": [
+                    {
+                        "managed_set_id": "test.legacy-authz-transport",
+                        "managed_rule_id": "terminal-policy-writer",
+                        "subjects": ["terminal-agent"],
+                        "token_labels": ["terminal-token"],
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": ["authz_policy_grant.write"],
+                    }
+                ],
+            }
+        )
+        terminal_app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=terminal_policy,
+            record_store_factory=lambda: _MissingProductReadStore(),
+            bearer_identity_config=BearerIdentityConfig(
+                terminal_agent_token="terminal-agent-token",
+                terminal_agent_subject="terminal-agent",
+                terminal_agent_token_label="terminal-token",
+            ),
+        )
+        terminal_response = await _asgi_request(
+            terminal_app,
+            "POST",
+            "/v1/authz-policies/managed-rule-sets/reconcile",
+            headers={
+                "Authorization": "Bearer terminal-agent-token",
+                "Content-Type": "application/json",
+            },
+            raw_body=b"not-json",
+        )
+
+        local_policy = _local_operator_policy(
+            actions=("authz_policy_grant.write",),
+            products=("launchplane",),
+            contexts=("launchplane",),
+            subject="local-operator",
+            token_label="local-token",
+        )
+        local_app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=local_policy,
+            record_store_factory=lambda: _MissingProductReadStore(),
+            bearer_identity_config=BearerIdentityConfig(
+                local_operator_token="local-operator-token",
+                local_operator_subject="local-operator",
+                local_operator_token_label="local-token",
+            ),
+        )
+        local_response = await _asgi_request(
+            local_app,
+            "POST",
+            "/v1/authz-policies/managed-rule-sets/reconcile",
+            headers={
+                "Authorization": "Bearer local-operator-token",
+                "Content-Type": "application/json",
+            },
+            raw_body=b"not-json",
+        )
+
+        self.assertEqual(github_response.status_code, 400)
+        self.assertEqual(github_response.json()["error"]["code"], "invalid_request")
+        self.assertEqual(terminal_response.status_code, 403)
+        self.assertEqual(terminal_response.json()["error"]["code"], "authorization_denied")
+        self.assertEqual(local_response.status_code, 403)
+        self.assertEqual(local_response.json()["error"]["code"], "authorization_denied")
+
+
 class FastApiNotificationPolicyApplyTests(unittest.IsolatedAsyncioTestCase):
     async def test_public_ingress_notification_policy_apply_writes_db_policy(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

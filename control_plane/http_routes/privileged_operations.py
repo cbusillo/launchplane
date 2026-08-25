@@ -6,27 +6,27 @@ from fastapi import Depends, Path, Query
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.privileged_operation import (
+    ManagedAuthzPolicySetProposalInput,
     ManagedSecretReencryptionPlanInput,
-    PRIVILEGED_OPERATION_SUMMARY_READ_ACTION,
-    PRIVILEGED_SECRET_OPERATION_APPROVE_ACTION,
-    PRIVILEGED_SECRET_OPERATION_CANCEL_ACTION,
-    PRIVILEGED_SECRET_OPERATION_PLAN_ACTION,
-    PRIVILEGED_SECRET_OPERATION_READ_ACTION,
-    PRIVILEGED_SECRET_OPERATION_REVOKE_ACTION,
     PrivilegedOperationApproval,
     PrivilegedOperationActor,
-    PrivilegedOperationAgentSummary,
+    PrivilegedOperationAgentActor,
     PrivilegedOperationConflictError,
+    PrivilegedOperationDescriptorId,
     PrivilegedOperationEventRecord,
     PrivilegedOperationRecord,
+    PrivilegedOperationRequest,
     PrivilegedOperationStatus,
+    PrivilegedOperationSummary,
     normalize_privileged_operation_source_event_id,
     privileged_operation_agent_summary,
     privileged_operation_pre_state_digest,
+    terminal_agent_principal_sha256,
 )
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.durable_operation_authorization import (
     ManagedRuleAuthorizationError,
+    managed_github_id_action_allows,
     require_single_managed_github_id_rule_identity,
     require_single_managed_rule_identity,
 )
@@ -34,6 +34,7 @@ from control_plane.http_routes.support import ApiRouteRegistrar, ReadRouteDepend
 from control_plane.privileged_operation_registry import (
     PrivilegedOperationPlannerError,
     PrivilegedOperationPlanningStoreError,
+    read_privileged_operation_descriptor,
 )
 from control_plane.privileged_operation_service import (
     DEFAULT_PRIVILEGED_OPERATION_TTL_SECONDS,
@@ -45,7 +46,7 @@ from control_plane.privileged_operation_service import (
     approve_privileged_operation,
     PrivilegedOperationStoreUnavailableError,
     cancel_privileged_operation,
-    create_privileged_operation_plan,
+    create_typed_privileged_operation_plan,
     list_privileged_operations,
     read_privileged_operation,
     revoke_privileged_operation,
@@ -56,6 +57,7 @@ from control_plane.service_auth import (
     GitHubHumanIdentity,
     LaunchplaneAuthzPolicy,
     LaunchplaneIdentity,
+    TerminalAgentIdentity,
 )
 
 
@@ -65,11 +67,13 @@ PRIVILEGED_OPERATION_CANCEL_ROUTE = "/v1/privileged-operations/plans/{operation_
 PRIVILEGED_OPERATION_APPROVE_ROUTE = "/v1/privileged-operations/plans/{operation_id}/approve"
 PRIVILEGED_OPERATION_REVOKE_ROUTE = "/v1/privileged-operations/plans/{operation_id}/revoke"
 PRIVILEGED_OPERATION_AGENT_SUMMARY_ROUTE = "/v1/agent/privileged-operations/plans/{operation_id}"
+PRIVILEGED_OPERATION_AGENT_PLANS_ROUTE = "/v1/agent/privileged-operations/plans"
 
 
 @dataclass(frozen=True, slots=True)
 class PrivilegedOperationRouteDependencies:
     common: ReadRouteDependencies
+    read_bearer_identity: Callable[..., LaunchplaneIdentity]
     read_github_human_identity: Callable[..., GitHubHumanIdentity]
     read_github_human_mutation_identity: Callable[..., GitHubHumanIdentity]
     policy_reader: Callable[[], LaunchplaneAuthzPolicy]
@@ -80,19 +84,48 @@ class PrivilegedOperationPlanEnvelope(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     schema_version: int = Field(default=1, ge=1)
-    descriptor_id: Literal["managed-secret-reencryption"] = "managed-secret-reencryption"
+    descriptor_id: PrivilegedOperationDescriptorId = "managed-secret-reencryption"
     source_event_id: str = Field(min_length=1, max_length=128)
     expires_in_seconds: int = Field(
         default=DEFAULT_PRIVILEGED_OPERATION_TTL_SECONDS,
         ge=MIN_PRIVILEGED_OPERATION_TTL_SECONDS,
         le=MAX_PRIVILEGED_OPERATION_TTL_SECONDS,
     )
-    request: ManagedSecretReencryptionPlanInput
+    request: PrivilegedOperationRequest
 
     @model_validator(mode="after")
     def _validate_envelope(self) -> "PrivilegedOperationPlanEnvelope":
         if self.schema_version != 1:
             raise ValueError("Unsupported privileged-operation plan envelope schema version.")
+        self.source_event_id = normalize_privileged_operation_source_event_id(self.source_event_id)
+        if self.descriptor_id == "managed-secret-reencryption" and not isinstance(
+            self.request, ManagedSecretReencryptionPlanInput
+        ):
+            raise ValueError("Managed-secret descriptor requires a managed-secret request.")
+        if self.descriptor_id == "managed-authz-policy-set" and not isinstance(
+            self.request, ManagedAuthzPolicySetProposalInput
+        ):
+            raise ValueError("Managed-policy descriptor requires a managed-policy request.")
+        return self
+
+
+class PrivilegedPolicyOperationAgentProposalEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    descriptor_id: Literal["managed-authz-policy-set"] = "managed-authz-policy-set"
+    source_event_id: str = Field(min_length=1, max_length=128)
+    expires_in_seconds: int = Field(
+        default=DEFAULT_PRIVILEGED_OPERATION_TTL_SECONDS,
+        ge=MIN_PRIVILEGED_OPERATION_TTL_SECONDS,
+        le=MAX_PRIVILEGED_OPERATION_TTL_SECONDS,
+    )
+    request: ManagedAuthzPolicySetProposalInput
+
+    @model_validator(mode="after")
+    def _validate_envelope(self) -> "PrivilegedPolicyOperationAgentProposalEnvelope":
+        if self.schema_version != 1:
+            raise ValueError("Unsupported privileged policy proposal envelope schema version.")
         self.source_event_id = normalize_privileged_operation_source_event_id(self.source_event_id)
         return self
 
@@ -163,7 +196,11 @@ class PrivilegedOperationAgentSummaryResponse(BaseModel):
 
     status: Literal["ok"] = "ok"
     trace_id: str
-    summary: PrivilegedOperationAgentSummary
+    summary: PrivilegedOperationSummary
+
+
+class PrivilegedPolicyOperationAgentProposalResponse(PrivilegedOperationAgentSummaryResponse):
+    write_status: Literal["written", "replayed"]
 
 
 def register_privileged_operation_routes(
@@ -194,9 +231,7 @@ def register_privileged_operation_routes(
                 message="Identity cannot access privileged-operation planning.",
             ) from error
 
-    def require_immutable_approval_rule(
-        *, identity: GitHubHumanIdentity, action: str, trace_id: str
-    ) -> tuple[LaunchplaneAuthzPolicyRecord, str, str]:
+    def read_active_policy_record(*, trace_id: str) -> LaunchplaneAuthzPolicyRecord:
         if dependencies.policy_record_reader is None:
             raise dependencies.common.http_error(
                 status_code=503,
@@ -205,9 +240,7 @@ def register_privileged_operation_routes(
                 message="The active authorization policy record is unavailable.",
             )
         try:
-            policy_record = LaunchplaneAuthzPolicyRecord.model_validate(
-                dependencies.policy_record_reader()
-            )
+            return LaunchplaneAuthzPolicyRecord.model_validate(dependencies.policy_record_reader())
         except (LookupError, TypeError, ValueError) as error:
             raise dependencies.common.http_error(
                 status_code=503,
@@ -215,9 +248,18 @@ def register_privileged_operation_routes(
                 code="authz_policy_unavailable",
                 message="The active authorization policy record is unavailable.",
             ) from error
+
+    def require_immutable_approval_rule(
+        *,
+        identity: GitHubHumanIdentity,
+        action: str,
+        trace_id: str,
+        policy_record: LaunchplaneAuthzPolicyRecord | None = None,
+    ) -> tuple[LaunchplaneAuthzPolicyRecord, str, str]:
+        resolved_policy_record = policy_record or read_active_policy_record(trace_id=trace_id)
         try:
             managed_identity = require_single_managed_github_id_rule_identity(
-                policy=policy_record.policy,
+                policy=resolved_policy_record.policy,
                 identity=identity,
                 action=action,
                 product="launchplane",
@@ -232,7 +274,7 @@ def register_privileged_operation_routes(
                 message="Identity cannot authorize this privileged-operation transition.",
             ) from error
         return (
-            policy_record,
+            resolved_policy_record,
             managed_identity.managed_set_id,
             managed_identity.managed_rule_id,
         )
@@ -246,6 +288,36 @@ def register_privileged_operation_routes(
             limit=10,
         )
 
+    def read_operation_or_error(
+        *,
+        record_store: object,
+        operation_id: str,
+        trace_id: str,
+    ) -> PrivilegedOperationRecord:
+        try:
+            return read_privileged_operation(
+                record_store=record_store,
+                operation_id=operation_id,
+            )
+        except FileNotFoundError as error:
+            raise dependencies.common.http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="privileged_operation_not_found",
+                message="Privileged-operation plan was not found.",
+            ) from error
+        except PrivilegedOperationStoreUnavailableError as error:
+            raise dependencies.common.http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="privileged_operation_storage_unavailable",
+                message="Privileged-operation planning storage is unavailable.",
+            ) from error
+
+    def descriptor_action(descriptor_id: PrivilegedOperationDescriptorId, field_name: str) -> str:
+        descriptor = read_privileged_operation_descriptor(descriptor_id).descriptor
+        return str(getattr(descriptor, field_name))
+
     def plan_privileged_operation(
         envelope: PrivilegedOperationPlanEnvelope,
         identity: Annotated[
@@ -257,14 +329,19 @@ def register_privileged_operation_routes(
         trace_id = dependencies.common.next_trace_id()
         require_managed_rule(
             identity=identity,
-            action=PRIVILEGED_SECRET_OPERATION_PLAN_ACTION,
+            action=descriptor_action(envelope.descriptor_id, "plan_action"),
             trace_id=trace_id,
         )
         try:
-            result = create_privileged_operation_plan(
+            result = create_typed_privileged_operation_plan(
                 record_store=record_store,
-                requester_github_id=identity.github_id,
-                requester_login=identity.login,
+                descriptor_id=envelope.descriptor_id,
+                actor=PrivilegedOperationActor(
+                    identity_type="github_human",
+                    github_id=identity.github_id,
+                    login=identity.login,
+                ),
+                source_kind="browser_api",
                 source_event_id=envelope.source_event_id,
                 request=envelope.request,
                 expires_in_seconds=envelope.expires_in_seconds,
@@ -310,18 +387,22 @@ def register_privileged_operation_routes(
         ],
         record_store: Annotated[object, Depends(dependencies.common.get_record_store)],
         status: Annotated[PrivilegedOperationStatus | None, Query()] = None,
+        descriptor_id: Annotated[PrivilegedOperationDescriptorId, Query()] = (
+            "managed-secret-reencryption"
+        ),
         limit: Annotated[int, Query(ge=1, le=100)] = 50,
     ) -> PrivilegedOperationListResponse:
         trace_id = dependencies.common.next_trace_id()
         require_managed_rule(
             identity=identity,
-            action=PRIVILEGED_SECRET_OPERATION_READ_ACTION,
+            action=descriptor_action(descriptor_id, "human_read_action"),
             trace_id=trace_id,
         )
         try:
             records = list_privileged_operations(
                 record_store=record_store,
                 status=status or "",
+                descriptor_id=descriptor_id,
                 limit=limit,
             )
         except PrivilegedOperationStoreUnavailableError as error:
@@ -346,30 +427,16 @@ def register_privileged_operation_routes(
         operation_id: Annotated[str, Path(min_length=1, max_length=96)],
     ) -> PrivilegedOperationHumanResponse:
         trace_id = dependencies.common.next_trace_id()
-        require_managed_rule(
-            identity=identity,
-            action=PRIVILEGED_SECRET_OPERATION_READ_ACTION,
+        record = read_operation_or_error(
+            record_store=record_store,
+            operation_id=operation_id,
             trace_id=trace_id,
         )
-        try:
-            record = read_privileged_operation(
-                record_store=record_store,
-                operation_id=operation_id,
-            )
-        except FileNotFoundError as error:
-            raise dependencies.common.http_error(
-                status_code=404,
-                trace_id=trace_id,
-                code="privileged_operation_not_found",
-                message="Privileged-operation plan was not found.",
-            ) from error
-        except PrivilegedOperationStoreUnavailableError as error:
-            raise dependencies.common.http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="privileged_operation_storage_unavailable",
-                message="Privileged-operation planning storage is unavailable.",
-            ) from error
+        require_managed_rule(
+            identity=identity,
+            action=descriptor_action(record.descriptor_id, "human_read_action"),
+            trace_id=trace_id,
+        )
         try:
             events = operation_events(record_store, record.operation_id)
         except PrivilegedOperationStoreUnavailableError as error:
@@ -395,13 +462,41 @@ def register_privileged_operation_routes(
         operation_id: Annotated[str, Path(min_length=1, max_length=96)],
     ) -> PrivilegedOperationHumanResponse:
         trace_id = dependencies.common.next_trace_id()
-        policy_record, managed_set_id, managed_rule_id = require_immutable_approval_rule(
-            identity=identity,
-            action=PRIVILEGED_SECRET_OPERATION_APPROVE_ACTION,
-            trace_id=trace_id,
-        )
+        policy_record = read_active_policy_record(trace_id=trace_id)
         try:
             record = read_privileged_operation(record_store=record_store, operation_id=operation_id)
+            policy_record, managed_set_id, managed_rule_id = require_immutable_approval_rule(
+                identity=identity,
+                action=descriptor_action(record.descriptor_id, "approve_action"),
+                trace_id=trace_id,
+                policy_record=policy_record,
+            )
+            if record.descriptor_id == "managed-authz-policy-set" and (
+                not policy_record.policy.allows(
+                    identity=identity,
+                    action="authz_policy_grant.write",
+                    product="launchplane",
+                    context="launchplane",
+                    target=AuthorizationTarget(scope="global"),
+                )
+                or not managed_github_id_action_allows(
+                    policy=policy_record.policy,
+                    github_id=identity.github_id,
+                    action="authz_policy_grant.write",
+                    product="launchplane",
+                    context="launchplane",
+                    target=AuthorizationTarget(scope="global"),
+                )
+            ):
+                raise dependencies.common.http_error(
+                    status_code=403,
+                    trace_id=trace_id,
+                    code="authorization_denied",
+                    message=(
+                        "Policy-operation approval requires an existing immutable-ID DB policy "
+                        "administrator."
+                    ),
+                )
             approval = PrivilegedOperationApproval(
                 approver=PrivilegedOperationActor(
                     identity_type="github_human",
@@ -422,6 +517,11 @@ def register_privileged_operation_routes(
                 managed_rule_id=managed_rule_id,
                 expires_at=record.expires_at,
                 reason=envelope.reason,
+                rollback_class=(
+                    "policy_cas"
+                    if record.descriptor_id == "managed-authz-policy-set"
+                    else "key_retained"
+                ),
             )
             result = approve_privileged_operation(
                 record_store=record_store,
@@ -468,12 +568,13 @@ def register_privileged_operation_routes(
         operation_id: Annotated[str, Path(min_length=1, max_length=96)],
     ) -> PrivilegedOperationHumanResponse:
         trace_id = dependencies.common.next_trace_id()
-        require_immutable_approval_rule(
-            identity=identity,
-            action=PRIVILEGED_SECRET_OPERATION_REVOKE_ACTION,
-            trace_id=trace_id,
-        )
         try:
+            record = read_privileged_operation(record_store=record_store, operation_id=operation_id)
+            require_immutable_approval_rule(
+                identity=identity,
+                action=descriptor_action(record.descriptor_id, "revoke_action"),
+                trace_id=trace_id,
+            )
             result = revoke_privileged_operation(
                 record_store=record_store,
                 operation_id=operation_id,
@@ -521,12 +622,13 @@ def register_privileged_operation_routes(
         operation_id: Annotated[str, Path(min_length=1, max_length=96)],
     ) -> PrivilegedOperationHumanResponse:
         trace_id = dependencies.common.next_trace_id()
-        require_managed_rule(
-            identity=identity,
-            action=PRIVILEGED_SECRET_OPERATION_CANCEL_ACTION,
-            trace_id=trace_id,
-        )
         try:
+            record = read_privileged_operation(record_store=record_store, operation_id=operation_id)
+            require_managed_rule(
+                identity=identity,
+                action=descriptor_action(record.descriptor_id, "cancel_action"),
+                trace_id=trace_id,
+            )
             result = cancel_privileged_operation(
                 record_store=record_store,
                 operation_id=operation_id,
@@ -580,38 +682,104 @@ def register_privileged_operation_routes(
         )
 
     def read_agent_privileged_operation_summary(
-        identity: Annotated[LaunchplaneIdentity, Depends(dependencies.common.read_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(dependencies.read_bearer_identity)],
         record_store: Annotated[object, Depends(dependencies.common.get_record_store)],
         operation_id: Annotated[str, Path(min_length=1, max_length=96)],
     ) -> PrivilegedOperationAgentSummaryResponse:
         trace_id = dependencies.common.next_trace_id()
-        require_managed_rule(
-            identity=identity,
-            action=PRIVILEGED_OPERATION_SUMMARY_READ_ACTION,
+        if not isinstance(identity, TerminalAgentIdentity):
+            raise dependencies.common.http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Only terminal agents can read the agent operation projection.",
+            )
+        record = read_operation_or_error(
+            record_store=record_store,
+            operation_id=operation_id,
             trace_id=trace_id,
         )
-        try:
-            record = read_privileged_operation(
-                record_store=record_store,
-                operation_id=operation_id,
+        require_managed_rule(
+            identity=identity,
+            action=descriptor_action(record.descriptor_id, "agent_summary_read_action"),
+            trace_id=trace_id,
+        )
+        if record.descriptor_id == "managed-authz-policy-set":
+            principal_sha256 = terminal_agent_principal_sha256(
+                subject=identity.subject,
+                token_label=identity.token_label,
             )
-        except FileNotFoundError as error:
-            raise dependencies.common.http_error(
-                status_code=404,
-                trace_id=trace_id,
-                code="privileged_operation_not_found",
-                message="Privileged-operation plan was not found.",
-            ) from error
-        except PrivilegedOperationStoreUnavailableError as error:
-            raise dependencies.common.http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="privileged_operation_storage_unavailable",
-                message="Privileged-operation planning storage is unavailable.",
-            ) from error
+            if (
+                record.requested_by.identity_type != "terminal_agent"
+                or record.requested_by.principal_sha256 != principal_sha256
+            ):
+                raise dependencies.common.http_error(
+                    status_code=403,
+                    trace_id=trace_id,
+                    code="authorization_denied",
+                    message="Terminal agents can read only their own policy operation proposals.",
+                )
         return PrivilegedOperationAgentSummaryResponse(
             trace_id=trace_id,
             summary=privileged_operation_agent_summary(record),
+        )
+
+    def propose_agent_privileged_policy_operation(
+        envelope: PrivilegedPolicyOperationAgentProposalEnvelope,
+        identity: Annotated[LaunchplaneIdentity, Depends(dependencies.read_bearer_identity)],
+        record_store: Annotated[object, Depends(dependencies.common.get_record_store)],
+    ) -> PrivilegedPolicyOperationAgentProposalResponse:
+        trace_id = dependencies.common.next_trace_id()
+        if not isinstance(identity, TerminalAgentIdentity):
+            raise dependencies.common.http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Only terminal agents can propose agent policy operations.",
+            )
+        require_managed_rule(
+            identity=identity,
+            action=descriptor_action(envelope.descriptor_id, "plan_action"),
+            trace_id=trace_id,
+        )
+        actor = PrivilegedOperationAgentActor(
+            principal_sha256=terminal_agent_principal_sha256(
+                subject=identity.subject,
+                token_label=identity.token_label,
+            ),
+        )
+        try:
+            result = create_typed_privileged_operation_plan(
+                record_store=record_store,
+                descriptor_id=envelope.descriptor_id,
+                actor=actor,
+                source_kind="agent_api",
+                source_event_id=envelope.source_event_id,
+                request=envelope.request,
+                expires_in_seconds=envelope.expires_in_seconds,
+            )
+        except (
+            PrivilegedOperationPlannerError,
+            PrivilegedOperationPlanningStoreError,
+            PrivilegedOperationStoreUnavailableError,
+        ) as error:
+            raise dependencies.common.http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="privileged_operation_planning_unavailable",
+                message="Privileged-operation planning is unavailable.",
+            ) from error
+        except PrivilegedOperationConflictError as error:
+            raise dependencies.common.http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="privileged_operation_plan_conflict",
+                message="Privileged-operation plan request conflicts with existing state.",
+            ) from error
+        return PrivilegedPolicyOperationAgentProposalResponse(
+            trace_id=trace_id,
+            write_status=result.write_status,
+            summary=privileged_operation_agent_summary(result.record),
         )
 
     app.add_api_route(
@@ -699,6 +867,20 @@ def register_privileged_operation_routes(
         summary="Revoke a privileged-operation approval",
         operation_id="revoke_human_privileged_operation",
         tags=["privileged-operations"],
+    )
+    app.add_api_route(
+        PRIVILEGED_OPERATION_AGENT_PLANS_ROUTE,
+        propose_agent_privileged_policy_operation,
+        methods=["POST"],
+        response_model=PrivilegedPolicyOperationAgentProposalResponse,
+        responses={
+            403: {"model": dependencies.common.error_response_model},
+            409: {"model": dependencies.common.error_response_model},
+            503: {"model": dependencies.common.error_response_model},
+        },
+        summary="Propose an inert managed authorization policy operation",
+        operation_id="propose_agent_privileged_policy_operation",
+        tags=["agent", "privileged-operations"],
     )
     app.add_api_route(
         PRIVILEGED_OPERATION_AGENT_SUMMARY_ROUTE,
