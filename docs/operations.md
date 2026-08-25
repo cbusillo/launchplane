@@ -751,6 +751,19 @@ a local CLI from an arbitrary checkout. The protected secret/workflow model
 below is transitional compatibility for already-existing managed sets, not the
 routine path for new grants. Do not create a managed set or modify production
 authorization merely to resolve another task's `authorization_denied` result.
+The owner-approved August 25, 2026 root-of-trust exception adds the temporary
+`privileged-operation-bootstrap` selection without a new GitHub secret. The
+protected wrapper derives the immutable repository-owner GitHub ID from the
+dispatch event and reads the existing terminal-agent subject and token label
+bootstrap variables. Its exact `operator.privileged-operation-bootstrap` set
+grants only terminal-agent policy proposal plus GitHub-owner policy
+read/cancel/approve/revoke. It grants no `authz_policy_grant.write`, secret
+operation action, execute action, summary read, product/runtime action, or
+workflow identity. Missing owner or terminal-agent selectors fail request
+validation rather than widening a rule. Use dry-run and exact reviewed-digest
+apply, then remove the
+temporary selection after the DB-native policy-operation path removes its own
+bootstrap set and read-back proves the exception is gone.
 `LAUNCHPLANE_AUTHZ_MANAGED_SET_JSON` currently carries the primary operator set;
 `LAUNCHPLANE_AUTHZ_POLICY_RECONCILE_MANAGED_SET_JSON` owns the exact immutable
 policy-admin worker rules for the standalone authz wrapper and must declare the
