@@ -158,6 +158,62 @@ export type AuthSessionResponse = {
     trace_id: string;
 };
 
+export type AuthorizationRecoveryAlertView = {
+    action: string;
+    challenge_id: string;
+    created_at: string;
+    delivery_id: string;
+    state: string;
+    updated_at: string;
+};
+
+export type AuthorizationRecoveryAuditView = {
+    audit_id: string;
+    challenge_id: string;
+    event: string;
+    key_fingerprint_sha256: string;
+    key_id: string;
+    operation: string;
+    reason_code: string;
+    recorded_at: string;
+    status: 'accepted' | 'rejected' | 'completed';
+};
+
+export type AuthorizationRecoveryBrowserStatusResponse = {
+    alerts: Array<AuthorizationRecoveryAlertView>;
+    audits: Array<AuthorizationRecoveryAuditView>;
+    readiness: {
+        [key: string]: unknown;
+    };
+    status: 'ok';
+    trace_id: string;
+};
+
+export type AuthorizationRecoveryKeyResponse = {
+    key: AuthorizationRecoveryKeyView;
+    status: 'ok';
+    trace_id: string;
+};
+
+export type AuthorizationRecoveryKeyView = {
+    activated_at: string;
+    custody_slot: string;
+    enrolled_at: string;
+    fingerprint_sha256: string;
+    key_id: string;
+    key_type: string;
+    revoked_at: string;
+    status: 'pending' | 'active' | 'revoked';
+};
+
+export type AuthorizationRecoveryProofResponse = {
+    key_id: string;
+    signing_input_base64: string;
+    signing_input_text: string;
+    status: 'ok';
+    trace_id: string;
+};
+
 export type BackupGateEvidence = {
     evidence: {
         [key: string]: string;
@@ -3183,6 +3239,56 @@ export type ReadHumanAuthSessionResponses = {
 
 export type ReadHumanAuthSessionResponse = ReadHumanAuthSessionResponses[keyof ReadHumanAuthSessionResponses];
 
+export type ReadAuthorizationRecoveryKeyProofData = {
+    body?: never;
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path: {
+        key_id: string;
+    };
+    query?: never;
+    url: '/v1/authorization-recovery/keys/{key_id}/proof';
+};
+
+export type ReadAuthorizationRecoveryKeyProofErrors = {
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type ReadAuthorizationRecoveryKeyProofError = ReadAuthorizationRecoveryKeyProofErrors[keyof ReadAuthorizationRecoveryKeyProofErrors];
+
+export type ReadAuthorizationRecoveryKeyProofResponses = {
+    200: AuthorizationRecoveryProofResponse;
+};
+
+export type ReadAuthorizationRecoveryKeyProofResponse = ReadAuthorizationRecoveryKeyProofResponses[keyof ReadAuthorizationRecoveryKeyProofResponses];
+
+export type ReadAuthorizationRecoveryStatusData = {
+    body?: never;
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/authorization-recovery/status';
+};
+
+export type ReadAuthorizationRecoveryStatusErrors = {
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type ReadAuthorizationRecoveryStatusError = ReadAuthorizationRecoveryStatusErrors[keyof ReadAuthorizationRecoveryStatusErrors];
+
+export type ReadAuthorizationRecoveryStatusResponses = {
+    200: AuthorizationRecoveryBrowserStatusResponse;
+};
+
+export type ReadAuthorizationRecoveryStatusResponse = ReadAuthorizationRecoveryStatusResponses[keyof ReadAuthorizationRecoveryStatusResponses];
+
 export type ReadDriverContextViewData = {
     body?: never;
     headers?: {
@@ -4091,6 +4197,90 @@ export type ReadTenantAdmissionEvaluationResponses = {
 };
 
 export type ReadTenantAdmissionEvaluationResponse = ReadTenantAdmissionEvaluationResponses[keyof ReadTenantAdmissionEvaluationResponses];
+
+export type EnrollAuthorizationRecoveryKeyData = {
+    body: {
+        custody_slot: string;
+        key_id: string;
+        public_key: string;
+    };
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/authorization-recovery/keys/enroll';
+};
+
+export type EnrollAuthorizationRecoveryKeyErrors = {
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type EnrollAuthorizationRecoveryKeyError = EnrollAuthorizationRecoveryKeyErrors[keyof EnrollAuthorizationRecoveryKeyErrors];
+
+export type EnrollAuthorizationRecoveryKeyResponses = {
+    200: AuthorizationRecoveryKeyResponse;
+};
+
+export type EnrollAuthorizationRecoveryKeyResponse = EnrollAuthorizationRecoveryKeyResponses[keyof EnrollAuthorizationRecoveryKeyResponses];
+
+export type RevokeAuthorizationRecoveryKeyData = {
+    body: {
+        [key: string]: never;
+    };
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path: {
+        key_id: string;
+    };
+    query?: never;
+    url: '/v1/authorization-recovery/keys/{key_id}/revoke';
+};
+
+export type RevokeAuthorizationRecoveryKeyErrors = {
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type RevokeAuthorizationRecoveryKeyError = RevokeAuthorizationRecoveryKeyErrors[keyof RevokeAuthorizationRecoveryKeyErrors];
+
+export type RevokeAuthorizationRecoveryKeyResponses = {
+    200: AuthorizationRecoveryKeyResponse;
+};
+
+export type RevokeAuthorizationRecoveryKeyResponse = RevokeAuthorizationRecoveryKeyResponses[keyof RevokeAuthorizationRecoveryKeyResponses];
+
+export type VerifyAuthorizationRecoveryKeyData = {
+    body: {
+        signature: string;
+    };
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path: {
+        key_id: string;
+    };
+    query?: never;
+    url: '/v1/authorization-recovery/keys/{key_id}/verify';
+};
+
+export type VerifyAuthorizationRecoveryKeyErrors = {
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type VerifyAuthorizationRecoveryKeyError = VerifyAuthorizationRecoveryKeyErrors[keyof VerifyAuthorizationRecoveryKeyErrors];
+
+export type VerifyAuthorizationRecoveryKeyResponses = {
+    200: AuthorizationRecoveryKeyResponse;
+};
+
+export type VerifyAuthorizationRecoveryKeyResponse = VerifyAuthorizationRecoveryKeyResponses[keyof VerifyAuthorizationRecoveryKeyResponses];
 
 export type WriteOwnerAcceptanceEventData = {
     body: OwnerAcceptanceEventEnvelope;

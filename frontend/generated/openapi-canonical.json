@@ -1076,6 +1076,351 @@
         "title": "AuthSessionResponse",
         "type": "object"
       },
+      "AuthorizationRecoveryAlertView": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "title": "Action",
+            "type": "string"
+          },
+          "challenge_id": {
+            "title": "Challenge Id",
+            "type": "string"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "delivery_id": {
+            "title": "Delivery Id",
+            "type": "string"
+          },
+          "state": {
+            "title": "State",
+            "type": "string"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "delivery_id",
+          "state",
+          "action",
+          "created_at",
+          "updated_at",
+          "challenge_id"
+        ],
+        "title": "AuthorizationRecoveryAlertView",
+        "type": "object"
+      },
+      "AuthorizationRecoveryApplyResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "challenge_id": {
+            "title": "Challenge Id",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "applied",
+              "adopted"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "trace_id",
+          "challenge_id"
+        ],
+        "title": "AuthorizationRecoveryApplyResponse",
+        "type": "object"
+      },
+      "AuthorizationRecoveryAuditView": {
+        "additionalProperties": false,
+        "properties": {
+          "audit_id": {
+            "title": "Audit Id",
+            "type": "string"
+          },
+          "challenge_id": {
+            "title": "Challenge Id",
+            "type": "string"
+          },
+          "event": {
+            "title": "Event",
+            "type": "string"
+          },
+          "key_fingerprint_sha256": {
+            "title": "Key Fingerprint Sha256",
+            "type": "string"
+          },
+          "key_id": {
+            "title": "Key Id",
+            "type": "string"
+          },
+          "operation": {
+            "title": "Operation",
+            "type": "string"
+          },
+          "reason_code": {
+            "title": "Reason Code",
+            "type": "string"
+          },
+          "recorded_at": {
+            "title": "Recorded At",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "accepted",
+              "rejected",
+              "completed"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "audit_id",
+          "event",
+          "status",
+          "recorded_at",
+          "challenge_id",
+          "operation",
+          "key_id",
+          "key_fingerprint_sha256",
+          "reason_code"
+        ],
+        "title": "AuthorizationRecoveryAuditView",
+        "type": "object"
+      },
+      "AuthorizationRecoveryBrowserStatusResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "alerts": {
+            "items": {
+              "$ref": "#/components/schemas/AuthorizationRecoveryAlertView"
+            },
+            "title": "Alerts",
+            "type": "array"
+          },
+          "audits": {
+            "items": {
+              "$ref": "#/components/schemas/AuthorizationRecoveryAuditView"
+            },
+            "title": "Audits",
+            "type": "array"
+          },
+          "readiness": {
+            "additionalProperties": true,
+            "title": "Readiness",
+            "type": "object"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "readiness",
+          "audits",
+          "alerts"
+        ],
+        "title": "AuthorizationRecoveryBrowserStatusResponse",
+        "type": "object"
+      },
+      "AuthorizationRecoveryKeyResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "key": {
+            "$ref": "#/components/schemas/AuthorizationRecoveryKeyView"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "key"
+        ],
+        "title": "AuthorizationRecoveryKeyResponse",
+        "type": "object"
+      },
+      "AuthorizationRecoveryKeyView": {
+        "additionalProperties": false,
+        "properties": {
+          "activated_at": {
+            "title": "Activated At",
+            "type": "string"
+          },
+          "custody_slot": {
+            "title": "Custody Slot",
+            "type": "string"
+          },
+          "enrolled_at": {
+            "title": "Enrolled At",
+            "type": "string"
+          },
+          "fingerprint_sha256": {
+            "title": "Fingerprint Sha256",
+            "type": "string"
+          },
+          "key_id": {
+            "title": "Key Id",
+            "type": "string"
+          },
+          "key_type": {
+            "title": "Key Type",
+            "type": "string"
+          },
+          "revoked_at": {
+            "title": "Revoked At",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "pending",
+              "active",
+              "revoked"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "key_id",
+          "custody_slot",
+          "fingerprint_sha256",
+          "key_type",
+          "status",
+          "enrolled_at",
+          "activated_at",
+          "revoked_at"
+        ],
+        "title": "AuthorizationRecoveryKeyView",
+        "type": "object"
+      },
+      "AuthorizationRecoveryProofResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "key_id": {
+            "title": "Key Id",
+            "type": "string"
+          },
+          "signing_input_base64": {
+            "title": "Signing Input Base64",
+            "type": "string"
+          },
+          "signing_input_text": {
+            "title": "Signing Input Text",
+            "type": "string"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "key_id",
+          "signing_input_base64",
+          "signing_input_text"
+        ],
+        "title": "AuthorizationRecoveryProofResponse",
+        "type": "object"
+      },
+      "AuthorizationRecoveryPublicChallengeResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "challenge_id": {
+            "title": "Challenge Id",
+            "type": "string"
+          },
+          "expires_at": {
+            "title": "Expires At",
+            "type": "string"
+          },
+          "operation": {
+            "enum": [
+              "initial_bootstrap",
+              "restore_known_administrator",
+              "replace_recovery_key"
+            ],
+            "title": "Operation",
+            "type": "string"
+          },
+          "signing_input_base64": {
+            "title": "Signing Input Base64",
+            "type": "string"
+          },
+          "signing_input_text": {
+            "title": "Signing Input Text",
+            "type": "string"
+          },
+          "signing_key_fingerprint_sha256": {
+            "title": "Signing Key Fingerprint Sha256",
+            "type": "string"
+          },
+          "signing_key_id": {
+            "title": "Signing Key Id",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "prepared",
+              "expired",
+              "consumed"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "trace_id",
+          "challenge_id",
+          "operation",
+          "signing_key_id",
+          "signing_key_fingerprint_sha256",
+          "expires_at",
+          "signing_input_base64",
+          "signing_input_text"
+        ],
+        "title": "AuthorizationRecoveryPublicChallengeResponse",
+        "type": "object"
+      },
       "AuthorizationTarget": {
         "additionalProperties": false,
         "properties": {
@@ -37667,6 +38012,683 @@
         "summary": "Read human auth session"
       }
     },
+    "/v1/authorization-recovery/keys/enroll": {
+      "post": {
+        "operationId": "enroll_authorization_recovery_key",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "custody_slot": {
+                    "maxLength": 120,
+                    "minLength": 1,
+                    "title": "Custody Slot",
+                    "type": "string"
+                  },
+                  "key_id": {
+                    "maxLength": 160,
+                    "minLength": 1,
+                    "title": "Key Id",
+                    "type": "string"
+                  },
+                  "public_key": {
+                    "maxLength": 8192,
+                    "minLength": 1,
+                    "title": "Public Key",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "key_id",
+                  "custody_slot",
+                  "public_key"
+                ],
+                "title": "AuthorizationRecoveryKeyEnrollEnvelope",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthorizationRecoveryKeyResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Enroll a pending authorization recovery hardware public key"
+      }
+    },
+    "/v1/authorization-recovery/keys/{key_id}/proof": {
+      "get": {
+        "operationId": "read_authorization_recovery_key_proof",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "key_id",
+            "required": true,
+            "schema": {
+              "title": "Key Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthorizationRecoveryProofResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read exact authorization recovery key proof signing input"
+      }
+    },
+    "/v1/authorization-recovery/keys/{key_id}/revoke": {
+      "post": {
+        "operationId": "revoke_authorization_recovery_key",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "key_id",
+            "required": true,
+            "schema": {
+              "title": "Key Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {},
+                "title": "EmptyEnvelope",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthorizationRecoveryKeyResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Revoke an authorization recovery key without reducing custody independence"
+      }
+    },
+    "/v1/authorization-recovery/keys/{key_id}/verify": {
+      "post": {
+        "operationId": "verify_authorization_recovery_key",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "key_id",
+            "required": true,
+            "schema": {
+              "title": "Key Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "signature": {
+                    "maxLength": 24576,
+                    "minLength": 1,
+                    "title": "Signature",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "signature"
+                ],
+                "title": "AuthorizationRecoverySignatureEnvelope",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthorizationRecoveryKeyResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Verify an authorization recovery key proof"
+      }
+    },
+    "/v1/authorization-recovery/public/apply": {
+      "post": {
+        "operationId": "apply_authorization_recovery",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "challenge_id": {
+                    "maxLength": 160,
+                    "minLength": 1,
+                    "title": "Challenge Id",
+                    "type": "string"
+                  },
+                  "signature": {
+                    "maxLength": 24576,
+                    "minLength": 1,
+                    "title": "Signature",
+                    "type": "string"
+                  },
+                  "signing_key_id": {
+                    "maxLength": 160,
+                    "minLength": 1,
+                    "title": "Signing Key Id",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "challenge_id",
+                  "signing_key_id",
+                  "signature"
+                ],
+                "title": "AuthorizationRecoveryPublicApplyEnvelope",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthorizationRecoveryApplyResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Apply an exact hardware-signed authorization recovery challenge"
+      }
+    },
+    "/v1/authorization-recovery/public/challenges/{challenge_id}": {
+      "get": {
+        "operationId": "read_authorization_recovery_challenge",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "challenge_id",
+            "required": true,
+            "schema": {
+              "title": "Challenge Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthorizationRecoveryPublicChallengeResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read a redacted prepared authorization recovery challenge"
+      }
+    },
+    "/v1/authorization-recovery/public/prepare": {
+      "post": {
+        "operationId": "prepare_authorization_recovery",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "compromised_key_id": {
+                    "default": "",
+                    "maxLength": 160,
+                    "title": "Compromised Key Id",
+                    "type": "string"
+                  },
+                  "intended_github_id": {
+                    "minimum": 1,
+                    "title": "Intended Github Id",
+                    "type": "integer"
+                  },
+                  "operation": {
+                    "enum": [
+                      "initial_bootstrap",
+                      "restore_known_administrator",
+                      "replace_recovery_key"
+                    ],
+                    "title": "Operation",
+                    "type": "string"
+                  },
+                  "replacement_key_id": {
+                    "default": "",
+                    "maxLength": 160,
+                    "title": "Replacement Key Id",
+                    "type": "string"
+                  },
+                  "signing_key_id": {
+                    "maxLength": 160,
+                    "minLength": 1,
+                    "title": "Signing Key Id",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "operation",
+                  "intended_github_id",
+                  "signing_key_id"
+                ],
+                "title": "AuthorizationRecoveryPrepareEnvelope",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthorizationRecoveryPublicChallengeResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Prepare a bounded unsigned authorization recovery challenge"
+      }
+    },
+    "/v1/authorization-recovery/status": {
+      "get": {
+        "operationId": "read_authorization_recovery_status",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthorizationRecoveryBrowserStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read redacted authorization recovery readiness"
+      }
+    },
     "/v1/authz-diagnostics/activation-preflight/self": {
       "get": {
         "operationId": "read_authz_activation_preflight_self",
@@ -72751,6 +73773,8 @@
   },
   "x-launchplane-ui-read-operations": {
     "/v1/auth/session": "read_human_auth_session",
+    "/v1/authorization-recovery/keys/{key_id}/proof": "read_authorization_recovery_key_proof",
+    "/v1/authorization-recovery/status": "read_authorization_recovery_status",
     "/v1/contexts/{context}/driver-view": "read_driver_context_view",
     "/v1/contexts/{context}/instances/{instance}/driver-view": "read_driver_instance_view",
     "/v1/drivers": "read_driver_descriptors",
@@ -72783,6 +73807,9 @@
     "/v1/work-graph/tenant-admission/evaluation": "read_tenant_admission_evaluation"
   },
   "x-launchplane-ui-write-operations": {
+    "/v1/authorization-recovery/keys/enroll": "enroll_authorization_recovery_key",
+    "/v1/authorization-recovery/keys/{key_id}/revoke": "revoke_authorization_recovery_key",
+    "/v1/authorization-recovery/keys/{key_id}/verify": "verify_authorization_recovery_key",
     "/v1/owner-acceptance/events": "write_owner_acceptance_event",
     "/v1/privileged-operations/plans/{operation_id}/approve": "approve_human_privileged_operation",
     "/v1/privileged-operations/plans/{operation_id}/revoke": "revoke_human_privileged_operation",

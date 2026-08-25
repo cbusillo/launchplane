@@ -238,11 +238,36 @@ DB policy.
 
 ### Hardware-Backed Recovery Root
 
-Issue `#2239` establishes backend records and storage primitives for a total
-authorization lockout. This phase intentionally adds no HTTP route, CLI command,
-operator UI, GitHub Action, static bearer, direct-live-DB helper, or production
-grant. Until a later reviewed phase connects an ingress path, this code grants
-nothing by itself.
+Issue `#2239` connects the recovery root through narrow HTTP, operator CLI, and
+signed-in browser surfaces. Code still grants nothing: browser key lifecycle is
+a transitional migration path only, and normal authorization remains the
+single-active-policy DB-native evaluator. No new authorization action or grant
+is created by this phase.
+
+The browser surface is limited to redacted readiness/evidence and public-key
+lifecycle. It accepts only a signed GitHub-human session, validates same-origin,
+fetch metadata, and single-use CSRF for mutations, and rejects bearer, agent,
+workflow, local-admin, and local-operator identities. While bootstrap remains
+pending, the session's server-derived `admin` role is required; after bootstrap,
+the service freshly loads exactly one active policy record and requires the
+immutable GitHub human to have the existing `authz_policy_grant.write` action.
+
+The total-lockout surface has only public `prepare`, redacted challenge status,
+and hardware-signature `apply` operations. Prepare/status are inert contract
+operations for agent/operator tooling; apply is deliberately absent from the
+agent contract. Apply accepts only challenge ID, signing-key ID, and a bounded
+base64 or pasted SSHSIG envelope. It accepts no bearer/cookie credential,
+policy upload, generic payload, private key, direct DB mutation, workflow, or
+caller-provided canonical bytes. Hardware signature verification over the
+service's exact bytes is the recovery authority.
+
+`launchplane authorization-recovery prepare|status|apply` uses deployed service
+HTTP only. Prepare writes exact signing bytes to an operator-selected local file
+and prints the fixed `ssh-keygen -Y sign` namespace command; the CLI never signs,
+accepts private keys, copies browser cookies, reads a local admin bearer, or
+suggests GitHub Actions. The local outbox worker records
+`operator_authorization_recovery_alert` deterministically without a provider or
+external credential; the browser status reads that durable alert evidence.
 
 Launchplane persists only public OpenSSH security-key verification material and
 bounded redacted audit/alert payloads. Public keys are canonicalized to

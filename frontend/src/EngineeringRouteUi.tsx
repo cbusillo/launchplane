@@ -27,6 +27,7 @@ const ENGINEERING_VIEWS: Exclude<EngineeringView, "hub">[] = [
   "governance-projection",
   "owner-acceptance",
   "privileged-operations",
+  "authorization-recovery",
 ];
 
 export function EngineeringRouteFrame({
@@ -49,7 +50,11 @@ export function EngineeringRouteFrame({
   useEffect(() => {
     navigationRef.current
       ?.querySelector<HTMLElement>('[aria-current="page"]')
-      ?.scrollIntoView({ behavior: "instant", block: "nearest", inline: "center" });
+      ?.scrollIntoView({
+        behavior: "instant",
+        block: "nearest",
+        inline: "center",
+      });
   }, [view]);
 
   return (

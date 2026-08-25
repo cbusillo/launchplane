@@ -333,6 +333,44 @@ class OutboxWorkerTests(unittest.TestCase):
         self.assertEqual(loaded.error_code, "workflow_run_not_observed")
         self.assertEqual([method for method, _path in requests], ["GET"])
 
+    def test_authorization_recovery_alert_is_completed_without_provider_access(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            dedupe_key = build_outbox_dedupe_key(
+                kind="operator_authorization_recovery_alert",
+                parts=("challenge-1", "candidate-1"),
+            )
+            delivery = OutboxDeliveryRecord(
+                delivery_id=build_outbox_delivery_id(
+                    kind="operator_authorization_recovery_alert", dedupe_key=dedupe_key
+                ),
+                kind="operator_authorization_recovery_alert",
+                aggregate_type="authorization_recovery",
+                aggregate_id="challenge-1",
+                dedupe_key=dedupe_key,
+                created_at="2026-08-25T00:00:00Z",
+                updated_at="2026-08-25T00:00:00Z",
+                next_attempt_at="2026-08-25T00:00:00Z",
+                payload={"event": "authorization_recovery_applied", "challenge_id": "challenge-1"},
+            )
+            store.write_outbox_delivery_record(delivery)
+            result = run_outbox_worker_once(
+                record_store=store,
+                control_plane_root=Path("."),
+                lease_owner="worker-a",
+            )
+            completed = store.read_outbox_delivery_record(delivery.delivery_id)
+            store.close()
+
+        self.assertEqual(result.status, "delivered")
+        self.assertEqual(completed.state, "delivered")
+        self.assertEqual(completed.action, "recorded_local_authorization_recovery_alert")
+
 
 if __name__ == "__main__":
     unittest.main()

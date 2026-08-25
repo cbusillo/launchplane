@@ -15,18 +15,23 @@ import { EngineeringMergeTrainRoute } from "./EngineeringMergeTrainRoute";
 import { EngineeringGovernanceProjectionRoute } from "./EngineeringGovernanceProjectionRoute";
 import { EngineeringOwnerAcceptanceRoute } from "./EngineeringOwnerAcceptanceRoute";
 import { EngineeringPrivilegedOperationsRoute } from "./EngineeringPrivilegedOperationsRoute";
+import { EngineeringAuthorizationRecoveryRoute } from "./EngineeringAuthorizationRecoveryRoute";
 import { EngineeringTenantAdmissionRoute } from "./EngineeringTenantAdmissionRoute";
 import { EngineeringRouteFrame } from "./EngineeringRouteUi";
 import { EngineeringWorkGraphRoute } from "./EngineeringWorkGraphRoute";
-import {
-  AppLink,
-  engineeringPath,
-  type EngineeringView,
-} from "./router";
+import { AppLink, engineeringPath, type EngineeringView } from "./router";
 
 import type { DevFixtureMode } from "./dev-fixture-loader";
 
 const ENGINEERING_SURFACES = [
+  {
+    detail:
+      "Read hardware-key readiness and redacted evidence, then enroll, prove, or revoke browser-managed public keys.",
+    icon: KeyRound,
+    label: "Human keys only",
+    title: "Authorization recovery",
+    view: "authorization-recovery" as const,
+  },
   {
     detail:
       "Inspect authoritative Owner acceptance, current readiness, immutable admission, landing outcome, and GitHub observations without fusing the layers.",
@@ -124,6 +129,9 @@ export function EngineeringOpsRoute({
   if (view === "privileged-operations") {
     return <EngineeringPrivilegedOperationsRoute fixtureMode={fixtureMode} />;
   }
+  if (view === "authorization-recovery") {
+    return <EngineeringAuthorizationRecoveryRoute fixtureMode={fixtureMode} />;
+  }
   return <EngineeringOpsHub />;
 }
 
@@ -144,24 +152,26 @@ function EngineeringOpsHub() {
         </p>
       </div>
       <div className="engineering-hub-grid">
-        {ENGINEERING_SURFACES.map(({ detail, icon: Icon, label, title, view }) => (
-          <AppLink
-            className="engineering-hub-card"
-            key={view}
-            to={engineeringPath(view)}
-          >
-            <span className="engineering-hub-icon">
-              <Icon size={21} aria-hidden="true" />
-            </span>
-            <span className="engineering-kicker">{label}</span>
-            <strong>{title}</strong>
-            <p>{detail}</p>
-            <span className="engineering-hub-link">
-              Open evidence
-              <ArrowRight size={15} aria-hidden="true" />
-            </span>
-          </AppLink>
-        ))}
+        {ENGINEERING_SURFACES.map(
+          ({ detail, icon: Icon, label, title, view }) => (
+            <AppLink
+              className="engineering-hub-card"
+              key={view}
+              to={engineeringPath(view)}
+            >
+              <span className="engineering-hub-icon">
+                <Icon size={21} aria-hidden="true" />
+              </span>
+              <span className="engineering-kicker">{label}</span>
+              <strong>{title}</strong>
+              <p>{detail}</p>
+              <span className="engineering-hub-link">
+                Open evidence
+                <ArrowRight size={15} aria-hidden="true" />
+              </span>
+            </AppLink>
+          ),
+        )}
       </div>
     </EngineeringRouteFrame>
   );

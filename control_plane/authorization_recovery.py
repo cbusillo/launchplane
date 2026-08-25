@@ -523,9 +523,14 @@ class AuthorizationRecoveryService:
         }
 
     def enroll_key(
-        self, *, key_id: str, custody_slot: str, public_key: str
+        self,
+        *,
+        key_id: str,
+        custody_slot: str,
+        public_key: str,
+        allow_after_bootstrap: bool = False,
     ) -> AuthorizationRecoveryKey:
-        if self.bootstrap_state() == "complete":
+        if self.bootstrap_state() == "complete" and not allow_after_bootstrap:
             raise PermissionError(
                 "Recovery-key enrollment after bootstrap completion requires browser administration."
             )

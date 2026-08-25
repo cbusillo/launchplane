@@ -70,6 +70,10 @@ from control_plane.http_routes.change_impact import (
     register_change_impact_read_routes,
     register_change_impact_write_routes,
 )
+from control_plane.http_routes.authorization_recovery import (
+    AuthorizationRecoveryRouteDependencies,
+    register_authorization_recovery_routes,
+)
 from control_plane.http_routes.product_owner import (
     PRODUCT_OWNER_POLICY_APPLY_ROUTE,
     PRODUCT_OWNER_POLICY_READ_ROUTE,
@@ -133,6 +137,7 @@ from control_plane.http_routes.work_graph import (
 
 __all__ = (
     "AcceptedEvidenceResponse",
+    "AuthorizationRecoveryRouteDependencies",
     "BackupGateEvidenceRequest",
     "DeploymentEvidenceRequest",
     "DriverReadRouteDependencies",
@@ -196,6 +201,7 @@ __all__ = (
     "EngineeringReviewWorkerIdentity",
     "EngineeringReviewDecisionRouteDependencies",
     "register_engineering_review_routes",
+    "register_authorization_recovery_routes",
     "register_engineering_review_decision_routes",
     "register_generic_web_rollback_write_routes",
     "register_generic_web_write_routes",

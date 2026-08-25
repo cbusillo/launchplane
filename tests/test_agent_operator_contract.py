@@ -34,6 +34,14 @@ class AgentOperatorContractTests(unittest.TestCase):
         expected_operation_ids = {
             ("GET", "/v1/agent/context"): "read_agent_context",
             ("POST", "/v1/agent/write-intents/evaluate"): "evaluate_agent_write_intent",
+            (
+                "POST",
+                "/v1/authorization-recovery/public/prepare",
+            ): "prepare_authorization_recovery",
+            (
+                "GET",
+                "/v1/authorization-recovery/public/challenges/{challenge_id}",
+            ): "read_authorization_recovery_challenge",
             ("POST", "/v1/product-config/apply"): "apply_product_config",
             ("POST", "/v1/change-impact/policies/apply"): "apply_change_impact_policy",
             ("GET", "/v1/change-impact/policy"): "read_change_impact_policy",
@@ -57,6 +65,10 @@ class AgentOperatorContractTests(unittest.TestCase):
         expected_dependencies = {
             "read_agent_context": ["read_identity"],
             "evaluate_agent_write_intent": ["read_browser_mutation_identity"],
+            "prepare_authorization_recovery": ["reject_authorization_recovery_credentials"],
+            "read_authorization_recovery_challenge": [
+                "reject_authorization_recovery_credentials"
+            ],
             "apply_product_config": ["read_browser_mutation_identity"],
             "apply_change_impact_policy": ["read_write_identity"],
             "read_change_impact_policy": ["read_identity"],

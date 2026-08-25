@@ -150,6 +150,8 @@ def write_canonical_openapi(output_path: Path) -> Path:
 
 UI_OPENAPI_READ_OPERATIONS: dict[str, str] = {
     "/v1/auth/session": "read_human_auth_session",
+    "/v1/authorization-recovery/status": "read_authorization_recovery_status",
+    "/v1/authorization-recovery/keys/{key_id}/proof": "read_authorization_recovery_key_proof",
     "/v1/drivers": "read_driver_descriptors",
     "/v1/contexts/{context}/driver-view": "read_driver_context_view",
     "/v1/contexts/{context}/instances/{instance}/driver-view": "read_driver_instance_view",
@@ -196,6 +198,9 @@ UI_OPENAPI_READ_OPERATIONS: dict[str, str] = {
 
 
 UI_OPENAPI_WRITE_OPERATIONS: dict[str, str] = {
+    "/v1/authorization-recovery/keys/enroll": "enroll_authorization_recovery_key",
+    "/v1/authorization-recovery/keys/{key_id}/verify": "verify_authorization_recovery_key",
+    "/v1/authorization-recovery/keys/{key_id}/revoke": "revoke_authorization_recovery_key",
     "/v1/work-graph/rank": "rank_work_graph_snapshot",
     "/v1/products/{product}/environments/{environment}/config/apply": (
         "apply_product_environment_config"

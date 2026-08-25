@@ -27,7 +27,8 @@ export type EngineeringView =
   | "tenant-admission"
   | "governance-projection"
   | "owner-acceptance"
-  | "privileged-operations";
+  | "privileged-operations"
+  | "authorization-recovery";
 
 export function productIndexPath(): string {
   return "/ui/products";
@@ -80,6 +81,9 @@ export function engineeringViewLabel(view: EngineeringView): string {
   if (view === "privileged-operations") {
     return "Privileged operation plans";
   }
+  if (view === "authorization-recovery") {
+    return "Authorization recovery";
+  }
   return "Engineering Ops";
 }
 
@@ -97,7 +101,9 @@ export function parseAppRoute(pathname: string): AppRoute {
   }
   const engineeringPrefix = `${engineeringPath()}/`;
   if (normalizedPath.startsWith(engineeringPrefix)) {
-    const routeSegments = normalizedPath.slice(engineeringPrefix.length).split("/");
+    const routeSegments = normalizedPath
+      .slice(engineeringPrefix.length)
+      .split("/");
     const view = routeSegments[0] as EngineeringView;
     if (
       routeSegments.length === 1 &&
@@ -110,6 +116,7 @@ export function parseAppRoute(pathname: string): AppRoute {
         "governance-projection",
         "owner-acceptance",
         "privileged-operations",
+        "authorization-recovery",
       ].includes(view)
     ) {
       return { kind: "engineering", view };
@@ -174,7 +181,8 @@ export function ownerAcceptanceLookupFromSearch(search: string): {
     pullRequest,
     requested: Boolean(repository || pullRequest),
     valid:
-      /^[^/\s]+\/[^/\s]+$/.test(repository) && /^[1-9][0-9]*$/.test(pullRequest),
+      /^[^/\s]+\/[^/\s]+$/.test(repository) &&
+      /^[1-9][0-9]*$/.test(pullRequest),
   };
 }
 

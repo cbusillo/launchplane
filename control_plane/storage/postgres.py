@@ -15049,6 +15049,23 @@ class PostgresRecordStore(HumanSessionStore):
             )
             session.commit()
 
+    def list_authorization_recovery_audits(
+        self,
+        *,
+        limit: int | None = None,
+    ) -> tuple[AuthorizationRecoveryAudit, ...]:
+        with self._session_factory() as session:
+            statement = select(LaunchplaneAuthorizationRecoveryAuditRow).order_by(
+                desc(LaunchplaneAuthorizationRecoveryAuditRow.recorded_at),
+                LaunchplaneAuthorizationRecoveryAuditRow.audit_id.desc(),
+            )
+            if limit is not None:
+                statement = statement.limit(max(limit, 0))
+            return tuple(
+                AuthorizationRecoveryAudit.model_validate(row.payload)
+                for row in session.scalars(statement)
+            )
+
     def read_authz_denial_record(
         self,
         *,

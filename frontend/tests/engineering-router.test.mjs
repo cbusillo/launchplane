@@ -20,6 +20,7 @@ test("engineering hub and every child route deep-link exactly", () => {
     "merge-train",
     "tenant-admission",
     "privileged-operations",
+    "authorization-recovery",
   ]) {
     assert.equal(engineeringPath(view), `/ui/engineering/${view}`);
     assert.deepEqual(parseAppRoute(engineeringPath(view)), {
@@ -50,6 +51,10 @@ test("engineering labels are route-specific", () => {
   assert.equal(
     engineeringViewLabel("privileged-operations"),
     "Privileged operation plans",
+  );
+  assert.equal(
+    engineeringViewLabel("authorization-recovery"),
+    "Authorization recovery",
   );
 });
 

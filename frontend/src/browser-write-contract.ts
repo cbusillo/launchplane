@@ -3,12 +3,21 @@ import type {
   ApproveHumanPrivilegedOperationData,
   DispatchProductPromotionWorkflowData,
   DryRunProductPromotionData,
+  EnrollAuthorizationRecoveryKeyData,
   RankWorkGraphSnapshotData,
+  RevokeAuthorizationRecoveryKeyData,
   RevokeHumanPrivilegedOperationData,
+  VerifyAuthorizationRecoveryKeyData,
   WriteOwnerAcceptanceEventData,
 } from "./generated/openapi.ts";
 
 export const BROWSER_WRITE_ROUTES = {
+  authorizationRecoveryEnroll:
+    "/v1/authorization-recovery/keys/enroll" satisfies EnrollAuthorizationRecoveryKeyData["url"],
+  authorizationRecoveryVerify:
+    "/v1/authorization-recovery/keys/{key_id}/verify" satisfies VerifyAuthorizationRecoveryKeyData["url"],
+  authorizationRecoveryRevoke:
+    "/v1/authorization-recovery/keys/{key_id}/revoke" satisfies RevokeAuthorizationRecoveryKeyData["url"],
   productEnvironmentConfigApply:
     "/v1/products/{product}/environments/{environment}/config/apply" satisfies ApplyProductEnvironmentConfigData["url"],
   productPromotionDryRun:
