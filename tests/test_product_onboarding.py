@@ -1685,6 +1685,261 @@ class ProductOnboardingTests(unittest.TestCase):
             workflow_text,
         )
 
+    def test_deploy_launchplane_manages_key_ring_only_by_explicit_operation(self) -> None:
+        workflow_path = Path(".github/workflows/deploy-launchplane.yml")
+        workflow = load_workflow(workflow_path)
+        trigger = workflow.data["on"]
+        assert isinstance(trigger, dict)
+        workflow_dispatch = trigger["workflow_dispatch"]
+        assert isinstance(workflow_dispatch, dict)
+        inputs = workflow_dispatch["inputs"]
+        assert isinstance(inputs, dict)
+        bootstrap_operation = inputs["bootstrap_secret_operation"]
+        assert isinstance(bootstrap_operation, dict)
+        self.assertEqual(bootstrap_operation["default"], "preserve")
+        self.assertEqual(bootstrap_operation["options"], ["preserve", "install", "remove"])
+        idempotency_key = inputs["self_deploy_idempotency_key"]
+        assert isinstance(idempotency_key, dict)
+        self.assertEqual(idempotency_key["required"], False)
+
+        workflow_text = workflow_path.read_text(encoding="utf-8")
+        self.assertIn(
+            "LAUNCHPLANE_SECRET_KEYS_JSON: ${{ secrets.LAUNCHPLANE_SECRET_KEYS_JSON }}",
+            workflow_text,
+        )
+        deploy_job = workflow.job("deploy")
+        deploy_environment = deploy_job["env"]
+        assert isinstance(deploy_environment, dict)
+        self.assertNotIn("LAUNCHPLANE_SECRET_KEYS_JSON", deploy_environment)
+        render_step = workflow.step_named("deploy", "Render Launchplane self deploy request")
+        self.assertIsNotNone(render_step)
+        assert render_step is not None
+        render_environment = render_step.data["env"]
+        assert isinstance(render_environment, dict)
+        self.assertEqual(
+            render_environment["LAUNCHPLANE_SECRET_KEYS_JSON"],
+            "${{ secrets.LAUNCHPLANE_SECRET_KEYS_JSON }}",
+        )
+        self.assertIn(
+            "bootstrap_secret_operation must be preserve, install, or remove.",
+            workflow_text,
+        )
+        self.assertIn(
+            "self_deploy_idempotency_key must be an 8-200 character safe token.",
+            workflow_text,
+        )
+        self.assertIn(
+            "Automatic deploys must preserve bootstrap secret configuration.",
+            workflow_text,
+        )
+        self.assertIn(
+            "bootstrap_secret_operation=install requires LAUNCHPLANE_SECRET_KEYS_JSON.",
+            workflow_text,
+        )
+        self.assertIn(
+            "Bootstrap secret operations must retain the current deployed image.",
+            workflow_text,
+        )
+        self.assertIn('echo "::add-mask::$secret_keys_json"', workflow_text)
+        self.assertIn(
+            "{LAUNCHPLANE_SECRET_KEYS_JSON: $secret_keys_json}",
+            workflow_text,
+        )
+        self.assertIn('["LAUNCHPLANE_SECRET_KEYS_JSON"]', workflow_text)
+        self.assertIn(
+            "steps.prep.outputs.self_deploy_idempotency_key ||",
+            workflow_text,
+        )
+        cleanup_step = workflow.step_named(
+            "deploy", "Remove Launchplane self deploy request material"
+        )
+        self.assertIsNotNone(cleanup_step)
+        assert cleanup_step is not None
+        self.assertEqual(cleanup_step.data["if"], "always()")
+        self.assertNotIn("steps.self_deploy.outputs.payload_file", cleanup_step.run)
+        self.assertIn(
+            '"$RUNNER_TEMP/launchplane-self-deploy-payload.json"',
+            cleanup_step.run,
+        )
+
+    def test_deploy_launchplane_validates_manual_bootstrap_inputs(self) -> None:
+        workflow = load_workflow(".github/workflows/deploy-launchplane.yml")
+        prep_step = workflow.step_named("deploy", "Resolve deploy inputs")
+        self.assertIsNotNone(prep_step)
+        assert prep_step is not None
+        image_reference = "ghcr.io/cbusillo/launchplane@sha256:" + ("a" * 64)
+
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_directory = Path(temporary_directory_name)
+
+            def prepare(
+                *,
+                event_name: str,
+                operation: str,
+                idempotency_key: str,
+            ) -> subprocess.CompletedProcess[str]:
+                output_file = temporary_directory / "github-output.txt"
+                output_file.unlink(missing_ok=True)
+                return subprocess.run(
+                    ["bash", "-ceu", prep_step.run],
+                    check=False,
+                    capture_output=True,
+                    env={
+                        **os.environ,
+                        "DISPATCH_BOOTSTRAP_SECRET_OPERATION": operation,
+                        "DISPATCH_IMAGE_REFERENCE": image_reference,
+                        "DISPATCH_SELF_DEPLOY_IDEMPOTENCY_KEY": idempotency_key,
+                        "EVENT_NAME": event_name,
+                        "GITHUB_OUTPUT": str(output_file),
+                        "GITHUB_REPOSITORY": "cbusillo/launchplane",
+                        "LAUNCHPLANE_IMAGE_REPOSITORY": "ghcr.io/cbusillo/launchplane",
+                        "OMIT_EVERY_CODE_ENV": "false",
+                        "OMIT_NPMPLUS_ENV": "false",
+                        "OMIT_OWNER_AGENT_ENV": "false",
+                        "OMIT_TERMINAL_AGENT_ENV": "false",
+                        "WORKFLOW_RUN_HEAD_SHA": "b" * 40,
+                        "WORKFLOW_SHA": "c" * 40,
+                    },
+                    text=True,
+                )
+
+            valid_key = "launchplane-self-deploy:issue-2204:root-2026-08-25:install:v1"
+            valid = prepare(
+                event_name="workflow_dispatch",
+                operation="install",
+                idempotency_key=valid_key,
+            )
+            self.assertEqual(valid.returncode, 0, valid.stderr)
+            outputs = _read_github_outputs(temporary_directory)
+            self.assertEqual(outputs["bootstrap_secret_operation"], "install")
+            self.assertEqual(outputs["self_deploy_idempotency_key"], valid_key)
+
+            unsafe = prepare(
+                event_name="workflow_dispatch",
+                operation="install",
+                idempotency_key="unsafe value",
+            )
+            self.assertNotEqual(unsafe.returncode, 0)
+            self.assertIn("8-200 character safe token", unsafe.stderr)
+
+            automatic = prepare(
+                event_name="workflow_run",
+                operation="remove",
+                idempotency_key="",
+            )
+            self.assertNotEqual(automatic.returncode, 0)
+            self.assertIn("Automatic deploys must preserve", automatic.stderr)
+
+    def test_deploy_launchplane_renders_key_ring_install_preserve_and_remove(self) -> None:
+        workflow = load_workflow(".github/workflows/deploy-launchplane.yml")
+        render_step = workflow.step_named("deploy", "Render Launchplane self deploy request")
+        self.assertIsNotNone(render_step)
+        assert render_step is not None
+        image_reference = "ghcr.io/cbusillo/launchplane@sha256:" + ("a" * 64)
+        key_ring = {
+            "active_key_id": "root-test",
+            "keys": {"root-test": "test-canonical-key-material"},
+        }
+        pretty_key_ring = json.dumps(key_ring, indent=2)
+
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_directory = Path(temporary_directory_name)
+            previous_runtime = temporary_directory / "runtime.json"
+            previous_runtime.write_text(
+                json.dumps({"runtime": {"docker_image_reference": image_reference}}),
+                encoding="utf-8",
+            )
+
+            def render(operation: str, secret_keys_json: str) -> subprocess.CompletedProcess[str]:
+                output_file = temporary_directory / "github-output.txt"
+                output_file.unlink(missing_ok=True)
+                result = subprocess.run(
+                    ["bash", "-ceu", render_step.run],
+                    check=False,
+                    capture_output=True,
+                    env={
+                        **os.environ,
+                        "BOOTSTRAP_SECRET_OPERATION": operation,
+                        "DEPLOY_IMAGE_REFERENCE": image_reference,
+                        "GITHUB_OUTPUT": str(output_file),
+                        "IMAGE_REPOSITORY": "ghcr.io/cbusillo/launchplane",
+                        "LAUNCHPLANE_DOKPLOY_TARGET_ID": "launchplane-target",
+                        "LAUNCHPLANE_DOKPLOY_TARGET_TYPE": "compose",
+                        "LAUNCHPLANE_SECRET_KEYS_JSON": secret_keys_json,
+                        "OMIT_EVERY_CODE_ENV": "false",
+                        "OMIT_NPMPLUS_ENV": "false",
+                        "OMIT_OWNER_AGENT_ENV": "false",
+                        "OMIT_TERMINAL_AGENT_ENV": "false",
+                        "PREVIOUS_RUNTIME_RESPONSE_FILE": str(previous_runtime),
+                        "RUNNER_TEMP": str(temporary_directory),
+                    },
+                    text=True,
+                )
+                return result
+
+            install = render("install", pretty_key_ring)
+            self.assertEqual(install.returncode, 0, install.stderr)
+            install_outputs = _read_github_outputs(temporary_directory)
+            install_payload = json.loads(
+                Path(install_outputs["payload_file"]).read_text(encoding="utf-8")
+            )
+            installed_value = install_payload["deploy"]["oauth_env"]["LAUNCHPLANE_SECRET_KEYS_JSON"]
+            self.assertEqual(json.loads(installed_value), key_ring)
+            self.assertNotIn(
+                "LAUNCHPLANE_SECRET_KEYS_JSON",
+                install_payload["deploy"].get("oauth_env_removals", []),
+            )
+
+            preserve = render("preserve", pretty_key_ring)
+            self.assertEqual(preserve.returncode, 0, preserve.stderr)
+            preserve_outputs = _read_github_outputs(temporary_directory)
+            preserve_payload = json.loads(
+                Path(preserve_outputs["payload_file"]).read_text(encoding="utf-8")
+            )
+            self.assertNotIn(
+                "LAUNCHPLANE_SECRET_KEYS_JSON",
+                preserve_payload["deploy"].get("oauth_env", {}),
+            )
+            self.assertNotIn(
+                "LAUNCHPLANE_SECRET_KEYS_JSON",
+                preserve_payload["deploy"].get("oauth_env_removals", []),
+            )
+
+            remove = render("remove", pretty_key_ring)
+            self.assertEqual(remove.returncode, 0, remove.stderr)
+            remove_outputs = _read_github_outputs(temporary_directory)
+            remove_payload = json.loads(
+                Path(remove_outputs["payload_file"]).read_text(encoding="utf-8")
+            )
+            self.assertNotIn(
+                "LAUNCHPLANE_SECRET_KEYS_JSON",
+                remove_payload["deploy"].get("oauth_env", {}),
+            )
+            self.assertIn(
+                "LAUNCHPLANE_SECRET_KEYS_JSON",
+                remove_payload["deploy"]["oauth_env_removals"],
+            )
+
+            missing = render("install", "")
+            self.assertNotEqual(missing.returncode, 0)
+            self.assertIn("requires LAUNCHPLANE_SECRET_KEYS_JSON", missing.stderr)
+
+            previous_runtime.write_text(
+                json.dumps(
+                    {
+                        "runtime": {
+                            "docker_image_reference": (
+                                "ghcr.io/cbusillo/launchplane@sha256:" + ("b" * 64)
+                            )
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            changed_image = render("install", pretty_key_ring)
+            self.assertNotEqual(changed_image.returncode, 0)
+            self.assertIn("must retain the current deployed image", changed_image.stderr)
+
     def test_deploy_launchplane_omit_npmplus_env_removes_existing_keys(self) -> None:
         workflow_text = Path(".github/workflows/deploy-launchplane.yml").read_text(encoding="utf-8")
 
@@ -1746,6 +2001,9 @@ class ProductOnboardingTests(unittest.TestCase):
                     "--arg",
                     "public_ingress_github_token",
                     public_ingress_github_token,
+                    "--arg",
+                    "bootstrap_secret_operation",
+                    "preserve",
                     "--argjson",
                     "omit_npmplus_env",
                     json.dumps(omit_npmplus_env),
@@ -2041,10 +2299,9 @@ class ProductOnboardingTests(unittest.TestCase):
             "payload-file: ${{ steps.self_deploy.outputs.payload_file }}",
             workflow_text,
         )
+        self.assertIn("steps.prep.outputs.self_deploy_idempotency_key ||", workflow_text)
         self.assertIn(
-            "idempotency-key: launchplane-self-deploy:${{ "
-            "steps.image.outputs.image_reference }}:${{ github.run_id }}:${{ "
-            "github.run_attempt }}:db-authz",
+            "format('launchplane-self-deploy:{0}:{1}:{2}:db-authz'",
             workflow_text,
         )
         self.assertIn('expected-status: "200,202"', workflow_text)

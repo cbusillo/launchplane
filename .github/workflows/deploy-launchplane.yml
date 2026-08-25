@@ -12,6 +12,19 @@ on:
         description: Exact immutable Launchplane image digest to deploy instead of building a new one.
         required: false
         type: string
+      bootstrap_secret_operation:
+        description: Preserve, install, or remove the canonical managed-secret key ring.
+        required: false
+        default: preserve
+        type: choice
+        options:
+          - preserve
+          - install
+          - remove
+      self_deploy_idempotency_key:
+        description: Exact bounded idempotency key for a reviewed manual self-deploy.
+        required: false
+        type: string
       omit_every_code_env:
         description: Temporarily omit Every Code env for one compatibility deploy.
         required: false
@@ -120,7 +133,9 @@ jobs:
         id: prep
         shell: bash
         env:
+          DISPATCH_BOOTSTRAP_SECRET_OPERATION: ${{ inputs.bootstrap_secret_operation }}
           DISPATCH_IMAGE_REFERENCE: ${{ inputs.image_reference }}
+          DISPATCH_SELF_DEPLOY_IDEMPOTENCY_KEY: ${{ inputs.self_deploy_idempotency_key }}
           EVENT_NAME: ${{ github.event_name }}
           WORKFLOW_RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
           WORKFLOW_SHA: ${{ github.sha }}
@@ -178,6 +193,32 @@ jobs:
             should_build="true"
           fi
 
+          bootstrap_secret_operation="${DISPATCH_BOOTSTRAP_SECRET_OPERATION:-preserve}"
+          case "$bootstrap_secret_operation" in
+            preserve | install | remove) ;;
+            *)
+              echo "bootstrap_secret_operation must be preserve, install, or remove." >&2
+              exit 1
+              ;;
+          esac
+          if [ "$EVENT_NAME" != "workflow_dispatch" ] &&
+            [ "$bootstrap_secret_operation" != "preserve" ]; then
+            echo "Automatic deploys must preserve bootstrap secret configuration." >&2
+            exit 1
+          fi
+
+          self_deploy_idempotency_key="$DISPATCH_SELF_DEPLOY_IDEMPOTENCY_KEY"
+          if [ -n "$self_deploy_idempotency_key" ]; then
+            if [[ ! "$self_deploy_idempotency_key" =~ ^[A-Za-z0-9._:/-]{8,200}$ ]]; then
+              echo "self_deploy_idempotency_key must be an 8-200 character safe token." >&2
+              exit 1
+            fi
+            if [ "$EVENT_NAME" != "workflow_dispatch" ]; then
+              echo "Only manual deploys may supply self_deploy_idempotency_key." >&2
+              exit 1
+            fi
+          fi
+
           for omit_environment_variable in \
             OMIT_EVERY_CODE_ENV \
             OMIT_TERMINAL_AGENT_ENV \
@@ -195,6 +236,8 @@ jobs:
             printf 'image_repository=%s\n' "$image_repository"
             printf 'should_build=%s\n' "$should_build"
             printf 'deploy_image_reference=%s\n' "$deploy_image_reference"
+            printf 'bootstrap_secret_operation=%s\n' "$bootstrap_secret_operation"
+            printf 'self_deploy_idempotency_key=%s\n' "$self_deploy_idempotency_key"
           } >> "$GITHUB_OUTPUT"
 
       - name: Validate deploy configuration
@@ -319,8 +362,10 @@ jobs:
         id: self_deploy
         shell: bash
         env:
+          BOOTSTRAP_SECRET_OPERATION: ${{ steps.prep.outputs.bootstrap_secret_operation }}
           DEPLOY_IMAGE_REFERENCE: ${{ steps.image.outputs.image_reference }}
           IMAGE_REPOSITORY: ${{ steps.prep.outputs.image_repository }}
+          LAUNCHPLANE_SECRET_KEYS_JSON: ${{ secrets.LAUNCHPLANE_SECRET_KEYS_JSON }}
           PREVIOUS_RUNTIME_RESPONSE_FILE: ${{ runner.temp }}/launchplane-previous-runtime.json
         run: |
           set -euo pipefail
@@ -341,12 +386,44 @@ jobs:
           fi
           printf 'previous_image_reference=%s\n' "$previous_image_reference" >> "$GITHUB_OUTPUT"
 
+          if [ "$BOOTSTRAP_SECRET_OPERATION" != "preserve" ]; then
+            if [ -z "$previous_image_reference" ]; then
+              echo "Bootstrap secret operations require the current deployed image." >&2
+              exit 1
+            fi
+            if [ "$DEPLOY_IMAGE_REFERENCE" != "$previous_image_reference" ]; then
+              echo "Bootstrap secret operations must retain the current deployed image." >&2
+              exit 1
+            fi
+          fi
+
+          secret_keys_json=""
+          case "$BOOTSTRAP_SECRET_OPERATION" in
+            install)
+              if [ -z "${LAUNCHPLANE_SECRET_KEYS_JSON:-}" ]; then
+                echo "bootstrap_secret_operation=install requires LAUNCHPLANE_SECRET_KEYS_JSON." >&2
+                exit 1
+              fi
+              secret_keys_json="$(
+                jq -ce 'if type == "object" then . else error("expected object") end' \
+                  <<<"$LAUNCHPLANE_SECRET_KEYS_JSON"
+              )"
+              echo "::add-mask::$secret_keys_json"
+              ;;
+            preserve | remove) ;;
+            *)
+              echo "Unexpected bootstrap secret operation." >&2
+              exit 1
+              ;;
+          esac
+
           service_env_json="$({
             jq -n \
               --arg github_client_id "${LAUNCHPLANE_GITHUB_CLIENT_ID:-}" \
               --arg github_client_secret "${LAUNCHPLANE_GITHUB_CLIENT_SECRET:-}" \
               --arg public_url "${LAUNCHPLANE_PUBLIC_URL:-}" \
               --arg session_secret "${LAUNCHPLANE_SESSION_SECRET:-}" \
+              --arg secret_keys_json "$secret_keys_json" \
               --arg cookie_secure "${LAUNCHPLANE_COOKIE_SECURE:-}" \
               --arg bootstrap_admin_emails "${LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS:-}" \
               --arg work_graph_project_owner "${LAUNCHPLANE_WORK_GRAPH_PROJECT_OWNER:-}" \
@@ -381,6 +458,7 @@ jobs:
               --argjson omit_terminal_agent_env "$OMIT_TERMINAL_AGENT_ENV" \
               --argjson omit_owner_agent_env "$OMIT_OWNER_AGENT_ENV" \
               --argjson omit_npmplus_env "$OMIT_NPMPLUS_ENV" \
+              --arg bootstrap_secret_operation "$BOOTSTRAP_SECRET_OPERATION" \
               '(
                 {
                 LAUNCHPLANE_GITHUB_CLIENT_ID: $github_client_id,
@@ -391,6 +469,13 @@ jobs:
                 LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS: $bootstrap_admin_emails,
                 LAUNCHPLANE_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET: $manager_preview_webhook_secret
                 }
+                + (
+                  if $bootstrap_secret_operation == "install" then
+                    {LAUNCHPLANE_SECRET_KEYS_JSON: $secret_keys_json}
+                  else
+                    {}
+                  end
+                )
                 + (
                   if ($omit_terminal_agent_env | not) then
                     {
@@ -485,6 +570,7 @@ jobs:
           service_env_removals_json="$({
             jq -n \
               --arg public_ingress_github_token "${LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN:-}" \
+              --arg bootstrap_secret_operation "$BOOTSTRAP_SECRET_OPERATION" \
               --argjson omit_npmplus_env "$OMIT_NPMPLUS_ENV" \
               '(
                 if $omit_npmplus_env then
@@ -493,6 +579,13 @@ jobs:
                     "LAUNCHPLANE_NPMPLUS_IDENTITY",
                     "LAUNCHPLANE_NPMPLUS_SECRET"
                   ]
+                else
+                  []
+                end
+              )
+              + (
+                if $bootstrap_secret_operation == "remove" then
+                  ["LAUNCHPLANE_SECRET_KEYS_JSON"]
                 else
                   []
                 end
@@ -516,7 +609,9 @@ jobs:
           })"
 
           request_payload_file="$RUNNER_TEMP/launchplane-self-deploy-payload.json"
+          umask 077
           printf '%s\n' "$request_payload" > "$request_payload_file"
+          chmod 600 "$request_payload_file"
           echo "payload_file=$request_payload_file" >> "$GITHUB_OUTPUT"
 
       - name: Request Launchplane self deploy
@@ -528,7 +623,12 @@ jobs:
           audience: ${{ steps.service.outputs.service_audience }}
           route-path: /v1/drivers/launchplane/self-deploy
           payload-file: ${{ steps.self_deploy.outputs.payload_file }}
-          idempotency-key: launchplane-self-deploy:${{ steps.image.outputs.image_reference }}:${{ github.run_id }}:${{ github.run_attempt }}:db-authz
+          idempotency-key: >-
+            ${{ steps.prep.outputs.self_deploy_idempotency_key ||
+              format('launchplane-self-deploy:{0}:{1}:{2}:db-authz',
+                steps.image.outputs.image_reference,
+                github.run_id,
+                github.run_attempt) }}
           expected-status: "200,202"
           fail-result-paths: ""
           timeout-ms: "30000"
@@ -1158,6 +1258,15 @@ jobs:
             jq -r '.results[] | "- \(.method) \(.route_path): HTTP \(.http_status) ok=\(.ok) classification=\(.classification) trace=\(.trace_id)"' \
               launchplane-v2-deployed-smoke.json
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remove Launchplane self deploy request material
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f -- \
+            "$RUNNER_TEMP/launchplane-self-deploy-payload.json" \
+            "$RUNNER_TEMP/launchplane-self-deploy-rollback-payload.json"
 
   emergency-dokploy-rollback:
     if: >-
