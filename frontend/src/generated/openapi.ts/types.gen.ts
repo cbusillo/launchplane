@@ -158,6 +158,61 @@ export type AuthSessionResponse = {
     trace_id: string;
 };
 
+export type AuthzManagedCompatibilityRetirement = {
+    managed_rule_id: string;
+    match_type: 'github_actions_name_only_authorization_narrowing';
+    principal_type: 'github_actions';
+    retained_managed_rule_sha256: string;
+    retired_rule_sha256: string;
+};
+
+export type AuthzManagedOperationalReadinessBlocker = {
+    actions: Array<string>;
+    managed_rule_id: string;
+    reason_codes: Array<'repository_not_exact' | 'workflow_refs_not_singleton' | 'workflow_ref_not_exact' | 'job_workflow_refs_not_singleton' | 'job_workflow_ref_not_immutable' | 'actions_not_singleton' | 'action_not_exact' | 'products_not_singleton' | 'product_not_exact' | 'contexts_not_singleton' | 'context_not_exact' | 'instances_not_singleton' | 'instance_not_exact'>;
+};
+
+export type AuthzManagedPolicyDiff = {
+    added_rule_count: number;
+    adopted_rule_count: number;
+    authorization_changed: boolean;
+    candidate_revision: number;
+    changed: boolean;
+    changes: Array<AuthzManagedRuleChange>;
+    desired_policy_sha256: string;
+    desired_set_sha256: string;
+    managed_set_id: string;
+    operational_readiness_blocked_rule_count: number;
+    operational_readiness_blockers: Array<AuthzManagedOperationalReadinessBlocker>;
+    plan_sha256: string;
+    policy_safety_blocker_count: number;
+    policy_safety_blockers: Array<AuthzManagedPolicySafetyBlocker>;
+    previous_policy_sha256: string;
+    previous_record_id: string;
+    previous_revision: number;
+    removed_rule_count: number;
+    retired_unmanaged_compatibility_rule_count: number;
+    retired_unmanaged_compatibility_rules: Array<AuthzManagedCompatibilityRetirement>;
+    schema_migrated: boolean;
+    unchanged_rule_count: number;
+    unmanaged_compatibility_candidate_count: number;
+    updated_rule_count: number;
+};
+
+export type AuthzManagedPolicySafetyBlocker = {
+    code: 'authz_policy_admin_unreachable' | 'authz_policy_applying_admin_removed' | 'authz_policy_independent_admin_unreachable';
+    message: string;
+};
+
+export type AuthzManagedRuleChange = {
+    change: 'added' | 'adopted' | 'updated' | 'removed';
+    desired_principal_type: 'github_actions' | 'github_humans' | 'terminal_agents' | 'local_operators' | 'local_admins' | null;
+    desired_rule_sha256: string;
+    managed_rule_id: string;
+    previous_principal_type: 'github_actions' | 'github_humans' | 'terminal_agents' | 'local_operators' | 'local_admins' | null;
+    previous_rule_sha256: string;
+};
+
 export type BackupGateEvidence = {
     evidence: {
         [key: string]: string;
@@ -624,6 +679,10 @@ export type HealthcheckEvidence = {
     verified: boolean;
 };
 
+export type LaunchplaneAuthzPolicyOutput = {
+    [key: string]: unknown;
+};
+
 export type LaunchplaneErrorDetail = {
     code: string;
     message: string;
@@ -687,6 +746,36 @@ export type LaunchplaneProductProfileRecord = {
     schema_version: number;
     source: string;
     updated_at: string;
+};
+
+export type ManagedAuthzPolicySetExecutionEvidence = {
+    changed: boolean;
+    failure_code: string;
+    previous_policy_sha256: string;
+    previous_record_id: string;
+    previous_revision: number;
+    reconciliation_required: boolean;
+    result_digest: string;
+    result_status: 'ok' | 'error';
+    resulting_policy_sha256: string;
+    resulting_record_id: string;
+    resulting_revision: number;
+    schema_version: number;
+};
+
+export type ManagedAuthzPolicySetHumanEvidence = {
+    diff: AuthzManagedPolicyDiff;
+    plan_digest: string;
+    result_status: 'ok' | 'blocked';
+    schema_version: number;
+};
+
+export type ManagedAuthzPolicySetProposalInputOutput = {
+    desired_policy: LaunchplaneAuthzPolicyOutput;
+    managed_set_id: string;
+    reason: string;
+    related_issue: string;
+    schema_version: number;
 };
 
 export type ManagedSecretReencryptionHumanEvidence = {
@@ -1566,9 +1655,15 @@ export type PrivilegedOperationActor = {
     login: string;
 };
 
+export type PrivilegedOperationAgentActor = {
+    identity_type: 'terminal_agent';
+    login: 'terminal-agent';
+    principal_sha256: string;
+};
+
 export type PrivilegedOperationApproval = {
     approver: PrivilegedOperationActor;
-    descriptor_id: 'managed-secret-reencryption';
+    descriptor_id: 'managed-secret-reencryption' | 'managed-authz-policy-set';
     descriptor_version: number;
     evidence_digest: string;
     expires_at: string;
@@ -1582,7 +1677,7 @@ export type PrivilegedOperationApproval = {
     pre_state_digest: string;
     reason: string;
     request_digest: string;
-    rollback_class: 'key_retained';
+    rollback_class: 'key_retained' | 'policy_cas';
     schema_version: number;
 };
 
@@ -1594,7 +1689,7 @@ export type PrivilegedOperationApprovalEnvelope = {
 
 export type PrivilegedOperationEventRecord = {
     action: 'planned' | 'approved' | 'revoked' | 'executing' | 'executed' | 'execution_failed' | 'expired' | 'cancelled';
-    actor: PrivilegedOperationActor;
+    actor: PrivilegedOperationActor | PrivilegedOperationAgentActor;
     event_id: string;
     occurred_at: string;
     operation_id: string;
@@ -1603,7 +1698,7 @@ export type PrivilegedOperationEventRecord = {
     schema_version: number;
     sequence: number;
     source_event_id: string;
-    source_kind: 'browser_api' | 'system';
+    source_kind: 'agent_api' | 'browser_api' | 'system';
 };
 
 export type PrivilegedOperationExecutionEvidence = {
@@ -1636,17 +1731,17 @@ export type PrivilegedOperationListResponse = {
 export type PrivilegedOperationRecord = {
     approval: PrivilegedOperationApproval | null;
     created_at: string;
-    descriptor_id: 'managed-secret-reencryption';
+    descriptor_id: 'managed-secret-reencryption' | 'managed-authz-policy-set';
     descriptor_version: number;
-    evidence: ManagedSecretReencryptionHumanEvidence;
+    evidence: ManagedSecretReencryptionHumanEvidence | ManagedAuthzPolicySetHumanEvidence;
     evidence_digest: string;
-    execution: PrivilegedOperationExecutionEvidence | null;
+    execution: PrivilegedOperationExecutionEvidence | ManagedAuthzPolicySetExecutionEvidence | null;
     expires_at: string;
     operation_id: string;
-    request: ManagedSecretReencryptionPlanInput;
+    request: ManagedSecretReencryptionPlanInput | ManagedAuthzPolicySetProposalInputOutput;
     request_digest: string;
-    requested_by: PrivilegedOperationActor;
-    safety_class: 'secret_backed';
+    requested_by: PrivilegedOperationActor | PrivilegedOperationAgentActor;
+    safety_class: 'secret_backed' | 'policy_admin';
     schema_version: number;
     source_event_id: string;
     status: 'planned' | 'approved' | 'revoked' | 'executing' | 'executed' | 'execution_failed' | 'expired' | 'cancelled';
@@ -3499,6 +3594,7 @@ export type ListHumanPrivilegedOperationsData = {
     path?: never;
     query?: {
         status?: 'planned' | 'approved' | 'revoked' | 'executing' | 'executed' | 'execution_failed' | 'expired' | 'cancelled' | null;
+        descriptor_id?: 'managed-secret-reencryption' | 'managed-authz-policy-set';
         limit?: number;
     };
     url: '/v1/privileged-operations/plans';

@@ -15,8 +15,17 @@ from click.testing import CliRunner
 
 from control_plane import secrets as control_plane_secrets
 from control_plane.cli import main
-from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
+from control_plane.contracts.authz_policy_record import (
+    AuthzPolicyCompareWriteResult,
+    LaunchplaneAuthzPolicyRecord,
+    authz_policy_sha256,
+    build_authz_policy_record_id,
+)
 from control_plane.contracts.privileged_operation import (
+    AUTHZ_POLICY_OPERATION_APPROVE_ACTION,
+    AUTHZ_POLICY_OPERATION_REVOKE_ACTION,
+    ManagedAuthzPolicySetExecutionEvidence,
+    ManagedAuthzPolicySetProposalInput,
     ManagedSecretReencryptionPlanInput,
     PRIVILEGED_SECRET_OPERATION_APPROVE_ACTION,
     PRIVILEGED_SECRET_OPERATION_REVOKE_ACTION,
@@ -37,6 +46,7 @@ from control_plane.privileged_operation_registry import (
 from control_plane.privileged_operation_service import (
     approve_privileged_operation,
     create_privileged_operation_plan,
+    create_typed_privileged_operation_plan,
 )
 from control_plane.privileged_operation_worker import (
     PRIVILEGED_OPERATION_EXECUTION_ROUTE,
@@ -49,7 +59,7 @@ from control_plane.privileged_operation_worker import (
 )
 from control_plane.service_auth import LaunchplaneAuthzPolicy
 from control_plane.storage.filesystem import FilesystemRecordStore
-from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.storage.postgres import DbOnlyMutationRequest, PostgresRecordStore
 from tests.support.stores import _sqlite_database_url
 
 
@@ -199,6 +209,138 @@ def _prepare_approved_operation(
     return approved.operation_id, str(written["secret_id"])
 
 
+def _policy_admin_record(
+    *,
+    revision: int = 1,
+    approver_is_policy_admin: bool = True,
+    approver_organizations: tuple[str, ...] = (),
+    include_same_approver_scoped_admin: bool = False,
+) -> LaunchplaneAuthzPolicyRecord:
+    approver_actions = [
+        AUTHZ_POLICY_OPERATION_APPROVE_ACTION,
+        AUTHZ_POLICY_OPERATION_REVOKE_ACTION,
+    ]
+    if approver_is_policy_admin:
+        approver_actions.append("authz_policy_grant.write")
+    github_humans: list[dict[str, object]] = [
+        {
+            "managed_set_id": "privileged-operations.policy-execution",
+            "managed_rule_id": "human-policy-approver",
+            "github_ids": [123],
+            "roles": ["admin"],
+            "products": ["launchplane"],
+            "contexts": ["launchplane"],
+            "actions": approver_actions,
+            "organizations": list(approver_organizations),
+        },
+        {
+            "managed_set_id": "privileged-operations.policy-safety",
+            "managed_rule_id": "independent-policy-admin",
+            "github_ids": [456],
+            "roles": ["admin"],
+            "products": ["launchplane"],
+            "contexts": ["launchplane"],
+            "actions": ["authz_policy_grant.write"],
+        },
+    ]
+    if include_same_approver_scoped_admin:
+        github_humans.append(
+            {
+                "managed_set_id": "privileged-operations.policy-shadow",
+                "managed_rule_id": "same-approver-org-admin",
+                "github_ids": [123],
+                "organizations": ["solo-org"],
+                "roles": ["admin"],
+                "products": ["launchplane"],
+                "contexts": ["launchplane"],
+                "actions": ["authz_policy_grant.write"],
+            }
+        )
+    policy = LaunchplaneAuthzPolicy.model_validate(
+        {"schema_version": 2, "github_humans": github_humans}
+    )
+    policy_sha256 = authz_policy_sha256(policy)
+    return LaunchplaneAuthzPolicyRecord(
+        record_id=build_authz_policy_record_id(
+            revision=revision,
+            policy_sha256=policy_sha256,
+        ),
+        revision=revision,
+        source=f"test-policy-admin-r{revision}",
+        updated_at=f"2026-08-22T19:{revision:02d}:00+00:00",
+        policy_sha256=policy_sha256,
+        policy=policy,
+    )
+
+
+def _prepare_approved_policy_operation(
+    store: PostgresRecordStore,
+    *,
+    approval_policy: LaunchplaneAuthzPolicyRecord,
+    request: ManagedAuthzPolicySetProposalInput | None = None,
+) -> str:
+    resolved_request = request or ManagedAuthzPolicySetProposalInput(
+        managed_set_id="test.policy-operation",
+        reason="Add a reviewed policy-operation read rule.",
+        related_issue="cbusillo/launchplane#2238",
+        desired_policy=LaunchplaneAuthzPolicy.model_validate(
+            {
+                "schema_version": 2,
+                "github_humans": [
+                    {
+                        "managed_set_id": "test.policy-operation",
+                        "managed_rule_id": "policy-operation-reader",
+                        "github_ids": [789],
+                        "roles": ["admin"],
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": ["authz_policy_operation.read"],
+                    }
+                ],
+            }
+        ),
+    )
+    actor = PrivilegedOperationActor(
+        identity_type="github_human",
+        github_id=123,
+        login="operator-at-approval",
+    )
+    planned = create_typed_privileged_operation_plan(
+        record_store=store,
+        descriptor_id="managed-authz-policy-set",
+        actor=actor,
+        source_kind="browser_api",
+        source_event_id="worker-policy-plan",
+        request=resolved_request,
+        now=lambda: datetime(2026, 8, 22, 20, 0, tzinfo=timezone.utc),
+    ).record
+    approval = PrivilegedOperationApproval(
+        approver=actor,
+        descriptor_id=planned.descriptor_id,
+        descriptor_version=planned.descriptor_version,
+        request_digest=planned.request_digest,
+        evidence_digest=planned.evidence_digest,
+        plan_digest=planned.evidence.plan_digest,
+        pre_state_digest=privileged_operation_pre_state_digest(planned.evidence),
+        policy_record_id=approval_policy.record_id,
+        policy_revision=approval_policy.revision,
+        policy_sha256=approval_policy.policy_sha256,
+        policy_source=approval_policy.source,
+        managed_set_id="privileged-operations.policy-execution",
+        managed_rule_id="human-policy-approver",
+        expires_at=planned.expires_at,
+        reason="Reviewed the exact policy diff and immutable policy state.",
+        rollback_class="policy_cas",
+    )
+    return approve_privileged_operation(
+        record_store=store,
+        operation_id=planned.operation_id,
+        approval=approval,
+        source_event_id="worker-policy-approval",
+        now=lambda: datetime(2026, 8, 22, 20, 5, tzinfo=timezone.utc),
+    ).record.operation_id
+
+
 class PrivilegedOperationWorkerTests(unittest.TestCase):
     def _store(self, directory: str) -> PostgresRecordStore:
         store = PostgresRecordStore(
@@ -221,6 +363,279 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             with self.assertRaisesRegex(TypeError, "PostgreSQL mutation storage"):
                 require_privileged_operation_execution_store(FilesystemRecordStore(Path(directory)))
+
+    def test_worker_executes_approved_managed_authz_policy_set_with_cas_readback(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = self._store(directory)
+            try:
+                approval_policy = store.seed_authz_policy_if_absent(
+                    _policy_admin_record(include_same_approver_scoped_admin=True)
+                )
+                operation_id = _prepare_approved_policy_operation(
+                    store,
+                    approval_policy=approval_policy,
+                )
+
+                completed = execute_approved_privileged_operations_once(
+                    record_store=store,
+                    now=lambda: FIXED_NOW,
+                )
+
+                record = store.read_privileged_operation_record(operation_id)
+                active_records = store.list_authz_policy_records(status="active", limit=2)
+            finally:
+                store.close()
+
+        self.assertEqual([item.operation_id for item in completed], [operation_id])
+        self.assertEqual(record.status, "executed")
+        self.assertIsInstance(record.execution, ManagedAuthzPolicySetExecutionEvidence)
+        assert isinstance(record.execution, ManagedAuthzPolicySetExecutionEvidence)
+        self.assertTrue(record.execution.changed)
+        self.assertEqual(record.execution.previous_revision, 1)
+        self.assertEqual(record.execution.resulting_revision, 2)
+        self.assertEqual(len(active_records), 1)
+        self.assertEqual(active_records[0].revision, 2)
+        self.assertTrue(
+            any(
+                rule.managed_rule_id == "policy-operation-reader"
+                for rule in active_records[0].policy.github_humans
+            )
+        )
+
+    def test_worker_uses_immutable_admin_identity_for_org_scoped_approver_rule(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = self._store(directory)
+            try:
+                approval_policy = store.seed_authz_policy_if_absent(
+                    _policy_admin_record(approver_organizations=("solo-org",))
+                )
+                operation_id = _prepare_approved_policy_operation(
+                    store,
+                    approval_policy=approval_policy,
+                )
+
+                execute_approved_privileged_operations_once(
+                    record_store=store,
+                    now=lambda: FIXED_NOW,
+                )
+
+                record = store.read_privileged_operation_record(operation_id)
+            finally:
+                store.close()
+
+        self.assertEqual(record.status, "executed")
+
+    def test_policy_readback_failure_after_cas_requires_reconciliation(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = self._store(directory)
+            try:
+                approval_policy = store.seed_authz_policy_if_absent(_policy_admin_record())
+                operation_id = _prepare_approved_policy_operation(
+                    store,
+                    approval_policy=approval_policy,
+                )
+                original_compare = store.compare_and_write_authz_policy_record
+                original_list = store.list_authz_policy_records
+                effect_committed = False
+
+                def compare_without_readback(
+                    *,
+                    expected_record: LaunchplaneAuthzPolicyRecord,
+                    replacement_record: LaunchplaneAuthzPolicyRecord | None,
+                    mutation: DbOnlyMutationRequest | None = None,
+                ) -> AuthzPolicyCompareWriteResult:
+                    nonlocal effect_committed
+                    result = original_compare(
+                        expected_record=expected_record,
+                        replacement_record=replacement_record,
+                        mutation=mutation,
+                    )
+                    effect_committed = result.status == "written"
+                    return AuthzPolicyCompareWriteResult(
+                        status=result.status,
+                        current_record=None,
+                        idempotency_record=result.idempotency_record,
+                    )
+
+                def fail_post_commit_readback(
+                    *,
+                    status: str = "",
+                    limit: int | None = None,
+                ) -> tuple[LaunchplaneAuthzPolicyRecord, ...]:
+                    if effect_committed and status == "active":
+                        return ()
+                    return original_list(status=status, limit=limit)
+
+                with (
+                    patch.object(
+                        store,
+                        "compare_and_write_authz_policy_record",
+                        side_effect=compare_without_readback,
+                    ),
+                    patch.object(
+                        store,
+                        "list_authz_policy_records",
+                        side_effect=fail_post_commit_readback,
+                    ),
+                ):
+                    execute_approved_privileged_operations_once(
+                        record_store=store,
+                        now=lambda: FIXED_NOW,
+                    )
+
+                record = store.read_privileged_operation_record(operation_id)
+                active_records = original_list(status="active", limit=2)
+                outer_lookup = store.lookup_existing_mutation_reservation(
+                    route_path=PRIVILEGED_OPERATION_EXECUTION_ROUTE,
+                    idempotency_key=operation_id,
+                    request_fingerprint=privileged_operation_execution_fingerprint(record),
+                )
+            finally:
+                store.close()
+
+        self.assertEqual(record.status, "execution_failed")
+        self.assertIsInstance(record.execution, ManagedAuthzPolicySetExecutionEvidence)
+        assert isinstance(record.execution, ManagedAuthzPolicySetExecutionEvidence)
+        self.assertEqual(record.execution.failure_code, "authz_policy_readback_failed")
+        self.assertTrue(record.execution.reconciliation_required)
+        self.assertEqual(len(active_records), 1)
+        self.assertEqual(active_records[0].revision, 2)
+        self.assertIsNotNone(outer_lookup.record)
+        assert outer_lookup.record is not None
+        self.assertEqual(outer_lookup.record.state, "reconcile_required")
+
+    def test_worker_rejects_policy_set_that_removes_independent_administrator(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = self._store(directory)
+            try:
+                approval_policy = store.seed_authz_policy_if_absent(
+                    _policy_admin_record(include_same_approver_scoped_admin=True)
+                )
+                operation_id = _prepare_approved_policy_operation(
+                    store,
+                    approval_policy=approval_policy,
+                    request=ManagedAuthzPolicySetProposalInput(
+                        managed_set_id="privileged-operations.policy-safety",
+                        reason="Attempt to remove the independent policy administrator.",
+                        desired_policy=LaunchplaneAuthzPolicy(schema_version=2),
+                    ),
+                )
+
+                execute_approved_privileged_operations_once(
+                    record_store=store,
+                    now=lambda: FIXED_NOW,
+                )
+
+                record = store.read_privileged_operation_record(operation_id)
+                active_records = store.list_authz_policy_records(status="active", limit=2)
+            finally:
+                store.close()
+
+        self.assertEqual(record.status, "execution_failed")
+        self.assertIsInstance(record.execution, ManagedAuthzPolicySetExecutionEvidence)
+        assert isinstance(record.execution, ManagedAuthzPolicySetExecutionEvidence)
+        self.assertEqual(
+            record.execution.failure_code,
+            "authz_policy_independent_admin_unreachable",
+        )
+        self.assertFalse(record.execution.reconciliation_required)
+        self.assertEqual(len(active_records), 1)
+        self.assertEqual(active_records[0].revision, 1)
+
+    def test_worker_rejects_approver_without_preexisting_policy_admin_authority(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = self._store(directory)
+            try:
+                approval_policy = store.seed_authz_policy_if_absent(
+                    _policy_admin_record(approver_is_policy_admin=False)
+                )
+                operation_id = _prepare_approved_policy_operation(
+                    store,
+                    approval_policy=approval_policy,
+                )
+
+                execute_approved_privileged_operations_once(
+                    record_store=store,
+                    now=lambda: FIXED_NOW,
+                )
+
+                record = store.read_privileged_operation_record(operation_id)
+                active_records = store.list_authz_policy_records(status="active", limit=2)
+            finally:
+                store.close()
+
+        self.assertEqual(record.status, "execution_failed")
+        self.assertIsInstance(record.execution, ManagedAuthzPolicySetExecutionEvidence)
+        assert isinstance(record.execution, ManagedAuthzPolicySetExecutionEvidence)
+        self.assertEqual(record.execution.failure_code, "approval_policy_admin_drift")
+        self.assertFalse(record.execution.reconciliation_required)
+        self.assertEqual(len(active_records), 1)
+        self.assertEqual(active_records[0].revision, 1)
+
+    def test_worker_rejects_managed_authz_policy_pre_state_drift_before_apply(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = self._store(directory)
+            try:
+                approval_policy = store.seed_authz_policy_if_absent(_policy_admin_record())
+                operation_id = _prepare_approved_policy_operation(
+                    store,
+                    approval_policy=approval_policy,
+                )
+                changed_policy_payload = approval_policy.policy.model_dump(mode="json")
+                changed_policy_payload["github_humans"].append(
+                    {
+                        "managed_set_id": "test.concurrent-policy-change",
+                        "managed_rule_id": "concurrent-policy-reader",
+                        "github_ids": [999],
+                        "roles": ["admin"],
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": ["authz_policy_operation.read"],
+                    }
+                )
+                changed_policy = LaunchplaneAuthzPolicy.model_validate(changed_policy_payload)
+                changed_policy_sha256 = authz_policy_sha256(changed_policy)
+                replacement = LaunchplaneAuthzPolicyRecord(
+                    record_id=build_authz_policy_record_id(
+                        revision=2,
+                        policy_sha256=changed_policy_sha256,
+                    ),
+                    revision=2,
+                    status="active",
+                    source="test:concurrent-policy-change",
+                    updated_at="2026-08-22T20:07:00+00:00",
+                    policy_sha256=changed_policy_sha256,
+                    policy=changed_policy,
+                )
+                write_result = store.compare_and_write_authz_policy_record(
+                    expected_record=approval_policy,
+                    replacement_record=replacement,
+                )
+
+                execute_approved_privileged_operations_once(
+                    record_store=store,
+                    now=lambda: FIXED_NOW,
+                )
+
+                record = store.read_privileged_operation_record(operation_id)
+                active_records = store.list_authz_policy_records(status="active", limit=2)
+            finally:
+                store.close()
+
+        self.assertEqual(write_result.status, "written")
+        self.assertEqual(record.status, "execution_failed")
+        self.assertIsInstance(record.execution, ManagedAuthzPolicySetExecutionEvidence)
+        assert isinstance(record.execution, ManagedAuthzPolicySetExecutionEvidence)
+        self.assertEqual(record.execution.failure_code, "approved_plan_drift")
+        self.assertFalse(record.execution.reconciliation_required)
+        self.assertEqual(len(active_records), 1)
+        self.assertEqual(active_records[0].record_id, replacement.record_id)
+        self.assertFalse(
+            any(
+                rule.managed_rule_id == "policy-operation-reader"
+                for rule in active_records[0].policy.github_humans
+            )
+        )
 
     def test_successful_poll_heartbeat_is_hashed_upserted_and_pruned(self) -> None:
         with TemporaryDirectory() as directory:
@@ -823,6 +1238,71 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
         completed_reservation = completed_lookup.record
         assert completed_reservation is not None
         self.assertEqual(completed_reservation.state, "completed")
+
+    def test_stale_policy_execution_recovers_from_inner_cas_readback(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = self._store(directory)
+            try:
+                approval_policy = store.seed_authz_policy_if_absent(_policy_admin_record())
+                operation_id = _prepare_approved_policy_operation(
+                    store,
+                    approval_policy=approval_policy,
+                )
+                original_transition = store.transition_privileged_operation
+
+                def crash_after_policy_effect(
+                    record: PrivilegedOperationRecord,
+                    event: PrivilegedOperationEventRecord,
+                ) -> PrivilegedOperationEventWriteStatus:
+                    if record.status == "executed":
+                        raise KeyboardInterrupt("simulated policy worker crash")
+                    return original_transition(record, event)
+
+                with (
+                    patch.object(
+                        store,
+                        "transition_privileged_operation",
+                        side_effect=crash_after_policy_effect,
+                    ),
+                    self.assertRaises(KeyboardInterrupt),
+                ):
+                    execute_approved_privileged_operations_once(
+                        record_store=store,
+                        now=lambda: FIXED_NOW,
+                    )
+
+                executing = store.read_privileged_operation_record(operation_id)
+                outer_lookup = store.lookup_existing_mutation_reservation(
+                    route_path=PRIVILEGED_OPERATION_EXECUTION_ROUTE,
+                    idempotency_key=operation_id,
+                    request_fingerprint=privileged_operation_execution_fingerprint(executing),
+                )
+                self.assertIsNotNone(outer_lookup.record)
+                outer_reservation = outer_lookup.record
+                assert outer_reservation is not None
+                store.mark_mutation_reconcile_required(
+                    reservation=outer_reservation,
+                    reconciliation_key=operation_id,
+                )
+
+                recovered = execute_approved_privileged_operations_once(
+                    record_store=store,
+                    now=lambda: FIXED_NOW,
+                )
+
+                current = store.read_privileged_operation_record(operation_id)
+                active_records = store.list_authz_policy_records(status="active", limit=2)
+            finally:
+                store.close()
+
+        self.assertEqual(executing.status, "executing")
+        self.assertEqual([record.operation_id for record in recovered], [operation_id])
+        self.assertEqual(current.status, "executed")
+        self.assertIsInstance(current.execution, ManagedAuthzPolicySetExecutionEvidence)
+        assert isinstance(current.execution, ManagedAuthzPolicySetExecutionEvidence)
+        self.assertFalse(current.execution.reconciliation_required)
+        self.assertEqual(len(active_records), 1)
+        self.assertEqual(active_records[0].revision, 2)
 
     def test_removed_github_id_rule_fails_before_effect_without_reconciliation(self) -> None:
         approval_policy = _policy_record(revision=3)

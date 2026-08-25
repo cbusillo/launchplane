@@ -16,6 +16,7 @@ import type {
   EveryCodeSummaryResponse,
   EvaluateOwnerAcceptanceResponse,
   GovernanceProjectionResponse,
+  ListHumanPrivilegedOperationsData,
   ListHumanPrivilegedOperationsResponse,
   ListOwnerAcceptanceCurrentItemsData,
   ListOwnerAcceptanceQueueData,
@@ -606,11 +607,20 @@ export function writeOwnerAcceptanceEvent(
 
 export type { PrivilegedOperationListResponse, PrivilegedOperationRecord };
 
+export type PrivilegedOperationDescriptorId = NonNullable<
+  ListHumanPrivilegedOperationsData["query"]
+>["descriptor_id"];
+
 export function readPrivilegedOperationPlans(
   signal?: AbortSignal,
+  descriptorId: PrivilegedOperationDescriptorId = "managed-secret-reencryption",
 ): Promise<ListHumanPrivilegedOperationsResponse> {
+  const query =
+    descriptorId === "managed-secret-reencryption"
+      ? ""
+      : `?descriptor_id=${encodeURIComponent(descriptorId)}`;
   return requestJson<ListHumanPrivilegedOperationsResponse>(
-    "/v1/privileged-operations/plans",
+    `/v1/privileged-operations/plans${query}`,
     "GET",
     undefined,
     signal,
@@ -625,7 +635,10 @@ export function approvePrivilegedOperation(
   const request: ApproveHumanPrivilegedOperationData = {
     url: BROWSER_WRITE_ROUTES.privilegedOperationApprove,
     path: { operation_id: operationId },
-    body: { source_event_id: `ui:approve:${operationId}:${Date.now()}`, reason },
+    body: {
+      source_event_id: `ui:approve:${operationId}:${Date.now()}`,
+      reason,
+    },
   };
   return requestJson<ApproveHumanPrivilegedOperationResponse>(
     `/v1/privileged-operations/plans/${encodeURIComponent(request.path.operation_id)}/approve`,

@@ -13,7 +13,13 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, ConfigDict
 
 from control_plane.contracts.privileged_operation import (
+    AUTHZ_POLICY_OPERATION_APPROVE_ACTION,
+    AUTHZ_POLICY_OPERATION_CANCEL_ACTION,
+    AUTHZ_POLICY_OPERATION_PROPOSE_ACTION,
+    AUTHZ_POLICY_OPERATION_READ_ACTION,
+    AUTHZ_POLICY_OPERATION_REVOKE_ACTION,
     PRIVILEGED_OPERATION_SUMMARY_READ_ACTION,
+    PRIVILEGED_POLICY_OPERATION_SUMMARY_READ_ACTION,
     PRIVILEGED_SECRET_OPERATION_APPROVE_ACTION,
     PRIVILEGED_SECRET_OPERATION_CANCEL_ACTION,
     PRIVILEGED_SECRET_OPERATION_PLAN_ACTION,
@@ -32,7 +38,9 @@ from control_plane.service_auth import (
     TerminalAgentIdentity,
 )
 from control_plane.storage.filesystem import FilesystemRecordStore
+from control_plane.storage.postgres import PostgresRecordStore
 from tests.support.http import lifespan_client
+from tests.support.stores import _sqlite_database_url
 
 
 class _ErrorResponse(BaseModel):
@@ -90,6 +98,35 @@ def _policy(
                 "managed_rule_id": "human-secret-planner-duplicate",
             }
         )
+    human_rules.append(
+        {
+            "managed_set_id": "privileged-operations.policy-planning",
+            "managed_rule_id": "human-policy-planner",
+            "github_ids": [123],
+            "roles": ["admin"],
+            "products": ["launchplane"],
+            "contexts": ["launchplane"],
+            "actions": [
+                AUTHZ_POLICY_OPERATION_PROPOSE_ACTION,
+                AUTHZ_POLICY_OPERATION_READ_ACTION,
+                AUTHZ_POLICY_OPERATION_CANCEL_ACTION,
+                AUTHZ_POLICY_OPERATION_APPROVE_ACTION,
+                AUTHZ_POLICY_OPERATION_REVOKE_ACTION,
+                "authz_policy_grant.write",
+            ],
+        }
+    )
+    human_rules.append(
+        {
+            "managed_set_id": "privileged-operations.policy-safety",
+            "managed_rule_id": "independent-policy-admin",
+            "github_ids": [456],
+            "roles": ["admin"],
+            "products": ["launchplane"],
+            "contexts": ["launchplane"],
+            "actions": ["authz_policy_grant.write"],
+        }
+    )
     return LaunchplaneAuthzPolicy.model_validate(
         {
             "schema_version": 2,
@@ -103,7 +140,28 @@ def _policy(
                     "products": ["launchplane"],
                     "contexts": ["launchplane"],
                     "actions": [PRIVILEGED_OPERATION_SUMMARY_READ_ACTION],
-                }
+                },
+                {
+                    "managed_set_id": "privileged-operations.policy-agent",
+                    "managed_rule_id": "agent-policy-proposer",
+                    "subjects": ["agent:planner"],
+                    "token_labels": ["planner"],
+                    "products": ["launchplane"],
+                    "contexts": ["launchplane"],
+                    "actions": [
+                        AUTHZ_POLICY_OPERATION_PROPOSE_ACTION,
+                        PRIVILEGED_POLICY_OPERATION_SUMMARY_READ_ACTION,
+                    ],
+                },
+                {
+                    "managed_set_id": "privileged-operations.policy-agent-other",
+                    "managed_rule_id": "agent-policy-proposer-other",
+                    "subjects": ["agent:other"],
+                    "token_labels": ["other"],
+                    "products": ["launchplane"],
+                    "contexts": ["launchplane"],
+                    "actions": [PRIVILEGED_POLICY_OPERATION_SUMMARY_READ_ACTION],
+                },
             ],
         }
     )
@@ -123,9 +181,10 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
     def _app(
         self,
         *,
-        store: FilesystemRecordStore,
+        store: object,
         policy: LaunchplaneAuthzPolicy,
         human_reader: Mock | None = None,
+        agent_identity: TerminalAgentIdentity | None = None,
         policy_record_reader: Callable[[], object] | None = None,
     ) -> FastAPI:
         app = FastAPI()
@@ -158,6 +217,7 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
                     http_error=http_error,
                     error_response_model=_ErrorResponse,
                 ),
+                read_bearer_identity=lambda: agent_identity or _agent(),
                 read_github_human_identity=read_human,
                 read_github_human_mutation_identity=read_human,
                 policy_reader=lambda: policy,
@@ -178,6 +238,76 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("/v1/privileged-operations/plans/{operation_id}/revoke", paths)
         self.assertIn("/v1/privileged-operations/plans/{operation_id}/cancel", paths)
         self.assertNotIn("/v1/privileged-operations/plans/{operation_id}/execute", paths)
+
+    async def test_terminal_agent_proposes_and_reads_only_its_redacted_policy_summary(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as directory:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(directory) / "launchplane.sqlite3")
+            )
+            store.ensure_schema()
+            policy = _policy()
+            policy_record = store.seed_authz_policy_if_absent(_policy_record(policy))
+            app = self._app(
+                store=store,
+                policy=policy,
+                policy_record_reader=lambda: policy_record,
+            )
+            try:
+                async with lifespan_client(app) as client:
+                    proposed = await client.post(
+                        "/v1/agent/privileged-operations/plans",
+                        json={
+                            "source_event_id": "agent-policy-proposal-1",
+                            "request": {
+                                "managed_set_id": "test.policy-operation",
+                                "reason": "Propose a bounded policy operation.",
+                                "related_issue": "cbusillo/launchplane#2238",
+                                "desired_policy": {
+                                    "schema_version": 2,
+                                    "github_humans": [
+                                        {
+                                            "managed_set_id": "test.policy-operation",
+                                            "managed_rule_id": "policy-operation-reader",
+                                            "github_ids": [789],
+                                            "roles": ["admin"],
+                                            "products": ["launchplane"],
+                                            "contexts": ["launchplane"],
+                                            "actions": ["authz_policy_operation.read"],
+                                        }
+                                    ],
+                                },
+                            },
+                        },
+                    )
+                    operation_id = proposed.json()["summary"]["operation_id"]
+                    read_response = await client.get(
+                        f"/v1/agent/privileged-operations/plans/{operation_id}"
+                    )
+                other_app = self._app(
+                    store=store,
+                    policy=policy,
+                    agent_identity=TerminalAgentIdentity(
+                        subject="agent:other",
+                        token_label="other",
+                    ),
+                    policy_record_reader=lambda: policy_record,
+                )
+                async with lifespan_client(other_app) as client:
+                    other_response = await client.get(
+                        f"/v1/agent/privileged-operations/plans/{operation_id}"
+                    )
+            finally:
+                store.close()
+
+        self.assertEqual(proposed.status_code, 200)
+        self.assertEqual(read_response.status_code, 200)
+        rendered = read_response.text
+        self.assertNotIn("desired_policy", rendered)
+        self.assertNotIn("policy-operation-reader", rendered)
+        self.assertNotIn("Propose a bounded policy operation", rendered)
+        self.assertEqual(other_response.status_code, 403)
 
     async def test_human_plan_list_and_agent_summary_are_redacted(self) -> None:
         with (
@@ -373,6 +503,7 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
                         ),
                         error_response_model=_ErrorResponse,
                     ),
+                    read_bearer_identity=lambda: _agent(),
                     read_github_human_identity=read_human,
                     read_github_human_mutation_identity=read_human,
                     policy_reader=policy_reader,

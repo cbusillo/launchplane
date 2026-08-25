@@ -64,7 +64,7 @@ class AgentOperatorContractTests(unittest.TestCase):
             "remediate_preview_pr_feedback": ["read_write_identity"],
             "execute_product_retirement": ["read_write_identity"],
             "execute_detached_application_retirement": ["read_write_identity"],
-            "reconcile_managed_authz_policy": ["read_browser_mutation_identity"],
+            "reconcile_managed_authz_policy": ["read_bearer_identity"],
             "apply_product_stable_lane_repair": ["read_write_identity"],
             "read_governance_projection": ["read_identity"],
         }

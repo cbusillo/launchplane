@@ -7,6 +7,7 @@ import json
 from typing import Any, Literal, Protocol, cast
 
 from control_plane import secrets as control_plane_secrets
+from control_plane import authz_grant_service
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.contracts.durable_operation_authorization import (
     DurableOperationAuthorization,
@@ -17,12 +18,14 @@ from control_plane.contracts.idempotency_record import (
     complete_launchplane_mutation_reservation,
 )
 from control_plane.contracts.privileged_operation import (
-    PRIVILEGED_SECRET_OPERATION_APPROVE_ACTION,
+    ManagedAuthzPolicySetExecutionEvidence,
+    ManagedAuthzPolicySetProposalInput,
     PrivilegedOperationActor,
     PrivilegedOperationConflictError,
     PrivilegedOperationEventRecord,
     PrivilegedOperationExecutionEvidence,
     PrivilegedOperationRecord,
+    PrivilegedOperationTerminalEvidence,
     build_privileged_operation_event_id,
     privileged_operation_pre_state_digest,
     privileged_operation_record_digest,
@@ -35,6 +38,7 @@ from control_plane.contracts.privileged_operation_worker_heartbeat import (
     privileged_operation_worker_identity_sha256,
 )
 from control_plane.durable_operation_authorization import (
+    managed_github_id_action_allows,
     managed_github_id_rule_allows,
     read_active_authz_policy_record,
 )
@@ -44,11 +48,15 @@ from control_plane.privileged_operation_service import (
     expire_privileged_operation_if_due,
     require_privileged_operation_store,
 )
-from control_plane.service_auth import AuthorizationTarget
+from control_plane.service_auth import AuthorizationTarget, GitHubHumanIdentity
+from control_plane.storage.postgres import DbOnlyMutationRequest
 
 
 PRIVILEGED_OPERATION_EXECUTION_SCOPE = "privileged-operation-execution"
 PRIVILEGED_OPERATION_EXECUTION_ROUTE = "service-internal:privileged-operation-worker"
+PRIVILEGED_POLICY_OPERATION_WRITE_ROUTE = (
+    "service-internal:privileged-operation-worker:managed-authz-policy-set"
+)
 PRIVILEGED_OPERATION_EXECUTION_LEASE_SECONDS = 300
 
 
@@ -104,6 +112,21 @@ class PrivilegedOperationExecutionStore(PrivilegedOperationStore, Protocol):
         response_trace_id: str,
         response_payload: dict[str, Any],
     ) -> Any: ...
+
+    def compare_and_write_authz_policy_record(
+        self,
+        *,
+        expected_record: LaunchplaneAuthzPolicyRecord,
+        replacement_record: LaunchplaneAuthzPolicyRecord | None,
+        mutation: DbOnlyMutationRequest | None = None,
+    ) -> Any: ...
+
+    def list_authz_policy_records(
+        self,
+        *,
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[LaunchplaneAuthzPolicyRecord, ...]: ...
 
 
 class PrivilegedOperationWorkerHeartbeatStore(Protocol):
@@ -218,8 +241,9 @@ def _construct_approver_authorization(
     approval = record.approval
     if approval is None:
         raise ValueError("approval_provenance_missing")
+    descriptor = read_privileged_operation_descriptor(record.descriptor_id).descriptor
     return DurableOperationAuthorization(
-        action=PRIVILEGED_SECRET_OPERATION_APPROVE_ACTION,
+        action=descriptor.approve_action,
         product="launchplane",
         context="launchplane",
         instances=("global",),
@@ -257,6 +281,35 @@ def _approver_is_still_authorized(
     )
 
 
+def _authorize_approved_operation(
+    *,
+    record: PrivilegedOperationRecord,
+    record_store: object,
+) -> DurableOperationAuthorization:
+    approval = record.approval
+    if approval is None:
+        raise ValueError("approval_provenance_missing")
+    policy_record = read_active_authz_policy_record(record_store)
+    authorization = _construct_approver_authorization(record, policy_record)
+    if not _approver_is_still_authorized(
+        authorization=authorization,
+        policy_record=policy_record,
+    ):
+        raise ValueError("approval_managed_rule_drift")
+    if record.descriptor_id == "managed-authz-policy-set" and not (
+        managed_github_id_action_allows(
+            policy=policy_record.policy,
+            github_id=approval.approver.github_id,
+            action="authz_policy_grant.write",
+            product="launchplane",
+            context="launchplane",
+            target=AuthorizationTarget(scope="global"),
+        )
+    ):
+        raise ValueError("approval_policy_admin_drift")
+    return authorization
+
+
 def _transition(
     *,
     store: PrivilegedOperationStore,
@@ -265,7 +318,7 @@ def _transition(
     sequence: int,
     source_event_id: str,
     reason: str,
-    execution: PrivilegedOperationExecutionEvidence | None = None,
+    execution: PrivilegedOperationTerminalEvidence | None = None,
     now: Callable[[], datetime],
 ) -> PrivilegedOperationRecord:
     occurred_at = _timestamp(now())
@@ -356,6 +409,220 @@ def _execution_evidence(
     )
 
 
+def _policy_execution_identity(record: PrivilegedOperationRecord) -> GitHubHumanIdentity:
+    approval = record.approval
+    if approval is None:
+        raise ValueError("approval_provenance_missing")
+    return GitHubHumanIdentity(
+        login=approval.approver.login,
+        github_id=approval.approver.github_id,
+        name="",
+        email="",
+        organizations=frozenset(),
+        teams=frozenset(),
+        role="admin",
+    )
+
+
+def _policy_execution_evidence(
+    *,
+    record: PrivilegedOperationRecord,
+    previous_record_id: str,
+    previous_revision: int,
+    previous_policy_sha256: str,
+    resulting_record: LaunchplaneAuthzPolicyRecord,
+    changed: bool,
+    authorization_policy_sha256: str,
+) -> ManagedAuthzPolicySetExecutionEvidence:
+    return ManagedAuthzPolicySetExecutionEvidence(
+        result_status="ok",
+        result_digest=_digest(
+            {
+                "operation_id": record.operation_id,
+                "plan_digest": record.approval.plan_digest if record.approval is not None else "",
+                "authorization_policy_sha256": authorization_policy_sha256,
+                "changed": changed,
+                "previous_record_id": previous_record_id,
+                "previous_revision": previous_revision,
+                "previous_policy_sha256": previous_policy_sha256,
+                "resulting_record_id": resulting_record.record_id,
+                "resulting_revision": resulting_record.revision,
+                "resulting_policy_sha256": resulting_record.policy_sha256,
+            }
+        ),
+        changed=changed,
+        previous_record_id=previous_record_id,
+        previous_revision=previous_revision,
+        previous_policy_sha256=previous_policy_sha256,
+        resulting_record_id=resulting_record.record_id,
+        resulting_revision=resulting_record.revision,
+        resulting_policy_sha256=resulting_record.policy_sha256,
+        reconciliation_required=False,
+    )
+
+
+def _failed_execution_evidence(
+    *,
+    record: PrivilegedOperationRecord,
+    failure_code: str,
+    reconciliation_required: bool,
+) -> PrivilegedOperationTerminalEvidence:
+    if record.descriptor_id == "managed-authz-policy-set":
+        return ManagedAuthzPolicySetExecutionEvidence(
+            result_status="error",
+            result_digest=_digest(
+                {
+                    "operation_id": record.operation_id,
+                    "failure_code": failure_code,
+                    "reconciliation_required": reconciliation_required,
+                }
+            ),
+            changed=False,
+            reconciliation_required=reconciliation_required,
+            failure_code=failure_code,
+        )
+    return _execution_evidence(
+        result_status="error",
+        payload={"failure_code": failure_code},
+        reconciliation_required=reconciliation_required,
+        failure_code=failure_code,
+    )
+
+
+def _execute_managed_authz_policy_set(
+    *,
+    store: PrivilegedOperationExecutionStore,
+    record: PrivilegedOperationRecord,
+    authorization: DurableOperationAuthorization,
+    now: Callable[[], datetime],
+    on_effect_completed: Callable[[], None],
+) -> ManagedAuthzPolicySetExecutionEvidence:
+    approval = record.approval
+    if approval is None:
+        raise ValueError("approval_provenance_missing")
+    if not isinstance(record.request, ManagedAuthzPolicySetProposalInput):
+        raise ValueError("executor_result_error")
+    apply_request = record.request.reconcile_request(
+        mode="apply",
+        reviewed_plan_sha256=approval.plan_digest,
+    )
+    route_result = authz_grant_service.execute_managed_authz_policy_reconcile(
+        record_store=cast(Any, store),
+        request=apply_request,
+        identity=_policy_execution_identity(record),
+        trace_id=f"privileged-operation:{record.operation_id}",
+        now_timestamp=lambda: _timestamp(now()),
+        authorized_policy_sha256=authorization.policy_sha256,
+        immutable_applying_github_id=approval.approver.github_id,
+    )
+    expected_result_record = (
+        route_result.authz_policy_record
+        if route_result.changed
+        else route_result.previous_authz_policy_record
+    )
+    response_payload = {
+        "status": "ok",
+        "operation_id": record.operation_id,
+        "changed": route_result.changed,
+        "record_id": expected_result_record.record_id,
+        "revision": expected_result_record.revision,
+        "policy_sha256": expected_result_record.policy_sha256,
+    }
+    write_result = store.compare_and_write_authz_policy_record(
+        expected_record=route_result.previous_authz_policy_record,
+        replacement_record=(route_result.authz_policy_record if route_result.changed else None),
+        mutation=DbOnlyMutationRequest(
+            scope=PRIVILEGED_OPERATION_EXECUTION_SCOPE,
+            route_path=PRIVILEGED_POLICY_OPERATION_WRITE_ROUTE,
+            idempotency_key=record.operation_id,
+            request_fingerprint=_digest(apply_request.model_dump(mode="json")),
+            lease_owner=record.operation_id,
+            response_status_code=200,
+            response_trace_id=f"privileged-operation:{record.operation_id}",
+            response_payload=response_payload,
+            lease_seconds=PRIVILEGED_OPERATION_EXECUTION_LEASE_SECONDS,
+        ),
+    )
+    if write_result.status == "stale":
+        raise ValueError("approved_plan_drift")
+    if write_result.status not in {"written", "unchanged", "replayed"}:
+        raise ValueError("authz_policy_write_conflict")
+    if route_result.changed:
+        on_effect_completed()
+    resulting_record = write_result.current_record
+    if resulting_record is None:
+        active_records = store.list_authz_policy_records(status="active", limit=2)
+        if len(active_records) != 1:
+            raise ValueError("authz_policy_readback_failed")
+        resulting_record = active_records[0]
+    if (
+        resulting_record.record_id != expected_result_record.record_id
+        or resulting_record.revision != expected_result_record.revision
+        or resulting_record.policy_sha256 != expected_result_record.policy_sha256
+    ):
+        raise ValueError("authz_policy_readback_failed")
+    return _policy_execution_evidence(
+        record=record,
+        previous_record_id=route_result.previous_authz_policy_record.record_id,
+        previous_revision=route_result.previous_authz_policy_record.revision,
+        previous_policy_sha256=route_result.previous_authz_policy_record.policy_sha256,
+        resulting_record=resulting_record,
+        changed=route_result.changed,
+        authorization_policy_sha256=authorization.policy_sha256,
+    )
+
+
+def _recover_managed_authz_policy_set(
+    *,
+    store: PrivilegedOperationExecutionStore,
+    record: PrivilegedOperationRecord,
+    authorization: DurableOperationAuthorization,
+) -> ManagedAuthzPolicySetExecutionEvidence:
+    if not isinstance(record.request, ManagedAuthzPolicySetProposalInput):
+        raise ValueError("execution_recovery_failed")
+    evidence = record.evidence
+    if not hasattr(evidence, "diff"):
+        raise ValueError("execution_recovery_failed")
+    request_fingerprint = _digest(
+        record.request.reconcile_request(
+            mode="apply",
+            reviewed_plan_sha256=record.approval.plan_digest if record.approval is not None else "",
+        ).model_dump(mode="json")
+    )
+    lookup = store.lookup_existing_mutation_reservation(
+        route_path=PRIVILEGED_POLICY_OPERATION_WRITE_ROUTE,
+        idempotency_key=record.operation_id,
+        request_fingerprint=request_fingerprint,
+    )
+    if lookup.status != "found" or lookup.record is None or lookup.record.state != "completed":
+        raise ValueError("execution_recovery_failed")
+    active_records = store.list_authz_policy_records(status="active", limit=2)
+    if len(active_records) != 1:
+        raise ValueError("authz_policy_readback_failed")
+    resulting_record = active_records[0]
+    diff = evidence.diff
+    if diff.changed:
+        expected_revision = diff.candidate_revision
+        expected_policy_sha256 = diff.desired_policy_sha256
+    else:
+        expected_revision = diff.previous_revision
+        expected_policy_sha256 = diff.previous_policy_sha256
+    if (
+        resulting_record.revision != expected_revision
+        or resulting_record.policy_sha256 != expected_policy_sha256
+    ):
+        raise ValueError("authz_policy_readback_failed")
+    return _policy_execution_evidence(
+        record=record,
+        previous_record_id=diff.previous_record_id,
+        previous_revision=diff.previous_revision,
+        previous_policy_sha256=diff.previous_policy_sha256,
+        resulting_record=resulting_record,
+        changed=diff.changed,
+        authorization_policy_sha256=authorization.policy_sha256,
+    )
+
+
 def _result_count(payload: dict[str, object], field_name: str) -> int:
     value = payload.get(field_name, 0)
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
@@ -364,10 +631,15 @@ def _result_count(payload: dict[str, object], field_name: str) -> int:
 
 
 def _failure_code(error: Exception) -> str:
+    if isinstance(error, authz_grant_service.AuthzPolicySafetyError):
+        return error.code
     known_codes = {
         "approval_provenance_missing",
         "approval_managed_rule_drift",
+        "approval_policy_admin_drift",
         "approved_plan_drift",
+        "authz_policy_readback_failed",
+        "authz_policy_write_conflict",
         "execution_recovery_failed",
         "executor_result_error",
         "mutation_reservation_completion_failed",
@@ -404,36 +676,41 @@ def reconcile_stale_privileged_operations(
         reservation = preflight.record
         if reservation is None:
             continue
+        terminal_evidence: PrivilegedOperationTerminalEvidence
         try:
             approval = record.approval
             if approval is None:
                 raise ValueError("approval_provenance_missing")
-            policy_record = read_active_authz_policy_record(record_store)
-            authorization = _construct_approver_authorization(record, policy_record)
-            if not _approver_is_still_authorized(
-                authorization=authorization,
-                policy_record=policy_record,
-            ):
-                raise ValueError("approval_managed_rule_drift")
-            result = control_plane_secrets.reencrypt_secrets(
-                record_store=cast(control_plane_secrets.SecretRotationStore, record_store),
-                apply=True,
-                expected_plan_digest=approval.plan_digest,
-                operation_token=privileged_operation_execution_token(record.operation_id),
-                actor=f"github-human:{approval.approver.github_id}",
-                source_label="privileged-operation-worker-recovery",
-                reason=record.request.reason,
+            authorization = _authorize_approved_operation(
+                record=record,
+                record_store=record_store,
             )
-            if result.get("status") != "ok":
-                raise ValueError("execution_recovery_failed")
-            execution = _execution_evidence(
-                result_status="ok",
-                payload={
-                    **result,
-                    "authorization_policy_sha256": authorization.policy_sha256,
-                },
-                reconciliation_required=False,
-            )
+            if record.descriptor_id == "managed-authz-policy-set":
+                terminal_evidence = _recover_managed_authz_policy_set(
+                    store=store,
+                    record=record,
+                    authorization=authorization,
+                )
+            else:
+                result = control_plane_secrets.reencrypt_secrets(
+                    record_store=cast(control_plane_secrets.SecretRotationStore, record_store),
+                    apply=True,
+                    expected_plan_digest=approval.plan_digest,
+                    operation_token=privileged_operation_execution_token(record.operation_id),
+                    actor=f"github-human:{approval.approver.github_id}",
+                    source_label="privileged-operation-worker-recovery",
+                    reason=record.request.reason,
+                )
+                if result.get("status") != "ok":
+                    raise ValueError("execution_recovery_failed")
+                terminal_evidence = _execution_evidence(
+                    result_status="ok",
+                    payload={
+                        **result,
+                        "authorization_policy_sha256": authorization.policy_sha256,
+                    },
+                    reconciliation_required=False,
+                )
             executed = _transition(
                 store=store,
                 record=record,
@@ -441,7 +718,7 @@ def reconcile_stale_privileged_operations(
                 sequence=4,
                 source_event_id=f"worker-reconcile:{record.operation_id}",
                 reason="Privileged operation execution was recovered by deterministic token.",
-                execution=execution,
+                execution=terminal_evidence,
                 now=now,
             )
             if executed.status != "executed":
@@ -454,7 +731,7 @@ def reconcile_stale_privileged_operations(
                 response_payload={
                     "status": executed.status,
                     "operation_id": executed.operation_id,
-                    "result_digest": execution.result_digest,
+                    "result_digest": terminal_evidence.result_digest,
                 },
             )
             reconciled.append(executed)
@@ -462,11 +739,10 @@ def reconcile_stale_privileged_operations(
                 continue
         except Exception as error:
             failure_code = _failure_code(error)
-            execution = _execution_evidence(
-                result_status="error",
-                payload={"failure_code": failure_code},
-                reconciliation_required=True,
+            terminal_evidence = _failed_execution_evidence(
+                record=record,
                 failure_code=failure_code,
+                reconciliation_required=True,
             )
             reconciled.append(
                 _transition(
@@ -476,7 +752,7 @@ def reconcile_stale_privileged_operations(
                     sequence=4,
                     source_event_id=f"worker-reconcile-failure:{record.operation_id}",
                     reason="Privileged operation recovery failed; reconciliation is required.",
-                    execution=execution,
+                    execution=terminal_evidence,
                     now=now,
                 )
             )
@@ -537,17 +813,15 @@ def execute_approved_privileged_operations_once(
             completed.append(claimed)
             continue
         effect_completed = False
+        operation_execution: PrivilegedOperationTerminalEvidence
         try:
             approval = claimed.approval
             if approval is None:
                 raise ValueError("approval_provenance_missing")
-            policy_record = read_active_authz_policy_record(record_store)
-            authorization = _construct_approver_authorization(claimed, policy_record)
-            if not _approver_is_still_authorized(
-                authorization=authorization,
-                policy_record=policy_record,
-            ):
-                raise ValueError("approval_managed_rule_drift")
+            authorization = _authorize_approved_operation(
+                record=claimed,
+                record_store=record_store,
+            )
             registration = read_privileged_operation_descriptor(claimed.descriptor_id)
             fresh_evidence = registration.planner(record_store, claimed.request)
             if (
@@ -556,26 +830,40 @@ def execute_approved_privileged_operations_once(
                 != approval.pre_state_digest
             ):
                 raise ValueError("approved_plan_drift")
-            result = control_plane_secrets.reencrypt_secrets(
-                record_store=cast(control_plane_secrets.SecretRotationStore, record_store),
-                apply=True,
-                expected_plan_digest=approval.plan_digest,
-                operation_token=privileged_operation_execution_token(claimed.operation_id),
-                actor=f"github-human:{approval.approver.github_id}",
-                source_label="privileged-operation-worker",
-                reason=claimed.request.reason,
-            )
-            if result.get("status") != "ok":
-                raise ValueError("executor_result_error")
-            effect_completed = True
-            execution = _execution_evidence(
-                result_status="ok",
-                payload={
-                    **result,
-                    "authorization_policy_sha256": authorization.policy_sha256,
-                },
-                reconciliation_required=False,
-            )
+            if claimed.descriptor_id == "managed-authz-policy-set":
+
+                def mark_effect_completed() -> None:
+                    nonlocal effect_completed
+                    effect_completed = True
+
+                operation_execution = _execute_managed_authz_policy_set(
+                    store=store,
+                    record=claimed,
+                    authorization=authorization,
+                    now=now,
+                    on_effect_completed=mark_effect_completed,
+                )
+            else:
+                result = control_plane_secrets.reencrypt_secrets(
+                    record_store=cast(control_plane_secrets.SecretRotationStore, record_store),
+                    apply=True,
+                    expected_plan_digest=approval.plan_digest,
+                    operation_token=privileged_operation_execution_token(claimed.operation_id),
+                    actor=f"github-human:{approval.approver.github_id}",
+                    source_label="privileged-operation-worker",
+                    reason=claimed.request.reason,
+                )
+                if result.get("status") != "ok":
+                    raise ValueError("executor_result_error")
+                effect_completed = True
+                operation_execution = _execution_evidence(
+                    result_status="ok",
+                    payload={
+                        **result,
+                        "authorization_policy_sha256": authorization.policy_sha256,
+                    },
+                    reconciliation_required=False,
+                )
             executed = _transition(
                 store=store,
                 record=claimed,
@@ -583,7 +871,7 @@ def execute_approved_privileged_operations_once(
                 sequence=4,
                 source_event_id=f"worker-result:{claimed.operation_id}",
                 reason="Privileged operation executed by the service worker.",
-                execution=execution,
+                execution=operation_execution,
                 now=now,
             )
             if executed.status != "executed":
@@ -602,7 +890,7 @@ def execute_approved_privileged_operations_once(
                 response_payload={
                     "status": executed.status,
                     "operation_id": executed.operation_id,
-                    "result_digest": execution.result_digest,
+                    "result_digest": operation_execution.result_digest,
                 },
                 now=now,
             ):
@@ -630,11 +918,10 @@ def execute_approved_privileged_operations_once(
                     response_payload={"status": "execution_failed", "failure_code": failure_code},
                     now=now,
                 )
-            execution = _execution_evidence(
-                result_status="error",
-                payload={"failure_code": failure_code},
-                reconciliation_required=reconciliation_required,
+            operation_execution = _failed_execution_evidence(
+                record=claimed,
                 failure_code=failure_code,
+                reconciliation_required=reconciliation_required,
             )
             completed.append(
                 _transition(
@@ -648,7 +935,7 @@ def execute_approved_privileged_operations_once(
                         if reconciliation_required
                         else "Privileged operation failed before a provider effect."
                     ),
-                    execution=execution,
+                    execution=operation_execution,
                     now=now,
                 )
             )

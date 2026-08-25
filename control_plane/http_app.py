@@ -124,6 +124,8 @@ from control_plane.http_routes import (
     CHANGE_IMPACT_POLICY_APPLY_ROUTE,
     OWNER_ACCEPTANCE_EVENTS_ROUTE,
     OWNER_ACCEPTANCE_PROJECT_ROUTE,
+    PRIVILEGED_OPERATION_AGENT_PLANS_ROUTE,
+    PRIVILEGED_OPERATION_PLANS_ROUTE,
     PRODUCT_OWNER_POLICY_APPLY_ROUTE,
     PRODUCT_OWNER_REQUIREMENT_APPLY_ROUTE,
     PRODUCT_OWNER_ROUTING_APPLY_ROUTE,
@@ -861,6 +863,7 @@ _PRODUCT_OWNER_POLICY_MAX_BODY_BYTES = 64 * 1024
 _OWNER_ACCEPTANCE_MAX_BODY_BYTES = 16 * 1024
 _CHANGE_IMPACT_EVALUATION_MAX_BODY_BYTES = 16 * 1024
 _CHANGE_IMPACT_POLICY_MAX_BODY_BYTES = 64 * 1024
+_PRIVILEGED_OPERATION_MAX_BODY_BYTES = 256 * 1024
 _PRODUCT_HEALTH_MONITORING_APPLY_ROUTE = "/v1/product-profiles/health-monitoring/apply"
 _PRODUCT_PRELAUNCH_REBUILD_POLICY_APPLY_ROUTE = "/v1/product-profiles/prelaunch-rebuild/apply"
 _PRODUCT_STABLE_LANE_REPAIR_APPLY_ROUTE = "/v1/product-profiles/stable-lane-repair/apply"
@@ -914,6 +917,18 @@ _BOUNDED_REQUEST_BODY_CONTRACTS: dict[str, tuple[str, int, bool, bool]] = {
     _SECRET_REENCRYPT_ROUTE: (
         "Managed-secret re-encryption",
         _SECRET_REENCRYPT_MAX_BODY_BYTES,
+        True,
+        True,
+    ),
+    PRIVILEGED_OPERATION_PLANS_ROUTE: (
+        "Privileged-operation plan",
+        _PRIVILEGED_OPERATION_MAX_BODY_BYTES,
+        True,
+        True,
+    ),
+    PRIVILEGED_OPERATION_AGENT_PLANS_ROUTE: (
+        "Agent privileged-operation proposal",
+        _PRIVILEGED_OPERATION_MAX_BODY_BYTES,
         True,
         True,
     ),
@@ -4722,6 +4737,7 @@ def create_launchplane_fastapi_app(
     )
     privileged_operation_route_dependencies = PrivilegedOperationRouteDependencies(
         common=read_route_dependencies,
+        read_bearer_identity=read_bearer_identity,
         read_github_human_identity=read_github_human_identity,
         read_github_human_mutation_identity=(read_github_human_browser_mutation_identity),
         policy_reader=lambda: resolved_authz_policy_runtime.policy,
@@ -14278,12 +14294,15 @@ def create_launchplane_fastapi_app(
         idempotency_key: str,
     ) -> AcceptedEvidenceResponse:
         trace_id = next_trace_id()
-        if isinstance(identity, TerminalAgentIdentity):
+        if not isinstance(identity, GitHubActionsIdentity):
             raise _launchplane_http_error(
                 status_code=403,
                 trace_id=trace_id,
                 code="authorization_denied",
-                message="Terminal agent credentials can only read redacted Launchplane context.",
+                message=(
+                    "Managed authz policy reconciliation requires GitHub Actions workload "
+                    "transport."
+                ),
             )
         try:
             raw_payload = await request.json()
@@ -15042,7 +15061,7 @@ def create_launchplane_fastapi_app(
 
     async def reconcile_managed_authz_policy(
         request: Request,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_browser_mutation_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_bearer_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse:

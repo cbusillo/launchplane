@@ -1302,6 +1302,20 @@
           },
           {
             "in": "query",
+            "name": "descriptor_id",
+            "required": false,
+            "schema": {
+              "default": "managed-secret-reencryption",
+              "enum": [
+                "managed-secret-reencryption",
+                "managed-authz-policy-set"
+              ],
+              "title": "Descriptor Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
             "name": "limit",
             "required": false,
             "schema": {
@@ -5225,6 +5239,345 @@
         "title": "AuthSessionResponse",
         "type": "object"
       },
+      "AuthzManagedCompatibilityRetirement": {
+        "additionalProperties": false,
+        "properties": {
+          "managed_rule_id": {
+            "title": "Managed Rule Id",
+            "type": "string"
+          },
+          "match_type": {
+            "const": "github_actions_name_only_authorization_narrowing",
+            "default": "github_actions_name_only_authorization_narrowing",
+            "title": "Match Type",
+            "type": "string"
+          },
+          "principal_type": {
+            "const": "github_actions",
+            "default": "github_actions",
+            "title": "Principal Type",
+            "type": "string"
+          },
+          "retained_managed_rule_sha256": {
+            "title": "Retained Managed Rule Sha256",
+            "type": "string"
+          },
+          "retired_rule_sha256": {
+            "title": "Retired Rule Sha256",
+            "type": "string"
+          }
+        },
+        "required": [
+          "managed_rule_id",
+          "match_type",
+          "principal_type",
+          "retained_managed_rule_sha256",
+          "retired_rule_sha256"
+        ],
+        "title": "AuthzManagedCompatibilityRetirement",
+        "type": "object"
+      },
+      "AuthzManagedOperationalReadinessBlocker": {
+        "additionalProperties": false,
+        "properties": {
+          "actions": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Actions",
+            "type": "array"
+          },
+          "managed_rule_id": {
+            "title": "Managed Rule Id",
+            "type": "string"
+          },
+          "reason_codes": {
+            "items": {
+              "enum": [
+                "repository_not_exact",
+                "workflow_refs_not_singleton",
+                "workflow_ref_not_exact",
+                "job_workflow_refs_not_singleton",
+                "job_workflow_ref_not_immutable",
+                "actions_not_singleton",
+                "action_not_exact",
+                "products_not_singleton",
+                "product_not_exact",
+                "contexts_not_singleton",
+                "context_not_exact",
+                "instances_not_singleton",
+                "instance_not_exact"
+              ],
+              "type": "string"
+            },
+            "title": "Reason Codes",
+            "type": "array"
+          }
+        },
+        "required": [
+          "actions",
+          "managed_rule_id",
+          "reason_codes"
+        ],
+        "title": "AuthzManagedOperationalReadinessBlocker",
+        "type": "object"
+      },
+      "AuthzManagedPolicyDiff": {
+        "additionalProperties": false,
+        "properties": {
+          "added_rule_count": {
+            "default": 0,
+            "title": "Added Rule Count",
+            "type": "integer"
+          },
+          "adopted_rule_count": {
+            "default": 0,
+            "title": "Adopted Rule Count",
+            "type": "integer"
+          },
+          "authorization_changed": {
+            "default": false,
+            "title": "Authorization Changed",
+            "type": "boolean"
+          },
+          "candidate_revision": {
+            "title": "Candidate Revision",
+            "type": "integer"
+          },
+          "changed": {
+            "default": false,
+            "title": "Changed",
+            "type": "boolean"
+          },
+          "changes": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/AuthzManagedRuleChange"
+            },
+            "title": "Changes",
+            "type": "array"
+          },
+          "desired_policy_sha256": {
+            "title": "Desired Policy Sha256",
+            "type": "string"
+          },
+          "desired_set_sha256": {
+            "title": "Desired Set Sha256",
+            "type": "string"
+          },
+          "managed_set_id": {
+            "title": "Managed Set Id",
+            "type": "string"
+          },
+          "operational_readiness_blocked_rule_count": {
+            "default": 0,
+            "title": "Operational Readiness Blocked Rule Count",
+            "type": "integer"
+          },
+          "operational_readiness_blockers": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/AuthzManagedOperationalReadinessBlocker"
+            },
+            "title": "Operational Readiness Blockers",
+            "type": "array"
+          },
+          "plan_sha256": {
+            "title": "Plan Sha256",
+            "type": "string"
+          },
+          "policy_safety_blocker_count": {
+            "default": 0,
+            "title": "Policy Safety Blocker Count",
+            "type": "integer"
+          },
+          "policy_safety_blockers": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/AuthzManagedPolicySafetyBlocker"
+            },
+            "title": "Policy Safety Blockers",
+            "type": "array"
+          },
+          "previous_policy_sha256": {
+            "title": "Previous Policy Sha256",
+            "type": "string"
+          },
+          "previous_record_id": {
+            "title": "Previous Record Id",
+            "type": "string"
+          },
+          "previous_revision": {
+            "title": "Previous Revision",
+            "type": "integer"
+          },
+          "removed_rule_count": {
+            "default": 0,
+            "title": "Removed Rule Count",
+            "type": "integer"
+          },
+          "retired_unmanaged_compatibility_rule_count": {
+            "default": 0,
+            "title": "Retired Unmanaged Compatibility Rule Count",
+            "type": "integer"
+          },
+          "retired_unmanaged_compatibility_rules": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/AuthzManagedCompatibilityRetirement"
+            },
+            "title": "Retired Unmanaged Compatibility Rules",
+            "type": "array"
+          },
+          "schema_migrated": {
+            "default": false,
+            "title": "Schema Migrated",
+            "type": "boolean"
+          },
+          "unchanged_rule_count": {
+            "default": 0,
+            "title": "Unchanged Rule Count",
+            "type": "integer"
+          },
+          "unmanaged_compatibility_candidate_count": {
+            "default": 0,
+            "title": "Unmanaged Compatibility Candidate Count",
+            "type": "integer"
+          },
+          "updated_rule_count": {
+            "default": 0,
+            "title": "Updated Rule Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "added_rule_count",
+          "adopted_rule_count",
+          "authorization_changed",
+          "candidate_revision",
+          "changed",
+          "changes",
+          "desired_policy_sha256",
+          "desired_set_sha256",
+          "managed_set_id",
+          "operational_readiness_blocked_rule_count",
+          "operational_readiness_blockers",
+          "plan_sha256",
+          "policy_safety_blocker_count",
+          "policy_safety_blockers",
+          "previous_policy_sha256",
+          "previous_record_id",
+          "previous_revision",
+          "removed_rule_count",
+          "retired_unmanaged_compatibility_rule_count",
+          "retired_unmanaged_compatibility_rules",
+          "schema_migrated",
+          "unchanged_rule_count",
+          "unmanaged_compatibility_candidate_count",
+          "updated_rule_count"
+        ],
+        "title": "AuthzManagedPolicyDiff",
+        "type": "object"
+      },
+      "AuthzManagedPolicySafetyBlocker": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "enum": [
+              "authz_policy_admin_unreachable",
+              "authz_policy_applying_admin_removed",
+              "authz_policy_independent_admin_unreachable"
+            ],
+            "title": "Code",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "title": "AuthzManagedPolicySafetyBlocker",
+        "type": "object"
+      },
+      "AuthzManagedRuleChange": {
+        "additionalProperties": false,
+        "properties": {
+          "change": {
+            "enum": [
+              "added",
+              "adopted",
+              "updated",
+              "removed"
+            ],
+            "title": "Change",
+            "type": "string"
+          },
+          "desired_principal_type": {
+            "anyOf": [
+              {
+                "enum": [
+                  "github_actions",
+                  "github_humans",
+                  "terminal_agents",
+                  "local_operators",
+                  "local_admins"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Desired Principal Type"
+          },
+          "desired_rule_sha256": {
+            "default": "",
+            "title": "Desired Rule Sha256",
+            "type": "string"
+          },
+          "managed_rule_id": {
+            "title": "Managed Rule Id",
+            "type": "string"
+          },
+          "previous_principal_type": {
+            "anyOf": [
+              {
+                "enum": [
+                  "github_actions",
+                  "github_humans",
+                  "terminal_agents",
+                  "local_operators",
+                  "local_admins"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Previous Principal Type"
+          },
+          "previous_rule_sha256": {
+            "default": "",
+            "title": "Previous Rule Sha256",
+            "type": "string"
+          }
+        },
+        "required": [
+          "change",
+          "desired_principal_type",
+          "desired_rule_sha256",
+          "managed_rule_id",
+          "previous_principal_type",
+          "previous_rule_sha256"
+        ],
+        "title": "AuthzManagedRuleChange",
+        "type": "object"
+      },
       "BackupGateEvidence": {
         "additionalProperties": false,
         "properties": {
@@ -7891,6 +8244,10 @@
           "verified"
         ]
       },
+      "LaunchplaneAuthzPolicy-Output": {
+        "additionalProperties": true,
+        "type": "object"
+      },
       "LaunchplaneErrorDetail": {
         "additionalProperties": false,
         "properties": {
@@ -8299,6 +8656,167 @@
           "updated_at"
         ],
         "title": "LaunchplaneProductProfileRecord",
+        "type": "object"
+      },
+      "ManagedAuthzPolicySetExecutionEvidence": {
+        "additionalProperties": false,
+        "description": "Redacted policy-record evidence written by the service-internal worker.",
+        "properties": {
+          "changed": {
+            "title": "Changed",
+            "type": "boolean"
+          },
+          "failure_code": {
+            "default": "",
+            "maxLength": 160,
+            "title": "Failure Code",
+            "type": "string"
+          },
+          "previous_policy_sha256": {
+            "default": "",
+            "title": "Previous Policy Sha256",
+            "type": "string"
+          },
+          "previous_record_id": {
+            "default": "",
+            "title": "Previous Record Id",
+            "type": "string"
+          },
+          "previous_revision": {
+            "default": 0,
+            "minimum": 0,
+            "title": "Previous Revision",
+            "type": "integer"
+          },
+          "reconciliation_required": {
+            "title": "Reconciliation Required",
+            "type": "boolean"
+          },
+          "result_digest": {
+            "title": "Result Digest",
+            "type": "string"
+          },
+          "result_status": {
+            "enum": [
+              "ok",
+              "error"
+            ],
+            "title": "Result Status",
+            "type": "string"
+          },
+          "resulting_policy_sha256": {
+            "default": "",
+            "title": "Resulting Policy Sha256",
+            "type": "string"
+          },
+          "resulting_record_id": {
+            "default": "",
+            "title": "Resulting Record Id",
+            "type": "string"
+          },
+          "resulting_revision": {
+            "default": 0,
+            "minimum": 0,
+            "title": "Resulting Revision",
+            "type": "integer"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "changed",
+          "failure_code",
+          "previous_policy_sha256",
+          "previous_record_id",
+          "previous_revision",
+          "reconciliation_required",
+          "result_digest",
+          "result_status",
+          "resulting_policy_sha256",
+          "resulting_record_id",
+          "resulting_revision",
+          "schema_version"
+        ],
+        "title": "ManagedAuthzPolicySetExecutionEvidence",
+        "type": "object"
+      },
+      "ManagedAuthzPolicySetHumanEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "diff": {
+            "$ref": "#/components/schemas/AuthzManagedPolicyDiff"
+          },
+          "plan_digest": {
+            "title": "Plan Digest",
+            "type": "string"
+          },
+          "result_status": {
+            "enum": [
+              "ok",
+              "blocked"
+            ],
+            "title": "Result Status",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "diff",
+          "plan_digest",
+          "result_status",
+          "schema_version"
+        ],
+        "title": "ManagedAuthzPolicySetHumanEvidence",
+        "type": "object"
+      },
+      "ManagedAuthzPolicySetProposalInput-Output": {
+        "additionalProperties": false,
+        "properties": {
+          "desired_policy": {
+            "$ref": "#/components/schemas/LaunchplaneAuthzPolicy-Output"
+          },
+          "managed_set_id": {
+            "maxLength": 96,
+            "minLength": 1,
+            "title": "Managed Set Id",
+            "type": "string"
+          },
+          "reason": {
+            "maxLength": 240,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          },
+          "related_issue": {
+            "default": "",
+            "maxLength": 128,
+            "title": "Related Issue",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "desired_policy",
+          "managed_set_id",
+          "reason",
+          "related_issue",
+          "schema_version"
+        ],
+        "title": "ManagedAuthzPolicySetProposalInput",
         "type": "object"
       },
       "ManagedSecretReencryptionHumanEvidence": {
@@ -13726,6 +14244,34 @@
         "title": "PrivilegedOperationActor",
         "type": "object"
       },
+      "PrivilegedOperationAgentActor": {
+        "additionalProperties": false,
+        "properties": {
+          "identity_type": {
+            "const": "terminal_agent",
+            "default": "terminal_agent",
+            "title": "Identity Type",
+            "type": "string"
+          },
+          "login": {
+            "const": "terminal-agent",
+            "default": "terminal-agent",
+            "title": "Login",
+            "type": "string"
+          },
+          "principal_sha256": {
+            "title": "Principal Sha256",
+            "type": "string"
+          }
+        },
+        "required": [
+          "identity_type",
+          "login",
+          "principal_sha256"
+        ],
+        "title": "PrivilegedOperationAgentActor",
+        "type": "object"
+      },
       "PrivilegedOperationApproval": {
         "additionalProperties": false,
         "description": "Immutable browser-human authorization for a single planned operation.",
@@ -13734,7 +14280,10 @@
             "$ref": "#/components/schemas/PrivilegedOperationActor"
           },
           "descriptor_id": {
-            "const": "managed-secret-reencryption",
+            "enum": [
+              "managed-secret-reencryption",
+              "managed-authz-policy-set"
+            ],
             "title": "Descriptor Id",
             "type": "string"
           },
@@ -13795,8 +14344,11 @@
             "type": "string"
           },
           "rollback_class": {
-            "const": "key_retained",
             "default": "key_retained",
+            "enum": [
+              "key_retained",
+              "policy_cas"
+            ],
             "title": "Rollback Class",
             "type": "string"
           },
@@ -13876,7 +14428,15 @@
             "type": "string"
           },
           "actor": {
-            "$ref": "#/components/schemas/PrivilegedOperationActor"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PrivilegedOperationActor"
+              },
+              {
+                "$ref": "#/components/schemas/PrivilegedOperationAgentActor"
+              }
+            ],
+            "title": "Actor"
           },
           "event_id": {
             "default": "",
@@ -13921,6 +14481,7 @@
           },
           "source_kind": {
             "enum": [
+              "agent_api",
               "browser_api",
               "system"
             ],
@@ -14108,7 +14669,10 @@
             "type": "string"
           },
           "descriptor_id": {
-            "const": "managed-secret-reencryption",
+            "enum": [
+              "managed-secret-reencryption",
+              "managed-authz-policy-set"
+            ],
             "title": "Descriptor Id",
             "type": "string"
           },
@@ -14119,7 +14683,15 @@
             "type": "integer"
           },
           "evidence": {
-            "$ref": "#/components/schemas/ManagedSecretReencryptionHumanEvidence"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ManagedSecretReencryptionHumanEvidence"
+              },
+              {
+                "$ref": "#/components/schemas/ManagedAuthzPolicySetHumanEvidence"
+              }
+            ],
+            "title": "Evidence"
           },
           "evidence_digest": {
             "title": "Evidence Digest",
@@ -14131,9 +14703,13 @@
                 "$ref": "#/components/schemas/PrivilegedOperationExecutionEvidence"
               },
               {
+                "$ref": "#/components/schemas/ManagedAuthzPolicySetExecutionEvidence"
+              },
+              {
                 "type": "null"
               }
-            ]
+            ],
+            "title": "Execution"
           },
           "expires_at": {
             "title": "Expires At",
@@ -14144,17 +14720,36 @@
             "type": "string"
           },
           "request": {
-            "$ref": "#/components/schemas/ManagedSecretReencryptionPlanInput"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ManagedSecretReencryptionPlanInput"
+              },
+              {
+                "$ref": "#/components/schemas/ManagedAuthzPolicySetProposalInput-Output"
+              }
+            ],
+            "title": "Request"
           },
           "request_digest": {
             "title": "Request Digest",
             "type": "string"
           },
           "requested_by": {
-            "$ref": "#/components/schemas/PrivilegedOperationActor"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PrivilegedOperationActor"
+              },
+              {
+                "$ref": "#/components/schemas/PrivilegedOperationAgentActor"
+              }
+            ],
+            "title": "Requested By"
           },
           "safety_class": {
-            "const": "secret_backed",
+            "enum": [
+              "secret_backed",
+              "policy_admin"
+            ],
             "title": "Safety Class",
             "type": "string"
           },

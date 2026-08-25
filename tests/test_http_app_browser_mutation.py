@@ -35,7 +35,6 @@ class FastApiBrowserMutationBoundaryTests(unittest.IsolatedAsyncioTestCase):
             "/auth/logout",
             "/v1/agent/write-intents/evaluate",
             "/v1/authz-diagnostics/effective-access/evaluate",
-            "/v1/authz-policies/managed-rule-sets/reconcile",
             "/v1/drivers/generic-web/prod-promotion",
             "/v1/drivers/generic-web/prod-promotion-workflow",
             "/v1/merge-train/policies/import",
@@ -60,7 +59,9 @@ class FastApiBrowserMutationBoundaryTests(unittest.IsolatedAsyncioTestCase):
         }
         expected_bearer_only_routes = {
             "/v1/authz-diagnostics/github-actions/evaluate",
+            "/v1/authz-policies/managed-rule-sets/reconcile",
             "/v1/change-impact/evaluation",
+            "/v1/agent/privileged-operations/plans",
             "/v1/secrets/reencrypt",
             "/v1/tenant-admission/repository-classifications/apply",
             "/v1/tenant-admission/repository-human-role-policies/apply",
