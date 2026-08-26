@@ -140,7 +140,7 @@ class ServiceImageContractTests(unittest.TestCase):
 
         dockerfile_text = dockerfile.read_text(encoding="utf-8")
         runtime_stage = re.search(
-            r"(?ms)^FROM\s+\S*python:3\.13-slim\s*$"
+            r"(?ms)^FROM\s+\S*python:3\.13-slim\s+AS\s+runtime\s*$"
             r"(?P<body>.*?)(?=^FROM\s|\Z)",
             dockerfile_text,
         )

@@ -92,6 +92,11 @@ written to the workflow log by the upstream implementation.
   use a release tag plus a 64-character `sha256` manifest digest. Mutable tags
   without a digest are rejected.
 
+Container vulnerability scans pull current base-image references and invalidate
+only the named `runtime` build stage. This preserves cache for the frontend and
+GitHub CLI build stages while forcing runtime OS package upgrades and dependency
+installation to run against current security repositories on every scan.
+
 The security workflow runs this policy for both same-repository and fork pull
 requests before actionlint. The unit-test suite runs it as well, so a mutable
 reference cannot pass the required CI path.
