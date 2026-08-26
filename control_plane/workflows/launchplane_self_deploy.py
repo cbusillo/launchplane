@@ -19,6 +19,7 @@ from control_plane.dokploy import api as dokploy_api
 from control_plane.dokploy import source as dokploy_source
 
 LAUNCHPLANE_IMAGE_REFERENCE_ENV_KEY = "DOCKER_IMAGE_REFERENCE"
+LAUNCHPLANE_DEPLOYMENT_MARKER_ENV_KEY = "LAUNCHPLANE_DEPLOYMENT_MARKER"
 _DATABASE_URL_ENV_KEY = "LAUNCHPLANE_DATABASE_URL"
 _SECRET_KEYS_JSON_ENV_KEY = "LAUNCHPLANE_SECRET_KEYS_JSON"
 _MASTER_ENCRYPTION_KEY_ENV_KEY = "LAUNCHPLANE_MASTER_ENCRYPTION_KEY"
@@ -37,6 +38,7 @@ LAUNCHPLANE_SELF_DEPLOY_OAUTH_ENV_KEYS = frozenset(
         "LAUNCHPLANE_COOKIE_SECURE",
         "LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS",
         "LAUNCHPLANE_COMPOSE_EXTERNAL_NETWORK",
+        LAUNCHPLANE_DEPLOYMENT_MARKER_ENV_KEY,
         _SECRET_KEYS_JSON_ENV_KEY,
         _MASTER_ENCRYPTION_KEY_ENV_KEY,
         "LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET",
@@ -78,6 +80,8 @@ class LaunchplaneSelfDeployRequest(BaseModel):
     policy_b64: str = ""
     oauth_env: dict[str, str] = Field(default_factory=dict)
     oauth_env_removals: tuple[str, ...] = ()
+    oauth_env_expected_absent: tuple[str, ...] = ()
+    oauth_env_expected_values: dict[str, str] = Field(default_factory=dict)
     no_cache: bool = False
 
     @model_validator(mode="before")
@@ -138,6 +142,55 @@ class LaunchplaneSelfDeployRequest(BaseModel):
             if normalized_key not in normalized_oauth_env_removals:
                 normalized_oauth_env_removals.append(normalized_key)
         self.oauth_env_removals = tuple(normalized_oauth_env_removals)
+
+        normalized_expected_absent: list[str] = []
+        for env_key in self.oauth_env_expected_absent:
+            normalized_key = env_key.strip()
+            if normalized_key not in LAUNCHPLANE_SELF_DEPLOY_OAUTH_ENV_KEYS:
+                raise ValueError(
+                    "Launchplane self deploy does not accept oauth_env_expected_absent key "
+                    f"{normalized_key!r}."
+                )
+            if normalized_key not in normalized_oauth_env:
+                raise ValueError(
+                    "Launchplane self deploy expected-absent keys must also be updated."
+                )
+            if normalized_key not in normalized_expected_absent:
+                normalized_expected_absent.append(normalized_key)
+        self.oauth_env_expected_absent = tuple(normalized_expected_absent)
+
+        normalized_expected_values: dict[str, str] = {}
+        for env_key, raw_value in self.oauth_env_expected_values.items():
+            normalized_key = env_key.strip()
+            if normalized_key not in LAUNCHPLANE_SELF_DEPLOY_OAUTH_ENV_KEYS:
+                raise ValueError(
+                    "Launchplane self deploy does not accept oauth_env_expected_values key "
+                    f"{normalized_key!r}."
+                )
+            if (
+                normalized_key not in normalized_oauth_env
+                and normalized_key not in normalized_oauth_env_removals
+            ):
+                raise ValueError(
+                    "Launchplane self deploy expected-value keys must also be updated or removed."
+                )
+            normalized_value = raw_value.strip()
+            if not normalized_value:
+                raise ValueError(
+                    "Launchplane self deploy expected oauth env values must be non-empty."
+                )
+            if "\n" in normalized_value or "\r" in normalized_value:
+                raise ValueError(
+                    "Launchplane self deploy expected oauth env values must be single-line."
+                )
+            normalized_expected_values[normalized_key] = normalized_value
+        overlap = set(normalized_expected_absent) & set(normalized_expected_values)
+        if overlap:
+            raise ValueError(
+                "Launchplane self deploy cannot require oauth env keys to be both absent and "
+                "equal to an expected value."
+            )
+        self.oauth_env_expected_values = normalized_expected_values
         return self
 
 
@@ -168,6 +221,17 @@ def execute_launchplane_self_deploy(
     )
     raw_env_text = str(target_payload.get("env") or "")
     previous_env_map = dokploy_api.parse_dokploy_env_text(raw_env_text)
+    for env_key in request.oauth_env_expected_absent:
+        if env_key in previous_env_map:
+            raise ValueError(
+                f"Launchplane self deploy requires oauth env key {env_key!r} to be absent."
+            )
+    for env_key, expected_value in request.oauth_env_expected_values.items():
+        if previous_env_map.get(env_key) != expected_value:
+            raise ValueError(
+                f"Launchplane self deploy requires oauth env key {env_key!r} to match the "
+                "reviewed expected value."
+            )
     updates = {LAUNCHPLANE_IMAGE_REFERENCE_ENV_KEY: request.image_reference}
     updates.update(request.oauth_env)
     removals: tuple[str, ...] = request.oauth_env_removals

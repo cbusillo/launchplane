@@ -209,8 +209,14 @@ secret never removes the active key ring. `install` requires non-empty JSON,
 minifies it before the private self-deploy request is written, and may use an
 operator-reviewed `self_deploy_idempotency_key`. `remove` is an explicit
 rollback or retirement action and never follows merely from secret absence.
-The workflow removes private self-deploy payload files at job completion and
-must not copy the key-ring value into outputs, summaries, artifacts, or logs.
+Both operations use exact target-state preconditions. A post-mutation workflow
+failure automatically attempts the inverse key-ring change against the same
+immutable image, guarded by the reviewed value and a unique forward deployment
+marker; a distinct rollback marker proves restart completion. Ambiguous or
+stale state fails closed for manual operator follow-up instead of applying a
+blind inverse. The workflow removes private self-deploy payload files at job
+completion and must not copy the key-ring value into outputs, summaries,
+artifacts, or logs.
 
 Old ciphertext versions and audit metadata retain the old/new key ids and
 version ids as rollback evidence. To roll back before destroying an old root,

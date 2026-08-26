@@ -12101,6 +12101,10 @@
             "title": "Database Schema Revision",
             "type": "string"
           },
+          "deployment_marker": {
+            "title": "Deployment Marker",
+            "type": "string"
+          },
           "docker_image_reference": {
             "title": "Docker Image Reference",
             "type": "string"
@@ -12125,6 +12129,7 @@
           "bootstrap_authz_policy_sha256",
           "compatible_database_schema_revisions",
           "database_schema_revision",
+          "deployment_marker",
           "docker_image_reference",
           "schema_migration_target_revision",
           "service_audience",
@@ -43897,6 +43902,21 @@
                           "type": "string"
                         },
                         "title": "Oauth Env",
+                        "type": "object"
+                      },
+                      "oauth_env_expected_absent": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Oauth Env Expected Absent",
+                        "type": "array"
+                      },
+                      "oauth_env_expected_values": {
+                        "additionalProperties": {
+                          "type": "string"
+                        },
+                        "title": "Oauth Env Expected Values",
                         "type": "object"
                       },
                       "oauth_env_removals": {

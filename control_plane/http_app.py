@@ -1464,6 +1464,7 @@ class LaunchplaneRuntimeStatus(BaseModel):
     bootstrap_authz_policy_sha256: str
     compatible_database_schema_revisions: tuple[str, ...]
     database_schema_revision: str
+    deployment_marker: str
     docker_image_reference: str
     schema_migration_target_revision: str
     service_audience: str

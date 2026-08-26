@@ -3381,9 +3381,7 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             ),
             (
                 "idempotency-key",
-                "launchplane-self-deploy-rollback:${{ "
-                "steps.rollback_request.outputs.previous_image_reference }}:${{ "
-                "github.run_id }}:${{ github.run_attempt }}",
+                "${{ steps.rollback_request.outputs.idempotency_key }}",
             ),
             ("method", "GET"),
             ("payload-file", "${{ steps.self_deploy.outputs.payload_file }}"),
@@ -3408,11 +3406,28 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 "poll-timeout-ms",
                 "${{ steps.rollback_health.outputs.remaining_timeout_ms }}",
             ),
+            ("poll-until-path", "runtime.deployment_marker"),
             ("poll-until-path", "runtime.docker_image_reference"),
             ("poll-until-value", "${{ steps.image.outputs.image_reference }}"),
             (
                 "poll-until-value",
+                "${{ steps.prep.outputs.forward_deployment_marker }}",
+            ),
+            (
+                "poll-until-value",
+                "${{ steps.rollback_request.outputs.deployment_marker }}",
+            ),
+            (
+                "poll-until-value",
                 "${{ steps.rollback_request.outputs.previous_image_reference }}",
+            ),
+            (
+                "response-output-file",
+                "${{ runner.temp }}/launchplane-deployed-marker-final.json",
+            ),
+            (
+                "response-output-file",
+                "${{ runner.temp }}/launchplane-deployed-marker-wait.json",
             ),
             (
                 "response-output-file",
@@ -3423,6 +3438,14 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 "${{ runner.temp }}/launchplane-deployed-runtime-final.json",
             ),
             ("response-output-file", "${{ runner.temp }}/launchplane-previous-runtime.json"),
+            (
+                "response-output-file",
+                "${{ runner.temp }}/launchplane-rollback-marker-final.json",
+            ),
+            (
+                "response-output-file",
+                "${{ runner.temp }}/launchplane-rollback-marker-wait.json",
+            ),
             (
                 "response-output-file",
                 "${{ runner.temp }}/launchplane-rollback-runtime-final.json",
