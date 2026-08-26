@@ -112,6 +112,8 @@ jobs:
           context: .
           load: true
           tags: ${{ env.LAUNCHPLANE_CI_IMAGE_TAG }}
+          pull: true
+          no-cache-filters: runtime
           cache-from: >-
             type=gha,scope=launchplane-ci
           cache-to: >-
@@ -172,6 +174,8 @@ jobs:
           context: .
           load: true
           tags: ${{ env.LAUNCHPLANE_CI_IMAGE_TAG }}
+          pull: true
+          no-cache-filters: runtime
           cache-from: >-
             type=gha,scope=launchplane-ci
 
