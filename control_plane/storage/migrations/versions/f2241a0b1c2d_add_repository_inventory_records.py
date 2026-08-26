@@ -29,7 +29,9 @@ def _table_exists() -> bool:
 
 def _index_exists(index_name: str) -> bool:
     return _table_exists() and index_name in {
-        str(index["name"]) for index in sa.inspect(op.get_bind()).get_indexes(_TABLE)
+        name
+        for index in sa.inspect(op.get_bind()).get_indexes(_TABLE)
+        if (name := index.get("name")) is not None
     }
 
 
@@ -65,7 +67,9 @@ def upgrade() -> None:
             _REVISION_INDEX, _TABLE, ["repository_id", "inventory_revision"], unique=True
         )
     if not _index_exists(_CURRENT_INDEX):
-        op.create_index(_CURRENT_INDEX, _TABLE, ["repository_id", sa.text("inventory_revision DESC")])
+        op.create_index(
+            _CURRENT_INDEX, _TABLE, ["repository_id", sa.text("inventory_revision DESC")]
+        )
 
 
 def downgrade() -> None:

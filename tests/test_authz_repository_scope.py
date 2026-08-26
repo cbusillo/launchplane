@@ -27,6 +27,7 @@ from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductImageProfile,
 )
+from control_plane.contracts.repository_inventory import RepositoryInventoryRecord
 from control_plane.contracts.repository_human_admission import RepositoryHumanRolePolicyRecord
 from control_plane.contracts.tenant_merge_eligibility import (
     TenantRepositoryClassificationRecord,
@@ -48,11 +49,13 @@ class _Store:
         product_profiles: tuple[LaunchplaneProductProfileRecord, ...] = (),
         role_policies: tuple[RepositoryHumanRolePolicyRecord, ...] = (),
         classifications: tuple[TenantRepositoryClassificationRecord, ...] = (),
+        inventory_records: tuple[RepositoryInventoryRecord, ...] = (),
         work_requests: tuple[EveryCodeWorkRequestRecord, ...] = (),
     ) -> None:
         self.product_profiles = product_profiles
         self.role_policies = role_policies
         self.classifications = classifications
+        self.inventory_records = inventory_records
         self.work_requests = work_requests
 
     def list_product_profile_records(
@@ -86,6 +89,19 @@ class _Store:
         del repository_id
         return self.classifications if limit is None else self.classifications[:limit]
 
+    def list_repository_inventory_records(
+        self,
+        *,
+        repository_id: str = "",
+        limit: int | None = None,
+    ) -> tuple[RepositoryInventoryRecord, ...]:
+        records = tuple(
+            record
+            for record in self.inventory_records
+            if not repository_id or record.repository_id == repository_id
+        )
+        return records if limit is None else records[:limit]
+
     def list_every_code_work_request_records(
         self,
         *,
@@ -113,12 +129,14 @@ class _CliStore(_Store):
         product_profiles: tuple[LaunchplaneProductProfileRecord, ...] = (),
         role_policies: tuple[RepositoryHumanRolePolicyRecord, ...] = (),
         classifications: tuple[TenantRepositoryClassificationRecord, ...] = (),
+        inventory_records: tuple[RepositoryInventoryRecord, ...] = (),
         work_requests: tuple[EveryCodeWorkRequestRecord, ...] = (),
     ) -> None:
         super().__init__(
             product_profiles=product_profiles,
             role_policies=role_policies,
             classifications=classifications,
+            inventory_records=inventory_records,
             work_requests=work_requests,
         )
         self.active_policy_records = active_policy_records
@@ -425,6 +443,104 @@ class AuthzRepositoryScopeTests(unittest.TestCase):
             ("product", "repository_record", "authorization_chain"),
         )
 
+    def test_tracked_inventory_supplies_immutable_repository_identity(self) -> None:
+        request = AuthzRepositoryScopeReadRequest.model_validate(
+            {
+                "candidates": [
+                    {
+                        "repository": REPOSITORY,
+                        "repository_id": REPOSITORY_ID,
+                        "repository_owner_id": REPOSITORY_OWNER_ID,
+                    }
+                ]
+            }
+        )
+        with _handle_key("repository-scope-inventory-key"):
+            response = build_authz_repository_scope_response(
+                trace_id="trace-inventory",
+                generated_at="2026-08-26T12:00:00+00:00",
+                request=request,
+                active_policy_record=_policy_record(repository=REPOSITORY, include_identity=False),
+                store=_Store(inventory_records=(_inventory_record(),)),
+            )
+
+        self.assertEqual(response.coverage.state, "complete")
+        self.assertEqual(response.candidates[0].state, "matched")
+        self.assertEqual(
+            response.candidates[0].memberships,
+            ("repository_record", "authorization_chain"),
+        )
+
+    def test_retired_inventory_does_not_supply_active_repository_membership(self) -> None:
+        tracked = _inventory_record()
+        retired = _inventory_record(
+            revision=2,
+            state="retired",
+            supersedes_record_id=tracked.record_id,
+        )
+        request = AuthzRepositoryScopeReadRequest.model_validate(
+            {
+                "candidates": [
+                    {
+                        "repository": REPOSITORY,
+                        "repository_id": REPOSITORY_ID,
+                        "repository_owner_id": REPOSITORY_OWNER_ID,
+                    }
+                ]
+            }
+        )
+        with _handle_key("repository-scope-retired-key"):
+            response = build_authz_repository_scope_response(
+                trace_id="trace-retired",
+                generated_at="2026-08-26T12:00:00+00:00",
+                request=request,
+                active_policy_record=_policy_record(repository=REPOSITORY),
+                store=_Store(inventory_records=(tracked, retired)),
+            )
+
+        self.assertEqual(response.coverage.state, "partial")
+        self.assertEqual(response.candidates[0].state, "matched")
+        self.assertEqual(response.candidates[0].memberships, ("authorization_chain",))
+        self.assertIn(
+            ("authorization_chain", "stale_authorization_membership", 1),
+            {(gap.source, gap.reason_code, gap.count) for gap in response.coverage.gaps},
+        )
+
+    def test_inventory_can_cover_seventeen_exact_candidates(self) -> None:
+        inventory_records = tuple(
+            _inventory_record(
+                repository=f"example/repository-{index}",
+                repository_id=str(120000 + index),
+                repository_owner_id=str(220000 + index),
+            )
+            for index in range(17)
+        )
+        request = AuthzRepositoryScopeReadRequest.model_validate(
+            {
+                "candidates": [
+                    {
+                        "repository": record.repository,
+                        "repository_id": record.repository_id,
+                        "repository_owner_id": record.repository_owner_id,
+                    }
+                    for record in inventory_records
+                ]
+            }
+        )
+        with _handle_key("repository-scope-seventeen-key"):
+            response = build_authz_repository_scope_response(
+                trace_id="trace-seventeen",
+                generated_at="2026-08-26T12:00:00+00:00",
+                request=request,
+                active_policy_record=_empty_policy_record(),
+                store=_Store(inventory_records=inventory_records),
+            )
+
+        self.assertEqual(response.coverage.state, "complete")
+        self.assertEqual(response.coverage.repository_count, 17)
+        self.assertEqual(response.coverage.matched_repository_count, 17)
+        self.assertEqual({candidate.state for candidate in response.candidates}, {"matched"})
+
     def test_stale_records_cannot_make_authorization_membership_complete(self) -> None:
         request = AuthzRepositoryScopeReadRequest.model_validate(
             {"candidates": [{"repository": REPOSITORY}]}
@@ -605,18 +721,23 @@ def _policy_record(
     *,
     repository: str,
     schema_version: int = 2,
+    include_identity: bool = True,
 ) -> LaunchplaneAuthzPolicyRecord:
+    rule: dict[str, object] = {
+        "repository": repository,
+        "actions": ["deploy.write"],
+    }
+    if include_identity:
+        rule.update(
+            {
+                "repository_id": REPOSITORY_ID,
+                "repository_owner_id": REPOSITORY_OWNER_ID,
+            }
+        )
     policy = LaunchplaneAuthzPolicy.model_validate(
         {
             "schema_version": schema_version,
-            "github_actions": [
-                {
-                    "repository": repository,
-                    "repository_id": REPOSITORY_ID,
-                    "repository_owner_id": REPOSITORY_OWNER_ID,
-                    "actions": ["deploy.write"],
-                }
-            ],
+            "github_actions": [rule],
         }
     )
     digest = authz_policy_sha256(policy)
@@ -626,6 +747,20 @@ def _policy_record(
         status="active",
         source="test:authz-repository-scope",
         updated_at="2026-08-20T22:00:00+00:00",
+        policy_sha256=digest,
+        policy=policy,
+    )
+
+
+def _empty_policy_record() -> LaunchplaneAuthzPolicyRecord:
+    policy = LaunchplaneAuthzPolicy(schema_version=2)
+    digest = authz_policy_sha256(policy)
+    return LaunchplaneAuthzPolicyRecord(
+        record_id=build_authz_policy_record_id(revision=1, policy_sha256=digest),
+        revision=1,
+        status="active",
+        source="test:authz-repository-scope",
+        updated_at="2026-08-26T11:00:00+00:00",
         policy_sha256=digest,
         policy=policy,
     )
@@ -679,6 +814,30 @@ def _classification() -> TenantRepositoryClassificationRecord:
         classified_at="2026-08-20T20:30:00Z",
         source="test:authz-repository-scope",
         reason="repository scope test",
+    )
+
+
+def _inventory_record(
+    *,
+    repository: str = REPOSITORY,
+    repository_id: str = REPOSITORY_ID,
+    repository_owner_id: str = REPOSITORY_OWNER_ID,
+    revision: int = 1,
+    state: str = "tracked",
+    supersedes_record_id: str | None = None,
+) -> RepositoryInventoryRecord:
+    return RepositoryInventoryRecord.model_validate(
+        {
+            "repository_id": repository_id,
+            "repository_owner_id": repository_owner_id,
+            "repository": repository,
+            "inventory_state": state,
+            "inventory_revision": revision,
+            "recorded_at": f"2026-08-26T10:00:0{revision}Z",
+            "source": "test:authz-repository-scope",
+            "reason": "repository inventory evidence",
+            "supersedes_record_id": supersedes_record_id,
+        }
     )
 
 

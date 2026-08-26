@@ -18,17 +18,7 @@ independent review remain incomplete.
 Until that work closes:
 
 - do not add new routine grants or managed sets through GitHub secrets or
-workflows;
-
-## Repository inventory
-
-Repository inventory has separate `repository_inventory.read` and
-`repository_inventory.write` actions at `product=launchplane` and
-`context=launchplane`. This change grants neither action: the active DB-native
-authorization policy remains the only authority. Active tracked inventory
-records are repository-record evidence for the redacted repository-scope read
-model; retired records contribute no node and do not alter that public response
-contract.
+  workflows;
 - do not create, edit, retarget, or dispatch a workflow merely to make an
   `authorization_denied` operation succeed;
 - route authorization gaps to `#2058` and add a native `blocked-by` relationship
@@ -40,6 +30,15 @@ contract.
 
 This freeze does not prohibit code, tests, documentation, threat-model work, or
 dry-run-only validation that cannot mutate live policy.
+
+Repository inventory follows the same authority boundary. Its
+`repository_inventory.read` and `repository_inventory.write` actions use the
+Launchplane service scope (`product=launchplane`, `context=launchplane`), but
+defining those actions grants neither one. Active tracked inventory records are
+repository-record evidence for the redacted repository-scope read model;
+retired records contribute no active inventory membership. When authorization
+rules are the only remaining active source, the read model reports stale
+authorization membership rather than complete coverage.
 
 ## Current Transitional Model
 

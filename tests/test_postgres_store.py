@@ -158,6 +158,7 @@ from control_plane.contracts.runtime_key_safety_policy import (
     RuntimeKeySafetyPolicyRecord,
     RuntimeSecretSafetyRule,
 )
+from control_plane.contracts.repository_inventory import RepositoryInventoryRecord
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyAuditRecord
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyAuditStatus
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyPolicy
@@ -291,6 +292,33 @@ def _tenant_repository_classification_record(
             "classification_kind": classification_kind,
             "classification_revision": classification_revision,
             "classified_at": classified_at,
+            "source": source,
+            "reason": reason,
+            "supersedes_record_id": supersedes_record_id,
+        }
+    )
+
+
+def _repository_inventory_record(
+    *,
+    repository_id: str = "1101",
+    repository_owner_id: str = "2101",
+    repository: str = "example/repository-inventory",
+    inventory_state: str = "tracked",
+    inventory_revision: int = 1,
+    recorded_at: str = "2026-08-26T10:00:00Z",
+    source: str = "test-source",
+    reason: str = "test-inventory",
+    supersedes_record_id: str | None = None,
+) -> RepositoryInventoryRecord:
+    return RepositoryInventoryRecord.model_validate(
+        {
+            "repository_id": repository_id,
+            "repository_owner_id": repository_owner_id,
+            "repository": repository,
+            "inventory_state": inventory_state,
+            "inventory_revision": inventory_revision,
+            "recorded_at": recorded_at,
             "source": source,
             "reason": reason,
             "supersedes_record_id": supersedes_record_id,
@@ -8426,6 +8454,16 @@ env_var = "GH_TOKEN"
                 _promotion_record(record_id="promotion-20260420T160500Z-opw-testing-to-prod")
             )
             filesystem_store.write_environment_inventory(_inventory_record())
+            repository_inventory_revision_1 = _repository_inventory_record()
+            filesystem_store.write_repository_inventory_record(repository_inventory_revision_1)
+            filesystem_store.write_repository_inventory_record(
+                _repository_inventory_record(
+                    inventory_revision=2,
+                    recorded_at="2026-08-26T10:05:00Z",
+                    reason="updated test inventory",
+                    supersedes_record_id=repository_inventory_revision_1.record_id,
+                )
+            )
             filesystem_store.write_artifact_manifest(_artifact_manifest())
             filesystem_store.write_odoo_instance_override_record(_odoo_instance_override_record())
             filesystem_store.write_preview_record(
@@ -8680,6 +8718,7 @@ env_var = "GH_TOKEN"
                     "release_tuples": 1,
                     "runtime_key_safety_policies": 1,
                     "tenant_repository_classifications": 2,
+                    "repository_inventory": 2,
                 },
             )
             self.assertEqual(
@@ -8690,6 +8729,10 @@ env_var = "GH_TOKEN"
             )
             self.assertEqual(
                 len(store.list_tenant_repository_classification_records(repository_id="1001")),
+                2,
+            )
+            self.assertEqual(
+                len(store.list_repository_inventory_records(repository_id="1101")),
                 2,
             )
             self.assertEqual(

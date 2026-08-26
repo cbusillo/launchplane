@@ -91,7 +91,7 @@ def repository_inventory_digest(record: RepositoryInventoryRecord) -> str:
         "supersedes_record_id": record.supersedes_record_id,
     }
     return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
 
 
@@ -125,7 +125,7 @@ def normalize_utc_timestamp(value: str, label: str) -> str:
         raise ValueError(f"repository inventory {label} must be an ISO-8601 timestamp") from error
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise ValueError(f"repository inventory {label} requires a timezone-aware UTC timestamp")
-    if parsed.utcoffset() != timedelta(0):
+    if parsed.utcoffset() != timedelta():
         raise ValueError(f"repository inventory {label} must be UTC")
     return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 

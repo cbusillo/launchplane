@@ -297,6 +297,8 @@ from control_plane.tenant_repository_classification import (
     plan_tenant_repository_classification_append,
 )
 from control_plane.repository_inventory import (
+    RepositoryInventoryConflictError,
+    RepositoryInventorySequenceError,
     plan_repository_inventory_append,
 )
 from control_plane.trusted_maintenance import (
@@ -359,6 +361,13 @@ ProductProfileCompareWriteStatus = Literal[
     "reconciliation_required",
 ]
 TenantRepositoryClassificationCompareWriteStatus = Literal[
+    "written",
+    "replayed",
+    "idempotency_conflict",
+    "reservation_in_progress",
+    "reconciliation_required",
+]
+RepositoryInventoryCompareWriteStatus = Literal[
     "written",
     "replayed",
     "idempotency_conflict",
@@ -491,6 +500,11 @@ class ProductProfileCompareWriteResult(NamedTuple):
 
 class TenantRepositoryClassificationCompareWriteResult(NamedTuple):
     status: TenantRepositoryClassificationCompareWriteStatus
+    idempotency_record: LaunchplaneIdempotencyRecord | None = None
+
+
+class RepositoryInventoryCompareWriteResult(NamedTuple):
+    status: RepositoryInventoryCompareWriteStatus
     idempotency_record: LaunchplaneIdempotencyRecord | None = None
 
 
@@ -1121,6 +1135,14 @@ class LaunchplaneTenantRepositoryClassificationRow(Base):
 class LaunchplaneRepositoryInventoryRow(Base):
     __tablename__ = "launchplane_repository_inventory_records"
     __table_args__ = (
+        CheckConstraint(
+            "inventory_state IN ('tracked', 'retired')",
+            name="launchplane_repository_inventory_state_ck",
+        ),
+        CheckConstraint(
+            "inventory_revision >= 1",
+            name="launchplane_repository_inventory_revision_ck",
+        ),
         Index(
             "launchplane_repository_inventory_revision_uidx",
             "repository_id",
@@ -11618,6 +11640,196 @@ class PostgresRecordStore(HumanSessionStore):
             {"lock_name": f"launchplane:repository-inventory:{repository_id}"},
         )
 
+    def compare_and_write_repository_inventory_record(
+        self,
+        *,
+        record: RepositoryInventoryRecord,
+        expected_current_record_id: str,
+        mutation: DbOnlyMutationRequest,
+    ) -> RepositoryInventoryCompareWriteResult:
+        if not 100 <= mutation.response_status_code <= 599:
+            raise ValueError("DB-only mutation response status must be between 100 and 599.")
+        if not mutation.response_trace_id.strip():
+            raise ValueError("DB-only mutation response trace id is required.")
+        normalized_expected = expected_current_record_id.strip()
+
+        reservation_insert_error: IntegrityError | None = None
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            observed_at = self._database_mutation_timestamp(session)
+            stored_reservation = build_launchplane_mutation_reservation(
+                scope=mutation.scope,
+                route_path=mutation.route_path,
+                idempotency_key=mutation.idempotency_key,
+                request_fingerprint=mutation.request_fingerprint,
+                lease_owner=mutation.lease_owner,
+                lease_expires_at=self._mutation_lease_expiry(
+                    observed_at=observed_at,
+                    lease_seconds=mutation.lease_seconds,
+                ),
+                reserved_at=observed_at,
+            )
+            reservation_row = self._idempotency_row(stored_reservation)
+            session.add(reservation_row)
+            try:
+                session.flush()
+            except IntegrityError as error:
+                session.rollback()
+                reservation_insert_error = error
+            if reservation_insert_error is None:
+                return self._compare_and_write_repository_inventory_locked(
+                    session=session,
+                    record=record,
+                    expected_current_record_id=normalized_expected,
+                    reservation_row=reservation_row,
+                    mutation_reservation=stored_reservation,
+                    mutation=mutation,
+                )
+
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            reservation_row = session.scalar(
+                self._idempotency_statement(
+                    scope=mutation.scope,
+                    route_path=mutation.route_path,
+                    idempotency_key=mutation.idempotency_key,
+                    for_update=True,
+                )
+            )
+            if reservation_row is None:
+                assert reservation_insert_error is not None
+                raise reservation_insert_error
+            current_reservation = self._read_payload(
+                model_type=LaunchplaneIdempotencyRecord,
+                payload=reservation_row.payload,
+            )
+            if current_reservation.request_fingerprint != mutation.request_fingerprint:
+                return RepositoryInventoryCompareWriteResult(
+                    status="idempotency_conflict",
+                    idempotency_record=current_reservation,
+                )
+            if current_reservation.state == "completed":
+                return RepositoryInventoryCompareWriteResult(
+                    status="replayed",
+                    idempotency_record=current_reservation,
+                )
+            if current_reservation.state == "reconcile_required":
+                return RepositoryInventoryCompareWriteResult(
+                    status="reconciliation_required",
+                    idempotency_record=current_reservation,
+                )
+            observed_at = self._database_mutation_timestamp(session)
+            if parse_launchplane_mutation_timestamp(
+                current_reservation.lease_expires_at,
+                field_name="lease_expires_at",
+            ) > parse_launchplane_mutation_timestamp(
+                observed_at,
+                field_name="observed_at",
+            ):
+                return RepositoryInventoryCompareWriteResult(
+                    status="reservation_in_progress",
+                    idempotency_record=current_reservation,
+                )
+            if current_reservation.reconciliation_key:
+                reconcile_record = self._updated_idempotency_record(
+                    current_reservation,
+                    state="reconcile_required",
+                    updated_at=observed_at,
+                )
+                self._sync_idempotency_row(reservation_row, reconcile_record)
+                session.commit()
+                return RepositoryInventoryCompareWriteResult(
+                    status="reconciliation_required",
+                    idempotency_record=reconcile_record,
+                )
+            reclaimed_reservation = self._updated_idempotency_record(
+                current_reservation,
+                lease_owner=mutation.lease_owner,
+                lease_expires_at=self._mutation_lease_expiry(
+                    observed_at=observed_at,
+                    lease_seconds=mutation.lease_seconds,
+                ),
+                attempt=current_reservation.attempt + 1,
+                updated_at=observed_at,
+                response_status_code=None,
+                response_trace_id="",
+                recorded_at="",
+                response_payload={},
+            )
+            self._sync_idempotency_row(reservation_row, reclaimed_reservation)
+            return self._compare_and_write_repository_inventory_locked(
+                session=session,
+                record=record,
+                expected_current_record_id=normalized_expected,
+                reservation_row=reservation_row,
+                mutation_reservation=reclaimed_reservation,
+                mutation=mutation,
+            )
+
+    def _compare_and_write_repository_inventory_locked(
+        self,
+        *,
+        session: Any,
+        record: RepositoryInventoryRecord,
+        expected_current_record_id: str,
+        reservation_row: LaunchplaneIdempotencyRow,
+        mutation_reservation: LaunchplaneIdempotencyRecord,
+        mutation: DbOnlyMutationRequest,
+    ) -> RepositoryInventoryCompareWriteResult:
+        self._lock_repository_inventory_write(session, repository_id=record.repository_id)
+        statement = select(LaunchplaneRepositoryInventoryRow).where(
+            LaunchplaneRepositoryInventoryRow.repository_id == record.repository_id
+        )
+        if not self.database_url.startswith("sqlite"):
+            statement = statement.with_for_update()
+        existing_records = tuple(
+            self._read_payload(model_type=RepositoryInventoryRecord, payload=row.payload)
+            for row in session.scalars(statement).all()
+        )
+        try:
+            plan = plan_repository_inventory_append(records=existing_records, record=record)
+            if plan.status == "replayed":
+                raise RepositoryInventoryConflictError(
+                    "Repository inventory record already exists; retry the original request "
+                    "with the same Idempotency-Key."
+                )
+            if plan.current_record is None and expected_current_record_id:
+                raise RepositoryInventoryConflictError(
+                    f"Expected current repository inventory record ID "
+                    f"'{expected_current_record_id}' does not match current state: repository "
+                    "has no existing inventory record."
+                )
+            if (
+                plan.current_record is not None
+                and expected_current_record_id != plan.current_record.record_id
+            ):
+                raise RepositoryInventoryConflictError(
+                    f"Expected current repository inventory record ID "
+                    f"'{expected_current_record_id}' does not match active current record ID "
+                    f"'{plan.current_record.record_id}'."
+                )
+        except (RepositoryInventoryConflictError, RepositoryInventorySequenceError):
+            session.delete(reservation_row)
+            session.commit()
+            raise
+
+        session.add(self._repository_inventory_row(record))
+        session.flush()
+        completed_at = self._database_mutation_timestamp(session)
+        completion = complete_launchplane_mutation_reservation(
+            mutation_reservation,
+            response_status_code=mutation.response_status_code,
+            response_trace_id=mutation.response_trace_id,
+            completed_at=completed_at,
+            response_payload=mutation.response_payload,
+        )
+        self._sync_idempotency_row(reservation_row, completion)
+        session.commit()
+        return RepositoryInventoryCompareWriteResult(
+            status="written",
+            idempotency_record=completion,
+        )
+
     def write_repository_inventory_record(
         self, record: RepositoryInventoryRecord
     ) -> Literal["written", "replayed"]:
@@ -17572,6 +17784,7 @@ class PostgresRecordStore(HumanSessionStore):
             "release_tuples": 0,
             "runtime_key_safety_policies": 0,
             "tenant_repository_classifications": 0,
+            "repository_inventory": 0,
         }
         for artifact_manifest in filesystem_store.list_artifact_manifests():
             self.write_artifact_manifest(artifact_manifest)
@@ -17591,6 +17804,18 @@ class PostgresRecordStore(HumanSessionStore):
             for classification_record in classification_records:
                 self.write_tenant_repository_classification_record(classification_record)
                 counts["tenant_repository_classifications"] += 1
+        if hasattr(filesystem_store, "list_repository_inventory_records"):
+            repository_inventory_records = sorted(
+                filesystem_store.list_repository_inventory_records(),
+                key=lambda record: (
+                    record.repository_id,
+                    record.inventory_revision,
+                    record.record_id,
+                ),
+            )
+            for repository_inventory_record in repository_inventory_records:
+                self.write_repository_inventory_record(repository_inventory_record)
+                counts["repository_inventory"] += 1
         for owner_policy in sorted(
             filesystem_store.list_product_owner_policy_records(),
             key=lambda record: (record.product, record.system, record.policy_revision),

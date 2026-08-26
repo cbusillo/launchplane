@@ -160,15 +160,12 @@ def build_authz_repository_scope_response(
         source="repository_record",
         truncated_sources=truncated_sources,
     )
-    list_inventory_records = getattr(store, "list_repository_inventory_records", None)
-    inventory_records = (
-        _bounded_records(
-            list_inventory_records(limit=AUTHZ_REPOSITORY_SCOPE_MAX_SOURCE_RECORDS + 1),
-            source="repository_record",
-            truncated_sources=truncated_sources,
-        )
-        if callable(list_inventory_records)
-        else ()
+    inventory_records = _bounded_records(
+        store.list_repository_inventory_records(
+            limit=AUTHZ_REPOSITORY_SCOPE_MAX_SOURCE_RECORDS + 1
+        ),
+        source="repository_record",
+        truncated_sources=truncated_sources,
     )
     work_requests = _bounded_interleaved_records(
         tuple(
@@ -213,7 +210,9 @@ def build_authz_repository_scope_response(
             _classification_evidence(record, current_classification_records)
             for record in classification_records
         )
-        + tuple(_inventory_evidence(record) for record in tracked_inventory_records)
+        + tuple(
+            _inventory_evidence(record, tracked_inventory_records) for record in inventory_records
+        )
         + tuple(_work_request_evidence(record) for record in work_requests)
         + tuple(_authorization_evidence(rule) for rule in authorization_rules)
     )
@@ -545,13 +544,16 @@ def _classification_evidence(
     )
 
 
-def _inventory_evidence(record: RepositoryInventoryRecord) -> _Evidence:
+def _inventory_evidence(
+    record: RepositoryInventoryRecord,
+    tracked_records: tuple[RepositoryInventoryRecord, ...],
+) -> _Evidence:
     return _Evidence(
         repository=record.repository,
         repository_id=record.repository_id,
         repository_owner_id=record.repository_owner_id,
         membership="repository_record",
-        current=True,
+        current=record in tracked_records,
         preserves_repository_case=False,
     )
 
