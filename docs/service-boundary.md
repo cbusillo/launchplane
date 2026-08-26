@@ -30,6 +30,16 @@ truth, provider mutation logic, rendered evidence payloads, or copied driver
 behavior. See [product-repo-contract.md](product-repo-contract.md) for the
 approval gate.
 
+### Repository Inventory
+
+The repository-inventory surface owns generic identity and existence evidence
+only. `GET /v1/repository-inventory` reads one repository stream by immutable
+repository ID. `POST /v1/repository-inventory/apply` supports dry-run and
+PostgreSQL-backed apply; apply requires an idempotency key, performs atomic CAS,
+and is denied to terminal agents. Inventory records do not establish product,
+tenant, role, authorization, branch, workflow, provider, runtime, or merge
+semantics.
+
 ## Current Implementation Status
 
 The service boundary is implemented and deployed for the current Odoo and

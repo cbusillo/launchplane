@@ -38,6 +38,18 @@ provider effect was attempted for the blocked entry and the controller lease is
 released cleanly. Earlier entries in a multi-PR batch may already be merged; the
 returned landing plan identifies their persisted status.
 
+## Repository Inventory
+
+Use the deployed service for repository inventory reads and mutations. Submit
+an exact immutable GitHub repository identity and a deterministic append-only
+record. Run `dry_run` before apply. Apply is PostgreSQL-only, requires an
+`Idempotency-Key`, and compares the supplied current record ID inside the same
+transaction that appends the revision and completes the idempotency response.
+Retiring a repository removes its active repository-scope inventory membership
+without granting or revoking authorization. A dry-run of an already-persisted
+record returns a conflict because replay is valid only when apply reuses the
+original idempotency key.
+
 ## Command Groups
 
 Use `uv run launchplane --help` for the complete CLI surface. The current

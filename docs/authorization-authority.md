@@ -31,6 +31,15 @@ Until that work closes:
 This freeze does not prohibit code, tests, documentation, threat-model work, or
 dry-run-only validation that cannot mutate live policy.
 
+Repository inventory follows the same authority boundary. Its
+`repository_inventory.read` and `repository_inventory.write` actions use the
+Launchplane service scope (`product=launchplane`, `context=launchplane`), but
+defining those actions grants neither one. Active tracked inventory records are
+repository-record evidence for the redacted repository-scope read model;
+retired records contribute no active inventory membership. When authorization
+rules are the only remaining active source, the read model reports stale
+authorization membership rather than complete coverage.
+
 ## Current Transitional Model
 
 The current service has a DB-backed managed-rule reconciliation endpoint with

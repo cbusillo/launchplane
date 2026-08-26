@@ -175,6 +175,9 @@ from control_plane.http_routes import (
     register_product_profile_read_routes,
     register_protected_artifact_read_routes,
     register_runner_host_hygiene_read_routes,
+    RepositoryInventoryWriteRouteDependencies,
+    register_repository_inventory_read_routes,
+    register_repository_inventory_write_routes,
     REPOSITORY_HUMAN_ROLE_POLICY_APPLY_ROUTE,
     TENANT_ADMISSION_CONTROLLER_RUN_ONCE_ROUTE,
     TENANT_ADMISSION_STATUS_RECONCILE_ROUTE,
@@ -21902,6 +21905,7 @@ def create_launchplane_fastapi_app(
             github_token=resolve_launchplane_github_token,
         ),
     )
+    register_repository_inventory_read_routes(app, dependencies=read_route_dependencies)
 
     app.add_api_route(
         "/v1/work-graph/github/issues/reconcile",
@@ -22920,6 +22924,17 @@ def create_launchplane_fastapi_app(
     register_tenant_admission_write_routes(
         app,
         dependencies=tenant_admission_write_route_dependencies,
+    )
+    register_repository_inventory_write_routes(
+        app,
+        dependencies=RepositoryInventoryWriteRouteDependencies(
+            read_write_identity=read_bearer_identity,
+            get_record_store=get_record_store,
+            next_trace_id=next_trace_id,
+            authorization_allows=resolved_authz_policy_runtime.allows,
+            http_error=_launchplane_http_error,
+            error_response_model=LaunchplaneErrorResponse,
+        ),
     )
     register_product_owner_write_routes(
         app,

@@ -10,7 +10,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
 AUTHZ_COMPATIBILITY_FLOOR_REVISION = "f3b5d7e9a1c2"
-EXPECTED_ALEMBIC_HEAD_REVISION = "f2239a0b1c2d"
+EXPECTED_ALEMBIC_HEAD_REVISION = "f2241a0b1c2d"
 RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS = (EXPECTED_ALEMBIC_HEAD_REVISION,)
 _AUTHZ_POLICY_TABLE = "launchplane_authz_policies"
 _AUTHZ_POLICY_WRITE_FENCE_TRIGGER = "launchplane_authz_policy_write_fence"
@@ -138,6 +138,11 @@ CRITICAL_POSTGRES_COLUMN_TYPES: tuple[CriticalColumnType, ...] = (
     ),
     CriticalColumnType(
         "launchplane_odoo_stable_bootstrap_operations",
+        "payload",
+        ("jsonb",),
+    ),
+    CriticalColumnType(
+        "launchplane_repository_inventory_records",
         "payload",
         ("jsonb",),
     ),
@@ -787,6 +792,17 @@ CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
         ("repository_id", "classification_revision"),
     ),
     CriticalIndex(
+        "launchplane_repository_inventory_records",
+        "launchplane_repository_inventory_revision_uidx",
+        ("repository_id", "inventory_revision"),
+        unique=True,
+    ),
+    CriticalIndex(
+        "launchplane_repository_inventory_records",
+        "launchplane_repository_inventory_current_idx",
+        ("repository_id", "inventory_revision"),
+    ),
+    CriticalIndex(
         "launchplane_repository_human_role_policies",
         "launchplane_repo_human_role_revision_uidx",
         ("repository_id", "product", "context", "role_policy_revision"),
@@ -988,6 +1004,10 @@ CRITICAL_PRIMARY_KEYS: tuple[CriticalPrimaryKey, ...] = (
     ),
     CriticalPrimaryKey(
         "launchplane_tenant_repository_classifications",
+        ("record_id",),
+    ),
+    CriticalPrimaryKey(
+        "launchplane_repository_inventory_records",
         ("record_id",),
     ),
     CriticalPrimaryKey(

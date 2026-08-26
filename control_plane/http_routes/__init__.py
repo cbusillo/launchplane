@@ -113,6 +113,11 @@ from control_plane.http_routes.products import (
     require_product_profile_read_store,
 )
 from control_plane.http_routes.support import ReadRouteDependencies
+from control_plane.http_routes.repository_inventory import (
+    RepositoryInventoryWriteRouteDependencies,
+    register_repository_inventory_read_routes,
+    register_repository_inventory_write_routes,
+)
 from control_plane.http_routes.tenant_admission import (
     REPOSITORY_HUMAN_ROLE_POLICY_APPLY_ROUTE,
     TENANT_ADMISSION_CONTROLLER_RUN_ONCE_ROUTE,
@@ -175,6 +180,7 @@ __all__ = (
     "TENANT_TECHNICAL_HUMAN_WAIVER_APPLY_ROUTE",
     "TRUSTED_MAINTENANCE_POLICY_APPLY_ROUTE",
     "ReadRouteDependencies",
+    "RepositoryInventoryWriteRouteDependencies",
     "TenantAdmissionReadRouteDependencies",
     "TenantAdmissionWriteRouteDependencies",
     "WorkGraphReadRouteDependencies",
@@ -220,6 +226,8 @@ __all__ = (
     "register_product_profile_read_routes",
     "register_protected_artifact_read_routes",
     "register_runner_host_hygiene_read_routes",
+    "register_repository_inventory_read_routes",
+    "register_repository_inventory_write_routes",
     "register_tenant_admission_read_routes",
     "register_tenant_admission_write_routes",
     "TENANT_REPOSITORY_CLASSIFICATION_APPLY_ROUTE",

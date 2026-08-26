@@ -202,6 +202,7 @@ from control_plane.contracts.tenant_merge_eligibility import (
     TenantRepositoryClassificationLookup,
     TenantRepositoryClassificationRecord,
 )
+from control_plane.contracts.repository_inventory import RepositoryInventoryRecord
 from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyPolicyRecord
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyAuditRecord
 from control_plane.contracts.runner_host_hygiene import (
@@ -215,6 +216,7 @@ from control_plane.contracts.verireel_prod_backup_gate_operation import (
 from control_plane.tenant_repository_classification import (
     plan_tenant_repository_classification_append,
 )
+from control_plane.repository_inventory import plan_repository_inventory_append
 from control_plane.storage.product_authority_bundle import (
     ProductAuthorityBundle,
     ProviderTargetWrite,
@@ -965,6 +967,41 @@ class FilesystemRecordStore:
                 record for record in records if record.classification_revision == latest_revision
             )
         )
+
+    def write_repository_inventory_record(
+        self, record: RepositoryInventoryRecord
+    ) -> Literal["written", "replayed"]:
+        record_type = "launchplane_repository_inventory_records"
+        with self._product_authority_bundle_lock():
+            records = tuple(
+                existing
+                for existing in self._list_models_locked(RepositoryInventoryRecord, record_type)
+                if existing.repository_id == record.repository_id
+            )
+            plan = plan_repository_inventory_append(records=records, record=record)
+            if plan.status == "replayed":
+                return "replayed"
+            self._write_model_locked(record_type, record.record_id, record)
+            return "written"
+
+    def list_repository_inventory_records(
+        self,
+        *,
+        repository_id: str = "",
+        limit: int | None = None,
+    ) -> tuple[RepositoryInventoryRecord, ...]:
+        records = [
+            record
+            for record in self._list_models(
+                RepositoryInventoryRecord, "launchplane_repository_inventory_records"
+            )
+            if not repository_id or record.repository_id == repository_id
+        ]
+        records.sort(
+            key=lambda record: (record.inventory_revision, record.repository_id, record.record_id),
+            reverse=True,
+        )
+        return tuple(records if limit is None else records[:limit])
 
     def write_repository_human_role_policy_record(
         self,

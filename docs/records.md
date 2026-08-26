@@ -25,6 +25,18 @@ title: Records
 - Keep git history separate from operational history.
 - Favor append-style writes for promotion records.
 
+### Repository Inventory
+
+`RepositoryInventoryRecord` is an append-only, inert repository inventory
+stream. It records only immutable GitHub repository identity, normalized
+owner/name, tracked or retired state, revision, timestamp, source, reason,
+predecessor, and deterministic digest. It is not product, tenant, role,
+authorization, branch, workflow, provider, runtime, or merge authority.
+Revision one has no predecessor; later revisions must supersede the exact
+current record. Shared writes use
+`launchplane_repository_inventory_records`; filesystem storage provides local
+rehearsal parity only.
+
 ## Schema Migrations
 
 Launchplane uses SQLAlchemy ORM models as the persistence boundary and Alembic as
