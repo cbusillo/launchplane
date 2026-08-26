@@ -1654,12 +1654,18 @@ image, an explicit `bootstrap_secret_operation`, and a bounded
 `self_deploy_idempotency_key`. `install` reads only the repository secret
 `LAUNCHPLANE_SECRET_KEYS_JSON`; `remove` explicitly removes that target env key;
 `preserve` changes neither state. Automatic deploys always preserve bootstrap
-secret state. Keep `LAUNCHPLANE_MASTER_ENCRYPTION_KEY` present through the
-migration and rollback window, verify health/runtime and a new privileged
-re-encryption dry-run after restart, and stop before re-encryption apply unless
-the owner approves the exact new plan digest. If install verification fails,
-dispatch `remove` against the same immutable image with a distinct rollback
-idempotency key, then require the legacy-only dry-run baseline to return clean.
+secret state. The workflow records a per-attempt deployment marker and, after a
+post-mutation failure, automatically attempts an exact inverse bootstrap-state
+rollback against the same immutable image: failed `install` removes only the
+reviewed key ring, while failed `remove` restores that exact reviewed value.
+Compare-and-set preconditions on the key-ring state and forward marker block
+stale or ambiguous compensation, and the rollback marker proves that the
+replacement container restarted. Keep `LAUNCHPLANE_MASTER_ENCRYPTION_KEY`
+present through the migration and rollback window, verify health/runtime and a
+new privileged re-encryption dry-run after restart, and stop before
+re-encryption apply unless the owner approves the exact new plan digest. If
+automatic compensation is rejected or fails, require manual operator follow-up
+and a clean legacy-only dry-run baseline before proceeding.
 
 For an invalid tracked Dokploy target domain authority, use the `Dokploy Target
 Setup` workflow with `operation=repair-domain-authority`. Supply the exact

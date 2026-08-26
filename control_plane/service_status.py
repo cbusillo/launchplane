@@ -9,7 +9,10 @@ from typing import cast
 
 import click
 
-from control_plane.workflows.launchplane_self_deploy import LAUNCHPLANE_IMAGE_REFERENCE_ENV_KEY
+from control_plane.workflows.launchplane_self_deploy import (
+    LAUNCHPLANE_DEPLOYMENT_MARKER_ENV_KEY,
+    LAUNCHPLANE_IMAGE_REFERENCE_ENV_KEY,
+)
 from control_plane.storage.schema_invariants import RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS
 from control_plane.storage.schema_migration import SCHEMA_MIGRATION_TARGET_REVISION
 from control_plane.workflows.odoo_stable_operation_worker import (
@@ -60,6 +63,7 @@ def launchplane_runtime_payload(
         "docker_image_reference": os.environ.get(LAUNCHPLANE_IMAGE_REFERENCE_ENV_KEY, "").strip(),
         "compatible_database_schema_revisions": RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS,
         "database_schema_revision": database_schema_revision,
+        "deployment_marker": os.environ.get(LAUNCHPLANE_DEPLOYMENT_MARKER_ENV_KEY, "").strip(),
         "schema_migration_target_revision": SCHEMA_MIGRATION_TARGET_REVISION,
         "service_audience": os.environ.get("LAUNCHPLANE_SERVICE_AUDIENCE", "").strip(),
         "storage_backend": storage_backend,

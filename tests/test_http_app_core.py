@@ -41,9 +41,13 @@ from control_plane.service_human_auth import (
     InMemoryHumanSessionStore,
     LaunchplaneHumanSession,
 )
+from control_plane.service_status import launchplane_runtime_payload
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
-from control_plane.workflows.launchplane_self_deploy import LAUNCHPLANE_IMAGE_REFERENCE_ENV_KEY
+from control_plane.workflows.launchplane_self_deploy import (
+    LAUNCHPLANE_DEPLOYMENT_MARKER_ENV_KEY,
+    LAUNCHPLANE_IMAGE_REFERENCE_ENV_KEY,
+)
 from tests.http_app_test_support import (
     _asgi_get,
     _asgi_request,
@@ -977,6 +981,18 @@ class FastApiOperatorUiTests(unittest.IsolatedAsyncioTestCase):
 
 
 class FastApiServiceRuntimeReadTests(unittest.IsolatedAsyncioTestCase):
+    def test_runtime_payload_defaults_deployment_marker_to_empty(self) -> None:
+        with patch.dict("os.environ", {}, clear=True):
+            runtime = launchplane_runtime_payload(
+                storage_backend="filesystem",
+                database_schema_revision="",
+                authz_policy_schema_version=1,
+                authz_policy_sha256_value="policy-sha256",
+                authz_policy_source="db",
+            )
+
+        self.assertEqual(runtime["deployment_marker"], "")
+
     def _verireel_operation_record(
         self,
         *,
@@ -1048,6 +1064,7 @@ class FastApiServiceRuntimeReadTests(unittest.IsolatedAsyncioTestCase):
             with patch.dict(
                 "os.environ",
                 {
+                    LAUNCHPLANE_DEPLOYMENT_MARKER_ENV_KEY: "deploy-marker",
                     LAUNCHPLANE_IMAGE_REFERENCE_ENV_KEY: "ghcr.io/example/launchplane@sha256:test",
                     "LAUNCHPLANE_SERVICE_AUDIENCE": "launchplane.example.com",
                     "LAUNCHPLANE_POLICY_B64": base64.b64encode(policy_text.encode("utf-8")).decode(
@@ -1072,6 +1089,7 @@ class FastApiServiceRuntimeReadTests(unittest.IsolatedAsyncioTestCase):
             runtime["docker_image_reference"],
             "ghcr.io/example/launchplane@sha256:test",
         )
+        self.assertEqual(runtime["deployment_marker"], "deploy-marker")
         self.assertEqual(runtime["service_audience"], "launchplane.example.com")
         self.assertEqual(runtime["authz_policy_sha256"], "resolved-policy-sha256")
         self.assertEqual(runtime["authz_policy_schema_version"], 1)

@@ -102,6 +102,201 @@ class LaunchplaneSelfDeployWorkflowTests(unittest.TestCase):
             no_cache=True,
         )
 
+    def test_request_rejects_invalid_oauth_env_preconditions(self) -> None:
+        base_request = {
+            "target_type": "compose",
+            "target_id": "compose-123",
+            "image_reference": "ghcr.io/cbusillo/launchplane@sha256:new",
+        }
+
+        with self.assertRaisesRegex(ValueError, "expected-absent keys must also be updated"):
+            LaunchplaneSelfDeployRequest.model_validate(
+                {
+                    **base_request,
+                    "oauth_env_expected_absent": ("LAUNCHPLANE_SECRET_KEYS_JSON",),
+                }
+            )
+        with self.assertRaisesRegex(
+            ValueError, "expected-value keys must also be updated or removed"
+        ):
+            LaunchplaneSelfDeployRequest.model_validate(
+                {
+                    **base_request,
+                    "oauth_env_expected_values": {"LAUNCHPLANE_SECRET_KEYS_JSON": "expected"},
+                }
+            )
+        with self.assertRaisesRegex(ValueError, "does not accept oauth_env_expected_absent"):
+            LaunchplaneSelfDeployRequest.model_validate(
+                {
+                    **base_request,
+                    "oauth_env_expected_absent": ("UNSUPPORTED_KEY",),
+                }
+            )
+        with self.assertRaisesRegex(ValueError, "both absent and equal"):
+            LaunchplaneSelfDeployRequest.model_validate(
+                {
+                    **base_request,
+                    "oauth_env": {"LAUNCHPLANE_DEPLOYMENT_MARKER": "next"},
+                    "oauth_env_expected_absent": ("LAUNCHPLANE_DEPLOYMENT_MARKER",),
+                    "oauth_env_expected_values": {"LAUNCHPLANE_DEPLOYMENT_MARKER": "previous"},
+                }
+            )
+
+    def test_execute_accepts_expected_absent_oauth_env_key(self) -> None:
+        canonical_key_ring = self._canonical_key_ring()
+        request = LaunchplaneSelfDeployRequest.model_validate(
+            {
+                "target_type": "compose",
+                "target_id": "compose-123",
+                "image_reference": "ghcr.io/cbusillo/launchplane@sha256:new",
+                "oauth_env": {
+                    "LAUNCHPLANE_DEPLOYMENT_MARKER": "deploy-marker",
+                    "LAUNCHPLANE_SECRET_KEYS_JSON": canonical_key_ring,
+                },
+                "oauth_env_expected_absent": ("LAUNCHPLANE_SECRET_KEYS_JSON",),
+            }
+        )
+
+        with (
+            patch(
+                "control_plane.workflows.launchplane_self_deploy.dokploy_source.read_dokploy_config",
+                return_value=("https://dokploy.example.com", "token-123"),
+            ),
+            patch(
+                "control_plane.workflows.launchplane_self_deploy.dokploy_api.fetch_dokploy_target_payload",
+                return_value={"env": self._BOOTSTRAP_ENV},
+            ),
+            patch(
+                "control_plane.workflows.launchplane_self_deploy.dokploy_api.update_dokploy_target_env"
+            ) as update_env_mock,
+            patch(
+                "control_plane.workflows.launchplane_self_deploy.dokploy_api.trigger_deployment"
+            ) as trigger_mock,
+        ):
+            execute_launchplane_self_deploy(
+                control_plane_root_path=Path("."),
+                request=request,
+            )
+
+        updated_env_text = update_env_mock.call_args.kwargs["env_text"]
+        self.assertIn("LAUNCHPLANE_DEPLOYMENT_MARKER=deploy-marker", updated_env_text)
+        self.assertIn("LAUNCHPLANE_SECRET_KEYS_JSON=", updated_env_text)
+        trigger_mock.assert_called_once()
+
+    def test_execute_rejects_present_expected_absent_key_before_mutation(self) -> None:
+        canonical_key_ring = self._canonical_key_ring()
+        request = LaunchplaneSelfDeployRequest.model_validate(
+            {
+                "target_type": "compose",
+                "target_id": "compose-123",
+                "image_reference": "ghcr.io/cbusillo/launchplane@sha256:new",
+                "oauth_env": {"LAUNCHPLANE_SECRET_KEYS_JSON": canonical_key_ring},
+                "oauth_env_expected_absent": ("LAUNCHPLANE_SECRET_KEYS_JSON",),
+            }
+        )
+
+        with (
+            patch(
+                "control_plane.workflows.launchplane_self_deploy.dokploy_source.read_dokploy_config",
+                return_value=("https://dokploy.example.com", "token-123"),
+            ),
+            patch(
+                "control_plane.workflows.launchplane_self_deploy.dokploy_api.fetch_dokploy_target_payload",
+                return_value={
+                    "env": self._BOOTSTRAP_ENV
+                    + f"LAUNCHPLANE_SECRET_KEYS_JSON={canonical_key_ring}\n"
+                },
+            ),
+            patch(
+                "control_plane.workflows.launchplane_self_deploy.dokploy_api.update_dokploy_target_env"
+            ) as update_env_mock,
+            patch(
+                "control_plane.workflows.launchplane_self_deploy.dokploy_api.trigger_deployment"
+            ) as trigger_mock,
+        ):
+            with self.assertRaisesRegex(ValueError, "to be absent"):
+                execute_launchplane_self_deploy(
+                    control_plane_root_path=Path("."),
+                    request=request,
+                )
+
+        update_env_mock.assert_not_called()
+        trigger_mock.assert_not_called()
+
+    def test_execute_accepts_matching_expected_oauth_env_value_for_update(self) -> None:
+        request = LaunchplaneSelfDeployRequest.model_validate(
+            {
+                "target_type": "compose",
+                "target_id": "compose-123",
+                "image_reference": "ghcr.io/cbusillo/launchplane@sha256:new",
+                "oauth_env": {"LAUNCHPLANE_DEPLOYMENT_MARKER": "rollback-marker"},
+                "oauth_env_expected_values": {"LAUNCHPLANE_DEPLOYMENT_MARKER": "forward-marker"},
+            }
+        )
+
+        with (
+            patch(
+                "control_plane.workflows.launchplane_self_deploy.dokploy_source.read_dokploy_config",
+                return_value=("https://dokploy.example.com", "token-123"),
+            ),
+            patch(
+                "control_plane.workflows.launchplane_self_deploy.dokploy_api.fetch_dokploy_target_payload",
+                return_value={
+                    "env": self._BOOTSTRAP_ENV + "LAUNCHPLANE_DEPLOYMENT_MARKER=forward-marker\n"
+                },
+            ),
+            patch(
+                "control_plane.workflows.launchplane_self_deploy.dokploy_api.update_dokploy_target_env"
+            ) as update_env_mock,
+            patch(
+                "control_plane.workflows.launchplane_self_deploy.dokploy_api.trigger_deployment"
+            ) as trigger_mock,
+        ):
+            execute_launchplane_self_deploy(
+                control_plane_root_path=Path("."),
+                request=request,
+            )
+
+        updated_env_text = update_env_mock.call_args.kwargs["env_text"]
+        self.assertIn("LAUNCHPLANE_DEPLOYMENT_MARKER=rollback-marker", updated_env_text)
+        trigger_mock.assert_called_once()
+
+    def test_execute_rejects_mismatched_expected_oauth_env_value_before_mutation(self) -> None:
+        request = LaunchplaneSelfDeployRequest.model_validate(
+            {
+                "target_type": "compose",
+                "target_id": "compose-123",
+                "image_reference": "ghcr.io/cbusillo/launchplane@sha256:new",
+                "oauth_env_removals": ("LAUNCHPLANE_SECRET_KEYS_JSON",),
+                "oauth_env_expected_values": {"LAUNCHPLANE_SECRET_KEYS_JSON": "reviewed"},
+            }
+        )
+
+        with (
+            patch(
+                "control_plane.workflows.launchplane_self_deploy.dokploy_source.read_dokploy_config",
+                return_value=("https://dokploy.example.com", "token-123"),
+            ),
+            patch(
+                "control_plane.workflows.launchplane_self_deploy.dokploy_api.fetch_dokploy_target_payload",
+                return_value={"env": self._BOOTSTRAP_ENV},
+            ),
+            patch(
+                "control_plane.workflows.launchplane_self_deploy.dokploy_api.update_dokploy_target_env"
+            ) as update_env_mock,
+            patch(
+                "control_plane.workflows.launchplane_self_deploy.dokploy_api.trigger_deployment"
+            ) as trigger_mock,
+        ):
+            with self.assertRaisesRegex(ValueError, "reviewed expected value"):
+                execute_launchplane_self_deploy(
+                    control_plane_root_path=Path("."),
+                    request=request,
+                )
+
+        update_env_mock.assert_not_called()
+        trigger_mock.assert_not_called()
+
     def test_execute_stops_before_mutation_when_bootstrap_env_missing(self) -> None:
         request = LaunchplaneSelfDeployRequest.model_validate(
             {

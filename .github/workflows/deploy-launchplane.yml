@@ -219,6 +219,11 @@ jobs:
             fi
           fi
 
+          forward_deployment_marker="github-actions:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}:deploy"
+          rollback_deployment_marker="github-actions:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}:rollback"
+          validate_single_line_value "forward deployment marker" "$forward_deployment_marker"
+          validate_single_line_value "rollback deployment marker" "$rollback_deployment_marker"
+
           for omit_environment_variable in \
             OMIT_EVERY_CODE_ENV \
             OMIT_TERMINAL_AGENT_ENV \
@@ -238,6 +243,8 @@ jobs:
             printf 'deploy_image_reference=%s\n' "$deploy_image_reference"
             printf 'bootstrap_secret_operation=%s\n' "$bootstrap_secret_operation"
             printf 'self_deploy_idempotency_key=%s\n' "$self_deploy_idempotency_key"
+            printf 'forward_deployment_marker=%s\n' "$forward_deployment_marker"
+            printf 'rollback_deployment_marker=%s\n' "$rollback_deployment_marker"
           } >> "$GITHUB_OUTPUT"
 
       - name: Validate deploy configuration
@@ -363,6 +370,7 @@ jobs:
         shell: bash
         env:
           BOOTSTRAP_SECRET_OPERATION: ${{ steps.prep.outputs.bootstrap_secret_operation }}
+          DEPLOYMENT_MARKER: ${{ steps.prep.outputs.forward_deployment_marker }}
           DEPLOY_IMAGE_REFERENCE: ${{ steps.image.outputs.image_reference }}
           IMAGE_REPOSITORY: ${{ steps.prep.outputs.image_repository }}
           LAUNCHPLANE_SECRET_KEYS_JSON: ${{ secrets.LAUNCHPLANE_SECRET_KEYS_JSON }}
@@ -399,9 +407,9 @@ jobs:
 
           secret_keys_json=""
           case "$BOOTSTRAP_SECRET_OPERATION" in
-            install)
+            install | remove)
               if [ -z "${LAUNCHPLANE_SECRET_KEYS_JSON:-}" ]; then
-                echo "bootstrap_secret_operation=install requires LAUNCHPLANE_SECRET_KEYS_JSON." >&2
+                echo "bootstrap_secret_operation=${BOOTSTRAP_SECRET_OPERATION} requires LAUNCHPLANE_SECRET_KEYS_JSON." >&2
                 exit 1
               fi
               secret_keys_json="$(
@@ -410,7 +418,7 @@ jobs:
               )"
               echo "::add-mask::$secret_keys_json"
               ;;
-            preserve | remove) ;;
+            preserve) ;;
             *)
               echo "Unexpected bootstrap secret operation." >&2
               exit 1
@@ -423,6 +431,7 @@ jobs:
               --arg github_client_secret "${LAUNCHPLANE_GITHUB_CLIENT_SECRET:-}" \
               --arg public_url "${LAUNCHPLANE_PUBLIC_URL:-}" \
               --arg session_secret "${LAUNCHPLANE_SESSION_SECRET:-}" \
+              --arg deployment_marker "$DEPLOYMENT_MARKER" \
               --arg secret_keys_json "$secret_keys_json" \
               --arg cookie_secure "${LAUNCHPLANE_COOKIE_SECURE:-}" \
               --arg bootstrap_admin_emails "${LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS:-}" \
@@ -469,6 +478,13 @@ jobs:
                 LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS: $bootstrap_admin_emails,
                 LAUNCHPLANE_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET: $manager_preview_webhook_secret
                 }
+                + (
+                  if $bootstrap_secret_operation != "preserve" then
+                    {LAUNCHPLANE_DEPLOYMENT_MARKER: $deployment_marker}
+                  else
+                    {}
+                  end
+                )
                 + (
                   if $bootstrap_secret_operation == "install" then
                     {LAUNCHPLANE_SECRET_KEYS_JSON: $secret_keys_json}
@@ -567,6 +583,25 @@ jobs:
                 )
               ) | with_entries(select(.value != ""))'
           })"
+          service_env_expected_absent_json="$({
+            jq -n \
+              --arg bootstrap_secret_operation "$BOOTSTRAP_SECRET_OPERATION" \
+              'if $bootstrap_secret_operation == "install" then
+                ["LAUNCHPLANE_SECRET_KEYS_JSON"]
+              else
+                []
+              end'
+          })"
+          service_env_expected_values_json="$({
+            jq -n \
+              --arg bootstrap_secret_operation "$BOOTSTRAP_SECRET_OPERATION" \
+              --arg secret_keys_json "$secret_keys_json" \
+              'if $bootstrap_secret_operation == "remove" then
+                {LAUNCHPLANE_SECRET_KEYS_JSON: $secret_keys_json}
+              else
+                {}
+              end'
+          })"
           service_env_removals_json="$({
             jq -n \
               --arg public_ingress_github_token "${LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN:-}" \
@@ -604,8 +639,16 @@ jobs:
               --arg target_id "$LAUNCHPLANE_DOKPLOY_TARGET_ID" \
               --arg image_reference "$DEPLOY_IMAGE_REFERENCE" \
               --argjson service_env "$service_env_json" \
+              --argjson service_env_expected_absent "$service_env_expected_absent_json" \
+              --argjson service_env_expected_values "$service_env_expected_values_json" \
               --argjson service_env_removals "$service_env_removals_json" \
-              '{schema_version: 1, product: "launchplane", deploy: ({target_type: $target_type, target_id: $target_id, image_reference: $image_reference} + (if ($service_env | length) > 0 then {oauth_env: $service_env} else {} end) + (if ($service_env_removals | length) > 0 then {oauth_env_removals: $service_env_removals} else {} end))}'
+              '{schema_version: 1, product: "launchplane", deploy: (
+                {target_type: $target_type, target_id: $target_id, image_reference: $image_reference}
+                + (if ($service_env | length) > 0 then {oauth_env: $service_env} else {} end)
+                + (if ($service_env_removals | length) > 0 then {oauth_env_removals: $service_env_removals} else {} end)
+                + (if ($service_env_expected_absent | length) > 0 then {oauth_env_expected_absent: $service_env_expected_absent} else {} end)
+                + (if ($service_env_expected_values | length) > 0 then {oauth_env_expected_values: $service_env_expected_values} else {} end)
+              )}'
           })"
 
           request_payload_file="$RUNNER_TEMP/launchplane-self-deploy-payload.json"
@@ -688,6 +731,25 @@ jobs:
           response-output-file: ${{ runner.temp }}/launchplane-deployed-runtime-wait.json
           log-response-body: "false"
 
+      - name: Wait for deployed Launchplane runtime marker
+        if: steps.prep.outputs.bootstrap_secret_operation != 'preserve'
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@dcfe6fb13cdd5f7c66428ce9ef108ebbe215fff5 # launchplane-request
+        with:
+          launchplane-url: ${{ steps.service.outputs.service_url }}
+          audience: ${{ steps.service.outputs.service_audience }}
+          route-path: /v1/service/runtime
+          method: GET
+          expected-status: "200"
+          timeout-ms: "30000"
+          poll-until-path: runtime.deployment_marker
+          poll-until-value: ${{ steps.prep.outputs.forward_deployment_marker }}
+          poll-retry-on-request-error: "true"
+          poll-retry-on-unexpected-status: "true"
+          poll-interval-ms: "5000"
+          poll-timeout-ms: ${{ steps.deploy_wait_timeout.outputs.timeout_ms }}
+          response-output-file: ${{ runner.temp }}/launchplane-deployed-marker-wait.json
+          log-response-body: "false"
+
       - name: Wait for deployed Launchplane health URLs
         id: deployed_health
         shell: bash
@@ -760,34 +822,150 @@ jobs:
           response-output-file: ${{ runner.temp }}/launchplane-deployed-runtime-final.json
           log-response-body: "false"
 
+      - name: Verify deployed Launchplane runtime marker after health
+        if: steps.prep.outputs.bootstrap_secret_operation != 'preserve'
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@dcfe6fb13cdd5f7c66428ce9ef108ebbe215fff5 # launchplane-request
+        with:
+          launchplane-url: ${{ steps.service.outputs.service_url }}
+          audience: ${{ steps.service.outputs.service_audience }}
+          route-path: /v1/service/runtime
+          method: GET
+          expected-status: "200"
+          timeout-ms: "30000"
+          poll-until-path: runtime.deployment_marker
+          poll-until-value: ${{ steps.prep.outputs.forward_deployment_marker }}
+          poll-interval-ms: "1000"
+          poll-timeout-ms: ${{ steps.deployed_health.outputs.remaining_timeout_ms }}
+          response-output-file: ${{ runner.temp }}/launchplane-deployed-marker-final.json
+          log-response-body: "false"
+
       - name: Render Launchplane rollback request
         if: failure() && steps.self_deploy.outputs.previous_image_reference != ''
         id: rollback_request
         shell: bash
         env:
+          BOOTSTRAP_SECRET_OPERATION: ${{ steps.prep.outputs.bootstrap_secret_operation }}
           DEPLOYED_IMAGE_REFERENCE: ${{ steps.image.outputs.image_reference }}
+          FORWARD_DEPLOYMENT_MARKER: ${{ steps.prep.outputs.forward_deployment_marker }}
+          LAUNCHPLANE_SECRET_KEYS_JSON: ${{ secrets.LAUNCHPLANE_SECRET_KEYS_JSON }}
           PREVIOUS_IMAGE_REFERENCE: ${{ steps.self_deploy.outputs.previous_image_reference }}
+          ROLLBACK_DEPLOYMENT_MARKER: ${{ steps.prep.outputs.rollback_deployment_marker }}
+          SELF_DEPLOY_IDEMPOTENCY_KEY: ${{ steps.prep.outputs.self_deploy_idempotency_key }}
         run: |
           set -euo pipefail
 
           previous_image_reference="$PREVIOUS_IMAGE_REFERENCE"
-          if [ -z "$previous_image_reference" ] || [ "$previous_image_reference" = "$DEPLOYED_IMAGE_REFERENCE" ]; then
+          if [ -z "$previous_image_reference" ]; then
+            echo "No previous Launchplane image reference is available for rollback."
+            exit 0
+          fi
+          if [ "$previous_image_reference" = "$DEPLOYED_IMAGE_REFERENCE" ] \
+            && [ "$BOOTSTRAP_SECRET_OPERATION" = "preserve" ]; then
             echo "No distinct previous Launchplane image reference is available for rollback."
             exit 0
           fi
 
+          secret_keys_json=""
+          if [ "$BOOTSTRAP_SECRET_OPERATION" != "preserve" ]; then
+            if [ -z "${LAUNCHPLANE_SECRET_KEYS_JSON:-}" ]; then
+              echo "Bootstrap secret rollback requires LAUNCHPLANE_SECRET_KEYS_JSON." >&2
+              exit 1
+            fi
+            secret_keys_json="$(
+              jq -ce 'if type == "object" then . else error("expected object") end' \
+                <<<"$LAUNCHPLANE_SECRET_KEYS_JSON"
+            )"
+            echo "::add-mask::$secret_keys_json"
+          fi
+
+          rollback_service_env_json="$({
+            jq -n \
+              --arg bootstrap_secret_operation "$BOOTSTRAP_SECRET_OPERATION" \
+              --arg deployment_marker "$ROLLBACK_DEPLOYMENT_MARKER" \
+              --arg secret_keys_json "$secret_keys_json" \
+              '(
+                if $bootstrap_secret_operation == "preserve" then
+                  {}
+                else
+                  {LAUNCHPLANE_DEPLOYMENT_MARKER: $deployment_marker}
+                end
+              )
+              + (
+                if $bootstrap_secret_operation == "remove" then
+                  {LAUNCHPLANE_SECRET_KEYS_JSON: $secret_keys_json}
+                else
+                  {}
+                end
+              )'
+          })"
+          rollback_service_env_removals_json="$({
+            jq -n \
+              --arg bootstrap_secret_operation "$BOOTSTRAP_SECRET_OPERATION" \
+              'if $bootstrap_secret_operation == "install" then
+                ["LAUNCHPLANE_SECRET_KEYS_JSON"]
+              else
+                []
+              end'
+          })"
+          rollback_service_env_expected_absent_json="$({
+            jq -n \
+              --arg bootstrap_secret_operation "$BOOTSTRAP_SECRET_OPERATION" \
+              'if $bootstrap_secret_operation == "remove" then
+                ["LAUNCHPLANE_SECRET_KEYS_JSON"]
+              else
+                []
+              end'
+          })"
+          rollback_service_env_expected_values_json="$({
+            jq -n \
+              --arg bootstrap_secret_operation "$BOOTSTRAP_SECRET_OPERATION" \
+              --arg forward_deployment_marker "$FORWARD_DEPLOYMENT_MARKER" \
+              --arg secret_keys_json "$secret_keys_json" \
+              'if $bootstrap_secret_operation == "install" then
+                {
+                  LAUNCHPLANE_DEPLOYMENT_MARKER: $forward_deployment_marker,
+                  LAUNCHPLANE_SECRET_KEYS_JSON: $secret_keys_json
+                }
+              elif $bootstrap_secret_operation == "remove" then
+                {LAUNCHPLANE_DEPLOYMENT_MARKER: $forward_deployment_marker}
+              else
+                {}
+              end'
+          })"
           rollback_payload="$({
             jq -n \
               --arg target_type "$LAUNCHPLANE_DOKPLOY_TARGET_TYPE" \
               --arg target_id "$LAUNCHPLANE_DOKPLOY_TARGET_ID" \
               --arg image_reference "$previous_image_reference" \
-              '{schema_version: 1, product: "launchplane", deploy: {target_type: $target_type, target_id: $target_id, image_reference: $image_reference, no_cache: true}}'
+              --argjson service_env "$rollback_service_env_json" \
+              --argjson service_env_expected_absent "$rollback_service_env_expected_absent_json" \
+              --argjson service_env_expected_values "$rollback_service_env_expected_values_json" \
+              --argjson service_env_removals "$rollback_service_env_removals_json" \
+              '{schema_version: 1, product: "launchplane", deploy: (
+                {target_type: $target_type, target_id: $target_id, image_reference: $image_reference, no_cache: true}
+                + (if ($service_env | length) > 0 then {oauth_env: $service_env} else {} end)
+                + (if ($service_env_removals | length) > 0 then {oauth_env_removals: $service_env_removals} else {} end)
+                + (if ($service_env_expected_absent | length) > 0 then {oauth_env_expected_absent: $service_env_expected_absent} else {} end)
+                + (if ($service_env_expected_values | length) > 0 then {oauth_env_expected_values: $service_env_expected_values} else {} end)
+              )}'
           })"
 
           rollback_payload_file="$RUNNER_TEMP/launchplane-self-deploy-rollback-payload.json"
+          forward_idempotency_key="$SELF_DEPLOY_IDEMPOTENCY_KEY"
+          if [ -z "$forward_idempotency_key" ]; then
+            forward_idempotency_key="launchplane-self-deploy:${DEPLOYED_IMAGE_REFERENCE}:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}:db-authz"
+          fi
+          rollback_idempotency_digest="$(printf '%s' "$forward_idempotency_key" | openssl dgst -sha256 -r | awk '{print $1}')"
+          rollback_idempotency_key="launchplane-self-deploy-rollback:${rollback_idempotency_digest}"
+          umask 077
           printf '%s\n' "$rollback_payload" > "$rollback_payload_file"
-          printf 'previous_image_reference=%s\n' "$previous_image_reference" >> "$GITHUB_OUTPUT"
-          printf 'payload_file=%s\n' "$rollback_payload_file" >> "$GITHUB_OUTPUT"
+          chmod 600 "$rollback_payload_file"
+          {
+            printf 'deployment_marker=%s\n' "$ROLLBACK_DEPLOYMENT_MARKER"
+            printf 'idempotency_key=%s\n' "$rollback_idempotency_key"
+            printf 'previous_image_reference=%s\n' "$previous_image_reference"
+            printf 'payload_file=%s\n' "$rollback_payload_file"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Request Launchplane rollback through service
         if: >-
@@ -802,7 +980,7 @@ jobs:
           audience: ${{ steps.service.outputs.service_audience }}
           route-path: /v1/drivers/launchplane/self-deploy
           payload-file: ${{ steps.rollback_request.outputs.payload_file }}
-          idempotency-key: launchplane-self-deploy-rollback:${{ steps.rollback_request.outputs.previous_image_reference }}:${{ github.run_id }}:${{ github.run_attempt }}
+          idempotency-key: ${{ steps.rollback_request.outputs.idempotency_key }}
           expected-status: "200,202"
           fail-result-paths: ""
           timeout-ms: "30000"
@@ -866,6 +1044,32 @@ jobs:
             echo "deadline_epoch=$(($(date +%s) + wait_timeout_seconds))"
           } >>"$GITHUB_OUTPUT"
 
+      - name: Wait for Launchplane rollback runtime marker
+        if: >-
+          failure()
+          && steps.rollback_request.outputs.payload_file != ''
+          && steps.rollback_request.outputs.previous_image_reference != ''
+          && steps.rollback_request_action.outcome == 'success'
+          && steps.prep.outputs.bootstrap_secret_operation != 'preserve'
+        id: rollback_marker
+        continue-on-error: true
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@dcfe6fb13cdd5f7c66428ce9ef108ebbe215fff5 # launchplane-request
+        with:
+          launchplane-url: ${{ steps.service.outputs.service_url }}
+          audience: ${{ steps.service.outputs.service_audience }}
+          route-path: /v1/service/runtime
+          method: GET
+          expected-status: "200"
+          timeout-ms: "30000"
+          poll-until-path: runtime.deployment_marker
+          poll-until-value: ${{ steps.rollback_request.outputs.deployment_marker }}
+          poll-retry-on-request-error: "true"
+          poll-retry-on-unexpected-status: "true"
+          poll-interval-ms: "5000"
+          poll-timeout-ms: ${{ steps.rollback_wait_timeout.outputs.timeout_ms }}
+          response-output-file: ${{ runner.temp }}/launchplane-rollback-marker-wait.json
+          log-response-body: "false"
+
       - name: Wait for Launchplane rollback runtime image
         if: >-
           failure()
@@ -899,7 +1103,10 @@ jobs:
           && steps.rollback_request_action.outcome == 'success'
         shell: bash
         env:
+          BOOTSTRAP_SECRET_OPERATION: ${{ steps.prep.outputs.bootstrap_secret_operation }}
           PREVIOUS_IMAGE_REFERENCE: ${{ steps.rollback_request.outputs.previous_image_reference }}
+          ROLLBACK_MARKER_OUTCOME: ${{ steps.rollback_marker.outcome }}
+          ROLLBACK_MARKER_RESPONSE_FILE: ${{ runner.temp }}/launchplane-rollback-marker-wait.json
           ROLLBACK_RESPONSE_FILE: ${{ runner.temp }}/launchplane-self-deploy-rollback-response.json
           ROLLBACK_RUNTIME_RESPONSE_FILE: ${{ runner.temp }}/launchplane-rollback-runtime-wait.json
           ROLLBACK_RUNTIME_OUTCOME: ${{ steps.rollback_runtime.outcome }}
@@ -907,11 +1114,21 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [ "${ROLLBACK_RUNTIME_OUTCOME:-failure}" = "success" ]; then
+          marker_succeeded="true"
+          if [ "$BOOTSTRAP_SECRET_OPERATION" != "preserve" ] \
+            && [ "${ROLLBACK_MARKER_OUTCOME:-failure}" != "success" ]; then
+            marker_succeeded="false"
+          fi
+          if [ "${ROLLBACK_RUNTIME_OUTCOME:-failure}" = "success" ] \
+            && [ "$marker_succeeded" = "true" ]; then
             echo "Rolled Launchplane back to $PREVIOUS_IMAGE_REFERENCE."
             exit 0
           fi
-          echo "Timed out waiting for Launchplane rollback image '$PREVIOUS_IMAGE_REFERENCE' to become live." >&2
+          echo "Timed out waiting for the exact Launchplane rollback runtime state to become live." >&2
+          if [ -s "$ROLLBACK_MARKER_RESPONSE_FILE" ]; then
+            echo "Rollback marker response summary:" >&2
+            jq '{runtime, error}' "$ROLLBACK_MARKER_RESPONSE_FILE" >&2 || cat "$ROLLBACK_MARKER_RESPONSE_FILE" >&2 || true
+          fi
           if [ -s "$ROLLBACK_RUNTIME_RESPONSE_FILE" ]; then
             echo "Rollback runtime response summary:" >&2
             jq '{runtime, error}' "$ROLLBACK_RUNTIME_RESPONSE_FILE" >&2 || cat "$ROLLBACK_RUNTIME_RESPONSE_FILE" >&2 || true
@@ -925,6 +1142,7 @@ jobs:
             echo
             echo "- Service rollback HTTP status: ${ROLLBACK_STATUS:-unknown}"
             echo "- Rollback image: $PREVIOUS_IMAGE_REFERENCE"
+            echo "- Rollback marker action outcome: ${ROLLBACK_MARKER_OUTCOME:-skipped}"
             echo "- Rollback runtime action outcome: ${ROLLBACK_RUNTIME_OUTCOME:-failure}"
           } >>"$GITHUB_STEP_SUMMARY"
           exit 1
@@ -936,6 +1154,7 @@ jobs:
           && steps.rollback_request.outputs.previous_image_reference != ''
           && steps.rollback_request_action.outcome == 'success'
           && steps.rollback_runtime.outcome == 'success'
+          && (steps.prep.outputs.bootstrap_secret_operation == 'preserve' || steps.rollback_marker.outcome == 'success')
         id: rollback_health
         shell: bash
         env:
@@ -1026,6 +1245,31 @@ jobs:
           poll-interval-ms: "1000"
           poll-timeout-ms: ${{ steps.rollback_health.outputs.remaining_timeout_ms }}
           response-output-file: ${{ runner.temp }}/launchplane-rollback-runtime-final.json
+          log-response-body: "false"
+
+      - name: Verify Launchplane rollback runtime marker after health
+        if: >-
+          failure()
+          && steps.rollback_request.outputs.payload_file != ''
+          && steps.rollback_request.outputs.previous_image_reference != ''
+          && steps.rollback_request_action.outcome == 'success'
+          && steps.rollback_marker.outcome == 'success'
+          && steps.rollback_runtime.outcome == 'success'
+          && steps.rollback_health.outcome == 'success'
+          && steps.prep.outputs.bootstrap_secret_operation != 'preserve'
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@dcfe6fb13cdd5f7c66428ce9ef108ebbe215fff5 # launchplane-request
+        with:
+          launchplane-url: ${{ steps.service.outputs.service_url }}
+          audience: ${{ steps.service.outputs.service_audience }}
+          route-path: /v1/service/runtime
+          method: GET
+          expected-status: "200"
+          timeout-ms: "30000"
+          poll-until-path: runtime.deployment_marker
+          poll-until-value: ${{ steps.rollback_request.outputs.deployment_marker }}
+          poll-interval-ms: "1000"
+          poll-timeout-ms: ${{ steps.rollback_health.outputs.remaining_timeout_ms }}
+          response-output-file: ${{ runner.temp }}/launchplane-rollback-marker-final.json
           log-response-body: "false"
 
       - name: Render runtime key-safety policy

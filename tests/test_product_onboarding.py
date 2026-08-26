@@ -1733,7 +1733,7 @@ class ProductOnboardingTests(unittest.TestCase):
             workflow_text,
         )
         self.assertIn(
-            "bootstrap_secret_operation=install requires LAUNCHPLANE_SECRET_KEYS_JSON.",
+            "bootstrap_secret_operation=${BOOTSTRAP_SECRET_OPERATION} requires LAUNCHPLANE_SECRET_KEYS_JSON.",
             workflow_text,
         )
         self.assertIn(
@@ -1790,6 +1790,8 @@ class ProductOnboardingTests(unittest.TestCase):
                         "DISPATCH_IMAGE_REFERENCE": image_reference,
                         "DISPATCH_SELF_DEPLOY_IDEMPOTENCY_KEY": idempotency_key,
                         "EVENT_NAME": event_name,
+                        "GITHUB_RUN_ATTEMPT": "2",
+                        "GITHUB_RUN_ID": "12345",
                         "GITHUB_OUTPUT": str(output_file),
                         "GITHUB_REPOSITORY": "cbusillo/launchplane",
                         "LAUNCHPLANE_IMAGE_REPOSITORY": "ghcr.io/cbusillo/launchplane",
@@ -1813,6 +1815,14 @@ class ProductOnboardingTests(unittest.TestCase):
             outputs = _read_github_outputs(temporary_directory)
             self.assertEqual(outputs["bootstrap_secret_operation"], "install")
             self.assertEqual(outputs["self_deploy_idempotency_key"], valid_key)
+            self.assertEqual(
+                outputs["forward_deployment_marker"],
+                "github-actions:12345:2:deploy",
+            )
+            self.assertEqual(
+                outputs["rollback_deployment_marker"],
+                "github-actions:12345:2:rollback",
+            )
 
             unsafe = prepare(
                 event_name="workflow_dispatch",
@@ -1860,6 +1870,7 @@ class ProductOnboardingTests(unittest.TestCase):
                     env={
                         **os.environ,
                         "BOOTSTRAP_SECRET_OPERATION": operation,
+                        "DEPLOYMENT_MARKER": "github-actions:12345:2:deploy",
                         "DEPLOY_IMAGE_REFERENCE": image_reference,
                         "GITHUB_OUTPUT": str(output_file),
                         "IMAGE_REPOSITORY": "ghcr.io/cbusillo/launchplane",
@@ -1885,6 +1896,15 @@ class ProductOnboardingTests(unittest.TestCase):
             )
             installed_value = install_payload["deploy"]["oauth_env"]["LAUNCHPLANE_SECRET_KEYS_JSON"]
             self.assertEqual(json.loads(installed_value), key_ring)
+            self.assertEqual(
+                install_payload["deploy"]["oauth_env"]["LAUNCHPLANE_DEPLOYMENT_MARKER"],
+                "github-actions:12345:2:deploy",
+            )
+            self.assertEqual(
+                install_payload["deploy"]["oauth_env_expected_absent"],
+                ["LAUNCHPLANE_SECRET_KEYS_JSON"],
+            )
+            self.assertNotIn("oauth_env_expected_values", install_payload["deploy"])
             self.assertNotIn(
                 "LAUNCHPLANE_SECRET_KEYS_JSON",
                 install_payload["deploy"].get("oauth_env_removals", []),
@@ -1904,6 +1924,12 @@ class ProductOnboardingTests(unittest.TestCase):
                 "LAUNCHPLANE_SECRET_KEYS_JSON",
                 preserve_payload["deploy"].get("oauth_env_removals", []),
             )
+            self.assertNotIn(
+                "LAUNCHPLANE_DEPLOYMENT_MARKER",
+                preserve_payload["deploy"].get("oauth_env", {}),
+            )
+            self.assertNotIn("oauth_env_expected_absent", preserve_payload["deploy"])
+            self.assertNotIn("oauth_env_expected_values", preserve_payload["deploy"])
 
             remove = render("remove", pretty_key_ring)
             self.assertEqual(remove.returncode, 0, remove.stderr)
@@ -1919,10 +1945,27 @@ class ProductOnboardingTests(unittest.TestCase):
                 "LAUNCHPLANE_SECRET_KEYS_JSON",
                 remove_payload["deploy"]["oauth_env_removals"],
             )
+            self.assertEqual(
+                remove_payload["deploy"]["oauth_env"]["LAUNCHPLANE_DEPLOYMENT_MARKER"],
+                "github-actions:12345:2:deploy",
+            )
+            self.assertEqual(
+                json.loads(
+                    remove_payload["deploy"]["oauth_env_expected_values"][
+                        "LAUNCHPLANE_SECRET_KEYS_JSON"
+                    ]
+                ),
+                key_ring,
+            )
+            self.assertNotIn("oauth_env_expected_absent", remove_payload["deploy"])
 
             missing = render("install", "")
             self.assertNotEqual(missing.returncode, 0)
             self.assertIn("requires LAUNCHPLANE_SECRET_KEYS_JSON", missing.stderr)
+
+            missing_remove = render("remove", "")
+            self.assertNotEqual(missing_remove.returncode, 0)
+            self.assertIn("requires LAUNCHPLANE_SECRET_KEYS_JSON", missing_remove.stderr)
 
             previous_runtime.write_text(
                 json.dumps(
@@ -1939,6 +1982,119 @@ class ProductOnboardingTests(unittest.TestCase):
             changed_image = render("install", pretty_key_ring)
             self.assertNotEqual(changed_image.returncode, 0)
             self.assertIn("must retain the current deployed image", changed_image.stderr)
+
+    def test_deploy_launchplane_renders_exact_bootstrap_secret_rollback(self) -> None:
+        workflow = load_workflow(".github/workflows/deploy-launchplane.yml")
+        rollback_step = workflow.step_named("deploy", "Render Launchplane rollback request")
+        self.assertIsNotNone(rollback_step)
+        assert rollback_step is not None
+        image_reference = "ghcr.io/cbusillo/launchplane@sha256:" + ("a" * 64)
+        key_ring = {
+            "active_key_id": "root-test",
+            "keys": {"root-test": "test-canonical-key-material"},
+        }
+        pretty_key_ring = json.dumps(key_ring, indent=2)
+
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_directory = Path(temporary_directory_name)
+            rollback_payload_path = (
+                temporary_directory / "launchplane-self-deploy-rollback-payload.json"
+            )
+
+            def render_rollback(operation: str) -> subprocess.CompletedProcess[str]:
+                output_file = temporary_directory / "github-output.txt"
+                output_file.unlink(missing_ok=True)
+                rollback_payload_path.unlink(missing_ok=True)
+                return subprocess.run(
+                    ["bash", "-ceu", rollback_step.run],
+                    check=False,
+                    capture_output=True,
+                    env={
+                        **os.environ,
+                        "BOOTSTRAP_SECRET_OPERATION": operation,
+                        "DEPLOYED_IMAGE_REFERENCE": image_reference,
+                        "FORWARD_DEPLOYMENT_MARKER": "github-actions:12345:2:deploy",
+                        "GITHUB_OUTPUT": str(output_file),
+                        "GITHUB_RUN_ATTEMPT": "2",
+                        "GITHUB_RUN_ID": "12345",
+                        "LAUNCHPLANE_DOKPLOY_TARGET_ID": "launchplane-target",
+                        "LAUNCHPLANE_DOKPLOY_TARGET_TYPE": "compose",
+                        "LAUNCHPLANE_SECRET_KEYS_JSON": pretty_key_ring,
+                        "PREVIOUS_IMAGE_REFERENCE": image_reference,
+                        "ROLLBACK_DEPLOYMENT_MARKER": "github-actions:12345:2:rollback",
+                        "RUNNER_TEMP": str(temporary_directory),
+                        "SELF_DEPLOY_IDEMPOTENCY_KEY": (
+                            "launchplane-self-deploy:issue-2249:bootstrap-rollback:v1"
+                        ),
+                    },
+                    text=True,
+                )
+
+            install = render_rollback("install")
+            self.assertEqual(install.returncode, 0, install.stderr)
+            install_outputs = _read_github_outputs(temporary_directory)
+            install_payload = json.loads(
+                Path(install_outputs["payload_file"]).read_text(encoding="utf-8")
+            )
+            self.assertEqual(install_payload["deploy"]["image_reference"], image_reference)
+            self.assertEqual(
+                install_payload["deploy"]["oauth_env"],
+                {"LAUNCHPLANE_DEPLOYMENT_MARKER": "github-actions:12345:2:rollback"},
+            )
+            self.assertEqual(
+                install_payload["deploy"]["oauth_env_removals"],
+                ["LAUNCHPLANE_SECRET_KEYS_JSON"],
+            )
+            self.assertEqual(
+                install_payload["deploy"]["oauth_env_expected_values"][
+                    "LAUNCHPLANE_DEPLOYMENT_MARKER"
+                ],
+                "github-actions:12345:2:deploy",
+            )
+            self.assertEqual(
+                json.loads(
+                    install_payload["deploy"]["oauth_env_expected_values"][
+                        "LAUNCHPLANE_SECRET_KEYS_JSON"
+                    ]
+                ),
+                key_ring,
+            )
+            self.assertNotIn("oauth_env_expected_absent", install_payload["deploy"])
+            self.assertEqual(
+                install_outputs["deployment_marker"],
+                "github-actions:12345:2:rollback",
+            )
+            self.assertTrue(
+                install_outputs["idempotency_key"].startswith("launchplane-self-deploy-rollback:")
+            )
+
+            remove = render_rollback("remove")
+            self.assertEqual(remove.returncode, 0, remove.stderr)
+            remove_outputs = _read_github_outputs(temporary_directory)
+            remove_payload = json.loads(
+                Path(remove_outputs["payload_file"]).read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                json.loads(remove_payload["deploy"]["oauth_env"]["LAUNCHPLANE_SECRET_KEYS_JSON"]),
+                key_ring,
+            )
+            self.assertEqual(
+                remove_payload["deploy"]["oauth_env"]["LAUNCHPLANE_DEPLOYMENT_MARKER"],
+                "github-actions:12345:2:rollback",
+            )
+            self.assertEqual(
+                remove_payload["deploy"]["oauth_env_expected_absent"],
+                ["LAUNCHPLANE_SECRET_KEYS_JSON"],
+            )
+            self.assertEqual(
+                remove_payload["deploy"]["oauth_env_expected_values"],
+                {"LAUNCHPLANE_DEPLOYMENT_MARKER": "github-actions:12345:2:deploy"},
+            )
+            self.assertNotIn("oauth_env_removals", remove_payload["deploy"])
+
+            preserve = render_rollback("preserve")
+            self.assertEqual(preserve.returncode, 0, preserve.stderr)
+            self.assertFalse(rollback_payload_path.exists())
 
     def test_deploy_launchplane_omit_npmplus_env_removes_existing_keys(self) -> None:
         workflow_text = Path(".github/workflows/deploy-launchplane.yml").read_text(encoding="utf-8")
@@ -2326,6 +2482,7 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn("timeout_ms=$((wait_timeout_seconds * 1000))", workflow_text)
         self.assertIn("deadline_epoch=$(($(date +%s) + wait_timeout_seconds))", workflow_text)
         self.assertIn("Wait for deployed Launchplane runtime image", workflow_text)
+        self.assertIn("Wait for deployed Launchplane runtime marker", workflow_text)
         self.assertLess(
             workflow_text.index("Wait for deployed Launchplane runtime image"),
             workflow_text.index("Wait for deployed Launchplane health URLs"),
@@ -2335,6 +2492,7 @@ class ProductOnboardingTests(unittest.TestCase):
             workflow_text.index("Verify deployed Launchplane runtime image after health"),
         )
         self.assertIn("poll-until-path: runtime.docker_image_reference", workflow_text)
+        self.assertIn("poll-until-path: runtime.deployment_marker", workflow_text)
         self.assertIn(
             "poll-until-value: ${{ steps.image.outputs.image_reference }}",
             workflow_text,
@@ -2357,6 +2515,14 @@ class ProductOnboardingTests(unittest.TestCase):
         )
         self.assertIn(
             "response-output-file: ${{ runner.temp }}/launchplane-deployed-runtime-final.json",
+            workflow_text,
+        )
+        self.assertIn(
+            "response-output-file: ${{ runner.temp }}/launchplane-deployed-marker-wait.json",
+            workflow_text,
+        )
+        self.assertIn(
+            "response-output-file: ${{ runner.temp }}/launchplane-deployed-marker-final.json",
             workflow_text,
         )
 
@@ -2386,9 +2552,7 @@ class ProductOnboardingTests(unittest.TestCase):
             workflow_text,
         )
         self.assertIn(
-            "idempotency-key: launchplane-self-deploy-rollback:${{ "
-            "steps.rollback_request.outputs.previous_image_reference }}:${{ "
-            "github.run_id }}:${{ github.run_attempt }}",
+            "idempotency-key: ${{ steps.rollback_request.outputs.idempotency_key }}",
             workflow_text,
         )
         self.assertIn('expected-status: "200,202"', workflow_text)
@@ -2417,6 +2581,8 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn("id: rollback_health", workflow_text)
         self.assertIn("Wait for Launchplane rollback runtime image", workflow_text)
         self.assertIn("id: rollback_runtime", workflow_text)
+        self.assertIn("Wait for Launchplane rollback runtime marker", workflow_text)
+        self.assertIn("id: rollback_marker", workflow_text)
         self.assertLess(
             workflow_text.index("Wait for Launchplane rollback runtime image"),
             workflow_text.index("Wait for Launchplane rollback health URLs"),
@@ -2427,6 +2593,10 @@ class ProductOnboardingTests(unittest.TestCase):
         )
         self.assertIn(
             "poll-until-value: ${{ steps.rollback_request.outputs.previous_image_reference }}",
+            workflow_text,
+        )
+        self.assertIn(
+            "poll-until-value: ${{ steps.rollback_request.outputs.deployment_marker }}",
             workflow_text,
         )
         self.assertIn('poll-retry-on-unexpected-status: "true"', workflow_text)
@@ -2444,6 +2614,14 @@ class ProductOnboardingTests(unittest.TestCase):
         )
         self.assertIn(
             "response-output-file: ${{ runner.temp }}/launchplane-rollback-runtime-final.json",
+            workflow_text,
+        )
+        self.assertIn(
+            "response-output-file: ${{ runner.temp }}/launchplane-rollback-marker-wait.json",
+            workflow_text,
+        )
+        self.assertIn(
+            "response-output-file: ${{ runner.temp }}/launchplane-rollback-marker-final.json",
             workflow_text,
         )
         self.assertIn("Rollback runtime response summary", workflow_text)

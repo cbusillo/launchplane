@@ -795,9 +795,7 @@ WORKFLOW_THIN_CONNECTOR_PATH_VALUES = {
             (
                 "launchplane-self-deploy:${{ steps.image.outputs.image_reference }}:${{ "
                 "github.run_id }}:${{ github.run_attempt }}:db-authz",
-                "launchplane-self-deploy-rollback:${{ "
-                "steps.rollback_request.outputs.previous_image_reference }}:${{ "
-                "github.run_id }}:${{ github.run_attempt }}",
+                "${{ steps.rollback_request.outputs.idempotency_key }}",
             )
         ),
         "launchplane-url": frozenset(("${{ env.LAUNCHPLANE_PUBLIC_URL }}",)),
@@ -820,18 +818,26 @@ WORKFLOW_THIN_CONNECTOR_PATH_VALUES = {
                 "${{ steps.rollback_health.outputs.remaining_timeout_ms }}",
             )
         ),
-        "poll-until-path": frozenset(("runtime.docker_image_reference",)),
+        "poll-until-path": frozenset(
+            ("runtime.deployment_marker", "runtime.docker_image_reference")
+        ),
         "poll-until-value": frozenset(
             (
                 "${{ steps.image.outputs.image_reference }}",
+                "${{ steps.prep.outputs.forward_deployment_marker }}",
+                "${{ steps.rollback_request.outputs.deployment_marker }}",
                 "${{ steps.rollback_request.outputs.previous_image_reference }}",
             )
         ),
         "response-output-file": frozenset(
             (
+                "${{ runner.temp }}/launchplane-deployed-marker-final.json",
+                "${{ runner.temp }}/launchplane-deployed-marker-wait.json",
                 "${{ runner.temp }}/launchplane-deployed-runtime-wait.json",
                 "${{ runner.temp }}/launchplane-deployed-runtime-final.json",
                 "${{ runner.temp }}/launchplane-previous-runtime.json",
+                "${{ runner.temp }}/launchplane-rollback-marker-final.json",
+                "${{ runner.temp }}/launchplane-rollback-marker-wait.json",
                 "${{ runner.temp }}/launchplane-rollback-runtime-final.json",
                 "${{ runner.temp }}/launchplane-rollback-runtime-wait.json",
                 "${{ runner.temp }}/launchplane-runtime-smoke.json",
