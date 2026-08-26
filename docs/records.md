@@ -4,6 +4,15 @@ title: Records
 
 ## Storage Policy
 
+### Repository inventory
+
+`RepositoryInventoryRecord` is an append-only, inert repository inventory stream. It records only
+immutable GitHub repository identity, normalized owner/name, tracked/retired state, revision,
+timestamp, source, reason, predecessor, and deterministic digest. It is not product, tenant,
+role, authorization, branch, workflow, provider, runtime, or merge authority. Revision one has
+no predecessor; later revisions must supersede the exact current record. The PostgreSQL table is
+`launchplane_repository_inventory_records`; filesystem storage provides rehearsal parity only.
+
 - Persist local-dev records as JSON files in a local state directory.
 - Use Postgres-backed Launchplane core-record tables for shared-service ingress
   when Launchplane is running with `LAUNCHPLANE_DATABASE_URL` or

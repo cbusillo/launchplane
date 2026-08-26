@@ -266,6 +266,7 @@ from control_plane.contracts.tenant_merge_eligibility import (
     TenantRepositoryClassificationLookup,
     TenantRepositoryClassificationRecord,
 )
+from control_plane.contracts.repository_inventory import RepositoryInventoryRecord
 from control_plane.contracts.repository_human_admission import (
     RepositoryHumanRolePolicyRecord,
     TenantTechnicalHumanWaiverEventRecord,
@@ -294,6 +295,9 @@ from control_plane.tenant_repository_classification import (
     TenantRepositoryClassificationConflictError,
     TenantRepositoryClassificationSequenceError,
     plan_tenant_repository_classification_append,
+)
+from control_plane.repository_inventory import (
+    plan_repository_inventory_append,
 )
 from control_plane.trusted_maintenance import (
     TrustedMaintenanceAuthorityError,
@@ -1111,6 +1115,33 @@ class LaunchplaneTenantRepositoryClassificationRow(Base):
     classification_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
     classified_at: Mapped[str] = mapped_column(String, nullable=False)
     classification_digest: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneRepositoryInventoryRow(Base):
+    __tablename__ = "launchplane_repository_inventory_records"
+    __table_args__ = (
+        Index(
+            "launchplane_repository_inventory_revision_uidx",
+            "repository_id",
+            "inventory_revision",
+            unique=True,
+        ),
+        Index(
+            "launchplane_repository_inventory_current_idx",
+            "repository_id",
+            desc("inventory_revision"),
+        ),
+    )
+
+    record_id: Mapped[str] = mapped_column(String, primary_key=True)
+    repository_id: Mapped[str] = mapped_column(String, nullable=False)
+    repository_owner_id: Mapped[str] = mapped_column(String, nullable=False)
+    repository: Mapped[str] = mapped_column(String, nullable=False)
+    inventory_state: Mapped[str] = mapped_column(String, nullable=False)
+    inventory_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    recorded_at: Mapped[str] = mapped_column(String, nullable=False)
+    inventory_digest: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -11562,6 +11593,86 @@ class PostgresRecordStore(HumanSessionStore):
             records=tuple(
                 record for record in records if record.classification_revision == latest_revision
             )
+        )
+
+    def _repository_inventory_row(
+        self, record: RepositoryInventoryRecord
+    ) -> LaunchplaneRepositoryInventoryRow:
+        return LaunchplaneRepositoryInventoryRow(
+            record_id=record.record_id,
+            repository_id=record.repository_id,
+            repository_owner_id=record.repository_owner_id,
+            repository=record.repository,
+            inventory_state=record.inventory_state,
+            inventory_revision=record.inventory_revision,
+            recorded_at=record.recorded_at,
+            inventory_digest=record.inventory_digest,
+            payload=self._payload_dict(record),
+        )
+
+    def _lock_repository_inventory_write(self, session: Any, *, repository_id: str) -> None:
+        if self.database_url.startswith("sqlite"):
+            return
+        session.execute(
+            text("select pg_advisory_xact_lock(hashtextextended(:lock_name, 0))"),
+            {"lock_name": f"launchplane:repository-inventory:{repository_id}"},
+        )
+
+    def write_repository_inventory_record(
+        self, record: RepositoryInventoryRecord
+    ) -> Literal["written", "replayed"]:
+        insert_error: IntegrityError | None = None
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_repository_inventory_write(session, repository_id=record.repository_id)
+            statement = select(LaunchplaneRepositoryInventoryRow).where(
+                LaunchplaneRepositoryInventoryRow.repository_id == record.repository_id
+            )
+            if not self.database_url.startswith("sqlite"):
+                statement = statement.with_for_update()
+            existing_records = tuple(
+                self._read_payload(model_type=RepositoryInventoryRecord, payload=row.payload)
+                for row in session.scalars(statement).all()
+            )
+            plan = plan_repository_inventory_append(records=existing_records, record=record)
+            if plan.status == "replayed":
+                session.rollback()
+                return "replayed"
+            session.add(self._repository_inventory_row(record))
+            try:
+                session.commit()
+                return "written"
+            except IntegrityError as error:
+                session.rollback()
+                insert_error = error
+        replay_plan = plan_repository_inventory_append(
+            records=self.list_repository_inventory_records(repository_id=record.repository_id),
+            record=record,
+        )
+        if replay_plan.status == "replayed":
+            return "replayed"
+        assert insert_error is not None
+        raise insert_error
+
+    def list_repository_inventory_records(
+        self,
+        *,
+        repository_id: str = "",
+        limit: int | None = None,
+    ) -> tuple[RepositoryInventoryRecord, ...]:
+        filters: list[object] = []
+        if repository_id:
+            filters.append(LaunchplaneRepositoryInventoryRow.repository_id == repository_id)
+        return self._list_models(
+            model_type=RepositoryInventoryRecord,
+            orm_model=LaunchplaneRepositoryInventoryRow,
+            filters=filters,
+            order_by=(
+                LaunchplaneRepositoryInventoryRow.inventory_revision.desc(),
+                LaunchplaneRepositoryInventoryRow.repository_id.desc(),
+                LaunchplaneRepositoryInventoryRow.record_id.desc(),
+            ),
+            limit=limit,
         )
 
     def list_manager_preview_approval_event_records(

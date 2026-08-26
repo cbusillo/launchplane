@@ -18,6 +18,15 @@ base/tree observations; this evidence does not claim that GitHub rejected the
 request. Only then may Launchplane recompute L2 for a fresh admission.
 Contradictory or incomplete evidence remains `reconcile_required` and needs
 operator investigation. Candidate-ref cleanup failures are separate from
+
+## Repository inventory
+
+Use the deployed service for repository inventory reads and mutations. Submit
+an exact immutable GitHub repository identity and a deterministic append-only
+record. Run `dry_run` before apply; apply is PostgreSQL-only, requires
+`Idempotency-Key`, and must use the current record ID for CAS. Retiring a
+repository removes its active repository-scope inventory membership without
+granting or revoking any authorization.
 landing truth and may be retried without changing the outcome record.
 
 Use the controller phase when diagnosing a failed landing. An active

@@ -18,7 +18,17 @@ independent review remain incomplete.
 Until that work closes:
 
 - do not add new routine grants or managed sets through GitHub secrets or
-  workflows;
+workflows;
+
+## Repository inventory
+
+Repository inventory has separate `repository_inventory.read` and
+`repository_inventory.write` actions at `product=launchplane` and
+`context=launchplane`. This change grants neither action: the active DB-native
+authorization policy remains the only authority. Active tracked inventory
+records are repository-record evidence for the redacted repository-scope read
+model; retired records contribute no node and do not alter that public response
+contract.
 - do not create, edit, retarget, or dispatch a workflow merely to make an
   `authorization_denied` operation succeed;
 - route authorization gaps to `#2058` and add a native `blocked-by` relationship

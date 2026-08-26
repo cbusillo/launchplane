@@ -4,6 +4,14 @@ title: Launchplane Service Boundary
 
 ## Purpose
 
+## Repository inventory boundary
+
+The repository-inventory service surface owns generic inventory evidence only. `GET
+/v1/repository-inventory` is bounded by repository ID. `POST /v1/repository-inventory/apply`
+supports dry-run and PostgreSQL-backed apply; apply requires an idempotency key and is denied to
+terminal agents. Inventory records do not establish product, tenant, role, authorization, branch,
+workflow, provider, runtime, or merge semantics.
+
 This document defines the first explicit Launchplane service boundary: the initial
 HTTP ingress, the GitHub Actions OIDC trust model, the claim-to-permission
 mapping, and the first stable API payloads Launchplane should accept.
