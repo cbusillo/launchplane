@@ -10,6 +10,22 @@ from tests.support.workflows import load_workflow
 
 
 class WorkflowInvariantCheckerTests(unittest.TestCase):
+    def test_container_scans_refresh_runtime_security_packages(self) -> None:
+        workflow = load_workflow(".github/workflows/ci.yml")
+        dockerfile = Path("Dockerfile").read_text(encoding="utf-8")
+
+        self.assertIn("FROM mirror.gcr.io/library/python:3.13-slim AS runtime", dockerfile)
+        for job_id in ("container_scan", "container_scan_fork"):
+            with self.subTest(job_id=job_id):
+                step = workflow.step_named(job_id, "Build runtime image")
+                self.assertIsNotNone(step)
+                assert step is not None
+                build_inputs = step.data.get("with")
+                self.assertIsInstance(build_inputs, dict)
+                assert isinstance(build_inputs, dict)
+                self.assertTrue(build_inputs.get("pull"))
+                self.assertEqual(build_inputs.get("no-cache-filters"), "runtime")
+
     def test_postgres_service_uses_ipv4_only_dynamic_host_port(self) -> None:
         workflow_text = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
 
