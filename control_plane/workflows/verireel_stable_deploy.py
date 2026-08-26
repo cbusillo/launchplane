@@ -24,6 +24,12 @@ from control_plane.workflows.ship import (
     generate_deployment_record_id,
     utc_now_timestamp,
 )
+from control_plane.workflows.verireel_billing_recovery_schedule import (
+    VeriReelRecoveryScheduleSnapshot,
+    finalize_verireel_billing_recovery_schedule,
+    quiesce_verireel_billing_recovery_schedule,
+    restore_verireel_billing_recovery_schedule,
+)
 from control_plane.workflows.verireel_rollout import (
     DEFAULT_ROLLOUT_INTERVAL_SECONDS,
     DEFAULT_ROLLOUT_TIMEOUT_SECONDS,
@@ -341,6 +347,27 @@ def _verify_rollout(
     )
 
 
+def _restore_testing_recovery_schedule(
+    *,
+    host: str,
+    token: str,
+    application_id: str,
+    snapshot: VeriReelRecoveryScheduleSnapshot,
+    error_message: str,
+) -> str:
+    try:
+        restore_verireel_billing_recovery_schedule(
+            host=host,
+            token=token,
+            application_id=application_id,
+            instance="testing",
+            snapshot=snapshot,
+        )
+    except click.ClickException as restore_error:
+        return f"{error_message}\nRecovery schedule restoration failed: {restore_error}"
+    return error_message
+
+
 def execute_verireel_stable_deploy(
     *,
     control_plane_root: Path,
@@ -401,6 +428,45 @@ def execute_verireel_stable_deploy(
         ship_request=ship_request,
         deployment_record_id=record_id,
     )
+    recovery_schedule_snapshot = VeriReelRecoveryScheduleSnapshot(existed=False)
+    recovery_host = ""
+    recovery_token = ""
+    if request.instance == "testing":
+        try:
+            recovery_host, recovery_token = dokploy_source.read_dokploy_config(
+                control_plane_root=control_plane_root
+            )
+            recovery_schedule_snapshot = quiesce_verireel_billing_recovery_schedule(
+                host=recovery_host,
+                token=recovery_token,
+                application_id=resolved_target.target_id,
+                instance="testing",
+            )
+        except click.ClickException as exc:
+            finished_at = utc_now_timestamp()
+            record_store.write_deployment_record(
+                build_deployment_record(
+                    request=ship_request,
+                    record_id=record_id,
+                    deployment_id="control-plane-dokploy",
+                    deployment_status="fail",
+                    started_at=started_at,
+                    finished_at=finished_at,
+                    resolved_target=resolved_target,
+                )
+            )
+            return _build_result(
+                deployment_record_id=record_id,
+                deploy_status="fail",
+                deploy_started_at=started_at,
+                deploy_finished_at=finished_at,
+                target_fields=_result_target_fields(
+                    target_name=resolved_target.target_name,
+                    target_id=resolved_target.target_id,
+                    target_category=resolved_target.target_type,
+                ),
+                error_message=str(exc),
+            )
     try:
         _execute_dokploy_deploy(
             control_plane_root=control_plane_root,
@@ -411,6 +477,15 @@ def execute_verireel_stable_deploy(
         )
     except click.ClickException as exc:
         finished_at = utc_now_timestamp()
+        error_message = str(exc)
+        if request.instance == "testing":
+            error_message = _restore_testing_recovery_schedule(
+                host=recovery_host,
+                token=recovery_token,
+                application_id=resolved_target.target_id,
+                snapshot=recovery_schedule_snapshot,
+                error_message=error_message,
+            )
         record_store.write_deployment_record(
             build_deployment_record(
                 request=ship_request,
@@ -432,7 +507,7 @@ def execute_verireel_stable_deploy(
                 target_id=resolved_target.target_id,
                 target_category=resolved_target.target_type,
             ),
-            error_message=str(exc),
+            error_message=error_message,
         )
 
     finished_at = utc_now_timestamp()
@@ -442,11 +517,20 @@ def execute_verireel_stable_deploy(
             request=request,
         )
     except click.ClickException as exc:
+        error_message = str(exc)
+        if request.instance == "testing":
+            error_message = _restore_testing_recovery_schedule(
+                host=recovery_host,
+                token=recovery_token,
+                application_id=resolved_target.target_id,
+                snapshot=recovery_schedule_snapshot,
+                error_message=error_message,
+            )
         failed_rollout_result = failed_verireel_rollout_result(
             control_plane_root=control_plane_root,
             context=request.context,
             instance=request.instance,
-            error_message=str(exc),
+            error_message=error_message,
         )
         record_store.write_deployment_record(
             build_deployment_record(
@@ -477,8 +561,59 @@ def execute_verireel_stable_deploy(
             rollout_status="fail",
             rollout_base_url=failed_rollout_result.base_url,
             rollout_health_urls=failed_rollout_result.health_urls,
-            error_message=str(exc),
+            error_message=error_message,
         )
+
+    if request.instance == "testing":
+        try:
+            finalize_verireel_billing_recovery_schedule(
+                host=recovery_host,
+                token=recovery_token,
+                application_id=resolved_target.target_id,
+                instance="testing",
+                snapshot=recovery_schedule_snapshot,
+            )
+        except click.ClickException as exc:
+            error_message = _restore_testing_recovery_schedule(
+                host=recovery_host,
+                token=recovery_token,
+                application_id=resolved_target.target_id,
+                snapshot=recovery_schedule_snapshot,
+                error_message=str(exc),
+            )
+            record_store.write_deployment_record(
+                build_deployment_record(
+                    request=ship_request,
+                    record_id=record_id,
+                    deployment_id="control-plane-dokploy",
+                    deployment_status="pass",
+                    started_at=started_at,
+                    finished_at=finished_at,
+                    resolved_target=resolved_target,
+                    runtime_identity=runtime_identity,
+                    destination_health=health_evidence_from_rollout(
+                        result=rollout_result,
+                        timeout_seconds=request.rollout_timeout_seconds,
+                    ),
+                )
+            )
+            return _build_result(
+                deployment_record_id=record_id,
+                deploy_status="fail",
+                deploy_started_at=started_at,
+                deploy_finished_at=finished_at,
+                target_fields=_result_target_fields(
+                    target_name=resolved_target.target_name,
+                    target_id=resolved_target.target_id,
+                    target_category=resolved_target.target_type,
+                ),
+                rollout_status=rollout_result.status,
+                rollout_base_url=rollout_result.base_url,
+                rollout_health_urls=rollout_result.health_urls,
+                rollout_started_at=rollout_result.started_at,
+                rollout_finished_at=rollout_result.finished_at,
+                error_message=error_message,
+            )
 
     record_store.write_deployment_record(
         build_deployment_record(

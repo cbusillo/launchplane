@@ -15,9 +15,36 @@ from control_plane.workflows.verireel_stable_deploy import (
     execute_verireel_stable_deploy,
 )
 from control_plane.workflows.verireel_rollout import VeriReelRolloutVerificationResult
+from control_plane.workflows.verireel_billing_recovery_schedule import (
+    VeriReelRecoveryScheduleSnapshot,
+)
 
 
 class VeriReelTestingDeployWorkflowTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.enterContext(
+            patch(
+                "control_plane.workflows.verireel_stable_deploy.dokploy_source.read_dokploy_config",
+                return_value=("https://dokploy.example.com", "token-123"),
+            )
+        )
+        self.quiesce_recovery_schedule = self.enterContext(
+            patch(
+                "control_plane.workflows.verireel_stable_deploy.quiesce_verireel_billing_recovery_schedule",
+                return_value=VeriReelRecoveryScheduleSnapshot(existed=False),
+            )
+        )
+        self.finalize_recovery_schedule = self.enterContext(
+            patch(
+                "control_plane.workflows.verireel_stable_deploy.finalize_verireel_billing_recovery_schedule"
+            )
+        )
+        self.restore_recovery_schedule = self.enterContext(
+            patch(
+                "control_plane.workflows.verireel_stable_deploy.restore_verireel_billing_recovery_schedule"
+            )
+        )
+
     def test_execute_writes_passed_deployment_record(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -101,6 +128,8 @@ class VeriReelTestingDeployWorkflowTests(unittest.TestCase):
             self.assertEqual(deployment.deploy.started_at, "2026-04-20T18:20:00Z")
             self.assertEqual(deployment.deploy.finished_at, "2026-04-20T18:21:15Z")
             self.assertEqual(deployment.destination_health.status, "pass")
+            self.quiesce_recovery_schedule.assert_called_once()
+            self.finalize_recovery_schedule.assert_called_once()
             self.assertIsNotNone(deployment.runtime_identity)
             assert deployment.runtime_identity is not None
             self.assertEqual(deployment.runtime_identity.product, "verireel")
@@ -262,6 +291,8 @@ class VeriReelTestingDeployWorkflowTests(unittest.TestCase):
 
             self.assertEqual(result.deploy_status, "fail")
             self.assertEqual(result.error_message, "deploy failed")
+            self.restore_recovery_schedule.assert_called_once()
+            self.finalize_recovery_schedule.assert_not_called()
             deployment = store.read_deployment_record(
                 "deployment-verireel-testing-run-12345-attempt-1"
             )

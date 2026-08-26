@@ -32,6 +32,13 @@ from control_plane.runtime_key_safety import (
 from control_plane.workflows.preview_resource_destroy import (
     destroy_dokploy_preview_resource,
 )
+from control_plane.workflows.verireel_billing_recovery_schedule import (
+    VeriReelRecoveryScheduleSnapshot,
+    delete_verireel_billing_recovery_schedule,
+    finalize_verireel_billing_recovery_schedule,
+    quiesce_verireel_billing_recovery_schedule,
+    restore_verireel_billing_recovery_schedule,
+)
 from control_plane.workflows.ship import generate_deployment_record_id, utc_now_timestamp
 from control_plane.dokploy import api as dokploy_api
 from control_plane.dokploy import source as dokploy_source
@@ -879,20 +886,6 @@ def _delete_application(*, host: str, token: str, application_id: str) -> None:
     )
 
 
-def _find_application_schedule(
-    *, host: str, token: str, application_id: str, schedule_name: str
-) -> JsonObject | None:
-    for schedule in dokploy_api.list_dokploy_schedules(
-        host=host,
-        token=token,
-        target_id=application_id,
-        schedule_type="application",
-    ):
-        if str(schedule.get("name") or "").strip() == schedule_name:
-            return schedule
-    return None
-
-
 def _upsert_application_schedule(
     *,
     host: str,
@@ -901,12 +894,6 @@ def _upsert_application_schedule(
     schedule_name: str,
     command: str,
 ) -> str:
-    existing = _find_application_schedule(
-        host=host,
-        token=token,
-        application_id=application_id,
-        schedule_name=schedule_name,
-    )
     payload: JsonObject = {
         "name": schedule_name,
         "cronExpression": dokploy_post_deploy.DOKPLOY_MANUAL_ONLY_CRON_EXPRESSION,
@@ -917,32 +904,12 @@ def _upsert_application_schedule(
         "enabled": False,
         "timezone": "UTC",
     }
-    if existing is None:
-        dokploy_api.dokploy_request(
-            host=host,
-            token=token,
-            path="/api/schedule.create",
-            method="POST",
-            payload=payload,
-        )
-    else:
-        dokploy_api.dokploy_request(
-            host=host,
-            token=token,
-            path="/api/schedule.update",
-            method="POST",
-            payload={"scheduleId": dokploy_api.schedule_key(existing), **payload},
-        )
-    resolved = _find_application_schedule(
+    resolved = dokploy_api.upsert_dokploy_application_schedule(
         host=host,
         token=token,
         application_id=application_id,
-        schedule_name=schedule_name,
+        schedule_payload=payload,
     )
-    if resolved is None:
-        raise click.ClickException(
-            f"Dokploy schedule {schedule_name!r} for preview application {application_id!r} could not be resolved."
-        )
     schedule_id = dokploy_api.schedule_key(resolved)
     if not schedule_id:
         raise click.ClickException(
@@ -1285,10 +1252,12 @@ def execute_verireel_preview_refresh(
         password=_random_password(),
     )
     created_preview_database = existing_database is None
+    application_id = ""
     created_application_id = ""
     created_domain_id = ""
     stale_domain_ids: tuple[str, ...] = ()
     migration_started = False
+    recovery_schedule_snapshot = VeriReelRecoveryScheduleSnapshot(existed=False)
 
     try:
         admin_database_url = _build_admin_database_url(template_database_url)
@@ -1363,6 +1332,13 @@ def execute_verireel_preview_refresh(
         application_id = str(application.get("applicationId") or "").strip()
         if existing_snapshot is None:
             created_application_id = application_id
+        else:
+            recovery_schedule_snapshot = quiesce_verireel_billing_recovery_schedule(
+                host=host,
+                token=token,
+                application_id=application_id,
+                instance="preview",
+            )
         _configure_application(
             host=host,
             token=token,
@@ -1420,6 +1396,13 @@ def execute_verireel_preview_refresh(
             timeout_seconds=request.timeout_seconds,
             expected_runtime_identity=expected_runtime_identity,
         )
+        finalize_verireel_billing_recovery_schedule(
+            host=host,
+            token=token,
+            application_id=application_id,
+            instance="preview",
+            snapshot=recovery_schedule_snapshot,
+        )
         for stale_domain_id in stale_domain_ids:
             _delete_domain(host=host, token=token, domain_id=stale_domain_id)
     except click.ClickException as exc:
@@ -1444,6 +1427,16 @@ def execute_verireel_preview_refresh(
                 )
             except click.ClickException as rollback_exc:
                 rollback_errors.append(f"existing preview rollback failed: {rollback_exc}")
+        try:
+            restore_verireel_billing_recovery_schedule(
+                host=host,
+                token=token,
+                application_id=application_id,
+                instance="preview",
+                snapshot=recovery_schedule_snapshot,
+            )
+        except click.ClickException as rollback_exc:
+            rollback_errors.append(f"recovery schedule restoration failed: {rollback_exc}")
         if created_preview_database:
             try:
                 _run_application_command(
@@ -1534,7 +1527,16 @@ def execute_verireel_preview_destroy(
     )
 
     cleanup_errors: list[str] = []
+    recovery_schedule_cleanup_error = ""
     if application_id:
+        try:
+            delete_verireel_billing_recovery_schedule(
+                host=host,
+                token=token,
+                application_id=application_id,
+            )
+        except click.ClickException as exc:
+            recovery_schedule_cleanup_error = str(exc)
         destroy_result = destroy_dokploy_preview_resource(
             host=host,
             token=token,
@@ -1542,6 +1544,10 @@ def execute_verireel_preview_destroy(
             resource_id=application_id,
         )
         cleanup_errors.extend(destroy_result.cleanup_errors)
+        if destroy_result.cleanup_errors and recovery_schedule_cleanup_error:
+            cleanup_errors.append(
+                f"recovery schedule cleanup failed: {recovery_schedule_cleanup_error}"
+            )
     try:
         _run_application_command_with_retries(
             host=host,
