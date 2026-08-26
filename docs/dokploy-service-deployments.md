@@ -51,6 +51,42 @@ Production callers import the canonical owning module. The
 and new code patch dependencies at the canonical module so the compatibility
 surface does not become a second implementation authority.
 
+## Managed Application Schedules
+
+Dokploy application schedules are provider-owned commands that run in the
+target application container. Launchplane therefore uses the application's
+loopback HTTP listener only when the product contract explicitly exposes an
+in-container route. It does not pass runtime secrets in a schedule command or
+argv. Every managed application schedule is read back after create or update;
+the readback must exactly match its name, cron expression, type, shell,
+command, application id, enabled state, and timezone. Duplicate managed names
+for one application fail closed instead of being selected arbitrarily.
+
+VeriReel uses one deterministic `verireel-billing-recovery` schedule per
+application:
+
+- stable testing runs at `2,17,32,47 * * * *` UTC and stable prod at
+  `7,22,37,52 * * * *` UTC, keeping the long-lived lanes on a staggered
+  15-minute cadence;
+- preview runs at `12,27,42,57 * * * *` UTC through the same authenticated
+  recovery endpoint, while VeriReel's runtime identity and preview build
+  checks restrict execution to commission maturity only;
+- stable deploy and prod promotion quiesce an existing schedule before the
+  provider mutation, restore its previous enabled state after a failed deploy,
+  migration, or canary/health check, and enable the reconciled schedule only
+  after a disabled-schedule canary succeeds;
+- preview refresh follows the same quiesce/restore behavior, creates or
+  refreshes the schedule only after preview health succeeds, and removes the
+  exact managed schedule before deleting the preview application.
+
+The managed command invokes VeriReel's in-image cron wrapper over loopback. The
+wrapper reads `VERIREEL_CRON_SECRET` from the application environment, sends it
+as the bearer credential without placing its value in the schedule spec, and
+treats a processor-lock overlap as a successful skipped execution. Before
+production enablement, prove against testing that Dokploy automatically fires
+two consecutive schedule runs, the app records `CRON` as the trigger, and no
+secret value appears in the schedule spec or captured output.
+
 Create a product-specific driver only when the service needs behavior beyond
 this contract, such as data migrations, product-specific smoke checks,
 destructive repair actions, backup gates, or custom rollback state.

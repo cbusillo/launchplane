@@ -32,6 +32,12 @@ from control_plane.workflows.verireel_rollout import (
     resolve_verireel_rollout_base_urls,
     verify_verireel_rollout,
 )
+from control_plane.workflows.verireel_billing_recovery_schedule import (
+    VeriReelRecoveryScheduleSnapshot,
+    finalize_verireel_billing_recovery_schedule,
+    quiesce_verireel_billing_recovery_schedule,
+    restore_verireel_billing_recovery_schedule,
+)
 from control_plane.dokploy import api as dokploy_api
 from control_plane.dokploy import source as dokploy_source
 from control_plane.dokploy import post_deploy as dokploy_post_deploy
@@ -616,18 +622,48 @@ def _resolve_application_id(
     return target_definition.target_id.strip()
 
 
-def _find_application_schedule(
-    *, host: str, token: str, application_id: str, schedule_name: str
-) -> dokploy_api.JsonObject | None:
-    for schedule in dokploy_api.list_dokploy_schedules(
-        host=host,
-        token=token,
-        target_id=application_id,
-        schedule_type="application",
-    ):
-        if str(schedule.get("name") or "").strip() == schedule_name:
-            return schedule
-    return None
+def _resolve_prod_recovery_schedule_application_id(
+    *, control_plane_root: Path, request: VeriReelProdPromotionRequest
+) -> str:
+    source_of_truth = dokploy_source.read_control_plane_dokploy_source_of_truth(
+        control_plane_root=control_plane_root
+    )
+    target_definition = dokploy_source.find_dokploy_target_definition(
+        source_of_truth,
+        context_name=request.context,
+        instance_name=request.to_instance,
+    )
+    if target_definition is None or target_definition.target_type != "application":
+        raise click.ClickException(
+            "VeriReel prod promotion billing-recovery schedule requires an application target."
+        )
+    application_id = target_definition.target_id.strip()
+    if not application_id:
+        raise click.ClickException(
+            "VeriReel prod promotion billing-recovery schedule requires an application id."
+        )
+    return application_id
+
+
+def _restore_prod_recovery_schedule(
+    *,
+    host: str,
+    token: str,
+    application_id: str,
+    snapshot: VeriReelRecoveryScheduleSnapshot,
+    error_message: str,
+) -> str:
+    try:
+        restore_verireel_billing_recovery_schedule(
+            host=host,
+            token=token,
+            application_id=application_id,
+            instance="prod",
+            snapshot=snapshot,
+        )
+    except click.ClickException as restore_error:
+        return f"{error_message}\nRecovery schedule restoration failed: {restore_error}"
+    return error_message
 
 
 def _upsert_application_schedule(
@@ -638,12 +674,6 @@ def _upsert_application_schedule(
     schedule_name: str,
     command: str,
 ) -> str:
-    existing_schedule = _find_application_schedule(
-        host=host,
-        token=token,
-        application_id=application_id,
-        schedule_name=schedule_name,
-    )
     payload: dokploy_api.JsonObject = {
         "name": schedule_name,
         "cronExpression": dokploy_post_deploy.DOKPLOY_MANUAL_ONLY_CRON_EXPRESSION,
@@ -654,36 +684,12 @@ def _upsert_application_schedule(
         "enabled": False,
         "timezone": "UTC",
     }
-    if existing_schedule is None:
-        dokploy_api.dokploy_request(
-            host=host,
-            token=token,
-            path="/api/schedule.create",
-            method="POST",
-            payload=payload,
-        )
-    else:
-        update_payload: dokploy_api.JsonObject = {
-            "scheduleId": dokploy_api.schedule_key(existing_schedule),
-            **payload,
-        }
-        dokploy_api.dokploy_request(
-            host=host,
-            token=token,
-            path="/api/schedule.update",
-            method="POST",
-            payload=update_payload,
-        )
-    resolved_schedule = _find_application_schedule(
+    resolved_schedule = dokploy_api.upsert_dokploy_application_schedule(
         host=host,
         token=token,
         application_id=application_id,
-        schedule_name=schedule_name,
+        schedule_payload=payload,
     )
-    if resolved_schedule is None:
-        raise click.ClickException(
-            f"Dokploy schedule {schedule_name!r} for application {application_id!r} could not be resolved."
-        )
     schedule_id = dokploy_api.schedule_key(resolved_schedule)
     if not schedule_id:
         raise click.ClickException(
@@ -714,24 +720,10 @@ def _run_application_command_with_retries(
                 schedule_name=schedule_name,
                 command=command,
             )
-            latest_before = dokploy_api.latest_deployment_for_schedule(
+            dokploy_api.run_dokploy_schedule(
                 host=host,
                 token=token,
                 schedule_id=schedule_id,
-            )
-            dokploy_api.dokploy_request(
-                host=host,
-                token=token,
-                path="/api/schedule.runManually",
-                method="POST",
-                payload={"scheduleId": schedule_id},
-                timeout_seconds=timeout_seconds,
-            )
-            dokploy_api.wait_for_dokploy_schedule_deployment(
-                host=host,
-                token=token,
-                schedule_id=schedule_id,
-                before_key=dokploy_api.deployment_key(latest_before),
                 timeout_seconds=timeout_seconds,
             )
             return
@@ -795,6 +787,39 @@ def execute_verireel_prod_promotion(
             error_message=error_message,
         )
 
+    try:
+        recovery_host, recovery_token = dokploy_source.read_dokploy_config(
+            control_plane_root=control_plane_root
+        )
+        recovery_application_id = _resolve_prod_recovery_schedule_application_id(
+            control_plane_root=control_plane_root,
+            request=request,
+        )
+        recovery_schedule_snapshot = quiesce_verireel_billing_recovery_schedule(
+            host=recovery_host,
+            token=recovery_token,
+            application_id=recovery_application_id,
+            instance="prod",
+        )
+    except click.ClickException as exc:
+        error_message = str(exc)
+        _write_failed_promotion_record(
+            record_store=record_store,
+            request=request,
+            backup_gate_record=backup_gate_record,
+            error_message=error_message,
+        )
+        return _build_result(
+            promotion_record_id=request.promotion_record_id,
+            backup_record_id=backup_gate_record.record_id,
+            deploy_status="fail",
+            rollout_status="skipped",
+            migration_status="skipped",
+            health_status="skipped",
+            target_fields=_default_target_result_fields(),
+            error_message=error_message,
+        )
+
     deployment_result = execute_verireel_stable_deploy(
         control_plane_root=control_plane_root,
         record_store=record_store,
@@ -825,6 +850,13 @@ def execute_verireel_prod_promotion(
     legacy_target_type = _legacy_dokploy_target_type(deployment_result)
 
     if deployment_result.deploy_status != "pass":
+        error_message = _restore_prod_recovery_schedule(
+            host=recovery_host,
+            token=recovery_token,
+            application_id=recovery_application_id,
+            snapshot=recovery_schedule_snapshot,
+            error_message=deployment_result.error_message or "VeriReel prod deployment failed.",
+        )
         promotion_record = _build_promotion_record(
             request=request,
             backup_gate_record=backup_gate_record,
@@ -856,12 +888,19 @@ def execute_verireel_prod_promotion(
                 promotion_record,
                 fallback=target_fields,
             ),
-            error_message=deployment_result.error_message,
+            error_message=error_message,
         )
 
     if deployment_result.rollout_status != "pass":
         error_message = (
             deployment_result.error_message or "VeriReel prod rollout verification failed."
+        )
+        error_message = _restore_prod_recovery_schedule(
+            host=recovery_host,
+            token=recovery_token,
+            application_id=recovery_application_id,
+            snapshot=recovery_schedule_snapshot,
+            error_message=error_message,
         )
         failed_rollout_result = VeriReelRolloutVerificationResult(
             status="fail",
@@ -913,7 +952,13 @@ def execute_verireel_prod_promotion(
             target_id=deployment_result.target_id,
         )
     except click.ClickException as exc:
-        error_message = str(exc)
+        error_message = _restore_prod_recovery_schedule(
+            host=recovery_host,
+            token=recovery_token,
+            application_id=recovery_application_id,
+            snapshot=recovery_schedule_snapshot,
+            error_message=str(exc),
+        )
         _write_failed_promotion_record(
             record_store=record_store,
             request=request,
@@ -952,7 +997,13 @@ def execute_verireel_prod_promotion(
             request=request,
         )
     except click.ClickException as exc:
-        error_message = str(exc)
+        error_message = _restore_prod_recovery_schedule(
+            host=recovery_host,
+            token=recovery_token,
+            application_id=recovery_application_id,
+            snapshot=recovery_schedule_snapshot,
+            error_message=str(exc),
+        )
         failed_health_result = VeriReelRolloutVerificationResult(status="fail")
         try:
             base_urls = _resolve_rollout_base_urls(
@@ -992,6 +1043,53 @@ def execute_verireel_prod_promotion(
             rollout_status=rollout_result.status,
             migration_status="pass",
             health_status="fail",
+            deploy_started_at=deployment_result.deploy_started_at,
+            deploy_finished_at=deployment_result.deploy_finished_at,
+            target_fields=target_fields,
+            error_message=error_message,
+        )
+
+    try:
+        finalize_verireel_billing_recovery_schedule(
+            host=recovery_host,
+            token=recovery_token,
+            application_id=recovery_application_id,
+            instance="prod",
+            snapshot=recovery_schedule_snapshot,
+        )
+    except click.ClickException as exc:
+        error_message = _restore_prod_recovery_schedule(
+            host=recovery_host,
+            token=recovery_token,
+            application_id=recovery_application_id,
+            snapshot=recovery_schedule_snapshot,
+            error_message=str(exc),
+        )
+        _write_failed_promotion_record(
+            record_store=record_store,
+            request=request,
+            backup_gate_record=backup_gate_record,
+            error_message=error_message,
+            deployment_record_id=deployment_result.deployment_record_id,
+            deploy_status="pass",
+            deploy_started_at=deployment_result.deploy_started_at,
+            deploy_finished_at=deployment_result.deploy_finished_at,
+            target_name=deployment_result.target_name,
+            target_type=legacy_target_type,
+            target_id=deployment_result.target_id,
+            target_fields=target_fields,
+            deployment_record=deployment_record,
+            migration_status="pass",
+            health_result=health_result,
+        )
+        return _build_result(
+            promotion_record_id=request.promotion_record_id,
+            deployment_record_id=deployment_result.deployment_record_id,
+            backup_record_id=backup_gate_record.record_id,
+            deploy_status="fail",
+            rollout_status=rollout_result.status,
+            migration_status="pass",
+            health_status=health_result.status,
             deploy_started_at=deployment_result.deploy_started_at,
             deploy_finished_at=deployment_result.deploy_finished_at,
             target_fields=target_fields,
