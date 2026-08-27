@@ -8,6 +8,7 @@ from typing import cast
 
 from pydantic import ValidationError
 
+import control_plane.authz_grant_service as control_plane_authz_grant_service
 from control_plane.authz_grant_service import (
     AuthzManagedPolicyReconcileEnvelope,
     AuthzPolicyConflictError,
@@ -15,6 +16,8 @@ from control_plane.authz_grant_service import (
     AuthzPolicySafetyError,
     build_authz_candidate_policy_structural_diff,
     execute_managed_authz_policy_reconcile,
+    export_managed_authz_policy_set,
+    managed_authz_policy_desired_set_sha256,
     plan_managed_authz_policy_reconcile,
     preview_authz_candidate_policy,
     summarize_active_authz_policy_record,
@@ -179,6 +182,75 @@ def _workflow_admin_rule(
 
 
 class AuthzManagedPolicyServiceTests(unittest.TestCase):
+    def test_managed_set_export_round_trips_reconciliation_digest(self) -> None:
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "schema_version": 2,
+                "github_actions": [
+                    {
+                        "managed_set_id": "operator.launchplane",
+                        "managed_rule_id": "service.read",
+                        "repository": "example/launchplane",
+                        "repository_id": "1001",
+                        "repository_owner_id": "2001",
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": ["product_profile.read"],
+                    }
+                ],
+            }
+        )
+
+        exported = export_managed_authz_policy_set(
+            policy=policy,
+            managed_set_id="operator.launchplane",
+        )
+
+        self.assertEqual(
+            managed_authz_policy_desired_set_sha256(exported),
+            managed_authz_policy_desired_set_sha256(policy),
+        )
+
+    def test_immutable_github_human_lockout_predicate_rejects_legacy_and_nonhuman_rules(
+        self,
+    ) -> None:
+        legacy_policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "schema_version": 2,
+                "github_humans": [
+                    {
+                        "github_ids": [101],
+                        "roles": ["admin"],
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": ["authz_policy_*"],
+                    }
+                ],
+                "local_admins": [
+                    {
+                        "subjects": ["recovery"],
+                        "token_labels": ["recovery"],
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": ["authz_policy_grant.write"],
+                    }
+                ],
+            }
+        )
+
+        self.assertFalse(
+            control_plane_authz_grant_service._authz_policy_allows_immutable_github_id_administration(
+                policy=legacy_policy,
+                github_id=101,
+            )
+        )
+        self.assertFalse(
+            control_plane_authz_grant_service._authz_policy_retains_independent_github_id_administration(
+                policy=legacy_policy,
+                applying_github_id=101,
+            )
+        )
+
     def test_health_monitoring_managed_rule_requires_pinned_reusable_workflow(
         self,
     ) -> None:

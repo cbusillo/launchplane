@@ -118,6 +118,7 @@ from control_plane.http_routes import (
     EngineeringReviewWorkerIdentity,
     EngineeringReviewWriteRouteDependencies,
     GenericWebWriteRouteDependencies,
+    AuthzAdministrationRouteDependencies,
     ChangeImpactReadRouteDependencies,
     ChangeImpactWriteRouteDependencies,
     CHANGE_IMPACT_EVALUATION_ROUTE,
@@ -142,6 +143,7 @@ from control_plane.http_routes import (
     idempotency_scope as idempotency_scope,
     provider_operation_response_payload as _provider_operation_response_payload,
     register_agent_context_read_routes,
+    register_authz_administration_routes,
     register_change_impact_read_routes,
     register_change_impact_write_routes,
     register_deployment_promotion_read_routes,
@@ -4381,6 +4383,18 @@ def create_launchplane_fastapi_app(
         identity = resolve_bearer_identity(authorization)
         if identity is not None:
             return identity
+        raise _authentication_required_error("Authorization header is required.")
+
+    def read_nonrenewing_identity(
+        authorization: Annotated[str, Header(alias="Authorization")] = "",
+        cookie: Annotated[str, Header(alias="Cookie")] = "",
+    ) -> LaunchplaneIdentity:
+        bearer_identity = resolve_bearer_identity(authorization)
+        if bearer_identity is not None:
+            return bearer_identity
+        session = read_nonrenewing_human_session(cookie_header=cookie)
+        if session is not None:
+            return session.identity
         raise _authentication_required_error("Authorization header is required.")
 
     def read_browser_mutation_identity(
@@ -21847,6 +21861,14 @@ def create_launchplane_fastapi_app(
     register_privileged_operation_routes(
         app,
         dependencies=privileged_operation_route_dependencies,
+    )
+    register_authz_administration_routes(
+        app,
+        dependencies=AuthzAdministrationRouteDependencies(
+            common=read_route_dependencies,
+            read_nonrenewing_identity=read_nonrenewing_identity,
+            runtime_policy_reader=lambda: resolved_authz_policy_runtime.policy,
+        ),
     )
     register_governance_projection_routes(
         app,

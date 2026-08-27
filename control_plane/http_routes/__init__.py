@@ -5,6 +5,10 @@ from control_plane.http_routes.drivers import (
     register_operation_status_read_routes,
     register_tracked_target_log_read_routes,
 )
+from control_plane.http_routes.authz_administration import (
+    AuthzAdministrationRouteDependencies,
+    register_authz_administration_routes,
+)
 from control_plane.http_routes.evidence import (
     EVIDENCE_INGRESS_ROUTES,
     BackupGateEvidenceRequest,
@@ -139,6 +143,7 @@ from control_plane.http_routes.work_graph import (
 
 __all__ = (
     "AcceptedEvidenceResponse",
+    "AuthzAdministrationRouteDependencies",
     "BackupGateEvidenceRequest",
     "DeploymentEvidenceRequest",
     "DriverReadRouteDependencies",
@@ -190,6 +195,7 @@ __all__ = (
     "idempotency_scope",
     "provider_operation_response_payload",
     "register_agent_context_read_routes",
+    "register_authz_administration_routes",
     "register_change_impact_read_routes",
     "register_change_impact_write_routes",
     "register_deployment_promotion_read_routes",
