@@ -65,6 +65,385 @@
         "summary": "Read human auth session"
       }
     },
+    "/v1/authz-diagnostics/denials/{trace_id}": {
+      "get": {
+        "operationId": "explain_authz_denial",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "trace_id",
+            "required": true,
+            "schema": {
+              "title": "Trace Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthzDenialExplanationResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read one redacted authorization denial explanation"
+      }
+    },
+    "/v1/authz-policies/active/export": {
+      "get": {
+        "operationId": "export_active_authz_policy",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthzActivePolicyExportResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Export the full-fidelity active authorization policy"
+      }
+    },
+    "/v1/authz-policies/administration": {
+      "get": {
+        "operationId": "read_authz_policy_administration",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthzPolicyAdministrationReadResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read redacted active authorization policy administration evidence"
+      }
+    },
+    "/v1/authz-policies/revisions": {
+      "get": {
+        "operationId": "read_authz_policy_revision_history",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthzPolicyRevisionHistoryResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read bounded redacted authorization policy revision history"
+      }
+    },
     "/v1/contexts/{context}/driver-view": {
       "get": {
         "operationId": "read_driver_context_view",
@@ -1390,6 +1769,87 @@
           }
         },
         "summary": "List privileged-operation plans",
+        "tags": [
+          "privileged-operations"
+        ]
+      },
+      "post": {
+        "operationId": "plan_privileged_operation",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PrivilegedOperationPlanEnvelope"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PrivilegedOperationHumanResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Plan a typed privileged operation",
         "tags": [
           "privileged-operations"
         ]
@@ -3577,6 +4037,216 @@
         "summary": "Read exact pull-request tenant admission and technical readiness"
       }
     },
+    "/v1/authz-diagnostics/effective-access/evaluate": {
+      "post": {
+        "operationId": "evaluate_effective_access",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EffectiveAccessEvaluateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EffectiveAccessEvaluateResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Evaluate one principal and scope against active authorization"
+      }
+    },
+    "/v1/authz-policies/managed-rule-sets/rollback-proposal": {
+      "post": {
+        "operationId": "build_authz_managed_set_rollback_proposal",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AuthzManagedSetRollbackProposalRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthzManagedSetRollbackProposalResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Build a managed authorization rollback proposal for existing submission"
+      }
+    },
     "/v1/owner-acceptance/events": {
       "post": {
         "operationId": "write_owner_acceptance_event",
@@ -5239,6 +5909,138 @@
         "title": "AuthSessionResponse",
         "type": "object"
       },
+      "AuthzActivePolicyExportResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "canonical_policy": {
+            "$ref": "#/components/schemas/LaunchplaneAuthzPolicy-Output"
+          },
+          "policy": {
+            "$ref": "#/components/schemas/AuthzPolicyAdministrationProvenance"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "canonical_policy",
+          "policy",
+          "status",
+          "trace_id"
+        ],
+        "title": "AuthzActivePolicyExportResponse",
+        "type": "object"
+      },
+      "AuthzDenialExplanationResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "title": "Action",
+            "type": "string"
+          },
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "instance_specified": {
+            "title": "Instance Specified",
+            "type": "boolean"
+          },
+          "policy_record_id": {
+            "title": "Policy Record Id",
+            "type": "string"
+          },
+          "policy_revision": {
+            "minimum": 1,
+            "title": "Policy Revision",
+            "type": "integer"
+          },
+          "policy_sha256": {
+            "title": "Policy Sha256",
+            "type": "string"
+          },
+          "principal_type": {
+            "enum": [
+              "github_actions",
+              "github_human",
+              "terminal_agent",
+              "local_operator",
+              "local_admin"
+            ],
+            "title": "Principal Type",
+            "type": "string"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "reason_code": {
+            "enum": [
+              "allowed",
+              "authz_policy_schema_incompatible",
+              "instance_scope_required",
+              "principal_role_restricted",
+              "principal_binding_invalid",
+              "no_matching_grant"
+            ],
+            "title": "Reason Code",
+            "type": "string"
+          },
+          "recorded_at": {
+            "title": "Recorded At",
+            "type": "string"
+          },
+          "route_path": {
+            "title": "Route Path",
+            "type": "string"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "target_scope": {
+            "enum": [
+              "global",
+              "context",
+              "instance",
+              "preview"
+            ],
+            "title": "Target Scope",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action",
+          "context",
+          "instance_specified",
+          "policy_record_id",
+          "policy_revision",
+          "policy_sha256",
+          "principal_type",
+          "product",
+          "reason_code",
+          "recorded_at",
+          "route_path",
+          "status",
+          "target_scope",
+          "trace_id"
+        ],
+        "title": "AuthzDenialExplanationResponse",
+        "type": "object"
+      },
       "AuthzManagedCompatibilityRetirement": {
         "additionalProperties": false,
         "properties": {
@@ -5576,6 +6378,615 @@
           "previous_rule_sha256"
         ],
         "title": "AuthzManagedRuleChange",
+        "type": "object"
+      },
+      "AuthzManagedRuleIdentityCollection": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/AuthzManagedRuleIdentitySummary"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "returned_count": {
+            "minimum": 0,
+            "title": "Returned Count",
+            "type": "integer"
+          },
+          "total_count": {
+            "minimum": 0,
+            "title": "Total Count",
+            "type": "integer"
+          },
+          "truncated": {
+            "title": "Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "items",
+          "returned_count",
+          "total_count",
+          "truncated"
+        ],
+        "title": "AuthzManagedRuleIdentityCollection",
+        "type": "object"
+      },
+      "AuthzManagedRuleIdentitySummary": {
+        "additionalProperties": false,
+        "properties": {
+          "managed_rule_id": {
+            "title": "Managed Rule Id",
+            "type": "string"
+          },
+          "managed_set_id": {
+            "title": "Managed Set Id",
+            "type": "string"
+          },
+          "principal_type": {
+            "enum": [
+              "github_actions",
+              "github_humans",
+              "terminal_agents",
+              "local_operators",
+              "local_admins"
+            ],
+            "title": "Principal Type",
+            "type": "string"
+          },
+          "rule_sha256": {
+            "title": "Rule Sha256",
+            "type": "string"
+          }
+        },
+        "required": [
+          "managed_rule_id",
+          "managed_set_id",
+          "principal_type",
+          "rule_sha256"
+        ],
+        "title": "AuthzManagedRuleIdentitySummary",
+        "type": "object"
+      },
+      "AuthzManagedSetCollectionSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/AuthzManagedSetSummary"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "returned_count": {
+            "minimum": 0,
+            "title": "Returned Count",
+            "type": "integer"
+          },
+          "total_count": {
+            "minimum": 0,
+            "title": "Total Count",
+            "type": "integer"
+          },
+          "truncated": {
+            "title": "Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "items",
+          "returned_count",
+          "total_count",
+          "truncated"
+        ],
+        "title": "AuthzManagedSetCollectionSummary",
+        "type": "object"
+      },
+      "AuthzManagedSetRollbackProposalPayload": {
+        "additionalProperties": false,
+        "description": "Exact request shape accepted by POST /v1/privileged-operations/plans.",
+        "properties": {
+          "descriptor_id": {
+            "const": "managed-authz-policy-set",
+            "default": "managed-authz-policy-set",
+            "title": "Descriptor Id",
+            "type": "string"
+          },
+          "expires_in_seconds": {
+            "default": 1800,
+            "maximum": 86400,
+            "minimum": 300,
+            "title": "Expires In Seconds",
+            "type": "integer"
+          },
+          "request": {
+            "$ref": "#/components/schemas/ManagedAuthzPolicySetProposalInput-Output"
+          },
+          "schema_version": {
+            "const": 1,
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "source_event_id": {
+            "title": "Source Event Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "descriptor_id",
+          "expires_in_seconds",
+          "request",
+          "schema_version",
+          "source_event_id"
+        ],
+        "title": "AuthzManagedSetRollbackProposalPayload",
+        "type": "object"
+      },
+      "AuthzManagedSetRollbackProposalRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "managed_set_id": {
+            "maxLength": 96,
+            "minLength": 1,
+            "title": "Managed Set Id",
+            "type": "string"
+          },
+          "reason": {
+            "maxLength": 240,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          },
+          "related_issue": {
+            "default": "",
+            "maxLength": 128,
+            "title": "Related Issue",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "source_event_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Source Event Id",
+            "type": "string"
+          },
+          "target_revision": {
+            "minimum": 1,
+            "title": "Target Revision",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "target_revision",
+          "managed_set_id",
+          "reason",
+          "source_event_id"
+        ],
+        "title": "AuthzManagedSetRollbackProposalRequest",
+        "type": "object"
+      },
+      "AuthzManagedSetRollbackProposalResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "proposal": {
+            "$ref": "#/components/schemas/AuthzManagedSetRollbackProposalPayload"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "target_policy": {
+            "$ref": "#/components/schemas/AuthzPolicyAdministrationProvenance"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "proposal",
+          "status",
+          "target_policy",
+          "trace_id"
+        ],
+        "title": "AuthzManagedSetRollbackProposalResponse",
+        "type": "object"
+      },
+      "AuthzManagedSetSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "managed_set_id": {
+            "title": "Managed Set Id",
+            "type": "string"
+          },
+          "principal_rule_counts": {
+            "$ref": "#/components/schemas/AuthzPrincipalRuleCounts"
+          },
+          "rule_count": {
+            "minimum": 1,
+            "title": "Rule Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "managed_set_id",
+          "principal_rule_counts",
+          "rule_count"
+        ],
+        "title": "AuthzManagedSetSummary",
+        "type": "object"
+      },
+      "AuthzPolicyAdministrationProvenance": {
+        "additionalProperties": false,
+        "properties": {
+          "policy_sha256": {
+            "title": "Policy Sha256",
+            "type": "string"
+          },
+          "record_id": {
+            "title": "Record Id",
+            "type": "string"
+          },
+          "revision": {
+            "minimum": 1,
+            "title": "Revision",
+            "type": "integer"
+          },
+          "schema_version": {
+            "enum": [
+              1,
+              2
+            ],
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "active",
+              "superseded"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "policy_sha256",
+          "record_id",
+          "revision",
+          "schema_version",
+          "source",
+          "status",
+          "updated_at"
+        ],
+        "title": "AuthzPolicyAdministrationProvenance",
+        "type": "object"
+      },
+      "AuthzPolicyAdministrationReadResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "health": {
+            "$ref": "#/components/schemas/AuthzPolicyHealthSummary"
+          },
+          "managed_rules": {
+            "$ref": "#/components/schemas/AuthzManagedRuleIdentityCollection"
+          },
+          "managed_sets": {
+            "$ref": "#/components/schemas/AuthzManagedSetCollectionSummary"
+          },
+          "policy": {
+            "$ref": "#/components/schemas/AuthzPolicyAdministrationProvenance"
+          },
+          "principal_rule_counts": {
+            "$ref": "#/components/schemas/AuthzPrincipalRuleCounts"
+          },
+          "reachable_administrators": {
+            "$ref": "#/components/schemas/AuthzReachableAdministratorSummary"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "health",
+          "managed_rules",
+          "managed_sets",
+          "policy",
+          "principal_rule_counts",
+          "reachable_administrators",
+          "status",
+          "trace_id"
+        ],
+        "title": "AuthzPolicyAdministrationReadResponse",
+        "type": "object"
+      },
+      "AuthzPolicyHealthSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "github_actions_legacy_name_only_rule_count": {
+            "minimum": 0,
+            "title": "Github Actions Legacy Name Only Rule Count",
+            "type": "integer"
+          },
+          "github_actions_privileged_unpinned_reusable_rule_count": {
+            "minimum": 0,
+            "title": "Github Actions Privileged Unpinned Reusable Rule Count",
+            "type": "integer"
+          },
+          "managed_rule_count": {
+            "minimum": 0,
+            "title": "Managed Rule Count",
+            "type": "integer"
+          },
+          "reason_codes": {
+            "items": {
+              "enum": [
+                "authz_policy_admin_unreachable",
+                "authz_policy_independent_admin_unreachable",
+                "policy_schema_legacy",
+                "unmanaged_rules_present",
+                "github_actions_legacy_name_only_rules_present",
+                "github_actions_privileged_unpinned_reusable_rules_present"
+              ],
+              "type": "string"
+            },
+            "title": "Reason Codes",
+            "type": "array"
+          },
+          "state": {
+            "enum": [
+              "healthy",
+              "attention_required",
+              "blocked"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "unmanaged_rule_count": {
+            "minimum": 0,
+            "title": "Unmanaged Rule Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "github_actions_legacy_name_only_rule_count",
+          "github_actions_privileged_unpinned_reusable_rule_count",
+          "managed_rule_count",
+          "reason_codes",
+          "state",
+          "unmanaged_rule_count"
+        ],
+        "title": "AuthzPolicyHealthSummary",
+        "type": "object"
+      },
+      "AuthzPolicyRevisionAuditSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "audit_present": {
+            "title": "Audit Present",
+            "type": "boolean"
+          },
+          "audit_sha256": {
+            "default": "",
+            "title": "Audit Sha256",
+            "type": "string"
+          },
+          "changed": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Changed"
+          },
+          "diff_counts": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Diff Counts",
+            "type": "object"
+          },
+          "managed_set_id": {
+            "default": "",
+            "title": "Managed Set Id",
+            "type": "string"
+          },
+          "mode": {
+            "default": "",
+            "title": "Mode",
+            "type": "string"
+          },
+          "operation": {
+            "default": "",
+            "title": "Operation",
+            "type": "string"
+          }
+        },
+        "required": [
+          "audit_present",
+          "audit_sha256",
+          "changed",
+          "diff_counts",
+          "managed_set_id",
+          "mode",
+          "operation"
+        ],
+        "title": "AuthzPolicyRevisionAuditSummary",
+        "type": "object"
+      },
+      "AuthzPolicyRevisionHistoryEntry": {
+        "additionalProperties": false,
+        "properties": {
+          "audit": {
+            "$ref": "#/components/schemas/AuthzPolicyRevisionAuditSummary"
+          },
+          "policy": {
+            "$ref": "#/components/schemas/AuthzPolicyAdministrationProvenance"
+          }
+        },
+        "required": [
+          "audit",
+          "policy"
+        ],
+        "title": "AuthzPolicyRevisionHistoryEntry",
+        "type": "object"
+      },
+      "AuthzPolicyRevisionHistoryResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "returned_count": {
+            "minimum": 0,
+            "title": "Returned Count",
+            "type": "integer"
+          },
+          "revisions": {
+            "items": {
+              "$ref": "#/components/schemas/AuthzPolicyRevisionHistoryEntry"
+            },
+            "title": "Revisions",
+            "type": "array"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          },
+          "truncated": {
+            "title": "Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "returned_count",
+          "revisions",
+          "status",
+          "trace_id",
+          "truncated"
+        ],
+        "title": "AuthzPolicyRevisionHistoryResponse",
+        "type": "object"
+      },
+      "AuthzPrincipalRuleCounts": {
+        "additionalProperties": false,
+        "properties": {
+          "github_actions": {
+            "minimum": 0,
+            "title": "Github Actions",
+            "type": "integer"
+          },
+          "github_humans": {
+            "minimum": 0,
+            "title": "Github Humans",
+            "type": "integer"
+          },
+          "local_admins": {
+            "minimum": 0,
+            "title": "Local Admins",
+            "type": "integer"
+          },
+          "local_operators": {
+            "minimum": 0,
+            "title": "Local Operators",
+            "type": "integer"
+          },
+          "terminal_agents": {
+            "minimum": 0,
+            "title": "Terminal Agents",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "github_actions",
+          "github_humans",
+          "local_admins",
+          "local_operators",
+          "terminal_agents"
+        ],
+        "title": "AuthzPrincipalRuleCounts",
+        "type": "object"
+      },
+      "AuthzReachableAdministratorSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "caller_has_policy_administration": {
+            "title": "Caller Has Policy Administration",
+            "type": "boolean"
+          },
+          "independent_from_caller_reachable": {
+            "title": "Independent From Caller Reachable",
+            "type": "boolean"
+          },
+          "independent_from_caller_rule_count": {
+            "minimum": 0,
+            "title": "Independent From Caller Rule Count",
+            "type": "integer"
+          },
+          "managed_rule_count": {
+            "minimum": 0,
+            "title": "Managed Rule Count",
+            "type": "integer"
+          },
+          "policy_reachable": {
+            "title": "Policy Reachable",
+            "type": "boolean"
+          },
+          "principal_rule_counts": {
+            "$ref": "#/components/schemas/AuthzPrincipalRuleCounts"
+          },
+          "rule_count": {
+            "minimum": 0,
+            "title": "Rule Count",
+            "type": "integer"
+          },
+          "unmanaged_rule_count": {
+            "minimum": 0,
+            "title": "Unmanaged Rule Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "caller_has_policy_administration",
+          "independent_from_caller_reachable",
+          "independent_from_caller_rule_count",
+          "managed_rule_count",
+          "policy_reachable",
+          "principal_rule_counts",
+          "rule_count",
+          "unmanaged_rule_count"
+        ],
+        "title": "AuthzReachableAdministratorSummary",
         "type": "object"
       },
       "BackupGateEvidence": {
@@ -6857,6 +8268,202 @@
         "title": "DriverView",
         "type": "object"
       },
+      "EffectiveAccessDecision": {
+        "additionalProperties": false,
+        "properties": {
+          "decision": {
+            "enum": [
+              "allowed",
+              "denied"
+            ],
+            "title": "Decision",
+            "type": "string"
+          },
+          "reason_code": {
+            "enum": [
+              "allowed",
+              "authz_policy_schema_incompatible",
+              "instance_scope_required",
+              "principal_role_restricted",
+              "principal_binding_invalid",
+              "no_matching_grant"
+            ],
+            "title": "Reason Code",
+            "type": "string"
+          }
+        },
+        "required": [
+          "decision",
+          "reason_code"
+        ],
+        "title": "EffectiveAccessDecision",
+        "type": "object"
+      },
+      "EffectiveAccessEvaluateRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "title": "Action",
+            "type": "string"
+          },
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "instance": {
+            "default": "",
+            "title": "Instance",
+            "type": "string"
+          },
+          "principal": {
+            "discriminator": {
+              "mapping": {
+                "github_actions": "#/components/schemas/GitHubActionsAccessPrincipal",
+                "github_human": "#/components/schemas/GitHubHumanAccessPrincipal",
+                "local_admin": "#/components/schemas/LocalAdminAccessPrincipal",
+                "local_operator": "#/components/schemas/LocalOperatorAccessPrincipal",
+                "terminal_agent": "#/components/schemas/TerminalAgentAccessPrincipal"
+              },
+              "propertyName": "principal_type"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/GitHubActionsAccessPrincipal"
+              },
+              {
+                "$ref": "#/components/schemas/GitHubHumanAccessPrincipal"
+              },
+              {
+                "$ref": "#/components/schemas/TerminalAgentAccessPrincipal"
+              },
+              {
+                "$ref": "#/components/schemas/LocalOperatorAccessPrincipal"
+              },
+              {
+                "$ref": "#/components/schemas/LocalAdminAccessPrincipal"
+              }
+            ],
+            "title": "Principal"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "target_scope": {
+            "enum": [
+              "context",
+              "instance"
+            ],
+            "title": "Target Scope",
+            "type": "string"
+          }
+        },
+        "required": [
+          "principal",
+          "action",
+          "product",
+          "context",
+          "target_scope"
+        ],
+        "title": "EffectiveAccessEvaluateRequest",
+        "type": "object"
+      },
+      "EffectiveAccessEvaluateResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "evaluation": {
+            "$ref": "#/components/schemas/EffectiveAccessDecision"
+          },
+          "policy_record_id": {
+            "title": "Policy Record Id",
+            "type": "string"
+          },
+          "policy_revision": {
+            "minimum": 1,
+            "title": "Policy Revision",
+            "type": "integer"
+          },
+          "policy_sha256": {
+            "title": "Policy Sha256",
+            "type": "string"
+          },
+          "request": {
+            "$ref": "#/components/schemas/EffectiveAccessRequestSummary"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "evaluation",
+          "policy_record_id",
+          "policy_revision",
+          "policy_sha256",
+          "request",
+          "status",
+          "trace_id"
+        ],
+        "title": "EffectiveAccessEvaluateResponse",
+        "type": "object"
+      },
+      "EffectiveAccessRequestSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "title": "Action",
+            "type": "string"
+          },
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "instance": {
+            "default": "",
+            "title": "Instance",
+            "type": "string"
+          },
+          "principal_type": {
+            "enum": [
+              "github_actions",
+              "github_human",
+              "terminal_agent",
+              "local_operator",
+              "local_admin"
+            ],
+            "title": "Principal Type",
+            "type": "string"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "target_scope": {
+            "enum": [
+              "context",
+              "instance"
+            ],
+            "title": "Target Scope",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action",
+          "context",
+          "instance",
+          "principal_type",
+          "product",
+          "target_scope"
+        ],
+        "title": "EffectiveAccessRequestSummary",
+        "type": "object"
+      },
       "EnvironmentInventory": {
         "additionalProperties": false,
         "properties": {
@@ -7478,6 +9085,250 @@
           "source_health_status"
         ]
       },
+      "GitHubActionsAccessPrincipal": {
+        "additionalProperties": false,
+        "properties": {
+          "environment": {
+            "default": "",
+            "title": "Environment",
+            "type": "string"
+          },
+          "event_name": {
+            "title": "Event Name",
+            "type": "string"
+          },
+          "job_workflow_ref": {
+            "default": "",
+            "title": "Job Workflow Ref",
+            "type": "string"
+          },
+          "principal_type": {
+            "const": "github_actions",
+            "default": "github_actions",
+            "title": "Principal Type",
+            "type": "string"
+          },
+          "ref": {
+            "title": "Ref",
+            "type": "string"
+          },
+          "ref_type": {
+            "title": "Ref Type",
+            "type": "string"
+          },
+          "repository": {
+            "title": "Repository",
+            "type": "string"
+          },
+          "repository_id": {
+            "default": "",
+            "title": "Repository Id",
+            "type": "string"
+          },
+          "repository_owner": {
+            "title": "Repository Owner",
+            "type": "string"
+          },
+          "repository_owner_id": {
+            "default": "",
+            "title": "Repository Owner Id",
+            "type": "string"
+          },
+          "sha": {
+            "default": "",
+            "title": "Sha",
+            "type": "string"
+          },
+          "subject": {
+            "title": "Subject",
+            "type": "string"
+          },
+          "workflow_ref": {
+            "title": "Workflow Ref",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repository",
+          "repository_owner",
+          "workflow_ref",
+          "ref",
+          "ref_type",
+          "event_name",
+          "subject"
+        ],
+        "title": "GitHubActionsAccessPrincipal",
+        "type": "object"
+      },
+      "GitHubActionsPolicyRule": {
+        "additionalProperties": false,
+        "properties": {
+          "actions": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Actions",
+            "type": "array"
+          },
+          "contexts": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Contexts",
+            "type": "array"
+          },
+          "environments": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Environments",
+            "type": "array"
+          },
+          "event_names": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Event Names",
+            "type": "array"
+          },
+          "instances": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Instances",
+            "type": "array"
+          },
+          "job_workflow_refs": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Job Workflow Refs",
+            "type": "array"
+          },
+          "managed_rule_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Managed Rule Id"
+          },
+          "managed_set_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Managed Set Id"
+          },
+          "products": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Products",
+            "type": "array"
+          },
+          "refs": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Refs",
+            "type": "array"
+          },
+          "repository": {
+            "title": "Repository",
+            "type": "string"
+          },
+          "repository_id": {
+            "default": "",
+            "title": "Repository Id",
+            "type": "string"
+          },
+          "repository_owner_id": {
+            "default": "",
+            "title": "Repository Owner Id",
+            "type": "string"
+          },
+          "workflow_refs": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Workflow Refs",
+            "type": "array"
+          }
+        },
+        "required": [
+          "repository"
+        ],
+        "title": "GitHubActionsPolicyRule",
+        "type": "object"
+      },
+      "GitHubHumanAccessPrincipal": {
+        "additionalProperties": false,
+        "properties": {
+          "github_id": {
+            "default": 0,
+            "minimum": 0,
+            "title": "Github Id",
+            "type": "integer"
+          },
+          "login": {
+            "title": "Login",
+            "type": "string"
+          },
+          "organizations": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Organizations",
+            "type": "array"
+          },
+          "principal_type": {
+            "const": "github_human",
+            "default": "github_human",
+            "title": "Principal Type",
+            "type": "string"
+          },
+          "role": {
+            "enum": [
+              "read_only",
+              "admin"
+            ],
+            "title": "Role",
+            "type": "string"
+          },
+          "teams": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Teams",
+            "type": "array"
+          }
+        },
+        "required": [
+          "login",
+          "role"
+        ],
+        "title": "GitHubHumanAccessPrincipal",
+        "type": "object"
+      },
       "GitHubHumanIdentityResponse": {
         "additionalProperties": false,
         "properties": {
@@ -7537,6 +9388,111 @@
           "teams"
         ],
         "title": "GitHubHumanIdentityResponse",
+        "type": "object"
+      },
+      "GitHubHumanPolicyRule": {
+        "additionalProperties": false,
+        "properties": {
+          "actions": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Actions",
+            "type": "array"
+          },
+          "contexts": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Contexts",
+            "type": "array"
+          },
+          "github_ids": {
+            "default": [],
+            "items": {
+              "type": "integer"
+            },
+            "title": "Github Ids",
+            "type": "array"
+          },
+          "instances": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Instances",
+            "type": "array"
+          },
+          "logins": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Logins",
+            "type": "array"
+          },
+          "managed_rule_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Managed Rule Id"
+          },
+          "managed_set_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Managed Set Id"
+          },
+          "organizations": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Organizations",
+            "type": "array"
+          },
+          "products": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Products",
+            "type": "array"
+          },
+          "roles": {
+            "default": [],
+            "items": {
+              "enum": [
+                "read_only",
+                "admin"
+              ],
+              "type": "string"
+            },
+            "title": "Roles",
+            "type": "array"
+          },
+          "teams": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Teams",
+            "type": "array"
+          }
+        },
+        "title": "GitHubHumanPolicyRule",
         "type": "object"
       },
       "GitHubIssueInboxIssue": {
@@ -8244,6 +10200,62 @@
           "verified"
         ]
       },
+      "LaunchplaneAuthzPolicy-Input": {
+        "additionalProperties": false,
+        "properties": {
+          "github_actions": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/GitHubActionsPolicyRule"
+            },
+            "title": "Github Actions",
+            "type": "array"
+          },
+          "github_humans": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/GitHubHumanPolicyRule"
+            },
+            "title": "Github Humans",
+            "type": "array"
+          },
+          "local_admins": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/LocalAdminPolicyRule"
+            },
+            "title": "Local Admins",
+            "type": "array"
+          },
+          "local_operators": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/LocalOperatorPolicyRule"
+            },
+            "title": "Local Operators",
+            "type": "array"
+          },
+          "schema_version": {
+            "default": 1,
+            "enum": [
+              1,
+              2
+            ],
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "terminal_agents": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/TerminalAgentPolicyRule"
+            },
+            "title": "Terminal Agents",
+            "type": "array"
+          }
+        },
+        "title": "LaunchplaneAuthzPolicy",
+        "type": "object"
+      },
       "LaunchplaneAuthzPolicy-Output": {
         "additionalProperties": true,
         "type": "object"
@@ -8658,6 +10670,210 @@
         "title": "LaunchplaneProductProfileRecord",
         "type": "object"
       },
+      "LocalAdminAccessPrincipal": {
+        "additionalProperties": false,
+        "properties": {
+          "principal_type": {
+            "const": "local_admin",
+            "default": "local_admin",
+            "title": "Principal Type",
+            "type": "string"
+          },
+          "subject": {
+            "title": "Subject",
+            "type": "string"
+          },
+          "token_label": {
+            "title": "Token Label",
+            "type": "string"
+          }
+        },
+        "required": [
+          "subject",
+          "token_label"
+        ],
+        "title": "LocalAdminAccessPrincipal",
+        "type": "object"
+      },
+      "LocalAdminPolicyRule": {
+        "additionalProperties": false,
+        "properties": {
+          "actions": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Actions",
+            "type": "array"
+          },
+          "contexts": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Contexts",
+            "type": "array"
+          },
+          "instances": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Instances",
+            "type": "array"
+          },
+          "managed_rule_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Managed Rule Id"
+          },
+          "managed_set_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Managed Set Id"
+          },
+          "products": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Products",
+            "type": "array"
+          },
+          "subjects": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Subjects",
+            "type": "array"
+          },
+          "token_labels": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Token Labels",
+            "type": "array"
+          }
+        },
+        "title": "LocalAdminPolicyRule",
+        "type": "object"
+      },
+      "LocalOperatorAccessPrincipal": {
+        "additionalProperties": false,
+        "properties": {
+          "principal_type": {
+            "const": "local_operator",
+            "default": "local_operator",
+            "title": "Principal Type",
+            "type": "string"
+          },
+          "subject": {
+            "title": "Subject",
+            "type": "string"
+          },
+          "token_label": {
+            "title": "Token Label",
+            "type": "string"
+          }
+        },
+        "required": [
+          "subject",
+          "token_label"
+        ],
+        "title": "LocalOperatorAccessPrincipal",
+        "type": "object"
+      },
+      "LocalOperatorPolicyRule": {
+        "additionalProperties": false,
+        "properties": {
+          "actions": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Actions",
+            "type": "array"
+          },
+          "contexts": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Contexts",
+            "type": "array"
+          },
+          "instances": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Instances",
+            "type": "array"
+          },
+          "managed_rule_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Managed Rule Id"
+          },
+          "managed_set_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Managed Set Id"
+          },
+          "products": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Products",
+            "type": "array"
+          },
+          "subjects": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Subjects",
+            "type": "array"
+          },
+          "token_labels": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Token Labels",
+            "type": "array"
+          }
+        },
+        "title": "LocalOperatorPolicyRule",
+        "type": "object"
+      },
       "ManagedAuthzPolicySetExecutionEvidence": {
         "additionalProperties": false,
         "description": "Redacted policy-record evidence written by the service-internal worker.",
@@ -8776,6 +10992,45 @@
           "schema_version"
         ],
         "title": "ManagedAuthzPolicySetHumanEvidence",
+        "type": "object"
+      },
+      "ManagedAuthzPolicySetProposalInput-Input": {
+        "additionalProperties": false,
+        "properties": {
+          "desired_policy": {
+            "$ref": "#/components/schemas/LaunchplaneAuthzPolicy-Input"
+          },
+          "managed_set_id": {
+            "maxLength": 96,
+            "minLength": 1,
+            "title": "Managed Set Id",
+            "type": "string"
+          },
+          "reason": {
+            "maxLength": 240,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          },
+          "related_issue": {
+            "default": "",
+            "maxLength": 128,
+            "title": "Related Issue",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "managed_set_id",
+          "desired_policy",
+          "reason"
+        ],
+        "title": "ManagedAuthzPolicySetProposalInput",
         "type": "object"
       },
       "ManagedAuthzPolicySetProposalInput-Output": {
@@ -14649,6 +16904,56 @@
           "trace_id"
         ],
         "title": "PrivilegedOperationListResponse",
+        "type": "object"
+      },
+      "PrivilegedOperationPlanEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "descriptor_id": {
+            "default": "managed-secret-reencryption",
+            "enum": [
+              "managed-secret-reencryption",
+              "managed-authz-policy-set"
+            ],
+            "title": "Descriptor Id",
+            "type": "string"
+          },
+          "expires_in_seconds": {
+            "default": 1800,
+            "maximum": 86400,
+            "minimum": 300,
+            "title": "Expires In Seconds",
+            "type": "integer"
+          },
+          "request": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ManagedSecretReencryptionPlanInput"
+              },
+              {
+                "$ref": "#/components/schemas/ManagedAuthzPolicySetProposalInput-Input"
+              }
+            ],
+            "title": "Request"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "source_event_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Source Event Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_event_id",
+          "request"
+        ],
+        "title": "PrivilegedOperationPlanEnvelope",
         "type": "object"
       },
       "PrivilegedOperationRecord": {
@@ -23232,6 +25537,108 @@
           "technical_human_waiver",
           "trusted_maintenance"
         ]
+      },
+      "TerminalAgentAccessPrincipal": {
+        "additionalProperties": false,
+        "properties": {
+          "principal_type": {
+            "const": "terminal_agent",
+            "default": "terminal_agent",
+            "title": "Principal Type",
+            "type": "string"
+          },
+          "subject": {
+            "title": "Subject",
+            "type": "string"
+          },
+          "token_label": {
+            "title": "Token Label",
+            "type": "string"
+          }
+        },
+        "required": [
+          "subject",
+          "token_label"
+        ],
+        "title": "TerminalAgentAccessPrincipal",
+        "type": "object"
+      },
+      "TerminalAgentPolicyRule": {
+        "additionalProperties": false,
+        "properties": {
+          "actions": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Actions",
+            "type": "array"
+          },
+          "contexts": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Contexts",
+            "type": "array"
+          },
+          "instances": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Instances",
+            "type": "array"
+          },
+          "managed_rule_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Managed Rule Id"
+          },
+          "managed_set_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Managed Set Id"
+          },
+          "products": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Products",
+            "type": "array"
+          },
+          "subjects": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Subjects",
+            "type": "array"
+          },
+          "token_labels": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Token Labels",
+            "type": "array"
+          }
+        },
+        "title": "TerminalAgentPolicyRule",
+        "type": "object"
       },
       "WorkGraphIssueInboxResponse": {
         "additionalProperties": false,

@@ -213,11 +213,19 @@ class DocsContractsTests(TestCase):
             set(read_operations) | set(write_operations),
             set(ui_openapi["paths"]),
         )
+        for route_path in set(read_operations) | set(write_operations):
+            expected_methods = {
+                method
+                for method, operations in (
+                    ("get", read_operations),
+                    ("post", write_operations),
+                )
+                if route_path in operations
+            }
+            self.assertEqual(set(ui_openapi["paths"][route_path]), expected_methods)
         for route_path, operation_id in read_operations.items():
-            self.assertEqual(set(ui_openapi["paths"][route_path]), {"get"})
             self.assertEqual(ui_openapi["paths"][route_path]["get"]["operationId"], operation_id)
         for route_path, operation_id in write_operations.items():
-            self.assertEqual(set(ui_openapi["paths"][route_path]), {"post"})
             self.assertEqual(ui_openapi["paths"][route_path]["post"]["operationId"], operation_id)
         for generated_alias in (
             "export type AuthSessionPayload = AuthSessionResponse",

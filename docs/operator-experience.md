@@ -302,13 +302,18 @@ adjacent policy snapshots and only emits a clearly labeled legacy change when a
 product-specific effect can be proven; otherwise it omits the record.
 
 Authorization administration is a DB-backed operator surface, not a raw policy
-browser. Eligible administrators can inspect redacted active-policy health and
-bounded revision history. A separately authorized GitHub-human administrator
-can export the canonical active policy or prepare a historical managed-set
-rollback for the existing privileged-operation submission flow. These reads do
-not grant access by landing, do not rotate browser session or CSRF state, and do
-not make a live apply available without the existing approval stop. Total
-lockout and break-glass recovery remain deferred.
+browser. The `/ui/engineering/authorization-administration` route keeps active
+policy inspection, exact effective-access evaluation, denial explanation,
+managed-set proposal and removal, forward-only rollback preparation, revision
+history, and guarded export visibly separate. A denied administration read does
+not hide the independently grantable effective-access or support-reader tools.
+Eligible administrators can inspect redacted active-policy health and bounded
+revision history. A separately authorized GitHub-human administrator can export
+the canonical active policy or prepare a historical managed-set rollback for
+the existing privileged-operation submission flow. These reads do not grant
+access by landing, do not rotate browser session or CSRF state, and do not make
+a live apply available without the existing approval stop. Total lockout and
+break-glass recovery remain deferred.
 
 Product environment config status compares product-profile expected config
 requirements against recorded runtime-environment keys and managed secret

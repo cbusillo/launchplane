@@ -1,8 +1,11 @@
 import type {
   ApplyProductEnvironmentConfigData,
   ApproveHumanPrivilegedOperationData,
+  BuildAuthzManagedSetRollbackProposalData,
   DispatchProductPromotionWorkflowData,
   DryRunProductPromotionData,
+  EvaluateEffectiveAccessData,
+  PlanPrivilegedOperationData,
   RankWorkGraphSnapshotData,
   RevokeHumanPrivilegedOperationData,
   WriteOwnerAcceptanceEventData,
@@ -21,8 +24,14 @@ export const BROWSER_WRITE_ROUTES = {
     "/v1/owner-acceptance/events" satisfies WriteOwnerAcceptanceEventData["url"],
   privilegedOperationApprove:
     "/v1/privileged-operations/plans/{operation_id}/approve" satisfies ApproveHumanPrivilegedOperationData["url"],
+  privilegedOperationPlan:
+    "/v1/privileged-operations/plans" satisfies PlanPrivilegedOperationData["url"],
   privilegedOperationRevoke:
     "/v1/privileged-operations/plans/{operation_id}/revoke" satisfies RevokeHumanPrivilegedOperationData["url"],
+  authzManagedSetRollbackProposal:
+    "/v1/authz-policies/managed-rule-sets/rollback-proposal" satisfies BuildAuthzManagedSetRollbackProposalData["url"],
+  authzEffectiveAccessEvaluate:
+    "/v1/authz-diagnostics/effective-access/evaluate" satisfies EvaluateEffectiveAccessData["url"],
 } as const;
 
 export type BrowserWriteRoute =

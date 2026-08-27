@@ -9,10 +9,22 @@ import type {
   ApplyProductEnvironmentConfigResponse,
   ApproveHumanPrivilegedOperationData,
   ApproveHumanPrivilegedOperationResponse,
+  AuthzActivePolicyExportResponse,
+  AuthzDenialExplanationResponse,
+  AuthzManagedSetRollbackProposalRequest,
+  AuthzManagedSetRollbackProposalResponse,
+  AuthzPolicyAdministrationReadResponse,
+  AuthzPolicyRevisionHistoryResponse,
+  BuildAuthzManagedSetRollbackProposalData,
+  BuildAuthzManagedSetRollbackProposalResponse,
   DispatchProductPromotionWorkflowData,
   DispatchProductPromotionWorkflowResponse,
   DryRunProductPromotionData,
   DryRunProductPromotionResponse,
+  EffectiveAccessEvaluateRequest,
+  EffectiveAccessEvaluateResponse,
+  EvaluateEffectiveAccessData,
+  EvaluateEffectiveAccessResponse,
   EveryCodeSummaryResponse,
   EvaluateOwnerAcceptanceResponse,
   GovernanceProjectionResponse,
@@ -27,6 +39,8 @@ import type {
   OwnerAcceptanceDecision,
   OwnerAcceptanceEventResponse,
   OwnerAcceptanceProductDecision,
+  PlanPrivilegedOperationData,
+  PlanPrivilegedOperationResponse,
   ProductActivityResponse,
   ProductEnvironmentConfigStatusResponse,
   ProductEnvironmentIncidentResponse,
@@ -38,6 +52,7 @@ import type {
   ProductPromotionWorkflowDeliveryStatusResponse,
   PrivilegedOperationHumanResponse,
   PrivilegedOperationListResponse,
+  PrivilegedOperationPlanEnvelope,
   PrivilegedOperationRecord,
   RankWorkGraphSnapshotData,
   RankWorkGraphSnapshotResponse,
@@ -99,6 +114,32 @@ async function requestJson<T>(
       signal,
       session.csrf_token,
       idempotencyKey,
+    );
+  });
+  browserMutationQueue = queuedRequest.then(
+    () => undefined,
+    () => undefined,
+  );
+  return queuedRequest;
+}
+
+async function requestSensitiveJson<T>(
+  path: string,
+  signal?: AbortSignal,
+): Promise<T> {
+  const queuedRequest = browserMutationQueue.then(async () => {
+    const session = await performJsonRequest<AuthSessionPayload>(
+      "/v1/auth/session",
+      "GET",
+      undefined,
+      signal,
+    );
+    return performJsonRequest<T>(
+      path,
+      "GET",
+      undefined,
+      signal,
+      session.csrf_token,
     );
   });
   browserMutationQueue = queuedRequest.then(
@@ -605,7 +646,94 @@ export function writeOwnerAcceptanceEvent(
   }));
 }
 
-export type { PrivilegedOperationListResponse, PrivilegedOperationRecord };
+export type {
+  AuthzActivePolicyExportResponse,
+  AuthzDenialExplanationResponse,
+  AuthzManagedSetRollbackProposalRequest,
+  AuthzManagedSetRollbackProposalResponse,
+  AuthzPolicyAdministrationReadResponse,
+  AuthzPolicyRevisionHistoryResponse,
+  EffectiveAccessEvaluateRequest,
+  EffectiveAccessEvaluateResponse,
+  PrivilegedOperationListResponse,
+  PrivilegedOperationPlanEnvelope,
+  PrivilegedOperationRecord,
+};
+
+export function readAuthzPolicyAdministration(
+  signal?: AbortSignal,
+): Promise<AuthzPolicyAdministrationReadResponse> {
+  return requestSensitiveJson<AuthzPolicyAdministrationReadResponse>(
+    "/v1/authz-policies/administration",
+    signal,
+  );
+}
+
+export function readAuthzPolicyRevisionHistory(
+  signal?: AbortSignal,
+): Promise<AuthzPolicyRevisionHistoryResponse> {
+  return requestSensitiveJson<AuthzPolicyRevisionHistoryResponse>(
+    "/v1/authz-policies/revisions",
+    signal,
+  );
+}
+
+export function exportActiveAuthzPolicy(
+  signal?: AbortSignal,
+): Promise<AuthzActivePolicyExportResponse> {
+  return requestSensitiveJson<AuthzActivePolicyExportResponse>(
+    "/v1/authz-policies/active/export",
+    signal,
+  );
+}
+
+export function explainAuthzDenial(
+  traceId: string,
+  signal?: AbortSignal,
+): Promise<AuthzDenialExplanationResponse> {
+  return requestJson<AuthzDenialExplanationResponse>(
+    `/v1/authz-diagnostics/denials/${encodeURIComponent(traceId)}`,
+    "GET",
+    undefined,
+    signal,
+  );
+}
+
+export function evaluateEffectiveAccess(
+  body: EffectiveAccessEvaluateRequest,
+  signal?: AbortSignal,
+): Promise<EffectiveAccessEvaluateResponse> {
+  const request: EvaluateEffectiveAccessData = {
+    url: BROWSER_WRITE_ROUTES.authzEffectiveAccessEvaluate,
+    body,
+  };
+  return requestGeneratedPost<EvaluateEffectiveAccessResponse>(request, signal);
+}
+
+export function buildAuthzManagedSetRollbackProposal(
+  body: AuthzManagedSetRollbackProposalRequest,
+  signal?: AbortSignal,
+): Promise<AuthzManagedSetRollbackProposalResponse> {
+  const request: BuildAuthzManagedSetRollbackProposalData = {
+    url: BROWSER_WRITE_ROUTES.authzManagedSetRollbackProposal,
+    body,
+  };
+  return requestGeneratedPost<BuildAuthzManagedSetRollbackProposalResponse>(
+    request,
+    signal,
+  );
+}
+
+export function planPrivilegedOperation(
+  body: PrivilegedOperationPlanEnvelope,
+  signal?: AbortSignal,
+): Promise<PrivilegedOperationHumanResponse> {
+  const request: PlanPrivilegedOperationData = {
+    url: BROWSER_WRITE_ROUTES.privilegedOperationPlan,
+    body,
+  };
+  return requestGeneratedPost<PlanPrivilegedOperationResponse>(request, signal);
+}
 
 export type PrivilegedOperationDescriptorId = NonNullable<
   ListHumanPrivilegedOperationsData["query"]

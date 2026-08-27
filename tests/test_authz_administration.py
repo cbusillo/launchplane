@@ -8,7 +8,10 @@ from typing import Literal, cast
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-from control_plane.contracts.authz_administration import AUTHZ_POLICY_ADMINISTRATION_READ_ACTION
+from control_plane.contracts.authz_administration import (
+    AUTHZ_POLICY_ADMINISTRATION_HISTORY_LIMIT,
+    AUTHZ_POLICY_ADMINISTRATION_READ_ACTION,
+)
 from control_plane.contracts.authz_policy_record import (
     LaunchplaneAuthzPolicyRecord,
     authz_policy_sha256,
@@ -20,7 +23,11 @@ from control_plane.http_routes.authz_administration import (
     register_authz_administration_routes,
 )
 from control_plane.http_routes.support import ApiRouteRegistrar, ReadRouteDependencies
-from control_plane.service_auth import GitHubHumanIdentity, LaunchplaneAuthzPolicy
+from control_plane.service_auth import (
+    GitHubHumanIdentity,
+    LaunchplaneAuthzPolicy,
+    LaunchplaneIdentity,
+)
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.support.http import lifespan_client
 
@@ -84,6 +91,18 @@ def _identity() -> GitHubHumanIdentity:
     )
 
 
+def _read_only_identity() -> GitHubHumanIdentity:
+    return GitHubHumanIdentity(
+        login="reader",
+        github_id=202,
+        name="Reader",
+        email="reader@example.test",
+        organizations=frozenset(),
+        teams=frozenset(),
+        role="read_only",
+    )
+
+
 class _ErrorResponse(BaseModel):
     trace_id: str
 
@@ -101,10 +120,16 @@ def _http_error(
     )
 
 
-def _app(*, store: PostgresRecordStore, policy: LaunchplaneAuthzPolicy) -> FastAPI:
+def _app(
+    *,
+    store: PostgresRecordStore,
+    policy: LaunchplaneAuthzPolicy,
+    identity: LaunchplaneIdentity | None = None,
+) -> FastAPI:
+    resolved_identity = identity or _identity()
     app = FastAPI()
     common = ReadRouteDependencies(
-        read_identity=lambda: _identity(),
+        read_identity=lambda: resolved_identity,
         get_record_store=lambda: store,
         next_trace_id=lambda: "trace-authz-administration",
         authorization_allows=policy.allows,
@@ -115,7 +140,8 @@ def _app(*, store: PostgresRecordStore, policy: LaunchplaneAuthzPolicy) -> FastA
         cast(ApiRouteRegistrar, app),
         dependencies=AuthzAdministrationRouteDependencies(
             common=common,
-            read_nonrenewing_identity=lambda: _identity(),
+            read_sensitive_identity=lambda: resolved_identity,
+            read_browser_mutation_identity=lambda: resolved_identity,
             runtime_policy_reader=lambda: policy,
         ),
     )
@@ -181,6 +207,92 @@ class AuthzAdministrationRouteTests(unittest.IsolatedAsyncioTestCase):
             "historical-admin",
         )
         self.assertEqual(before, after)
+
+    async def test_administration_routes_reject_nonadministrator_humans(self) -> None:
+        identity = _read_only_identity()
+        with TemporaryDirectory() as directory:
+            store = PostgresRecordStore(
+                database_url=f"sqlite+pysqlite:///{Path(directory) / 'db.sqlite3'}"
+            )
+            store.ensure_schema()
+            policy = _policy(managed_rule_id="active-admin")
+            store.seed_authz_policy_if_absent(_record(policy=policy, revision=1))
+            app = _app(store=store, policy=policy, identity=identity)
+            async with lifespan_client(app) as client:
+                responses = (
+                    await client.get("/v1/authz-policies/administration"),
+                    await client.get("/v1/authz-policies/revisions"),
+                    await client.get("/v1/authz-policies/active/export"),
+                    await client.post(
+                        "/v1/authz-policies/managed-rule-sets/rollback-proposal",
+                        json={
+                            "target_revision": 1,
+                            "managed_set_id": "admin.set",
+                            "reason": "Rejected rollback",
+                            "source_event_id": "rollback-proposal-denied",
+                        },
+                    ),
+                )
+            store.close()
+
+        self.assertTrue(all(response.status_code == 403 for response in responses))
+
+    async def test_rollback_proposal_cannot_read_beyond_bounded_history(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = PostgresRecordStore(
+                database_url=f"sqlite+pysqlite:///{Path(directory) / 'db.sqlite3'}"
+            )
+            store.ensure_schema()
+            current_record = store.seed_authz_policy_if_absent(
+                _record(policy=_policy(managed_rule_id="admin-r1"), revision=1)
+            )
+            active_policy = current_record.policy
+            for revision in range(2, AUTHZ_POLICY_ADMINISTRATION_HISTORY_LIMIT + 2):
+                active_policy = _policy(managed_rule_id=f"admin-r{revision}")
+                replacement = _record(policy=active_policy, revision=revision)
+                store.compare_and_write_authz_policy_record(
+                    expected_record=current_record,
+                    replacement_record=replacement,
+                )
+                current_record = replacement
+            app = _app(store=store, policy=active_policy)
+            async with lifespan_client(app) as client:
+                response = await client.post(
+                    "/v1/authz-policies/managed-rule-sets/rollback-proposal",
+                    json={
+                        "target_revision": 1,
+                        "managed_set_id": "admin.set",
+                        "reason": "Too old for bounded rollback history",
+                        "source_event_id": "rollback-proposal-too-old",
+                    },
+                )
+            store.close()
+
+        self.assertEqual(response.status_code, 404, response.text)
+
+    async def test_rollback_proposal_rejects_an_invalid_managed_set_id(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = PostgresRecordStore(
+                database_url=f"sqlite+pysqlite:///{Path(directory) / 'db.sqlite3'}"
+            )
+            store.ensure_schema()
+            policy = _policy(managed_rule_id="active-admin")
+            store.seed_authz_policy_if_absent(_record(policy=policy, revision=1))
+            app = _app(store=store, policy=policy)
+            async with lifespan_client(app) as client:
+                response = await client.post(
+                    "/v1/authz-policies/managed-rule-sets/rollback-proposal",
+                    json={
+                        "target_revision": 1,
+                        "managed_set_id": "Invalid Set!",
+                        "reason": "Reject an invalid managed set identifier",
+                        "source_event_id": "rollback-proposal-invalid-set",
+                    },
+                )
+            store.close()
+
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertEqual(response.json()["detail"]["code"], "authz_managed_set_invalid")
 
     async def test_export_requires_existing_managed_proposal_authority(self) -> None:
         with TemporaryDirectory() as directory:

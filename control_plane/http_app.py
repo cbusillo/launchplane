@@ -730,6 +730,7 @@ from control_plane.service_human_auth import (
     build_pkce_verifier,
     safe_oauth_return_to,
     validate_browser_mutation_request_headers,
+    validate_browser_sensitive_read_request_headers,
 )
 from control_plane.storage.factory import build_shared_record_store
 from control_plane.storage.factory import storage_backend_name
@@ -4385,18 +4386,6 @@ def create_launchplane_fastapi_app(
             return identity
         raise _authentication_required_error("Authorization header is required.")
 
-    def read_nonrenewing_identity(
-        authorization: Annotated[str, Header(alias="Authorization")] = "",
-        cookie: Annotated[str, Header(alias="Cookie")] = "",
-    ) -> LaunchplaneIdentity:
-        bearer_identity = resolve_bearer_identity(authorization)
-        if bearer_identity is not None:
-            return bearer_identity
-        session = read_nonrenewing_human_session(cookie_header=cookie)
-        if session is not None:
-            return session.identity
-        raise _authentication_required_error("Authorization header is required.")
-
     def read_browser_mutation_identity(
         request: Request,
         response: Response,
@@ -4450,6 +4439,32 @@ def create_launchplane_fastapi_app(
             raise _authentication_required_error("Authorization header is required.")
         try:
             csrf_token = validate_browser_mutation_request_headers(
+                expected_origin=human_session_manager.public_origin,
+                origin_values=tuple(request.headers.getlist("Origin")),
+                sec_fetch_site_values=tuple(request.headers.getlist("Sec-Fetch-Site")),
+                sec_fetch_mode_values=tuple(request.headers.getlist("Sec-Fetch-Mode")),
+                sec_fetch_dest_values=tuple(request.headers.getlist("Sec-Fetch-Dest")),
+                csrf_token_values=tuple(request.headers.getlist(BROWSER_CSRF_HEADER_NAME)),
+            )
+        except (PermissionError, ValueError):
+            reject_browser_mutation()
+        if not human_session_manager.csrf_token_is_valid(session, csrf_token):
+            reject_browser_mutation()
+        return session.identity
+
+    def read_nonpersisting_sensitive_read_identity(
+        request: Request,
+        authorization: Annotated[str, Header(alias="Authorization")] = "",
+        cookie: Annotated[str, Header(alias="Cookie")] = "",
+    ) -> LaunchplaneIdentity:
+        bearer_identity = resolve_bearer_identity(authorization)
+        if bearer_identity is not None:
+            return bearer_identity
+        session = read_nonrenewing_human_session(cookie_header=cookie)
+        if session is None or human_session_manager is None:
+            raise _authentication_required_error("Authorization header is required.")
+        try:
+            csrf_token = validate_browser_sensitive_read_request_headers(
                 expected_origin=human_session_manager.public_origin,
                 origin_values=tuple(request.headers.getlist("Origin")),
                 sec_fetch_site_values=tuple(request.headers.getlist("Sec-Fetch-Site")),
@@ -21866,7 +21881,8 @@ def create_launchplane_fastapi_app(
         app,
         dependencies=AuthzAdministrationRouteDependencies(
             common=read_route_dependencies,
-            read_nonrenewing_identity=read_nonrenewing_identity,
+            read_sensitive_identity=read_nonpersisting_sensitive_read_identity,
+            read_browser_mutation_identity=read_browser_mutation_identity,
             runtime_policy_reader=lambda: resolved_authz_policy_runtime.policy,
         ),
     )

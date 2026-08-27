@@ -7,9 +7,10 @@ from typing import Annotated
 from fastapi import Depends, Response
 
 from control_plane.authz_grant_service import (
-    _authz_policy_principal_rule_counts,
-    _authz_policy_rule_collections,
-    _authz_rule_sha256,
+    AuthzPolicyRequestError,
+    authz_policy_principal_rule_counts,
+    authz_policy_rule_collections,
+    authz_rule_sha256,
     export_managed_authz_policy_set,
     summarize_active_authz_policy_health_record,
 )
@@ -58,7 +59,8 @@ AUTHZ_MANAGED_SET_ROLLBACK_PROPOSAL_ROUTE = "/v1/authz-policies/managed-rule-set
 @dataclass(frozen=True, slots=True)
 class AuthzAdministrationRouteDependencies:
     common: ReadRouteDependencies
-    read_nonrenewing_identity: Callable[..., LaunchplaneIdentity]
+    read_sensitive_identity: Callable[..., LaunchplaneIdentity]
+    read_browser_mutation_identity: Callable[..., LaunchplaneIdentity]
     runtime_policy_reader: Callable[[], LaunchplaneAuthzPolicy]
 
 
@@ -90,15 +92,7 @@ def register_authz_administration_routes(
                 code="database_storage_required",
                 message="Authz policy administration reads require database record storage.",
             )
-        list_records = getattr(record_store, "list_authz_policy_records", None)
-        if not callable(list_records):
-            raise dependencies.common.http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="database_storage_required",
-                message="Authz policy administration reads require database record storage.",
-            )
-        records = tuple(list_records(status="active", limit=2))
+        records = record_store.list_authz_policy_records(status="active", limit=2)
         if not records:
             raise dependencies.common.http_error(
                 status_code=503,
@@ -121,12 +115,13 @@ def register_authz_administration_routes(
         eligible = isinstance(identity, LocalAdminIdentity) or (
             isinstance(identity, GitHubHumanIdentity) and identity.role == "admin"
         )
-        if not eligible or not dependencies.runtime_policy_reader().allows(
+        runtime_evaluation = dependencies.runtime_policy_reader().evaluate(
             identity=identity,
             action=AUTHZ_POLICY_ADMINISTRATION_READ_ACTION,
             product="launchplane",
             context="launchplane",
-        ):
+        )
+        if not eligible or runtime_evaluation.decision != "allowed":
             raise dependencies.common.http_error(
                 status_code=403,
                 trace_id=trace_id,
@@ -151,19 +146,17 @@ def register_authz_administration_routes(
     def require_proposal_authority(
         *, identity: LaunchplaneIdentity, active_record: LaunchplaneAuthzPolicyRecord, trace_id: str
     ) -> None:
-        if not isinstance(identity, GitHubHumanIdentity) or identity.role != "admin":
-            raise dependencies.common.http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="authorization_denied",
-                message="This operation requires a GitHub-human administrator.",
-            )
-        if not dependencies.runtime_policy_reader().allows(
+        runtime_evaluation = dependencies.runtime_policy_reader().evaluate(
             identity=identity,
             action=AUTHZ_POLICY_OPERATION_PROPOSE_ACTION,
             product="launchplane",
             context="launchplane",
             target=AuthorizationTarget(scope="global"),
+        )
+        if (
+            not isinstance(identity, GitHubHumanIdentity)
+            or identity.role != "admin"
+            or runtime_evaluation.decision != "allowed"
         ):
             raise dependencies.common.http_error(
                 status_code=403,
@@ -196,9 +189,9 @@ def register_authz_administration_routes(
                 managed_set_id=rule.managed_set_id,
                 managed_rule_id=rule.managed_rule_id,
                 principal_type=principal_type,
-                rule_sha256=_authz_rule_sha256(rule),
+                rule_sha256=authz_rule_sha256(rule),
             )
-            for principal_type, rules in _authz_policy_rule_collections(record.policy)
+            for principal_type, rules in authz_policy_rule_collections(record.policy)
             for rule in rules
             if rule.managed_set_id is not None and rule.managed_rule_id is not None
         )
@@ -230,19 +223,24 @@ def register_authz_administration_routes(
             else {}
         )
         changed = audit.get("changed")
+
+        def audit_text(field_name: str) -> str:
+            value = audit.get(field_name)
+            return value if isinstance(value, str) else ""
+
         return AuthzPolicyRevisionAuditSummary(
             audit_present=True,
             audit_sha256=hashlib.sha256(serialized.encode()).hexdigest(),
-            operation=str(audit.get("operation") or ""),
-            mode=str(audit.get("mode") or ""),
-            managed_set_id=str(audit.get("managed_set_id") or ""),
+            operation=audit_text("operation"),
+            mode=audit_text("mode"),
+            managed_set_id=audit_text("managed_set_id"),
             changed=changed if isinstance(changed, bool) else None,
             diff_counts=diff_counts,
         )
 
     def read_administration(
         response: Response,
-        identity: Annotated[LaunchplaneIdentity, Depends(dependencies.read_nonrenewing_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(dependencies.read_sensitive_identity)],
         record_store: Annotated[object, Depends(dependencies.common.get_record_store)],
     ) -> AuthzPolicyAdministrationReadResponse:
         trace_id = dependencies.common.next_trace_id()
@@ -256,7 +254,7 @@ def register_authz_administration_routes(
         return AuthzPolicyAdministrationReadResponse(
             trace_id=trace_id,
             policy=policy_provenance(active_record),
-            principal_rule_counts=_authz_policy_principal_rule_counts(active_record.policy),
+            principal_rule_counts=authz_policy_principal_rule_counts(active_record.policy),
             health=snapshot.health,
             managed_sets=snapshot.managed_sets,
             reachable_administrators=snapshot.reachable_administrators,
@@ -265,14 +263,16 @@ def register_authz_administration_routes(
 
     def read_history(
         response: Response,
-        identity: Annotated[LaunchplaneIdentity, Depends(dependencies.read_nonrenewing_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(dependencies.read_sensitive_identity)],
         record_store: Annotated[object, Depends(dependencies.common.get_record_store)],
     ) -> AuthzPolicyRevisionHistoryResponse:
         trace_id = dependencies.common.next_trace_id()
         response.headers["Cache-Control"] = "no-store"
         require_administration_read(identity=identity, record_store=record_store, trace_id=trace_id)
-        list_records = getattr(record_store, "list_authz_policy_records")
-        records = tuple(list_records(limit=AUTHZ_POLICY_ADMINISTRATION_HISTORY_LIMIT + 1))
+        assert isinstance(record_store, PostgresRecordStore)
+        records = record_store.list_authz_policy_records(
+            limit=AUTHZ_POLICY_ADMINISTRATION_HISTORY_LIMIT + 1
+        )
         bounded_records = tuple(
             LaunchplaneAuthzPolicyRecord.model_validate(record)
             for record in records[:AUTHZ_POLICY_ADMINISTRATION_HISTORY_LIMIT]
@@ -291,7 +291,7 @@ def register_authz_administration_routes(
 
     def export_active_policy(
         response: Response,
-        identity: Annotated[LaunchplaneIdentity, Depends(dependencies.read_nonrenewing_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(dependencies.read_sensitive_identity)],
         record_store: Annotated[object, Depends(dependencies.common.get_record_store)],
     ) -> AuthzActivePolicyExportResponse:
         trace_id = dependencies.common.next_trace_id()
@@ -311,7 +311,10 @@ def register_authz_administration_routes(
     def build_rollback_proposal(
         request: AuthzManagedSetRollbackProposalRequest,
         response: Response,
-        identity: Annotated[LaunchplaneIdentity, Depends(dependencies.read_nonrenewing_identity)],
+        identity: Annotated[
+            LaunchplaneIdentity,
+            Depends(dependencies.read_browser_mutation_identity),
+        ],
         record_store: Annotated[object, Depends(dependencies.common.get_record_store)],
     ) -> AuthzManagedSetRollbackProposalResponse:
         trace_id = dependencies.common.next_trace_id()
@@ -322,10 +325,12 @@ def register_authz_administration_routes(
         require_proposal_authority(
             identity=identity, active_record=active_record, trace_id=trace_id
         )
-        list_records = getattr(record_store, "list_authz_policy_records")
+        assert isinstance(record_store, PostgresRecordStore)
         records = tuple(
             LaunchplaneAuthzPolicyRecord.model_validate(record)
-            for record in list_records(limit=AUTHZ_POLICY_ADMINISTRATION_HISTORY_LIMIT)
+            for record in record_store.list_authz_policy_records(
+                limit=AUTHZ_POLICY_ADMINISTRATION_HISTORY_LIMIT
+            )
         )
         target_record = next(
             (record for record in records if record.revision == request.target_revision), None
@@ -342,6 +347,13 @@ def register_authz_administration_routes(
                 policy=target_record.policy,
                 managed_set_id=request.managed_set_id,
             )
+        except AuthzPolicyRequestError as error:
+            raise dependencies.common.http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="authz_managed_set_invalid",
+                message=str(error),
+            ) from error
         except LookupError as error:
             raise dependencies.common.http_error(
                 status_code=404,
@@ -404,5 +416,8 @@ def register_authz_administration_routes(
         response_model=AuthzManagedSetRollbackProposalResponse,
         operation_id="build_authz_managed_set_rollback_proposal",
         summary="Build a managed authorization rollback proposal for existing submission",
-        responses=responses,
+        responses={
+            **responses,
+            400: {"model": dependencies.common.error_response_model},
+        },
     )

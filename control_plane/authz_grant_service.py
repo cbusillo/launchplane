@@ -1030,6 +1030,22 @@ def _authz_policy_principal_rule_counts(
     )
 
 
+def authz_policy_principal_rule_counts(
+    policy: LaunchplaneAuthzPolicy,
+) -> AuthzPrincipalRuleCounts:
+    return _authz_policy_principal_rule_counts(policy)
+
+
+def authz_policy_rule_collections(
+    policy: LaunchplaneAuthzPolicy,
+) -> tuple[tuple[AuthzPrincipalType, tuple[AuthzPolicyRule, ...]], ...]:
+    return _authz_policy_rule_collections(policy)
+
+
+def authz_rule_sha256(rule: AuthzPolicyRule) -> str:
+    return _authz_rule_sha256(rule)
+
+
 def _authz_policy_managed_rule_entries(
     policy: LaunchplaneAuthzPolicy,
 ) -> dict[tuple[str, str], AuthzPolicyRuleEntry]:

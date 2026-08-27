@@ -649,6 +649,48 @@ def validate_browser_mutation_request_headers(
     return csrf_token
 
 
+def validate_browser_sensitive_read_request_headers(
+    *,
+    expected_origin: str,
+    origin_values: tuple[str, ...],
+    sec_fetch_site_values: tuple[str, ...],
+    sec_fetch_mode_values: tuple[str, ...],
+    sec_fetch_dest_values: tuple[str, ...],
+    csrf_token_values: tuple[str, ...],
+) -> str:
+    if len(origin_values) > 1 or not all(
+        len(values) == 1
+        for values in (
+            sec_fetch_site_values,
+            sec_fetch_mode_values,
+            sec_fetch_dest_values,
+            csrf_token_values,
+        )
+    ):
+        raise PermissionError("Browser sensitive read request metadata is invalid.")
+    if origin_values:
+        origin = origin_values[0].strip()
+        parsed_origin = urlsplit(origin)
+        if parsed_origin.path not in {"", "/"} or parsed_origin.query or parsed_origin.fragment:
+            raise PermissionError("Browser sensitive read request metadata is invalid.")
+        try:
+            normalized_origin = browser_origin_from_url(origin)
+        except ValueError as error:
+            raise PermissionError("Browser sensitive read request metadata is invalid.") from error
+        if normalized_origin != expected_origin:
+            raise PermissionError("Browser sensitive read request metadata is invalid.")
+    if sec_fetch_site_values[0].strip().lower() != "same-origin":
+        raise PermissionError("Browser sensitive read request metadata is invalid.")
+    if sec_fetch_mode_values[0].strip().lower() not in {"cors", "same-origin"}:
+        raise PermissionError("Browser sensitive read request metadata is invalid.")
+    if sec_fetch_dest_values[0].strip().lower() != "empty":
+        raise PermissionError("Browser sensitive read request metadata is invalid.")
+    csrf_token = csrf_token_values[0].strip()
+    if not csrf_token:
+        raise PermissionError("Browser sensitive read request metadata is invalid.")
+    return csrf_token
+
+
 def _csrf_token_generation(token: str) -> int | None:
     if len(token) > 256:
         return None

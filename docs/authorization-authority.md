@@ -123,7 +123,9 @@ administrators. It returns typed redacted provenance, health, managed-set and
 principal counts, reachable-administrator evidence, and bounded managed-rule
 identities only; it never returns selectors or unrelated principal values.
 Revision history is similarly bounded and redacts audit metadata to provenance,
-audit digest, and approved count fields.
+audit digest, and approved count fields. Browser-session reads of these
+sensitive administration routes require same-origin fetch metadata plus the
+session CSRF token; bearer callers retain the ordinary non-browser path.
 
 Full active-policy export is read-only, `no-store`, and requires a GitHub-human
 administrator with the existing exact managed `authz_policy_operation.propose`
@@ -260,7 +262,11 @@ matching semantics until a reviewed migration replaces wildcard or implicit
 selectors, while all newly reconciled managed human rules require explicit
 roles, explicit principals, exact selectors, and immutable IDs for sensitive
 access. Changed applies must also retain a policy administrator independent from
-the applying identity. Any future break-glass design must be separately approved
+the applying identity. Continuity recognizes only an immutable-ID-bound GitHub
+human rule with the literal `authz_policy_grant.write` action and exact
+`launchplane` product/context selectors; action-empty, wildcard-action,
+wildcard-selector, workflow, terminal, operator, and local-admin rules cannot
+satisfy that independent-administrator predicate. Any future break-glass design must be separately approved
 by the owner before implementation, use an independent credential and approval
 boundary, bind the expected active policy digest, make the smallest recoverable
 change, append audit evidence, and require normalization through the ordinary

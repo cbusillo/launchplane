@@ -14,6 +14,7 @@ import { EngineeringIssueInboxRoute } from "./EngineeringIssueInboxRoute";
 import { EngineeringMergeTrainRoute } from "./EngineeringMergeTrainRoute";
 import { EngineeringGovernanceProjectionRoute } from "./EngineeringGovernanceProjectionRoute";
 import { EngineeringOwnerAcceptanceRoute } from "./EngineeringOwnerAcceptanceRoute";
+import { EngineeringAuthorizationAdministrationRoute } from "./EngineeringAuthorizationAdministrationRoute";
 import { EngineeringPrivilegedOperationsRoute } from "./EngineeringPrivilegedOperationsRoute";
 import { EngineeringTenantAdmissionRoute } from "./EngineeringTenantAdmissionRoute";
 import { EngineeringRouteFrame } from "./EngineeringRouteUi";
@@ -27,6 +28,14 @@ import {
 import type { DevFixtureMode } from "./dev-fixture-loader";
 
 const ENGINEERING_SURFACES = [
+  {
+    detail:
+      "Inspect active DB policy, evaluate exact access, explain denials, and prepare reviewed proposals or forward rollback.",
+    icon: ShieldCheck,
+    label: "Read + reviewed proposals",
+    title: "Authorization administration",
+    view: "authorization-administration" as const,
+  },
   {
     detail:
       "Inspect authoritative Owner acceptance, current readiness, immutable admission, landing outcome, and GitHub observations without fusing the layers.",
@@ -121,6 +130,9 @@ export function EngineeringOpsRoute({
   if (view === "owner-acceptance") {
     return <EngineeringOwnerAcceptanceRoute fixtureMode={fixtureMode} />;
   }
+  if (view === "authorization-administration") {
+    return <EngineeringAuthorizationAdministrationRoute fixtureMode={fixtureMode} />;
+  }
   if (view === "privileged-operations") {
     return <EngineeringPrivilegedOperationsRoute fixtureMode={fixtureMode} />;
   }
@@ -136,7 +148,7 @@ function EngineeringOpsHub() {
       view="hub"
     >
       <div className="engineering-hub-intro">
-        <strong>Eight independent evidence routes</strong>
+        <strong>Nine independent evidence routes</strong>
         <p>
           Each surface owns its own request lifecycle, direct link, stale-data
           disclosure, refresh failure, and cancellation state. Browser controls

@@ -41020,6 +41020,16 @@
             },
             "description": "Successful Response"
           },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
           "401": {
             "content": {
               "application/json": {
@@ -74931,6 +74941,10 @@
   },
   "x-launchplane-ui-read-operations": {
     "/v1/auth/session": "read_human_auth_session",
+    "/v1/authz-diagnostics/denials/{trace_id}": "explain_authz_denial",
+    "/v1/authz-policies/active/export": "export_active_authz_policy",
+    "/v1/authz-policies/administration": "read_authz_policy_administration",
+    "/v1/authz-policies/revisions": "read_authz_policy_revision_history",
     "/v1/contexts/{context}/driver-view": "read_driver_context_view",
     "/v1/contexts/{context}/instances/{instance}/driver-view": "read_driver_instance_view",
     "/v1/drivers": "read_driver_descriptors",
@@ -74963,7 +74977,10 @@
     "/v1/work-graph/tenant-admission/evaluation": "read_tenant_admission_evaluation"
   },
   "x-launchplane-ui-write-operations": {
+    "/v1/authz-diagnostics/effective-access/evaluate": "evaluate_effective_access",
+    "/v1/authz-policies/managed-rule-sets/rollback-proposal": "build_authz_managed_set_rollback_proposal",
     "/v1/owner-acceptance/events": "write_owner_acceptance_event",
+    "/v1/privileged-operations/plans": "plan_privileged_operation",
     "/v1/privileged-operations/plans/{operation_id}/approve": "approve_human_privileged_operation",
     "/v1/privileged-operations/plans/{operation_id}/revoke": "revoke_human_privileged_operation",
     "/v1/products/{product}/environments/{environment}/config/apply": "apply_product_environment_config",

@@ -224,7 +224,13 @@ class AuthzManagedPolicyServiceTests(unittest.TestCase):
                         "products": ["launchplane"],
                         "contexts": ["launchplane"],
                         "actions": ["authz_policy_*"],
-                    }
+                    },
+                    {
+                        "github_ids": [102],
+                        "roles": ["admin"],
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                    },
                 ],
                 "local_admins": [
                     {
@@ -248,6 +254,12 @@ class AuthzManagedPolicyServiceTests(unittest.TestCase):
             control_plane_authz_grant_service._authz_policy_retains_independent_github_id_administration(
                 policy=legacy_policy,
                 applying_github_id=101,
+            )
+        )
+        self.assertFalse(
+            control_plane_authz_grant_service._authz_policy_allows_immutable_github_id_administration(
+                policy=legacy_policy,
+                github_id=102,
             )
         )
 

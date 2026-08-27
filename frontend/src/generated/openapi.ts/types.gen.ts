@@ -158,6 +158,30 @@ export type AuthSessionResponse = {
     trace_id: string;
 };
 
+export type AuthzActivePolicyExportResponse = {
+    canonical_policy: LaunchplaneAuthzPolicyOutput;
+    policy: AuthzPolicyAdministrationProvenance;
+    status: 'ok';
+    trace_id: string;
+};
+
+export type AuthzDenialExplanationResponse = {
+    action: string;
+    context: string;
+    instance_specified: boolean;
+    policy_record_id: string;
+    policy_revision: number;
+    policy_sha256: string;
+    principal_type: 'github_actions' | 'github_human' | 'terminal_agent' | 'local_operator' | 'local_admin';
+    product: string;
+    reason_code: 'allowed' | 'authz_policy_schema_incompatible' | 'instance_scope_required' | 'principal_role_restricted' | 'principal_binding_invalid' | 'no_matching_grant';
+    recorded_at: string;
+    route_path: string;
+    status: 'ok';
+    target_scope: 'global' | 'context' | 'instance' | 'preview';
+    trace_id: string;
+};
+
 export type AuthzManagedCompatibilityRetirement = {
     managed_rule_id: string;
     match_type: 'github_actions_name_only_authorization_narrowing';
@@ -211,6 +235,131 @@ export type AuthzManagedRuleChange = {
     managed_rule_id: string;
     previous_principal_type: 'github_actions' | 'github_humans' | 'terminal_agents' | 'local_operators' | 'local_admins' | null;
     previous_rule_sha256: string;
+};
+
+export type AuthzManagedRuleIdentityCollection = {
+    items: Array<AuthzManagedRuleIdentitySummary>;
+    returned_count: number;
+    total_count: number;
+    truncated: boolean;
+};
+
+export type AuthzManagedRuleIdentitySummary = {
+    managed_rule_id: string;
+    managed_set_id: string;
+    principal_type: 'github_actions' | 'github_humans' | 'terminal_agents' | 'local_operators' | 'local_admins';
+    rule_sha256: string;
+};
+
+export type AuthzManagedSetCollectionSummary = {
+    items: Array<AuthzManagedSetSummary>;
+    returned_count: number;
+    total_count: number;
+    truncated: boolean;
+};
+
+export type AuthzManagedSetRollbackProposalPayload = {
+    descriptor_id: 'managed-authz-policy-set';
+    expires_in_seconds: number;
+    request: ManagedAuthzPolicySetProposalInputOutput;
+    schema_version: 1;
+    source_event_id: string;
+};
+
+export type AuthzManagedSetRollbackProposalRequest = {
+    managed_set_id: string;
+    reason: string;
+    related_issue?: string;
+    schema_version?: number;
+    source_event_id: string;
+    target_revision: number;
+};
+
+export type AuthzManagedSetRollbackProposalResponse = {
+    proposal: AuthzManagedSetRollbackProposalPayload;
+    status: 'ok';
+    target_policy: AuthzPolicyAdministrationProvenance;
+    trace_id: string;
+};
+
+export type AuthzManagedSetSummary = {
+    managed_set_id: string;
+    principal_rule_counts: AuthzPrincipalRuleCounts;
+    rule_count: number;
+};
+
+export type AuthzPolicyAdministrationProvenance = {
+    policy_sha256: string;
+    record_id: string;
+    revision: number;
+    schema_version: 1 | 2;
+    source: string;
+    status: 'active' | 'superseded';
+    updated_at: string;
+};
+
+export type AuthzPolicyAdministrationReadResponse = {
+    health: AuthzPolicyHealthSummary;
+    managed_rules: AuthzManagedRuleIdentityCollection;
+    managed_sets: AuthzManagedSetCollectionSummary;
+    policy: AuthzPolicyAdministrationProvenance;
+    principal_rule_counts: AuthzPrincipalRuleCounts;
+    reachable_administrators: AuthzReachableAdministratorSummary;
+    status: 'ok';
+    trace_id: string;
+};
+
+export type AuthzPolicyHealthSummary = {
+    github_actions_legacy_name_only_rule_count: number;
+    github_actions_privileged_unpinned_reusable_rule_count: number;
+    managed_rule_count: number;
+    reason_codes: Array<'authz_policy_admin_unreachable' | 'authz_policy_independent_admin_unreachable' | 'policy_schema_legacy' | 'unmanaged_rules_present' | 'github_actions_legacy_name_only_rules_present' | 'github_actions_privileged_unpinned_reusable_rules_present'>;
+    state: 'healthy' | 'attention_required' | 'blocked';
+    unmanaged_rule_count: number;
+};
+
+export type AuthzPolicyRevisionAuditSummary = {
+    audit_present: boolean;
+    audit_sha256: string;
+    changed: boolean | null;
+    diff_counts: {
+        [key: string]: number;
+    };
+    managed_set_id: string;
+    mode: string;
+    operation: string;
+};
+
+export type AuthzPolicyRevisionHistoryEntry = {
+    audit: AuthzPolicyRevisionAuditSummary;
+    policy: AuthzPolicyAdministrationProvenance;
+};
+
+export type AuthzPolicyRevisionHistoryResponse = {
+    returned_count: number;
+    revisions: Array<AuthzPolicyRevisionHistoryEntry>;
+    status: 'ok';
+    trace_id: string;
+    truncated: boolean;
+};
+
+export type AuthzPrincipalRuleCounts = {
+    github_actions: number;
+    github_humans: number;
+    local_admins: number;
+    local_operators: number;
+    terminal_agents: number;
+};
+
+export type AuthzReachableAdministratorSummary = {
+    caller_has_policy_administration: boolean;
+    independent_from_caller_reachable: boolean;
+    independent_from_caller_rule_count: number;
+    managed_rule_count: number;
+    policy_reachable: boolean;
+    principal_rule_counts: AuthzPrincipalRuleCounts;
+    rule_count: number;
+    unmanaged_rule_count: number;
 };
 
 export type BackupGateEvidence = {
@@ -443,6 +592,49 @@ export type DriverView = {
     preview_summaries: Array<LaunchplanePreviewSummary>;
 };
 
+export type EffectiveAccessDecision = {
+    decision: 'allowed' | 'denied';
+    reason_code: 'allowed' | 'authz_policy_schema_incompatible' | 'instance_scope_required' | 'principal_role_restricted' | 'principal_binding_invalid' | 'no_matching_grant';
+};
+
+export type EffectiveAccessEvaluateRequest = {
+    action: string;
+    context: string;
+    instance?: string;
+    principal: ({
+        principal_type: 'github_actions';
+    } & GitHubActionsAccessPrincipal) | ({
+        principal_type: 'github_human';
+    } & GitHubHumanAccessPrincipal) | ({
+        principal_type: 'terminal_agent';
+    } & TerminalAgentAccessPrincipal) | ({
+        principal_type: 'local_operator';
+    } & LocalOperatorAccessPrincipal) | ({
+        principal_type: 'local_admin';
+    } & LocalAdminAccessPrincipal);
+    product: string;
+    target_scope: 'context' | 'instance';
+};
+
+export type EffectiveAccessEvaluateResponse = {
+    evaluation: EffectiveAccessDecision;
+    policy_record_id: string;
+    policy_revision: number;
+    policy_sha256: string;
+    request: EffectiveAccessRequestSummary;
+    status: 'ok';
+    trace_id: string;
+};
+
+export type EffectiveAccessRequestSummary = {
+    action: string;
+    context: string;
+    instance: string;
+    principal_type: 'github_actions' | 'github_human' | 'terminal_agent' | 'local_operator' | 'local_admin';
+    product: string;
+    target_scope: 'context' | 'instance';
+};
+
 export type EnvironmentInventory = {
     artifact_identity: ArtifactIdentityReference | null;
     bootstrap: BootstrapEvidence;
@@ -552,6 +744,48 @@ export type GenericWebProdPromotionRecords = {
     source_health_status: string;
 };
 
+export type GitHubActionsAccessPrincipal = {
+    environment?: string;
+    event_name: string;
+    job_workflow_ref?: string;
+    principal_type?: 'github_actions';
+    ref: string;
+    ref_type: string;
+    repository: string;
+    repository_id?: string;
+    repository_owner: string;
+    repository_owner_id?: string;
+    sha?: string;
+    subject: string;
+    workflow_ref: string;
+};
+
+export type GitHubActionsPolicyRule = {
+    actions?: Array<string>;
+    contexts?: Array<string>;
+    environments?: Array<string>;
+    event_names?: Array<string>;
+    instances?: Array<string>;
+    job_workflow_refs?: Array<string>;
+    managed_rule_id?: string | null;
+    managed_set_id?: string | null;
+    products?: Array<string>;
+    refs?: Array<string>;
+    repository: string;
+    repository_id?: string;
+    repository_owner_id?: string;
+    workflow_refs?: Array<string>;
+};
+
+export type GitHubHumanAccessPrincipal = {
+    github_id?: number;
+    login: string;
+    organizations?: Array<string>;
+    principal_type?: 'github_human';
+    role: 'read_only' | 'admin';
+    teams?: Array<string>;
+};
+
 export type GitHubHumanIdentityResponse = {
     email: string;
     github_id: number;
@@ -561,6 +795,20 @@ export type GitHubHumanIdentityResponse = {
     provider: 'github';
     role: 'read_only' | 'admin';
     teams: Array<string>;
+};
+
+export type GitHubHumanPolicyRule = {
+    actions?: Array<string>;
+    contexts?: Array<string>;
+    github_ids?: Array<number>;
+    instances?: Array<string>;
+    logins?: Array<string>;
+    managed_rule_id?: string | null;
+    managed_set_id?: string | null;
+    organizations?: Array<string>;
+    products?: Array<string>;
+    roles?: Array<'read_only' | 'admin'>;
+    teams?: Array<string>;
 };
 
 export type GitHubIssueInboxIssue = {
@@ -679,6 +927,15 @@ export type HealthcheckEvidence = {
     verified: boolean;
 };
 
+export type LaunchplaneAuthzPolicyInput = {
+    github_actions?: Array<GitHubActionsPolicyRule>;
+    github_humans?: Array<GitHubHumanPolicyRule>;
+    local_admins?: Array<LocalAdminPolicyRule>;
+    local_operators?: Array<LocalOperatorPolicyRule>;
+    schema_version?: 1 | 2;
+    terminal_agents?: Array<TerminalAgentPolicyRule>;
+};
+
 export type LaunchplaneAuthzPolicyOutput = {
     [key: string]: unknown;
 };
@@ -748,6 +1005,40 @@ export type LaunchplaneProductProfileRecord = {
     updated_at: string;
 };
 
+export type LocalAdminAccessPrincipal = {
+    principal_type?: 'local_admin';
+    subject: string;
+    token_label: string;
+};
+
+export type LocalAdminPolicyRule = {
+    actions?: Array<string>;
+    contexts?: Array<string>;
+    instances?: Array<string>;
+    managed_rule_id?: string | null;
+    managed_set_id?: string | null;
+    products?: Array<string>;
+    subjects?: Array<string>;
+    token_labels?: Array<string>;
+};
+
+export type LocalOperatorAccessPrincipal = {
+    principal_type?: 'local_operator';
+    subject: string;
+    token_label: string;
+};
+
+export type LocalOperatorPolicyRule = {
+    actions?: Array<string>;
+    contexts?: Array<string>;
+    instances?: Array<string>;
+    managed_rule_id?: string | null;
+    managed_set_id?: string | null;
+    products?: Array<string>;
+    subjects?: Array<string>;
+    token_labels?: Array<string>;
+};
+
 export type ManagedAuthzPolicySetExecutionEvidence = {
     changed: boolean;
     failure_code: string;
@@ -768,6 +1059,14 @@ export type ManagedAuthzPolicySetHumanEvidence = {
     plan_digest: string;
     result_status: 'ok' | 'blocked';
     schema_version: number;
+};
+
+export type ManagedAuthzPolicySetProposalInputInput = {
+    desired_policy: LaunchplaneAuthzPolicyInput;
+    managed_set_id: string;
+    reason: string;
+    related_issue?: string;
+    schema_version?: number;
 };
 
 export type ManagedAuthzPolicySetProposalInputOutput = {
@@ -1726,6 +2025,14 @@ export type PrivilegedOperationListResponse = {
     status: 'ok';
     total: number;
     trace_id: string;
+};
+
+export type PrivilegedOperationPlanEnvelope = {
+    descriptor_id?: 'managed-secret-reencryption' | 'managed-authz-policy-set';
+    expires_in_seconds?: number;
+    request: ManagedSecretReencryptionPlanInput | ManagedAuthzPolicySetProposalInputInput;
+    schema_version?: number;
+    source_event_id: string;
 };
 
 export type PrivilegedOperationRecord = {
@@ -3141,6 +3448,23 @@ export type TenantMergeEligibilityEvidenceInputs = {
     trusted_maintenance: TenantAdmissionPathResult | null;
 };
 
+export type TerminalAgentAccessPrincipal = {
+    principal_type?: 'terminal_agent';
+    subject: string;
+    token_label: string;
+};
+
+export type TerminalAgentPolicyRule = {
+    actions?: Array<string>;
+    contexts?: Array<string>;
+    instances?: Array<string>;
+    managed_rule_id?: string | null;
+    managed_set_id?: string | null;
+    products?: Array<string>;
+    subjects?: Array<string>;
+    token_labels?: Array<string>;
+};
+
 export type WorkGraphIssueInboxResponse = {
     configured: boolean;
     inbox: GitHubIssueInboxReadModel;
@@ -3277,6 +3601,117 @@ export type ReadHumanAuthSessionResponses = {
 };
 
 export type ReadHumanAuthSessionResponse = ReadHumanAuthSessionResponses[keyof ReadHumanAuthSessionResponses];
+
+export type ExplainAuthzDenialData = {
+    body?: never;
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path: {
+        trace_id: string;
+    };
+    query?: never;
+    url: '/v1/authz-diagnostics/denials/{trace_id}';
+};
+
+export type ExplainAuthzDenialErrors = {
+    400: LaunchplaneErrorResponse;
+    401: LaunchplaneErrorResponse;
+    403: LaunchplaneErrorResponse;
+    404: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type ExplainAuthzDenialError = ExplainAuthzDenialErrors[keyof ExplainAuthzDenialErrors];
+
+export type ExplainAuthzDenialResponses = {
+    200: AuthzDenialExplanationResponse;
+};
+
+export type ExplainAuthzDenialResponse = ExplainAuthzDenialResponses[keyof ExplainAuthzDenialResponses];
+
+export type ExportActiveAuthzPolicyData = {
+    body?: never;
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/authz-policies/active/export';
+};
+
+export type ExportActiveAuthzPolicyErrors = {
+    401: LaunchplaneErrorResponse;
+    403: LaunchplaneErrorResponse;
+    404: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type ExportActiveAuthzPolicyError = ExportActiveAuthzPolicyErrors[keyof ExportActiveAuthzPolicyErrors];
+
+export type ExportActiveAuthzPolicyResponses = {
+    200: AuthzActivePolicyExportResponse;
+};
+
+export type ExportActiveAuthzPolicyResponse = ExportActiveAuthzPolicyResponses[keyof ExportActiveAuthzPolicyResponses];
+
+export type ReadAuthzPolicyAdministrationData = {
+    body?: never;
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/authz-policies/administration';
+};
+
+export type ReadAuthzPolicyAdministrationErrors = {
+    401: LaunchplaneErrorResponse;
+    403: LaunchplaneErrorResponse;
+    404: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type ReadAuthzPolicyAdministrationError = ReadAuthzPolicyAdministrationErrors[keyof ReadAuthzPolicyAdministrationErrors];
+
+export type ReadAuthzPolicyAdministrationResponses = {
+    200: AuthzPolicyAdministrationReadResponse;
+};
+
+export type ReadAuthzPolicyAdministrationResponse = ReadAuthzPolicyAdministrationResponses[keyof ReadAuthzPolicyAdministrationResponses];
+
+export type ReadAuthzPolicyRevisionHistoryData = {
+    body?: never;
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/authz-policies/revisions';
+};
+
+export type ReadAuthzPolicyRevisionHistoryErrors = {
+    401: LaunchplaneErrorResponse;
+    403: LaunchplaneErrorResponse;
+    404: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type ReadAuthzPolicyRevisionHistoryError = ReadAuthzPolicyRevisionHistoryErrors[keyof ReadAuthzPolicyRevisionHistoryErrors];
+
+export type ReadAuthzPolicyRevisionHistoryResponses = {
+    200: AuthzPolicyRevisionHistoryResponse;
+};
+
+export type ReadAuthzPolicyRevisionHistoryResponse = ReadAuthzPolicyRevisionHistoryResponses[keyof ReadAuthzPolicyRevisionHistoryResponses];
 
 export type ReadDriverContextViewData = {
     body?: never;
@@ -3613,6 +4048,31 @@ export type ListHumanPrivilegedOperationsResponses = {
 };
 
 export type ListHumanPrivilegedOperationsResponse = ListHumanPrivilegedOperationsResponses[keyof ListHumanPrivilegedOperationsResponses];
+
+export type PlanPrivilegedOperationData = {
+    body: PrivilegedOperationPlanEnvelope;
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/privileged-operations/plans';
+};
+
+export type PlanPrivilegedOperationErrors = {
+    403: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type PlanPrivilegedOperationError = PlanPrivilegedOperationErrors[keyof PlanPrivilegedOperationErrors];
+
+export type PlanPrivilegedOperationResponses = {
+    200: PrivilegedOperationHumanResponse;
+};
+
+export type PlanPrivilegedOperationResponse = PlanPrivilegedOperationResponses[keyof PlanPrivilegedOperationResponses];
 
 export type ReadHumanPrivilegedOperationData = {
     body?: never;
@@ -4187,6 +4647,61 @@ export type ReadTenantAdmissionEvaluationResponses = {
 };
 
 export type ReadTenantAdmissionEvaluationResponse = ReadTenantAdmissionEvaluationResponses[keyof ReadTenantAdmissionEvaluationResponses];
+
+export type EvaluateEffectiveAccessData = {
+    body: EffectiveAccessEvaluateRequest;
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/authz-diagnostics/effective-access/evaluate';
+};
+
+export type EvaluateEffectiveAccessErrors = {
+    400: LaunchplaneErrorResponse;
+    401: LaunchplaneErrorResponse;
+    403: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type EvaluateEffectiveAccessError = EvaluateEffectiveAccessErrors[keyof EvaluateEffectiveAccessErrors];
+
+export type EvaluateEffectiveAccessResponses = {
+    200: EffectiveAccessEvaluateResponse;
+};
+
+export type EvaluateEffectiveAccessResponse = EvaluateEffectiveAccessResponses[keyof EvaluateEffectiveAccessResponses];
+
+export type BuildAuthzManagedSetRollbackProposalData = {
+    body: AuthzManagedSetRollbackProposalRequest;
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/authz-policies/managed-rule-sets/rollback-proposal';
+};
+
+export type BuildAuthzManagedSetRollbackProposalErrors = {
+    400: LaunchplaneErrorResponse;
+    401: LaunchplaneErrorResponse;
+    403: LaunchplaneErrorResponse;
+    404: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type BuildAuthzManagedSetRollbackProposalError = BuildAuthzManagedSetRollbackProposalErrors[keyof BuildAuthzManagedSetRollbackProposalErrors];
+
+export type BuildAuthzManagedSetRollbackProposalResponses = {
+    200: AuthzManagedSetRollbackProposalResponse;
+};
+
+export type BuildAuthzManagedSetRollbackProposalResponse = BuildAuthzManagedSetRollbackProposalResponses[keyof BuildAuthzManagedSetRollbackProposalResponses];
 
 export type WriteOwnerAcceptanceEventData = {
     body: OwnerAcceptanceEventEnvelope;

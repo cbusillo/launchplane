@@ -27,6 +27,7 @@ export type EngineeringView =
   | "tenant-admission"
   | "governance-projection"
   | "owner-acceptance"
+  | "authorization-administration"
   | "privileged-operations";
 
 export function productIndexPath(): string {
@@ -77,6 +78,9 @@ export function engineeringViewLabel(view: EngineeringView): string {
   if (view === "owner-acceptance") {
     return "Owner product review";
   }
+  if (view === "authorization-administration") {
+    return "Authorization";
+  }
   if (view === "privileged-operations") {
     return "Privileged operation plans";
   }
@@ -109,6 +113,7 @@ export function parseAppRoute(pathname: string): AppRoute {
         "tenant-admission",
         "governance-projection",
         "owner-acceptance",
+        "authorization-administration",
         "privileged-operations",
       ].includes(view)
     ) {

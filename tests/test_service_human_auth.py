@@ -21,6 +21,7 @@ from control_plane.service_human_auth import (
     LaunchplaneHumanSession,
     build_browser_mutation_request_headers,
     validate_browser_mutation_request_headers,
+    validate_browser_sensitive_read_request_headers,
 )
 
 
@@ -461,6 +462,40 @@ class HumanSessionManagerTests(unittest.TestCase):
                 validate_browser_mutation_request_headers(
                     expected_origin=manager.public_origin,
                     **values,
+                )
+
+    def test_browser_sensitive_read_headers_allow_absent_origin_but_require_csrf_and_fetch_metadata(
+        self,
+    ) -> None:
+        manager = HumanSessionManager(config=_config(), session_store=InMemoryHumanSessionStore())
+        values: dict[str, tuple[str, ...]] = {
+            "origin_values": (),
+            "sec_fetch_site_values": ("same-origin",),
+            "sec_fetch_mode_values": ("cors",),
+            "sec_fetch_dest_values": ("empty",),
+            "csrf_token_values": ("csrf-token",),
+        }
+
+        csrf_token = validate_browser_sensitive_read_request_headers(
+            expected_origin=manager.public_origin,
+            **values,
+        )
+
+        self.assertEqual(csrf_token, "csrf-token")
+        for overrides in (
+            {"origin_values": ("https://attacker.example",)},
+            {"origin_values": (manager.public_origin, manager.public_origin)},
+            {"sec_fetch_site_values": ("cross-site",)},
+            {"sec_fetch_mode_values": ("navigate",)},
+            {"sec_fetch_dest_values": ("document",)},
+            {"csrf_token_values": ()},
+            {"csrf_token_values": ("",)},
+        ):
+            invalid_values = {**values, **overrides}
+            with self.subTest(overrides=overrides), self.assertRaises(PermissionError):
+                validate_browser_sensitive_read_request_headers(
+                    expected_origin=manager.public_origin,
+                    **invalid_values,
                 )
 
 

@@ -1125,7 +1125,7 @@
 
 .tenant-admission-summary[data-tone="pending"] {
   border-left-color: var(--preview);
-  background: color-mix(in srgb, var(--preview-soft) 35%, var(--surface));
+  background: color-mix(in srgb, var(--accent-soft) 35%, var(--surface));
 }
 
 .tenant-admission-summary[data-tone="blocked"] {
@@ -1572,7 +1572,7 @@
 .governance-lookup p {
   grid-column: 1 / -1;
   margin: 0;
-  color: var(--error, #ef6b73);
+  color: var(--danger);
   font-size: 13px;
 }
 
@@ -1724,7 +1724,7 @@
   padding: 0.35rem 0.62rem;
   border: 1px solid var(--border);
   border-radius: 999px;
-  color: var(--muted-strong);
+  color: var(--muted);
   font-size: 0.75rem;
   font-weight: 700;
   letter-spacing: 0.08em;
@@ -1797,7 +1797,7 @@
 }
 
 .privileged-operation-metrics dd {
-  font-family: var(--font-display);
+  font-family: var(--font-ui, system-ui, sans-serif);
   font-size: 1.25rem;
   font-weight: 700;
 }
@@ -1814,7 +1814,7 @@
 
 .privileged-operation-policy-review summary {
   padding: 0.75rem 0.9rem;
-  color: var(--muted-strong);
+  color: var(--muted);
   cursor: pointer;
   font-weight: 700;
 }
@@ -1834,7 +1834,359 @@
   margin: 0;
   padding-top: 0.8rem;
   border-top: 1px solid var(--border);
-  color: var(--muted-strong);
+  color: var(--muted);
+}
+
+.authz-admin-workspace,
+.authz-admin-independent-tools {
+  display: grid;
+  gap: 18px;
+}
+
+.authz-admin-independent-tools,
+.authz-admin-action-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-top: 18px;
+}
+
+.authz-admin-policy-card,
+.authz-admin-section,
+.authz-admin-tool-card,
+.authz-admin-export {
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--surface) 94%, transparent);
+  box-shadow: 0 16px 40px rgb(0 0 0 / 12%);
+}
+
+.authz-admin-policy-card,
+.authz-admin-section,
+.authz-admin-tool-card {
+  padding: 20px;
+}
+
+.authz-admin-policy-card {
+  border-left: 4px solid var(--prod);
+}
+
+.authz-admin-policy-card[data-health="attention_required"] {
+  border-left-color: var(--warning);
+}
+
+.authz-admin-policy-card[data-health="blocked"] {
+  border-left-color: var(--danger);
+}
+
+.authz-admin-policy-card > header,
+.authz-admin-section > header,
+.authz-admin-tool-card > header,
+.authz-admin-export > div:first-child {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.authz-admin-section > header,
+.authz-admin-tool-card > header,
+.authz-admin-export > div:first-child {
+  justify-content: flex-start;
+}
+
+.authz-admin-policy-card h2,
+.authz-admin-section h2,
+.authz-admin-tool-card h2 {
+  margin: 3px 0 0;
+  font-size: 18px;
+}
+
+.authz-admin-policy-card header p,
+.authz-admin-tool-card > p,
+.authz-admin-export p {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.authz-admin-health {
+  border: 1px solid color-mix(in srgb, var(--prod) 44%, var(--border));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--prod) 10%, transparent);
+  color: var(--prod);
+  font-size: 11px;
+  font-weight: 760;
+  letter-spacing: 0.04em;
+  padding: 6px 10px;
+  text-transform: uppercase;
+}
+
+.authz-admin-policy-card[data-health="attention_required"] .authz-admin-health {
+  border-color: color-mix(in srgb, var(--warning) 44%, var(--border));
+  background: color-mix(in srgb, var(--warning) 10%, transparent);
+  color: var(--warning);
+}
+
+.authz-admin-policy-card[data-health="blocked"] .authz-admin-health {
+  border-color: color-mix(in srgb, var(--danger) 44%, var(--border));
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+  color: var(--danger);
+}
+
+.authz-admin-metrics,
+.authz-admin-provenance,
+.authz-admin-result {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin: 18px 0 0;
+}
+
+.authz-admin-metrics > div,
+.authz-admin-provenance > div,
+.authz-admin-result > div {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--surface) 86%, transparent);
+  padding: 11px;
+}
+
+.authz-admin-metrics dt,
+.authz-admin-provenance dt,
+.authz-admin-result dt {
+  color: var(--faint);
+  font-size: 10px;
+  font-weight: 740;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.authz-admin-metrics dd,
+.authz-admin-provenance dd,
+.authz-admin-result dd {
+  margin: 6px 0 0;
+  color: var(--text-strong);
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.authz-admin-metrics dd {
+  font-size: 22px;
+}
+
+.authz-admin-reasons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-top: 14px;
+}
+
+.authz-admin-reasons span,
+.authz-admin-caution {
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--warning) 11%, transparent);
+  color: var(--warning);
+  font-size: 11px;
+  font-weight: 680;
+  padding: 6px 8px;
+}
+
+.authz-admin-managed-set-grid,
+.authz-admin-history {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.authz-admin-managed-set-grid article,
+.authz-admin-history article {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--surface) 82%, transparent);
+  padding: 12px;
+}
+
+.authz-admin-managed-set-grid span,
+.authz-admin-managed-set-grid small,
+.authz-admin-history span,
+.authz-admin-history small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.authz-admin-rule-details {
+  margin-top: 14px;
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}
+
+.authz-admin-rule-details summary {
+  cursor: pointer;
+  color: var(--text-strong);
+  font-size: 12px;
+  font-weight: 720;
+}
+
+.authz-admin-rule-details p {
+  display: grid;
+  gap: 3px;
+  margin: 10px 0 0;
+}
+
+.authz-admin-rule-details span,
+.authz-admin-rule-details code {
+  color: var(--muted);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.authz-admin-action-grid {
+  display: grid;
+  gap: 18px;
+}
+
+.authz-admin-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.authz-admin-form label {
+  display: grid;
+  gap: 6px;
+}
+
+.authz-admin-form label > span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.authz-admin-form input,
+.authz-admin-form select,
+.authz-admin-form textarea {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--surface);
+  color: var(--text-strong);
+  font: inherit;
+  padding: 9px 10px;
+}
+
+.authz-admin-form textarea {
+  min-height: 128px;
+  resize: vertical;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.authz-admin-form input:focus,
+.authz-admin-form select:focus,
+.authz-admin-form textarea:focus {
+  border-color: var(--accent);
+  outline: 2px solid color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+.authz-admin-wide-field {
+  grid-column: 1 / -1;
+}
+
+.authz-admin-trace-form {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+}
+
+.authz-admin-action-message {
+  display: grid;
+  gap: 5px;
+  margin-top: 12px;
+  border-radius: 9px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-size: 12px;
+  padding: 9px 10px;
+}
+
+.authz-admin-action-message[data-tone="error"] {
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+  color: var(--danger);
+}
+
+.authz-admin-action-message[data-tone="success"] {
+  background: color-mix(in srgb, var(--prod) 10%, transparent);
+  color: var(--prod);
+}
+
+.authz-admin-action-message code,
+.authz-admin-inline-link,
+.authz-admin-history code,
+.authz-admin-export code {
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+
+.authz-admin-inline-link {
+  display: inline-flex;
+  margin-top: 12px;
+  color: var(--accent-strong);
+  font-weight: 700;
+}
+
+.authz-admin-result {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.authz-admin-result dd[data-decision="allowed"] {
+  color: var(--prod);
+}
+
+.authz-admin-result dd[data-decision="denied"] {
+  color: var(--danger);
+}
+
+.authz-admin-export {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 18px;
+  padding: 17px 20px;
+}
+
+.authz-admin-export .authz-admin-action-message {
+  grid-column: 1 / -1;
+}
+
+@media (max-width: 820px) {
+  .authz-admin-independent-tools,
+  .authz-admin-action-grid,
+  .authz-admin-managed-set-grid,
+  .authz-admin-history,
+  .authz-admin-metrics,
+  .authz-admin-provenance,
+  .authz-admin-result {
+    grid-template-columns: 1fr;
+  }
+
+  .authz-admin-form {
+    grid-template-columns: 1fr;
+  }
+
+  .authz-admin-wide-field {
+    grid-column: auto;
+  }
+
+  .authz-admin-trace-form,
+  .authz-admin-export {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (max-width: 760px) {
@@ -2240,7 +2592,7 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  color: var(--link);
+  color: var(--accent-strong);
   font-size: 13px;
   font-weight: 650;
   white-space: nowrap;
@@ -2402,7 +2754,7 @@
 }
 
 .engineering-owner-action-message[data-tone="success"] {
-  border: 1px solid var(--status-pass-border);
+  border: 1px solid color-mix(in srgb, var(--prod) 50%, var(--border));
 }
 
 @media (max-width: 640px) {
@@ -2508,7 +2860,7 @@
 
 .engineering-owner-acceptance-lookup-error {
   border: 1px solid var(--border);
-  border-left: 3px solid var(--error, #c0392b);
+  border-left: 3px solid var(--danger);
   border-radius: 6px;
   background: var(--surface-raised);
   color: var(--text);

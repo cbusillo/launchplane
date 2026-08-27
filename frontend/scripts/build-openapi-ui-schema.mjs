@@ -1,5 +1,6 @@
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import process from "node:process";
 
 const frontendRoot = path.resolve(new URL("..", import.meta.url).pathname);
 const defaultInputPath = path.join(frontendRoot, "generated", "openapi-canonical.json");
@@ -71,10 +72,14 @@ function selectUiOperations(openapi, manifestKey, method, selectedPaths) {
         `Canonical OpenAPI operation id drift for ${routePath}: expected ${operationId}, got ${pathItem[method].operationId ?? "missing"}.`,
       );
     }
-    if (Object.hasOwn(selectedPaths, routePath)) {
-      throw new Error(`Canonical OpenAPI selects the UI route more than once: ${routePath}`);
+    const selectedPath = selectedPaths[routePath] ?? {};
+    if (Object.hasOwn(selectedPath, method)) {
+      throw new Error(
+        `Canonical OpenAPI selects the UI ${method.toUpperCase()} route more than once: ${routePath}`,
+      );
     }
     selectedPaths[routePath] = {
+      ...selectedPath,
       ...(pathItem.parameters ? { parameters: pathItem.parameters } : {}),
       [method]: pathItem[method],
     };

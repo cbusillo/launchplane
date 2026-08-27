@@ -28,19 +28,21 @@ class _DeterministicOpenApiTokenVerifier(TokenVerifier):
 
 
 class _DeterministicGitHubOAuthLoginClient:
-    def authorization_url(self, *, state: str, code_challenge: str) -> str:
+    @staticmethod
+    def authorization_url(*, state: str, code_challenge: str) -> str:
         return (
             "https://github.example.invalid/login/oauth/authorize"
             f"?state={state}&code_challenge={code_challenge}"
         )
 
+    @staticmethod
     def fetch_identity(
-        self,
         *,
         code: str,
         code_verifier: str,
         authz_policy: LaunchplaneAuthzPolicy,
     ) -> GitHubHumanIdentity:
+        del code, code_verifier, authz_policy
         return GitHubHumanIdentity(
             login="launchplane-docs",
             github_id=1,
@@ -191,7 +193,11 @@ UI_OPENAPI_READ_OPERATIONS: dict[str, str] = {
     "/v1/owner-acceptance/current-items": "list_owner_acceptance_current_items",
     "/v1/owner-acceptance/queue": "list_owner_acceptance_queue",
     "/v1/privileged-operations/plans": "list_human_privileged_operations",
-    "/v1/privileged-operations/plans/{operation_id}": ("read_human_privileged_operation"),
+    "/v1/privileged-operations/plans/{operation_id}": "read_human_privileged_operation",
+    "/v1/authz-policies/administration": "read_authz_policy_administration",
+    "/v1/authz-policies/revisions": "read_authz_policy_revision_history",
+    "/v1/authz-policies/active/export": "export_active_authz_policy",
+    "/v1/authz-diagnostics/denials/{trace_id}": "explain_authz_denial",
 }
 
 
@@ -210,5 +216,10 @@ UI_OPENAPI_WRITE_OPERATIONS: dict[str, str] = {
     "/v1/privileged-operations/plans/{operation_id}/approve": (
         "approve_human_privileged_operation"
     ),
-    "/v1/privileged-operations/plans/{operation_id}/revoke": ("revoke_human_privileged_operation"),
+    "/v1/privileged-operations/plans/{operation_id}/revoke": "revoke_human_privileged_operation",
+    "/v1/privileged-operations/plans": "plan_privileged_operation",
+    "/v1/authz-policies/managed-rule-sets/rollback-proposal": (
+        "build_authz_managed_set_rollback_proposal"
+    ),
+    "/v1/authz-diagnostics/effective-access/evaluate": "evaluate_effective_access",
 }

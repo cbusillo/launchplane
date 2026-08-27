@@ -1207,6 +1207,33 @@ test.describe("operator journeys", () => {
     await captureScreenshot(page, testInfo, "privileged-operation-plans-human-governed");
     diagnostics.assertClean();
   });
+
+  test("authorization administration keeps inspection, proposals, and support reads separate", async ({
+    page,
+  }, testInfo) => {
+    const diagnostics = monitorBrowser(page);
+
+    await page.goto(
+      "/ui/engineering/authorization-administration?fixture=products",
+    );
+
+    await expect(
+      page.getByRole("heading", { level: 1, name: "Authorization administration" }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("link", { name: "Authorization", exact: true }),
+    ).toHaveAttribute("aria-current", "page");
+    await expect(page.getByRole("heading", { name: "Revision 367" })).toBeVisible();
+    await expect(page.getByText("Independent Administrator Reachable")).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Managed-set proposal" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Restore one managed set" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Effective access" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Explain a denial" })).toBeVisible();
+    await expect(page.getByRole("button", { name: /apply|execute/i })).toHaveCount(0);
+    await assertDocumentBasics(page);
+    await captureScreenshot(page, testInfo, "authorization-administration-anchor");
+    diagnostics.assertClean();
+  });
 });
 
 function monitorBrowser(
