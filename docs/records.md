@@ -1946,6 +1946,13 @@ run` is the foreground loop intended for an external process supervisor, and
   `effective_at`, and optional evidence TTL; and uses CAS-friendly
   `supersedes_record_id` chaining. The canonical policy digest excludes mutable
   lifecycle `status` and audit-only display logins.
+- Authorization policy revisions remain append-only `active|superseded` DB
+  records. The administration history API exposes only bounded provenance plus
+  an audit digest and selected change counts. Full canonical policy payloads are
+  available only through the separately authorized active-policy export; a
+  managed-set rollback reconstructs a desired set from a historical revision
+  and returns the existing privileged-operation proposal payload without
+  reactivating historical rows or writing a new policy record.
 - Trusted-maintenance v1 actor rules require one explicit positive numeric
   GitHub PR author ID with actor type `Bot`, explicit positive numeric sender
   IDs with sender type `Bot`, and an explicit allow-list of signed GitHub event

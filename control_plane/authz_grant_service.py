@@ -966,6 +966,38 @@ def _candidate_managed_set_policies(
     }
 
 
+def export_managed_authz_policy_set(
+    *,
+    policy: LaunchplaneAuthzPolicy,
+    managed_set_id: str,
+) -> LaunchplaneAuthzPolicy:
+    """Return one canonical managed set as a reconciliation-ready desired policy."""
+    normalized_set_id = managed_set_id.strip()
+    if _MANAGED_AUTHZ_SET_PATTERN.fullmatch(normalized_set_id) is None:
+        raise AuthzPolicyRequestError(
+            "Managed authz policy export requires a stable managed_set_id."
+        )
+    normalized_policy = _normalize_desired_authz_policy(policy)
+    managed_set_policy = _candidate_managed_set_policies(normalized_policy).get(normalized_set_id)
+    if managed_set_policy is None:
+        raise LookupError("The requested managed authz policy set is not present in this revision.")
+    return managed_set_policy
+
+
+def managed_authz_policy_desired_set_payload(
+    policy: LaunchplaneAuthzPolicy,
+) -> list[dict[str, object]]:
+    """Return the canonical payload reconciliation binds into its desired-set digest."""
+    return _desired_managed_set_payload(policy)
+
+
+def managed_authz_policy_desired_set_sha256(policy: LaunchplaneAuthzPolicy) -> str:
+    payload = managed_authz_policy_desired_set_payload(policy)
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
 def validate_authz_candidate_policy(
     policy: LaunchplaneAuthzPolicy,
 ) -> LaunchplaneAuthzPolicy:
@@ -1647,8 +1679,8 @@ def _authz_policy_allows_immutable_github_id_administration(
     github_id: int,
 ) -> bool:
     return github_id > 0 and any(
-        isinstance(rule, GitHubHumanPolicyRule) and github_id in rule.github_ids
-        for rule in _authz_policy_administrator_rules(policy)
+        _is_strict_immutable_github_human_administrator_rule(rule) and github_id in rule.github_ids
+        for rule in policy.github_humans
     )
 
 
@@ -1658,12 +1690,20 @@ def _authz_policy_retains_independent_github_id_administration(
     applying_github_id: int,
 ) -> bool:
     return any(
-        (
-            any(github_id != applying_github_id for github_id in rule.github_ids)
-            if isinstance(rule, GitHubHumanPolicyRule)
-            else True
-        )
-        for rule in _authz_policy_administrator_rules(policy)
+        _is_strict_immutable_github_human_administrator_rule(rule)
+        and any(github_id != applying_github_id for github_id in rule.github_ids)
+        for rule in policy.github_humans
+    )
+
+
+def _is_strict_immutable_github_human_administrator_rule(rule: GitHubHumanPolicyRule) -> bool:
+    return bool(
+        rule.github_ids
+        and "admin" in rule.roles
+        and rule.actions
+        and _AUTHZ_POLICY_ADMIN_ACTION in rule.actions
+        and rule.products == ("launchplane",)
+        and rule.contexts == ("launchplane",)
     )
 
 
@@ -1945,14 +1985,8 @@ def plan_managed_authz_policy_reconcile(
         policy_safety_blockers = (_managed_policy_safety_blocker("authz_policy_admin_unreachable"),)
     desired_policy_sha256 = authz_policy_sha256(updated_policy)
     changed = current_record.policy_sha256 != desired_policy_sha256
-    desired_set_payload = _desired_managed_set_payload(request.desired_policy)
-    desired_set_sha256 = hashlib.sha256(
-        json.dumps(
-            desired_set_payload,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode()
-    ).hexdigest()
+    desired_set_payload = managed_authz_policy_desired_set_payload(request.desired_policy)
+    desired_set_sha256 = managed_authz_policy_desired_set_sha256(request.desired_policy)
     candidate_revision = current_record.revision + int(changed)
     plan_payload = {
         "contract_version": 2,

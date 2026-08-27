@@ -115,8 +115,25 @@ is currently available.
 The health read checks the caller against both the current runtime policy and
 the freshly loaded active DB record, rejects non-administrator principal types,
 and fails closed when active policy state is missing or ambiguous. It performs
-no policy, provider, runtime, bootstrap, secret, or deployment mutation. Landing
-the action and route does not grant production access to them.
+no policy, provider, runtime, bootstrap, secret, or deployment mutation.
+
+The administration read slice adds the separately ungranted
+`authz_policy_administration.read` action for eligible GitHub or local
+administrators. It returns typed redacted provenance, health, managed-set and
+principal counts, reachable-administrator evidence, and bounded managed-rule
+identities only; it never returns selectors or unrelated principal values.
+Revision history is similarly bounded and redacts audit metadata to provenance,
+audit digest, and approved count fields.
+
+Full active-policy export is read-only, `no-store`, and requires a GitHub-human
+administrator with the existing exact managed `authz_policy_operation.propose`
+authority. It returns the canonical policy with record/revision/digest for
+restore or import preparation. A managed-set rollback first reconstructs the
+target historical set and returns the exact existing privileged-operation plan
+payload; submission still follows the existing proposal, dry-run, approval,
+CAS, idempotency, worker, and read-back path. Landing grants no access, live
+apply remains approval-stopped, and total-lockout and break-glass recovery
+remain deferred.
 
 The activation preflight is a separate, read-only self-check at
 `GET /v1/authz-diagnostics/activation-preflight/self`. It accepts only the
