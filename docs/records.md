@@ -2656,5 +2656,11 @@ review plus bounded diff and CAS/read-back evidence. See
 `docs/privileged-operations.md` for the full evidence and authorization
 boundary.
 
+The checked `contracts/owner-control-contract.json` artifact is not a record,
+nonce store, audit event, or runtime authority. It supplies deterministic
+cross-host serialization and synthetic golden vectors only; future owner-control
+issuance, confirmation, replay rejection, and expiry records require a separate
+storage contract.
+
 **Preserved history:** references to Phase 1 planning records describe the
 pre-worker lifecycle and do not constrain the current Phase 2 statuses.

@@ -32,6 +32,14 @@ route, execute action, static execution credential, or agent execution path.
 The registry is not an arbitrary route, command, SQL, or payload proxy. New
 descriptors require code, schemas, tests, documentation, and review.
 
+## Owner-Control Contract Seam
+
+`contracts/owner-control-contract.json` publishes canonical owner-control
+request and response bytes plus generic golden vectors for every registered
+descriptor. It is a cross-host conformance artifact only: it does not issue a
+challenge, consume an owner confirmation, alter browser approval, add a route,
+or authorize execution. See `docs/owner-control-channel.md`.
+
 ## Authorization
 
 Privileged-operation routes do not use bare `LaunchplaneAuthzPolicy.allows`.

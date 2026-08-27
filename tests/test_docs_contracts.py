@@ -141,6 +141,7 @@ class DocsContractsTests(TestCase):
         agent_operator_contract = Path("docs/agent-operator-contract.md").read_text(
             encoding="utf-8"
         )
+        owner_control_channel = Path("docs/owner-control-channel.md").read_text(encoding="utf-8")
         docs_index = Path("docs/README.md").read_text(encoding="utf-8")
         canonical_openapi = json.loads(
             Path("frontend/generated/openapi-canonical.json").read_text(encoding="utf-8")
@@ -183,6 +184,22 @@ class DocsContractsTests(TestCase):
             "pnpm --dir frontend check:openapi-drift",
             metadata["qualityGate"]["agentContract"]["drift"],
         )
+        self.assertEqual(
+            "docs/owner-control-channel.md",
+            metadata["docs"]["ownerControlChannel"],
+        )
+        self.assertEqual(
+            "contracts/owner-control-contract.json",
+            metadata["qualityGate"]["ownerControlContract"]["artifact"],
+        )
+        self.assertEqual(
+            "uv run launchplane service export-owner-control-contract --output contracts/owner-control-contract.json",
+            metadata["qualityGate"]["ownerControlContract"]["export"],
+        )
+        self.assertEqual(
+            "uv run --extra dev python -m unittest tests.test_owner_control_contract.OwnerControlArtifactTests.test_checked_artifact_matches_generated_contract",
+            metadata["qualityGate"]["ownerControlContract"]["drift"],
+        )
         self.assertIn(
             "`uv run launchplane service export-openapi --output frontend/generated/openapi-canonical.json`",
             service_boundary,
@@ -193,7 +210,10 @@ class DocsContractsTests(TestCase):
             service_boundary,
         )
         self.assertIn("agent-operator-contract.md", docs_index)
+        self.assertIn("owner-control-channel.md", docs_index)
         self.assertIn("contracts/agent-operator-contract.json", agent_context_boundary)
+        self.assertIn("contracts/owner-control-contract.json", owner_control_channel)
+        self.assertIn("export-owner-control-contract", owner_control_channel)
         self.assertIn("`semantic_digest_sha256`", agent_operator_contract)
         self.assertIn("`normalization_version`", agent_operator_contract)
         self.assertEqual(

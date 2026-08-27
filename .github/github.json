@@ -30,6 +30,7 @@
     "runnerHostHygiene": "docs/runner-host-hygiene.md",
     "productOwnerPolicy": "docs/product-owner-policy.md",
     "ownerAcceptance": "docs/owner-acceptance.md",
+    "ownerControlChannel": "docs/owner-control-channel.md",
     "privilegedOperations": "docs/privileged-operations.md",
     "changeImpactPolicy": "docs/change-impact-policy.md",
     "agentContextBoundary": "docs/agent-context-boundary.md",
@@ -80,6 +81,11 @@
       "artifact": "contracts/agent-operator-contract.json",
       "export": "uv run launchplane service export-agent-contract --output contracts/agent-operator-contract.json",
       "drift": "pnpm --dir frontend check:openapi-drift"
+    },
+    "ownerControlContract": {
+      "artifact": "contracts/owner-control-contract.json",
+      "export": "uv run launchplane service export-owner-control-contract --output contracts/owner-control-contract.json",
+      "drift": "uv run --extra dev python -m unittest tests.test_owner_control_contract.OwnerControlArtifactTests.test_checked_artifact_matches_generated_contract"
     },
     "audit": {
       "pythonDependencies": "uv run --with pip-audit pip-audit --ignore-vuln PYSEC-2025-183",
