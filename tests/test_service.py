@@ -2699,6 +2699,27 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(payload["provenance"]["source_commit_sha"], "a" * 40)
         self.assertEqual(len(payload["contract"]["operations"]), 12)
 
+    def test_service_export_owner_control_contract_writes_conformance_artifact(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            output_path = Path(temporary_directory_name) / "owner-control-contract.json"
+
+            result = runner.invoke(
+                CLI_MAIN,
+                [
+                    "service",
+                    "export-owner-control-contract",
+                    "--output",
+                    str(output_path),
+                ],
+            )
+            payload = json.loads(output_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(result.output.strip(), str(output_path))
+        self.assertEqual(payload["schema_version"], 1)
+        self.assertTrue(payload["golden_vectors"])
+
     def test_product_onboarding_endpoint_writes_full_launchplane_owned_bundle(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)

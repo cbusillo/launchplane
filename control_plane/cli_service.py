@@ -13,6 +13,7 @@ import click
 
 from control_plane.agent_operator_contract import write_agent_operator_contract
 from control_plane.cli_shared import DATABASE_URL_ENV_KEYS as _DATABASE_URL_ENV_KEYS
+from control_plane.owner_control_contract import write_owner_control_contract
 from control_plane.outbox_worker import (
     DEFAULT_OUTBOX_WORKER_ERROR_BACKOFF_SECONDS,
     DEFAULT_OUTBOX_WORKER_LEASE_SECONDS,
@@ -1492,4 +1493,16 @@ def service_export_openapi(output: Path) -> None:
 )
 def service_export_agent_contract(output: Path, source_sha: str | None) -> None:
     written_path = write_agent_operator_contract(output, source_commit_sha=source_sha)
+    click.echo(str(written_path))
+
+
+@service.command("export-owner-control-contract")
+@click.option(
+    "--output",
+    type=click.Path(path_type=Path),
+    required=True,
+    help="Write the public owner-control conformance contract to this path.",
+)
+def service_export_owner_control_contract(output: Path) -> None:
+    written_path = write_owner_control_contract(output)
     click.echo(str(written_path))

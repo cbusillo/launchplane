@@ -60,6 +60,8 @@ Use these docs as the source of truth for `launchplane`.
   product/system Owner membership, requirement, routing, and evaluation contract.
 - [owner-acceptance.md](owner-acceptance.md) — authoritative exact-change Owner
   acceptance binding, event ledger, and human-only API boundary.
+- [owner-control-channel.md](owner-control-channel.md) — public canonical owner
+  challenge payloads, cross-host conformance artifact, and deferred runtime boundary.
 - [privileged-operations.md](privileged-operations.md) — typed human-governed
   planning, managed-rule authorization, redaction, and future execution boundary.
 - [change-impact-policy.md](change-impact-policy.md) — authoritative

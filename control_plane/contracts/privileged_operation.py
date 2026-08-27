@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-import hashlib
-import json
 import re
 from typing import Literal, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.authz_grant_service import (
     AuthzManagedPolicyDiff,
     AuthzManagedPolicyReconcileEnvelope,
@@ -102,9 +101,7 @@ def _timestamp(value: str, field_name: str) -> str:
 
 
 def _digest_payload(payload: object) -> str:
-    return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
+    return canonical_json_sha256(payload)
 
 
 class PrivilegedOperationActor(BaseModel):
