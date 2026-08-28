@@ -1,16 +1,24 @@
 from __future__ import annotations
 
+import base64
+import binascii
 from datetime import datetime, timezone
 import re
 from typing import Final, Literal
 
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from control_plane.contracts.canonical_json import canonical_json_sha256
+from control_plane.contracts.canonical_json import canonical_json_bytes, canonical_json_sha256
 from control_plane.contracts.privileged_operation import PrivilegedOperationDescriptorId
 
 
 OWNER_CONTROL_SCHEMA_VERSION: Final[Literal[1]] = 1
+OWNER_CONTROL_SIGNATURE_DOMAIN: Final[Literal["launchplane-owner-control-confirmation-v1"]] = (
+    "launchplane-owner-control-confirmation-v1"
+)
+OWNER_CONTROL_SIGNATURE_ALGORITHM: Final[Literal["ed25519"]] = "ed25519"
 
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _OPERATION_ID_PATTERN = re.compile(r"^privileged-operation-[0-9a-f]{32}$")
@@ -18,6 +26,7 @@ _NONCE_PATTERN = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
 _IDENTIFIER_PATTERN = re.compile(r"^[a-z][a-z0-9_-]{0,127}$")
 _REVIEW_KEY_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _CANONICAL_TIMESTAMP_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+00:00$")
+_BASE64URL_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 def _canonical_sha256(value: str, field_name: str) -> str:
@@ -43,6 +52,25 @@ def _canonical_timestamp(value: str, field_name: str) -> str:
     if value != canonical:
         raise ValueError(f"{field_name} must use canonical UTC ISO-8601 form")
     return value
+
+
+def _canonical_base64url(value: str, field_name: str, expected_length: int) -> str:
+    if _BASE64URL_PATTERN.fullmatch(value) is None or len(value) % 4 == 1:
+        raise ValueError(f"{field_name} must be unpadded base64url")
+    try:
+        decoded = base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+    except (binascii.Error, ValueError) as error:
+        raise ValueError(f"{field_name} must be unpadded base64url") from error
+    if len(decoded) != expected_length:
+        raise ValueError(f"{field_name} must encode exactly {expected_length} bytes")
+    if base64.urlsafe_b64encode(decoded).decode("ascii").rstrip("=") != value:
+        raise ValueError(f"{field_name} must use canonical unpadded base64url")
+    return value
+
+
+def _decode_canonical_base64url(value: str, field_name: str, expected_length: int) -> bytes:
+    _canonical_base64url(value, field_name, expected_length)
+    return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
 
 
 class ReviewItem(BaseModel):
@@ -169,6 +197,109 @@ class ChallengeResponse(BaseModel):
         return self
 
 
+class ChannelBindingRecord(BaseModel):
+    """Immutable versioned binding between an owner key and one channel session."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    schema_version: Literal[1] = OWNER_CONTROL_SCHEMA_VERSION
+    channel_session_id: str = Field(pattern=_IDENTIFIER_PATTERN.pattern)
+    owner_github_id: int = Field(ge=1, le=2**63 - 1)
+    signature_algorithm: Literal["ed25519"] = OWNER_CONTROL_SIGNATURE_ALGORITHM
+    owner_public_key: str = Field(
+        min_length=43,
+        max_length=43,
+        pattern=_BASE64URL_PATTERN.pattern,
+    )
+    session_issued_at: str = Field(pattern=_CANONICAL_TIMESTAMP_PATTERN.pattern)
+    session_expires_at: str = Field(pattern=_CANONICAL_TIMESTAMP_PATTERN.pattern)
+
+    @model_validator(mode="after")
+    def _validate_channel_binding_record(self) -> "ChannelBindingRecord":
+        if self.schema_version != OWNER_CONTROL_SCHEMA_VERSION:
+            raise ValueError("Unsupported owner-control channel binding schema version.")
+        _canonical_identifier(self.channel_session_id, "channel_session_id")
+        if self.signature_algorithm != OWNER_CONTROL_SIGNATURE_ALGORITHM:
+            raise ValueError("Unsupported owner-control signature algorithm.")
+        _canonical_base64url(self.owner_public_key, "owner_public_key", 32)
+        _canonical_timestamp(self.session_issued_at, "session_issued_at")
+        _canonical_timestamp(self.session_expires_at, "session_expires_at")
+        session_issued_at = datetime.fromisoformat(self.session_issued_at)
+        session_expires_at = datetime.fromisoformat(self.session_expires_at)
+        if session_expires_at <= session_issued_at:
+            raise ValueError("session_expires_at must be later than session_issued_at")
+        return self
+
+
+class OwnerControlSignaturePayload(BaseModel):
+    """Exact domain-separated payload authenticated by an owner signature."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    schema_version: Literal[1] = OWNER_CONTROL_SCHEMA_VERSION
+    domain: Literal["launchplane-owner-control-confirmation-v1"] = OWNER_CONTROL_SIGNATURE_DOMAIN
+    challenge_response: ChallengeResponse
+
+    @model_validator(mode="after")
+    def _validate_signature_payload(self) -> "OwnerControlSignaturePayload":
+        if self.schema_version != OWNER_CONTROL_SCHEMA_VERSION:
+            raise ValueError("Unsupported owner-control signature payload schema version.")
+        if self.domain != OWNER_CONTROL_SIGNATURE_DOMAIN:
+            raise ValueError("Unsupported owner-control signature payload domain.")
+        return self
+
+
+class OwnerControlConfirmationEnvelope(BaseModel):
+    """Signed owner confirmation bound to one channel session and challenge."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    schema_version: Literal[1] = OWNER_CONTROL_SCHEMA_VERSION
+    channel_binding: ChannelBindingRecord
+    challenge_response: ChallengeResponse
+    signature_algorithm: Literal["ed25519"] = OWNER_CONTROL_SIGNATURE_ALGORITHM
+    signature: str = Field(
+        min_length=86,
+        max_length=86,
+        pattern=_BASE64URL_PATTERN.pattern,
+    )
+
+    @model_validator(mode="after")
+    def _validate_confirmation_envelope(self) -> "OwnerControlConfirmationEnvelope":
+        if self.schema_version != OWNER_CONTROL_SCHEMA_VERSION:
+            raise ValueError("Unsupported owner-control confirmation envelope schema version.")
+        if self.signature_algorithm != OWNER_CONTROL_SIGNATURE_ALGORITHM:
+            raise ValueError("Unsupported owner-control signature algorithm.")
+        _canonical_base64url(self.signature, "signature", 64)
+        if self.challenge_response.channel_binding_sha256 != owner_control_channel_binding_sha256(
+            self.channel_binding
+        ):
+            raise ValueError(
+                "challenge_response channel binding digest does not match the binding record"
+            )
+        if (
+            self.challenge_response.approval_request.owner_github_id
+            != self.channel_binding.owner_github_id
+        ):
+            raise ValueError(
+                "channel binding owner identity does not match the approval request owner"
+            )
+        session_issued_at = datetime.fromisoformat(self.channel_binding.session_issued_at)
+        session_expires_at = datetime.fromisoformat(self.channel_binding.session_expires_at)
+        request_issued_at = datetime.fromisoformat(
+            self.challenge_response.approval_request.issued_at
+        )
+        request_expires_at = datetime.fromisoformat(
+            self.challenge_response.approval_request.expires_at
+        )
+        confirmed_at = datetime.fromisoformat(self.challenge_response.confirmed_at)
+        if request_issued_at < session_issued_at or request_expires_at > session_expires_at:
+            raise ValueError("approval request bounds must be inside the channel session interval")
+        if confirmed_at < session_issued_at or confirmed_at > session_expires_at:
+            raise ValueError("confirmation time must be inside the channel session interval")
+        return self
+
+
 def owner_control_approval_request_digest(request: ApprovalRequest) -> str:
     """Return the canonical digest shared by Launchplane and the owner-control host."""
 
@@ -179,3 +310,45 @@ def owner_control_challenge_response_digest(response: ChallengeResponse) -> str:
     """Return the canonical digest of an owner-control challenge response."""
 
     return canonical_json_sha256(response.model_dump(mode="json"))
+
+
+def owner_control_channel_binding_sha256(binding: ChannelBindingRecord) -> str:
+    """Return the digest of the exact canonical channel binding record payload."""
+
+    return canonical_json_sha256(binding.model_dump(mode="json"))
+
+
+def owner_control_signature_payload(response: ChallengeResponse) -> OwnerControlSignaturePayload:
+    """Build the exact domain-separated payload covered by an owner signature."""
+
+    return OwnerControlSignaturePayload(challenge_response=response)
+
+
+def owner_control_signature_payload_bytes(response: ChallengeResponse) -> bytes:
+    """Return canonical JSON bytes for the exact owner signature preimage."""
+
+    return canonical_json_bytes(owner_control_signature_payload(response).model_dump(mode="json"))
+
+
+def verify_owner_control_confirmation_signature(
+    envelope: OwnerControlConfirmationEnvelope,
+) -> bool:
+    """Verify only the envelope's internal Ed25519 proof, not server authorization state."""
+
+    try:
+        validated_envelope = OwnerControlConfirmationEnvelope.model_validate_json(
+            canonical_json_bytes(envelope.model_dump(mode="json"))
+        )
+        public_key = Ed25519PublicKey.from_public_bytes(
+            _decode_canonical_base64url(
+                validated_envelope.channel_binding.owner_public_key, "owner_public_key", 32
+            )
+        )
+        signature = _decode_canonical_base64url(validated_envelope.signature, "signature", 64)
+        public_key.verify(
+            signature,
+            owner_control_signature_payload_bytes(validated_envelope.challenge_response),
+        )
+    except (AttributeError, InvalidSignature, TypeError, ValueError):
+        return False
+    return True
