@@ -41,9 +41,7 @@ Pydantic contracts for:
 Version, digest casing, canonical UTC timestamps and ordering, nonce form, and
 duplicate review fields fail closed. Single-field constraints are present in
 the exported JSON Schemas; cross-field constraints are also represented by
-negative conformance vectors. Single-use nonce tracking, challenge issuance,
-and expiry enforcement at request time require later storage and service work;
-this contract slice adds none of them.
+negative conformance vectors.
 
 ## Binding and Signature Proof
 
@@ -79,6 +77,35 @@ request bytes plus their server-stored digests against the enrolled
 channel-session and issued challenge records. A self-asserted binding or
 otherwise valid self-signed envelope cannot create enrolled or issued state and
 is never authorization evidence by itself.
+
+## Service-Only Challenge Issuance
+
+The unrouted PostgreSQL storage API accepts only a channel-session ID, planned
+operation ID, and bounded requested TTL. It locks the enrolled session, exact
+planned operation, active policy read, and active challenge guard in that order.
+The service derives every approval-request field, nonce, whole-second timestamps,
+and deterministic review payload from those locked records; callers cannot
+author request, evidence, policy, owner, review, or provenance fields.
+
+Issuance requires exactly one active schema-v2 policy, a live enrolled session,
+an unexpired `planned` operation, and one immutable GitHub-ID managed rule that
+allows the enrolled owner under the descriptor's existing approval action.
+Blocked managed-policy plans and unsupported evidence fail closed. Challenge
+expiry is the earliest of requested TTL, operation expiry, and session expiry.
+The review discloses only typed status, bounded counts, digests, and timestamps;
+it never discloses secret/key IDs, desired policy bodies, raw logins or subjects,
+token labels, planner errors, or free-text request reasons.
+
+At most one `issued` challenge can bind an operation. An exact repeat returns
+that existing challenge only while it remains unexpired, its expiry does not
+exceed the newly requested bound, and the session binding plus all current
+derived provenance still match. An expired row must receive a separately
+audited terminal transition before re-issuance; otherwise issuance conflicts.
+Verification updates only
+the challenge's mutable state/attempt evidence and does not change immutable
+challenge provenance, privileged-operation state, its event ledger, browser
+approval, or execution authorization. The verifier remains `shadow`, inert, and
+returns `authorizes_execution: false`.
 
 ## Conformance Artifact
 

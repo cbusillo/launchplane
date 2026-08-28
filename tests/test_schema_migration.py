@@ -1505,7 +1505,7 @@ class SchemaMigrationTests(unittest.TestCase):
             for primary_key in CRITICAL_PRIMARY_KEYS
         }
 
-        self.assertEqual(EXPECTED_ALEMBIC_HEAD_REVISION, "e5f7a9b1c3d6")
+        self.assertEqual(EXPECTED_ALEMBIC_HEAD_REVISION, "f6a1c3e5b7d9")
         self.assertNotIn(
             ("launchplane_human_sessions", "launchplane_human_sessions_github_id_idx"),
             indexes,
@@ -1789,6 +1789,13 @@ class SchemaMigrationTests(unittest.TestCase):
                         "launchplane_owner_control_issued_challenges"
                     )
                 }
+                challenge_indexes = {
+                    str(name): index
+                    for index in inspector.get_indexes(
+                        "launchplane_owner_control_issued_challenges"
+                    )
+                    if (name := index.get("name")) is not None
+                }
             finally:
                 engine.dispose()
             command.downgrade(config, "f2241a0b1c2d")
@@ -1827,6 +1834,11 @@ class SchemaMigrationTests(unittest.TestCase):
             }.issubset(challenge_columns)
         )
         self.assertIn("launchplane_owner_control_shadow_event_challenge_idx", event_indexes)
+        active_operation_index = challenge_indexes[
+            "launchplane_owner_control_challenge_active_operation_uidx"
+        ]
+        self.assertTrue(active_operation_index["unique"])
+        self.assertEqual(active_operation_index["column_names"], ["operation_id"])
         self.assertNotIn("launchplane_owner_control_channel_sessions", downgraded_tables)
         self.assertNotIn("launchplane_owner_control_issued_challenges", downgraded_tables)
         self.assertNotIn("launchplane_owner_control_shadow_verification_events", downgraded_tables)

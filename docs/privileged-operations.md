@@ -43,7 +43,9 @@ or authorize execution. See `docs/owner-control-channel.md`.
 The DB-backed shadow verifier remains independent from this lifecycle. No
 privileged-operation route, service, worker, transition, approval, or execution
 path imports it. Its unrouted storage API can retain test or future
-service-authored challenge state and return only `authorizes_execution: false`;
+service-authored challenge state and return only `authorizes_execution: false`.
+Its service-only issuance derives a challenge from an already-locked planned
+record and active policy without mutating that record or its event ledger;
 browser approval remains the only active approval transport.
 
 ## Authorization

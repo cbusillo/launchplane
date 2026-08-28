@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 import hmac
 import re
 from typing import Final, Literal
@@ -170,7 +170,7 @@ class OwnerControlChallengeIssueRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     channel_session_id: str = Field(pattern=_SERVER_IDENTIFIER_PATTERN.pattern)
-    approval_request: ApprovalRequest
+    operation_id: str = Field(pattern=r"^privileged-operation-[0-9a-f]{32}$")
     expires_in_seconds: int = Field(ge=1, le=3_600)
 
 
@@ -391,8 +391,7 @@ def issue_owner_control_challenge_record(
     *,
     issue_request: OwnerControlChallengeIssueRequest,
     session: OwnerControlChannelSessionRecord,
-    challenge_nonce: str,
-    issued_at: str,
+    approval_request: ApprovalRequest,
 ) -> OwnerControlIssuedChallengeRecord:
     """Materialize a challenge with DB-clock issuance and expiry timestamps."""
 
@@ -402,25 +401,23 @@ def issue_owner_control_challenge_record(
         raise OwnerControlShadowVerifierConflictError(
             "Challenge issue session does not match enrollment."
         )
-    if issue_request.approval_request.owner_github_id != session.owner_github_id:
+    if approval_request.owner_github_id != session.owner_github_id:
         raise OwnerControlShadowVerifierConflictError("Challenge owner does not match enrollment.")
-    issued_at_value = _canonical_timestamp(issued_at, "issued_at")
-    expires_at = (issued_at_value + timedelta(seconds=issue_request.expires_in_seconds)).isoformat()
+    if approval_request.operation_id != issue_request.operation_id:
+        raise OwnerControlShadowVerifierConflictError(
+            "Challenge operation does not match issue request."
+        )
+    issued_at_value = _canonical_timestamp(approval_request.issued_at, "issued_at")
+    expires_at = _canonical_timestamp(approval_request.expires_at, "expires_at")
     binding = session.channel_binding()
     session_expires_at = _canonical_timestamp(binding.session_expires_at, "session_expires_at")
     if issued_at_value < _canonical_timestamp(binding.session_issued_at, "session_issued_at"):
         raise OwnerControlShadowVerifierConflictError("Channel session has not started.")
-    if datetime.fromisoformat(expires_at) > session_expires_at:
+    if expires_at > session_expires_at:
         raise OwnerControlShadowVerifierConflictError(
             "Challenge expiry exceeds the channel session."
         )
-    request = issue_request.approval_request.model_copy(
-        update={
-            "nonce": challenge_nonce,
-            "issued_at": issued_at,
-            "expires_at": expires_at,
-        }
-    )
+    request = approval_request
     request_json = _canonical_wire_json(request)
     approval_request_sha256 = owner_control_approval_request_digest(request)
     return OwnerControlIssuedChallengeRecord(
@@ -430,8 +427,8 @@ def issue_owner_control_challenge_record(
         operation_id=request.operation_id,
         descriptor_id=request.descriptor_id,
         owner_github_id=session.owner_github_id,
-        issued_at=issued_at,
-        expires_at=expires_at,
+        issued_at=request.issued_at,
+        expires_at=request.expires_at,
         approval_request_json=request_json,
         approval_request_sha256=approval_request_sha256,
         binding_json=session.binding_json,

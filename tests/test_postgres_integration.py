@@ -59,8 +59,6 @@ from control_plane.contracts.owner_control import (
     ChannelBindingRecord,
     ChallengeResponse,
     OwnerControlConfirmationEnvelope,
-    ReviewItem,
-    ServerReviewPayload,
     owner_control_approval_request_digest,
     owner_control_channel_binding_sha256,
     owner_control_signature_payload_bytes,
@@ -86,6 +84,17 @@ from control_plane.contracts.outbox_delivery import (
 )
 from control_plane.contracts.privileged_operation_worker_heartbeat import (
     PrivilegedOperationWorkerHeartbeatRecord,
+)
+from control_plane.contracts.privileged_operation import (
+    ManagedSecretReencryptionHumanEvidence,
+    ManagedSecretReencryptionPlanInput,
+    PRIVILEGED_SECRET_OPERATION_APPROVE_ACTION,
+    PrivilegedOperationActor,
+    PrivilegedOperationEventRecord,
+    PrivilegedOperationRecord,
+    privileged_operation_evidence_digest,
+    privileged_operation_record_digest,
+    privileged_operation_request_digest,
 )
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
@@ -2450,29 +2459,78 @@ def _owner_control_shadow_binding(private_key: Ed25519PrivateKey) -> ChannelBind
     )
 
 
-def _owner_control_shadow_request() -> ApprovalRequest:
-    return ApprovalRequest(
+def _seed_owner_control_shadow_issue_provenance(
+    store: PostgresRecordStore,
+) -> PrivilegedOperationRecord:
+    request = ManagedSecretReencryptionPlanInput(reason="Rotate retained keys", source_label="test")
+    evidence = ManagedSecretReencryptionHumanEvidence(
+        result_status="ok",
+        plan_digest="a" * 64,
+        configured_secret_count=3,
+        rotation_candidate_count=2,
+        unchanged_count=1,
+        unreadable_secret_count=0,
+        active_key_id="redacted-key",
+        retirement_blocked_key_ids=(),
+        retirement_ready_key_ids=(),
+        legacy_compatibility_key_loaded=False,
+    )
+    actor = PrivilegedOperationActor(identity_type="github_human", github_id=44, login="requester")
+    record = PrivilegedOperationRecord(
         operation_id="privileged-operation-0123456789abcdef0123456789abcdef",
         descriptor_id="managed-secret-reencryption",
         descriptor_version=1,
-        request_digest="1" * 64,
-        plan_digest="2" * 64,
-        evidence_digest="3" * 64,
-        pre_state_digest="4" * 64,
-        policy_record_id="owner-policy",
-        policy_revision=1,
-        policy_sha256="5" * 64,
-        owner_github_id=100001,
-        server_review=ServerReviewPayload(
-            review_id="owner-control-postgres-review",
-            title="Review operation",
-            summary="Review the exact server-authored request.",
-            items=(ReviewItem(key="operation", label="Operation", value="Re-encrypt"),),
-        ),
-        nonce="owner-control-nonce-0000000000000004",
-        issued_at="2026-01-01T00:00:00+00:00",
-        expires_at="2026-01-01T00:01:00+00:00",
+        safety_class="secret_backed",
+        status="planned",
+        source_event_id="owner-control-test",
+        requested_by=actor,
+        request=request,
+        request_digest=privileged_operation_request_digest(request),
+        evidence=evidence,
+        evidence_digest=privileged_operation_evidence_digest(evidence),
+        created_at="2026-08-28T00:00:00+00:00",
+        updated_at="2026-08-28T00:00:00+00:00",
+        expires_at="2030-01-01T00:00:00+00:00",
     )
+    store.write_privileged_operation_plan(
+        record,
+        PrivilegedOperationEventRecord(
+            operation_id=record.operation_id,
+            sequence=1,
+            action="planned",
+            occurred_at=record.created_at,
+            source_kind="browser_api",
+            source_event_id=record.source_event_id,
+            actor=actor,
+            resulting_record_digest=privileged_operation_record_digest(record),
+        ),
+    )
+    policy = LaunchplaneAuthzPolicy(
+        schema_version=2,
+        github_humans=(
+            GitHubHumanPolicyRule(
+                managed_set_id="owner-control-tests",
+                managed_rule_id="approve",
+                github_ids=(100001,),
+                products=("launchplane",),
+                contexts=("launchplane",),
+                actions=(PRIVILEGED_SECRET_OPERATION_APPROVE_ACTION,),
+            ),
+        ),
+    )
+    digest = authz_policy_sha256(policy)
+    store.seed_authz_policy_if_absent(
+        LaunchplaneAuthzPolicyRecord(
+            record_id=build_authz_policy_record_id(revision=1, policy_sha256=digest),
+            revision=1,
+            status="active",
+            source="owner-control-tests",
+            updated_at="2026-08-28T00:00:00Z",
+            policy_sha256=digest,
+            policy=policy,
+        )
+    )
+    return record
 
 
 def _owner_control_shadow_envelope(
@@ -2499,15 +2557,56 @@ def _owner_control_shadow_envelope(
 
 
 class RealPostgresStorageConcurrencyTests(unittest.TestCase):
+    def test_owner_control_challenge_issuance_serializes_one_active_operation(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            private_key = Ed25519PrivateKey.generate()
+            binding = _owner_control_shadow_binding(private_key)
+            store.enroll_owner_control_channel_session(binding)
+            operation = _seed_owner_control_shadow_issue_provenance(store)
+            issue_request = OwnerControlChallengeIssueRequest(
+                channel_session_id=binding.channel_session_id,
+                operation_id=operation.operation_id,
+                expires_in_seconds=300,
+            )
+            second_store = PostgresRecordStore(database_url=store.database_url)
+            barrier = threading.Barrier(2)
+
+            def issue_once(active_store: PostgresRecordStore) -> object:
+                barrier.wait(timeout=10)
+                return active_store.issue_owner_control_challenge(issue_request)
+
+            try:
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    issued_records = tuple(executor.map(issue_once, (store, second_store)))
+                engine = create_engine(store.database_url)
+                try:
+                    with engine.connect() as connection:
+                        active_count = connection.scalar(
+                            text(
+                                "select count(*) from "
+                                "launchplane_owner_control_issued_challenges "
+                                "where operation_id = :operation_id and state = 'issued'"
+                            ),
+                            {"operation_id": operation.operation_id},
+                        )
+                finally:
+                    engine.dispose()
+            finally:
+                second_store.close()
+
+        self.assertEqual(issued_records[0], issued_records[1])
+        self.assertEqual(active_count, 1)
+
     def test_owner_control_shadow_verification_consumes_one_challenge_once(self) -> None:
         with _store_for_fresh_head_database() as store:
             private_key = Ed25519PrivateKey.generate()
             binding = _owner_control_shadow_binding(private_key)
             store.enroll_owner_control_channel_session(binding)
+            operation = _seed_owner_control_shadow_issue_provenance(store)
             issued = store.issue_owner_control_challenge(
                 OwnerControlChallengeIssueRequest(
                     channel_session_id=binding.channel_session_id,
-                    approval_request=_owner_control_shadow_request(),
+                    operation_id=operation.operation_id,
                     expires_in_seconds=300,
                 )
             )
