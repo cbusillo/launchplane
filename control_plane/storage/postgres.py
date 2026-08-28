@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 import fcntl
 import hashlib
 from pathlib import Path
+import secrets
 from threading import Lock
 import time
 from typing import Any, Literal, NamedTuple, Protocol, TypeVar, cast, overload
@@ -20,6 +21,7 @@ from sqlalchemy import (
     Index,
     Integer,
     String,
+    UniqueConstraint,
     create_engine,
     delete,
     desc,
@@ -114,6 +116,27 @@ from control_plane.contracts.owner_acceptance import (
     owner_acceptance_event_replay_digest,
     owner_acceptance_subject_key,
     validate_owner_acceptance_event_transition,
+)
+from control_plane.contracts.owner_control import (
+    ChannelBindingRecord,
+    OwnerControlConfirmationEnvelope,
+    owner_control_channel_binding_sha256,
+)
+from control_plane.contracts.owner_control_shadow_verifier import (
+    OWNER_CONTROL_SHADOW_MAX_ATTEMPTS,
+    OwnerControlChannelSessionRecord,
+    OwnerControlChallengeIssueRequest,
+    OwnerControlIssuedChallengeRecord,
+    OwnerControlShadowVerificationEvaluation,
+    OwnerControlShadowVerificationEventRecord,
+    OwnerControlShadowVerificationResult,
+    OwnerControlShadowVerifierConflictError,
+    build_owner_control_channel_session_record,
+    evaluate_owner_control_shadow_verification,
+    issue_owner_control_challenge_record,
+    owner_control_confirmation_envelope_sha256,
+    owner_control_verification_event_id,
+    revoke_owner_control_channel_session_record,
 )
 from control_plane.contracts.merge_train_batch import (
     MergeTrainBatchCandidateRecord,
@@ -1023,6 +1046,183 @@ class LaunchplaneOwnerAcceptanceEventRow(Base):
     )
     self_review: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=false())
     occurred_at: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneOwnerControlChannelSessionRow(Base):
+    __tablename__ = "launchplane_owner_control_channel_sessions"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('enrolled', 'revoked')",
+            name="launchplane_owner_control_session_status_ck",
+        ),
+        CheckConstraint(
+            "(status = 'enrolled' AND revoked_at IS NULL) OR "
+            "(status = 'revoked' AND revoked_at IS NOT NULL)",
+            name="launchplane_owner_control_session_revocation_ck",
+        ),
+        CheckConstraint(
+            "authority_state = 'inert'",
+            name="launchplane_owner_control_session_authority_ck",
+        ),
+        UniqueConstraint(
+            "owner_github_id",
+            "binding_sha256",
+            name="launchplane_owner_control_session_owner_binding_uq",
+        ),
+        Index(
+            "launchplane_owner_control_session_status_idx",
+            "status",
+            "session_expires_at",
+        ),
+    )
+
+    channel_session_id: Mapped[str] = mapped_column(String, primary_key=True)
+    owner_github_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    session_issued_at: Mapped[str] = mapped_column(String, nullable=False)
+    session_expires_at: Mapped[str] = mapped_column(String, nullable=False)
+    binding_sha256: Mapped[str] = mapped_column(String, nullable=False)
+    enrolled_at: Mapped[str] = mapped_column(String, nullable=False)
+    revoked_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    authority_state: Mapped[str] = mapped_column(
+        String,
+        nullable=False,
+        server_default="inert",
+    )
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneOwnerControlIssuedChallengeRow(Base):
+    __tablename__ = "launchplane_owner_control_issued_challenges"
+    __table_args__ = (
+        CheckConstraint(
+            "expires_at > issued_at",
+            name="launchplane_owner_control_challenge_expiry_ck",
+        ),
+        CheckConstraint(
+            "state IN ('issued', 'consumed', 'expired', 'rejected')",
+            name="launchplane_owner_control_challenge_state_ck",
+        ),
+        CheckConstraint(
+            "attempt_count BETWEEN 0 AND 8",
+            name="launchplane_owner_control_challenge_attempt_count_ck",
+        ),
+        CheckConstraint(
+            "(state = 'issued' AND consumed_at IS NULL AND terminal_event_id IS NULL) OR "
+            "(state = 'consumed' AND consumed_at IS NOT NULL AND terminal_event_id IS NOT NULL) OR "
+            "(state IN ('expired', 'rejected') AND consumed_at IS NULL AND terminal_event_id IS NOT NULL)",
+            name="launchplane_owner_control_challenge_terminal_ck",
+        ),
+        CheckConstraint(
+            "authority_state = 'inert'",
+            name="launchplane_owner_control_challenge_authority_ck",
+        ),
+        UniqueConstraint(
+            "challenge_nonce",
+            name="launchplane_owner_control_challenge_nonce_uq",
+        ),
+        UniqueConstraint(
+            "approval_request_sha256",
+            name="launchplane_owner_control_challenge_request_digest_uq",
+        ),
+        Index(
+            "launchplane_owner_control_challenge_session_idx",
+            "channel_session_id",
+            "expires_at",
+        ),
+        Index(
+            "launchplane_owner_control_challenge_state_idx",
+            "state",
+            "expires_at",
+        ),
+    )
+
+    challenge_id: Mapped[str] = mapped_column(String, primary_key=True)
+    challenge_nonce: Mapped[str] = mapped_column(String, nullable=False)
+    channel_session_id: Mapped[str] = mapped_column(String, nullable=False)
+    operation_id: Mapped[str] = mapped_column(String, nullable=False)
+    descriptor_id: Mapped[str] = mapped_column(String, nullable=False)
+    owner_github_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    issued_at: Mapped[str] = mapped_column(String, nullable=False)
+    expires_at: Mapped[str] = mapped_column(String, nullable=False)
+    approval_request_sha256: Mapped[str] = mapped_column(String, nullable=False)
+    binding_sha256: Mapped[str] = mapped_column(String, nullable=False)
+    state: Mapped[str] = mapped_column(String, nullable=False)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    consumed_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    terminal_event_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    authority_state: Mapped[str] = mapped_column(
+        String,
+        nullable=False,
+        server_default="inert",
+    )
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneOwnerControlShadowVerificationEventRow(Base):
+    __tablename__ = "launchplane_owner_control_shadow_verification_events"
+    __table_args__ = (
+        CheckConstraint(
+            "verification_status IN ('verified', 'rejected')",
+            name="launchplane_owner_control_shadow_event_status_ck",
+        ),
+        CheckConstraint(
+            "verifier_mode = 'shadow'",
+            name="launchplane_owner_control_shadow_event_mode_ck",
+        ),
+        CheckConstraint(
+            "authorizes_execution = false",
+            name="launchplane_owner_control_shadow_event_authorization_ck",
+        ),
+        CheckConstraint(
+            "authority_state = 'inert'",
+            name="launchplane_owner_control_shadow_event_authority_ck",
+        ),
+        CheckConstraint(
+            "sequence BETWEEN 1 AND 8",
+            name="launchplane_owner_control_shadow_event_sequence_ck",
+        ),
+        UniqueConstraint(
+            "challenge_id",
+            "sequence",
+            name="launchplane_owner_control_shadow_event_sequence_uq",
+        ),
+        Index(
+            "launchplane_owner_control_shadow_event_challenge_idx",
+            "challenge_nonce",
+            desc("occurred_at"),
+        ),
+        Index(
+            "launchplane_owner_control_shadow_event_session_idx",
+            "channel_session_id",
+            desc("occurred_at"),
+        ),
+    )
+
+    event_id: Mapped[str] = mapped_column(String, primary_key=True)
+    challenge_id: Mapped[str] = mapped_column(String, nullable=False)
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    channel_session_id: Mapped[str] = mapped_column(String, nullable=False)
+    challenge_nonce: Mapped[str] = mapped_column(String, nullable=False)
+    envelope_sha256: Mapped[str] = mapped_column(String, nullable=False)
+    approval_request_sha256: Mapped[str] = mapped_column(String, nullable=False)
+    binding_sha256: Mapped[str] = mapped_column(String, nullable=False)
+    verification_status: Mapped[str] = mapped_column(String, nullable=False)
+    rejection_reason: Mapped[str | None] = mapped_column(String, nullable=True)
+    resulting_challenge_state: Mapped[str] = mapped_column(String, nullable=False)
+    occurred_at: Mapped[str] = mapped_column(String, nullable=False)
+    verifier_mode: Mapped[str] = mapped_column(String, nullable=False, server_default="shadow")
+    authorizes_execution: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        server_default=false(),
+    )
+    authority_state: Mapped[str] = mapped_column(
+        String,
+        nullable=False,
+        server_default="inert",
+    )
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -4566,6 +4766,9 @@ class PostgresRecordStore(HumanSessionStore):
             if parsed.tzinfo is None:
                 parsed = parsed.replace(tzinfo=timezone.utc)
         return format_launchplane_mutation_timestamp(parsed)
+
+    def _owner_control_shadow_timestamp(self, session: Any) -> str:
+        return self._database_mutation_timestamp(session).replace("Z", "+00:00")
 
     @staticmethod
     def _mutation_lease_expiry(*, observed_at: str, lease_seconds: int) -> str:
@@ -8961,6 +9164,403 @@ class PostgresRecordStore(HumanSessionStore):
                             )
                     return
             time.sleep(0.05)
+
+    def _owner_control_channel_session_row(
+        self,
+        session: Any,
+        *,
+        channel_session_id: str,
+        for_update: bool = False,
+    ) -> LaunchplaneOwnerControlChannelSessionRow | None:
+        statement = select(LaunchplaneOwnerControlChannelSessionRow).where(
+            LaunchplaneOwnerControlChannelSessionRow.channel_session_id == channel_session_id
+        )
+        if for_update and not self.database_url.startswith("sqlite"):
+            statement = statement.with_for_update()
+        return cast(LaunchplaneOwnerControlChannelSessionRow | None, session.scalar(statement))
+
+    def _owner_control_issued_challenge_row(
+        self,
+        session: Any,
+        *,
+        challenge_nonce: str,
+        for_update: bool = False,
+    ) -> LaunchplaneOwnerControlIssuedChallengeRow | None:
+        statement = select(LaunchplaneOwnerControlIssuedChallengeRow).where(
+            LaunchplaneOwnerControlIssuedChallengeRow.challenge_nonce == challenge_nonce
+        )
+        if for_update and not self.database_url.startswith("sqlite"):
+            statement = statement.with_for_update()
+        return cast(LaunchplaneOwnerControlIssuedChallengeRow | None, session.scalar(statement))
+
+    @staticmethod
+    def _owner_control_channel_session_record_from_row(
+        row: LaunchplaneOwnerControlChannelSessionRow,
+    ) -> OwnerControlChannelSessionRecord:
+        return OwnerControlChannelSessionRecord.model_validate(row.payload)
+
+    @staticmethod
+    def _owner_control_issued_challenge_record_from_row(
+        row: LaunchplaneOwnerControlIssuedChallengeRow,
+    ) -> OwnerControlIssuedChallengeRecord:
+        return OwnerControlIssuedChallengeRecord.model_validate(row.payload)
+
+    def _owner_control_channel_session_row_from_record(
+        self,
+        record: OwnerControlChannelSessionRecord,
+    ) -> LaunchplaneOwnerControlChannelSessionRow:
+        binding = record.channel_binding()
+        return LaunchplaneOwnerControlChannelSessionRow(
+            channel_session_id=record.channel_session_id,
+            owner_github_id=record.owner_github_id,
+            status=record.status,
+            session_issued_at=binding.session_issued_at,
+            session_expires_at=binding.session_expires_at,
+            binding_sha256=record.binding_sha256,
+            enrolled_at=record.enrolled_at,
+            revoked_at=record.revoked_at,
+            authority_state=record.authority_state,
+            payload=self._payload_dict(record),
+        )
+
+    def _sync_owner_control_channel_session_row(
+        self,
+        row: LaunchplaneOwnerControlChannelSessionRow,
+        record: OwnerControlChannelSessionRecord,
+    ) -> None:
+        binding = record.channel_binding()
+        row.owner_github_id = record.owner_github_id
+        row.status = record.status
+        row.session_issued_at = binding.session_issued_at
+        row.session_expires_at = binding.session_expires_at
+        row.binding_sha256 = record.binding_sha256
+        row.enrolled_at = record.enrolled_at
+        row.revoked_at = record.revoked_at
+        row.authority_state = record.authority_state
+        row.payload = self._payload_dict(record)
+
+    def _owner_control_issued_challenge_row_from_record(
+        self,
+        record: OwnerControlIssuedChallengeRecord,
+    ) -> LaunchplaneOwnerControlIssuedChallengeRow:
+        return LaunchplaneOwnerControlIssuedChallengeRow(
+            challenge_id=record.challenge_id,
+            challenge_nonce=record.challenge_nonce,
+            channel_session_id=record.channel_session_id,
+            operation_id=record.operation_id,
+            descriptor_id=record.descriptor_id,
+            owner_github_id=record.owner_github_id,
+            issued_at=record.issued_at,
+            expires_at=record.expires_at,
+            approval_request_sha256=record.approval_request_sha256,
+            binding_sha256=record.binding_sha256,
+            state=record.state,
+            attempt_count=record.attempt_count,
+            consumed_at=record.consumed_at,
+            terminal_event_id=record.terminal_event_id,
+            authority_state=record.authority_state,
+            payload=self._payload_dict(record),
+        )
+
+    def _sync_owner_control_issued_challenge_row(
+        self,
+        row: LaunchplaneOwnerControlIssuedChallengeRow,
+        record: OwnerControlIssuedChallengeRecord,
+    ) -> None:
+        row.channel_session_id = record.channel_session_id
+        row.operation_id = record.operation_id
+        row.descriptor_id = record.descriptor_id
+        row.owner_github_id = record.owner_github_id
+        row.issued_at = record.issued_at
+        row.expires_at = record.expires_at
+        row.approval_request_sha256 = record.approval_request_sha256
+        row.binding_sha256 = record.binding_sha256
+        row.state = record.state
+        row.attempt_count = record.attempt_count
+        row.consumed_at = record.consumed_at
+        row.terminal_event_id = record.terminal_event_id
+        row.authority_state = record.authority_state
+        row.payload = self._payload_dict(record)
+
+    def enroll_owner_control_channel_session(
+        self,
+        binding: ChannelBindingRecord,
+    ) -> OwnerControlChannelSessionRecord:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            existing_row = self._owner_control_channel_session_row(
+                session,
+                channel_session_id=binding.channel_session_id,
+                for_update=True,
+            )
+            if existing_row is not None:
+                existing_record = self._owner_control_channel_session_record_from_row(existing_row)
+                if (
+                    existing_record.binding_sha256 == owner_control_channel_binding_sha256(binding)
+                    and existing_record.channel_binding() == binding
+                ):
+                    session.rollback()
+                    return existing_record
+                raise OwnerControlShadowVerifierConflictError(
+                    "Channel-session enrollment changed the stored binding."
+                )
+            record = build_owner_control_channel_session_record(
+                binding=binding,
+                enrolled_at=self._owner_control_shadow_timestamp(session),
+            )
+            session.add(self._owner_control_channel_session_row_from_record(record))
+            session.commit()
+            return record
+
+    def revoke_owner_control_channel_session(
+        self,
+        *,
+        channel_session_id: str,
+    ) -> OwnerControlChannelSessionRecord:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            row = self._owner_control_channel_session_row(
+                session,
+                channel_session_id=channel_session_id,
+                for_update=True,
+            )
+            if row is None:
+                raise FileNotFoundError(
+                    f"Owner-control channel session {channel_session_id} was not found."
+                )
+            record = self._owner_control_channel_session_record_from_row(row)
+            revoked_record = revoke_owner_control_channel_session_record(
+                record,
+                revoked_at=self._owner_control_shadow_timestamp(session),
+            )
+            if revoked_record != record:
+                self._sync_owner_control_channel_session_row(row, revoked_record)
+                session.commit()
+            else:
+                session.rollback()
+            return revoked_record
+
+    def issue_owner_control_challenge(
+        self,
+        issue_request: OwnerControlChallengeIssueRequest,
+    ) -> OwnerControlIssuedChallengeRecord:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            session_row = self._owner_control_channel_session_row(
+                session,
+                channel_session_id=issue_request.channel_session_id,
+                for_update=True,
+            )
+            if session_row is None:
+                raise FileNotFoundError(
+                    f"Owner-control channel session {issue_request.channel_session_id} was not found."
+                )
+            session_record = self._owner_control_channel_session_record_from_row(session_row)
+            record = issue_owner_control_challenge_record(
+                issue_request=issue_request,
+                session=session_record,
+                challenge_nonce=secrets.token_urlsafe(32),
+                issued_at=self._owner_control_shadow_timestamp(session),
+            )
+            existing_row = self._owner_control_issued_challenge_row(
+                session,
+                challenge_nonce=record.challenge_nonce,
+                for_update=True,
+            )
+            if existing_row is not None:
+                existing_record = self._owner_control_issued_challenge_record_from_row(existing_row)
+                if existing_record == record:
+                    session.rollback()
+                    return existing_record
+                raise OwnerControlShadowVerifierConflictError(
+                    "Owner-control challenge nonce was already issued."
+                )
+            session.add(self._owner_control_issued_challenge_row_from_record(record))
+            session.commit()
+            return record
+
+    def verify_owner_control_confirmation_shadow(
+        self,
+        envelope: OwnerControlConfirmationEnvelope,
+    ) -> OwnerControlShadowVerificationResult:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            observed_challenge_row = self._owner_control_issued_challenge_row(
+                session,
+                challenge_nonce=envelope.challenge_response.approval_request.nonce,
+            )
+            if observed_challenge_row is None:
+                session.rollback()
+                raise FileNotFoundError("Owner-control challenge was not issued.")
+            observed_challenge = self._owner_control_issued_challenge_record_from_row(
+                observed_challenge_row
+            )
+            session_row = self._owner_control_channel_session_row(
+                session,
+                channel_session_id=observed_challenge.channel_session_id,
+                for_update=True,
+            )
+            challenge_row = self._owner_control_issued_challenge_row(
+                session,
+                challenge_nonce=observed_challenge.challenge_nonce,
+                for_update=True,
+            )
+            if challenge_row is None:
+                session.rollback()
+                raise FileNotFoundError("Owner-control challenge was not issued.")
+            challenge_record = self._owner_control_issued_challenge_record_from_row(challenge_row)
+            if challenge_record.attempt_count >= OWNER_CONTROL_SHADOW_MAX_ATTEMPTS:
+                session.rollback()
+                raise OwnerControlShadowVerifierConflictError(
+                    "Owner-control challenge verification attempt budget is exhausted."
+                )
+            observed_at = self._owner_control_shadow_timestamp(session)
+            evaluation = evaluate_owner_control_shadow_verification(
+                envelope=envelope,
+                channel_session=(
+                    self._owner_control_channel_session_record_from_row(session_row)
+                    if session_row is not None
+                    else None
+                ),
+                issued_challenge=challenge_record,
+                observed_at=observed_at,
+            )
+            sequence = challenge_record.attempt_count + 1
+            if (
+                evaluation.verification_status == "rejected"
+                and evaluation.resulting_challenge_state == "issued"
+                and sequence == OWNER_CONTROL_SHADOW_MAX_ATTEMPTS
+            ):
+                evaluation = OwnerControlShadowVerificationEvaluation(
+                    verification_status="rejected",
+                    rejection_reason="attempt_budget_exhausted",
+                    resulting_challenge_state="rejected",
+                )
+            envelope_sha256 = owner_control_confirmation_envelope_sha256(envelope)
+            event_id = owner_control_verification_event_id(
+                challenge_id=challenge_record.challenge_id,
+                sequence=sequence,
+                envelope_sha256=envelope_sha256,
+                verification_status=evaluation.verification_status,
+                rejection_reason=evaluation.rejection_reason,
+            )
+            first_terminal_transition = (
+                challenge_record.state == "issued"
+                and evaluation.resulting_challenge_state != "issued"
+            )
+            updated_challenge = challenge_record.model_copy(
+                update={
+                    "attempt_count": sequence,
+                    "state": evaluation.resulting_challenge_state,
+                    "consumed_at": (
+                        observed_at
+                        if evaluation.resulting_challenge_state == "consumed"
+                        and challenge_record.consumed_at is None
+                        else challenge_record.consumed_at
+                    ),
+                    "terminal_event_id": (
+                        event_id
+                        if first_terminal_transition
+                        else challenge_record.terminal_event_id
+                    ),
+                }
+            )
+            self._sync_owner_control_issued_challenge_row(challenge_row, updated_challenge)
+            event = OwnerControlShadowVerificationEventRecord(
+                event_id=event_id,
+                challenge_id=challenge_record.challenge_id,
+                sequence=sequence,
+                channel_session_id=challenge_record.channel_session_id,
+                challenge_nonce=challenge_record.challenge_nonce,
+                envelope_sha256=envelope_sha256,
+                approval_request_sha256=challenge_record.approval_request_sha256,
+                binding_sha256=challenge_record.binding_sha256,
+                verification_status=evaluation.verification_status,
+                rejection_reason=evaluation.rejection_reason,
+                resulting_challenge_state=evaluation.resulting_challenge_state,
+                occurred_at=observed_at,
+            )
+            session.add(
+                LaunchplaneOwnerControlShadowVerificationEventRow(
+                    event_id=event.event_id,
+                    challenge_id=event.challenge_id,
+                    sequence=event.sequence,
+                    channel_session_id=event.channel_session_id,
+                    challenge_nonce=event.challenge_nonce,
+                    envelope_sha256=event.envelope_sha256,
+                    approval_request_sha256=event.approval_request_sha256,
+                    binding_sha256=event.binding_sha256,
+                    verification_status=event.verification_status,
+                    rejection_reason=event.rejection_reason,
+                    resulting_challenge_state=event.resulting_challenge_state,
+                    occurred_at=event.occurred_at,
+                    verifier_mode=event.verifier_mode,
+                    authorizes_execution=event.authorizes_execution,
+                    authority_state=event.authority_state,
+                    payload=self._payload_dict(event),
+                )
+            )
+            session.commit()
+            return OwnerControlShadowVerificationResult(
+                event_id=event.event_id,
+                challenge_id=event.challenge_id,
+                sequence=event.sequence,
+                verification_status=event.verification_status,
+                rejection_reason=event.rejection_reason,
+                resulting_challenge_state=event.resulting_challenge_state,
+            )
+
+    def read_owner_control_channel_session(
+        self,
+        *,
+        channel_session_id: str,
+    ) -> OwnerControlChannelSessionRecord:
+        return self._read_model(
+            model_type=OwnerControlChannelSessionRecord,
+            orm_model=LaunchplaneOwnerControlChannelSessionRow,
+            filters=(
+                LaunchplaneOwnerControlChannelSessionRow.channel_session_id == channel_session_id,
+            ),
+        )
+
+    def read_owner_control_issued_challenge(
+        self,
+        *,
+        challenge_nonce: str,
+    ) -> OwnerControlIssuedChallengeRecord:
+        return self._read_model(
+            model_type=OwnerControlIssuedChallengeRecord,
+            orm_model=LaunchplaneOwnerControlIssuedChallengeRow,
+            filters=(LaunchplaneOwnerControlIssuedChallengeRow.challenge_nonce == challenge_nonce,),
+        )
+
+    def list_owner_control_shadow_verification_events(
+        self,
+        *,
+        challenge_nonce: str = "",
+        channel_session_id: str = "",
+        limit: int | None = None,
+    ) -> tuple[OwnerControlShadowVerificationEventRecord, ...]:
+        filters: list[object] = []
+        if challenge_nonce:
+            filters.append(
+                LaunchplaneOwnerControlShadowVerificationEventRow.challenge_nonce == challenge_nonce
+            )
+        if channel_session_id:
+            filters.append(
+                LaunchplaneOwnerControlShadowVerificationEventRow.channel_session_id
+                == channel_session_id
+            )
+        return self._list_models(
+            model_type=OwnerControlShadowVerificationEventRecord,
+            orm_model=LaunchplaneOwnerControlShadowVerificationEventRow,
+            filters=filters,
+            order_by=(
+                LaunchplaneOwnerControlShadowVerificationEventRow.occurred_at.desc(),
+                LaunchplaneOwnerControlShadowVerificationEventRow.event_id.desc(),
+            ),
+            limit=limit,
+        )
 
     def _sync_privileged_operation_row(
         self,

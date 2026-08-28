@@ -1,0 +1,397 @@
+from __future__ import annotations
+
+import base64
+from pathlib import Path
+import subprocess
+from tempfile import TemporaryDirectory
+import unittest
+
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+from control_plane.contracts.owner_control import (
+    ApprovalRequest,
+    ChannelBindingRecord,
+    ChallengeResponse,
+    OwnerControlConfirmationEnvelope,
+    ReviewItem,
+    ServerReviewPayload,
+    owner_control_approval_request_digest,
+    owner_control_channel_binding_sha256,
+    owner_control_signature_payload_bytes,
+)
+from control_plane.contracts.owner_control_shadow_verifier import (
+    OwnerControlChallengeIssueRequest,
+    evaluate_owner_control_shadow_verification,
+)
+from control_plane.storage.postgres import PostgresRecordStore
+
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+OWNER_CONTROL_BASE_REVISION = "8c34cb5849edafd8db05f936afe994ac82372087"
+
+
+def _base64url(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
+
+
+def _binding(
+    private_key: Ed25519PrivateKey, *, session_id: str = "owner-control-session"
+) -> ChannelBindingRecord:
+    return ChannelBindingRecord(
+        channel_session_id=session_id,
+        owner_github_id=100001,
+        signature_algorithm="ed25519",
+        owner_public_key=_base64url(
+            private_key.public_key().public_bytes_raw(),
+        ),
+        session_issued_at="2025-01-01T00:00:00+00:00",
+        session_expires_at="2035-01-01T00:00:00+00:00",
+    )
+
+
+def _request(*, nonce: str = "owner-control-nonce-0000000000000001") -> ApprovalRequest:
+    return ApprovalRequest(
+        operation_id="privileged-operation-0123456789abcdef0123456789abcdef",
+        descriptor_id="managed-secret-reencryption",
+        descriptor_version=1,
+        request_digest="1" * 64,
+        plan_digest="2" * 64,
+        evidence_digest="3" * 64,
+        pre_state_digest="4" * 64,
+        policy_record_id="owner-policy",
+        policy_revision=1,
+        policy_sha256="5" * 64,
+        owner_github_id=100001,
+        server_review=ServerReviewPayload(
+            review_id="owner-control-review",
+            title="Review operation",
+            summary="Review the exact server-authored request.",
+            items=(ReviewItem(key="operation", label="Operation", value="Re-encrypt"),),
+        ),
+        nonce=nonce,
+        issued_at="2026-01-01T00:00:00+00:00",
+        expires_at="2026-01-01T00:01:00+00:00",
+    )
+
+
+def _envelope(
+    private_key: Ed25519PrivateKey,
+    *,
+    binding: ChannelBindingRecord,
+    request: ApprovalRequest,
+) -> OwnerControlConfirmationEnvelope:
+    response = ChallengeResponse(
+        approval_request=request,
+        approval_request_digest=owner_control_approval_request_digest(request),
+        decision="approved",
+        channel_binding_sha256=owner_control_channel_binding_sha256(binding),
+        confirmed_at=request.issued_at,
+    )
+    signature = private_key.sign(owner_control_signature_payload_bytes(response))
+    return OwnerControlConfirmationEnvelope(
+        channel_binding=binding,
+        challenge_response=response,
+        signature_algorithm="ed25519",
+        signature=_base64url(signature),
+    )
+
+
+class OwnerControlShadowVerifierStorageTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary_directory = TemporaryDirectory()
+        self.store = PostgresRecordStore(
+            database_url=f"sqlite+pysqlite:///{Path(self.temporary_directory.name) / 'records.sqlite3'}"
+        )
+        self.store.ensure_schema()
+
+    def tearDown(self) -> None:
+        self.store.close()
+        self.temporary_directory.cleanup()
+
+    def test_verifies_once_with_exact_server_state_and_persists_shadow_events(self) -> None:
+        private_key = Ed25519PrivateKey.generate()
+        binding = _binding(private_key)
+        enrolled = self.store.enroll_owner_control_channel_session(binding)
+        issued = self.store.issue_owner_control_challenge(
+            OwnerControlChallengeIssueRequest(
+                channel_session_id=binding.channel_session_id,
+                approval_request=_request(),
+                expires_in_seconds=300,
+            )
+        )
+        envelope = _envelope(
+            private_key,
+            binding=binding,
+            request=issued.approval_request(),
+        )
+
+        verified = self.store.verify_owner_control_confirmation_shadow(envelope)
+        replayed = self.store.verify_owner_control_confirmation_shadow(envelope)
+        stored_challenge = self.store.read_owner_control_issued_challenge(
+            challenge_nonce=issued.challenge_nonce
+        )
+        events = self.store.list_owner_control_shadow_verification_events(
+            challenge_nonce=issued.challenge_nonce
+        )
+
+        self.assertEqual(enrolled.status, "enrolled")
+        self.assertEqual(enrolled.authority_state, "inert")
+        self.assertNotEqual(issued.challenge_nonce, _request().nonce)
+        self.assertEqual(issued.state, "issued")
+        self.assertEqual(issued.authority_state, "inert")
+        self.assertEqual(verified.verification_status, "verified")
+        self.assertEqual(verified.resulting_challenge_state, "consumed")
+        self.assertFalse(verified.authorizes_execution)
+        self.assertEqual(verified.verifier_mode, "shadow")
+        self.assertEqual(replayed.verification_status, "rejected")
+        self.assertEqual(replayed.rejection_reason, "challenge_replayed")
+        self.assertEqual(stored_challenge.state, "consumed")
+        self.assertEqual(stored_challenge.attempt_count, 2)
+        self.assertIsNotNone(stored_challenge.consumed_at)
+        self.assertIsNotNone(stored_challenge.terminal_event_id)
+        self.assertEqual(
+            sorted(event.verification_status for event in events), ["rejected", "verified"]
+        )
+        self.assertEqual(sorted(event.sequence for event in events), [1, 2])
+        self.assertTrue(all(event.verifier_mode == "shadow" for event in events))
+        self.assertTrue(all(event.authorizes_execution is False for event in events))
+        self.assertTrue(all(event.authority_state == "inert" for event in events))
+
+    def test_valid_signature_with_changed_request_never_verifies(self) -> None:
+        private_key = Ed25519PrivateKey.generate()
+        binding = _binding(private_key)
+        self.store.enroll_owner_control_channel_session(binding)
+        issued = self.store.issue_owner_control_challenge(
+            OwnerControlChallengeIssueRequest(
+                channel_session_id=binding.channel_session_id,
+                approval_request=_request(),
+                expires_in_seconds=300,
+            )
+        )
+        altered_request = issued.approval_request().model_copy(update={"plan_digest": "9" * 64})
+        envelope = _envelope(private_key, binding=binding, request=altered_request)
+
+        result = self.store.verify_owner_control_confirmation_shadow(envelope)
+        stored_challenge = self.store.read_owner_control_issued_challenge(
+            challenge_nonce=issued.challenge_nonce
+        )
+
+        self.assertEqual(result.verification_status, "rejected")
+        self.assertEqual(result.rejection_reason, "stored_approval_request_mismatch")
+        self.assertEqual(stored_challenge.state, "issued")
+        self.assertEqual(stored_challenge.attempt_count, 1)
+        self.assertIsNone(stored_challenge.consumed_at)
+
+    def test_self_signed_unknown_session_never_creates_durable_state(self) -> None:
+        private_key = Ed25519PrivateKey.generate()
+        binding = _binding(private_key, session_id="self-signed-session")
+        request = _request(nonce="owner-control-nonce-0000000000000002")
+        envelope = _envelope(private_key, binding=binding, request=request)
+
+        with self.assertRaisesRegex(FileNotFoundError, "was not issued"):
+            self.store.verify_owner_control_confirmation_shadow(envelope)
+        events = self.store.list_owner_control_shadow_verification_events(
+            challenge_nonce=request.nonce
+        )
+
+        self.assertEqual(events, ())
+
+    def test_rejection_audit_is_bounded_and_terminal(self) -> None:
+        private_key = Ed25519PrivateKey.generate()
+        binding = _binding(private_key)
+        self.store.enroll_owner_control_channel_session(binding)
+        issued = self.store.issue_owner_control_challenge(
+            OwnerControlChallengeIssueRequest(
+                channel_session_id=binding.channel_session_id,
+                approval_request=_request(),
+                expires_in_seconds=300,
+            )
+        )
+        altered_request = issued.approval_request().model_copy(update={"plan_digest": "9" * 64})
+        envelope = _envelope(private_key, binding=binding, request=altered_request)
+
+        results = tuple(
+            self.store.verify_owner_control_confirmation_shadow(envelope) for _ in range(8)
+        )
+        with self.assertRaisesRegex(ValueError, "attempt budget is exhausted"):
+            self.store.verify_owner_control_confirmation_shadow(envelope)
+        stored_challenge = self.store.read_owner_control_issued_challenge(
+            challenge_nonce=issued.challenge_nonce
+        )
+        events = self.store.list_owner_control_shadow_verification_events(
+            challenge_nonce=issued.challenge_nonce
+        )
+
+        self.assertTrue(
+            all(
+                result.rejection_reason == "stored_approval_request_mismatch"
+                for result in results[:7]
+            )
+        )
+        self.assertEqual(results[7].rejection_reason, "attempt_budget_exhausted")
+        self.assertEqual(stored_challenge.state, "rejected")
+        self.assertEqual(stored_challenge.attempt_count, 8)
+        self.assertEqual(len(events), 8)
+        self.assertEqual(sorted(event.sequence for event in events), list(range(1, 9)))
+
+    def test_pure_evaluation_rejects_unknown_sessions_before_signature_can_authorize(self) -> None:
+        private_key = Ed25519PrivateKey.generate()
+        binding = _binding(private_key, session_id="not-enrolled")
+        request = _request(nonce="owner-control-nonce-0000000000000003")
+        envelope = _envelope(private_key, binding=binding, request=request)
+
+        evaluation = evaluate_owner_control_shadow_verification(
+            envelope=envelope,
+            channel_session=None,
+            issued_challenge=None,
+            observed_at="2026-08-28T00:00:00+00:00",
+        )
+
+        self.assertEqual(evaluation.verification_status, "rejected")
+        self.assertEqual(evaluation.rejection_reason, "unknown_channel_session")
+        self.assertEqual(evaluation.resulting_challenge_state, "rejected")
+        self.assertFalse(evaluation.consume_challenge)
+
+    def test_pure_evaluation_rejects_stored_state_and_signature_mismatches(self) -> None:
+        private_key = Ed25519PrivateKey.generate()
+        binding = _binding(private_key)
+        enrolled = self.store.enroll_owner_control_channel_session(binding)
+        issued = self.store.issue_owner_control_challenge(
+            OwnerControlChallengeIssueRequest(
+                channel_session_id=binding.channel_session_id,
+                approval_request=_request(),
+                expires_in_seconds=300,
+            )
+        )
+        valid_envelope = _envelope(
+            private_key,
+            binding=binding,
+            request=issued.approval_request(),
+        )
+        wrong_signature_envelope = _envelope(
+            Ed25519PrivateKey.generate(),
+            binding=binding,
+            request=issued.approval_request(),
+        )
+        cross_session_binding = binding.model_copy(
+            update={"channel_session_id": "owner-control-other-session"}
+        )
+        cross_session_envelope = _envelope(
+            private_key,
+            binding=cross_session_binding,
+            request=issued.approval_request(),
+        )
+        revoked = enrolled.model_copy(
+            update={"status": "revoked", "revoked_at": enrolled.enrolled_at}
+        )
+
+        cases = (
+            (
+                "revoked",
+                valid_envelope,
+                revoked,
+                issued.issued_at,
+                "channel_session_revoked",
+            ),
+            (
+                "session-expired",
+                valid_envelope,
+                enrolled,
+                "2035-01-02T00:00:00+00:00",
+                "channel_session_expired",
+            ),
+            (
+                "challenge-expired",
+                valid_envelope,
+                enrolled,
+                "2027-01-01T00:00:00+00:00",
+                "challenge_expired",
+            ),
+            (
+                "cross-session",
+                cross_session_envelope,
+                enrolled,
+                issued.issued_at,
+                "challenge_channel_session_mismatch",
+            ),
+            (
+                "wrong-signature",
+                wrong_signature_envelope,
+                enrolled,
+                issued.issued_at,
+                "signature_invalid",
+            ),
+        )
+        for name, envelope, session_record, observed_at, expected_reason in cases:
+            with self.subTest(name=name):
+                evaluation = evaluate_owner_control_shadow_verification(
+                    envelope=envelope,
+                    channel_session=session_record,
+                    issued_challenge=issued,
+                    observed_at=observed_at,
+                )
+                self.assertEqual(evaluation.verification_status, "rejected")
+                self.assertEqual(evaluation.rejection_reason, expected_reason)
+                self.assertFalse(evaluation.consume_challenge)
+
+
+class OwnerControlShadowVerifierFreezeBoundaryTests(unittest.TestCase):
+    def test_published_wire_contract_and_transport_boundaries_remain_frozen(self) -> None:
+        frozen_paths = (
+            "contracts/owner-control-contract.json",
+            "control_plane/contracts/owner_control.py",
+            "control_plane/http_app.py",
+        )
+
+        for path in frozen_paths:
+            with self.subTest(path=path):
+                result = subprocess.run(
+                    ["git", "diff", "--quiet", OWNER_CONTROL_BASE_REVISION, "--", path],
+                    cwd=REPOSITORY_ROOT,
+                )
+                self.assertEqual(result.returncode, 0, f"Frozen boundary changed: {path}")
+
+    def test_shadow_verifier_contract_has_no_transport_or_execution_coupling(self) -> None:
+        source = (
+            REPOSITORY_ROOT / "control_plane/contracts/owner_control_shadow_verifier.py"
+        ).read_text(encoding="utf-8")
+
+        for forbidden_reference in (
+            "http_app",
+            "http_routes",
+            "filesystem",
+            "privileged_operation_service",
+            "privileged_operation_worker",
+            "outbox",
+            "os.environ",
+        ):
+            with self.subTest(forbidden_reference=forbidden_reference):
+                self.assertNotIn(forbidden_reference, source)
+
+    def test_privileged_operation_paths_do_not_import_shadow_verifier(self) -> None:
+        for path in (
+            "control_plane/privileged_operation_service.py",
+            "control_plane/privileged_operation_worker.py",
+            "control_plane/http_routes/privileged_operations.py",
+        ):
+            with self.subTest(path=path):
+                source = (REPOSITORY_ROOT / path).read_text(encoding="utf-8")
+                self.assertNotIn("owner_control_shadow_verifier", source)
+
+    def test_docs_keep_shadow_state_inert_and_unrouted(self) -> None:
+        owner_control_doc = (REPOSITORY_ROOT / "docs/owner-control-channel.md").read_text(
+            encoding="utf-8"
+        )
+        authorization_doc = (REPOSITORY_ROOT / "docs/authorization-authority.md").read_text(
+            encoding="utf-8"
+        )
+        privileged_operation_doc = (REPOSITORY_ROOT / "docs/privileged-operations.md").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("at most eight audited verification attempts", owner_control_doc)
+        self.assertIn("Unknown challenge nonces create no durable", owner_control_doc)
+        self.assertIn("`authority_state = 'inert'`", authorization_doc)
+        self.assertIn(
+            "browser approval remains the only active approval transport", privileged_operation_doc
+        )

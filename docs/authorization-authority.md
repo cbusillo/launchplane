@@ -31,6 +31,13 @@ Until that work closes:
 This freeze does not prohibit code, tests, documentation, threat-model work, or
 dry-run-only validation that cannot mutate live policy.
 
+Owner-control channel-session, issued-challenge, and shadow-verification event
+records are inert verification evidence, not authorization policy or grants.
+They define no HTTP action, route, managed set, workflow, secret, or production
+access path; every result persists `authority_state = 'inert'` and
+`authorizes_execution = false`. Adding these records does not relax issue
+`#2058` or make a self-asserted key, binding, or challenge authoritative.
+
 Repository inventory follows the same authority boundary. Its
 `repository_inventory.read` and `repository_inventory.write` actions use the
 Launchplane service scope (`product=launchplane`, `context=launchplane`), but

@@ -2656,11 +2656,23 @@ review plus bounded diff and CAS/read-back evidence. See
 `docs/privileged-operations.md` for the full evidence and authorization
 boundary.
 
-The checked `contracts/owner-control-contract.json` artifact is not a record,
-nonce store, audit event, or runtime authority. It supplies deterministic
-cross-host serialization and synthetic golden vectors only; future owner-control
-issuance, confirmation, replay rejection, and expiry records require a separate
-storage contract.
+The checked `contracts/owner-control-contract.json` artifact is not a record or
+runtime authority. It supplies deterministic cross-host serialization and
+synthetic golden vectors only.
+
+Owner-control shadow-verifier state is persisted only in PostgreSQL through
+`PostgresRecordStore`: `launchplane_owner_control_channel_sessions` stores one
+enrolled canonical binding, inert authority marker, and revocation state;
+`launchplane_owner_control_issued_challenges` stores one canonical approval
+request and binding plus their SHA-256 digests, issued/terminal state, and a
+bounded verification-attempt count;
+and `launchplane_owner_control_shadow_verification_events` is append-only,
+retains only bounded digest/result fields with a unique per-challenge sequence,
+and is constrained to `verifier_mode = 'shadow'`, `authority_state = 'inert'`,
+and `authorizes_execution = false`. The stored canonical binding and
+approval-request bytes, rather than an envelope's self-asserted values, govern
+only the shadow verification comparison; they grant no execution authority.
+Unknown challenge nonces create no record or event.
 
 **Preserved history:** references to Phase 1 planning records describe the
 pre-worker lifecycle and do not constrain the current Phase 2 statuses.
