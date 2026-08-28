@@ -256,10 +256,17 @@ matching semantics until a reviewed migration replaces wildcard or implicit
 selectors, while all newly reconciled managed human rules require explicit
 roles, explicit principals, exact selectors, and immutable IDs for sensitive
 access. Changed applies must also retain a policy administrator independent from
-the applying identity. Any future break-glass design must be separately approved
-by the owner before implementation, use an independent credential and approval
-boundary, bind the expected active policy digest, make the smallest recoverable
-change, append audit evidence, and require normalization through the ordinary
+the applying identity. Continuity recognizes only an immutable-ID-bound GitHub
+ID-only human rule with the explicit `admin` role, literal
+`authz_policy_grant.write` action, and exact `launchplane` product/context
+selectors; roles-empty rules, mutable login, organization, team, or instance
+selectors, action-empty or wildcard actions, wildcard selectors, workflow,
+terminal, operator, and local-admin rules cannot satisfy that
+independent-administrator predicate. Any future break-glass design
+must be separately approved by the owner before implementation, use an
+independent credential and approval boundary, bind the expected active policy
+digest, make the smallest recoverable change, append audit evidence, and
+require normalization through the ordinary
 DB-native path.
 
 Immutable-image rollback is service-code recovery; it is not authorization-data

@@ -5727,6 +5727,15 @@ class LaunchplaneServiceTests(unittest.TestCase):
                             ],
                         }
                     ],
+                    "github_humans": [
+                        {
+                            "github_ids": [2002],
+                            "roles": ["admin"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["authz_policy_grant.write"],
+                        }
+                    ],
                     "local_admins": [
                         {
                             "subjects": ["recovery-admin"],
@@ -6106,6 +6115,15 @@ class LaunchplaneServiceTests(unittest.TestCase):
                             "actions": ["product_profile.read"],
                         },
                     ],
+                    "github_humans": [
+                        {
+                            "github_ids": [2002],
+                            "roles": ["admin"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["authz_policy_grant.write"],
+                        }
+                    ],
                     "local_admins": [
                         {
                             "subjects": ["recovery-admin"],
@@ -6223,7 +6241,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(active_status, 200)
         self.assertEqual(active_payload["policy"]["revision"], 2)
         self.assertEqual(active_payload["policy"]["managed_rule_count"], 1)
-        self.assertEqual(active_payload["policy"]["unmanaged_rule_count"], 2)
+        self.assertEqual(active_payload["policy"]["unmanaged_rule_count"], 3)
         self.assertEqual(
             active_payload["policy"]["github_actions_privileged_unpinned_reusable_rule_count"],
             1,
