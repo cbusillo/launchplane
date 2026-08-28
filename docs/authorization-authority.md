@@ -257,10 +257,11 @@ selectors, while all newly reconciled managed human rules require explicit
 roles, explicit principals, exact selectors, and immutable IDs for sensitive
 access. Changed applies must also retain a policy administrator independent from
 the applying identity. Continuity recognizes only an immutable-ID-bound GitHub
-human rule with the literal `authz_policy_grant.write` action and exact
-`launchplane` product/context selectors; action-empty, wildcard-action,
-wildcard-selector, workflow, terminal, operator, and local-admin rules cannot
-satisfy that independent-administrator predicate. Any future break-glass design
+ID-only human rule with the literal `authz_policy_grant.write` action and exact
+`launchplane` product/context selectors; mutable login, organization, team, or
+instance selectors, action-empty or wildcard actions, wildcard selectors,
+workflow, terminal, operator, and local-admin rules cannot satisfy that
+independent-administrator predicate. Any future break-glass design
 must be separately approved by the owner before implementation, use an
 independent credential and approval boundary, bind the expected active policy
 digest, make the smallest recoverable change, append audit evidence, and

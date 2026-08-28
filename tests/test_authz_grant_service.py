@@ -196,9 +196,18 @@ class AuthzManagedPolicyServiceTests(unittest.TestCase):
         wildcard_product = strict_admin.model_copy(
             update={"github_ids": (105,), "products": ("*",)}
         )
+        mutable_organization = strict_admin.model_copy(
+            update={"github_ids": (106,), "organizations": ("mutable-org",)}
+        )
         policy = LaunchplaneAuthzPolicy(
             schema_version=2,
-            github_humans=(strict_admin, action_empty, wildcard_action, wildcard_product),
+            github_humans=(
+                strict_admin,
+                action_empty,
+                wildcard_action,
+                wildcard_product,
+                mutable_organization,
+            ),
             local_admins=(
                 LocalAdminPolicyRule(
                     subjects=("recovery-admin",),
@@ -216,7 +225,7 @@ class AuthzManagedPolicyServiceTests(unittest.TestCase):
                 github_id=101,
             )
         )
-        for github_id in (103, 104, 105):
+        for github_id in (103, 104, 105, 106):
             self.assertFalse(
                 control_plane_authz_grant_service._authz_policy_allows_immutable_github_id_administration(
                     policy=policy,

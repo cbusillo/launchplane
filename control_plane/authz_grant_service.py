@@ -1637,6 +1637,10 @@ def _is_strict_immutable_github_human_administrator_rule(
         and _AUTHZ_POLICY_ADMIN_ACTION in rule.actions
         and rule.products == ("launchplane",)
         and rule.contexts == ("launchplane",)
+        and not rule.logins
+        and not rule.organizations
+        and not rule.teams
+        and not rule.instances
     )
 
 
