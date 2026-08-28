@@ -2674,5 +2674,11 @@ approval-request bytes, rather than an envelope's self-asserted values, govern
 only the shadow verification comparison; they grant no execution authority.
 Unknown challenge nonces create no record or event.
 
+Challenge issuance is service-only and provenance-bound: the store derives the
+canonical approval request from one locked planned operation, exactly one active
+policy, and the enrolled session owner. Its partial unique index permits at most
+one `issued` challenge per operation. Issuance never updates the privileged
+operation current projection or its append-only event ledger.
+
 **Preserved history:** references to Phase 1 planning records describe the
 pre-worker lifecycle and do not constrain the current Phase 2 statuses.

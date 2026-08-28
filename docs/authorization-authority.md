@@ -37,6 +37,12 @@ They define no HTTP action, route, managed set, workflow, secret, or production
 access path; every result persists `authority_state = 'inert'` and
 `authorizes_execution = false`. Adding these records does not relax issue
 `#2058` or make a self-asserted key, binding, or challenge authoritative.
+Service-only challenge derivation may fail closed unless the enrolled immutable
+GitHub owner ID has exactly one ID-only managed rule for the descriptor's
+existing approval action. That read does not define a new action, grant access,
+or authorize approval or execution; rules that also depend on mutable login,
+organization, team, or role selectors are intentionally insufficient without a
+live authenticated human identity.
 
 Repository inventory follows the same authority boundary. Its
 `repository_inventory.read` and `repository_inventory.write` actions use the
