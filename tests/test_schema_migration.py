@@ -1505,7 +1505,7 @@ class SchemaMigrationTests(unittest.TestCase):
             for primary_key in CRITICAL_PRIMARY_KEYS
         }
 
-        self.assertEqual(EXPECTED_ALEMBIC_HEAD_REVISION, "e5f7a9b1c3d6")
+        self.assertEqual(EXPECTED_ALEMBIC_HEAD_REVISION, "f6a1c3e5b7d9")
         self.assertNotIn(
             ("launchplane_human_sessions", "launchplane_human_sessions_github_id_idx"),
             indexes,

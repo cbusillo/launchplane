@@ -5,8 +5,10 @@ from pathlib import Path
 import subprocess
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from pydantic import ValidationError
 
 from control_plane.contracts.owner_control import (
     ApprovalRequest,
@@ -23,6 +25,23 @@ from control_plane.contracts.owner_control_shadow_verifier import (
     OwnerControlChallengeIssueRequest,
     evaluate_owner_control_shadow_verification,
 )
+from control_plane.contracts.authz_policy_record import (
+    LaunchplaneAuthzPolicyRecord,
+    authz_policy_sha256,
+    build_authz_policy_record_id,
+)
+from control_plane.contracts.privileged_operation import (
+    ManagedSecretReencryptionHumanEvidence,
+    ManagedSecretReencryptionPlanInput,
+    PRIVILEGED_SECRET_OPERATION_APPROVE_ACTION,
+    PrivilegedOperationActor,
+    PrivilegedOperationEventRecord,
+    PrivilegedOperationRecord,
+    privileged_operation_evidence_digest,
+    privileged_operation_record_digest,
+    privileged_operation_request_digest,
+)
+from control_plane.service_auth import GitHubHumanPolicyRule, LaunchplaneAuthzPolicy
 from control_plane.storage.postgres import PostgresRecordStore
 
 
@@ -96,6 +115,82 @@ def _envelope(
     )
 
 
+def _seed_issue_provenance(
+    store: PostgresRecordStore,
+    *,
+    expires_at: str = "2030-01-01T00:00:00+00:00",
+    owner_ids: tuple[int, ...] = (100001,),
+) -> PrivilegedOperationRecord:
+    request = ManagedSecretReencryptionPlanInput(reason="Rotate retained keys", source_label="test")
+    evidence = ManagedSecretReencryptionHumanEvidence(
+        result_status="ok",
+        plan_digest="a" * 64,
+        configured_secret_count=3,
+        rotation_candidate_count=2,
+        unchanged_count=1,
+        unreadable_secret_count=0,
+        active_key_id="redacted-key",
+        retirement_blocked_key_ids=(),
+        retirement_ready_key_ids=(),
+        legacy_compatibility_key_loaded=False,
+    )
+    actor = PrivilegedOperationActor(identity_type="github_human", github_id=44, login="requester")
+    record = PrivilegedOperationRecord(
+        operation_id="privileged-operation-0123456789abcdef0123456789abcdef",
+        descriptor_id="managed-secret-reencryption",
+        descriptor_version=1,
+        safety_class="secret_backed",
+        status="planned",
+        source_event_id="owner-control-test",
+        requested_by=actor,
+        request=request,
+        request_digest=privileged_operation_request_digest(request),
+        evidence=evidence,
+        evidence_digest=privileged_operation_evidence_digest(evidence),
+        created_at="2026-08-28T00:00:00+00:00",
+        updated_at="2026-08-28T00:00:00+00:00",
+        expires_at=expires_at,
+    )
+    event = PrivilegedOperationEventRecord(
+        operation_id=record.operation_id,
+        sequence=1,
+        action="planned",
+        occurred_at=record.created_at,
+        source_kind="browser_api",
+        source_event_id=record.source_event_id,
+        actor=actor,
+        resulting_record_digest=privileged_operation_record_digest(record),
+    )
+    store.write_privileged_operation_plan(record, event)
+    policy = LaunchplaneAuthzPolicy(
+        schema_version=2,
+        github_humans=(
+            GitHubHumanPolicyRule(
+                managed_set_id="owner-control-tests",
+                managed_rule_id="approve",
+                github_ids=owner_ids,
+                roles=("read_only",),
+                products=("launchplane",),
+                contexts=("launchplane",),
+                actions=(PRIVILEGED_SECRET_OPERATION_APPROVE_ACTION,),
+            ),
+        ),
+    )
+    digest = authz_policy_sha256(policy)
+    store.seed_authz_policy_if_absent(
+        LaunchplaneAuthzPolicyRecord(
+            record_id=build_authz_policy_record_id(revision=1, policy_sha256=digest),
+            revision=1,
+            status="active",
+            source="owner-control-tests",
+            updated_at="2026-08-28T00:00:00Z",
+            policy_sha256=digest,
+            policy=policy,
+        )
+    )
+    return record
+
+
 class OwnerControlShadowVerifierStorageTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary_directory = TemporaryDirectory()
@@ -112,10 +207,11 @@ class OwnerControlShadowVerifierStorageTests(unittest.TestCase):
         private_key = Ed25519PrivateKey.generate()
         binding = _binding(private_key)
         enrolled = self.store.enroll_owner_control_channel_session(binding)
+        operation = _seed_issue_provenance(self.store)
         issued = self.store.issue_owner_control_challenge(
             OwnerControlChallengeIssueRequest(
                 channel_session_id=binding.channel_session_id,
-                approval_request=_request(),
+                operation_id=operation.operation_id,
                 expires_in_seconds=300,
             )
         )
@@ -164,14 +260,90 @@ class OwnerControlShadowVerifierStorageTests(unittest.TestCase):
         self.assertTrue(all(event.authorizes_execution is False for event in events))
         self.assertTrue(all(event.authority_state == "inert" for event in events))
 
+    def test_issue_request_accepts_no_caller_authored_provenance(self) -> None:
+        with self.assertRaises(ValidationError):
+            OwnerControlChallengeIssueRequest.model_validate(
+                {
+                    "channel_session_id": "owner-control-session",
+                    "operation_id": "privileged-operation-0123456789abcdef0123456789abcdef",
+                    "expires_in_seconds": 300,
+                    "approval_request": _request().model_dump(mode="json"),
+                }
+            )
+
+    def test_issuance_is_idempotent_only_for_current_bound_provenance(self) -> None:
+        private_key = Ed25519PrivateKey.generate()
+        binding = _binding(private_key)
+        self.store.enroll_owner_control_channel_session(binding)
+        operation = _seed_issue_provenance(self.store)
+        issue_request = OwnerControlChallengeIssueRequest(
+            channel_session_id=binding.channel_session_id,
+            operation_id=operation.operation_id,
+            expires_in_seconds=300,
+        )
+        before = self.store.read_privileged_operation_record(operation.operation_id)
+        issued = self.store.issue_owner_control_challenge(issue_request)
+        replayed = self.store.issue_owner_control_challenge(issue_request)
+        after = self.store.read_privileged_operation_record(operation.operation_id)
+        review = issued.approval_request().server_review.model_dump(mode="json")
+
+        self.assertEqual(issued, replayed)
+        self.assertEqual(before, after)
+        self.assertEqual(issued.approval_request().request_digest, operation.request_digest)
+        self.assertEqual(issued.approval_request().plan_digest, operation.evidence.plan_digest)
+        self.assertNotIn("redacted-key", str(review))
+        self.assertNotIn("Rotate retained keys", str(review))
+        self.assertNotIn("requester", str(review))
+
+    def test_issuance_clamps_expiry_and_refuses_ineligible_owner(self) -> None:
+        private_key = Ed25519PrivateKey.generate()
+        binding = _binding(
+            private_key,
+            session_id="owner-control-clamped-session",
+        ).model_copy(update={"session_expires_at": "2026-08-28T12:02:00+00:00"})
+        with patch.object(
+            self.store,
+            "_owner_control_shadow_timestamp",
+            return_value="2026-08-28T12:00:00+00:00",
+        ):
+            self.store.enroll_owner_control_channel_session(binding)
+            operation = _seed_issue_provenance(self.store)
+            issued = self.store.issue_owner_control_challenge(
+                OwnerControlChallengeIssueRequest(
+                    channel_session_id=binding.channel_session_id,
+                    operation_id=operation.operation_id,
+                    expires_in_seconds=300,
+                )
+            )
+        self.assertEqual(issued.expires_at, binding.session_expires_at)
+
+        second_store = PostgresRecordStore(
+            database_url=f"sqlite+pysqlite:///{Path(self.temporary_directory.name) / 'denied.sqlite3'}"
+        )
+        try:
+            second_store.ensure_schema()
+            second_store.enroll_owner_control_channel_session(_binding(private_key))
+            denied_operation = _seed_issue_provenance(second_store, owner_ids=(999,))
+            with self.assertRaisesRegex(ValueError, "immutable GitHub-ID approval rule"):
+                second_store.issue_owner_control_challenge(
+                    OwnerControlChallengeIssueRequest(
+                        channel_session_id="owner-control-session",
+                        operation_id=denied_operation.operation_id,
+                        expires_in_seconds=300,
+                    )
+                )
+        finally:
+            second_store.close()
+
     def test_valid_signature_with_changed_request_never_verifies(self) -> None:
         private_key = Ed25519PrivateKey.generate()
         binding = _binding(private_key)
         self.store.enroll_owner_control_channel_session(binding)
+        operation = _seed_issue_provenance(self.store)
         issued = self.store.issue_owner_control_challenge(
             OwnerControlChallengeIssueRequest(
                 channel_session_id=binding.channel_session_id,
-                approval_request=_request(),
+                operation_id=operation.operation_id,
                 expires_in_seconds=300,
             )
         )
@@ -207,10 +379,11 @@ class OwnerControlShadowVerifierStorageTests(unittest.TestCase):
         private_key = Ed25519PrivateKey.generate()
         binding = _binding(private_key)
         self.store.enroll_owner_control_channel_session(binding)
+        operation = _seed_issue_provenance(self.store)
         issued = self.store.issue_owner_control_challenge(
             OwnerControlChallengeIssueRequest(
                 channel_session_id=binding.channel_session_id,
-                approval_request=_request(),
+                operation_id=operation.operation_id,
                 expires_in_seconds=300,
             )
         )
@@ -263,10 +436,11 @@ class OwnerControlShadowVerifierStorageTests(unittest.TestCase):
         private_key = Ed25519PrivateKey.generate()
         binding = _binding(private_key)
         enrolled = self.store.enroll_owner_control_channel_session(binding)
+        operation = _seed_issue_provenance(self.store)
         issued = self.store.issue_owner_control_challenge(
             OwnerControlChallengeIssueRequest(
                 channel_session_id=binding.channel_session_id,
-                approval_request=_request(),
+                operation_id=operation.operation_id,
                 expires_in_seconds=300,
             )
         )
