@@ -73,11 +73,12 @@ above. The artifact's signature declaration marks this compatibility boundary
 explicitly.
 
 Signature verification proves only that the private key corresponding to the
-public key inside the envelope signed the exact challenge response. A future
-runtime verifier must also compare the exact binding record and digest against
-the server-enrolled channel-session record and the binding selected when the
-challenge was issued. A self-asserted binding or otherwise valid self-signed
-envelope is never authorization evidence by itself.
+public key inside the envelope signed the exact challenge response. The
+shadow-verifier storage slice compares the exact canonical binding and approval
+request bytes plus their server-stored digests against the enrolled
+channel-session and issued challenge records. A self-asserted binding or
+otherwise valid self-signed envelope cannot create enrolled or issued state and
+is never authorization evidence by itself.
 
 ## Conformance Artifact
 
@@ -111,16 +112,38 @@ The vectors contain only synthetic identifiers, digests, nonces, timestamps,
 and generic review strings. They carry no tenant, product, repository, domain,
 operator, policy authority, session credential, or live endpoint data.
 
-## Deferred Runtime Work
+## Shadow-Verifier Storage
 
-This is a behavior-neutral contract seam. It adds no HTTP route, storage record,
-migration, frontend, worker action, authorization grant, source-kind change,
-policy change, credential, channel implementation, or live runtime mutation.
-Existing browser approval behavior remains unchanged until a separately reviewed
-runtime adoption change proves the trusted owner-control path.
+`control_plane.contracts.owner_control_shadow_verifier` defines server-state
+records separate from the published wire contract. PostgreSQL persists enrolled
+channel sessions, issued single-use challenges, and append-only verification
+events. Enrollment and revocation are DB-backed; challenge issuance, expiry,
+verification audit timestamps, and successful-consumption timestamps use the
+database clock. Verification locks the enrolled session and issued challenge in
+one transaction, so one exact valid challenge can verify only once. Each issued
+challenge permits at most eight audited verification attempts; the eighth
+non-terminal rejection closes the challenge as rejected, and later attempts
+cannot append more events.
 
-`ChallengeResponse` represents successful confirmation only. Owner rejection,
-challenge expiry, and replay rejection are future audit events rather than
-alternate signed response decisions. The checked artifact uses one explicitly
-synthetic deterministic Ed25519 key only to make public conformance vectors
-reproducible; it is not runtime authority, a credential, or a deployed key.
+Challenge issuance accepts an exact `ApprovalRequest` only through an unrouted
+service-internal storage API. This slice does not claim that arbitrary supplied
+request fields are trusted or derive a challenge from a live privileged
+operation; the database service replaces the nonce and timestamp bounds with a
+server-generated nonce and database-clock values. The remaining
+operation-binding and transport boundary requires a separate review before any
+route exists. Unknown challenge nonces create no durable state.
+
+Every stored event and returned result has `verifier_mode: "shadow"` and
+`authorizes_execution: false`. The slice adds no HTTP route, authorization
+action or grant, browser workflow, privileged-operation approval/execution
+coupling, worker, outbox, filesystem store, signing key, or channel-host
+implementation. Existing browser approval behavior remains unchanged until a
+separately reviewed runtime adoption change proves the trusted owner-control
+path.
+
+`ChallengeResponse` represents successful confirmation only. Challenge expiry,
+replay, mismatch, and attempt-budget rejection are shadow audit outcomes rather
+than alternate signed response decisions. The checked artifact uses one
+explicitly synthetic deterministic Ed25519 key only to make public conformance
+vectors reproducible; it is not runtime authority, a credential, or a deployed
+key.
