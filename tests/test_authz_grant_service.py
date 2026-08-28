@@ -8,6 +8,7 @@ from typing import cast
 
 from pydantic import ValidationError
 
+import control_plane.authz_grant_service as control_plane_authz_grant_service
 from control_plane.authz_grant_service import (
     AuthzManagedPolicyReconcileEnvelope,
     AuthzPolicyConflictError,
@@ -29,6 +30,7 @@ from control_plane.contracts.authz_policy_record import (
 from control_plane.service_auth import (
     GitHubActionsIdentity,
     GitHubActionsPolicyRule,
+    GitHubHumanPolicyRule,
     LaunchplaneAuthzPolicy,
     LocalAdminIdentity,
     LocalAdminPolicyRule,
@@ -179,6 +181,65 @@ def _workflow_admin_rule(
 
 
 class AuthzManagedPolicyServiceTests(unittest.TestCase):
+    def test_continuity_requires_exact_immutable_github_human_administrators(self) -> None:
+        strict_admin = GitHubHumanPolicyRule(
+            github_ids=(101, 102),
+            roles=("admin",),
+            products=("launchplane",),
+            contexts=("launchplane",),
+            actions=("authz_policy_grant.write",),
+        )
+        action_empty = strict_admin.model_copy(update={"github_ids": (103,), "actions": ()})
+        wildcard_action = strict_admin.model_copy(
+            update={"github_ids": (104,), "actions": ("authz_policy_*",)}
+        )
+        wildcard_product = strict_admin.model_copy(
+            update={"github_ids": (105,), "products": ("*",)}
+        )
+        policy = LaunchplaneAuthzPolicy(
+            schema_version=2,
+            github_humans=(strict_admin, action_empty, wildcard_action, wildcard_product),
+            local_admins=(
+                LocalAdminPolicyRule(
+                    subjects=("recovery-admin",),
+                    token_labels=("recovery-admin",),
+                    products=("launchplane",),
+                    contexts=("launchplane",),
+                    actions=("authz_policy_grant.write",),
+                ),
+            ),
+        )
+
+        self.assertTrue(
+            control_plane_authz_grant_service._authz_policy_allows_immutable_github_id_administration(
+                policy=policy,
+                github_id=101,
+            )
+        )
+        for github_id in (103, 104, 105):
+            self.assertFalse(
+                control_plane_authz_grant_service._authz_policy_allows_immutable_github_id_administration(
+                    policy=policy,
+                    github_id=github_id,
+                )
+            )
+        self.assertTrue(
+            control_plane_authz_grant_service._authz_policy_retains_independent_github_id_administration(
+                policy=policy,
+                applying_github_id=101,
+            )
+        )
+        self.assertFalse(
+            control_plane_authz_grant_service._authz_policy_retains_independent_github_id_administration(
+                policy=policy.model_copy(
+                    update={
+                        "github_humans": (strict_admin.model_copy(update={"github_ids": (101,)}),)
+                    }
+                ),
+                applying_github_id=101,
+            )
+        )
+
     def test_health_monitoring_managed_rule_requires_pinned_reusable_workflow(
         self,
     ) -> None:
@@ -663,15 +724,48 @@ class AuthzManagedPolicyServiceTests(unittest.TestCase):
             "authz_policy_independent_admin_unreachable",
         )
 
-        independent_admin = LocalAdminPolicyRule(
+        local_admin = LocalAdminPolicyRule(
             subjects=("recovery-admin",),
             token_labels=("recovery-admin",),
             products=("launchplane",),
             contexts=("launchplane",),
             actions=("authz_policy_grant.write",),
         )
+        local_admin_record = _active_record_for_policy(
+            current_policy.model_copy(update={"local_admins": (local_admin,)})
+        )
+        local_admin_result = execute_managed_authz_policy_reconcile(
+            record_store=_AuthzPolicyStore((local_admin_record,)),
+            request=AuthzManagedPolicyReconcileEnvelope(
+                schema_version=2,
+                product="launchplane",
+                managed_set_id="operator.launchplane",
+                reason="Retire the obsolete managed read rule.",
+                desired_policy=LaunchplaneAuthzPolicy(
+                    schema_version=2,
+                    github_actions=(applying_admin,),
+                ),
+            ),
+            identity=identity,
+            trace_id="trace-local-admin-not-independent",
+            now_timestamp=lambda: "2026-08-17T00:00:00Z",
+            authorized_policy_sha256=local_admin_record.policy_sha256,
+        )
+        local_admin_diff = cast(dict[str, object], local_admin_result.driver_result["diff"])
+        self.assertEqual(
+            cast(list[dict[str, object]], local_admin_diff["policy_safety_blockers"])[0]["code"],
+            "authz_policy_independent_admin_unreachable",
+        )
+
+        independent_admin = GitHubHumanPolicyRule(
+            github_ids=(2002,),
+            roles=("admin",),
+            products=("launchplane",),
+            contexts=("launchplane",),
+            actions=("authz_policy_grant.write",),
+        )
         recoverable_record = _active_record_for_policy(
-            current_policy.model_copy(update={"local_admins": (independent_admin,)})
+            current_policy.model_copy(update={"github_humans": (independent_admin,)})
         )
         result = execute_managed_authz_policy_reconcile(
             record_store=_AuthzPolicyStore((recoverable_record,)),

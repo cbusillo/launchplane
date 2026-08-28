@@ -1628,16 +1628,15 @@ def _authz_rule_allows_identity(
     )
 
 
-def _authz_policy_retains_independent_administration(
-    *, policy: LaunchplaneAuthzPolicy, applying_identity: AuthzApplyingIdentity
+def _is_strict_immutable_github_human_administrator_rule(
+    rule: GitHubHumanPolicyRule,
 ) -> bool:
-    return any(
-        not _authz_rule_allows_identity(
-            rule=rule,
-            identity=applying_identity,
-            schema_version=policy.schema_version,
-        )
-        for rule in _authz_policy_administrator_rules(policy)
+    return bool(
+        rule.github_ids
+        and "admin" in rule.roles
+        and _AUTHZ_POLICY_ADMIN_ACTION in rule.actions
+        and rule.products == ("launchplane",)
+        and rule.contexts == ("launchplane",)
     )
 
 
@@ -1647,8 +1646,8 @@ def _authz_policy_allows_immutable_github_id_administration(
     github_id: int,
 ) -> bool:
     return github_id > 0 and any(
-        isinstance(rule, GitHubHumanPolicyRule) and github_id in rule.github_ids
-        for rule in _authz_policy_administrator_rules(policy)
+        _is_strict_immutable_github_human_administrator_rule(rule) and github_id in rule.github_ids
+        for rule in policy.github_humans
     )
 
 
@@ -1658,12 +1657,9 @@ def _authz_policy_retains_independent_github_id_administration(
     applying_github_id: int,
 ) -> bool:
     return any(
-        (
-            any(github_id != applying_github_id for github_id in rule.github_ids)
-            if isinstance(rule, GitHubHumanPolicyRule)
-            else True
-        )
-        for rule in _authz_policy_administrator_rules(policy)
+        _is_strict_immutable_github_human_administrator_rule(rule)
+        and any(github_id != applying_github_id for github_id in rule.github_ids)
+        for rule in policy.github_humans
     )
 
 
@@ -2144,16 +2140,9 @@ def execute_managed_authz_policy_reconcile(
         policy_safety_blockers.append(
             _managed_policy_safety_blocker("authz_policy_applying_admin_removed")
         )
-    independent_admin_retained = (
-        _authz_policy_retains_independent_github_id_administration(
-            policy=updated_policy,
-            applying_github_id=immutable_applying_github_id,
-        )
-        if immutable_applying_github_id
-        else _authz_policy_retains_independent_administration(
-            policy=updated_policy,
-            applying_identity=identity,
-        )
+    independent_admin_retained = _authz_policy_retains_independent_github_id_administration(
+        policy=updated_policy,
+        applying_github_id=immutable_applying_github_id,
     )
     if managed_diff.changed and not independent_admin_retained:
         policy_safety_blockers.append(
