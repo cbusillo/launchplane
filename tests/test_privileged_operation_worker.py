@@ -402,7 +402,7 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
             )
         )
 
-    def test_worker_uses_immutable_admin_identity_for_org_scoped_approver_rule(self) -> None:
+    def test_worker_rejects_org_scoped_approver_as_continuity_admin(self) -> None:
         with TemporaryDirectory() as directory:
             store = self._store(directory)
             try:
@@ -420,10 +420,17 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
                 )
 
                 record = store.read_privileged_operation_record(operation_id)
+                active_records = store.list_authz_policy_records(status="active", limit=2)
             finally:
                 store.close()
 
-        self.assertEqual(record.status, "executed")
+        self.assertEqual(record.status, "execution_failed")
+        self.assertIsInstance(record.execution, ManagedAuthzPolicySetExecutionEvidence)
+        assert isinstance(record.execution, ManagedAuthzPolicySetExecutionEvidence)
+        self.assertEqual(record.execution.failure_code, "authz_policy_applying_admin_removed")
+        self.assertFalse(record.execution.reconciliation_required)
+        self.assertEqual(len(active_records), 1)
+        self.assertEqual(active_records[0].revision, 1)
 
     def test_policy_readback_failure_after_cas_requires_reconciliation(self) -> None:
         with TemporaryDirectory() as directory:
