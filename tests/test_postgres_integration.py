@@ -9,6 +9,7 @@ import json
 import os
 import threading
 import time
+from typing import Any
 import unittest
 from unittest.mock import patch
 from uuid import uuid4
@@ -157,6 +158,7 @@ from control_plane.service_auth import (
 )
 from control_plane.storage.postgres import (
     DbOnlyMutationRequest,
+    LaunchplaneOwnerControlIssuedChallengeRow,
     MutationReservationResult,
     OutboxWithIdempotencyRequest,
     PostgresRecordStore,
@@ -2515,17 +2517,44 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                 request=issued.approval_request(),
             )
             second_store = PostgresRecordStore(database_url=store.database_url)
-            barrier = threading.Barrier(2)
+            loser_prelock_read_complete = threading.Event()
+            allow_loser_locking_read = threading.Event()
+            original_challenge_read = second_store._owner_control_issued_challenge_row
 
-            def verify_once(active_store: PostgresRecordStore) -> str:
-                barrier.wait(timeout=10)
-                return active_store.verify_owner_control_confirmation_shadow(
-                    envelope
-                ).verification_status
+            def controlled_challenge_read(
+                session: Any,
+                *,
+                challenge_nonce: str,
+                for_update: bool = False,
+            ) -> LaunchplaneOwnerControlIssuedChallengeRow | None:
+                row = original_challenge_read(
+                    session,
+                    challenge_nonce=challenge_nonce,
+                    for_update=for_update,
+                )
+                if not for_update:
+                    loser_prelock_read_complete.set()
+                    if not allow_loser_locking_read.wait(timeout=10):
+                        raise TimeoutError("Timed out waiting to release the losing verification.")
+                return row
 
+            executor = ThreadPoolExecutor(max_workers=1)
             try:
-                with ThreadPoolExecutor(max_workers=2) as executor:
-                    statuses = tuple(executor.map(verify_once, (store, second_store)))
+                with patch.object(
+                    second_store,
+                    "_owner_control_issued_challenge_row",
+                    side_effect=controlled_challenge_read,
+                ):
+                    losing_future = executor.submit(
+                        second_store.verify_owner_control_confirmation_shadow,
+                        envelope,
+                    )
+                    self.assertTrue(loser_prelock_read_complete.wait(timeout=10))
+                    winning_status = store.verify_owner_control_confirmation_shadow(
+                        envelope
+                    ).verification_status
+                    allow_loser_locking_read.set()
+                    losing_status = losing_future.result(timeout=10).verification_status
                 stored_challenge = store.read_owner_control_issued_challenge(
                     challenge_nonce=issued.challenge_nonce
                 )
@@ -2533,9 +2562,11 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                     challenge_nonce=issued.challenge_nonce
                 )
             finally:
+                allow_loser_locking_read.set()
+                executor.shutdown(wait=True)
                 second_store.close()
 
-        self.assertEqual(sorted(statuses), ["rejected", "verified"])
+        self.assertEqual([winning_status, losing_status], ["verified", "rejected"])
         self.assertEqual(stored_challenge.state, "consumed")
         self.assertEqual(stored_challenge.attempt_count, 2)
         self.assertIsNotNone(stored_challenge.consumed_at)

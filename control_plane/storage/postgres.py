@@ -9175,8 +9175,10 @@ class PostgresRecordStore(HumanSessionStore):
         statement = select(LaunchplaneOwnerControlChannelSessionRow).where(
             LaunchplaneOwnerControlChannelSessionRow.channel_session_id == channel_session_id
         )
-        if for_update and not self.database_url.startswith("sqlite"):
-            statement = statement.with_for_update()
+        if for_update:
+            statement = statement.execution_options(populate_existing=True)
+            if not self.database_url.startswith("sqlite"):
+                statement = statement.with_for_update()
         return cast(LaunchplaneOwnerControlChannelSessionRow | None, session.scalar(statement))
 
     def _owner_control_issued_challenge_row(
@@ -9189,8 +9191,10 @@ class PostgresRecordStore(HumanSessionStore):
         statement = select(LaunchplaneOwnerControlIssuedChallengeRow).where(
             LaunchplaneOwnerControlIssuedChallengeRow.challenge_nonce == challenge_nonce
         )
-        if for_update and not self.database_url.startswith("sqlite"):
-            statement = statement.with_for_update()
+        if for_update:
+            statement = statement.execution_options(populate_existing=True)
+            if not self.database_url.startswith("sqlite"):
+                statement = statement.with_for_update()
         return cast(LaunchplaneOwnerControlIssuedChallengeRow | None, session.scalar(statement))
 
     @staticmethod
