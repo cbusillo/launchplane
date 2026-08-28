@@ -12,11 +12,7 @@ from control_plane.contracts.privileged_operation import (
     PrivilegedOperationRecord,
     privileged_operation_pre_state_digest,
 )
-from control_plane.durable_operation_authorization import (
-    ManagedRuleAuthorizationError,
-    require_single_managed_github_id_rule_identity,
-)
-from control_plane.service_auth import AuthorizationTarget, GitHubHumanIdentity
+from control_plane.service_auth import AuthorizationTarget
 
 
 class OwnerControlChallengeProvenanceError(ValueError):
@@ -24,7 +20,12 @@ class OwnerControlChallengeProvenanceError(ValueError):
 
 
 def _canonical_timestamp(value: str, field_name: str) -> datetime:
-    parsed = datetime.fromisoformat(value)
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as error:
+        raise OwnerControlChallengeProvenanceError(
+            f"{field_name} must be an ISO-8601 timestamp."
+        ) from error
     if parsed.tzinfo is None:
         raise OwnerControlChallengeProvenanceError(f"{field_name} must include a timezone.")
     canonical = parsed.astimezone(timezone.utc).isoformat()
@@ -71,6 +72,11 @@ def _review_payload(
         ReviewItem(
             key="operation_expires_at", label="Operation expires", value=operation.expires_at
         ),
+        ReviewItem(
+            key="planning_result",
+            label="Planning result",
+            value=operation.evidence.result_status,
+        ),
     )
     if isinstance(operation.evidence, ManagedSecretReencryptionHumanEvidence):
         items = base_items + (
@@ -103,6 +109,36 @@ def _review_payload(
                 "Blocked managed-policy plans cannot be challenged."
             )
         items = base_items + (
+            ReviewItem(
+                key="changed",
+                label="Policy changes",
+                value="yes" if operation.evidence.diff.changed else "no",
+            ),
+            ReviewItem(
+                key="added_rule_count",
+                label="Added rules",
+                value=str(operation.evidence.diff.added_rule_count),
+            ),
+            ReviewItem(
+                key="adopted_rule_count",
+                label="Adopted rules",
+                value=str(operation.evidence.diff.adopted_rule_count),
+            ),
+            ReviewItem(
+                key="updated_rule_count",
+                label="Updated rules",
+                value=str(operation.evidence.diff.updated_rule_count),
+            ),
+            ReviewItem(
+                key="removed_rule_count",
+                label="Removed rules",
+                value=str(operation.evidence.diff.removed_rule_count),
+            ),
+            ReviewItem(
+                key="unchanged_rule_count",
+                label="Unchanged rules",
+                value=str(operation.evidence.diff.unchanged_rule_count),
+            ),
             ReviewItem(
                 key="managed_set_digest",
                 label="Managed set digest",
@@ -161,27 +197,28 @@ def derive_owner_control_approval_request(
     from control_plane.privileged_operation_registry import read_privileged_operation_descriptor
 
     descriptor = read_privileged_operation_descriptor(operation.descriptor_id).descriptor
-    try:
-        require_single_managed_github_id_rule_identity(
-            policy=policy_record.policy,
-            identity=GitHubHumanIdentity(
-                login="owner-control",
-                github_id=owner_github_id,
-                name="",
-                email="",
-                organizations=frozenset(),
-                teams=frozenset(),
-                role="read_only",
-            ),
+    matching_rules = tuple(
+        rule
+        for rule in policy_record.policy.github_humans
+        if rule.managed_set_id
+        and rule.managed_rule_id
+        and owner_github_id in rule.github_ids
+        and not rule.logins
+        and not rule.organizations
+        and not rule.teams
+        and not rule.roles
+        and rule.allows_scope(
             action=descriptor.approve_action,
             product="launchplane",
             context="launchplane",
             target=AuthorizationTarget(scope="global"),
+            schema_version=policy_record.policy.schema_version,
         )
-    except ManagedRuleAuthorizationError as error:
+    )
+    if len(matching_rules) != 1:
         raise OwnerControlChallengeProvenanceError(
-            "Enrolled owner lacks one immutable GitHub-ID approval rule."
-        ) from error
+            "Enrolled owner requires exactly one immutable GitHub-ID-only approval rule."
+        )
     return ApprovalRequest(
         operation_id=operation.operation_id,
         descriptor_id=operation.descriptor_id,

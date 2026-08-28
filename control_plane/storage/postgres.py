@@ -9423,22 +9423,25 @@ class PostgresRecordStore(HumanSessionStore):
             policy_record = self._locked_active_authz_policy_record(session)
             issued_at = self._owner_control_shadow_timestamp(session)
             issued_at_value = datetime.fromisoformat(issued_at)
-            operation_expires_at = datetime.fromisoformat(operation.expires_at)
+            operation_expires_at = datetime.fromisoformat(operation.expires_at).astimezone(
+                timezone.utc
+            )
             session_expires_at = datetime.fromisoformat(
                 session_record.channel_binding().session_expires_at
-            )
-            expires_at = min(
+            ).astimezone(timezone.utc)
+            expires_at_value = min(
                 issued_at_value + timedelta(seconds=issue_request.expires_in_seconds),
                 operation_expires_at,
                 session_expires_at,
-            ).isoformat()
+            ).replace(microsecond=0)
+            expires_at = expires_at_value.isoformat()
             if session_record.status != "enrolled":
                 raise OwnerControlShadowVerifierConflictError("Channel session is not enrolled.")
             if operation.status != "planned" or operation_expires_at <= issued_at_value:
                 raise OwnerControlShadowVerifierConflictError(
                     "Owner-control challenges require an unexpired planned operation."
                 )
-            if expires_at <= issued_at:
+            if expires_at_value <= issued_at_value:
                 raise OwnerControlShadowVerifierConflictError(
                     "Owner-control challenge expiry does not remain within live provenance."
                 )
@@ -9460,9 +9463,15 @@ class PostgresRecordStore(HumanSessionStore):
             )
             if existing_row is not None:
                 existing_record = self._owner_control_issued_challenge_record_from_row(existing_row)
+                existing_expires_at = datetime.fromisoformat(existing_record.expires_at)
+                if existing_expires_at <= issued_at_value:
+                    raise OwnerControlShadowVerifierConflictError(
+                        "Expired owner-control challenges require an audited terminal transition."
+                    )
                 if (
                     existing_record.channel_session_id == session_record.channel_session_id
                     and existing_record.binding_sha256 == session_record.binding_sha256
+                    and existing_expires_at <= expires_at_value
                     and owner_control_challenge_semantics(existing_record.approval_request())
                     == owner_control_challenge_semantics(candidate)
                 ):
@@ -9477,13 +9486,7 @@ class PostgresRecordStore(HumanSessionStore):
                 approval_request=candidate,
             )
             session.add(self._owner_control_issued_challenge_row_from_record(record))
-            try:
-                session.commit()
-            except IntegrityError as error:
-                session.rollback()
-                raise OwnerControlShadowVerifierConflictError(
-                    "An active owner-control challenge already binds this operation."
-                ) from error
+            session.commit()
             return record
 
     def verify_owner_control_confirmation_shadow(

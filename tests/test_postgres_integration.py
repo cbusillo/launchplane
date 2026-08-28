@@ -2512,7 +2512,6 @@ def _seed_owner_control_shadow_issue_provenance(
                 managed_set_id="owner-control-tests",
                 managed_rule_id="approve",
                 github_ids=(100001,),
-                roles=("read_only",),
                 products=("launchplane",),
                 contexts=("launchplane",),
                 actions=(PRIVILEGED_SECRET_OPERATION_APPROVE_ACTION,),
@@ -2558,6 +2557,46 @@ def _owner_control_shadow_envelope(
 
 
 class RealPostgresStorageConcurrencyTests(unittest.TestCase):
+    def test_owner_control_challenge_issuance_serializes_one_active_operation(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            private_key = Ed25519PrivateKey.generate()
+            binding = _owner_control_shadow_binding(private_key)
+            store.enroll_owner_control_channel_session(binding)
+            operation = _seed_owner_control_shadow_issue_provenance(store)
+            issue_request = OwnerControlChallengeIssueRequest(
+                channel_session_id=binding.channel_session_id,
+                operation_id=operation.operation_id,
+                expires_in_seconds=300,
+            )
+            second_store = PostgresRecordStore(database_url=store.database_url)
+            barrier = threading.Barrier(2)
+
+            def issue_once(active_store: PostgresRecordStore) -> object:
+                barrier.wait(timeout=10)
+                return active_store.issue_owner_control_challenge(issue_request)
+
+            try:
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    issued_records = tuple(executor.map(issue_once, (store, second_store)))
+                engine = create_engine(store.database_url)
+                try:
+                    with engine.connect() as connection:
+                        active_count = connection.scalar(
+                            text(
+                                "select count(*) from "
+                                "launchplane_owner_control_issued_challenges "
+                                "where operation_id = :operation_id and state = 'issued'"
+                            ),
+                            {"operation_id": operation.operation_id},
+                        )
+                finally:
+                    engine.dispose()
+            finally:
+                second_store.close()
+
+        self.assertEqual(issued_records[0], issued_records[1])
+        self.assertEqual(active_count, 1)
+
     def test_owner_control_shadow_verification_consumes_one_challenge_once(self) -> None:
         with _store_for_fresh_head_database() as store:
             private_key = Ed25519PrivateKey.generate()

@@ -97,8 +97,11 @@ it never discloses secret/key IDs, desired policy bodies, raw logins or subjects
 token labels, planner errors, or free-text request reasons.
 
 At most one `issued` challenge can bind an operation. An exact repeat returns
-that existing challenge only when the session binding and all current derived
-provenance still match; otherwise issuance conflicts. Verification updates only
+that existing challenge only while it remains unexpired, its expiry does not
+exceed the newly requested bound, and the session binding plus all current
+derived provenance still match. An expired row must receive a separately
+audited terminal transition before re-issuance; otherwise issuance conflicts.
+Verification updates only
 the challenge's mutable state/attempt evidence and does not change immutable
 challenge provenance, privileged-operation state, its event ledger, browser
 approval, or execution authorization. The verifier remains `shadow`, inert, and
