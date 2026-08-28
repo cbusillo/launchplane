@@ -449,16 +449,36 @@ def evaluate_owner_control_shadow_verification(
     """Evaluate one envelope against exact stored server state without authorizing execution."""
 
     observed_at_value = _canonical_timestamp(observed_at, "observed_at")
+    if issued_challenge is None:
+        return OwnerControlShadowVerificationEvaluation(
+            verification_status="rejected",
+            rejection_reason=(
+                "unknown_channel_session" if channel_session is None else "unknown_challenge"
+            ),
+            resulting_challenge_state="rejected",
+        )
+    if issued_challenge.state == "consumed":
+        return OwnerControlShadowVerificationEvaluation(
+            verification_status="rejected",
+            rejection_reason="challenge_replayed",
+            resulting_challenge_state="consumed",
+        )
+    if issued_challenge.state == "expired":
+        return OwnerControlShadowVerificationEvaluation(
+            verification_status="rejected",
+            rejection_reason="challenge_expired",
+            resulting_challenge_state="expired",
+        )
+    if issued_challenge.state == "rejected":
+        return OwnerControlShadowVerificationEvaluation(
+            verification_status="rejected",
+            rejection_reason="attempt_budget_exhausted",
+            resulting_challenge_state="rejected",
+        )
     if channel_session is None:
         return OwnerControlShadowVerificationEvaluation(
             verification_status="rejected",
             rejection_reason="unknown_channel_session",
-            resulting_challenge_state="rejected",
-        )
-    if issued_challenge is None:
-        return OwnerControlShadowVerificationEvaluation(
-            verification_status="rejected",
-            rejection_reason="unknown_challenge",
             resulting_challenge_state="rejected",
         )
     if (
@@ -486,24 +506,6 @@ def evaluate_owner_control_shadow_verification(
             verification_status="rejected",
             rejection_reason="channel_session_expired",
             resulting_challenge_state="expired",
-        )
-    if issued_challenge.state == "consumed":
-        return OwnerControlShadowVerificationEvaluation(
-            verification_status="rejected",
-            rejection_reason="challenge_replayed",
-            resulting_challenge_state="consumed",
-        )
-    if issued_challenge.state == "expired":
-        return OwnerControlShadowVerificationEvaluation(
-            verification_status="rejected",
-            rejection_reason="challenge_expired",
-            resulting_challenge_state="expired",
-        )
-    if issued_challenge.state == "rejected":
-        return OwnerControlShadowVerificationEvaluation(
-            verification_status="rejected",
-            rejection_reason="attempt_budget_exhausted",
-            resulting_challenge_state="rejected",
         )
     if not (
         _canonical_timestamp(issued_challenge.issued_at, "issued_at")

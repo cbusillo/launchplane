@@ -2571,9 +2571,12 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
         self.assertEqual(stored_challenge.attempt_count, 2)
         self.assertIsNotNone(stored_challenge.consumed_at)
         self.assertEqual(
-            sorted(event.verification_status for event in events), ["rejected", "verified"]
+            sorted(
+                (event.sequence, event.verification_status, event.rejection_reason)
+                for event in events
+            ),
+            [(1, "verified", None), (2, "rejected", "challenge_replayed")],
         )
-        self.assertEqual(sorted(event.sequence for event in events), [1, 2])
         self.assertTrue(all(event.verifier_mode == "shadow" for event in events))
         self.assertTrue(all(event.authorizes_execution is False for event in events))
         self.assertTrue(all(event.authority_state == "inert" for event in events))

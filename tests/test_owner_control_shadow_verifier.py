@@ -126,6 +126,9 @@ class OwnerControlShadowVerifierStorageTests(unittest.TestCase):
         )
 
         verified = self.store.verify_owner_control_confirmation_shadow(envelope)
+        revoked = self.store.revoke_owner_control_channel_session(
+            channel_session_id=binding.channel_session_id
+        )
         replayed = self.store.verify_owner_control_confirmation_shadow(envelope)
         stored_challenge = self.store.read_owner_control_issued_challenge(
             challenge_nonce=issued.challenge_nonce
@@ -143,6 +146,7 @@ class OwnerControlShadowVerifierStorageTests(unittest.TestCase):
         self.assertEqual(verified.resulting_challenge_state, "consumed")
         self.assertFalse(verified.authorizes_execution)
         self.assertEqual(verified.verifier_mode, "shadow")
+        self.assertEqual(revoked.status, "revoked")
         self.assertEqual(replayed.verification_status, "rejected")
         self.assertEqual(replayed.rejection_reason, "challenge_replayed")
         self.assertEqual(stored_challenge.state, "consumed")
@@ -150,9 +154,12 @@ class OwnerControlShadowVerifierStorageTests(unittest.TestCase):
         self.assertIsNotNone(stored_challenge.consumed_at)
         self.assertIsNotNone(stored_challenge.terminal_event_id)
         self.assertEqual(
-            sorted(event.verification_status for event in events), ["rejected", "verified"]
+            sorted(
+                (event.sequence, event.verification_status, event.rejection_reason)
+                for event in events
+            ),
+            [(1, "verified", None), (2, "rejected", "challenge_replayed")],
         )
-        self.assertEqual(sorted(event.sequence for event in events), [1, 2])
         self.assertTrue(all(event.verifier_mode == "shadow" for event in events))
         self.assertTrue(all(event.authorizes_execution is False for event in events))
         self.assertTrue(all(event.authority_state == "inert" for event in events))
