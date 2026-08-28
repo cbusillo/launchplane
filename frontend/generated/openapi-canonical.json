@@ -1799,6 +1799,99 @@
         "title": "AuthzManagedSetSummary",
         "type": "object"
       },
+      "AuthzPolicyAdministrationProvenance": {
+        "additionalProperties": false,
+        "properties": {
+          "policy_sha256": {
+            "title": "Policy Sha256",
+            "type": "string"
+          },
+          "record_id": {
+            "title": "Record Id",
+            "type": "string"
+          },
+          "revision": {
+            "minimum": 1.0,
+            "title": "Revision",
+            "type": "integer"
+          },
+          "schema_version": {
+            "enum": [
+              1,
+              2
+            ],
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "active",
+              "superseded"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "record_id",
+          "revision",
+          "status",
+          "source",
+          "updated_at",
+          "policy_sha256",
+          "schema_version"
+        ],
+        "title": "AuthzPolicyAdministrationProvenance",
+        "type": "object"
+      },
+      "AuthzPolicyAdministrationResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "health": {
+            "$ref": "#/components/schemas/AuthzPolicyHealthSummary"
+          },
+          "managed_sets": {
+            "$ref": "#/components/schemas/AuthzManagedSetCollectionSummary"
+          },
+          "policy": {
+            "$ref": "#/components/schemas/AuthzPolicyAdministrationProvenance"
+          },
+          "principal_rule_counts": {
+            "$ref": "#/components/schemas/AuthzPrincipalRuleCounts"
+          },
+          "reachable_administrators": {
+            "$ref": "#/components/schemas/AuthzReachableAdministratorSummary"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "policy",
+          "principal_rule_counts",
+          "health",
+          "managed_sets",
+          "reachable_administrators"
+        ],
+        "title": "AuthzPolicyAdministrationResponse",
+        "type": "object"
+      },
       "AuthzPolicyCandidatePreviewRequest": {
         "additionalProperties": false,
         "properties": {
@@ -2239,6 +2332,194 @@
           "schema_version"
         ],
         "title": "AuthzPolicyRecordSummary",
+        "type": "object"
+      },
+      "AuthzPolicyRevisionAuditSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "audit_present": {
+            "title": "Audit Present",
+            "type": "boolean"
+          },
+          "audit_sha256": {
+            "default": "",
+            "title": "Audit Sha256",
+            "type": "string"
+          },
+          "diff_counts": {
+            "$ref": "#/components/schemas/AuthzPolicyRevisionDiffCounts"
+          },
+          "mode": {
+            "default": "unknown",
+            "enum": [
+              "apply",
+              "dry_run",
+              "unknown"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "operation": {
+            "default": "unknown",
+            "enum": [
+              "managed_rule_set_reconcile",
+              "unknown"
+            ],
+            "title": "Operation",
+            "type": "string"
+          }
+        },
+        "required": [
+          "audit_present"
+        ],
+        "title": "AuthzPolicyRevisionAuditSummary",
+        "type": "object"
+      },
+      "AuthzPolicyRevisionDiffCounts": {
+        "additionalProperties": false,
+        "properties": {
+          "added_rule_count": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Added Rule Count"
+          },
+          "adopted_rule_count": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Adopted Rule Count"
+          },
+          "operational_readiness_blocked_rule_count": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Operational Readiness Blocked Rule Count"
+          },
+          "policy_safety_blocker_count": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Policy Safety Blocker Count"
+          },
+          "removed_rule_count": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Removed Rule Count"
+          },
+          "unchanged_rule_count": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unchanged Rule Count"
+          },
+          "updated_rule_count": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated Rule Count"
+          }
+        },
+        "title": "AuthzPolicyRevisionDiffCounts",
+        "type": "object"
+      },
+      "AuthzPolicyRevisionHistoryEntry": {
+        "additionalProperties": false,
+        "properties": {
+          "audit": {
+            "$ref": "#/components/schemas/AuthzPolicyRevisionAuditSummary"
+          },
+          "policy": {
+            "$ref": "#/components/schemas/AuthzPolicyAdministrationProvenance"
+          }
+        },
+        "required": [
+          "policy",
+          "audit"
+        ],
+        "title": "AuthzPolicyRevisionHistoryEntry",
+        "type": "object"
+      },
+      "AuthzPolicyRevisionHistoryResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "returned_count": {
+            "minimum": 0.0,
+            "title": "Returned Count",
+            "type": "integer"
+          },
+          "revisions": {
+            "items": {
+              "$ref": "#/components/schemas/AuthzPolicyRevisionHistoryEntry"
+            },
+            "title": "Revisions",
+            "type": "array"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          },
+          "truncated": {
+            "title": "Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "trace_id",
+          "returned_count",
+          "truncated",
+          "revisions"
+        ],
+        "title": "AuthzPolicyRevisionHistoryResponse",
         "type": "object"
       },
       "AuthzPrincipalRuleCounts": {
@@ -39607,6 +39888,96 @@
         "summary": "Read redacted active authz policy administration state"
       }
     },
+    "/v1/authz-policies/administration": {
+      "get": {
+        "operationId": "read_authz_policy_administration",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthzPolicyAdministrationResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read redacted authorization policy administration"
+      }
+    },
     "/v1/authz-policies/managed-rule-sets/generic-web-preview/plan": {
       "post": {
         "operationId": "plan_generic_web_preview_authz",
@@ -40375,6 +40746,96 @@
           }
         },
         "summary": "Reconcile managed authz policy rules"
+      }
+    },
+    "/v1/authz-policies/revisions": {
+      "get": {
+        "operationId": "read_authz_policy_revision_history",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthzPolicyRevisionHistoryResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read redacted authorization policy revision history"
       }
     },
     "/v1/change-impact/evaluation": {

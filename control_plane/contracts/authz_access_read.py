@@ -21,8 +21,10 @@ AUTHZ_DENIAL_EXPLANATION_READ_ACTION = "authz_denial_explanation.read"
 AUTHZ_POLICY_HEALTH_READ_ACTION = "authz_policy_health.read"
 AUTHZ_POLICY_CANDIDATE_PREVIEW_READ_ACTION = "authz_policy_candidate_preview.read"
 AUTHZ_REPOSITORY_SCOPE_READ_ACTION = "authz_repository_scope.read"
+AUTHZ_POLICY_ADMINISTRATION_READ_ACTION = "authz_policy_administration.read"
 AUTHZ_POLICY_CANDIDATE_PREVIEW_MAX_PROBES = 25
 AUTHZ_POLICY_CANDIDATE_PREVIEW_MAX_RULES = 500
+AUTHZ_POLICY_ADMINISTRATION_HISTORY_LIMIT = 50
 AUTHZ_REPOSITORY_SCOPE_MAX_CANDIDATES = 100
 AUTHZ_REPOSITORY_SCOPE_MAX_SOURCE_RECORDS = 1000
 AuthzPolicyPrincipalType: TypeAlias = Literal[
@@ -418,6 +420,78 @@ class AuthzPolicyHealthSnapshot(BaseModel):
 class AuthzPolicyHealthResponse(AuthzPolicyHealthSnapshot):
     status: Literal["ok"] = "ok"
     trace_id: str
+
+
+class AuthzPolicyAdministrationProvenance(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    record_id: str
+    revision: int = Field(ge=1)
+    status: Literal["active", "superseded"]
+    source: str
+    updated_at: str
+    policy_sha256: str
+    schema_version: Literal[1, 2]
+
+
+class AuthzPolicyAdministrationResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    policy: AuthzPolicyAdministrationProvenance
+    principal_rule_counts: AuthzPrincipalRuleCounts
+    health: AuthzPolicyHealthSummary
+    managed_sets: AuthzManagedSetCollectionSummary
+    reachable_administrators: AuthzReachableAdministratorSummary
+
+
+AuthzPolicyRevisionAuditOperation: TypeAlias = Literal[
+    "managed_rule_set_reconcile",
+    "unknown",
+]
+AuthzPolicyRevisionAuditMode: TypeAlias = Literal["apply", "dry_run", "unknown"]
+
+
+class AuthzPolicyRevisionDiffCounts(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    added_rule_count: int | None = Field(default=None, ge=0)
+    adopted_rule_count: int | None = Field(default=None, ge=0)
+    updated_rule_count: int | None = Field(default=None, ge=0)
+    removed_rule_count: int | None = Field(default=None, ge=0)
+    unchanged_rule_count: int | None = Field(default=None, ge=0)
+    policy_safety_blocker_count: int | None = Field(default=None, ge=0)
+    operational_readiness_blocked_rule_count: int | None = Field(default=None, ge=0)
+
+
+class AuthzPolicyRevisionAuditSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    audit_present: bool
+    audit_sha256: str = ""
+    operation: AuthzPolicyRevisionAuditOperation = "unknown"
+    mode: AuthzPolicyRevisionAuditMode = "unknown"
+    diff_counts: AuthzPolicyRevisionDiffCounts = Field(
+        default_factory=AuthzPolicyRevisionDiffCounts
+    )
+
+
+class AuthzPolicyRevisionHistoryEntry(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    policy: AuthzPolicyAdministrationProvenance
+    audit: AuthzPolicyRevisionAuditSummary
+
+
+class AuthzPolicyRevisionHistoryResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    returned_count: int = Field(ge=0)
+    truncated: bool
+    revisions: tuple[AuthzPolicyRevisionHistoryEntry, ...]
 
 
 class AuthzPolicyCandidateSummary(BaseModel):

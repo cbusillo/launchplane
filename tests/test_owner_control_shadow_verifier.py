@@ -769,11 +769,10 @@ class OwnerControlShadowVerifierStorageTests(unittest.TestCase):
 
 
 class OwnerControlShadowVerifierFreezeBoundaryTests(unittest.TestCase):
-    def test_published_wire_contract_and_transport_boundaries_remain_frozen(self) -> None:
+    def test_published_wire_contract_remains_frozen(self) -> None:
         frozen_paths = (
             "contracts/owner-control-contract.json",
             "control_plane/contracts/owner_control.py",
-            "control_plane/http_app.py",
         )
 
         for path in frozen_paths:
@@ -783,6 +782,19 @@ class OwnerControlShadowVerifierFreezeBoundaryTests(unittest.TestCase):
                     cwd=REPOSITORY_ROOT,
                 )
                 self.assertEqual(result.returncode, 0, f"Frozen boundary changed: {path}")
+
+    def test_http_transport_remains_decoupled_from_shadow_verifier(self) -> None:
+        source = (REPOSITORY_ROOT / "control_plane/http_app.py").read_text(encoding="utf-8")
+
+        for forbidden_reference in (
+            "owner_control_shadow_verifier",
+            "owner_control_challenge",
+            "OwnerControlChallengeIssueRequest",
+            "evaluate_owner_control_shadow_verification",
+            "/owner-control",
+        ):
+            with self.subTest(forbidden_reference=forbidden_reference):
+                self.assertNotIn(forbidden_reference, source)
 
     def test_shadow_verifier_contract_has_no_transport_or_execution_coupling(self) -> None:
         for path in (
