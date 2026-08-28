@@ -21,6 +21,7 @@ from control_plane.service_human_auth import (
     LaunchplaneHumanSession,
     build_browser_mutation_request_headers,
     validate_browser_mutation_request_headers,
+    validate_browser_sensitive_read_request_headers,
 )
 
 
@@ -459,6 +460,49 @@ class HumanSessionManagerTests(unittest.TestCase):
             values.update(overrides)
             with self.subTest(overrides=overrides), self.assertRaises(PermissionError):
                 validate_browser_mutation_request_headers(
+                    expected_origin=manager.public_origin,
+                    **values,
+                )
+
+    def test_browser_sensitive_read_headers_allow_absent_same_origin_get_origin(self) -> None:
+        manager = HumanSessionManager(config=_config(), session_store=InMemoryHumanSessionStore())
+        headers = build_browser_mutation_request_headers(
+            origin="https://launchplane.example/operator",
+            csrf_token="csrf-token",
+        )
+        common_values: dict[str, tuple[str, ...]] = {
+            "sec_fetch_site_values": (headers["Sec-Fetch-Site"],),
+            "sec_fetch_mode_values": (headers["Sec-Fetch-Mode"],),
+            "sec_fetch_dest_values": (headers["Sec-Fetch-Dest"],),
+            "csrf_token_values": (headers["X-CSRF-Token"],),
+        }
+
+        absent_origin_token = validate_browser_sensitive_read_request_headers(
+            expected_origin=manager.public_origin,
+            origin_values=(),
+            **common_values,
+        )
+        explicit_origin_token = validate_browser_sensitive_read_request_headers(
+            expected_origin=manager.public_origin,
+            origin_values=(headers["Origin"],),
+            **common_values,
+        )
+
+        self.assertEqual(absent_origin_token, "csrf-token")
+        self.assertEqual(explicit_origin_token, "csrf-token")
+        for overrides in (
+            {"origin_values": (headers["Origin"], headers["Origin"])},
+            {"origin_values": ("https://attacker.example",)},
+            {"sec_fetch_site_values": ("cross-site",)},
+            {"sec_fetch_mode_values": ("navigate",)},
+            {"sec_fetch_dest_values": ("document",)},
+            {"csrf_token_values": ()},
+            {"csrf_token_values": ("",)},
+        ):
+            values = {"origin_values": (), **common_values}
+            values.update(overrides)
+            with self.subTest(overrides=overrides), self.assertRaises(PermissionError):
+                validate_browser_sensitive_read_request_headers(
                     expected_origin=manager.public_origin,
                     **values,
                 )
