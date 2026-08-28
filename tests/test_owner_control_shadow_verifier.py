@@ -190,13 +190,14 @@ def _owner_control_policy_record(
     action: str,
     owner_ids: tuple[int, ...] = (100001,),
     roles: tuple[Literal["read_only", "admin"], ...] = (),
+    schema_version: Literal[1, 2] = 2,
 ) -> LaunchplaneAuthzPolicyRecord:
     policy = LaunchplaneAuthzPolicy(
-        schema_version=2,
+        schema_version=schema_version,
         github_humans=(
             GitHubHumanPolicyRule(
-                managed_set_id="owner-control-tests",
-                managed_rule_id="approve",
+                managed_set_id="owner-control-tests" if schema_version == 2 else None,
+                managed_rule_id="approve" if schema_version == 2 else None,
                 github_ids=owner_ids,
                 roles=roles,
                 products=("launchplane",),
@@ -591,6 +592,23 @@ class OwnerControlShadowVerifierStorageTests(unittest.TestCase):
                 policy_record=policy_record,
                 owner_github_id=100001,
                 nonce="owner-control-nonce-0000000000000011",
+                issued_at="2026-08-28T00:00:00+00:00",
+                expires_at="2026-08-28T00:05:00+00:00",
+            )
+
+    def test_owner_control_challenge_requires_schema_v2_policy(self) -> None:
+        with self.assertRaisesRegex(
+            OwnerControlChallengeProvenanceError,
+            "schema-v2 authz policy",
+        ):
+            derive_owner_control_approval_request(
+                operation=_managed_policy_operation(blocked=False),
+                policy_record=_owner_control_policy_record(
+                    action=AUTHZ_POLICY_OPERATION_APPROVE_ACTION,
+                    schema_version=1,
+                ),
+                owner_github_id=100001,
+                nonce="owner-control-nonce-0000000000000013",
                 issued_at="2026-08-28T00:00:00+00:00",
                 expires_at="2026-08-28T00:05:00+00:00",
             )
