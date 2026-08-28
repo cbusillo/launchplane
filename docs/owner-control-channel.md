@@ -31,14 +31,53 @@ Pydantic contracts for:
   plan, evidence, pre-state, policy, immutable GitHub owner ID, review, nonce,
   issuance time, and expiry; and
 - `ChallengeResponse`, which embeds and digests the exact request, records an
-  approved decision, channel binding digest, and bounded confirmation time.
+  approved decision, channel binding digest, and bounded confirmation time;
+- `ChannelBindingRecord`, which binds one canonical channel-session interval,
+  immutable owner ID, and raw Ed25519 public key; and
+- `OwnerControlConfirmationEnvelope`, which carries the exact challenge,
+  binding record, and an Ed25519 proof over the domain-separated signature
+  payload.
 
 Version, digest casing, canonical UTC timestamps and ordering, nonce form, and
 duplicate review fields fail closed. Single-field constraints are present in
 the exported JSON Schemas; cross-field constraints are also represented by
 negative conformance vectors. Single-use nonce tracking, challenge issuance,
-channel/session binding verification, and expiry enforcement at request time
-require later storage and service work; this contract slice adds none of them.
+and expiry enforcement at request time require later storage and service work;
+this contract slice adds none of them.
+
+## Binding and Signature Proof
+
+`channel_binding_sha256` is the lowercase SHA-256 digest of the exact canonical
+JSON bytes of the `ChannelBindingRecord` payload. The payload is not wrapped,
+prefixed, or newline-terminated. The record uses schema version `1`, a
+canonical `channel_session_id`, an `owner_github_id` in the signed 64-bit
+positive range, `signature_algorithm: "ed25519"`, an Ed25519 public key as raw
+32-byte unpadded base64url, and canonical whole-second UTC
+`session_issued_at`/`session_expires_at` values with expiry later than issuance.
+
+`OwnerControlSignaturePayload` is the exact schema-version-1 object
+`{"schema_version":1,"domain":"launchplane-owner-control-confirmation-v1","challenge_response":<exact ChallengeResponse>}`.
+The signature is Ed25519 over its canonical UTF-8 JSON bytes. Signatures are
+raw 64-byte values encoded as unpadded base64url. The envelope repeats the
+algorithm, binds the response digest to the exact binding record, requires the
+owner ID to match, and requires request issuance, request expiry, and
+confirmation time to remain inside the channel-session interval. Verification
+fails closed for malformed encodings, wrong keys, tampered payloads, and
+cross-session substitution.
+
+The retained `golden_vectors` are legacy v1 byte-compatibility fixtures; their
+`channel_binding_sha256` values remain explicit synthetic placeholders and do
+not have a `ChannelBindingRecord` preimage. Signed-channel consumers must use
+`confirmation_golden_vectors`, whose binding digests follow the definition
+above. The artifact's signature declaration marks this compatibility boundary
+explicitly.
+
+Signature verification proves only that the private key corresponding to the
+public key inside the envelope signed the exact challenge response. A future
+runtime verifier must also compare the exact binding record and digest against
+the server-enrolled channel-session record and the binding selected when the
+challenge was issued. A self-asserted binding or otherwise valid self-signed
+envelope is never authorization evidence by itself.
 
 ## Conformance Artifact
 
@@ -46,6 +85,12 @@ require later storage and service work; this contract slice adds none of them.
 contains the JSON schemas, canonicalization declaration, and byte/digest golden
 vectors for every descriptor currently registered in
 `control_plane.privileged_operation_registry`.
+
+The artifact container is schema version `2`; the embedded approval, response,
+binding, signature-payload, and envelope models remain schema version `1`.
+Version `2` adds the signed-channel declarations and vectors while preserving
+the legacy version-1 canonicalization, approval, response, and negative-vector
+bytes.
 
 Descriptor vectors derive all synthetic identity values from the descriptor ID,
 so registering another descriptor does not churn existing vectors. Negative
@@ -76,8 +121,6 @@ runtime adoption change proves the trusted owner-control path.
 
 `ChallengeResponse` represents successful confirmation only. Owner rejection,
 challenge expiry, and replay rejection are future audit events rather than
-alternate signed response decisions. `channel_binding_sha256` is reserved for
-the digest of the later channel-protocol binding record; its preimage and proof
-mechanism remain deliberately undefined until that separately reviewed runtime
-protocol exists. The current vectors use a synthetic placeholder digest and do
-not claim to prove a live channel.
+alternate signed response decisions. The checked artifact uses one explicitly
+synthetic deterministic Ed25519 key only to make public conformance vectors
+reproducible; it is not runtime authority, a credential, or a deployed key.

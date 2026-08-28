@@ -11,11 +11,16 @@ from pydantic import BaseModel, ValidationError
 from control_plane.contracts.canonical_json import canonical_json_bytes, canonical_json_sha256
 from control_plane.contracts.owner_control import (
     ApprovalRequest,
+    ChannelBindingRecord,
     ChallengeResponse,
+    OwnerControlConfirmationEnvelope,
     ReviewItem,
     ServerReviewPayload,
     owner_control_approval_request_digest,
+    owner_control_channel_binding_sha256,
     owner_control_challenge_response_digest,
+    owner_control_signature_payload_bytes,
+    verify_owner_control_confirmation_signature,
 )
 from control_plane.contracts.privileged_operation import (
     ManagedSecretReencryptionPlanInput,
@@ -172,6 +177,9 @@ class OwnerControlContractModelTests(unittest.TestCase):
         artifact = build_owner_control_contract()
         approval_schema = artifact["schemas"]["approval_request"]
         response_schema = artifact["schemas"]["challenge_response"]
+        binding_schema = artifact["schemas"]["channel_binding_record"]
+        envelope_schema = artifact["schemas"]["owner_control_confirmation_envelope"]
+        signature_payload_schema = artifact["schemas"]["owner_control_signature_payload"]
 
         self.assertEqual(approval_schema["properties"]["schema_version"]["const"], 1)
         self.assertEqual(approval_schema["properties"]["descriptor_version"]["const"], 1)
@@ -184,9 +192,74 @@ class OwnerControlContractModelTests(unittest.TestCase):
             "^[A-Za-z0-9_-]{16,128}$",
         )
         self.assertIn("pattern", response_schema["properties"]["confirmed_at"])
+        self.assertEqual(binding_schema["properties"]["signature_algorithm"]["const"], "ed25519")
+        self.assertEqual(
+            signature_payload_schema["properties"]["domain"]["const"],
+            "launchplane-owner-control-confirmation-v1",
+        )
+        self.assertEqual(envelope_schema["properties"]["signature_algorithm"]["const"], "ed25519")
+
+    def test_confirmation_verifies_only_for_the_exact_signed_payload(self) -> None:
+        vector = build_owner_control_contract()["confirmation_golden_vectors"][0]
+        binding = ChannelBindingRecord.model_validate_json(
+            json.dumps(vector["channel_binding"]["payload"])
+        )
+        response = ChallengeResponse.model_validate_json(
+            json.dumps(vector["challenge_response"]["payload"])
+        )
+        envelope = OwnerControlConfirmationEnvelope.model_validate_json(
+            json.dumps(vector["confirmation_envelope"]["payload"])
+        )
+
+        self.assertEqual(
+            vector["channel_binding"]["canonical_json"],
+            canonical_json_bytes(binding.model_dump(mode="json")).decode(),
+        )
+        self.assertEqual(
+            vector["channel_binding"]["sha256"],
+            owner_control_channel_binding_sha256(binding),
+        )
+        self.assertEqual(
+            vector["signature_payload"]["canonical_json"],
+            owner_control_signature_payload_bytes(response).decode(),
+        )
+        self.assertTrue(verify_owner_control_confirmation_signature(envelope))
+
+        tampered = envelope.model_copy(
+            update={
+                "challenge_response": response.model_copy(
+                    update={"confirmed_at": "2030-01-02T03:05:05+00:00"}
+                )
+            }
+        )
+        self.assertFalse(verify_owner_control_confirmation_signature(tampered))
 
 
 class OwnerControlArtifactTests(unittest.TestCase):
+    def test_existing_approval_and_challenge_vectors_remain_byte_compatible(self) -> None:
+        vector = next(
+            vector
+            for vector in build_owner_control_contract()["golden_vectors"]
+            if vector["descriptor_id"] == "managed-secret-reencryption"
+        )
+
+        self.assertEqual(
+            vector["approval_request"]["canonical_json"],
+            '{"descriptor_id":"managed-secret-reencryption","descriptor_version":1,"evidence_digest":"9823b32b0823bd4004bacdbe08391b3e0120e8f24c36f91474115ef9fa01155d","expires_at":"2030-01-02T03:09:05+00:00","issued_at":"2030-01-02T03:00:05+00:00","nonce":"owner-control-1bb1a85cd3cf848e5c7a0ee17410addb","operation_id":"privileged-operation-9a9d1838b14102ef23bc2528687abda0","owner_github_id":2594086616,"plan_digest":"f87d15dd32b95865b4fe98cc67c5c418757a0559488488355bb0cf52a06cdf95","policy_record_id":"owner-policy-9a9d1838b14102ef23bc","policy_revision":1,"policy_sha256":"158ffbbe76bc73789a3e644e339411d8569ed880328b1e7728e7db3a25f1be8f","pre_state_digest":"96cb3e8e7bc9a596d31b699bd6ea1681651eda477f9b7a6c482f9378e6798d58","request_digest":"4a9624ebacf973b34eeb4762279d052e3c637d8090cb79ecbb217fa320a58d68","schema_version":1,"server_review":{"items":[{"key":"descriptor","label":"Operation class","value":"managed-secret-reencryption"},{"key":"safety_class","label":"Safety class","value":"secret_backed"}],"review_id":"review-9a9d1838b14102ef23bc2528","schema_version":1,"summary":"Review this exact privileged operation before confirming.","title":"Owner approval required"}}',
+        )
+        self.assertEqual(
+            vector["approval_request"]["sha256"],
+            "a158dabb09e35c75932985b8682c34f7f598a2b1404ac80a9e4fa0d4a19313c4",
+        )
+        self.assertEqual(
+            vector["challenge_response"]["canonical_json"],
+            '{"approval_request":{"descriptor_id":"managed-secret-reencryption","descriptor_version":1,"evidence_digest":"9823b32b0823bd4004bacdbe08391b3e0120e8f24c36f91474115ef9fa01155d","expires_at":"2030-01-02T03:09:05+00:00","issued_at":"2030-01-02T03:00:05+00:00","nonce":"owner-control-1bb1a85cd3cf848e5c7a0ee17410addb","operation_id":"privileged-operation-9a9d1838b14102ef23bc2528687abda0","owner_github_id":2594086616,"plan_digest":"f87d15dd32b95865b4fe98cc67c5c418757a0559488488355bb0cf52a06cdf95","policy_record_id":"owner-policy-9a9d1838b14102ef23bc","policy_revision":1,"policy_sha256":"158ffbbe76bc73789a3e644e339411d8569ed880328b1e7728e7db3a25f1be8f","pre_state_digest":"96cb3e8e7bc9a596d31b699bd6ea1681651eda477f9b7a6c482f9378e6798d58","request_digest":"4a9624ebacf973b34eeb4762279d052e3c637d8090cb79ecbb217fa320a58d68","schema_version":1,"server_review":{"items":[{"key":"descriptor","label":"Operation class","value":"managed-secret-reencryption"},{"key":"safety_class","label":"Safety class","value":"secret_backed"}],"review_id":"review-9a9d1838b14102ef23bc2528","schema_version":1,"summary":"Review this exact privileged operation before confirming.","title":"Owner approval required"}},"approval_request_digest":"a158dabb09e35c75932985b8682c34f7f598a2b1404ac80a9e4fa0d4a19313c4","channel_binding_sha256":"4a000cc8036cc97f077bc431ad78ce27f5a940d5766377ef2de3d964229b8a9c","confirmed_at":"2030-01-02T03:04:05+00:00","decision":"approved","schema_version":1}',
+        )
+        self.assertEqual(
+            vector["challenge_response"]["sha256"],
+            "76b409c883d422aef5378d03dfe1527c16f2f1ac41b8b81202a71c2375641a28",
+        )
+
     def test_golden_vectors_cover_every_registered_descriptor(self) -> None:
         artifact = build_owner_control_contract()
         expected_descriptors = {
@@ -208,7 +281,7 @@ class OwnerControlArtifactTests(unittest.TestCase):
             )
             self.assertEqual(
                 vector["approval_request"]["canonical_json"],
-                canonical_json_bytes(request.model_dump(mode="json")).decode("utf-8"),
+                canonical_json_bytes(request.model_dump(mode="json")).decode(),
             )
             self.assertEqual(
                 vector["approval_request"]["sha256"],
@@ -216,12 +289,45 @@ class OwnerControlArtifactTests(unittest.TestCase):
             )
             self.assertEqual(
                 vector["challenge_response"]["canonical_json"],
-                canonical_json_bytes(response.model_dump(mode="json")).decode("utf-8"),
+                canonical_json_bytes(response.model_dump(mode="json")).decode(),
             )
             self.assertEqual(
                 vector["challenge_response"]["sha256"],
                 owner_control_challenge_response_digest(response),
             )
+
+    def test_confirmation_vectors_cover_every_descriptor_and_verify(self) -> None:
+        artifact = build_owner_control_contract()
+        expected_descriptors = {
+            (descriptor.descriptor_id, descriptor.descriptor_version)
+            for descriptor in list_privileged_operation_descriptors()
+        }
+        actual_descriptors = {
+            (vector["descriptor_id"], vector["descriptor_version"])
+            for vector in artifact["confirmation_golden_vectors"]
+        }
+
+        self.assertEqual(actual_descriptors, expected_descriptors)
+        for vector in artifact["confirmation_golden_vectors"]:
+            with self.subTest(descriptor_id=vector["descriptor_id"]):
+                binding = ChannelBindingRecord.model_validate_json(
+                    json.dumps(vector["channel_binding"]["payload"])
+                )
+                response = ChallengeResponse.model_validate_json(
+                    json.dumps(vector["challenge_response"]["payload"])
+                )
+                envelope = OwnerControlConfirmationEnvelope.model_validate_json(
+                    json.dumps(vector["confirmation_envelope"]["payload"])
+                )
+                self.assertEqual(
+                    vector["channel_binding"]["sha256"],
+                    owner_control_channel_binding_sha256(binding),
+                )
+                self.assertEqual(
+                    vector["signature_payload"]["canonical_json"],
+                    owner_control_signature_payload_bytes(response).decode(),
+                )
+                self.assertTrue(verify_owner_control_confirmation_signature(envelope))
 
     def test_validator_rejects_contract_drift(self) -> None:
         artifact = build_owner_control_contract()
@@ -246,6 +352,28 @@ class OwnerControlArtifactTests(unittest.TestCase):
                 errors = raised.exception.errors()
                 self.assertEqual(len(errors), 1)
                 self.assertEqual(list(errors[0]["loc"]), vector["error_location"])
+                if expected_message := vector.get("error_message_contains"):
+                    self.assertIn(expected_message, errors[0]["msg"])
+
+    def test_negative_confirmation_vectors_fail_closed(self) -> None:
+        artifact = build_owner_control_contract()
+        for vector in artifact["negative_confirmation_vectors"]:
+            with self.subTest(rule=vector["rule"]):
+                if vector.get("verification") == "invalid":
+                    envelope = OwnerControlConfirmationEnvelope.model_validate_json(
+                        json.dumps(vector["payload"])
+                    )
+                    self.assertFalse(verify_owner_control_confirmation_signature(envelope))
+                    continue
+                with self.assertRaises(ValidationError) as raised:
+                    OwnerControlConfirmationEnvelope.model_validate_json(
+                        json.dumps(vector["payload"])
+                    )
+                errors = raised.exception.errors()
+                self.assertEqual(len(errors), 1)
+                self.assertEqual(list(errors[0]["loc"]), vector["error_location"])
+                if expected_message := vector.get("error_message_contains"):
+                    self.assertIn(expected_message, errors[0]["msg"])
 
     def test_checked_artifact_matches_generated_contract(self) -> None:
         checked = json.loads(

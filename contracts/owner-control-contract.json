@@ -64,6 +64,356 @@
       "sha256": "07db6c156108fd238db2691d759e6fe5d8f8649fb5e9c8130dc3f98342ba5ae2"
     }
   ],
+  "confirmation_golden_vectors": [
+    {
+      "challenge_response": {
+        "canonical_json": "{\"approval_request\":{\"descriptor_id\":\"managed-authz-policy-set\",\"descriptor_version\":1,\"evidence_digest\":\"df6da961581b149a28639add56e3b08401b3bed6afb07ad0c7b5ca3d51632be9\",\"expires_at\":\"2030-01-02T03:09:05+00:00\",\"issued_at\":\"2030-01-02T03:00:05+00:00\",\"nonce\":\"owner-control-b565a7b3115d408e250eeffe65af9513\",\"operation_id\":\"privileged-operation-1d762a6ac3895594ed85ba7aa9c39330\",\"owner_github_id\":494383370,\"plan_digest\":\"edf23f94b33d1188e34e143e7aff91075ec941053b3b95d367a45de67b1fe1d7\",\"policy_record_id\":\"owner-policy-1d762a6ac3895594ed85\",\"policy_revision\":1,\"policy_sha256\":\"b379db2fe113e77eef0b3bb05aec804189d9f0b359e67d941d837c7de59e6f8e\",\"pre_state_digest\":\"46df3876ade6b39b0edfbd3b8ea1a408173bbe5d8cc7154cea4d63e5d057239f\",\"request_digest\":\"e0e31f55312d2562bf610587d7a21b5badeed50224284b08d1662924379b4539\",\"schema_version\":1,\"server_review\":{\"items\":[{\"key\":\"descriptor\",\"label\":\"Operation class\",\"value\":\"managed-authz-policy-set\"},{\"key\":\"safety_class\",\"label\":\"Safety class\",\"value\":\"policy_admin\"}],\"review_id\":\"review-1d762a6ac3895594ed85ba7a\",\"schema_version\":1,\"summary\":\"Review this exact privileged operation before confirming.\",\"title\":\"Owner approval required\"}},\"approval_request_digest\":\"a60572025b121241d44c3f28ce22715841e348765dd50cfa514861e89334d9eb\",\"channel_binding_sha256\":\"1b8a26cd423937c1b5edcb5f7162c67978055213231bc4e85c3c46dc9a9738aa\",\"confirmed_at\":\"2030-01-02T03:04:05+00:00\",\"decision\":\"approved\",\"schema_version\":1}",
+        "payload": {
+          "approval_request": {
+            "descriptor_id": "managed-authz-policy-set",
+            "descriptor_version": 1,
+            "evidence_digest": "df6da961581b149a28639add56e3b08401b3bed6afb07ad0c7b5ca3d51632be9",
+            "expires_at": "2030-01-02T03:09:05+00:00",
+            "issued_at": "2030-01-02T03:00:05+00:00",
+            "nonce": "owner-control-b565a7b3115d408e250eeffe65af9513",
+            "operation_id": "privileged-operation-1d762a6ac3895594ed85ba7aa9c39330",
+            "owner_github_id": 494383370,
+            "plan_digest": "edf23f94b33d1188e34e143e7aff91075ec941053b3b95d367a45de67b1fe1d7",
+            "policy_record_id": "owner-policy-1d762a6ac3895594ed85",
+            "policy_revision": 1,
+            "policy_sha256": "b379db2fe113e77eef0b3bb05aec804189d9f0b359e67d941d837c7de59e6f8e",
+            "pre_state_digest": "46df3876ade6b39b0edfbd3b8ea1a408173bbe5d8cc7154cea4d63e5d057239f",
+            "request_digest": "e0e31f55312d2562bf610587d7a21b5badeed50224284b08d1662924379b4539",
+            "schema_version": 1,
+            "server_review": {
+              "items": [
+                {
+                  "key": "descriptor",
+                  "label": "Operation class",
+                  "value": "managed-authz-policy-set"
+                },
+                {
+                  "key": "safety_class",
+                  "label": "Safety class",
+                  "value": "policy_admin"
+                }
+              ],
+              "review_id": "review-1d762a6ac3895594ed85ba7a",
+              "schema_version": 1,
+              "summary": "Review this exact privileged operation before confirming.",
+              "title": "Owner approval required"
+            }
+          },
+          "approval_request_digest": "a60572025b121241d44c3f28ce22715841e348765dd50cfa514861e89334d9eb",
+          "channel_binding_sha256": "1b8a26cd423937c1b5edcb5f7162c67978055213231bc4e85c3c46dc9a9738aa",
+          "confirmed_at": "2030-01-02T03:04:05+00:00",
+          "decision": "approved",
+          "schema_version": 1
+        },
+        "sha256": "cd4d72f6fca70cd0e62dbdb5db25f1c8b200fffb71c2e62edc85aa4a1f955539"
+      },
+      "channel_binding": {
+        "canonical_json": "{\"channel_session_id\":\"channel-session-5138ce25ddfcf0b39d4d178ef80612d0\",\"owner_github_id\":494383370,\"owner_public_key\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\",\"schema_version\":1,\"session_expires_at\":\"2030-01-02T03:09:05+00:00\",\"session_issued_at\":\"2030-01-02T03:00:05+00:00\",\"signature_algorithm\":\"ed25519\"}",
+        "payload": {
+          "channel_session_id": "channel-session-5138ce25ddfcf0b39d4d178ef80612d0",
+          "owner_github_id": 494383370,
+          "owner_public_key": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+          "schema_version": 1,
+          "session_expires_at": "2030-01-02T03:09:05+00:00",
+          "session_issued_at": "2030-01-02T03:00:05+00:00",
+          "signature_algorithm": "ed25519"
+        },
+        "sha256": "1b8a26cd423937c1b5edcb5f7162c67978055213231bc4e85c3c46dc9a9738aa"
+      },
+      "confirmation_envelope": {
+        "canonical_json": "{\"challenge_response\":{\"approval_request\":{\"descriptor_id\":\"managed-authz-policy-set\",\"descriptor_version\":1,\"evidence_digest\":\"df6da961581b149a28639add56e3b08401b3bed6afb07ad0c7b5ca3d51632be9\",\"expires_at\":\"2030-01-02T03:09:05+00:00\",\"issued_at\":\"2030-01-02T03:00:05+00:00\",\"nonce\":\"owner-control-b565a7b3115d408e250eeffe65af9513\",\"operation_id\":\"privileged-operation-1d762a6ac3895594ed85ba7aa9c39330\",\"owner_github_id\":494383370,\"plan_digest\":\"edf23f94b33d1188e34e143e7aff91075ec941053b3b95d367a45de67b1fe1d7\",\"policy_record_id\":\"owner-policy-1d762a6ac3895594ed85\",\"policy_revision\":1,\"policy_sha256\":\"b379db2fe113e77eef0b3bb05aec804189d9f0b359e67d941d837c7de59e6f8e\",\"pre_state_digest\":\"46df3876ade6b39b0edfbd3b8ea1a408173bbe5d8cc7154cea4d63e5d057239f\",\"request_digest\":\"e0e31f55312d2562bf610587d7a21b5badeed50224284b08d1662924379b4539\",\"schema_version\":1,\"server_review\":{\"items\":[{\"key\":\"descriptor\",\"label\":\"Operation class\",\"value\":\"managed-authz-policy-set\"},{\"key\":\"safety_class\",\"label\":\"Safety class\",\"value\":\"policy_admin\"}],\"review_id\":\"review-1d762a6ac3895594ed85ba7a\",\"schema_version\":1,\"summary\":\"Review this exact privileged operation before confirming.\",\"title\":\"Owner approval required\"}},\"approval_request_digest\":\"a60572025b121241d44c3f28ce22715841e348765dd50cfa514861e89334d9eb\",\"channel_binding_sha256\":\"1b8a26cd423937c1b5edcb5f7162c67978055213231bc4e85c3c46dc9a9738aa\",\"confirmed_at\":\"2030-01-02T03:04:05+00:00\",\"decision\":\"approved\",\"schema_version\":1},\"channel_binding\":{\"channel_session_id\":\"channel-session-5138ce25ddfcf0b39d4d178ef80612d0\",\"owner_github_id\":494383370,\"owner_public_key\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\",\"schema_version\":1,\"session_expires_at\":\"2030-01-02T03:09:05+00:00\",\"session_issued_at\":\"2030-01-02T03:00:05+00:00\",\"signature_algorithm\":\"ed25519\"},\"schema_version\":1,\"signature\":\"tglT-SQl-k0_FmKKynVn6iop-CRZnBmAVLLgCSX6Ak1FN5NcQRSrFYiGLmTtoqOKvYb9FCc0GRGnGWVKaXaDAQ\",\"signature_algorithm\":\"ed25519\"}",
+        "payload": {
+          "challenge_response": {
+            "approval_request": {
+              "descriptor_id": "managed-authz-policy-set",
+              "descriptor_version": 1,
+              "evidence_digest": "df6da961581b149a28639add56e3b08401b3bed6afb07ad0c7b5ca3d51632be9",
+              "expires_at": "2030-01-02T03:09:05+00:00",
+              "issued_at": "2030-01-02T03:00:05+00:00",
+              "nonce": "owner-control-b565a7b3115d408e250eeffe65af9513",
+              "operation_id": "privileged-operation-1d762a6ac3895594ed85ba7aa9c39330",
+              "owner_github_id": 494383370,
+              "plan_digest": "edf23f94b33d1188e34e143e7aff91075ec941053b3b95d367a45de67b1fe1d7",
+              "policy_record_id": "owner-policy-1d762a6ac3895594ed85",
+              "policy_revision": 1,
+              "policy_sha256": "b379db2fe113e77eef0b3bb05aec804189d9f0b359e67d941d837c7de59e6f8e",
+              "pre_state_digest": "46df3876ade6b39b0edfbd3b8ea1a408173bbe5d8cc7154cea4d63e5d057239f",
+              "request_digest": "e0e31f55312d2562bf610587d7a21b5badeed50224284b08d1662924379b4539",
+              "schema_version": 1,
+              "server_review": {
+                "items": [
+                  {
+                    "key": "descriptor",
+                    "label": "Operation class",
+                    "value": "managed-authz-policy-set"
+                  },
+                  {
+                    "key": "safety_class",
+                    "label": "Safety class",
+                    "value": "policy_admin"
+                  }
+                ],
+                "review_id": "review-1d762a6ac3895594ed85ba7a",
+                "schema_version": 1,
+                "summary": "Review this exact privileged operation before confirming.",
+                "title": "Owner approval required"
+              }
+            },
+            "approval_request_digest": "a60572025b121241d44c3f28ce22715841e348765dd50cfa514861e89334d9eb",
+            "channel_binding_sha256": "1b8a26cd423937c1b5edcb5f7162c67978055213231bc4e85c3c46dc9a9738aa",
+            "confirmed_at": "2030-01-02T03:04:05+00:00",
+            "decision": "approved",
+            "schema_version": 1
+          },
+          "channel_binding": {
+            "channel_session_id": "channel-session-5138ce25ddfcf0b39d4d178ef80612d0",
+            "owner_github_id": 494383370,
+            "owner_public_key": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+            "schema_version": 1,
+            "session_expires_at": "2030-01-02T03:09:05+00:00",
+            "session_issued_at": "2030-01-02T03:00:05+00:00",
+            "signature_algorithm": "ed25519"
+          },
+          "schema_version": 1,
+          "signature": "tglT-SQl-k0_FmKKynVn6iop-CRZnBmAVLLgCSX6Ak1FN5NcQRSrFYiGLmTtoqOKvYb9FCc0GRGnGWVKaXaDAQ",
+          "signature_algorithm": "ed25519"
+        },
+        "sha256": "38fb345517a01931f91ab8f0ba81cf99c082103f50da24dc4b2e284ccbf864cc"
+      },
+      "descriptor_id": "managed-authz-policy-set",
+      "descriptor_version": 1,
+      "signature_payload": {
+        "canonical_json": "{\"challenge_response\":{\"approval_request\":{\"descriptor_id\":\"managed-authz-policy-set\",\"descriptor_version\":1,\"evidence_digest\":\"df6da961581b149a28639add56e3b08401b3bed6afb07ad0c7b5ca3d51632be9\",\"expires_at\":\"2030-01-02T03:09:05+00:00\",\"issued_at\":\"2030-01-02T03:00:05+00:00\",\"nonce\":\"owner-control-b565a7b3115d408e250eeffe65af9513\",\"operation_id\":\"privileged-operation-1d762a6ac3895594ed85ba7aa9c39330\",\"owner_github_id\":494383370,\"plan_digest\":\"edf23f94b33d1188e34e143e7aff91075ec941053b3b95d367a45de67b1fe1d7\",\"policy_record_id\":\"owner-policy-1d762a6ac3895594ed85\",\"policy_revision\":1,\"policy_sha256\":\"b379db2fe113e77eef0b3bb05aec804189d9f0b359e67d941d837c7de59e6f8e\",\"pre_state_digest\":\"46df3876ade6b39b0edfbd3b8ea1a408173bbe5d8cc7154cea4d63e5d057239f\",\"request_digest\":\"e0e31f55312d2562bf610587d7a21b5badeed50224284b08d1662924379b4539\",\"schema_version\":1,\"server_review\":{\"items\":[{\"key\":\"descriptor\",\"label\":\"Operation class\",\"value\":\"managed-authz-policy-set\"},{\"key\":\"safety_class\",\"label\":\"Safety class\",\"value\":\"policy_admin\"}],\"review_id\":\"review-1d762a6ac3895594ed85ba7a\",\"schema_version\":1,\"summary\":\"Review this exact privileged operation before confirming.\",\"title\":\"Owner approval required\"}},\"approval_request_digest\":\"a60572025b121241d44c3f28ce22715841e348765dd50cfa514861e89334d9eb\",\"channel_binding_sha256\":\"1b8a26cd423937c1b5edcb5f7162c67978055213231bc4e85c3c46dc9a9738aa\",\"confirmed_at\":\"2030-01-02T03:04:05+00:00\",\"decision\":\"approved\",\"schema_version\":1},\"domain\":\"launchplane-owner-control-confirmation-v1\",\"schema_version\":1}",
+        "payload": {
+          "challenge_response": {
+            "approval_request": {
+              "descriptor_id": "managed-authz-policy-set",
+              "descriptor_version": 1,
+              "evidence_digest": "df6da961581b149a28639add56e3b08401b3bed6afb07ad0c7b5ca3d51632be9",
+              "expires_at": "2030-01-02T03:09:05+00:00",
+              "issued_at": "2030-01-02T03:00:05+00:00",
+              "nonce": "owner-control-b565a7b3115d408e250eeffe65af9513",
+              "operation_id": "privileged-operation-1d762a6ac3895594ed85ba7aa9c39330",
+              "owner_github_id": 494383370,
+              "plan_digest": "edf23f94b33d1188e34e143e7aff91075ec941053b3b95d367a45de67b1fe1d7",
+              "policy_record_id": "owner-policy-1d762a6ac3895594ed85",
+              "policy_revision": 1,
+              "policy_sha256": "b379db2fe113e77eef0b3bb05aec804189d9f0b359e67d941d837c7de59e6f8e",
+              "pre_state_digest": "46df3876ade6b39b0edfbd3b8ea1a408173bbe5d8cc7154cea4d63e5d057239f",
+              "request_digest": "e0e31f55312d2562bf610587d7a21b5badeed50224284b08d1662924379b4539",
+              "schema_version": 1,
+              "server_review": {
+                "items": [
+                  {
+                    "key": "descriptor",
+                    "label": "Operation class",
+                    "value": "managed-authz-policy-set"
+                  },
+                  {
+                    "key": "safety_class",
+                    "label": "Safety class",
+                    "value": "policy_admin"
+                  }
+                ],
+                "review_id": "review-1d762a6ac3895594ed85ba7a",
+                "schema_version": 1,
+                "summary": "Review this exact privileged operation before confirming.",
+                "title": "Owner approval required"
+              }
+            },
+            "approval_request_digest": "a60572025b121241d44c3f28ce22715841e348765dd50cfa514861e89334d9eb",
+            "channel_binding_sha256": "1b8a26cd423937c1b5edcb5f7162c67978055213231bc4e85c3c46dc9a9738aa",
+            "confirmed_at": "2030-01-02T03:04:05+00:00",
+            "decision": "approved",
+            "schema_version": 1
+          },
+          "domain": "launchplane-owner-control-confirmation-v1",
+          "schema_version": 1
+        },
+        "sha256": "d4e381e653d1de2252a06c4e0e150318d938e27a6da8b0791a3820431652f56e"
+      },
+      "verification": "valid"
+    },
+    {
+      "challenge_response": {
+        "canonical_json": "{\"approval_request\":{\"descriptor_id\":\"managed-secret-reencryption\",\"descriptor_version\":1,\"evidence_digest\":\"9823b32b0823bd4004bacdbe08391b3e0120e8f24c36f91474115ef9fa01155d\",\"expires_at\":\"2030-01-02T03:09:05+00:00\",\"issued_at\":\"2030-01-02T03:00:05+00:00\",\"nonce\":\"owner-control-1bb1a85cd3cf848e5c7a0ee17410addb\",\"operation_id\":\"privileged-operation-9a9d1838b14102ef23bc2528687abda0\",\"owner_github_id\":2594086616,\"plan_digest\":\"f87d15dd32b95865b4fe98cc67c5c418757a0559488488355bb0cf52a06cdf95\",\"policy_record_id\":\"owner-policy-9a9d1838b14102ef23bc\",\"policy_revision\":1,\"policy_sha256\":\"158ffbbe76bc73789a3e644e339411d8569ed880328b1e7728e7db3a25f1be8f\",\"pre_state_digest\":\"96cb3e8e7bc9a596d31b699bd6ea1681651eda477f9b7a6c482f9378e6798d58\",\"request_digest\":\"4a9624ebacf973b34eeb4762279d052e3c637d8090cb79ecbb217fa320a58d68\",\"schema_version\":1,\"server_review\":{\"items\":[{\"key\":\"descriptor\",\"label\":\"Operation class\",\"value\":\"managed-secret-reencryption\"},{\"key\":\"safety_class\",\"label\":\"Safety class\",\"value\":\"secret_backed\"}],\"review_id\":\"review-9a9d1838b14102ef23bc2528\",\"schema_version\":1,\"summary\":\"Review this exact privileged operation before confirming.\",\"title\":\"Owner approval required\"}},\"approval_request_digest\":\"a158dabb09e35c75932985b8682c34f7f598a2b1404ac80a9e4fa0d4a19313c4\",\"channel_binding_sha256\":\"f700fe53f99c7817cb6451964b9bc50c66fd1628ae842c5c496a0a7fc6be1c93\",\"confirmed_at\":\"2030-01-02T03:04:05+00:00\",\"decision\":\"approved\",\"schema_version\":1}",
+        "payload": {
+          "approval_request": {
+            "descriptor_id": "managed-secret-reencryption",
+            "descriptor_version": 1,
+            "evidence_digest": "9823b32b0823bd4004bacdbe08391b3e0120e8f24c36f91474115ef9fa01155d",
+            "expires_at": "2030-01-02T03:09:05+00:00",
+            "issued_at": "2030-01-02T03:00:05+00:00",
+            "nonce": "owner-control-1bb1a85cd3cf848e5c7a0ee17410addb",
+            "operation_id": "privileged-operation-9a9d1838b14102ef23bc2528687abda0",
+            "owner_github_id": 2594086616,
+            "plan_digest": "f87d15dd32b95865b4fe98cc67c5c418757a0559488488355bb0cf52a06cdf95",
+            "policy_record_id": "owner-policy-9a9d1838b14102ef23bc",
+            "policy_revision": 1,
+            "policy_sha256": "158ffbbe76bc73789a3e644e339411d8569ed880328b1e7728e7db3a25f1be8f",
+            "pre_state_digest": "96cb3e8e7bc9a596d31b699bd6ea1681651eda477f9b7a6c482f9378e6798d58",
+            "request_digest": "4a9624ebacf973b34eeb4762279d052e3c637d8090cb79ecbb217fa320a58d68",
+            "schema_version": 1,
+            "server_review": {
+              "items": [
+                {
+                  "key": "descriptor",
+                  "label": "Operation class",
+                  "value": "managed-secret-reencryption"
+                },
+                {
+                  "key": "safety_class",
+                  "label": "Safety class",
+                  "value": "secret_backed"
+                }
+              ],
+              "review_id": "review-9a9d1838b14102ef23bc2528",
+              "schema_version": 1,
+              "summary": "Review this exact privileged operation before confirming.",
+              "title": "Owner approval required"
+            }
+          },
+          "approval_request_digest": "a158dabb09e35c75932985b8682c34f7f598a2b1404ac80a9e4fa0d4a19313c4",
+          "channel_binding_sha256": "f700fe53f99c7817cb6451964b9bc50c66fd1628ae842c5c496a0a7fc6be1c93",
+          "confirmed_at": "2030-01-02T03:04:05+00:00",
+          "decision": "approved",
+          "schema_version": 1
+        },
+        "sha256": "9b817797377a5895e81a3c741372c1bfedc79dba42b280e51e14bd175a098081"
+      },
+      "channel_binding": {
+        "canonical_json": "{\"channel_session_id\":\"channel-session-0f7a58f81d1b3945ee77723d618048a3\",\"owner_github_id\":2594086616,\"owner_public_key\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\",\"schema_version\":1,\"session_expires_at\":\"2030-01-02T03:09:05+00:00\",\"session_issued_at\":\"2030-01-02T03:00:05+00:00\",\"signature_algorithm\":\"ed25519\"}",
+        "payload": {
+          "channel_session_id": "channel-session-0f7a58f81d1b3945ee77723d618048a3",
+          "owner_github_id": 2594086616,
+          "owner_public_key": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+          "schema_version": 1,
+          "session_expires_at": "2030-01-02T03:09:05+00:00",
+          "session_issued_at": "2030-01-02T03:00:05+00:00",
+          "signature_algorithm": "ed25519"
+        },
+        "sha256": "f700fe53f99c7817cb6451964b9bc50c66fd1628ae842c5c496a0a7fc6be1c93"
+      },
+      "confirmation_envelope": {
+        "canonical_json": "{\"challenge_response\":{\"approval_request\":{\"descriptor_id\":\"managed-secret-reencryption\",\"descriptor_version\":1,\"evidence_digest\":\"9823b32b0823bd4004bacdbe08391b3e0120e8f24c36f91474115ef9fa01155d\",\"expires_at\":\"2030-01-02T03:09:05+00:00\",\"issued_at\":\"2030-01-02T03:00:05+00:00\",\"nonce\":\"owner-control-1bb1a85cd3cf848e5c7a0ee17410addb\",\"operation_id\":\"privileged-operation-9a9d1838b14102ef23bc2528687abda0\",\"owner_github_id\":2594086616,\"plan_digest\":\"f87d15dd32b95865b4fe98cc67c5c418757a0559488488355bb0cf52a06cdf95\",\"policy_record_id\":\"owner-policy-9a9d1838b14102ef23bc\",\"policy_revision\":1,\"policy_sha256\":\"158ffbbe76bc73789a3e644e339411d8569ed880328b1e7728e7db3a25f1be8f\",\"pre_state_digest\":\"96cb3e8e7bc9a596d31b699bd6ea1681651eda477f9b7a6c482f9378e6798d58\",\"request_digest\":\"4a9624ebacf973b34eeb4762279d052e3c637d8090cb79ecbb217fa320a58d68\",\"schema_version\":1,\"server_review\":{\"items\":[{\"key\":\"descriptor\",\"label\":\"Operation class\",\"value\":\"managed-secret-reencryption\"},{\"key\":\"safety_class\",\"label\":\"Safety class\",\"value\":\"secret_backed\"}],\"review_id\":\"review-9a9d1838b14102ef23bc2528\",\"schema_version\":1,\"summary\":\"Review this exact privileged operation before confirming.\",\"title\":\"Owner approval required\"}},\"approval_request_digest\":\"a158dabb09e35c75932985b8682c34f7f598a2b1404ac80a9e4fa0d4a19313c4\",\"channel_binding_sha256\":\"f700fe53f99c7817cb6451964b9bc50c66fd1628ae842c5c496a0a7fc6be1c93\",\"confirmed_at\":\"2030-01-02T03:04:05+00:00\",\"decision\":\"approved\",\"schema_version\":1},\"channel_binding\":{\"channel_session_id\":\"channel-session-0f7a58f81d1b3945ee77723d618048a3\",\"owner_github_id\":2594086616,\"owner_public_key\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\",\"schema_version\":1,\"session_expires_at\":\"2030-01-02T03:09:05+00:00\",\"session_issued_at\":\"2030-01-02T03:00:05+00:00\",\"signature_algorithm\":\"ed25519\"},\"schema_version\":1,\"signature\":\"x8JWwd2jpFDAtEnjO1HJWuck3kwxVq_c2MXWcElZlk-2orXreHObpdIqioPGq4R5Uyu-VeKVlU1CnBLvD_YdBA\",\"signature_algorithm\":\"ed25519\"}",
+        "payload": {
+          "challenge_response": {
+            "approval_request": {
+              "descriptor_id": "managed-secret-reencryption",
+              "descriptor_version": 1,
+              "evidence_digest": "9823b32b0823bd4004bacdbe08391b3e0120e8f24c36f91474115ef9fa01155d",
+              "expires_at": "2030-01-02T03:09:05+00:00",
+              "issued_at": "2030-01-02T03:00:05+00:00",
+              "nonce": "owner-control-1bb1a85cd3cf848e5c7a0ee17410addb",
+              "operation_id": "privileged-operation-9a9d1838b14102ef23bc2528687abda0",
+              "owner_github_id": 2594086616,
+              "plan_digest": "f87d15dd32b95865b4fe98cc67c5c418757a0559488488355bb0cf52a06cdf95",
+              "policy_record_id": "owner-policy-9a9d1838b14102ef23bc",
+              "policy_revision": 1,
+              "policy_sha256": "158ffbbe76bc73789a3e644e339411d8569ed880328b1e7728e7db3a25f1be8f",
+              "pre_state_digest": "96cb3e8e7bc9a596d31b699bd6ea1681651eda477f9b7a6c482f9378e6798d58",
+              "request_digest": "4a9624ebacf973b34eeb4762279d052e3c637d8090cb79ecbb217fa320a58d68",
+              "schema_version": 1,
+              "server_review": {
+                "items": [
+                  {
+                    "key": "descriptor",
+                    "label": "Operation class",
+                    "value": "managed-secret-reencryption"
+                  },
+                  {
+                    "key": "safety_class",
+                    "label": "Safety class",
+                    "value": "secret_backed"
+                  }
+                ],
+                "review_id": "review-9a9d1838b14102ef23bc2528",
+                "schema_version": 1,
+                "summary": "Review this exact privileged operation before confirming.",
+                "title": "Owner approval required"
+              }
+            },
+            "approval_request_digest": "a158dabb09e35c75932985b8682c34f7f598a2b1404ac80a9e4fa0d4a19313c4",
+            "channel_binding_sha256": "f700fe53f99c7817cb6451964b9bc50c66fd1628ae842c5c496a0a7fc6be1c93",
+            "confirmed_at": "2030-01-02T03:04:05+00:00",
+            "decision": "approved",
+            "schema_version": 1
+          },
+          "channel_binding": {
+            "channel_session_id": "channel-session-0f7a58f81d1b3945ee77723d618048a3",
+            "owner_github_id": 2594086616,
+            "owner_public_key": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+            "schema_version": 1,
+            "session_expires_at": "2030-01-02T03:09:05+00:00",
+            "session_issued_at": "2030-01-02T03:00:05+00:00",
+            "signature_algorithm": "ed25519"
+          },
+          "schema_version": 1,
+          "signature": "x8JWwd2jpFDAtEnjO1HJWuck3kwxVq_c2MXWcElZlk-2orXreHObpdIqioPGq4R5Uyu-VeKVlU1CnBLvD_YdBA",
+          "signature_algorithm": "ed25519"
+        },
+        "sha256": "a7eef23e056ba68142aa18c05f636a8c18cf2f71f813c4bd21b195ac9f18dbde"
+      },
+      "descriptor_id": "managed-secret-reencryption",
+      "descriptor_version": 1,
+      "signature_payload": {
+        "canonical_json": "{\"challenge_response\":{\"approval_request\":{\"descriptor_id\":\"managed-secret-reencryption\",\"descriptor_version\":1,\"evidence_digest\":\"9823b32b0823bd4004bacdbe08391b3e0120e8f24c36f91474115ef9fa01155d\",\"expires_at\":\"2030-01-02T03:09:05+00:00\",\"issued_at\":\"2030-01-02T03:00:05+00:00\",\"nonce\":\"owner-control-1bb1a85cd3cf848e5c7a0ee17410addb\",\"operation_id\":\"privileged-operation-9a9d1838b14102ef23bc2528687abda0\",\"owner_github_id\":2594086616,\"plan_digest\":\"f87d15dd32b95865b4fe98cc67c5c418757a0559488488355bb0cf52a06cdf95\",\"policy_record_id\":\"owner-policy-9a9d1838b14102ef23bc\",\"policy_revision\":1,\"policy_sha256\":\"158ffbbe76bc73789a3e644e339411d8569ed880328b1e7728e7db3a25f1be8f\",\"pre_state_digest\":\"96cb3e8e7bc9a596d31b699bd6ea1681651eda477f9b7a6c482f9378e6798d58\",\"request_digest\":\"4a9624ebacf973b34eeb4762279d052e3c637d8090cb79ecbb217fa320a58d68\",\"schema_version\":1,\"server_review\":{\"items\":[{\"key\":\"descriptor\",\"label\":\"Operation class\",\"value\":\"managed-secret-reencryption\"},{\"key\":\"safety_class\",\"label\":\"Safety class\",\"value\":\"secret_backed\"}],\"review_id\":\"review-9a9d1838b14102ef23bc2528\",\"schema_version\":1,\"summary\":\"Review this exact privileged operation before confirming.\",\"title\":\"Owner approval required\"}},\"approval_request_digest\":\"a158dabb09e35c75932985b8682c34f7f598a2b1404ac80a9e4fa0d4a19313c4\",\"channel_binding_sha256\":\"f700fe53f99c7817cb6451964b9bc50c66fd1628ae842c5c496a0a7fc6be1c93\",\"confirmed_at\":\"2030-01-02T03:04:05+00:00\",\"decision\":\"approved\",\"schema_version\":1},\"domain\":\"launchplane-owner-control-confirmation-v1\",\"schema_version\":1}",
+        "payload": {
+          "challenge_response": {
+            "approval_request": {
+              "descriptor_id": "managed-secret-reencryption",
+              "descriptor_version": 1,
+              "evidence_digest": "9823b32b0823bd4004bacdbe08391b3e0120e8f24c36f91474115ef9fa01155d",
+              "expires_at": "2030-01-02T03:09:05+00:00",
+              "issued_at": "2030-01-02T03:00:05+00:00",
+              "nonce": "owner-control-1bb1a85cd3cf848e5c7a0ee17410addb",
+              "operation_id": "privileged-operation-9a9d1838b14102ef23bc2528687abda0",
+              "owner_github_id": 2594086616,
+              "plan_digest": "f87d15dd32b95865b4fe98cc67c5c418757a0559488488355bb0cf52a06cdf95",
+              "policy_record_id": "owner-policy-9a9d1838b14102ef23bc",
+              "policy_revision": 1,
+              "policy_sha256": "158ffbbe76bc73789a3e644e339411d8569ed880328b1e7728e7db3a25f1be8f",
+              "pre_state_digest": "96cb3e8e7bc9a596d31b699bd6ea1681651eda477f9b7a6c482f9378e6798d58",
+              "request_digest": "4a9624ebacf973b34eeb4762279d052e3c637d8090cb79ecbb217fa320a58d68",
+              "schema_version": 1,
+              "server_review": {
+                "items": [
+                  {
+                    "key": "descriptor",
+                    "label": "Operation class",
+                    "value": "managed-secret-reencryption"
+                  },
+                  {
+                    "key": "safety_class",
+                    "label": "Safety class",
+                    "value": "secret_backed"
+                  }
+                ],
+                "review_id": "review-9a9d1838b14102ef23bc2528",
+                "schema_version": 1,
+                "summary": "Review this exact privileged operation before confirming.",
+                "title": "Owner approval required"
+              }
+            },
+            "approval_request_digest": "a158dabb09e35c75932985b8682c34f7f598a2b1404ac80a9e4fa0d4a19313c4",
+            "channel_binding_sha256": "f700fe53f99c7817cb6451964b9bc50c66fd1628ae842c5c496a0a7fc6be1c93",
+            "confirmed_at": "2030-01-02T03:04:05+00:00",
+            "decision": "approved",
+            "schema_version": 1
+          },
+          "domain": "launchplane-owner-control-confirmation-v1",
+          "schema_version": 1
+        },
+        "sha256": "db44c6648567a3a88e48cff26cf6c1efe11c9d6345d2ee457477292a335fa7d6"
+      },
+      "verification": "valid"
+    }
+  ],
   "golden_vectors": [
     {
       "approval_request": {
@@ -242,6 +592,823 @@
       },
       "descriptor_id": "managed-secret-reencryption",
       "descriptor_version": 1
+    }
+  ],
+  "negative_confirmation_vectors": [
+    {
+      "error_location": [
+        "schema_version"
+      ],
+      "model": "owner_control_confirmation_envelope",
+      "payload": {
+        "challenge_response": {
+          "approval_request": {
+            "descriptor_id": "managed-authz-policy-set",
+            "descriptor_version": 1,
+            "evidence_digest": "df6da961581b149a28639add56e3b08401b3bed6afb07ad0c7b5ca3d51632be9",
+            "expires_at": "2030-01-02T03:09:05+00:00",
+            "issued_at": "2030-01-02T03:00:05+00:00",
+            "nonce": "owner-control-b565a7b3115d408e250eeffe65af9513",
+            "operation_id": "privileged-operation-1d762a6ac3895594ed85ba7aa9c39330",
+            "owner_github_id": 494383370,
+            "plan_digest": "edf23f94b33d1188e34e143e7aff91075ec941053b3b95d367a45de67b1fe1d7",
+            "policy_record_id": "owner-policy-1d762a6ac3895594ed85",
+            "policy_revision": 1,
+            "policy_sha256": "b379db2fe113e77eef0b3bb05aec804189d9f0b359e67d941d837c7de59e6f8e",
+            "pre_state_digest": "46df3876ade6b39b0edfbd3b8ea1a408173bbe5d8cc7154cea4d63e5d057239f",
+            "request_digest": "e0e31f55312d2562bf610587d7a21b5badeed50224284b08d1662924379b4539",
+            "schema_version": 1,
+            "server_review": {
+              "items": [
+                {
+                  "key": "descriptor",
+                  "label": "Operation class",
+                  "value": "managed-authz-policy-set"
+                },
+                {
+                  "key": "safety_class",
+                  "label": "Safety class",
+                  "value": "policy_admin"
+                }
+              ],
+              "review_id": "review-1d762a6ac3895594ed85ba7a",
+              "schema_version": 1,
+              "summary": "Review this exact privileged operation before confirming.",
+              "title": "Owner approval required"
+            }
+          },
+          "approval_request_digest": "a60572025b121241d44c3f28ce22715841e348765dd50cfa514861e89334d9eb",
+          "channel_binding_sha256": "1b8a26cd423937c1b5edcb5f7162c67978055213231bc4e85c3c46dc9a9738aa",
+          "confirmed_at": "2030-01-02T03:04:05+00:00",
+          "decision": "approved",
+          "schema_version": 1
+        },
+        "channel_binding": {
+          "channel_session_id": "channel-session-5138ce25ddfcf0b39d4d178ef80612d0",
+          "owner_github_id": 494383370,
+          "owner_public_key": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+          "schema_version": 1,
+          "session_expires_at": "2030-01-02T03:09:05+00:00",
+          "session_issued_at": "2030-01-02T03:00:05+00:00",
+          "signature_algorithm": "ed25519"
+        },
+        "schema_version": 2,
+        "signature": "tglT-SQl-k0_FmKKynVn6iop-CRZnBmAVLLgCSX6Ak1FN5NcQRSrFYiGLmTtoqOKvYb9FCc0GRGnGWVKaXaDAQ",
+        "signature_algorithm": "ed25519"
+      },
+      "rule": "schema-version-is-one"
+    },
+    {
+      "error_location": [
+        "signature_algorithm"
+      ],
+      "model": "owner_control_confirmation_envelope",
+      "payload": {
+        "challenge_response": {
+          "approval_request": {
+            "descriptor_id": "managed-authz-policy-set",
+            "descriptor_version": 1,
+            "evidence_digest": "df6da961581b149a28639add56e3b08401b3bed6afb07ad0c7b5ca3d51632be9",
+            "expires_at": "2030-01-02T03:09:05+00:00",
+            "issued_at": "2030-01-02T03:00:05+00:00",
+            "nonce": "owner-control-b565a7b3115d408e250eeffe65af9513",
+            "operation_id": "privileged-operation-1d762a6ac3895594ed85ba7aa9c39330",
+            "owner_github_id": 494383370,
+            "plan_digest": "edf23f94b33d1188e34e143e7aff91075ec941053b3b95d367a45de67b1fe1d7",
+            "policy_record_id": "owner-policy-1d762a6ac3895594ed85",
+            "policy_revision": 1,
+            "policy_sha256": "b379db2fe113e77eef0b3bb05aec804189d9f0b359e67d941d837c7de59e6f8e",
+            "pre_state_digest": "46df3876ade6b39b0edfbd3b8ea1a408173bbe5d8cc7154cea4d63e5d057239f",
+            "request_digest": "e0e31f55312d2562bf610587d7a21b5badeed50224284b08d1662924379b4539",
+            "schema_version": 1,
+            "server_review": {
+              "items": [
+                {
+                  "key": "descriptor",
+                  "label": "Operation class",
+                  "value": "managed-authz-policy-set"
+                },
+                {
+                  "key": "safety_class",
+                  "label": "Safety class",
+                  "value": "policy_admin"
+                }
+              ],
+              "review_id": "review-1d762a6ac3895594ed85ba7a",
+              "schema_version": 1,
+              "summary": "Review this exact privileged operation before confirming.",
+              "title": "Owner approval required"
+            }
+          },
+          "approval_request_digest": "a60572025b121241d44c3f28ce22715841e348765dd50cfa514861e89334d9eb",
+          "channel_binding_sha256": "1b8a26cd423937c1b5edcb5f7162c67978055213231bc4e85c3c46dc9a9738aa",
+          "confirmed_at": "2030-01-02T03:04:05+00:00",
+          "decision": "approved",
+          "schema_version": 1
+        },
+        "channel_binding": {
+          "channel_session_id": "channel-session-5138ce25ddfcf0b39d4d178ef80612d0",
+          "owner_github_id": 494383370,
+          "owner_public_key": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+          "schema_version": 1,
+          "session_expires_at": "2030-01-02T03:09:05+00:00",
+          "session_issued_at": "2030-01-02T03:00:05+00:00",
+          "signature_algorithm": "ed25519"
+        },
+        "schema_version": 1,
+        "signature": "tglT-SQl-k0_FmKKynVn6iop-CRZnBmAVLLgCSX6Ak1FN5NcQRSrFYiGLmTtoqOKvYb9FCc0GRGnGWVKaXaDAQ",
+        "signature_algorithm": "rsa"
+      },
+      "rule": "signature-algorithm-is-ed25519"
+    },
+    {
+      "error_location": [
+        "channel_binding",
+        "owner_public_key"
+      ],
+      "model": "owner_control_confirmation_envelope",
+      "payload": {
+        "challenge_response": {
+          "approval_request": {
+            "descriptor_id": "managed-authz-policy-set",
+            "descriptor_version": 1,
+            "evidence_digest": "df6da961581b149a28639add56e3b08401b3bed6afb07ad0c7b5ca3d51632be9",
+            "expires_at": "2030-01-02T03:09:05+00:00",
+            "issued_at": "2030-01-02T03:00:05+00:00",
+            "nonce": "owner-control-b565a7b3115d408e250eeffe65af9513",
+            "operation_id": "privileged-operation-1d762a6ac3895594ed85ba7aa9c39330",
+            "owner_github_id": 494383370,
+            "plan_digest": "edf23f94b33d1188e34e143e7aff91075ec941053b3b95d367a45de67b1fe1d7",
+            "policy_record_id": "owner-policy-1d762a6ac3895594ed85",
+            "policy_revision": 1,
+            "policy_sha256": "b379db2fe113e77eef0b3bb05aec804189d9f0b359e67d941d837c7de59e6f8e",
+            "pre_state_digest": "46df3876ade6b39b0edfbd3b8ea1a408173bbe5d8cc7154cea4d63e5d057239f",
+            "request_digest": "e0e31f55312d2562bf610587d7a21b5badeed50224284b08d1662924379b4539",
+            "schema_version": 1,
+            "server_review": {
+              "items": [
+                {
+                  "key": "descriptor",
+                  "label": "Operation class",
+                  "value": "managed-authz-policy-set"
+                },
+                {
+                  "key": "safety_class",
+                  "label": "Safety class",
+                  "value": "policy_admin"
+                }
+              ],
+              "review_id": "review-1d762a6ac3895594ed85ba7a",
+              "schema_version": 1,
+              "summary": "Review this exact privileged operation before confirming.",
+              "title": "Owner approval required"
+            }
+          },
+          "approval_request_digest": "a60572025b121241d44c3f28ce22715841e348765dd50cfa514861e89334d9eb",
+          "channel_binding_sha256": "1b8a26cd423937c1b5edcb5f7162c67978055213231bc4e85c3c46dc9a9738aa",
+          "confirmed_at": "2030-01-02T03:04:05+00:00",
+          "decision": "approved",
+          "schema_version": 1
+        },
+        "channel_binding": {
+          "channel_session_id": "channel-session-5138ce25ddfcf0b39d4d178ef80612d0",
+          "owner_github_id": 494383370,
+          "owner_public_key": "bad!",
+          "schema_version": 1,
+          "session_expires_at": "2030-01-02T03:09:05+00:00",
+          "session_issued_at": "2030-01-02T03:00:05+00:00",
+          "signature_algorithm": "ed25519"
+        },
+        "schema_version": 1,
+        "signature": "tglT-SQl-k0_FmKKynVn6iop-CRZnBmAVLLgCSX6Ak1FN5NcQRSrFYiGLmTtoqOKvYb9FCc0GRGnGWVKaXaDAQ",
+        "signature_algorithm": "ed25519"
+      },
+      "rule": "public-key-is-raw-32-byte-unpadded-base64url"
+    },
+    {
+      "error_location": [
+        "signature"
+      ],
+      "model": "owner_control_confirmation_envelope",
+      "payload": {
+        "challenge_response": {
+          "approval_request": {
+            "descriptor_id": "managed-authz-policy-set",
+            "descriptor_version": 1,
+            "evidence_digest": "df6da961581b149a28639add56e3b08401b3bed6afb07ad0c7b5ca3d51632be9",
+            "expires_at": "2030-01-02T03:09:05+00:00",
+            "issued_at": "2030-01-02T03:00:05+00:00",
+            "nonce": "owner-control-b565a7b3115d408e250eeffe65af9513",
+            "operation_id": "privileged-operation-1d762a6ac3895594ed85ba7aa9c39330",
+            "owner_github_id": 494383370,
+            "plan_digest": "edf23f94b33d1188e34e143e7aff91075ec941053b3b95d367a45de67b1fe1d7",
+            "policy_record_id": "owner-policy-1d762a6ac3895594ed85",
+            "policy_revision": 1,
+            "policy_sha256": "b379db2fe113e77eef0b3bb05aec804189d9f0b359e67d941d837c7de59e6f8e",
+            "pre_state_digest": "46df3876ade6b39b0edfbd3b8ea1a408173bbe5d8cc7154cea4d63e5d057239f",
+            "request_digest": "e0e31f55312d2562bf610587d7a21b5badeed50224284b08d1662924379b4539",
+            "schema_version": 1,
+            "server_review": {
+              "items": [
+                {
+                  "key": "descriptor",
+                  "label": "Operation class",
+                  "value": "managed-authz-policy-set"
+                },
+                {
+                  "key": "safety_class",
+                  "label": "Safety class",
+                  "value": "policy_admin"
+                }
+              ],
+              "review_id": "review-1d762a6ac3895594ed85ba7a",
+              "schema_version": 1,
+              "summary": "Review this exact privileged operation before confirming.",
+              "title": "Owner approval required"
+            }
+          },
+          "approval_request_digest": "a60572025b121241d44c3f28ce22715841e348765dd50cfa514861e89334d9eb",
+          "channel_binding_sha256": "1b8a26cd423937c1b5edcb5f7162c67978055213231bc4e85c3c46dc9a9738aa",
+          "confirmed_at": "2030-01-02T03:04:05+00:00",
+          "decision": "approved",
+          "schema_version": 1
+        },
+        "channel_binding": {
+          "channel_session_id": "channel-session-5138ce25ddfcf0b39d4d178ef80612d0",
+          "owner_github_id": 494383370,
+          "owner_public_key": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+          "schema_version": 1,
+          "session_expires_at": "2030-01-02T03:09:05+00:00",
+          "session_issued_at": "2030-01-02T03:00:05+00:00",
+          "signature_algorithm": "ed25519"
+        },
+        "schema_version": 1,
+        "signature": "bad!",
+        "signature_algorithm": "ed25519"
+      },
+      "rule": "signature-is-raw-64-byte-unpadded-base64url"
+    },
+    {
+      "error_location": [
+        "channel_binding"
+      ],
+      "error_message_contains": "owner_public_key must use canonical unpadded base64url",
+      "model": "owner_control_confirmation_envelope",
+      "payload": {
+        "challenge_response": {
+          "approval_request": {
+            "descriptor_id": "managed-authz-policy-set",
+            "descriptor_version": 1,
+            "evidence_digest": "df6da961581b149a28639add56e3b08401b3bed6afb07ad0c7b5ca3d51632be9",
+            "expires_at": "2030-01-02T03:09:05+00:00",
+            "issued_at": "2030-01-02T03:00:05+00:00",
+            "nonce": "owner-control-b565a7b3115d408e250eeffe65af9513",
+            "operation_id": "privileged-operation-1d762a6ac3895594ed85ba7aa9c39330",
+            "owner_github_id": 494383370,
+            "plan_digest": "edf23f94b33d1188e34e143e7aff91075ec941053b3b95d367a45de67b1fe1d7",
+            "policy_record_id": "owner-policy-1d762a6ac3895594ed85",
+            "policy_revision": 1,
+            "policy_sha256": "b379db2fe113e77eef0b3bb05aec804189d9f0b359e67d941d837c7de59e6f8e",
+            "pre_state_digest": "46df3876ade6b39b0edfbd3b8ea1a408173bbe5d8cc7154cea4d63e5d057239f",
+            "request_digest": "e0e31f55312d2562bf610587d7a21b5badeed50224284b08d1662924379b4539",
+            "schema_version": 1,
+            "server_review": {
+              "items": [
+                {
+                  "key": "descriptor",
+                  "label": "Operation class",
+                  "value": "managed-authz-policy-set"
+                },
+                {
+                  "key": "safety_class",
+                  "label": "Safety class",
+                  "value": "policy_admin"
+                }
+              ],
+              "review_id": "review-1d762a6ac3895594ed85ba7a",
+              "schema_version": 1,
+              "summary": "Review this exact privileged operation before confirming.",
+              "title": "Owner approval required"
+            }
+          },
+          "approval_request_digest": "a60572025b121241d44c3f28ce22715841e348765dd50cfa514861e89334d9eb",
+          "channel_binding_sha256": "1b8a26cd423937c1b5edcb5f7162c67978055213231bc4e85c3c46dc9a9738aa",
+          "confirmed_at": "2030-01-02T03:04:05+00:00",
+          "decision": "approved",
+          "schema_version": 1
+        },
+        "channel_binding": {
+          "channel_session_id": "channel-session-5138ce25ddfcf0b39d4d178ef80612d0",
+          "owner_github_id": 494383370,
+          "owner_public_key": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbh",
+          "schema_version": 1,
+          "session_expires_at": "2030-01-02T03:09:05+00:00",
+          "session_issued_at": "2030-01-02T03:00:05+00:00",
+          "signature_algorithm": "ed25519"
+        },
+        "schema_version": 1,
+        "signature": "tglT-SQl-k0_FmKKynVn6iop-CRZnBmAVLLgCSX6Ak1FN5NcQRSrFYiGLmTtoqOKvYb9FCc0GRGnGWVKaXaDAQ",
+        "signature_algorithm": "ed25519"
+      },
+      "rule": "public-key-base64url-has-canonical-trailing-bits"
+    },
+    {
+      "error_location": [],
+      "error_message_contains": "signature must use canonical unpadded base64url",
+      "model": "owner_control_confirmation_envelope",
+      "payload": {
+        "challenge_response": {
+          "approval_request": {
+            "descriptor_id": "managed-authz-policy-set",
+            "descriptor_version": 1,
+            "evidence_digest": "df6da961581b149a28639add56e3b08401b3bed6afb07ad0c7b5ca3d51632be9",
+            "expires_at": "2030-01-02T03:09:05+00:00",
+            "issued_at": "2030-01-02T03:00:05+00:00",
+            "nonce": "owner-control-b565a7b3115d408e250eeffe65af9513",
+            "operation_id": "privileged-operation-1d762a6ac3895594ed85ba7aa9c39330",
+            "owner_github_id": 494383370,
+            "plan_digest": "edf23f94b33d1188e34e143e7aff91075ec941053b3b95d367a45de67b1fe1d7",
+            "policy_record_id": "owner-policy-1d762a6ac3895594ed85",
+            "policy_revision": 1,
+            "policy_sha256": "b379db2fe113e77eef0b3bb05aec804189d9f0b359e67d941d837c7de59e6f8e",
+            "pre_state_digest": "46df3876ade6b39b0edfbd3b8ea1a408173bbe5d8cc7154cea4d63e5d057239f",
+            "request_digest": "e0e31f55312d2562bf610587d7a21b5badeed50224284b08d1662924379b4539",
+            "schema_version": 1,
+            "server_review": {
+              "items": [
+                {
+                  "key": "descriptor",
+                  "label": "Operation class",
+                  "value": "managed-authz-policy-set"
+                },
+                {
+                  "key": "safety_class",
+                  "label": "Safety class",
+                  "value": "policy_admin"
+                }
+              ],
+              "review_id": "review-1d762a6ac3895594ed85ba7a",
+              "schema_version": 1,
+              "summary": "Review this exact privileged operation before confirming.",
+              "title": "Owner approval required"
+            }
+          },
+          "approval_request_digest": "a60572025b121241d44c3f28ce22715841e348765dd50cfa514861e89334d9eb",
+          "channel_binding_sha256": "1b8a26cd423937c1b5edcb5f7162c67978055213231bc4e85c3c46dc9a9738aa",
+          "confirmed_at": "2030-01-02T03:04:05+00:00",
+          "decision": "approved",
+          "schema_version": 1
+        },
+        "channel_binding": {
+          "channel_session_id": "channel-session-5138ce25ddfcf0b39d4d178ef80612d0",
+          "owner_github_id": 494383370,
+          "owner_public_key": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+          "schema_version": 1,
+          "session_expires_at": "2030-01-02T03:09:05+00:00",
+          "session_issued_at": "2030-01-02T03:00:05+00:00",
+          "signature_algorithm": "ed25519"
+        },
+        "schema_version": 1,
+        "signature": "tglT-SQl-k0_FmKKynVn6iop-CRZnBmAVLLgCSX6Ak1FN5NcQRSrFYiGLmTtoqOKvYb9FCc0GRGnGWVKaXaDAR",
+        "signature_algorithm": "ed25519"
+      },
+      "rule": "signature-base64url-has-canonical-trailing-bits"
+    },
+    {
+      "error_location": [],
+      "error_message_contains": "channel binding owner identity does not match",
+      "model": "owner_control_confirmation_envelope",
+      "payload": {
+        "challenge_response": {
+          "approval_request": {
+            "descriptor_id": "managed-authz-policy-set",
+            "descriptor_version": 1,
+            "evidence_digest": "df6da961581b149a28639add56e3b08401b3bed6afb07ad0c7b5ca3d51632be9",
+            "expires_at": "2030-01-02T03:09:05+00:00",
+            "issued_at": "2030-01-02T03:00:05+00:00",
+            "nonce": "owner-control-b565a7b3115d408e250eeffe65af9513",
+            "operation_id": "privileged-operation-1d762a6ac3895594ed85ba7aa9c39330",
+            "owner_github_id": 494383370,
+            "plan_digest": "edf23f94b33d1188e34e143e7aff91075ec941053b3b95d367a45de67b1fe1d7",
+            "policy_record_id": "owner-policy-1d762a6ac3895594ed85",
+            "policy_revision": 1,
+            "policy_sha256": "b379db2fe113e77eef0b3bb05aec804189d9f0b359e67d941d837c7de59e6f8e",
+            "pre_state_digest": "46df3876ade6b39b0edfbd3b8ea1a408173bbe5d8cc7154cea4d63e5d057239f",
+            "request_digest": "e0e31f55312d2562bf610587d7a21b5badeed50224284b08d1662924379b4539",
+            "schema_version": 1,
+            "server_review": {
+              "items": [
+                {
+                  "key": "descriptor",
+                  "label": "Operation class",
+                  "value": "managed-authz-policy-set"
+                },
+                {
+                  "key": "safety_class",
+                  "label": "Safety class",
+                  "value": "policy_admin"
+                }
+              ],
+              "review_id": "review-1d762a6ac3895594ed85ba7a",
+              "schema_version": 1,
+              "summary": "Review this exact privileged operation before confirming.",
+              "title": "Owner approval required"
+            }
+          },
+          "approval_request_digest": "a60572025b121241d44c3f28ce22715841e348765dd50cfa514861e89334d9eb",
+          "channel_binding_sha256": "2ee116ed52d29d898b7e557f5091a2ca3a60b95aa27f1cc476d5f0a89be4235b",
+          "confirmed_at": "2030-01-02T03:04:05+00:00",
+          "decision": "approved",
+          "schema_version": 1
+        },
+        "channel_binding": {
+          "channel_session_id": "channel-session-5138ce25ddfcf0b39d4d178ef80612d0",
+          "owner_github_id": 494383371,
+          "owner_public_key": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+          "schema_version": 1,
+          "session_expires_at": "2030-01-02T03:09:05+00:00",
+          "session_issued_at": "2030-01-02T03:00:05+00:00",
+          "signature_algorithm": "ed25519"
+        },
+        "schema_version": 1,
+        "signature": "tglT-SQl-k0_FmKKynVn6iop-CRZnBmAVLLgCSX6Ak1FN5NcQRSrFYiGLmTtoqOKvYb9FCc0GRGnGWVKaXaDAQ",
+        "signature_algorithm": "ed25519"
+      },
+      "rule": "owner-identity-matches"
+    },
+    {
+      "error_location": [],
+      "error_message_contains": "channel binding digest does not match",
+      "model": "owner_control_confirmation_envelope",
+      "payload": {
+        "challenge_response": {
+          "approval_request": {
+            "descriptor_id": "managed-authz-policy-set",
+            "descriptor_version": 1,
+            "evidence_digest": "df6da961581b149a28639add56e3b08401b3bed6afb07ad0c7b5ca3d51632be9",
+            "expires_at": "2030-01-02T03:09:05+00:00",
+            "issued_at": "2030-01-02T03:00:05+00:00",
+            "nonce": "owner-control-b565a7b3115d408e250eeffe65af9513",
+            "operation_id": "privileged-operation-1d762a6ac3895594ed85ba7aa9c39330",
+            "owner_github_id": 494383370,
+            "plan_digest": "edf23f94b33d1188e34e143e7aff91075ec941053b3b95d367a45de67b1fe1d7",
+            "policy_record_id": "owner-policy-1d762a6ac3895594ed85",
+            "policy_revision": 1,
+            "policy_sha256": "b379db2fe113e77eef0b3bb05aec804189d9f0b359e67d941d837c7de59e6f8e",
+            "pre_state_digest": "46df3876ade6b39b0edfbd3b8ea1a408173bbe5d8cc7154cea4d63e5d057239f",
+            "request_digest": "e0e31f55312d2562bf610587d7a21b5badeed50224284b08d1662924379b4539",
+            "schema_version": 1,
+            "server_review": {
+              "items": [
+                {
+                  "key": "descriptor",
+                  "label": "Operation class",
+                  "value": "managed-authz-policy-set"
+                },
+                {
+                  "key": "safety_class",
+                  "label": "Safety class",
+                  "value": "policy_admin"
+                }
+              ],
+              "review_id": "review-1d762a6ac3895594ed85ba7a",
+              "schema_version": 1,
+              "summary": "Review this exact privileged operation before confirming.",
+              "title": "Owner approval required"
+            }
+          },
+          "approval_request_digest": "a60572025b121241d44c3f28ce22715841e348765dd50cfa514861e89334d9eb",
+          "channel_binding_sha256": "1b8a26cd423937c1b5edcb5f7162c67978055213231bc4e85c3c46dc9a9738aa",
+          "confirmed_at": "2030-01-02T03:04:05+00:00",
+          "decision": "approved",
+          "schema_version": 1
+        },
+        "channel_binding": {
+          "channel_session_id": "channel-session-substituted",
+          "owner_github_id": 494383370,
+          "owner_public_key": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+          "schema_version": 1,
+          "session_expires_at": "2030-01-02T03:09:05+00:00",
+          "session_issued_at": "2030-01-02T03:00:05+00:00",
+          "signature_algorithm": "ed25519"
+        },
+        "schema_version": 1,
+        "signature": "tglT-SQl-k0_FmKKynVn6iop-CRZnBmAVLLgCSX6Ak1FN5NcQRSrFYiGLmTtoqOKvYb9FCc0GRGnGWVKaXaDAQ",
+        "signature_algorithm": "ed25519"
+      },
+      "rule": "binding-digest-matches"
+    },
+    {
+      "error_location": [
+        "channel_binding"
+      ],
+      "error_message_contains": "session_expires_at must be later than session_issued_at",
+      "model": "owner_control_confirmation_envelope",
+      "payload": {
+        "challenge_response": {
+          "approval_request": {
+            "descriptor_id": "managed-authz-policy-set",
+            "descriptor_version": 1,
+            "evidence_digest": "df6da961581b149a28639add56e3b08401b3bed6afb07ad0c7b5ca3d51632be9",
+            "expires_at": "2030-01-02T03:09:05+00:00",
+            "issued_at": "2030-01-02T03:00:05+00:00",
+            "nonce": "owner-control-b565a7b3115d408e250eeffe65af9513",
+            "operation_id": "privileged-operation-1d762a6ac3895594ed85ba7aa9c39330",
+            "owner_github_id": 494383370,
+            "plan_digest": "edf23f94b33d1188e34e143e7aff91075ec941053b3b95d367a45de67b1fe1d7",
+            "policy_record_id": "owner-policy-1d762a6ac3895594ed85",
+            "policy_revision": 1,
+            "policy_sha256": "b379db2fe113e77eef0b3bb05aec804189d9f0b359e67d941d837c7de59e6f8e",
+            "pre_state_digest": "46df3876ade6b39b0edfbd3b8ea1a408173bbe5d8cc7154cea4d63e5d057239f",
+            "request_digest": "e0e31f55312d2562bf610587d7a21b5badeed50224284b08d1662924379b4539",
+            "schema_version": 1,
+            "server_review": {
+              "items": [
+                {
+                  "key": "descriptor",
+                  "label": "Operation class",
+                  "value": "managed-authz-policy-set"
+                },
+                {
+                  "key": "safety_class",
+                  "label": "Safety class",
+                  "value": "policy_admin"
+                }
+              ],
+              "review_id": "review-1d762a6ac3895594ed85ba7a",
+              "schema_version": 1,
+              "summary": "Review this exact privileged operation before confirming.",
+              "title": "Owner approval required"
+            }
+          },
+          "approval_request_digest": "a60572025b121241d44c3f28ce22715841e348765dd50cfa514861e89334d9eb",
+          "channel_binding_sha256": "1b8a26cd423937c1b5edcb5f7162c67978055213231bc4e85c3c46dc9a9738aa",
+          "confirmed_at": "2030-01-02T03:04:05+00:00",
+          "decision": "approved",
+          "schema_version": 1
+        },
+        "channel_binding": {
+          "channel_session_id": "channel-session-5138ce25ddfcf0b39d4d178ef80612d0",
+          "owner_github_id": 494383370,
+          "owner_public_key": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+          "schema_version": 1,
+          "session_expires_at": "2030-01-02T03:00:05+00:00",
+          "session_issued_at": "2030-01-02T03:00:05+00:00",
+          "signature_algorithm": "ed25519"
+        },
+        "schema_version": 1,
+        "signature": "tglT-SQl-k0_FmKKynVn6iop-CRZnBmAVLLgCSX6Ak1FN5NcQRSrFYiGLmTtoqOKvYb9FCc0GRGnGWVKaXaDAQ",
+        "signature_algorithm": "ed25519"
+      },
+      "rule": "session-expires-after-issuance"
+    },
+    {
+      "error_location": [],
+      "error_message_contains": "approval request bounds must be inside",
+      "model": "owner_control_confirmation_envelope",
+      "payload": {
+        "challenge_response": {
+          "approval_request": {
+            "descriptor_id": "managed-authz-policy-set",
+            "descriptor_version": 1,
+            "evidence_digest": "df6da961581b149a28639add56e3b08401b3bed6afb07ad0c7b5ca3d51632be9",
+            "expires_at": "2030-01-02T03:09:05+00:00",
+            "issued_at": "2030-01-02T03:00:05+00:00",
+            "nonce": "owner-control-b565a7b3115d408e250eeffe65af9513",
+            "operation_id": "privileged-operation-1d762a6ac3895594ed85ba7aa9c39330",
+            "owner_github_id": 494383370,
+            "plan_digest": "edf23f94b33d1188e34e143e7aff91075ec941053b3b95d367a45de67b1fe1d7",
+            "policy_record_id": "owner-policy-1d762a6ac3895594ed85",
+            "policy_revision": 1,
+            "policy_sha256": "b379db2fe113e77eef0b3bb05aec804189d9f0b359e67d941d837c7de59e6f8e",
+            "pre_state_digest": "46df3876ade6b39b0edfbd3b8ea1a408173bbe5d8cc7154cea4d63e5d057239f",
+            "request_digest": "e0e31f55312d2562bf610587d7a21b5badeed50224284b08d1662924379b4539",
+            "schema_version": 1,
+            "server_review": {
+              "items": [
+                {
+                  "key": "descriptor",
+                  "label": "Operation class",
+                  "value": "managed-authz-policy-set"
+                },
+                {
+                  "key": "safety_class",
+                  "label": "Safety class",
+                  "value": "policy_admin"
+                }
+              ],
+              "review_id": "review-1d762a6ac3895594ed85ba7a",
+              "schema_version": 1,
+              "summary": "Review this exact privileged operation before confirming.",
+              "title": "Owner approval required"
+            }
+          },
+          "approval_request_digest": "a60572025b121241d44c3f28ce22715841e348765dd50cfa514861e89334d9eb",
+          "channel_binding_sha256": "e927ba5607063982c2a4919447c1d52b6ef860a05875823ee6fe53cef2684d34",
+          "confirmed_at": "2030-01-02T03:04:05+00:00",
+          "decision": "approved",
+          "schema_version": 1
+        },
+        "channel_binding": {
+          "channel_session_id": "channel-session-5138ce25ddfcf0b39d4d178ef80612d0",
+          "owner_github_id": 494383370,
+          "owner_public_key": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+          "schema_version": 1,
+          "session_expires_at": "2030-01-02T03:09:05+00:00",
+          "session_issued_at": "2030-01-02T03:01:05+00:00",
+          "signature_algorithm": "ed25519"
+        },
+        "schema_version": 1,
+        "signature": "tglT-SQl-k0_FmKKynVn6iop-CRZnBmAVLLgCSX6Ak1FN5NcQRSrFYiGLmTtoqOKvYb9FCc0GRGnGWVKaXaDAQ",
+        "signature_algorithm": "ed25519"
+      },
+      "rule": "request-and-confirmation-stay-inside-session"
+    },
+    {
+      "error_location": [],
+      "model": "owner_control_confirmation_envelope",
+      "payload": {
+        "challenge_response": {
+          "approval_request": {
+            "descriptor_id": "managed-authz-policy-set",
+            "descriptor_version": 1,
+            "evidence_digest": "df6da961581b149a28639add56e3b08401b3bed6afb07ad0c7b5ca3d51632be9",
+            "expires_at": "2030-01-02T03:09:05+00:00",
+            "issued_at": "2030-01-02T03:00:05+00:00",
+            "nonce": "owner-control-b565a7b3115d408e250eeffe65af9513",
+            "operation_id": "privileged-operation-1d762a6ac3895594ed85ba7aa9c39330",
+            "owner_github_id": 494383370,
+            "plan_digest": "edf23f94b33d1188e34e143e7aff91075ec941053b3b95d367a45de67b1fe1d7",
+            "policy_record_id": "owner-policy-1d762a6ac3895594ed85",
+            "policy_revision": 1,
+            "policy_sha256": "b379db2fe113e77eef0b3bb05aec804189d9f0b359e67d941d837c7de59e6f8e",
+            "pre_state_digest": "46df3876ade6b39b0edfbd3b8ea1a408173bbe5d8cc7154cea4d63e5d057239f",
+            "request_digest": "e0e31f55312d2562bf610587d7a21b5badeed50224284b08d1662924379b4539",
+            "schema_version": 1,
+            "server_review": {
+              "items": [
+                {
+                  "key": "descriptor",
+                  "label": "Operation class",
+                  "value": "managed-authz-policy-set"
+                },
+                {
+                  "key": "safety_class",
+                  "label": "Safety class",
+                  "value": "policy_admin"
+                }
+              ],
+              "review_id": "review-1d762a6ac3895594ed85ba7a",
+              "schema_version": 1,
+              "summary": "Review this exact privileged operation before confirming.",
+              "title": "Owner approval required"
+            }
+          },
+          "approval_request_digest": "a60572025b121241d44c3f28ce22715841e348765dd50cfa514861e89334d9eb",
+          "channel_binding_sha256": "1b8a26cd423937c1b5edcb5f7162c67978055213231bc4e85c3c46dc9a9738aa",
+          "confirmed_at": "2030-01-02T03:05:05+00:00",
+          "decision": "approved",
+          "schema_version": 1
+        },
+        "channel_binding": {
+          "channel_session_id": "channel-session-5138ce25ddfcf0b39d4d178ef80612d0",
+          "owner_github_id": 494383370,
+          "owner_public_key": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+          "schema_version": 1,
+          "session_expires_at": "2030-01-02T03:09:05+00:00",
+          "session_issued_at": "2030-01-02T03:00:05+00:00",
+          "signature_algorithm": "ed25519"
+        },
+        "schema_version": 1,
+        "signature": "tglT-SQl-k0_FmKKynVn6iop-CRZnBmAVLLgCSX6Ak1FN5NcQRSrFYiGLmTtoqOKvYb9FCc0GRGnGWVKaXaDAQ",
+        "signature_algorithm": "ed25519"
+      },
+      "rule": "tampered-signed-payload-is-rejected",
+      "verification": "invalid"
+    },
+    {
+      "error_location": [],
+      "model": "owner_control_confirmation_envelope",
+      "payload": {
+        "challenge_response": {
+          "approval_request": {
+            "descriptor_id": "managed-authz-policy-set",
+            "descriptor_version": 1,
+            "evidence_digest": "df6da961581b149a28639add56e3b08401b3bed6afb07ad0c7b5ca3d51632be9",
+            "expires_at": "2030-01-02T03:09:05+00:00",
+            "issued_at": "2030-01-02T03:00:05+00:00",
+            "nonce": "owner-control-b565a7b3115d408e250eeffe65af9513",
+            "operation_id": "privileged-operation-1d762a6ac3895594ed85ba7aa9c39330",
+            "owner_github_id": 494383370,
+            "plan_digest": "edf23f94b33d1188e34e143e7aff91075ec941053b3b95d367a45de67b1fe1d7",
+            "policy_record_id": "owner-policy-1d762a6ac3895594ed85",
+            "policy_revision": 1,
+            "policy_sha256": "b379db2fe113e77eef0b3bb05aec804189d9f0b359e67d941d837c7de59e6f8e",
+            "pre_state_digest": "46df3876ade6b39b0edfbd3b8ea1a408173bbe5d8cc7154cea4d63e5d057239f",
+            "request_digest": "e0e31f55312d2562bf610587d7a21b5badeed50224284b08d1662924379b4539",
+            "schema_version": 1,
+            "server_review": {
+              "items": [
+                {
+                  "key": "descriptor",
+                  "label": "Operation class",
+                  "value": "managed-authz-policy-set"
+                },
+                {
+                  "key": "safety_class",
+                  "label": "Safety class",
+                  "value": "policy_admin"
+                }
+              ],
+              "review_id": "review-1d762a6ac3895594ed85ba7a",
+              "schema_version": 1,
+              "summary": "Review this exact privileged operation before confirming.",
+              "title": "Owner approval required"
+            }
+          },
+          "approval_request_digest": "a60572025b121241d44c3f28ce22715841e348765dd50cfa514861e89334d9eb",
+          "channel_binding_sha256": "1b8a26cd423937c1b5edcb5f7162c67978055213231bc4e85c3c46dc9a9738aa",
+          "confirmed_at": "2030-01-02T03:04:05+00:00",
+          "decision": "approved",
+          "schema_version": 1
+        },
+        "channel_binding": {
+          "channel_session_id": "channel-session-5138ce25ddfcf0b39d4d178ef80612d0",
+          "owner_github_id": 494383370,
+          "owner_public_key": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+          "schema_version": 1,
+          "session_expires_at": "2030-01-02T03:09:05+00:00",
+          "session_issued_at": "2030-01-02T03:00:05+00:00",
+          "signature_algorithm": "ed25519"
+        },
+        "schema_version": 1,
+        "signature": "02J6oR7ilFnTUXL4_Qex6UOK199sdgOJ7nfIvBDMwLgD5-RheWhxWqpfBG_ctz8wrZ16j2WsSPCXznrKAuLVAg",
+        "signature_algorithm": "ed25519"
+      },
+      "rule": "signature-from-wrong-private-key-is-rejected",
+      "verification": "invalid"
+    },
+    {
+      "error_location": [],
+      "model": "owner_control_confirmation_envelope",
+      "payload": {
+        "challenge_response": {
+          "approval_request": {
+            "descriptor_id": "managed-authz-policy-set",
+            "descriptor_version": 1,
+            "evidence_digest": "df6da961581b149a28639add56e3b08401b3bed6afb07ad0c7b5ca3d51632be9",
+            "expires_at": "2030-01-02T03:09:05+00:00",
+            "issued_at": "2030-01-02T03:00:05+00:00",
+            "nonce": "owner-control-b565a7b3115d408e250eeffe65af9513",
+            "operation_id": "privileged-operation-1d762a6ac3895594ed85ba7aa9c39330",
+            "owner_github_id": 494383370,
+            "plan_digest": "edf23f94b33d1188e34e143e7aff91075ec941053b3b95d367a45de67b1fe1d7",
+            "policy_record_id": "owner-policy-1d762a6ac3895594ed85",
+            "policy_revision": 1,
+            "policy_sha256": "b379db2fe113e77eef0b3bb05aec804189d9f0b359e67d941d837c7de59e6f8e",
+            "pre_state_digest": "46df3876ade6b39b0edfbd3b8ea1a408173bbe5d8cc7154cea4d63e5d057239f",
+            "request_digest": "e0e31f55312d2562bf610587d7a21b5badeed50224284b08d1662924379b4539",
+            "schema_version": 1,
+            "server_review": {
+              "items": [
+                {
+                  "key": "descriptor",
+                  "label": "Operation class",
+                  "value": "managed-authz-policy-set"
+                },
+                {
+                  "key": "safety_class",
+                  "label": "Safety class",
+                  "value": "policy_admin"
+                }
+              ],
+              "review_id": "review-1d762a6ac3895594ed85ba7a",
+              "schema_version": 1,
+              "summary": "Review this exact privileged operation before confirming.",
+              "title": "Owner approval required"
+            }
+          },
+          "approval_request_digest": "a60572025b121241d44c3f28ce22715841e348765dd50cfa514861e89334d9eb",
+          "channel_binding_sha256": "ad99324cd7ba27f2730bad0fdcaf32d4184e189823a83ea67ae8a5ab3216df38",
+          "confirmed_at": "2030-01-02T03:04:05+00:00",
+          "decision": "approved",
+          "schema_version": 1
+        },
+        "channel_binding": {
+          "channel_session_id": "channel-session-substituted",
+          "owner_github_id": 494383370,
+          "owner_public_key": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+          "schema_version": 1,
+          "session_expires_at": "2030-01-02T03:09:05+00:00",
+          "session_issued_at": "2030-01-02T03:00:05+00:00",
+          "signature_algorithm": "ed25519"
+        },
+        "schema_version": 1,
+        "signature": "tglT-SQl-k0_FmKKynVn6iop-CRZnBmAVLLgCSX6Ak1FN5NcQRSrFYiGLmTtoqOKvYb9FCc0GRGnGWVKaXaDAQ",
+        "signature_algorithm": "ed25519"
+      },
+      "rule": "cross-session-substitution-is-rejected",
+      "verification": "invalid"
     }
   ],
   "negative_vectors": [
@@ -749,7 +1916,7 @@
       "rule": "review-item-text-has-no-surrounding-whitespace"
     }
   ],
-  "schema_version": 1,
+  "schema_version": 2,
   "schemas": {
     "approval_request": {
       "$defs": {
@@ -1169,6 +2336,642 @@
       "title": "ChallengeResponse",
       "type": "object"
     },
+    "channel_binding_record": {
+      "additionalProperties": false,
+      "description": "Immutable versioned binding between an owner key and one channel session.",
+      "properties": {
+        "channel_session_id": {
+          "pattern": "^[a-z][a-z0-9_-]{0,127}$",
+          "title": "Channel Session Id",
+          "type": "string"
+        },
+        "owner_github_id": {
+          "maximum": 9223372036854775807,
+          "minimum": 1,
+          "title": "Owner Github Id",
+          "type": "integer"
+        },
+        "owner_public_key": {
+          "maxLength": 43,
+          "minLength": 43,
+          "pattern": "^[A-Za-z0-9_-]+$",
+          "title": "Owner Public Key",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "session_expires_at": {
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\+00:00$",
+          "title": "Session Expires At",
+          "type": "string"
+        },
+        "session_issued_at": {
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\+00:00$",
+          "title": "Session Issued At",
+          "type": "string"
+        },
+        "signature_algorithm": {
+          "const": "ed25519",
+          "default": "ed25519",
+          "title": "Signature Algorithm",
+          "type": "string"
+        }
+      },
+      "required": [
+        "channel_session_id",
+        "owner_github_id",
+        "owner_public_key",
+        "session_issued_at",
+        "session_expires_at"
+      ],
+      "title": "ChannelBindingRecord",
+      "type": "object"
+    },
+    "owner_control_confirmation_envelope": {
+      "$defs": {
+        "ApprovalRequest": {
+          "additionalProperties": false,
+          "description": "Exact, versioned owner-control challenge input issued by Launchplane.",
+          "properties": {
+            "descriptor_id": {
+              "enum": [
+                "managed-secret-reencryption",
+                "managed-authz-policy-set"
+              ],
+              "title": "Descriptor Id",
+              "type": "string"
+            },
+            "descriptor_version": {
+              "const": 1,
+              "title": "Descriptor Version",
+              "type": "integer"
+            },
+            "evidence_digest": {
+              "pattern": "^[0-9a-f]{64}$",
+              "title": "Evidence Digest",
+              "type": "string"
+            },
+            "expires_at": {
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\+00:00$",
+              "title": "Expires At",
+              "type": "string"
+            },
+            "issued_at": {
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\+00:00$",
+              "title": "Issued At",
+              "type": "string"
+            },
+            "nonce": {
+              "pattern": "^[A-Za-z0-9_-]{16,128}$",
+              "title": "Nonce",
+              "type": "string"
+            },
+            "operation_id": {
+              "pattern": "^privileged-operation-[0-9a-f]{32}$",
+              "title": "Operation Id",
+              "type": "string"
+            },
+            "owner_github_id": {
+              "maximum": 9223372036854775807,
+              "minimum": 1,
+              "title": "Owner Github Id",
+              "type": "integer"
+            },
+            "plan_digest": {
+              "pattern": "^[0-9a-f]{64}$",
+              "title": "Plan Digest",
+              "type": "string"
+            },
+            "policy_record_id": {
+              "pattern": "^[a-z][a-z0-9_-]{0,127}$",
+              "title": "Policy Record Id",
+              "type": "string"
+            },
+            "policy_revision": {
+              "maximum": 9223372036854775807,
+              "minimum": 1,
+              "title": "Policy Revision",
+              "type": "integer"
+            },
+            "policy_sha256": {
+              "pattern": "^[0-9a-f]{64}$",
+              "title": "Policy Sha256",
+              "type": "string"
+            },
+            "pre_state_digest": {
+              "pattern": "^[0-9a-f]{64}$",
+              "title": "Pre State Digest",
+              "type": "string"
+            },
+            "request_digest": {
+              "pattern": "^[0-9a-f]{64}$",
+              "title": "Request Digest",
+              "type": "string"
+            },
+            "schema_version": {
+              "const": 1,
+              "default": 1,
+              "title": "Schema Version",
+              "type": "integer"
+            },
+            "server_review": {
+              "$ref": "#/$defs/ServerReviewPayload"
+            }
+          },
+          "required": [
+            "operation_id",
+            "descriptor_id",
+            "descriptor_version",
+            "request_digest",
+            "plan_digest",
+            "evidence_digest",
+            "pre_state_digest",
+            "policy_record_id",
+            "policy_revision",
+            "policy_sha256",
+            "owner_github_id",
+            "server_review",
+            "nonce",
+            "issued_at",
+            "expires_at"
+          ],
+          "title": "ApprovalRequest",
+          "type": "object"
+        },
+        "ChallengeResponse": {
+          "additionalProperties": false,
+          "description": "Owner-channel confirmation bound to one exact approval request.",
+          "properties": {
+            "approval_request": {
+              "$ref": "#/$defs/ApprovalRequest"
+            },
+            "approval_request_digest": {
+              "pattern": "^[0-9a-f]{64}$",
+              "title": "Approval Request Digest",
+              "type": "string"
+            },
+            "channel_binding_sha256": {
+              "pattern": "^[0-9a-f]{64}$",
+              "title": "Channel Binding Sha256",
+              "type": "string"
+            },
+            "confirmed_at": {
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\+00:00$",
+              "title": "Confirmed At",
+              "type": "string"
+            },
+            "decision": {
+              "const": "approved",
+              "title": "Decision",
+              "type": "string"
+            },
+            "schema_version": {
+              "const": 1,
+              "default": 1,
+              "title": "Schema Version",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "approval_request",
+            "approval_request_digest",
+            "decision",
+            "channel_binding_sha256",
+            "confirmed_at"
+          ],
+          "title": "ChallengeResponse",
+          "type": "object"
+        },
+        "ChannelBindingRecord": {
+          "additionalProperties": false,
+          "description": "Immutable versioned binding between an owner key and one channel session.",
+          "properties": {
+            "channel_session_id": {
+              "pattern": "^[a-z][a-z0-9_-]{0,127}$",
+              "title": "Channel Session Id",
+              "type": "string"
+            },
+            "owner_github_id": {
+              "maximum": 9223372036854775807,
+              "minimum": 1,
+              "title": "Owner Github Id",
+              "type": "integer"
+            },
+            "owner_public_key": {
+              "maxLength": 43,
+              "minLength": 43,
+              "pattern": "^[A-Za-z0-9_-]+$",
+              "title": "Owner Public Key",
+              "type": "string"
+            },
+            "schema_version": {
+              "const": 1,
+              "default": 1,
+              "title": "Schema Version",
+              "type": "integer"
+            },
+            "session_expires_at": {
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\+00:00$",
+              "title": "Session Expires At",
+              "type": "string"
+            },
+            "session_issued_at": {
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\+00:00$",
+              "title": "Session Issued At",
+              "type": "string"
+            },
+            "signature_algorithm": {
+              "const": "ed25519",
+              "default": "ed25519",
+              "title": "Signature Algorithm",
+              "type": "string"
+            }
+          },
+          "required": [
+            "channel_session_id",
+            "owner_github_id",
+            "owner_public_key",
+            "session_issued_at",
+            "session_expires_at"
+          ],
+          "title": "ChannelBindingRecord",
+          "type": "object"
+        },
+        "ReviewItem": {
+          "additionalProperties": false,
+          "description": "One server-authored, display-ready field in an owner review payload.",
+          "properties": {
+            "key": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
+              "title": "Key",
+              "type": "string"
+            },
+            "label": {
+              "maxLength": 120,
+              "minLength": 1,
+              "title": "Label",
+              "type": "string"
+            },
+            "value": {
+              "maxLength": 4000,
+              "minLength": 1,
+              "title": "Value",
+              "type": "string"
+            }
+          },
+          "required": [
+            "key",
+            "label",
+            "value"
+          ],
+          "title": "ReviewItem",
+          "type": "object"
+        },
+        "ServerReviewPayload": {
+          "additionalProperties": false,
+          "description": "Canonical server-authored review content rendered for one owner decision.",
+          "properties": {
+            "items": {
+              "items": {
+                "$ref": "#/$defs/ReviewItem"
+              },
+              "maxItems": 32,
+              "minItems": 1,
+              "title": "Items",
+              "type": "array"
+            },
+            "review_id": {
+              "pattern": "^[a-z][a-z0-9_-]{0,127}$",
+              "title": "Review Id",
+              "type": "string"
+            },
+            "schema_version": {
+              "const": 1,
+              "default": 1,
+              "title": "Schema Version",
+              "type": "integer"
+            },
+            "summary": {
+              "maxLength": 4000,
+              "minLength": 1,
+              "title": "Summary",
+              "type": "string"
+            },
+            "title": {
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Title",
+              "type": "string"
+            }
+          },
+          "required": [
+            "review_id",
+            "title",
+            "summary",
+            "items"
+          ],
+          "title": "ServerReviewPayload",
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "description": "Signed owner confirmation bound to one channel session and challenge.",
+      "properties": {
+        "challenge_response": {
+          "$ref": "#/$defs/ChallengeResponse"
+        },
+        "channel_binding": {
+          "$ref": "#/$defs/ChannelBindingRecord"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "signature": {
+          "maxLength": 86,
+          "minLength": 86,
+          "pattern": "^[A-Za-z0-9_-]+$",
+          "title": "Signature",
+          "type": "string"
+        },
+        "signature_algorithm": {
+          "const": "ed25519",
+          "default": "ed25519",
+          "title": "Signature Algorithm",
+          "type": "string"
+        }
+      },
+      "required": [
+        "channel_binding",
+        "challenge_response",
+        "signature"
+      ],
+      "title": "OwnerControlConfirmationEnvelope",
+      "type": "object"
+    },
+    "owner_control_signature_payload": {
+      "$defs": {
+        "ApprovalRequest": {
+          "additionalProperties": false,
+          "description": "Exact, versioned owner-control challenge input issued by Launchplane.",
+          "properties": {
+            "descriptor_id": {
+              "enum": [
+                "managed-secret-reencryption",
+                "managed-authz-policy-set"
+              ],
+              "title": "Descriptor Id",
+              "type": "string"
+            },
+            "descriptor_version": {
+              "const": 1,
+              "title": "Descriptor Version",
+              "type": "integer"
+            },
+            "evidence_digest": {
+              "pattern": "^[0-9a-f]{64}$",
+              "title": "Evidence Digest",
+              "type": "string"
+            },
+            "expires_at": {
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\+00:00$",
+              "title": "Expires At",
+              "type": "string"
+            },
+            "issued_at": {
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\+00:00$",
+              "title": "Issued At",
+              "type": "string"
+            },
+            "nonce": {
+              "pattern": "^[A-Za-z0-9_-]{16,128}$",
+              "title": "Nonce",
+              "type": "string"
+            },
+            "operation_id": {
+              "pattern": "^privileged-operation-[0-9a-f]{32}$",
+              "title": "Operation Id",
+              "type": "string"
+            },
+            "owner_github_id": {
+              "maximum": 9223372036854775807,
+              "minimum": 1,
+              "title": "Owner Github Id",
+              "type": "integer"
+            },
+            "plan_digest": {
+              "pattern": "^[0-9a-f]{64}$",
+              "title": "Plan Digest",
+              "type": "string"
+            },
+            "policy_record_id": {
+              "pattern": "^[a-z][a-z0-9_-]{0,127}$",
+              "title": "Policy Record Id",
+              "type": "string"
+            },
+            "policy_revision": {
+              "maximum": 9223372036854775807,
+              "minimum": 1,
+              "title": "Policy Revision",
+              "type": "integer"
+            },
+            "policy_sha256": {
+              "pattern": "^[0-9a-f]{64}$",
+              "title": "Policy Sha256",
+              "type": "string"
+            },
+            "pre_state_digest": {
+              "pattern": "^[0-9a-f]{64}$",
+              "title": "Pre State Digest",
+              "type": "string"
+            },
+            "request_digest": {
+              "pattern": "^[0-9a-f]{64}$",
+              "title": "Request Digest",
+              "type": "string"
+            },
+            "schema_version": {
+              "const": 1,
+              "default": 1,
+              "title": "Schema Version",
+              "type": "integer"
+            },
+            "server_review": {
+              "$ref": "#/$defs/ServerReviewPayload"
+            }
+          },
+          "required": [
+            "operation_id",
+            "descriptor_id",
+            "descriptor_version",
+            "request_digest",
+            "plan_digest",
+            "evidence_digest",
+            "pre_state_digest",
+            "policy_record_id",
+            "policy_revision",
+            "policy_sha256",
+            "owner_github_id",
+            "server_review",
+            "nonce",
+            "issued_at",
+            "expires_at"
+          ],
+          "title": "ApprovalRequest",
+          "type": "object"
+        },
+        "ChallengeResponse": {
+          "additionalProperties": false,
+          "description": "Owner-channel confirmation bound to one exact approval request.",
+          "properties": {
+            "approval_request": {
+              "$ref": "#/$defs/ApprovalRequest"
+            },
+            "approval_request_digest": {
+              "pattern": "^[0-9a-f]{64}$",
+              "title": "Approval Request Digest",
+              "type": "string"
+            },
+            "channel_binding_sha256": {
+              "pattern": "^[0-9a-f]{64}$",
+              "title": "Channel Binding Sha256",
+              "type": "string"
+            },
+            "confirmed_at": {
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\+00:00$",
+              "title": "Confirmed At",
+              "type": "string"
+            },
+            "decision": {
+              "const": "approved",
+              "title": "Decision",
+              "type": "string"
+            },
+            "schema_version": {
+              "const": 1,
+              "default": 1,
+              "title": "Schema Version",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "approval_request",
+            "approval_request_digest",
+            "decision",
+            "channel_binding_sha256",
+            "confirmed_at"
+          ],
+          "title": "ChallengeResponse",
+          "type": "object"
+        },
+        "ReviewItem": {
+          "additionalProperties": false,
+          "description": "One server-authored, display-ready field in an owner review payload.",
+          "properties": {
+            "key": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
+              "title": "Key",
+              "type": "string"
+            },
+            "label": {
+              "maxLength": 120,
+              "minLength": 1,
+              "title": "Label",
+              "type": "string"
+            },
+            "value": {
+              "maxLength": 4000,
+              "minLength": 1,
+              "title": "Value",
+              "type": "string"
+            }
+          },
+          "required": [
+            "key",
+            "label",
+            "value"
+          ],
+          "title": "ReviewItem",
+          "type": "object"
+        },
+        "ServerReviewPayload": {
+          "additionalProperties": false,
+          "description": "Canonical server-authored review content rendered for one owner decision.",
+          "properties": {
+            "items": {
+              "items": {
+                "$ref": "#/$defs/ReviewItem"
+              },
+              "maxItems": 32,
+              "minItems": 1,
+              "title": "Items",
+              "type": "array"
+            },
+            "review_id": {
+              "pattern": "^[a-z][a-z0-9_-]{0,127}$",
+              "title": "Review Id",
+              "type": "string"
+            },
+            "schema_version": {
+              "const": 1,
+              "default": 1,
+              "title": "Schema Version",
+              "type": "integer"
+            },
+            "summary": {
+              "maxLength": 4000,
+              "minLength": 1,
+              "title": "Summary",
+              "type": "string"
+            },
+            "title": {
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Title",
+              "type": "string"
+            }
+          },
+          "required": [
+            "review_id",
+            "title",
+            "summary",
+            "items"
+          ],
+          "title": "ServerReviewPayload",
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "description": "Exact domain-separated payload authenticated by an owner signature.",
+      "properties": {
+        "challenge_response": {
+          "$ref": "#/$defs/ChallengeResponse"
+        },
+        "domain": {
+          "const": "launchplane-owner-control-confirmation-v1",
+          "default": "launchplane-owner-control-confirmation-v1",
+          "title": "Domain",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "challenge_response"
+      ],
+      "title": "OwnerControlSignaturePayload",
+      "type": "object"
+    },
     "server_review_payload": {
       "$defs": {
         "ReviewItem": {
@@ -1247,5 +3050,17 @@
       "title": "ServerReviewPayload",
       "type": "object"
     }
+  },
+  "signature_declaration": {
+    "algorithm": "ed25519",
+    "contract_schema_version": 2,
+    "domain": "launchplane-owner-control-confirmation-v1",
+    "legacy_golden_channel_binding": "synthetic-placeholder-not-channel-binding-record",
+    "payload": "OwnerControlSignaturePayload",
+    "payload_encoding": "canonical-json-utf8",
+    "public_key_bytes": 32,
+    "public_key_encoding": "base64url-unpadded",
+    "signature_bytes": 64,
+    "signature_encoding": "base64url-unpadded"
   }
 }

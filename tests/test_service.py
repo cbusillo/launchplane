@@ -2717,7 +2717,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertEqual(result.output.strip(), str(output_path))
-        self.assertEqual(payload["schema_version"], 1)
+        self.assertEqual(payload["schema_version"], 2)
         self.assertTrue(payload["golden_vectors"])
 
     def test_product_onboarding_endpoint_writes_full_launchplane_owned_bundle(self) -> None:

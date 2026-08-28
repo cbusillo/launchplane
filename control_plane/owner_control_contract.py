@@ -1,18 +1,27 @@
 from __future__ import annotations
 
+import base64
 import json
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from control_plane.contracts.canonical_json import canonical_json_bytes, canonical_json_sha256
 from control_plane.contracts.owner_control import (
     ApprovalRequest,
+    ChannelBindingRecord,
     ChallengeResponse,
+    OwnerControlConfirmationEnvelope,
+    OwnerControlSignaturePayload,
     ReviewItem,
     ServerReviewPayload,
     owner_control_approval_request_digest,
+    owner_control_channel_binding_sha256,
     owner_control_challenge_response_digest,
+    owner_control_signature_payload,
+    owner_control_signature_payload_bytes,
 )
 from control_plane.contracts.privileged_operation import (
     PrivilegedOperationDescriptorId,
@@ -22,7 +31,10 @@ from control_plane.privileged_operation_registry import list_privileged_operatio
 from control_plane.privileged_operation_registry import read_privileged_operation_descriptor
 
 
-OWNER_CONTROL_CONTRACT_SCHEMA_VERSION = 1
+OWNER_CONTROL_CONTRACT_SCHEMA_VERSION = 2
+_OWNER_CONTROL_VECTOR_SCHEMA_VERSION = 1
+_ARTIFACT_SYNTHETIC_PRIVATE_KEY_SEED = bytes(range(32))
+_ARTIFACT_SYNTHETIC_WRONG_PRIVATE_KEY_SEED = bytes(range(31, -1, -1))
 
 
 class OwnerControlContractError(ValueError):
@@ -34,7 +46,7 @@ def _digest_for_vector(*, descriptor_id: PrivilegedOperationDescriptorId, label:
         {
             "descriptor_id": descriptor_id,
             "label": label,
-            "schema_version": OWNER_CONTROL_CONTRACT_SCHEMA_VERSION,
+            "schema_version": _OWNER_CONTROL_VECTOR_SCHEMA_VERSION,
         }
     )
 
@@ -111,16 +123,126 @@ def _golden_vector(
         "descriptor_id": descriptor_id,
         "descriptor_version": descriptor_version,
         "approval_request": {
-            "canonical_json": canonical_json_bytes(request_payload).decode("utf-8"),
+            "canonical_json": canonical_json_bytes(request_payload).decode(),
             "payload": request_payload,
             "sha256": owner_control_approval_request_digest(request),
         },
         "challenge_response": {
-            "canonical_json": canonical_json_bytes(response_payload).decode("utf-8"),
+            "canonical_json": canonical_json_bytes(response_payload).decode(),
             "payload": response_payload,
             "sha256": owner_control_challenge_response_digest(response),
         },
     }
+
+
+def _artifact_synthetic_private_key() -> Ed25519PrivateKey:
+    return Ed25519PrivateKey.from_private_bytes(_ARTIFACT_SYNTHETIC_PRIVATE_KEY_SEED)
+
+
+def _artifact_synthetic_wrong_private_key() -> Ed25519PrivateKey:
+    return Ed25519PrivateKey.from_private_bytes(_ARTIFACT_SYNTHETIC_WRONG_PRIVATE_KEY_SEED)
+
+
+def _base64url(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
+
+
+def _synthetic_owner_public_key(private_key: Ed25519PrivateKey) -> str:
+    return _base64url(
+        private_key.public_key().public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw,
+        )
+    )
+
+
+def _channel_binding_for_request(
+    *,
+    descriptor_id: PrivilegedOperationDescriptorId,
+    request: ApprovalRequest,
+) -> ChannelBindingRecord:
+    return ChannelBindingRecord(
+        channel_session_id=f"channel-session-{_digest_for_vector(descriptor_id=descriptor_id, label='channel-session')[:32]}",
+        owner_github_id=request.owner_github_id,
+        signature_algorithm="ed25519",
+        owner_public_key=_synthetic_owner_public_key(_artifact_synthetic_private_key()),
+        session_issued_at=request.issued_at,
+        session_expires_at=request.expires_at,
+    )
+
+
+def _confirmation_golden_vector(
+    *,
+    descriptor_id: PrivilegedOperationDescriptorId,
+    descriptor_version: int,
+    safety_class: PrivilegedOperationSafetyClass,
+) -> dict[str, Any]:
+    if descriptor_version != 1:
+        raise OwnerControlContractError(
+            f"Unsupported owner-control descriptor version: {descriptor_version}"
+        )
+    binding, response, envelope = _confirmation_models_for_descriptor(
+        descriptor_id=descriptor_id,
+        safety_class=safety_class,
+    )
+    signature_payload = owner_control_signature_payload(response)
+    binding_payload = binding.model_dump(mode="json")
+    response_payload = response.model_dump(mode="json")
+    signature_payload_data = signature_payload.model_dump(mode="json")
+    envelope_payload = envelope.model_dump(mode="json")
+    return {
+        "descriptor_id": descriptor_id,
+        "descriptor_version": descriptor_version,
+        "channel_binding": {
+            "canonical_json": canonical_json_bytes(binding_payload).decode(),
+            "payload": binding_payload,
+            "sha256": owner_control_channel_binding_sha256(binding),
+        },
+        "challenge_response": {
+            "canonical_json": canonical_json_bytes(response_payload).decode(),
+            "payload": response_payload,
+            "sha256": owner_control_challenge_response_digest(response),
+        },
+        "signature_payload": {
+            "canonical_json": canonical_json_bytes(signature_payload_data).decode(),
+            "payload": signature_payload_data,
+            "sha256": canonical_json_sha256(signature_payload_data),
+        },
+        "confirmation_envelope": {
+            "canonical_json": canonical_json_bytes(envelope_payload).decode(),
+            "payload": envelope_payload,
+            "sha256": canonical_json_sha256(envelope_payload),
+        },
+        "verification": "valid",
+    }
+
+
+def _confirmation_models_for_descriptor(
+    *,
+    descriptor_id: PrivilegedOperationDescriptorId,
+    safety_class: PrivilegedOperationSafetyClass,
+) -> tuple[ChannelBindingRecord, ChallengeResponse, OwnerControlConfirmationEnvelope]:
+    request = _approval_request_for_descriptor(
+        descriptor_id=descriptor_id,
+        safety_class=safety_class,
+    )
+    binding = _channel_binding_for_request(descriptor_id=descriptor_id, request=request)
+    response = ChallengeResponse(
+        approval_request=request,
+        approval_request_digest=owner_control_approval_request_digest(request),
+        decision="approved",
+        channel_binding_sha256=owner_control_channel_binding_sha256(binding),
+        confirmed_at="2030-01-02T03:04:05+00:00",
+    )
+    envelope = OwnerControlConfirmationEnvelope(
+        channel_binding=binding,
+        challenge_response=response,
+        signature_algorithm="ed25519",
+        signature=_base64url(
+            _artifact_synthetic_private_key().sign(owner_control_signature_payload_bytes(response))
+        ),
+    )
+    return binding, response, envelope
 
 
 def _canonicalization_vectors() -> list[dict[str, Any]]:
@@ -147,7 +269,7 @@ def _canonicalization_vectors() -> list[dict[str, Any]]:
         {
             "name": name,
             "payload": payload,
-            "canonical_json": canonical_json_bytes(payload).decode("utf-8"),
+            "canonical_json": canonical_json_bytes(payload).decode(),
             "sha256": canonical_json_sha256(payload),
         }
         for name, payload in payloads
@@ -265,6 +387,187 @@ def _negative_vectors() -> list[dict[str, Any]]:
     ]
 
 
+def _negative_confirmation_vectors() -> list[dict[str, Any]]:
+    descriptor = read_privileged_operation_descriptor("managed-authz-policy-set").descriptor
+    binding, response, envelope = _confirmation_models_for_descriptor(
+        descriptor_id=descriptor.descriptor_id,
+        safety_class=descriptor.safety_class,
+    )
+    valid_payload = envelope.model_dump(mode="json")
+    changed_binding = binding.model_copy(update={"owner_github_id": binding.owner_github_id + 1})
+    changed_binding_payload = changed_binding.model_dump(mode="json")
+    response_for_changed_binding = response.model_copy(
+        update={"channel_binding_sha256": owner_control_channel_binding_sha256(changed_binding)}
+    )
+    changed_session_binding = binding.model_copy(
+        update={"session_issued_at": "2030-01-02T03:01:05+00:00"}
+    )
+    response_for_changed_session = response.model_copy(
+        update={
+            "channel_binding_sha256": owner_control_channel_binding_sha256(changed_session_binding)
+        }
+    )
+    cross_session_binding = binding.model_copy(
+        update={"channel_session_id": "channel-session-substituted"}
+    )
+    response_for_cross_session = response.model_copy(
+        update={
+            "channel_binding_sha256": owner_control_channel_binding_sha256(cross_session_binding)
+        }
+    )
+    wrong_key_signature = _base64url(
+        _artifact_synthetic_wrong_private_key().sign(
+            owner_control_signature_payload_bytes(response)
+        )
+    )
+
+    return [
+        {
+            "model": "owner_control_confirmation_envelope",
+            "rule": "schema-version-is-one",
+            "error_location": ["schema_version"],
+            "payload": {**valid_payload, "schema_version": 2},
+        },
+        {
+            "model": "owner_control_confirmation_envelope",
+            "rule": "signature-algorithm-is-ed25519",
+            "error_location": ["signature_algorithm"],
+            "payload": {**valid_payload, "signature_algorithm": "rsa"},
+        },
+        {
+            "model": "owner_control_confirmation_envelope",
+            "rule": "public-key-is-raw-32-byte-unpadded-base64url",
+            "error_location": ["channel_binding", "owner_public_key"],
+            "payload": {
+                **valid_payload,
+                "channel_binding": {**valid_payload["channel_binding"], "owner_public_key": "bad!"},
+            },
+        },
+        {
+            "model": "owner_control_confirmation_envelope",
+            "rule": "signature-is-raw-64-byte-unpadded-base64url",
+            "error_location": ["signature"],
+            "payload": {**valid_payload, "signature": "bad!"},
+        },
+        {
+            "model": "owner_control_confirmation_envelope",
+            "rule": "public-key-base64url-has-canonical-trailing-bits",
+            "error_location": ["channel_binding"],
+            "error_message_contains": "owner_public_key must use canonical unpadded base64url",
+            "payload": {
+                **valid_payload,
+                "channel_binding": {
+                    **valid_payload["channel_binding"],
+                    "owner_public_key": (
+                        valid_payload["channel_binding"]["owner_public_key"][:-1] + "h"
+                    ),
+                },
+            },
+        },
+        {
+            "model": "owner_control_confirmation_envelope",
+            "rule": "signature-base64url-has-canonical-trailing-bits",
+            "error_location": [],
+            "error_message_contains": "signature must use canonical unpadded base64url",
+            "payload": {**valid_payload, "signature": valid_payload["signature"][:-1] + "R"},
+        },
+        {
+            "model": "owner_control_confirmation_envelope",
+            "rule": "owner-identity-matches",
+            "error_location": [],
+            "error_message_contains": "channel binding owner identity does not match",
+            "payload": {
+                **valid_payload,
+                "channel_binding": changed_binding_payload,
+                "challenge_response": response_for_changed_binding.model_dump(mode="json"),
+            },
+        },
+        {
+            "model": "owner_control_confirmation_envelope",
+            "rule": "binding-digest-matches",
+            "error_location": [],
+            "error_message_contains": "channel binding digest does not match",
+            "payload": {
+                **valid_payload,
+                "channel_binding": {
+                    **valid_payload["channel_binding"],
+                    "channel_session_id": "channel-session-substituted",
+                },
+            },
+        },
+        {
+            "model": "owner_control_confirmation_envelope",
+            "rule": "session-expires-after-issuance",
+            "error_location": ["channel_binding"],
+            "error_message_contains": "session_expires_at must be later than session_issued_at",
+            "payload": {
+                **valid_payload,
+                "channel_binding": {
+                    **valid_payload["channel_binding"],
+                    "session_expires_at": valid_payload["channel_binding"]["session_issued_at"],
+                },
+            },
+        },
+        {
+            "model": "owner_control_confirmation_envelope",
+            "rule": "request-and-confirmation-stay-inside-session",
+            "error_location": [],
+            "error_message_contains": "approval request bounds must be inside",
+            "payload": {
+                **valid_payload,
+                "channel_binding": changed_session_binding.model_dump(mode="json"),
+                "challenge_response": response_for_changed_session.model_dump(mode="json"),
+            },
+        },
+        {
+            "model": "owner_control_confirmation_envelope",
+            "rule": "tampered-signed-payload-is-rejected",
+            "error_location": [],
+            "payload": {
+                **valid_payload,
+                "challenge_response": {
+                    **valid_payload["challenge_response"],
+                    "confirmed_at": "2030-01-02T03:05:05+00:00",
+                },
+            },
+            "verification": "invalid",
+        },
+        {
+            "model": "owner_control_confirmation_envelope",
+            "rule": "signature-from-wrong-private-key-is-rejected",
+            "error_location": [],
+            "payload": {**valid_payload, "signature": wrong_key_signature},
+            "verification": "invalid",
+        },
+        {
+            "model": "owner_control_confirmation_envelope",
+            "rule": "cross-session-substitution-is-rejected",
+            "error_location": [],
+            "payload": {
+                **valid_payload,
+                "channel_binding": cross_session_binding.model_dump(mode="json"),
+                "challenge_response": response_for_cross_session.model_dump(mode="json"),
+            },
+            "verification": "invalid",
+        },
+    ]
+
+
+def _signature_declaration() -> dict[str, Any]:
+    return {
+        "algorithm": "ed25519",
+        "domain": "launchplane-owner-control-confirmation-v1",
+        "payload": "OwnerControlSignaturePayload",
+        "payload_encoding": "canonical-json-utf8",
+        "public_key_bytes": 32,
+        "public_key_encoding": "base64url-unpadded",
+        "signature_bytes": 64,
+        "signature_encoding": "base64url-unpadded",
+        "legacy_golden_channel_binding": "synthetic-placeholder-not-channel-binding-record",
+        "contract_schema_version": OWNER_CONTROL_CONTRACT_SCHEMA_VERSION,
+    }
+
+
 def _build_owner_control_contract() -> dict[str, Any]:
     descriptors = list_privileged_operation_descriptors()
     return {
@@ -281,10 +584,14 @@ def _build_owner_control_contract() -> dict[str, Any]:
             "separators": [",", ":"],
             "trailing_newline": False,
         },
+        "signature_declaration": _signature_declaration(),
         "canonicalization_vectors": _canonicalization_vectors(),
         "schemas": {
             "approval_request": ApprovalRequest.model_json_schema(),
+            "channel_binding_record": ChannelBindingRecord.model_json_schema(),
             "challenge_response": ChallengeResponse.model_json_schema(),
+            "owner_control_confirmation_envelope": OwnerControlConfirmationEnvelope.model_json_schema(),
+            "owner_control_signature_payload": OwnerControlSignaturePayload.model_json_schema(),
             "server_review_payload": ServerReviewPayload.model_json_schema(),
         },
         "golden_vectors": [
@@ -295,7 +602,16 @@ def _build_owner_control_contract() -> dict[str, Any]:
             )
             for descriptor in descriptors
         ],
+        "confirmation_golden_vectors": [
+            _confirmation_golden_vector(
+                descriptor_id=descriptor.descriptor_id,
+                descriptor_version=descriptor.descriptor_version,
+                safety_class=descriptor.safety_class,
+            )
+            for descriptor in descriptors
+        ],
         "negative_vectors": _negative_vectors(),
+        "negative_confirmation_vectors": _negative_confirmation_vectors(),
     }
 
 
@@ -321,10 +637,13 @@ def validate_owner_control_contract(artifact: Mapping[str, Any]) -> None:
         {
             "schema_version",
             "canonical_json",
+            "signature_declaration",
             "canonicalization_vectors",
             "schemas",
             "golden_vectors",
+            "confirmation_golden_vectors",
             "negative_vectors",
+            "negative_confirmation_vectors",
         },
         "root",
     )
@@ -333,6 +652,8 @@ def validate_owner_control_contract(artifact: Mapping[str, Any]) -> None:
     expected = _build_owner_control_contract()
     if artifact["canonical_json"] != expected["canonical_json"]:
         raise OwnerControlContractError("Owner-control canonical JSON declaration drifted")
+    if artifact["signature_declaration"] != expected["signature_declaration"]:
+        raise OwnerControlContractError("Owner-control signature declaration drifted")
     if artifact["canonicalization_vectors"] != expected["canonicalization_vectors"]:
         raise OwnerControlContractError("Owner-control canonicalization vectors drifted")
     if artifact["schemas"] != expected["schemas"]:
@@ -342,8 +663,12 @@ def validate_owner_control_contract(artifact: Mapping[str, Any]) -> None:
         raise OwnerControlContractError("Owner-control golden vectors must be a list")
     if vectors != expected["golden_vectors"]:
         raise OwnerControlContractError("Owner-control golden vectors drifted from the registry")
+    if artifact["confirmation_golden_vectors"] != expected["confirmation_golden_vectors"]:
+        raise OwnerControlContractError("Owner-control confirmation golden vectors drifted")
     if artifact["negative_vectors"] != expected["negative_vectors"]:
         raise OwnerControlContractError("Owner-control negative vectors drifted")
+    if artifact["negative_confirmation_vectors"] != expected["negative_confirmation_vectors"]:
+        raise OwnerControlContractError("Owner-control negative confirmation vectors drifted")
 
 
 def write_owner_control_contract(output_path: Path) -> Path:
