@@ -40,6 +40,12 @@ descriptor. It is a cross-host conformance artifact only: it does not issue a
 challenge, consume an owner confirmation, alter browser approval, add a route,
 or authorize execution. See `docs/owner-control-channel.md`.
 
+The DB-backed shadow verifier remains independent from this lifecycle. No
+privileged-operation route, service, worker, transition, approval, or execution
+path imports it. Its unrouted storage API can retain test or future
+service-authored challenge state and return only `authorizes_execution: false`;
+browser approval remains the only active approval transport.
+
 ## Authorization
 
 Privileged-operation routes do not use bare `LaunchplaneAuthzPolicy.allows`.

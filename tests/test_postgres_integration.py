@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -8,12 +9,14 @@ import json
 import os
 import threading
 import time
+from typing import Any
 import unittest
 from unittest.mock import patch
 from uuid import uuid4
 
 from alembic import command as alembic_command
 from alembic.config import Config as AlembicConfig
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.engine import make_url
@@ -51,6 +54,18 @@ from control_plane.contracts.owner_acceptance import (
     OwnerAcceptanceTransitionError,
     owner_acceptance_runtime_identity_binding,
 )
+from control_plane.contracts.owner_control import (
+    ApprovalRequest,
+    ChannelBindingRecord,
+    ChallengeResponse,
+    OwnerControlConfirmationEnvelope,
+    ReviewItem,
+    ServerReviewPayload,
+    owner_control_approval_request_digest,
+    owner_control_channel_binding_sha256,
+    owner_control_signature_payload_bytes,
+)
+from control_plane.contracts.owner_control_shadow_verifier import OwnerControlChallengeIssueRequest
 from control_plane.contracts.merge_train_controller_state import (
     MergeTrainControllerAdoptionRejectedError,
     MergeTrainControllerLeaseHeldError,
@@ -143,6 +158,7 @@ from control_plane.service_auth import (
 )
 from control_plane.storage.postgres import (
     DbOnlyMutationRequest,
+    LaunchplaneOwnerControlIssuedChallengeRow,
     MutationReservationResult,
     OutboxWithIdempotencyRequest,
     PostgresRecordStore,
@@ -2417,7 +2433,154 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                 store.close()
 
 
+def _owner_control_shadow_base64url(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
+
+
+def _owner_control_shadow_binding(private_key: Ed25519PrivateKey) -> ChannelBindingRecord:
+    return ChannelBindingRecord(
+        channel_session_id="owner-control-postgres-session",
+        owner_github_id=100001,
+        signature_algorithm="ed25519",
+        owner_public_key=_owner_control_shadow_base64url(
+            private_key.public_key().public_bytes_raw()
+        ),
+        session_issued_at="2025-01-01T00:00:00+00:00",
+        session_expires_at="2035-01-01T00:00:00+00:00",
+    )
+
+
+def _owner_control_shadow_request() -> ApprovalRequest:
+    return ApprovalRequest(
+        operation_id="privileged-operation-0123456789abcdef0123456789abcdef",
+        descriptor_id="managed-secret-reencryption",
+        descriptor_version=1,
+        request_digest="1" * 64,
+        plan_digest="2" * 64,
+        evidence_digest="3" * 64,
+        pre_state_digest="4" * 64,
+        policy_record_id="owner-policy",
+        policy_revision=1,
+        policy_sha256="5" * 64,
+        owner_github_id=100001,
+        server_review=ServerReviewPayload(
+            review_id="owner-control-postgres-review",
+            title="Review operation",
+            summary="Review the exact server-authored request.",
+            items=(ReviewItem(key="operation", label="Operation", value="Re-encrypt"),),
+        ),
+        nonce="owner-control-nonce-0000000000000004",
+        issued_at="2026-01-01T00:00:00+00:00",
+        expires_at="2026-01-01T00:01:00+00:00",
+    )
+
+
+def _owner_control_shadow_envelope(
+    private_key: Ed25519PrivateKey,
+    *,
+    binding: ChannelBindingRecord,
+    request: ApprovalRequest,
+) -> OwnerControlConfirmationEnvelope:
+    response = ChallengeResponse(
+        approval_request=request,
+        approval_request_digest=owner_control_approval_request_digest(request),
+        decision="approved",
+        channel_binding_sha256=owner_control_channel_binding_sha256(binding),
+        confirmed_at=request.issued_at,
+    )
+    return OwnerControlConfirmationEnvelope(
+        channel_binding=binding,
+        challenge_response=response,
+        signature_algorithm="ed25519",
+        signature=_owner_control_shadow_base64url(
+            private_key.sign(owner_control_signature_payload_bytes(response))
+        ),
+    )
+
+
 class RealPostgresStorageConcurrencyTests(unittest.TestCase):
+    def test_owner_control_shadow_verification_consumes_one_challenge_once(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            private_key = Ed25519PrivateKey.generate()
+            binding = _owner_control_shadow_binding(private_key)
+            store.enroll_owner_control_channel_session(binding)
+            issued = store.issue_owner_control_challenge(
+                OwnerControlChallengeIssueRequest(
+                    channel_session_id=binding.channel_session_id,
+                    approval_request=_owner_control_shadow_request(),
+                    expires_in_seconds=300,
+                )
+            )
+            envelope = _owner_control_shadow_envelope(
+                private_key,
+                binding=binding,
+                request=issued.approval_request(),
+            )
+            second_store = PostgresRecordStore(database_url=store.database_url)
+            loser_prelock_read_complete = threading.Event()
+            allow_loser_locking_read = threading.Event()
+            original_challenge_read = second_store._owner_control_issued_challenge_row
+
+            def controlled_challenge_read(
+                session: Any,
+                *,
+                challenge_nonce: str,
+                for_update: bool = False,
+            ) -> LaunchplaneOwnerControlIssuedChallengeRow | None:
+                row = original_challenge_read(
+                    session,
+                    challenge_nonce=challenge_nonce,
+                    for_update=for_update,
+                )
+                if not for_update:
+                    loser_prelock_read_complete.set()
+                    if not allow_loser_locking_read.wait(timeout=10):
+                        raise TimeoutError("Timed out waiting to release the losing verification.")
+                return row
+
+            executor = ThreadPoolExecutor(max_workers=1)
+            try:
+                with patch.object(
+                    second_store,
+                    "_owner_control_issued_challenge_row",
+                    side_effect=controlled_challenge_read,
+                ):
+                    losing_future = executor.submit(
+                        second_store.verify_owner_control_confirmation_shadow,
+                        envelope,
+                    )
+                    self.assertTrue(loser_prelock_read_complete.wait(timeout=10))
+                    winning_status = store.verify_owner_control_confirmation_shadow(
+                        envelope
+                    ).verification_status
+                    allow_loser_locking_read.set()
+                    losing_status = losing_future.result(timeout=10).verification_status
+                stored_challenge = store.read_owner_control_issued_challenge(
+                    challenge_nonce=issued.challenge_nonce
+                )
+                events = store.list_owner_control_shadow_verification_events(
+                    challenge_nonce=issued.challenge_nonce
+                )
+            finally:
+                allow_loser_locking_read.set()
+                executor.shutdown(wait=True)
+                second_store.close()
+
+        self.assertEqual([winning_status, losing_status], ["verified", "rejected"])
+        self.assertEqual(stored_challenge.state, "consumed")
+        self.assertEqual(stored_challenge.attempt_count, 2)
+        self.assertIsNotNone(stored_challenge.consumed_at)
+        self.assertEqual(
+            sorted(
+                (event.sequence, event.verification_status, event.rejection_reason)
+                for event in events
+            ),
+            [(1, "verified", None), (2, "rejected", "challenge_replayed")],
+        )
+        self.assertTrue(all(event.verifier_mode == "shadow" for event in events))
+        self.assertTrue(all(event.authorizes_execution is False for event in events))
+        self.assertTrue(all(event.authority_state == "inert" for event in events))
+
     def test_concurrent_detached_application_retirement_plans_reuse_one_reservation(
         self,
     ) -> None:
