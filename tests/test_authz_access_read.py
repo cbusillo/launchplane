@@ -479,15 +479,17 @@ class AuthzAccessReadHttpTests(unittest.IsolatedAsyncioTestCase):
                                 "authz_policy_grant.write",
                             ],
                         },
+                    ],
+                    "github_humans": [
                         {
                             "managed_set_id": "operator.recovery",
                             "managed_rule_id": "independent-admin",
-                            "subjects": ["independent-admin-secret"],
-                            "token_labels": ["independent-token-secret"],
+                            "github_ids": [2002],
+                            "roles": ["admin"],
                             "products": ["launchplane"],
                             "contexts": ["launchplane"],
                             "actions": ["authz_policy_grant.write"],
-                        },
+                        }
                     ],
                 }
             )
@@ -529,8 +531,6 @@ class AuthzAccessReadHttpTests(unittest.IsolatedAsyncioTestCase):
         for secret_value in (
             "authz-admin",
             "authz-admin-label",
-            "independent-admin-secret",
-            "independent-token-secret",
         ):
             self.assertNotIn(secret_value, serialized)
         self.assertTrue(
