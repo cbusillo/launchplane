@@ -313,6 +313,10 @@ cleanup scope so the store is always closed.
     and optional `Idempotency-Key` replay/conflict handling)
 - authz policy administration routes:
   - `GET /v1/authz-policies/active`
+  - `GET /v1/authz-policies/administration` (backend-only bounded policy
+    provenance, principal counts, and existing health summaries)
+  - `GET /v1/authz-policies/revisions` (newest-first bounded redacted revision
+    provenance and digest/count-only audit summaries)
   - `GET /v1/authz-diagnostics/active-policy/health`
   - `POST /v1/authz-diagnostics/candidate-policy/preview`
   - `POST /v1/authz-policies/managed-rule-sets/reconcile`
@@ -322,6 +326,13 @@ cleanup scope so the store is always closed.
     `Idempotency-Key` completion. Managed reconciliation is the sole policy
     write contract and requires immutable numeric `repository_id` and
     `repository_owner_id` selectors for GitHub Actions rules.)
+  - The two bounded administration GET routes require an eligible GitHub or
+    local administrator, runtime and fresh active-DB authorization for the
+    ungranted `authz_policy_administration.read` action, strict same-origin/CSRF
+    proof for browser sessions, PostgreSQL record storage, and exactly one active
+    policy. They are `no-store`, nonrenewing, nonpersisting reads and expose no
+    raw policy, raw audit, principal identity, selector, managed-rule identity,
+    proposal, export, rollback, or mutation surface.
 
 - Every Code local automation work-request routes:
   - `GET /v1/every-code/summary` (native FastAPI for bearer-token,

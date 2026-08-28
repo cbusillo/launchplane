@@ -526,6 +526,14 @@ an ORM column/table or remains only in the evidence payload.
   caller/worker rule identities. Their workflow artifacts are scoped by run and
   attempt so retries preserve distinct evidence without turning observation or
   payload churn into new runtime authority.
+  The bounded authorization-administration read model projects only record
+  provenance, principal counts, existing health summaries, and at most 50
+  newest-first revision summaries. Historical audit payloads remain stored as
+  authority evidence but are returned only as presence, canonical digest,
+  normalized operation/mode, and allowlisted numeric diff counts. Read access
+  never exposes raw policy, raw audit, principal identifiers, selectors,
+  managed rule IDs or hashes, reasons, or key material and never creates a new
+  policy, denial, session, audit, or idempotency record.
   During a future OpenFGA migration, these DB-backed policy records remain the
   source evidence for dry-run tuple proposals and parity checks.
   After a proven cutover, records should store import/audit/model-version

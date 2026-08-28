@@ -131,6 +131,33 @@ and fails closed when active policy state is missing or ambiguous. It performs
 no policy, provider, runtime, bootstrap, secret, or deployment mutation. Landing
 the action and route does not grant production access to them.
 
+The bounded policy-administration read slice adds the independently grantable
+`authz_policy_administration.read` action and two backend-only routes:
+`GET /v1/authz-policies/administration` and `GET
+/v1/authz-policies/revisions`. Both routes are restricted to authenticated
+GitHub administrators or local administrators, require the action in both the
+current runtime policy and the freshly loaded single active DB policy record,
+and fail closed for missing, ambiguous, or non-database policy authority. The
+action is defined but deliberately ungranted; landing these routes gives no real
+caller access.
+
+The administration response contains only policy-record provenance, principal
+rule counts, and the existing bounded health, managed-set, and reachable-
+administrator summaries. The revision response is newest-first, returns at most
+50 records, and reports truncation from one additional bounded read. Revision
+audit data is reduced to presence, a canonical SHA-256 digest, normalized
+operation and mode enums, and allowlisted nonnegative numeric counts. Neither
+route returns raw policy or audit payloads, principal identifiers, selectors,
+managed rule IDs or hashes, reasons, key IDs, tokens, or free text.
+
+Browser administrators must provide the existing strict same-origin,
+`Sec-Fetch-*`, and CSRF proof. Validation neither renews the session nor rotates
+the CSRF token. Successes and every error class are `Cache-Control: no-store`,
+and the routes do not write denial, session, policy, idempotency, audit, outbox,
+provider, runtime, deployment, secret, or other persistent state. This slice
+adds no proposal, export, rollback, mutation, workflow, UI, or authorization
+grant and does not weaken the issue `#2058` freeze.
+
 The activation preflight is a separate, read-only self-check at
 `GET /v1/authz-diagnostics/activation-preflight/self`. It accepts only the
 signed Launchplane browser-session cookie and rejects every Authorization

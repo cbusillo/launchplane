@@ -78,15 +78,24 @@ from control_plane.contracts.generic_web_deploy_recovery import (
 )
 from control_plane.contracts.authz_access_read import (
     AUTHZ_DENIAL_EXPLANATION_READ_ACTION,
+    AUTHZ_POLICY_ADMINISTRATION_HISTORY_LIMIT,
+    AUTHZ_POLICY_ADMINISTRATION_READ_ACTION,
     AUTHZ_POLICY_CANDIDATE_PREVIEW_READ_ACTION,
     AUTHZ_POLICY_HEALTH_READ_ACTION,
     AuthzActivationPreflightSelfResponse,
     AUTHZ_REPOSITORY_SCOPE_READ_ACTION,
     EFFECTIVE_ACCESS_READ_ACTION,
     AuthzDenialExplanationResponse,
+    AuthzPolicyAdministrationProvenance,
+    AuthzPolicyAdministrationResponse,
     AuthzPolicyCandidatePreviewRequest,
     AuthzPolicyCandidatePreviewResponse,
     AuthzPolicyHealthResponse,
+    AuthzPolicyRevisionAuditSummary,
+    AuthzPolicyRevisionDiffCounts,
+    AuthzPolicyRevisionHistoryEntry,
+    AuthzPolicyRevisionHistoryResponse,
+    AuthzPrincipalRuleCounts,
     AuthzRepositoryScopeReadRequest,
     AuthzRepositoryScopeResponse,
     EffectiveAccessDecision,
@@ -1051,6 +1060,8 @@ _DETACHED_APPLICATION_RETIREMENT_ROUTE = "/v1/detached-application-retirement"
 _PRODUCT_ONBOARDING_APPLY_ROUTE = "/v1/product-onboarding/apply"
 _MERGE_TRAIN_POLICY_IMPORT_ROUTE = "/v1/merge-train/policies/import"
 _AUTHZ_POLICY_ACTIVE_ROUTE = "/v1/authz-policies/active"
+_AUTHZ_POLICY_ADMINISTRATION_ROUTE = "/v1/authz-policies/administration"
+_AUTHZ_POLICY_REVISION_HISTORY_ROUTE = "/v1/authz-policies/revisions"
 _AUTHZ_DIAGNOSTIC_EVALUATE_ROUTE = "/v1/authz-diagnostics/github-actions/evaluate"
 _AUTHZ_EFFECTIVE_ACCESS_EVALUATE_ROUTE = "/v1/authz-diagnostics/effective-access/evaluate"
 _AUTHZ_POLICY_HEALTH_ROUTE = "/v1/authz-diagnostics/active-policy/health"
@@ -1059,6 +1070,12 @@ _AUTHZ_POLICY_CANDIDATE_PREVIEW_ROUTE = "/v1/authz-diagnostics/candidate-policy/
 _AUTHZ_REPOSITORY_SCOPE_READ_ROUTE = "/v1/authz-diagnostics/repository-scope/read"
 _AUTHZ_DENIAL_EXPLANATION_ROUTE = "/v1/authz-diagnostics/denials/{trace_id}"
 _AUTHZ_POLICY_MANAGED_RECONCILE_ROUTE = "/v1/authz-policies/managed-rule-sets/reconcile"
+_AUTHZ_NONPERSISTING_SENSITIVE_READ_ROUTES = frozenset(
+    {
+        _AUTHZ_POLICY_ADMINISTRATION_ROUTE,
+        _AUTHZ_POLICY_REVISION_HISTORY_ROUTE,
+    }
+)
 _GENERIC_WEB_PREVIEW_AUTHZ_PLAN_ROUTE = (
     "/v1/authz-policies/managed-rule-sets/generic-web-preview/plan"
 )
@@ -3998,7 +4015,9 @@ def create_launchplane_fastapi_app(
         clear_authz_evaluation()
         try:
             response = cast(Response, await call_next(request))
-            if request.url.path == _AUTHZ_ACTIVATION_PREFLIGHT_ROUTE:
+            if request.url.path == _AUTHZ_ACTIVATION_PREFLIGHT_ROUTE or (
+                request.url.path in _AUTHZ_NONPERSISTING_SENSITIVE_READ_ROUTES
+            ):
                 response.headers["Cache-Control"] = "no-store"
             return response
         finally:
@@ -4743,7 +4762,7 @@ def create_launchplane_fastapi_app(
         common=read_route_dependencies,
         read_bearer_identity=read_bearer_identity,
         read_github_human_identity=read_github_human_identity,
-        read_github_human_mutation_identity=(read_github_human_browser_mutation_identity),
+        read_github_human_mutation_identity=read_github_human_browser_mutation_identity,
         policy_reader=lambda: resolved_authz_policy_runtime.policy,
         policy_record_reader=lambda: read_active_authz_policy_record(get_record_store()),
     )
@@ -13792,8 +13811,8 @@ def create_launchplane_fastapi_app(
     async def reencrypt_managed_secrets(
         request: Request,
         identity: Annotated[LaunchplaneIdentity, Depends(read_bearer_identity)],
-        record_store: Annotated[object, Depends(get_record_store)],
-        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+        _record_store: Annotated[object, Depends(get_record_store)],
+        _idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse:
         trace_id = next_trace_id()
         if isinstance(identity, TerminalAgentIdentity):
@@ -14593,6 +14612,169 @@ def create_launchplane_fastapi_app(
                 message="Multiple active Launchplane authz policy records were found.",
             )
         return active_records[0]
+
+    def authz_policy_administration_provenance(
+        record: LaunchplaneAuthzPolicyRecord,
+    ) -> AuthzPolicyAdministrationProvenance:
+        return AuthzPolicyAdministrationProvenance(
+            record_id=record.record_id,
+            revision=record.revision,
+            status=record.status,
+            source=record.source,
+            updated_at=record.updated_at,
+            policy_sha256=record.policy_sha256,
+            schema_version=record.policy.schema_version,
+        )
+
+    def require_authz_policy_administration_read(
+        *,
+        identity: LaunchplaneIdentity,
+        record_store: object,
+        trace_id: str,
+    ) -> tuple[PostgresRecordStore, LaunchplaneAuthzPolicyRecord]:
+        is_administrator = isinstance(identity, LocalAdminIdentity) or (
+            isinstance(identity, GitHubHumanIdentity) and identity.role == "admin"
+        )
+        preflight_authorized = resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action=AUTHZ_POLICY_ADMINISTRATION_READ_ACTION,
+            product="launchplane",
+            context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        )
+        if not is_administrator or not preflight_authorized:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Identity cannot read Launchplane authz policy administration.",
+            )
+        database_store = require_authz_policy_database_store(
+            record_store=record_store,
+            trace_id=trace_id,
+            message="Authz policy administration reads require Launchplane database storage.",
+        )
+        active_record = read_single_active_authz_policy_record(
+            database_store=database_store,
+            trace_id=trace_id,
+        )
+        if not active_record.policy.allows(
+            identity=identity,
+            action=AUTHZ_POLICY_ADMINISTRATION_READ_ACTION,
+            product="launchplane",
+            context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Identity cannot read Launchplane authz policy administration.",
+                authz_policy_provenance=AuthzPolicyProvenance.from_record(active_record),
+            )
+        return database_store, active_record
+
+    def authz_policy_principal_rule_counts(
+        policy: LaunchplaneAuthzPolicy,
+    ) -> AuthzPrincipalRuleCounts:
+        return AuthzPrincipalRuleCounts(
+            github_actions=len(policy.github_actions),
+            github_humans=len(policy.github_humans),
+            terminal_agents=len(policy.terminal_agents),
+            local_operators=len(policy.local_operators),
+            local_admins=len(policy.local_admins),
+        )
+
+    def authz_policy_revision_audit_summary(
+        audit: dict[str, object],
+    ) -> AuthzPolicyRevisionAuditSummary:
+        if not audit:
+            return AuthzPolicyRevisionAuditSummary(audit_present=False)
+        serialized = json.dumps(audit, sort_keys=True, separators=(",", ":"), default=str)
+        raw_diff = audit.get("diff")
+        allowed_count_names = (
+            "added_rule_count",
+            "adopted_rule_count",
+            "updated_rule_count",
+            "removed_rule_count",
+            "unchanged_rule_count",
+            "policy_safety_blocker_count",
+            "operational_readiness_blocked_rule_count",
+        )
+        diff_counts: dict[str, int] = {}
+        if isinstance(raw_diff, dict):
+            for name in allowed_count_names:
+                value = raw_diff.get(name)
+                if type(value) is int and value >= 0:
+                    diff_counts[name] = value
+        operation: Literal["managed_rule_set_reconcile", "unknown"] = (
+            "managed_rule_set_reconcile"
+            if audit.get("operation") == "managed_rule_set_reconcile"
+            else "unknown"
+        )
+        raw_mode = audit.get("mode")
+        mode: Literal["apply", "dry_run", "unknown"] = (
+            raw_mode if raw_mode in {"apply", "dry_run"} else "unknown"
+        )
+        return AuthzPolicyRevisionAuditSummary(
+            audit_present=True,
+            audit_sha256=hashlib.sha256(serialized.encode()).hexdigest(),
+            operation=operation,
+            mode=mode,
+            diff_counts=AuthzPolicyRevisionDiffCounts(**diff_counts),
+        )
+
+    async def read_authz_policy_administration(
+        response: Response,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_nonpersisting_sensitive_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+    ) -> AuthzPolicyAdministrationResponse:
+        trace_id = next_trace_id()
+        response.headers["Cache-Control"] = "no-store"
+        _, active_record = require_authz_policy_administration_read(
+            identity=identity,
+            record_store=record_store,
+            trace_id=trace_id,
+        )
+        snapshot = control_plane_authz_grant_service.summarize_active_authz_policy_health_record(
+            record=active_record,
+            caller_identity=identity,
+        )
+        return AuthzPolicyAdministrationResponse(
+            trace_id=trace_id,
+            policy=authz_policy_administration_provenance(active_record),
+            principal_rule_counts=authz_policy_principal_rule_counts(active_record.policy),
+            health=snapshot.health,
+            managed_sets=snapshot.managed_sets,
+            reachable_administrators=snapshot.reachable_administrators,
+        )
+
+    async def read_authz_policy_revision_history(
+        response: Response,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_nonpersisting_sensitive_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+    ) -> AuthzPolicyRevisionHistoryResponse:
+        trace_id = next_trace_id()
+        response.headers["Cache-Control"] = "no-store"
+        database_store, _ = require_authz_policy_administration_read(
+            identity=identity,
+            record_store=record_store,
+            trace_id=trace_id,
+        )
+        records = database_store.list_authz_policy_records(
+            limit=AUTHZ_POLICY_ADMINISTRATION_HISTORY_LIMIT + 1
+        )
+        bounded_records = records[:AUTHZ_POLICY_ADMINISTRATION_HISTORY_LIMIT]
+        return AuthzPolicyRevisionHistoryResponse(
+            trace_id=trace_id,
+            returned_count=len(bounded_records),
+            truncated=len(records) > len(bounded_records),
+            revisions=tuple(
+                AuthzPolicyRevisionHistoryEntry(
+                    policy=authz_policy_administration_provenance(record),
+                    audit=authz_policy_revision_audit_summary(record.audit),
+                )
+                for record in bounded_records
+            ),
+        )
 
     async def read_authz_policy_health(
         identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
@@ -22699,6 +22881,28 @@ def create_launchplane_fastapi_app(
     )
 
     app.add_api_route(
+        _AUTHZ_POLICY_ADMINISTRATION_ROUTE,
+        read_authz_policy_administration,
+        methods=["GET"],
+        response_model=AuthzPolicyAdministrationResponse,
+        response_model_exclude_none=True,
+        operation_id="read_authz_policy_administration",
+        summary="Read redacted authorization policy administration",
+        responses=authz_policy_route_responses,
+    )
+
+    app.add_api_route(
+        _AUTHZ_POLICY_REVISION_HISTORY_ROUTE,
+        read_authz_policy_revision_history,
+        methods=["GET"],
+        response_model=AuthzPolicyRevisionHistoryResponse,
+        response_model_exclude_none=True,
+        operation_id="read_authz_policy_revision_history",
+        summary="Read redacted authorization policy revision history",
+        responses=authz_policy_route_responses,
+    )
+
+    app.add_api_route(
         _AUTHZ_POLICY_HEALTH_ROUTE,
         read_authz_policy_health,
         methods=["GET"],
@@ -23084,7 +23288,11 @@ def create_launchplane_fastapi_app(
             authz = None
             authz_evaluation = None
             authz_policy_provenance = None
-        if http_error.status_code == 403 and code == "authorization_denied":
+        if (
+            http_error.status_code == 403
+            and code == "authorization_denied"
+            and request.url.path not in _AUTHZ_NONPERSISTING_SENSITIVE_READ_ROUTES
+        ):
             if authz_policy_provenance is None:
                 request_provenance = getattr(
                     request.state,
@@ -23113,6 +23321,7 @@ def create_launchplane_fastapi_app(
                 **(
                     {"Cache-Control": "no-store"}
                     if request.url.path == _AUTHZ_ACTIVATION_PREFLIGHT_ROUTE
+                    or request.url.path in _AUTHZ_NONPERSISTING_SENSITIVE_READ_ROUTES
                     else {}
                 ),
             },
@@ -23155,6 +23364,7 @@ def create_launchplane_fastapi_app(
                 **(
                     {"Cache-Control": "no-store"}
                     if request.url.path == _AUTHZ_ACTIVATION_PREFLIGHT_ROUTE
+                    or request.url.path in _AUTHZ_NONPERSISTING_SENSITIVE_READ_ROUTES
                     else {}
                 ),
             },
@@ -23180,7 +23390,11 @@ def create_launchplane_fastapi_app(
             headers=(
                 {"Cache-Control": "no-store"}
                 if request.url.path
-                in {_AUTHZ_REPOSITORY_SCOPE_READ_ROUTE, _AUTHZ_ACTIVATION_PREFLIGHT_ROUTE}
+                in {
+                    _AUTHZ_REPOSITORY_SCOPE_READ_ROUTE,
+                    _AUTHZ_ACTIVATION_PREFLIGHT_ROUTE,
+                    *_AUTHZ_NONPERSISTING_SENSITIVE_READ_ROUTES,
+                }
                 else None
             ),
         )
