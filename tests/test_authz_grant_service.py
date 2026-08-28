@@ -199,6 +199,16 @@ class AuthzManagedPolicyServiceTests(unittest.TestCase):
         mutable_organization = strict_admin.model_copy(
             update={"github_ids": (106,), "organizations": ("mutable-org",)}
         )
+        mutable_login = strict_admin.model_copy(
+            update={"github_ids": (107,), "logins": ("mutable-login",)}
+        )
+        mutable_team = strict_admin.model_copy(
+            update={"github_ids": (108,), "teams": ("mutable-org/mutable-team",)}
+        )
+        wildcard_context = strict_admin.model_copy(
+            update={"github_ids": (109,), "contexts": ("*",)}
+        )
+        roles_empty = strict_admin.model_copy(update={"github_ids": (110,), "roles": ()})
         policy = LaunchplaneAuthzPolicy(
             schema_version=2,
             github_humans=(
@@ -207,6 +217,10 @@ class AuthzManagedPolicyServiceTests(unittest.TestCase):
                 wildcard_action,
                 wildcard_product,
                 mutable_organization,
+                mutable_login,
+                mutable_team,
+                wildcard_context,
+                roles_empty,
             ),
             local_admins=(
                 LocalAdminPolicyRule(
@@ -225,7 +239,7 @@ class AuthzManagedPolicyServiceTests(unittest.TestCase):
                 github_id=101,
             )
         )
-        for github_id in (103, 104, 105, 106):
+        for github_id in (103, 104, 105, 106, 107, 108, 109, 110):
             self.assertFalse(
                 control_plane_authz_grant_service._authz_policy_allows_immutable_github_id_administration(
                     policy=policy,
@@ -2407,6 +2421,7 @@ class AuthzManagedPolicyServiceTests(unittest.TestCase):
         self.assertEqual(
             summary.health.reason_codes,
             (
+                "authz_policy_independent_admin_unreachable",
                 "policy_schema_legacy",
                 "unmanaged_rules_present",
                 "github_actions_legacy_name_only_rules_present",
@@ -2416,7 +2431,7 @@ class AuthzManagedPolicyServiceTests(unittest.TestCase):
         self.assertEqual(summary.health.managed_rule_count, 0)
         self.assertEqual(summary.health.unmanaged_rule_count, 1)
         self.assertTrue(summary.reachable_administrators.policy_reachable)
-        self.assertTrue(summary.reachable_administrators.independent_from_caller_reachable)
+        self.assertFalse(summary.reachable_administrators.independent_from_caller_reachable)
 
     def test_candidate_policy_structural_diff_is_bounded_and_deterministic(self) -> None:
         active_policy = LaunchplaneAuthzPolicy.model_validate(
@@ -2652,7 +2667,7 @@ class AuthzManagedPolicyServiceTests(unittest.TestCase):
         self.assertEqual(response.probes[0].delta, "granted")
         self.assertEqual(response.candidate_readiness.blocked_rule_count, 0)
         self.assertTrue(response.candidate_reachable_administrators.policy_reachable)
-        self.assertTrue(
+        self.assertFalse(
             response.candidate_reachable_administrators.independent_from_caller_reachable
         )
 

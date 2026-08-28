@@ -660,8 +660,13 @@ def summarize_authz_policy_health(
         )
         for entry in administrator_entries
     )
-    independent_administrator_rule_count = (
-        len(administrator_entries) - caller_administrator_rule_count
+    applying_github_id = (
+        caller_identity.github_id if isinstance(caller_identity, GitHubHumanIdentity) else 0
+    )
+    independent_administrator_rule_count = sum(
+        _is_strict_immutable_github_human_administrator_rule(rule)
+        and any(github_id != applying_github_id for github_id in rule.github_ids)
+        for rule in policy.github_humans
     )
     managed_administrator_rule_count = sum(
         entry.rule.managed_set_id is not None for entry in administrator_entries
