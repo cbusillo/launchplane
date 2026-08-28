@@ -1505,7 +1505,7 @@ class SchemaMigrationTests(unittest.TestCase):
             for primary_key in CRITICAL_PRIMARY_KEYS
         }
 
-        self.assertEqual(EXPECTED_ALEMBIC_HEAD_REVISION, "f2241a0b1c2d")
+        self.assertEqual(EXPECTED_ALEMBIC_HEAD_REVISION, "e5f7a9b1c3d6")
         self.assertNotIn(
             ("launchplane_human_sessions", "launchplane_human_sessions_github_id_idx"),
             indexes,
@@ -1518,6 +1518,33 @@ class SchemaMigrationTests(unittest.TestCase):
             column_types[("launchplane_privileged_operation_events", "payload")],
             ("jsonb",),
         )
+        self.assertEqual(
+            column_types[("launchplane_owner_control_channel_sessions", "payload")],
+            ("jsonb",),
+        )
+        self.assertEqual(
+            primary_keys["launchplane_owner_control_issued_challenges"],
+            ("challenge_id",),
+        )
+        self.assertIn(
+            (
+                "launchplane_owner_control_issued_challenges",
+                "launchplane_owner_control_challenge_state_idx",
+            ),
+            indexes,
+        )
+        self.assertEqual(
+            primary_keys["launchplane_owner_control_shadow_verification_events"],
+            ("event_id",),
+        )
+        self.assertIn(
+            (
+                "launchplane_owner_control_shadow_verification_events",
+                "launchplane_owner_control_shadow_event_challenge_idx",
+            ),
+            indexes,
+        )
+
         self.assertEqual(
             primary_keys["launchplane_privileged_operations"],
             ("operation_id",),
@@ -1731,6 +1758,78 @@ class SchemaMigrationTests(unittest.TestCase):
             ].column_names,
             ("repository_id", "pull_request_number", "head_sha", "occurred_at", "event_id"),
         )
+
+    def test_owner_control_shadow_verifier_migration_upgrades_and_downgrades(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = (
+                f"sqlite+pysqlite:///{Path(temporary_directory_name) / 'records.sqlite3'}"
+            )
+            config = alembic_config(database_url)
+            command.upgrade(config, EXPECTED_ALEMBIC_HEAD_REVISION)
+            engine = create_engine(database_url)
+            try:
+                inspector = inspect(engine)
+                table_names = set(inspector.get_table_names())
+                event_indexes = {
+                    str(name): index
+                    for index in inspector.get_indexes(
+                        "launchplane_owner_control_shadow_verification_events"
+                    )
+                    if (name := index.get("name")) is not None
+                }
+                event_columns = {
+                    str(column["name"])
+                    for column in inspector.get_columns(
+                        "launchplane_owner_control_shadow_verification_events"
+                    )
+                }
+                challenge_columns = {
+                    str(column["name"])
+                    for column in inspector.get_columns(
+                        "launchplane_owner_control_issued_challenges"
+                    )
+                }
+            finally:
+                engine.dispose()
+            command.downgrade(config, "f2241a0b1c2d")
+            engine = create_engine(database_url)
+            try:
+                downgraded_tables = set(inspect(engine).get_table_names())
+            finally:
+                engine.dispose()
+
+        self.assertTrue(
+            {
+                "launchplane_owner_control_channel_sessions",
+                "launchplane_owner_control_issued_challenges",
+                "launchplane_owner_control_shadow_verification_events",
+            }.issubset(table_names)
+        )
+        self.assertTrue(
+            {
+                "verifier_mode",
+                "authorizes_execution",
+                "authority_state",
+                "challenge_id",
+                "sequence",
+                "verification_status",
+                "payload",
+            }.issubset(event_columns)
+        )
+        self.assertTrue(
+            {
+                "challenge_id",
+                "state",
+                "attempt_count",
+                "consumed_at",
+                "terminal_event_id",
+                "authority_state",
+            }.issubset(challenge_columns)
+        )
+        self.assertIn("launchplane_owner_control_shadow_event_challenge_idx", event_indexes)
+        self.assertNotIn("launchplane_owner_control_channel_sessions", downgraded_tables)
+        self.assertNotIn("launchplane_owner_control_issued_challenges", downgraded_tables)
+        self.assertNotIn("launchplane_owner_control_shadow_verification_events", downgraded_tables)
 
 
 if __name__ == "__main__":

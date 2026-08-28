@@ -10,7 +10,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
 AUTHZ_COMPATIBILITY_FLOOR_REVISION = "f3b5d7e9a1c2"
-EXPECTED_ALEMBIC_HEAD_REVISION = "f2241a0b1c2d"
+EXPECTED_ALEMBIC_HEAD_REVISION = "e5f7a9b1c3d6"
 RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS = (EXPECTED_ALEMBIC_HEAD_REVISION,)
 _AUTHZ_POLICY_TABLE = "launchplane_authz_policies"
 _AUTHZ_POLICY_WRITE_FENCE_TRIGGER = "launchplane_authz_policy_write_fence"
@@ -443,6 +443,21 @@ CRITICAL_POSTGRES_COLUMN_TYPES: tuple[CriticalColumnType, ...] = (
     ),
     CriticalColumnType(
         "launchplane_change_impact_policies",
+        "payload",
+        ("jsonb",),
+    ),
+    CriticalColumnType(
+        "launchplane_owner_control_channel_sessions",
+        "payload",
+        ("jsonb",),
+    ),
+    CriticalColumnType(
+        "launchplane_owner_control_issued_challenges",
+        "payload",
+        ("jsonb",),
+    ),
+    CriticalColumnType(
+        "launchplane_owner_control_shadow_verification_events",
         "payload",
         ("jsonb",),
     ),
@@ -956,6 +971,31 @@ CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
         "launchplane_change_impact_policy_current_idx",
         ("repository_id", "status", "policy_revision"),
     ),
+    CriticalIndex(
+        "launchplane_owner_control_channel_sessions",
+        "launchplane_owner_control_session_status_idx",
+        ("status", "session_expires_at"),
+    ),
+    CriticalIndex(
+        "launchplane_owner_control_issued_challenges",
+        "launchplane_owner_control_challenge_session_idx",
+        ("channel_session_id", "expires_at"),
+    ),
+    CriticalIndex(
+        "launchplane_owner_control_issued_challenges",
+        "launchplane_owner_control_challenge_state_idx",
+        ("state", "expires_at"),
+    ),
+    CriticalIndex(
+        "launchplane_owner_control_shadow_verification_events",
+        "launchplane_owner_control_shadow_event_challenge_idx",
+        ("challenge_nonce", "occurred_at"),
+    ),
+    CriticalIndex(
+        "launchplane_owner_control_shadow_verification_events",
+        "launchplane_owner_control_shadow_event_session_idx",
+        ("channel_session_id", "occurred_at"),
+    ),
 )
 
 CRITICAL_PRIMARY_KEYS: tuple[CriticalPrimaryKey, ...] = (
@@ -1053,6 +1093,18 @@ CRITICAL_PRIMARY_KEYS: tuple[CriticalPrimaryKey, ...] = (
     CriticalPrimaryKey(
         "launchplane_engineering_review_decisions",
         ("decision_id",),
+    ),
+    CriticalPrimaryKey(
+        "launchplane_owner_control_channel_sessions",
+        ("channel_session_id",),
+    ),
+    CriticalPrimaryKey(
+        "launchplane_owner_control_issued_challenges",
+        ("challenge_id",),
+    ),
+    CriticalPrimaryKey(
+        "launchplane_owner_control_shadow_verification_events",
+        ("event_id",),
     ),
 )
 
