@@ -99,9 +99,16 @@ token labels, planner errors, or free-text request reasons.
 At most one `issued` challenge can bind an operation. An exact repeat returns
 that existing challenge only while it remains unexpired, its expiry does not
 exceed the newly requested bound, and the session binding plus all current
-derived provenance still match. An expired row must receive a separately
-audited terminal transition before re-issuance; otherwise issuance conflicts.
-Verification updates only
+derived provenance still match. When locked issuance observes
+`expires_at <=` the database clock, it atomically appends one deterministic
+challenge-lifecycle event, changes the old row from `issued` to `expired`,
+flushes that transition to release the partial one-active-operation guard, and
+inserts the newly derived challenge in the same transaction. The lifecycle
+event contains no envelope and consumes no verification attempt. At the exact
+expiry boundary, issuance and verification serialize on the enrolled-session
+and challenge locks: verification may consume first under its inclusive
+confirmation-time contract, or issuance may expire first; the loser observes
+the committed terminal state. Verification updates only
 the challenge's mutable state/attempt evidence and does not change immutable
 challenge provenance, privileged-operation state, its event ledger, browser
 approval, or execution authorization. The verifier remains `shadow`, inert, and
@@ -144,7 +151,12 @@ operator, policy authority, session credential, or live endpoint data.
 `control_plane.contracts.owner_control_shadow_verifier` defines server-state
 records separate from the published wire contract. PostgreSQL persists enrolled
 channel sessions, issued single-use challenges, and append-only verification
-events. Enrollment and revocation are DB-backed; challenge issuance, expiry,
+events. A separate append-only challenge-lifecycle ledger records reactive
+non-verification transitions such as `issued -> expired` before re-issuance;
+it carries exact challenge/session/operation identifiers, request and binding
+digests, timestamp bounds, and inert non-authorizing markers without an
+envelope digest or attempt sequence. Enrollment and revocation are DB-backed;
+challenge issuance, expiry,
 verification audit timestamps, and successful-consumption timestamps use the
 database clock. Verification locks the enrolled session and issued challenge in
 one transaction, so one exact valid challenge can verify only once. Each issued

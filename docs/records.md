@@ -2674,6 +2674,11 @@ enrolled canonical binding, inert authority marker, and revocation state;
 `launchplane_owner_control_issued_challenges` stores one canonical approval
 request and binding plus their SHA-256 digests, issued/terminal state, and a
 bounded verification-attempt count;
+`launchplane_owner_control_challenge_lifecycle_events` is append-only and stores
+one deterministic `issued -> expired` transition per challenge with exact
+challenge/session/operation identifiers, request and binding digests, challenge
+expiry, database occurrence time, `authorizes_execution = false`, and inert
+authority state but no envelope or verification-attempt sequence;
 and `launchplane_owner_control_shadow_verification_events` is append-only,
 retains only bounded digest/result fields with a unique per-challenge sequence,
 and is constrained to `verifier_mode = 'shadow'`, `authority_state = 'inert'`,
@@ -2685,8 +2690,13 @@ Unknown challenge nonces create no record or event.
 Challenge issuance is service-only and provenance-bound: the store derives the
 canonical approval request from one locked planned operation, exactly one active
 policy, and the enrolled session owner. Its partial unique index permits at most
-one `issued` challenge per operation. Issuance never updates the privileged
-operation current projection or its append-only event ledger.
+one `issued` challenge per operation. When the active row has expired at or
+before the database clock, issuance terminalizes it and appends its lifecycle
+event before flushing and inserting the replacement in the same transaction.
+The challenge `terminal_event_id` prefix identifies whether the terminal record
+came from the lifecycle ledger or the envelope-bound shadow-verification ledger.
+Issuance never updates the privileged operation current projection or its
+append-only event ledger.
 
 **Preserved history:** references to Phase 1 planning records describe the
 pre-worker lifecycle and do not constrain the current Phase 2 statuses.

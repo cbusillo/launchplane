@@ -27,6 +27,8 @@ from control_plane.contracts.owner_control import (
 from control_plane.contracts.owner_control_shadow_verifier import (
     OwnerControlChallengeIssueRequest,
     evaluate_owner_control_shadow_verification,
+    owner_control_challenge_lifecycle_event_id,
+    terminalize_expired_owner_control_challenge_record,
 )
 from control_plane.contracts.authz_policy_record import (
     LaunchplaneAuthzPolicyRecord,
@@ -431,7 +433,7 @@ class OwnerControlShadowVerifierStorageTests(unittest.TestCase):
             issued = self.store.issue_owner_control_challenge(issue_request)
         self.assertEqual(issued.expires_at, "2026-08-28T12:01:30+00:00")
 
-    def test_issuance_rejects_expired_active_replay(self) -> None:
+    def test_issuance_terminalizes_expired_active_challenge_before_reissue(self) -> None:
         private_key = Ed25519PrivateKey.generate()
         binding = _binding(private_key, session_id="owner-control-stale-session")
         self.store.enroll_owner_control_channel_session(binding)
@@ -449,16 +451,189 @@ class OwnerControlShadowVerifierStorageTests(unittest.TestCase):
             "_owner_control_shadow_timestamp",
             return_value="2026-08-28T12:00:00+00:00",
         ):
-            self.store.issue_owner_control_challenge(issue_request)
+            issued = self.store.issue_owner_control_challenge(issue_request)
+        before = self.store.read_privileged_operation_record(operation.operation_id)
+        with patch.object(
+            self.store,
+            "_owner_control_shadow_timestamp",
+            return_value="2026-08-28T12:01:01+00:00",
+        ):
+            reissued = self.store.issue_owner_control_challenge(issue_request)
+        after = self.store.read_privileged_operation_record(operation.operation_id)
+        expired = self.store.read_owner_control_issued_challenge(
+            challenge_nonce=issued.challenge_nonce
+        )
+        lifecycle_events = self.store.list_owner_control_challenge_lifecycle_events(
+            challenge_nonce=issued.challenge_nonce
+        )
+        shadow_events = self.store.list_owner_control_shadow_verification_events(
+            challenge_nonce=issued.challenge_nonce
+        )
+
+        self.assertNotEqual(reissued.challenge_nonce, issued.challenge_nonce)
+        self.assertEqual(reissued.state, "issued")
+        self.assertEqual(expired.state, "expired")
+        self.assertEqual(expired.attempt_count, 0)
+        self.assertIsNone(expired.consumed_at)
+        self.assertEqual(len(lifecycle_events), 1)
+        lifecycle_event = lifecycle_events[0]
+        self.assertEqual(lifecycle_event.event_id, expired.terminal_event_id)
+        self.assertEqual(lifecycle_event.from_state, "issued")
+        self.assertEqual(lifecycle_event.to_state, "expired")
+        self.assertEqual(lifecycle_event.transition_reason, "expired")
+        self.assertEqual(lifecycle_event.occurred_at, reissued.issued_at)
+        self.assertFalse(lifecycle_event.authorizes_execution)
+        self.assertEqual(shadow_events, ())
+        self.assertEqual(before, after)
+
+        expired_result = self.store.verify_owner_control_confirmation_shadow(
+            _envelope(
+                private_key,
+                binding=binding,
+                request=issued.approval_request(),
+            )
+        )
+        expired_after_attempt = self.store.read_owner_control_issued_challenge(
+            challenge_nonce=issued.challenge_nonce
+        )
+        self.assertEqual(expired_result.rejection_reason, "challenge_expired")
+        self.assertEqual(expired_after_attempt.attempt_count, 1)
+        self.assertEqual(expired_after_attempt.terminal_event_id, lifecycle_event.event_id)
+
+    def test_expiry_terminalization_uses_exact_boundary_and_deterministic_event(self) -> None:
+        private_key = Ed25519PrivateKey.generate()
+        binding = _binding(private_key, session_id="owner-control-boundary-session")
+        self.store.enroll_owner_control_channel_session(binding)
+        operation = _seed_issue_provenance(
+            self.store,
+            expires_at="2026-08-28T12:10:00+00:00",
+        )
+        with patch.object(
+            self.store,
+            "_owner_control_shadow_timestamp",
+            return_value="2026-08-28T12:00:00+00:00",
+        ):
+            issued = self.store.issue_owner_control_challenge(
+                OwnerControlChallengeIssueRequest(
+                    channel_session_id=binding.channel_session_id,
+                    operation_id=operation.operation_id,
+                    expires_in_seconds=60,
+                )
+            )
+
+        expired, event = terminalize_expired_owner_control_challenge_record(
+            issued,
+            observed_at=issued.expires_at,
+        )
+        self.assertEqual(expired.state, "expired")
+        self.assertEqual(expired.attempt_count, issued.attempt_count)
+        self.assertEqual(expired.terminal_event_id, event.event_id)
+        self.assertEqual(
+            event.event_id,
+            owner_control_challenge_lifecycle_event_id(
+                challenge_id=issued.challenge_id,
+                from_state="issued",
+                to_state="expired",
+                transition_reason="expired",
+            ),
+        )
+        with self.assertRaisesRegex(ValueError, "has not expired"):
+            terminalize_expired_owner_control_challenge_record(
+                issued,
+                observed_at="2026-08-28T12:00:59+00:00",
+            )
+
+    def test_reissuance_rolls_back_terminalization_when_replacement_insert_fails(self) -> None:
+        private_key = Ed25519PrivateKey.generate()
+        binding = _binding(private_key, session_id="owner-control-rollback-session")
+        self.store.enroll_owner_control_channel_session(binding)
+        operation = _seed_issue_provenance(
+            self.store,
+            expires_at="2026-08-28T12:10:00+00:00",
+        )
+        issue_request = OwnerControlChallengeIssueRequest(
+            channel_session_id=binding.channel_session_id,
+            operation_id=operation.operation_id,
+            expires_in_seconds=60,
+        )
+        with patch.object(
+            self.store,
+            "_owner_control_shadow_timestamp",
+            return_value="2026-08-28T12:00:00+00:00",
+        ):
+            issued = self.store.issue_owner_control_challenge(issue_request)
+
         with (
             patch.object(
                 self.store,
                 "_owner_control_shadow_timestamp",
                 return_value="2026-08-28T12:01:01+00:00",
             ),
-            self.assertRaisesRegex(ValueError, "audited terminal transition"),
+            patch.object(
+                self.store,
+                "_owner_control_issued_challenge_row_from_record",
+                side_effect=RuntimeError("replacement insert failed"),
+            ),
+            self.assertRaisesRegex(RuntimeError, "replacement insert failed"),
         ):
             self.store.issue_owner_control_challenge(issue_request)
+
+        unchanged = self.store.read_owner_control_issued_challenge(
+            challenge_nonce=issued.challenge_nonce
+        )
+        self.assertEqual(unchanged.state, "issued")
+        self.assertIsNone(unchanged.terminal_event_id)
+        self.assertEqual(
+            self.store.list_owner_control_challenge_lifecycle_events(
+                challenge_nonce=issued.challenge_nonce
+            ),
+            (),
+        )
+
+    def test_reissuance_rolls_back_when_replacement_expires_before_commit(self) -> None:
+        private_key = Ed25519PrivateKey.generate()
+        binding = _binding(private_key, session_id="owner-control-stale-commit-session")
+        self.store.enroll_owner_control_channel_session(binding)
+        operation = _seed_issue_provenance(
+            self.store,
+            expires_at="2026-08-28T12:10:00+00:00",
+        )
+        issue_request = OwnerControlChallengeIssueRequest(
+            channel_session_id=binding.channel_session_id,
+            operation_id=operation.operation_id,
+            expires_in_seconds=60,
+        )
+        with patch.object(
+            self.store,
+            "_owner_control_shadow_timestamp",
+            return_value="2026-08-28T12:00:00+00:00",
+        ):
+            issued = self.store.issue_owner_control_challenge(issue_request)
+
+        with (
+            patch.object(
+                self.store,
+                "_owner_control_shadow_timestamp",
+                side_effect=(
+                    "2026-08-28T12:01:01+00:00",
+                    "2026-08-28T12:02:01+00:00",
+                ),
+            ),
+            self.assertRaisesRegex(ValueError, "expired before issuance committed"),
+        ):
+            self.store.issue_owner_control_challenge(issue_request)
+
+        unchanged = self.store.read_owner_control_issued_challenge(
+            challenge_nonce=issued.challenge_nonce
+        )
+        self.assertEqual(unchanged.state, "issued")
+        self.assertIsNone(unchanged.terminal_event_id)
+        self.assertEqual(
+            self.store.list_owner_control_challenge_lifecycle_events(
+                challenge_nonce=issued.challenge_nonce
+            ),
+            (),
+        )
 
     def test_issuance_rejects_rules_with_mutable_principal_selectors(self) -> None:
         private_key = Ed25519PrivateKey.generate()
