@@ -23,6 +23,21 @@ from control_plane.contracts.owner_control import (
     owner_control_signature_payload,
     owner_control_signature_payload_bytes,
 )
+from control_plane.contracts.owner_control_enrollment_provenance import (
+    OWNER_CONTROL_ENROLLMENT_CONTEXT,
+    OWNER_CONTROL_ENROLLMENT_PROVENANCE_SCHEMA_VERSION,
+    OWNER_CONTROL_PROVENANCE_TIER,
+    OWNER_CONTROL_SERVER_CORROBORATION,
+    OwnerControlEnrollmentProvenanceRecord,
+    OwnerControlGestureSourceClaim,
+    OwnerControlHostPrincipalClaim,
+    OwnerControlKeyCustodyClaim,
+    OwnerControlPrincipalSeparationClaim,
+    derive_owner_control_provenance_tier,
+    is_published_owner_control_synthetic_public_key,
+    owner_control_host_principal_claim_sha256,
+    owner_control_public_key_sha256,
+)
 from control_plane.contracts.owner_control_shadow_verifier import (
     OWNER_CONTROL_SHADOW_AUTHORITY_STATE,
     OWNER_CONTROL_SHADOW_MAX_ATTEMPTS,
@@ -48,11 +63,13 @@ from control_plane.privileged_operation_registry import list_privileged_operatio
 from control_plane.privileged_operation_registry import read_privileged_operation_descriptor
 
 
-OWNER_CONTROL_CONTRACT_SCHEMA_VERSION = 3
-_OWNER_CONTROL_PREVIOUS_CONTRACT_SCHEMA_VERSION = 2
+OWNER_CONTROL_CONTRACT_SCHEMA_VERSION = 4
+_OWNER_CONTROL_PREVIOUS_CONTRACT_SCHEMA_VERSION = 3
 _OWNER_CONTROL_VECTOR_SCHEMA_VERSION = 1
+_OWNER_CONTROL_SIGNATURE_CONTRACT_SCHEMA_VERSION = 2
 _ARTIFACT_SYNTHETIC_PRIVATE_KEY_SEED = bytes(range(32))
 _ARTIFACT_SYNTHETIC_WRONG_PRIVATE_KEY_SEED = bytes(range(31, -1, -1))
+_PROVENANCE_SYNTHETIC_PUBLIC_KEY = base64.urlsafe_b64encode(bytes(32)).decode().rstrip("=")
 _PRESERVED_V2_SECTION_SHA256 = {
     "canonical_json": "0c6b6454d737943d01d4621c217ff8412552a0bf0c69a0f50a761d38ac0e7d1f",
     "canonicalization_vectors": "ca481ff769bba537310c8568b56850f5d12ebc0c90ace9ea2dc39ff714daa6a8",
@@ -62,6 +79,20 @@ _PRESERVED_V2_SECTION_SHA256 = {
     "negative_vectors": "232d29bc542df455c9f54a3196a2a4d41cb0912155f92d060c850df99c835b29",
     "schemas": "00a8524a65afd637c8cfc88ef44e780154addc759b813a831f3ddf2ce1490bd0",
     "signature_declaration": "7d9c62d55792931383d4a02ed99d31e21c67b5ce714c01d9144dc2a3bed34f72",
+}
+_PRESERVED_V3_SECTION_SHA256 = {
+    "canonical_json": "0c6b6454d737943d01d4621c217ff8412552a0bf0c69a0f50a761d38ac0e7d1f",
+    "canonicalization_vectors": "ca481ff769bba537310c8568b56850f5d12ebc0c90ace9ea2dc39ff714daa6a8",
+    "challenge_lifecycle_vectors": "81a1d62ee2c9268366e052da78221ab13d8946b276c0a06c1009296357a89807",
+    "compatibility": "cb8720ac7b08fd92ade453489b127546a98908f858408e7ac56c2bbd05525982",
+    "confirmation_golden_vectors": "58391f364a79ab321596d30200b87c9d29be366eaa1386a9ff4c242c8b38d50a",
+    "golden_vectors": "6955c5c8bb228c21bc6a68a4ddb7cf22456cd51615ffe6e421b0fa04f15d9584",
+    "negative_confirmation_vectors": "9d529ca0f5153c8c3eb3eb4862311efc6dc3c1dc7e5df55824ebde13194eb46d",
+    "negative_vectors": "232d29bc542df455c9f54a3196a2a4d41cb0912155f92d060c850df99c835b29",
+    "schema_version": "4e07408562bedb8b60ce05c1decfe3ad16b72230967de01f640b7e4729b49fce",
+    "schemas": "00a8524a65afd637c8cfc88ef44e780154addc759b813a831f3ddf2ce1490bd0",
+    "signature_declaration": "7d9c62d55792931383d4a02ed99d31e21c67b5ce714c01d9144dc2a3bed34f72",
+    "verification_state_vectors": "4c199bf64618845f098ac12ef992a21111ab87a6e91e5325f962db3e8174c8df",
 }
 
 
@@ -891,14 +922,159 @@ def _signature_declaration() -> dict[str, Any]:
         "signature_bytes": 64,
         "signature_encoding": "base64url-unpadded",
         "legacy_golden_channel_binding": "synthetic-placeholder-not-channel-binding-record",
-        "contract_schema_version": _OWNER_CONTROL_PREVIOUS_CONTRACT_SCHEMA_VERSION,
+        "contract_schema_version": _OWNER_CONTROL_SIGNATURE_CONTRACT_SCHEMA_VERSION,
     }
 
 
-def _compatibility_declaration() -> dict[str, Any]:
+def _provenance_claims() -> list[OwnerControlHostPrincipalClaim]:
+    return [
+        OwnerControlHostPrincipalClaim(
+            host_instance_id="synthetic-owner-control-host",
+            principal_id="synthetic-owner-control-principal",
+            principal_separation=principal_separation,
+            key_custody=key_custody,
+            gesture_source=gesture_source,
+        )
+        for principal_separation in get_args(OwnerControlPrincipalSeparationClaim)
+        for key_custody in get_args(OwnerControlKeyCustodyClaim)
+        for gesture_source in get_args(OwnerControlGestureSourceClaim)
+    ]
+
+
+def _provenance_record_for_claim(
+    claim: OwnerControlHostPrincipalClaim,
+) -> OwnerControlEnrollmentProvenanceRecord:
+    _, signed_binding, _, _, _ = _shadow_verifier_fixture_models()
+    binding = signed_binding.model_copy(
+        update={"owner_public_key": _PROVENANCE_SYNTHETIC_PUBLIC_KEY}
+    )
+    binding_payload = binding.model_dump(mode="json")
+    claim_payload = claim.model_dump(mode="json")
+    return OwnerControlEnrollmentProvenanceRecord(
+        channel_session_id=binding.channel_session_id,
+        owner_github_id=binding.owner_github_id,
+        binding_json=canonical_json_bytes(binding_payload).decode(),
+        binding_sha256=owner_control_channel_binding_sha256(binding),
+        host_principal_claim_json=canonical_json_bytes(claim_payload).decode(),
+        host_principal_claim_sha256=owner_control_host_principal_claim_sha256(claim),
+        enrolled_at="2030-01-02T03:00:05+00:00",
+        enrollment_context=OWNER_CONTROL_ENROLLMENT_CONTEXT,
+        server_observed_corroboration=OWNER_CONTROL_SERVER_CORROBORATION,
+        provenance_tier=derive_owner_control_provenance_tier(
+            claim=claim,
+            server_observed_corroboration=OWNER_CONTROL_SERVER_CORROBORATION,
+        ),
+    )
+
+
+def _provenance_vectors() -> list[dict[str, Any]]:
+    vectors: list[dict[str, Any]] = []
+    for claim in _provenance_claims():
+        record = _provenance_record_for_claim(claim)
+        claim_payload = claim.model_dump(mode="json")
+        record_payload = record.model_dump(mode="json")
+        vectors.append(
+            {
+                "claim": {
+                    "canonical_json": canonical_json_bytes(claim_payload).decode(),
+                    "payload": claim_payload,
+                    "sha256": owner_control_host_principal_claim_sha256(claim),
+                },
+                "enrollment_provenance": {
+                    "canonical_json": canonical_json_bytes(record_payload).decode(),
+                    "payload": record_payload,
+                    "sha256": canonical_json_sha256(record_payload),
+                },
+                "result": {
+                    "authority_state": record.authority_state,
+                    "authorizes_execution": record.authorizes_execution,
+                    "provenance_tier": record.provenance_tier,
+                    "server_observed_corroboration": record.server_observed_corroboration,
+                },
+            }
+        )
+    return vectors
+
+
+def _negative_provenance_vectors() -> list[dict[str, Any]]:
+    claim = _provenance_claims()[0]
+    claim_payload = claim.model_dump(mode="json")
+    record = _provenance_record_for_claim(claim)
+    record_payload = record.model_dump(mode="json")
+    published_keys = (
+        _synthetic_owner_public_key(_artifact_synthetic_private_key()),
+        _synthetic_owner_public_key(_artifact_synthetic_wrong_private_key()),
+        _PROVENANCE_SYNTHETIC_PUBLIC_KEY,
+    )
+    return [
+        {
+            "model": "owner_control_host_principal_claim",
+            "rule": "unknown-fields-are-rejected",
+            "error_location": ["unexpected"],
+            "payload": {**claim_payload, "unexpected": True},
+        },
+        {
+            "model": "owner_control_host_principal_claim",
+            "rule": "unknown-schema-versions-are-rejected",
+            "error_location": ["schema_version"],
+            "payload": {**claim_payload, "schema_version": 2},
+        },
+        {
+            "model": "owner_control_enrollment_provenance",
+            "rule": "claim-drift-is-rejected",
+            "error_location": [],
+            "payload": {
+                **record_payload,
+                "host_principal_claim_json": canonical_json_bytes(
+                    {**claim_payload, "principal_id": "synthetic-changed-principal"}
+                ).decode(),
+            },
+        },
+        {
+            "model": "owner_control_enrollment_provenance",
+            "rule": "absent-corroboration-cannot-raise-trust",
+            "error_location": ["provenance_tier"],
+            "payload": {**record_payload, "provenance_tier": "corroborated"},
+        },
+        {
+            "operation": "issue_challenge",
+            "rule": "missing-enrollment-provenance-is-rejected",
+            "channel_session_id": record.channel_session_id,
+            "result": "reject",
+        },
+        *[
+            {
+                "operation": "enroll_channel_session",
+                "rule": "published-synthetic-conformance-key-is-rejected",
+                "owner_public_key_sha256": owner_control_public_key_sha256(public_key),
+                "result": "reject",
+                "runtime_guard_matches": is_published_owner_control_synthetic_public_key(
+                    public_key
+                ),
+            }
+            for public_key in published_keys
+        ],
+    ]
+
+
+def _provenance_declaration() -> dict[str, Any]:
     return {
-        "container_schema_version": OWNER_CONTROL_CONTRACT_SCHEMA_VERSION,
-        "previous_container_schema_version": _OWNER_CONTROL_PREVIOUS_CONTRACT_SCHEMA_VERSION,
+        "authority_state": OWNER_CONTROL_SHADOW_AUTHORITY_STATE,
+        "authorizes_execution": False,
+        "claim_source": "caller-declared",
+        "enrollment_context": OWNER_CONTROL_ENROLLMENT_CONTEXT,
+        "provenance_schema_version": OWNER_CONTROL_ENROLLMENT_PROVENANCE_SCHEMA_VERSION,
+        "provenance_tier": OWNER_CONTROL_PROVENANCE_TIER,
+        "runtime_synthetic_key_policy": "reject-published-conformance-keys",
+        "server_observed_corroboration": OWNER_CONTROL_SERVER_CORROBORATION,
+        "trust_derivation": "corroboration-only",
+    }
+
+
+def _v3_compatibility_declaration() -> dict[str, Any]:
+    return {
+        "container_schema_version": 3,
+        "previous_container_schema_version": 2,
         "change_kind": "additive-server-state-vectors",
         "unknown_container_versions": "reject",
         "wire_model_schema_versions": [1],
@@ -907,11 +1083,41 @@ def _compatibility_declaration() -> dict[str, Any]:
     }
 
 
+def _compatibility_declaration() -> dict[str, Any]:
+    return {
+        "container_schema_version": OWNER_CONTROL_CONTRACT_SCHEMA_VERSION,
+        "previous_container_schema_version": _OWNER_CONTROL_PREVIOUS_CONTRACT_SCHEMA_VERSION,
+        "change_kind": "additive-enrollment-provenance",
+        "unknown_container_versions": "reject",
+        "wire_model_schema_versions": [1],
+        "shadow_verifier_schema_versions": [OWNER_CONTROL_SHADOW_VERIFIER_SCHEMA_VERSION],
+        "enrollment_provenance_schema_versions": [
+            OWNER_CONTROL_ENROLLMENT_PROVENANCE_SCHEMA_VERSION
+        ],
+        "preserved_v2_section_sha256": dict(_PRESERVED_V2_SECTION_SHA256),
+        "preserved_v3_section_sha256": dict(_PRESERVED_V3_SECTION_SHA256),
+    }
+
+
 def _validate_preserved_v2_sections(artifact: Mapping[str, Any]) -> None:
     for section, expected_sha256 in _PRESERVED_V2_SECTION_SHA256.items():
         if canonical_json_sha256(artifact[section]) != expected_sha256:
             raise OwnerControlContractError(
                 f"Owner-control v2 section {section!r} changed without a compatibility break"
+            )
+
+
+def _validate_preserved_v3_sections(artifact: Mapping[str, Any]) -> None:
+    for section, expected_sha256 in _PRESERVED_V3_SECTION_SHA256.items():
+        if section == "schema_version":
+            actual_sha256 = canonical_json_sha256(3)
+        elif section == "compatibility":
+            actual_sha256 = canonical_json_sha256(_v3_compatibility_declaration())
+        else:
+            actual_sha256 = canonical_json_sha256(artifact[section])
+        if actual_sha256 != expected_sha256:
+            raise OwnerControlContractError(
+                f"Owner-control v3 section {section!r} changed without a compatibility break"
             )
 
 
@@ -962,6 +1168,13 @@ def _build_owner_control_contract() -> dict[str, Any]:
         "negative_confirmation_vectors": _negative_confirmation_vectors(),
         "verification_state_vectors": _verification_state_vectors(),
         "challenge_lifecycle_vectors": _challenge_lifecycle_vectors(),
+        "provenance_declaration": _provenance_declaration(),
+        "provenance_schemas": {
+            "owner_control_host_principal_claim": OwnerControlHostPrincipalClaim.model_json_schema(),
+            "owner_control_enrollment_provenance": OwnerControlEnrollmentProvenanceRecord.model_json_schema(),
+        },
+        "provenance_vectors": _provenance_vectors(),
+        "negative_provenance_vectors": _negative_provenance_vectors(),
     }
 
 
@@ -970,6 +1183,7 @@ def build_owner_control_contract() -> dict[str, Any]:
 
     artifact = _build_owner_control_contract()
     _validate_preserved_v2_sections(artifact)
+    _validate_preserved_v3_sections(artifact)
     return artifact
 
 
@@ -999,6 +1213,10 @@ def validate_owner_control_contract(artifact: Mapping[str, Any]) -> None:
             "negative_confirmation_vectors",
             "verification_state_vectors",
             "challenge_lifecycle_vectors",
+            "provenance_declaration",
+            "provenance_schemas",
+            "provenance_vectors",
+            "negative_provenance_vectors",
         },
         "root",
     )
@@ -1008,6 +1226,7 @@ def validate_owner_control_contract(artifact: Mapping[str, Any]) -> None:
     if artifact["compatibility"] != expected["compatibility"]:
         raise OwnerControlContractError("Owner-control compatibility declaration drifted")
     _validate_preserved_v2_sections(artifact)
+    _validate_preserved_v3_sections(artifact)
     if artifact["canonical_json"] != expected["canonical_json"]:
         raise OwnerControlContractError("Owner-control canonical JSON declaration drifted")
     if artifact["signature_declaration"] != expected["signature_declaration"]:
@@ -1031,6 +1250,14 @@ def validate_owner_control_contract(artifact: Mapping[str, Any]) -> None:
         raise OwnerControlContractError("Owner-control verification state vectors drifted")
     if artifact["challenge_lifecycle_vectors"] != expected["challenge_lifecycle_vectors"]:
         raise OwnerControlContractError("Owner-control challenge lifecycle vectors drifted")
+    if artifact["provenance_declaration"] != expected["provenance_declaration"]:
+        raise OwnerControlContractError("Owner-control provenance declaration drifted")
+    if artifact["provenance_schemas"] != expected["provenance_schemas"]:
+        raise OwnerControlContractError("Owner-control provenance schemas drifted")
+    if artifact["provenance_vectors"] != expected["provenance_vectors"]:
+        raise OwnerControlContractError("Owner-control provenance vectors drifted")
+    if artifact["negative_provenance_vectors"] != expected["negative_provenance_vectors"]:
+        raise OwnerControlContractError("Owner-control negative provenance vectors drifted")
 
 
 def write_owner_control_contract(output_path: Path) -> Path:

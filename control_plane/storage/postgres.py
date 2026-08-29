@@ -17,6 +17,7 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
+    ForeignKey,
     JSON,
     Index,
     Integer,
@@ -121,6 +122,13 @@ from control_plane.contracts.owner_control import (
     ChannelBindingRecord,
     OwnerControlConfirmationEnvelope,
     owner_control_channel_binding_sha256,
+)
+from control_plane.contracts.owner_control_enrollment_provenance import (
+    OwnerControlChannelEnrollment,
+    OwnerControlEnrollmentProvenanceConflictError,
+    OwnerControlEnrollmentProvenanceRecord,
+    OwnerControlHostPrincipalClaim,
+    build_owner_control_enrollment_provenance_record,
 )
 from control_plane.contracts.owner_control_shadow_verifier import (
     OWNER_CONTROL_SHADOW_MAX_ATTEMPTS,
@@ -1096,6 +1104,77 @@ class LaunchplaneOwnerControlChannelSessionRow(Base):
         String,
         nullable=False,
         server_default="inert",
+    )
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneOwnerControlEnrollmentProvenanceRow(Base):
+    __tablename__ = "launchplane_owner_control_enrollment_provenance"
+    __table_args__ = (
+        CheckConstraint(
+            "enrollment_context = 'postgres_record_store'",
+            name="launchplane_owner_control_provenance_context_ck",
+        ),
+        CheckConstraint(
+            "server_observed_corroboration = 'none'",
+            name="launchplane_owner_control_provenance_corroboration_ck",
+        ),
+        CheckConstraint(
+            "provenance_tier = 'self_asserted'",
+            name="launchplane_owner_control_provenance_tier_ck",
+        ),
+        CheckConstraint(
+            "authority_state = 'inert'",
+            name="launchplane_owner_control_provenance_authority_ck",
+        ),
+        CheckConstraint(
+            "authorizes_execution = false",
+            name="launchplane_owner_control_provenance_authorization_ck",
+        ),
+        UniqueConstraint(
+            "owner_github_id",
+            "binding_sha256",
+            "host_principal_claim_sha256",
+            name="launchplane_owner_control_provenance_binding_claim_uq",
+        ),
+    )
+
+    channel_session_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey(
+            "launchplane_owner_control_channel_sessions.channel_session_id",
+            ondelete="RESTRICT",
+        ),
+        primary_key=True,
+    )
+    owner_github_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    binding_sha256: Mapped[str] = mapped_column(String, nullable=False)
+    host_principal_claim_sha256: Mapped[str] = mapped_column(String, nullable=False)
+    enrolled_at: Mapped[str] = mapped_column(String, nullable=False)
+    enrollment_context: Mapped[str] = mapped_column(
+        String,
+        nullable=False,
+        server_default="postgres_record_store",
+    )
+    server_observed_corroboration: Mapped[str] = mapped_column(
+        String,
+        nullable=False,
+        server_default="none",
+    )
+    provenance_tier: Mapped[str] = mapped_column(
+        String,
+        nullable=False,
+        server_default="self_asserted",
+    )
+    authority_state: Mapped[str] = mapped_column(
+        String,
+        nullable=False,
+        server_default="inert",
+    )
+    authorizes_execution: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        server_default=false(),
     )
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
@@ -9259,6 +9338,25 @@ class PostgresRecordStore(HumanSessionStore):
                 statement = statement.with_for_update()
         return cast(LaunchplaneOwnerControlChannelSessionRow | None, session.scalar(statement))
 
+    def _owner_control_enrollment_provenance_row(
+        self,
+        session: Any,
+        *,
+        channel_session_id: str,
+        for_update: bool = False,
+    ) -> LaunchplaneOwnerControlEnrollmentProvenanceRow | None:
+        statement = select(LaunchplaneOwnerControlEnrollmentProvenanceRow).where(
+            LaunchplaneOwnerControlEnrollmentProvenanceRow.channel_session_id == channel_session_id
+        )
+        if for_update:
+            statement = statement.execution_options(populate_existing=True)
+            if not self.database_url.startswith("sqlite"):
+                statement = statement.with_for_update()
+        return cast(
+            LaunchplaneOwnerControlEnrollmentProvenanceRow | None,
+            session.scalar(statement),
+        )
+
     def _owner_control_issued_challenge_row(
         self,
         session: Any,
@@ -9334,6 +9432,12 @@ class PostgresRecordStore(HumanSessionStore):
         return OwnerControlChannelSessionRecord.model_validate(row.payload)
 
     @staticmethod
+    def _owner_control_enrollment_provenance_record_from_row(
+        row: LaunchplaneOwnerControlEnrollmentProvenanceRow,
+    ) -> OwnerControlEnrollmentProvenanceRecord:
+        return OwnerControlEnrollmentProvenanceRecord.model_validate(row.payload)
+
+    @staticmethod
     def _owner_control_issued_challenge_record_from_row(
         row: LaunchplaneOwnerControlIssuedChallengeRow,
     ) -> OwnerControlIssuedChallengeRecord:
@@ -9354,6 +9458,24 @@ class PostgresRecordStore(HumanSessionStore):
             enrolled_at=record.enrolled_at,
             revoked_at=record.revoked_at,
             authority_state=record.authority_state,
+            payload=self._payload_dict(record),
+        )
+
+    def _owner_control_enrollment_provenance_row_from_record(
+        self,
+        record: OwnerControlEnrollmentProvenanceRecord,
+    ) -> LaunchplaneOwnerControlEnrollmentProvenanceRow:
+        return LaunchplaneOwnerControlEnrollmentProvenanceRow(
+            channel_session_id=record.channel_session_id,
+            owner_github_id=record.owner_github_id,
+            binding_sha256=record.binding_sha256,
+            host_principal_claim_sha256=record.host_principal_claim_sha256,
+            enrolled_at=record.enrolled_at,
+            enrollment_context=record.enrollment_context,
+            server_observed_corroboration=record.server_observed_corroboration,
+            provenance_tier=record.provenance_tier,
+            authority_state=record.authority_state,
+            authorizes_execution=record.authorizes_execution,
             payload=self._payload_dict(record),
         )
 
@@ -9433,7 +9555,9 @@ class PostgresRecordStore(HumanSessionStore):
     def enroll_owner_control_channel_session(
         self,
         binding: ChannelBindingRecord,
-    ) -> OwnerControlChannelSessionRecord:
+        *,
+        host_principal_claim: OwnerControlHostPrincipalClaim,
+    ) -> OwnerControlChannelEnrollment:
         with self._session_factory() as session:
             self._begin_serialized_write(session)
             existing_row = self._owner_control_channel_session_row(
@@ -9443,22 +9567,53 @@ class PostgresRecordStore(HumanSessionStore):
             )
             if existing_row is not None:
                 existing_record = self._owner_control_channel_session_record_from_row(existing_row)
-                if (
+                if not (
                     existing_record.binding_sha256 == owner_control_channel_binding_sha256(binding)
                     and existing_record.channel_binding() == binding
                 ):
-                    session.rollback()
-                    return existing_record
-                raise OwnerControlShadowVerifierConflictError(
-                    "Channel-session enrollment changed the stored binding."
+                    raise OwnerControlShadowVerifierConflictError(
+                        "Channel-session enrollment changed the stored binding."
+                    )
+                provenance_row = self._owner_control_enrollment_provenance_row(
+                    session,
+                    channel_session_id=binding.channel_session_id,
+                    for_update=True,
                 )
+                if provenance_row is None:
+                    raise OwnerControlEnrollmentProvenanceConflictError(
+                        "Channel-session enrollment provenance is missing."
+                    )
+                existing_provenance = self._owner_control_enrollment_provenance_record_from_row(
+                    provenance_row
+                )
+                candidate_provenance = build_owner_control_enrollment_provenance_record(
+                    binding=binding,
+                    claim=host_principal_claim,
+                    enrolled_at=existing_record.enrolled_at,
+                )
+                if existing_provenance != candidate_provenance:
+                    raise OwnerControlEnrollmentProvenanceConflictError(
+                        "Channel-session re-enrollment changed immutable provenance."
+                    )
+                session.rollback()
+                return OwnerControlChannelEnrollment(
+                    session=existing_record,
+                    provenance=existing_provenance,
+                )
+            enrolled_at = self._owner_control_shadow_timestamp(session)
             record = build_owner_control_channel_session_record(
                 binding=binding,
-                enrolled_at=self._owner_control_shadow_timestamp(session),
+                enrolled_at=enrolled_at,
+            )
+            provenance = build_owner_control_enrollment_provenance_record(
+                binding=binding,
+                claim=host_principal_claim,
+                enrolled_at=enrolled_at,
             )
             session.add(self._owner_control_channel_session_row_from_record(record))
+            session.add(self._owner_control_enrollment_provenance_row_from_record(provenance))
             session.commit()
-            return record
+            return OwnerControlChannelEnrollment(session=record, provenance=provenance)
 
     def revoke_owner_control_channel_session(
         self,
@@ -9504,6 +9659,21 @@ class PostgresRecordStore(HumanSessionStore):
                     f"Owner-control channel session {issue_request.channel_session_id} was not found."
                 )
             session_record = self._owner_control_channel_session_record_from_row(session_row)
+            provenance_row = self._owner_control_enrollment_provenance_row(
+                session,
+                channel_session_id=issue_request.channel_session_id,
+                for_update=True,
+            )
+            if provenance_row is None:
+                raise OwnerControlEnrollmentProvenanceConflictError(
+                    "Owner-control challenge issuance requires enrollment provenance."
+                )
+            OwnerControlChannelEnrollment(
+                session=session_record,
+                provenance=self._owner_control_enrollment_provenance_record_from_row(
+                    provenance_row
+                ),
+            )
             operation = self._locked_privileged_operation_record(
                 session,
                 operation_id=issue_request.operation_id,
@@ -9621,6 +9791,22 @@ class PostgresRecordStore(HumanSessionStore):
                 channel_session_id=observed_challenge.channel_session_id,
                 for_update=True,
             )
+            if session_row is not None:
+                provenance_row = self._owner_control_enrollment_provenance_row(
+                    session,
+                    channel_session_id=observed_challenge.channel_session_id,
+                    for_update=True,
+                )
+                if provenance_row is None:
+                    raise OwnerControlEnrollmentProvenanceConflictError(
+                        "Owner-control shadow verification requires enrollment provenance."
+                    )
+                OwnerControlChannelEnrollment(
+                    session=self._owner_control_channel_session_record_from_row(session_row),
+                    provenance=self._owner_control_enrollment_provenance_record_from_row(
+                        provenance_row
+                    ),
+                )
             challenge_row = self._owner_control_issued_challenge_row(
                 session,
                 challenge_nonce=observed_challenge.challenge_nonce,
@@ -9741,6 +9927,20 @@ class PostgresRecordStore(HumanSessionStore):
             orm_model=LaunchplaneOwnerControlChannelSessionRow,
             filters=(
                 LaunchplaneOwnerControlChannelSessionRow.channel_session_id == channel_session_id,
+            ),
+        )
+
+    def read_owner_control_enrollment_provenance(
+        self,
+        *,
+        channel_session_id: str,
+    ) -> OwnerControlEnrollmentProvenanceRecord:
+        return self._read_model(
+            model_type=OwnerControlEnrollmentProvenanceRecord,
+            orm_model=LaunchplaneOwnerControlEnrollmentProvenanceRow,
+            filters=(
+                LaunchplaneOwnerControlEnrollmentProvenanceRow.channel_session_id
+                == channel_session_id,
             ),
         )
 

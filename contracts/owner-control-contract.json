@@ -128,8 +128,11 @@
     }
   ],
   "compatibility": {
-    "change_kind": "additive-server-state-vectors",
-    "container_schema_version": 3,
+    "change_kind": "additive-enrollment-provenance",
+    "container_schema_version": 4,
+    "enrollment_provenance_schema_versions": [
+      1
+    ],
     "preserved_v2_section_sha256": {
       "canonical_json": "0c6b6454d737943d01d4621c217ff8412552a0bf0c69a0f50a761d38ac0e7d1f",
       "canonicalization_vectors": "ca481ff769bba537310c8568b56850f5d12ebc0c90ace9ea2dc39ff714daa6a8",
@@ -140,7 +143,21 @@
       "schemas": "00a8524a65afd637c8cfc88ef44e780154addc759b813a831f3ddf2ce1490bd0",
       "signature_declaration": "7d9c62d55792931383d4a02ed99d31e21c67b5ce714c01d9144dc2a3bed34f72"
     },
-    "previous_container_schema_version": 2,
+    "preserved_v3_section_sha256": {
+      "canonical_json": "0c6b6454d737943d01d4621c217ff8412552a0bf0c69a0f50a761d38ac0e7d1f",
+      "canonicalization_vectors": "ca481ff769bba537310c8568b56850f5d12ebc0c90ace9ea2dc39ff714daa6a8",
+      "challenge_lifecycle_vectors": "81a1d62ee2c9268366e052da78221ab13d8946b276c0a06c1009296357a89807",
+      "compatibility": "cb8720ac7b08fd92ade453489b127546a98908f858408e7ac56c2bbd05525982",
+      "confirmation_golden_vectors": "58391f364a79ab321596d30200b87c9d29be366eaa1386a9ff4c242c8b38d50a",
+      "golden_vectors": "6955c5c8bb228c21bc6a68a4ddb7cf22456cd51615ffe6e421b0fa04f15d9584",
+      "negative_confirmation_vectors": "9d529ca0f5153c8c3eb3eb4862311efc6dc3c1dc7e5df55824ebde13194eb46d",
+      "negative_vectors": "232d29bc542df455c9f54a3196a2a4d41cb0912155f92d060c850df99c835b29",
+      "schema_version": "4e07408562bedb8b60ce05c1decfe3ad16b72230967de01f640b7e4729b49fce",
+      "schemas": "00a8524a65afd637c8cfc88ef44e780154addc759b813a831f3ddf2ce1490bd0",
+      "signature_declaration": "7d9c62d55792931383d4a02ed99d31e21c67b5ce714c01d9144dc2a3bed34f72",
+      "verification_state_vectors": "4c199bf64618845f098ac12ef992a21111ab87a6e91e5325f962db3e8174c8df"
+    },
+    "previous_container_schema_version": 3,
     "shadow_verifier_schema_versions": [
       1
     ],
@@ -1496,6 +1513,108 @@
       "verification": "invalid"
     }
   ],
+  "negative_provenance_vectors": [
+    {
+      "error_location": [
+        "unexpected"
+      ],
+      "model": "owner_control_host_principal_claim",
+      "payload": {
+        "gesture_source": "not_claimed",
+        "host_instance_id": "synthetic-owner-control-host",
+        "key_custody": "not_claimed",
+        "principal_id": "synthetic-owner-control-principal",
+        "principal_separation": "not_claimed",
+        "schema_version": 1,
+        "unexpected": true
+      },
+      "rule": "unknown-fields-are-rejected"
+    },
+    {
+      "error_location": [
+        "schema_version"
+      ],
+      "model": "owner_control_host_principal_claim",
+      "payload": {
+        "gesture_source": "not_claimed",
+        "host_instance_id": "synthetic-owner-control-host",
+        "key_custody": "not_claimed",
+        "principal_id": "synthetic-owner-control-principal",
+        "principal_separation": "not_claimed",
+        "schema_version": 2
+      },
+      "rule": "unknown-schema-versions-are-rejected"
+    },
+    {
+      "error_location": [],
+      "model": "owner_control_enrollment_provenance",
+      "payload": {
+        "authority_state": "inert",
+        "authorizes_execution": false,
+        "binding_json": "{\"channel_session_id\":\"channel-session-c57b127e5947af58b1597cb51fa705f3\",\"owner_github_id\":494383370,\"owner_public_key\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"schema_version\":1,\"session_expires_at\":\"2030-01-02T03:20:05+00:00\",\"session_issued_at\":\"2030-01-02T03:00:00+00:00\",\"signature_algorithm\":\"ed25519\"}",
+        "binding_sha256": "15fafd5a626ab2b0466eac21295f7ffab42ce85ea8ea6600af07a68b917d75f3",
+        "channel_session_id": "channel-session-c57b127e5947af58b1597cb51fa705f3",
+        "enrolled_at": "2030-01-02T03:00:05+00:00",
+        "enrollment_context": "postgres_record_store",
+        "host_principal_claim_json": "{\"gesture_source\":\"not_claimed\",\"host_instance_id\":\"synthetic-owner-control-host\",\"key_custody\":\"not_claimed\",\"principal_id\":\"synthetic-changed-principal\",\"principal_separation\":\"not_claimed\",\"schema_version\":1}",
+        "host_principal_claim_sha256": "8445cf35afad4aa49f4c2af8657aa797d029fb6e2538fb9221bbf95a37aef159",
+        "owner_github_id": 494383370,
+        "provenance_tier": "self_asserted",
+        "schema_version": 1,
+        "server_observed_corroboration": "none"
+      },
+      "rule": "claim-drift-is-rejected"
+    },
+    {
+      "error_location": [
+        "provenance_tier"
+      ],
+      "model": "owner_control_enrollment_provenance",
+      "payload": {
+        "authority_state": "inert",
+        "authorizes_execution": false,
+        "binding_json": "{\"channel_session_id\":\"channel-session-c57b127e5947af58b1597cb51fa705f3\",\"owner_github_id\":494383370,\"owner_public_key\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"schema_version\":1,\"session_expires_at\":\"2030-01-02T03:20:05+00:00\",\"session_issued_at\":\"2030-01-02T03:00:00+00:00\",\"signature_algorithm\":\"ed25519\"}",
+        "binding_sha256": "15fafd5a626ab2b0466eac21295f7ffab42ce85ea8ea6600af07a68b917d75f3",
+        "channel_session_id": "channel-session-c57b127e5947af58b1597cb51fa705f3",
+        "enrolled_at": "2030-01-02T03:00:05+00:00",
+        "enrollment_context": "postgres_record_store",
+        "host_principal_claim_json": "{\"gesture_source\":\"not_claimed\",\"host_instance_id\":\"synthetic-owner-control-host\",\"key_custody\":\"not_claimed\",\"principal_id\":\"synthetic-owner-control-principal\",\"principal_separation\":\"not_claimed\",\"schema_version\":1}",
+        "host_principal_claim_sha256": "8445cf35afad4aa49f4c2af8657aa797d029fb6e2538fb9221bbf95a37aef159",
+        "owner_github_id": 494383370,
+        "provenance_tier": "corroborated",
+        "schema_version": 1,
+        "server_observed_corroboration": "none"
+      },
+      "rule": "absent-corroboration-cannot-raise-trust"
+    },
+    {
+      "channel_session_id": "channel-session-c57b127e5947af58b1597cb51fa705f3",
+      "operation": "issue_challenge",
+      "result": "reject",
+      "rule": "missing-enrollment-provenance-is-rejected"
+    },
+    {
+      "operation": "enroll_channel_session",
+      "owner_public_key_sha256": "56475aa75463474c0285df5dbf2bcab73da651358839e9b77481b2eab107708c",
+      "result": "reject",
+      "rule": "published-synthetic-conformance-key-is-rejected",
+      "runtime_guard_matches": true
+    },
+    {
+      "operation": "enroll_channel_session",
+      "owner_public_key_sha256": "141ddf2e77d4f690748cf74ecd390d44687d477b31b8931fa37abd02c35dbaba",
+      "result": "reject",
+      "rule": "published-synthetic-conformance-key-is-rejected",
+      "runtime_guard_matches": true
+    },
+    {
+      "operation": "enroll_channel_session",
+      "owner_public_key_sha256": "66687aadf862bd776c8fc18b8e9f8e20089714856ee233b3902a591d0d5f2925",
+      "result": "reject",
+      "rule": "published-synthetic-conformance-key-is-rejected",
+      "runtime_guard_matches": true
+    }
+  ],
   "negative_vectors": [
     {
       "error_location": [
@@ -2001,7 +2120,870 @@
       "rule": "review-item-text-has-no-surrounding-whitespace"
     }
   ],
-  "schema_version": 3,
+  "provenance_declaration": {
+    "authority_state": "inert",
+    "authorizes_execution": false,
+    "claim_source": "caller-declared",
+    "enrollment_context": "postgres_record_store",
+    "provenance_schema_version": 1,
+    "provenance_tier": "self_asserted",
+    "runtime_synthetic_key_policy": "reject-published-conformance-keys",
+    "server_observed_corroboration": "none",
+    "trust_derivation": "corroboration-only"
+  },
+  "provenance_schemas": {
+    "owner_control_enrollment_provenance": {
+      "additionalProperties": false,
+      "description": "Immutable server-observed enrollment record for one exact session and claim.",
+      "properties": {
+        "authority_state": {
+          "const": "inert",
+          "default": "inert",
+          "title": "Authority State",
+          "type": "string"
+        },
+        "authorizes_execution": {
+          "const": false,
+          "default": false,
+          "title": "Authorizes Execution",
+          "type": "boolean"
+        },
+        "binding_json": {
+          "maxLength": 20000,
+          "minLength": 2,
+          "title": "Binding Json",
+          "type": "string"
+        },
+        "binding_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Binding Sha256",
+          "type": "string"
+        },
+        "channel_session_id": {
+          "title": "Channel Session Id",
+          "type": "string"
+        },
+        "enrolled_at": {
+          "title": "Enrolled At",
+          "type": "string"
+        },
+        "enrollment_context": {
+          "const": "postgres_record_store",
+          "default": "postgres_record_store",
+          "title": "Enrollment Context",
+          "type": "string"
+        },
+        "host_principal_claim_json": {
+          "maxLength": 20000,
+          "minLength": 2,
+          "title": "Host Principal Claim Json",
+          "type": "string"
+        },
+        "host_principal_claim_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Host Principal Claim Sha256",
+          "type": "string"
+        },
+        "owner_github_id": {
+          "maximum": 9223372036854775807,
+          "minimum": 1,
+          "title": "Owner Github Id",
+          "type": "integer"
+        },
+        "provenance_tier": {
+          "const": "self_asserted",
+          "default": "self_asserted",
+          "title": "Provenance Tier",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "server_observed_corroboration": {
+          "const": "none",
+          "default": "none",
+          "title": "Server Observed Corroboration",
+          "type": "string"
+        }
+      },
+      "required": [
+        "channel_session_id",
+        "owner_github_id",
+        "binding_json",
+        "binding_sha256",
+        "host_principal_claim_json",
+        "host_principal_claim_sha256",
+        "enrolled_at"
+      ],
+      "title": "OwnerControlEnrollmentProvenanceRecord",
+      "type": "object"
+    },
+    "owner_control_host_principal_claim": {
+      "additionalProperties": false,
+      "description": "Caller-declared host-principal properties that confer no trust.",
+      "properties": {
+        "gesture_source": {
+          "enum": [
+            "not_claimed",
+            "local_interactive"
+          ],
+          "title": "Gesture Source",
+          "type": "string"
+        },
+        "host_instance_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$",
+          "title": "Host Instance Id",
+          "type": "string"
+        },
+        "key_custody": {
+          "enum": [
+            "not_claimed",
+            "software_backed",
+            "hardware_backed"
+          ],
+          "title": "Key Custody",
+          "type": "string"
+        },
+        "principal_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$",
+          "title": "Principal Id",
+          "type": "string"
+        },
+        "principal_separation": {
+          "enum": [
+            "not_claimed",
+            "shared_runtime",
+            "separate_os_principal"
+          ],
+          "title": "Principal Separation",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "host_instance_id",
+        "principal_id",
+        "principal_separation",
+        "key_custody",
+        "gesture_source"
+      ],
+      "title": "OwnerControlHostPrincipalClaim",
+      "type": "object"
+    }
+  },
+  "provenance_vectors": [
+    {
+      "claim": {
+        "canonical_json": "{\"gesture_source\":\"not_claimed\",\"host_instance_id\":\"synthetic-owner-control-host\",\"key_custody\":\"not_claimed\",\"principal_id\":\"synthetic-owner-control-principal\",\"principal_separation\":\"not_claimed\",\"schema_version\":1}",
+        "payload": {
+          "gesture_source": "not_claimed",
+          "host_instance_id": "synthetic-owner-control-host",
+          "key_custody": "not_claimed",
+          "principal_id": "synthetic-owner-control-principal",
+          "principal_separation": "not_claimed",
+          "schema_version": 1
+        },
+        "sha256": "8445cf35afad4aa49f4c2af8657aa797d029fb6e2538fb9221bbf95a37aef159"
+      },
+      "enrollment_provenance": {
+        "canonical_json": "{\"authority_state\":\"inert\",\"authorizes_execution\":false,\"binding_json\":\"{\\\"channel_session_id\\\":\\\"channel-session-c57b127e5947af58b1597cb51fa705f3\\\",\\\"owner_github_id\\\":494383370,\\\"owner_public_key\\\":\\\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\\\",\\\"schema_version\\\":1,\\\"session_expires_at\\\":\\\"2030-01-02T03:20:05+00:00\\\",\\\"session_issued_at\\\":\\\"2030-01-02T03:00:00+00:00\\\",\\\"signature_algorithm\\\":\\\"ed25519\\\"}\",\"binding_sha256\":\"15fafd5a626ab2b0466eac21295f7ffab42ce85ea8ea6600af07a68b917d75f3\",\"channel_session_id\":\"channel-session-c57b127e5947af58b1597cb51fa705f3\",\"enrolled_at\":\"2030-01-02T03:00:05+00:00\",\"enrollment_context\":\"postgres_record_store\",\"host_principal_claim_json\":\"{\\\"gesture_source\\\":\\\"not_claimed\\\",\\\"host_instance_id\\\":\\\"synthetic-owner-control-host\\\",\\\"key_custody\\\":\\\"not_claimed\\\",\\\"principal_id\\\":\\\"synthetic-owner-control-principal\\\",\\\"principal_separation\\\":\\\"not_claimed\\\",\\\"schema_version\\\":1}\",\"host_principal_claim_sha256\":\"8445cf35afad4aa49f4c2af8657aa797d029fb6e2538fb9221bbf95a37aef159\",\"owner_github_id\":494383370,\"provenance_tier\":\"self_asserted\",\"schema_version\":1,\"server_observed_corroboration\":\"none\"}",
+        "payload": {
+          "authority_state": "inert",
+          "authorizes_execution": false,
+          "binding_json": "{\"channel_session_id\":\"channel-session-c57b127e5947af58b1597cb51fa705f3\",\"owner_github_id\":494383370,\"owner_public_key\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"schema_version\":1,\"session_expires_at\":\"2030-01-02T03:20:05+00:00\",\"session_issued_at\":\"2030-01-02T03:00:00+00:00\",\"signature_algorithm\":\"ed25519\"}",
+          "binding_sha256": "15fafd5a626ab2b0466eac21295f7ffab42ce85ea8ea6600af07a68b917d75f3",
+          "channel_session_id": "channel-session-c57b127e5947af58b1597cb51fa705f3",
+          "enrolled_at": "2030-01-02T03:00:05+00:00",
+          "enrollment_context": "postgres_record_store",
+          "host_principal_claim_json": "{\"gesture_source\":\"not_claimed\",\"host_instance_id\":\"synthetic-owner-control-host\",\"key_custody\":\"not_claimed\",\"principal_id\":\"synthetic-owner-control-principal\",\"principal_separation\":\"not_claimed\",\"schema_version\":1}",
+          "host_principal_claim_sha256": "8445cf35afad4aa49f4c2af8657aa797d029fb6e2538fb9221bbf95a37aef159",
+          "owner_github_id": 494383370,
+          "provenance_tier": "self_asserted",
+          "schema_version": 1,
+          "server_observed_corroboration": "none"
+        },
+        "sha256": "f523eeba739b0efd5a15ce4cc64b6706f17c6b87005ea97dad72f31ae547c8dd"
+      },
+      "result": {
+        "authority_state": "inert",
+        "authorizes_execution": false,
+        "provenance_tier": "self_asserted",
+        "server_observed_corroboration": "none"
+      }
+    },
+    {
+      "claim": {
+        "canonical_json": "{\"gesture_source\":\"local_interactive\",\"host_instance_id\":\"synthetic-owner-control-host\",\"key_custody\":\"not_claimed\",\"principal_id\":\"synthetic-owner-control-principal\",\"principal_separation\":\"not_claimed\",\"schema_version\":1}",
+        "payload": {
+          "gesture_source": "local_interactive",
+          "host_instance_id": "synthetic-owner-control-host",
+          "key_custody": "not_claimed",
+          "principal_id": "synthetic-owner-control-principal",
+          "principal_separation": "not_claimed",
+          "schema_version": 1
+        },
+        "sha256": "0cc2c47ab0d9389c6c0104dcbff5ff0152d6ac68f9260343a20dc84b0b4b2fe0"
+      },
+      "enrollment_provenance": {
+        "canonical_json": "{\"authority_state\":\"inert\",\"authorizes_execution\":false,\"binding_json\":\"{\\\"channel_session_id\\\":\\\"channel-session-c57b127e5947af58b1597cb51fa705f3\\\",\\\"owner_github_id\\\":494383370,\\\"owner_public_key\\\":\\\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\\\",\\\"schema_version\\\":1,\\\"session_expires_at\\\":\\\"2030-01-02T03:20:05+00:00\\\",\\\"session_issued_at\\\":\\\"2030-01-02T03:00:00+00:00\\\",\\\"signature_algorithm\\\":\\\"ed25519\\\"}\",\"binding_sha256\":\"15fafd5a626ab2b0466eac21295f7ffab42ce85ea8ea6600af07a68b917d75f3\",\"channel_session_id\":\"channel-session-c57b127e5947af58b1597cb51fa705f3\",\"enrolled_at\":\"2030-01-02T03:00:05+00:00\",\"enrollment_context\":\"postgres_record_store\",\"host_principal_claim_json\":\"{\\\"gesture_source\\\":\\\"local_interactive\\\",\\\"host_instance_id\\\":\\\"synthetic-owner-control-host\\\",\\\"key_custody\\\":\\\"not_claimed\\\",\\\"principal_id\\\":\\\"synthetic-owner-control-principal\\\",\\\"principal_separation\\\":\\\"not_claimed\\\",\\\"schema_version\\\":1}\",\"host_principal_claim_sha256\":\"0cc2c47ab0d9389c6c0104dcbff5ff0152d6ac68f9260343a20dc84b0b4b2fe0\",\"owner_github_id\":494383370,\"provenance_tier\":\"self_asserted\",\"schema_version\":1,\"server_observed_corroboration\":\"none\"}",
+        "payload": {
+          "authority_state": "inert",
+          "authorizes_execution": false,
+          "binding_json": "{\"channel_session_id\":\"channel-session-c57b127e5947af58b1597cb51fa705f3\",\"owner_github_id\":494383370,\"owner_public_key\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"schema_version\":1,\"session_expires_at\":\"2030-01-02T03:20:05+00:00\",\"session_issued_at\":\"2030-01-02T03:00:00+00:00\",\"signature_algorithm\":\"ed25519\"}",
+          "binding_sha256": "15fafd5a626ab2b0466eac21295f7ffab42ce85ea8ea6600af07a68b917d75f3",
+          "channel_session_id": "channel-session-c57b127e5947af58b1597cb51fa705f3",
+          "enrolled_at": "2030-01-02T03:00:05+00:00",
+          "enrollment_context": "postgres_record_store",
+          "host_principal_claim_json": "{\"gesture_source\":\"local_interactive\",\"host_instance_id\":\"synthetic-owner-control-host\",\"key_custody\":\"not_claimed\",\"principal_id\":\"synthetic-owner-control-principal\",\"principal_separation\":\"not_claimed\",\"schema_version\":1}",
+          "host_principal_claim_sha256": "0cc2c47ab0d9389c6c0104dcbff5ff0152d6ac68f9260343a20dc84b0b4b2fe0",
+          "owner_github_id": 494383370,
+          "provenance_tier": "self_asserted",
+          "schema_version": 1,
+          "server_observed_corroboration": "none"
+        },
+        "sha256": "b9d62759757353c66fe280f215ee63d3a72b2a3eb410f009e938c29e4be7ff0a"
+      },
+      "result": {
+        "authority_state": "inert",
+        "authorizes_execution": false,
+        "provenance_tier": "self_asserted",
+        "server_observed_corroboration": "none"
+      }
+    },
+    {
+      "claim": {
+        "canonical_json": "{\"gesture_source\":\"not_claimed\",\"host_instance_id\":\"synthetic-owner-control-host\",\"key_custody\":\"software_backed\",\"principal_id\":\"synthetic-owner-control-principal\",\"principal_separation\":\"not_claimed\",\"schema_version\":1}",
+        "payload": {
+          "gesture_source": "not_claimed",
+          "host_instance_id": "synthetic-owner-control-host",
+          "key_custody": "software_backed",
+          "principal_id": "synthetic-owner-control-principal",
+          "principal_separation": "not_claimed",
+          "schema_version": 1
+        },
+        "sha256": "d1f11c383e43c6fd09a0371a779a5e409a9c07a307550f7b39b4efc762ba1a1e"
+      },
+      "enrollment_provenance": {
+        "canonical_json": "{\"authority_state\":\"inert\",\"authorizes_execution\":false,\"binding_json\":\"{\\\"channel_session_id\\\":\\\"channel-session-c57b127e5947af58b1597cb51fa705f3\\\",\\\"owner_github_id\\\":494383370,\\\"owner_public_key\\\":\\\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\\\",\\\"schema_version\\\":1,\\\"session_expires_at\\\":\\\"2030-01-02T03:20:05+00:00\\\",\\\"session_issued_at\\\":\\\"2030-01-02T03:00:00+00:00\\\",\\\"signature_algorithm\\\":\\\"ed25519\\\"}\",\"binding_sha256\":\"15fafd5a626ab2b0466eac21295f7ffab42ce85ea8ea6600af07a68b917d75f3\",\"channel_session_id\":\"channel-session-c57b127e5947af58b1597cb51fa705f3\",\"enrolled_at\":\"2030-01-02T03:00:05+00:00\",\"enrollment_context\":\"postgres_record_store\",\"host_principal_claim_json\":\"{\\\"gesture_source\\\":\\\"not_claimed\\\",\\\"host_instance_id\\\":\\\"synthetic-owner-control-host\\\",\\\"key_custody\\\":\\\"software_backed\\\",\\\"principal_id\\\":\\\"synthetic-owner-control-principal\\\",\\\"principal_separation\\\":\\\"not_claimed\\\",\\\"schema_version\\\":1}\",\"host_principal_claim_sha256\":\"d1f11c383e43c6fd09a0371a779a5e409a9c07a307550f7b39b4efc762ba1a1e\",\"owner_github_id\":494383370,\"provenance_tier\":\"self_asserted\",\"schema_version\":1,\"server_observed_corroboration\":\"none\"}",
+        "payload": {
+          "authority_state": "inert",
+          "authorizes_execution": false,
+          "binding_json": "{\"channel_session_id\":\"channel-session-c57b127e5947af58b1597cb51fa705f3\",\"owner_github_id\":494383370,\"owner_public_key\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"schema_version\":1,\"session_expires_at\":\"2030-01-02T03:20:05+00:00\",\"session_issued_at\":\"2030-01-02T03:00:00+00:00\",\"signature_algorithm\":\"ed25519\"}",
+          "binding_sha256": "15fafd5a626ab2b0466eac21295f7ffab42ce85ea8ea6600af07a68b917d75f3",
+          "channel_session_id": "channel-session-c57b127e5947af58b1597cb51fa705f3",
+          "enrolled_at": "2030-01-02T03:00:05+00:00",
+          "enrollment_context": "postgres_record_store",
+          "host_principal_claim_json": "{\"gesture_source\":\"not_claimed\",\"host_instance_id\":\"synthetic-owner-control-host\",\"key_custody\":\"software_backed\",\"principal_id\":\"synthetic-owner-control-principal\",\"principal_separation\":\"not_claimed\",\"schema_version\":1}",
+          "host_principal_claim_sha256": "d1f11c383e43c6fd09a0371a779a5e409a9c07a307550f7b39b4efc762ba1a1e",
+          "owner_github_id": 494383370,
+          "provenance_tier": "self_asserted",
+          "schema_version": 1,
+          "server_observed_corroboration": "none"
+        },
+        "sha256": "8447a1e01de5585dfa29ce038af2ac96d891c725338111361c33f08b2f1e6075"
+      },
+      "result": {
+        "authority_state": "inert",
+        "authorizes_execution": false,
+        "provenance_tier": "self_asserted",
+        "server_observed_corroboration": "none"
+      }
+    },
+    {
+      "claim": {
+        "canonical_json": "{\"gesture_source\":\"local_interactive\",\"host_instance_id\":\"synthetic-owner-control-host\",\"key_custody\":\"software_backed\",\"principal_id\":\"synthetic-owner-control-principal\",\"principal_separation\":\"not_claimed\",\"schema_version\":1}",
+        "payload": {
+          "gesture_source": "local_interactive",
+          "host_instance_id": "synthetic-owner-control-host",
+          "key_custody": "software_backed",
+          "principal_id": "synthetic-owner-control-principal",
+          "principal_separation": "not_claimed",
+          "schema_version": 1
+        },
+        "sha256": "08cad84d11a81e84cf8e88b30459e0f170153df3aeb562d27d5d2ec591fbf97e"
+      },
+      "enrollment_provenance": {
+        "canonical_json": "{\"authority_state\":\"inert\",\"authorizes_execution\":false,\"binding_json\":\"{\\\"channel_session_id\\\":\\\"channel-session-c57b127e5947af58b1597cb51fa705f3\\\",\\\"owner_github_id\\\":494383370,\\\"owner_public_key\\\":\\\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\\\",\\\"schema_version\\\":1,\\\"session_expires_at\\\":\\\"2030-01-02T03:20:05+00:00\\\",\\\"session_issued_at\\\":\\\"2030-01-02T03:00:00+00:00\\\",\\\"signature_algorithm\\\":\\\"ed25519\\\"}\",\"binding_sha256\":\"15fafd5a626ab2b0466eac21295f7ffab42ce85ea8ea6600af07a68b917d75f3\",\"channel_session_id\":\"channel-session-c57b127e5947af58b1597cb51fa705f3\",\"enrolled_at\":\"2030-01-02T03:00:05+00:00\",\"enrollment_context\":\"postgres_record_store\",\"host_principal_claim_json\":\"{\\\"gesture_source\\\":\\\"local_interactive\\\",\\\"host_instance_id\\\":\\\"synthetic-owner-control-host\\\",\\\"key_custody\\\":\\\"software_backed\\\",\\\"principal_id\\\":\\\"synthetic-owner-control-principal\\\",\\\"principal_separation\\\":\\\"not_claimed\\\",\\\"schema_version\\\":1}\",\"host_principal_claim_sha256\":\"08cad84d11a81e84cf8e88b30459e0f170153df3aeb562d27d5d2ec591fbf97e\",\"owner_github_id\":494383370,\"provenance_tier\":\"self_asserted\",\"schema_version\":1,\"server_observed_corroboration\":\"none\"}",
+        "payload": {
+          "authority_state": "inert",
+          "authorizes_execution": false,
+          "binding_json": "{\"channel_session_id\":\"channel-session-c57b127e5947af58b1597cb51fa705f3\",\"owner_github_id\":494383370,\"owner_public_key\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"schema_version\":1,\"session_expires_at\":\"2030-01-02T03:20:05+00:00\",\"session_issued_at\":\"2030-01-02T03:00:00+00:00\",\"signature_algorithm\":\"ed25519\"}",
+          "binding_sha256": "15fafd5a626ab2b0466eac21295f7ffab42ce85ea8ea6600af07a68b917d75f3",
+          "channel_session_id": "channel-session-c57b127e5947af58b1597cb51fa705f3",
+          "enrolled_at": "2030-01-02T03:00:05+00:00",
+          "enrollment_context": "postgres_record_store",
+          "host_principal_claim_json": "{\"gesture_source\":\"local_interactive\",\"host_instance_id\":\"synthetic-owner-control-host\",\"key_custody\":\"software_backed\",\"principal_id\":\"synthetic-owner-control-principal\",\"principal_separation\":\"not_claimed\",\"schema_version\":1}",
+          "host_principal_claim_sha256": "08cad84d11a81e84cf8e88b30459e0f170153df3aeb562d27d5d2ec591fbf97e",
+          "owner_github_id": 494383370,
+          "provenance_tier": "self_asserted",
+          "schema_version": 1,
+          "server_observed_corroboration": "none"
+        },
+        "sha256": "41b1b7895416d200d271ca630f8e5ddf4fe9e65395da5ca627a2f693e30bd91d"
+      },
+      "result": {
+        "authority_state": "inert",
+        "authorizes_execution": false,
+        "provenance_tier": "self_asserted",
+        "server_observed_corroboration": "none"
+      }
+    },
+    {
+      "claim": {
+        "canonical_json": "{\"gesture_source\":\"not_claimed\",\"host_instance_id\":\"synthetic-owner-control-host\",\"key_custody\":\"hardware_backed\",\"principal_id\":\"synthetic-owner-control-principal\",\"principal_separation\":\"not_claimed\",\"schema_version\":1}",
+        "payload": {
+          "gesture_source": "not_claimed",
+          "host_instance_id": "synthetic-owner-control-host",
+          "key_custody": "hardware_backed",
+          "principal_id": "synthetic-owner-control-principal",
+          "principal_separation": "not_claimed",
+          "schema_version": 1
+        },
+        "sha256": "4bc22ee336ad4cf74e82ec99d0642581e4da63cb515a5a7278149cdeb616c357"
+      },
+      "enrollment_provenance": {
+        "canonical_json": "{\"authority_state\":\"inert\",\"authorizes_execution\":false,\"binding_json\":\"{\\\"channel_session_id\\\":\\\"channel-session-c57b127e5947af58b1597cb51fa705f3\\\",\\\"owner_github_id\\\":494383370,\\\"owner_public_key\\\":\\\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\\\",\\\"schema_version\\\":1,\\\"session_expires_at\\\":\\\"2030-01-02T03:20:05+00:00\\\",\\\"session_issued_at\\\":\\\"2030-01-02T03:00:00+00:00\\\",\\\"signature_algorithm\\\":\\\"ed25519\\\"}\",\"binding_sha256\":\"15fafd5a626ab2b0466eac21295f7ffab42ce85ea8ea6600af07a68b917d75f3\",\"channel_session_id\":\"channel-session-c57b127e5947af58b1597cb51fa705f3\",\"enrolled_at\":\"2030-01-02T03:00:05+00:00\",\"enrollment_context\":\"postgres_record_store\",\"host_principal_claim_json\":\"{\\\"gesture_source\\\":\\\"not_claimed\\\",\\\"host_instance_id\\\":\\\"synthetic-owner-control-host\\\",\\\"key_custody\\\":\\\"hardware_backed\\\",\\\"principal_id\\\":\\\"synthetic-owner-control-principal\\\",\\\"principal_separation\\\":\\\"not_claimed\\\",\\\"schema_version\\\":1}\",\"host_principal_claim_sha256\":\"4bc22ee336ad4cf74e82ec99d0642581e4da63cb515a5a7278149cdeb616c357\",\"owner_github_id\":494383370,\"provenance_tier\":\"self_asserted\",\"schema_version\":1,\"server_observed_corroboration\":\"none\"}",
+        "payload": {
+          "authority_state": "inert",
+          "authorizes_execution": false,
+          "binding_json": "{\"channel_session_id\":\"channel-session-c57b127e5947af58b1597cb51fa705f3\",\"owner_github_id\":494383370,\"owner_public_key\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"schema_version\":1,\"session_expires_at\":\"2030-01-02T03:20:05+00:00\",\"session_issued_at\":\"2030-01-02T03:00:00+00:00\",\"signature_algorithm\":\"ed25519\"}",
+          "binding_sha256": "15fafd5a626ab2b0466eac21295f7ffab42ce85ea8ea6600af07a68b917d75f3",
+          "channel_session_id": "channel-session-c57b127e5947af58b1597cb51fa705f3",
+          "enrolled_at": "2030-01-02T03:00:05+00:00",
+          "enrollment_context": "postgres_record_store",
+          "host_principal_claim_json": "{\"gesture_source\":\"not_claimed\",\"host_instance_id\":\"synthetic-owner-control-host\",\"key_custody\":\"hardware_backed\",\"principal_id\":\"synthetic-owner-control-principal\",\"principal_separation\":\"not_claimed\",\"schema_version\":1}",
+          "host_principal_claim_sha256": "4bc22ee336ad4cf74e82ec99d0642581e4da63cb515a5a7278149cdeb616c357",
+          "owner_github_id": 494383370,
+          "provenance_tier": "self_asserted",
+          "schema_version": 1,
+          "server_observed_corroboration": "none"
+        },
+        "sha256": "3146bf1abed5497e8c5a18da4b0f036f8c42fd28746ab854c7010aed3ab10cad"
+      },
+      "result": {
+        "authority_state": "inert",
+        "authorizes_execution": false,
+        "provenance_tier": "self_asserted",
+        "server_observed_corroboration": "none"
+      }
+    },
+    {
+      "claim": {
+        "canonical_json": "{\"gesture_source\":\"local_interactive\",\"host_instance_id\":\"synthetic-owner-control-host\",\"key_custody\":\"hardware_backed\",\"principal_id\":\"synthetic-owner-control-principal\",\"principal_separation\":\"not_claimed\",\"schema_version\":1}",
+        "payload": {
+          "gesture_source": "local_interactive",
+          "host_instance_id": "synthetic-owner-control-host",
+          "key_custody": "hardware_backed",
+          "principal_id": "synthetic-owner-control-principal",
+          "principal_separation": "not_claimed",
+          "schema_version": 1
+        },
+        "sha256": "453ea85d73ba9c3680f2e717fc48093c31d996b16e3b45692f8af3f5322df566"
+      },
+      "enrollment_provenance": {
+        "canonical_json": "{\"authority_state\":\"inert\",\"authorizes_execution\":false,\"binding_json\":\"{\\\"channel_session_id\\\":\\\"channel-session-c57b127e5947af58b1597cb51fa705f3\\\",\\\"owner_github_id\\\":494383370,\\\"owner_public_key\\\":\\\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\\\",\\\"schema_version\\\":1,\\\"session_expires_at\\\":\\\"2030-01-02T03:20:05+00:00\\\",\\\"session_issued_at\\\":\\\"2030-01-02T03:00:00+00:00\\\",\\\"signature_algorithm\\\":\\\"ed25519\\\"}\",\"binding_sha256\":\"15fafd5a626ab2b0466eac21295f7ffab42ce85ea8ea6600af07a68b917d75f3\",\"channel_session_id\":\"channel-session-c57b127e5947af58b1597cb51fa705f3\",\"enrolled_at\":\"2030-01-02T03:00:05+00:00\",\"enrollment_context\":\"postgres_record_store\",\"host_principal_claim_json\":\"{\\\"gesture_source\\\":\\\"local_interactive\\\",\\\"host_instance_id\\\":\\\"synthetic-owner-control-host\\\",\\\"key_custody\\\":\\\"hardware_backed\\\",\\\"principal_id\\\":\\\"synthetic-owner-control-principal\\\",\\\"principal_separation\\\":\\\"not_claimed\\\",\\\"schema_version\\\":1}\",\"host_principal_claim_sha256\":\"453ea85d73ba9c3680f2e717fc48093c31d996b16e3b45692f8af3f5322df566\",\"owner_github_id\":494383370,\"provenance_tier\":\"self_asserted\",\"schema_version\":1,\"server_observed_corroboration\":\"none\"}",
+        "payload": {
+          "authority_state": "inert",
+          "authorizes_execution": false,
+          "binding_json": "{\"channel_session_id\":\"channel-session-c57b127e5947af58b1597cb51fa705f3\",\"owner_github_id\":494383370,\"owner_public_key\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"schema_version\":1,\"session_expires_at\":\"2030-01-02T03:20:05+00:00\",\"session_issued_at\":\"2030-01-02T03:00:00+00:00\",\"signature_algorithm\":\"ed25519\"}",
+          "binding_sha256": "15fafd5a626ab2b0466eac21295f7ffab42ce85ea8ea6600af07a68b917d75f3",
+          "channel_session_id": "channel-session-c57b127e5947af58b1597cb51fa705f3",
+          "enrolled_at": "2030-01-02T03:00:05+00:00",
+          "enrollment_context": "postgres_record_store",
+          "host_principal_claim_json": "{\"gesture_source\":\"local_interactive\",\"host_instance_id\":\"synthetic-owner-control-host\",\"key_custody\":\"hardware_backed\",\"principal_id\":\"synthetic-owner-control-principal\",\"principal_separation\":\"not_claimed\",\"schema_version\":1}",
+          "host_principal_claim_sha256": "453ea85d73ba9c3680f2e717fc48093c31d996b16e3b45692f8af3f5322df566",
+          "owner_github_id": 494383370,
+          "provenance_tier": "self_asserted",
+          "schema_version": 1,
+          "server_observed_corroboration": "none"
+        },
+        "sha256": "60ac7a440789590bfb5cd4c432e0ba3909d0965dc38bd249eca7f56ac118b88a"
+      },
+      "result": {
+        "authority_state": "inert",
+        "authorizes_execution": false,
+        "provenance_tier": "self_asserted",
+        "server_observed_corroboration": "none"
+      }
+    },
+    {
+      "claim": {
+        "canonical_json": "{\"gesture_source\":\"not_claimed\",\"host_instance_id\":\"synthetic-owner-control-host\",\"key_custody\":\"not_claimed\",\"principal_id\":\"synthetic-owner-control-principal\",\"principal_separation\":\"shared_runtime\",\"schema_version\":1}",
+        "payload": {
+          "gesture_source": "not_claimed",
+          "host_instance_id": "synthetic-owner-control-host",
+          "key_custody": "not_claimed",
+          "principal_id": "synthetic-owner-control-principal",
+          "principal_separation": "shared_runtime",
+          "schema_version": 1
+        },
+        "sha256": "f52a183996247be7dc8136cf6b713f37acb141ea72bc20398b0233a164697c24"
+      },
+      "enrollment_provenance": {
+        "canonical_json": "{\"authority_state\":\"inert\",\"authorizes_execution\":false,\"binding_json\":\"{\\\"channel_session_id\\\":\\\"channel-session-c57b127e5947af58b1597cb51fa705f3\\\",\\\"owner_github_id\\\":494383370,\\\"owner_public_key\\\":\\\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\\\",\\\"schema_version\\\":1,\\\"session_expires_at\\\":\\\"2030-01-02T03:20:05+00:00\\\",\\\"session_issued_at\\\":\\\"2030-01-02T03:00:00+00:00\\\",\\\"signature_algorithm\\\":\\\"ed25519\\\"}\",\"binding_sha256\":\"15fafd5a626ab2b0466eac21295f7ffab42ce85ea8ea6600af07a68b917d75f3\",\"channel_session_id\":\"channel-session-c57b127e5947af58b1597cb51fa705f3\",\"enrolled_at\":\"2030-01-02T03:00:05+00:00\",\"enrollment_context\":\"postgres_record_store\",\"host_principal_claim_json\":\"{\\\"gesture_source\\\":\\\"not_claimed\\\",\\\"host_instance_id\\\":\\\"synthetic-owner-control-host\\\",\\\"key_custody\\\":\\\"not_claimed\\\",\\\"principal_id\\\":\\\"synthetic-owner-control-principal\\\",\\\"principal_separation\\\":\\\"shared_runtime\\\",\\\"schema_version\\\":1}\",\"host_principal_claim_sha256\":\"f52a183996247be7dc8136cf6b713f37acb141ea72bc20398b0233a164697c24\",\"owner_github_id\":494383370,\"provenance_tier\":\"self_asserted\",\"schema_version\":1,\"server_observed_corroboration\":\"none\"}",
+        "payload": {
+          "authority_state": "inert",
+          "authorizes_execution": false,
+          "binding_json": "{\"channel_session_id\":\"channel-session-c57b127e5947af58b1597cb51fa705f3\",\"owner_github_id\":494383370,\"owner_public_key\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"schema_version\":1,\"session_expires_at\":\"2030-01-02T03:20:05+00:00\",\"session_issued_at\":\"2030-01-02T03:00:00+00:00\",\"signature_algorithm\":\"ed25519\"}",
+          "binding_sha256": "15fafd5a626ab2b0466eac21295f7ffab42ce85ea8ea6600af07a68b917d75f3",
+          "channel_session_id": "channel-session-c57b127e5947af58b1597cb51fa705f3",
+          "enrolled_at": "2030-01-02T03:00:05+00:00",
+          "enrollment_context": "postgres_record_store",
+          "host_principal_claim_json": "{\"gesture_source\":\"not_claimed\",\"host_instance_id\":\"synthetic-owner-control-host\",\"key_custody\":\"not_claimed\",\"principal_id\":\"synthetic-owner-control-principal\",\"principal_separation\":\"shared_runtime\",\"schema_version\":1}",
+          "host_principal_claim_sha256": "f52a183996247be7dc8136cf6b713f37acb141ea72bc20398b0233a164697c24",
+          "owner_github_id": 494383370,
+          "provenance_tier": "self_asserted",
+          "schema_version": 1,
+          "server_observed_corroboration": "none"
+        },
+        "sha256": "14e35c7ff3dbffec40a80312c2d389aaa870079570045a757421345323babc9a"
+      },
+      "result": {
+        "authority_state": "inert",
+        "authorizes_execution": false,
+        "provenance_tier": "self_asserted",
+        "server_observed_corroboration": "none"
+      }
+    },
+    {
+      "claim": {
+        "canonical_json": "{\"gesture_source\":\"local_interactive\",\"host_instance_id\":\"synthetic-owner-control-host\",\"key_custody\":\"not_claimed\",\"principal_id\":\"synthetic-owner-control-principal\",\"principal_separation\":\"shared_runtime\",\"schema_version\":1}",
+        "payload": {
+          "gesture_source": "local_interactive",
+          "host_instance_id": "synthetic-owner-control-host",
+          "key_custody": "not_claimed",
+          "principal_id": "synthetic-owner-control-principal",
+          "principal_separation": "shared_runtime",
+          "schema_version": 1
+        },
+        "sha256": "8a0871e1974e60d2afc1f16e0ba2b681b8e2935f226002bce81533ab2718b700"
+      },
+      "enrollment_provenance": {
+        "canonical_json": "{\"authority_state\":\"inert\",\"authorizes_execution\":false,\"binding_json\":\"{\\\"channel_session_id\\\":\\\"channel-session-c57b127e5947af58b1597cb51fa705f3\\\",\\\"owner_github_id\\\":494383370,\\\"owner_public_key\\\":\\\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\\\",\\\"schema_version\\\":1,\\\"session_expires_at\\\":\\\"2030-01-02T03:20:05+00:00\\\",\\\"session_issued_at\\\":\\\"2030-01-02T03:00:00+00:00\\\",\\\"signature_algorithm\\\":\\\"ed25519\\\"}\",\"binding_sha256\":\"15fafd5a626ab2b0466eac21295f7ffab42ce85ea8ea6600af07a68b917d75f3\",\"channel_session_id\":\"channel-session-c57b127e5947af58b1597cb51fa705f3\",\"enrolled_at\":\"2030-01-02T03:00:05+00:00\",\"enrollment_context\":\"postgres_record_store\",\"host_principal_claim_json\":\"{\\\"gesture_source\\\":\\\"local_interactive\\\",\\\"host_instance_id\\\":\\\"synthetic-owner-control-host\\\",\\\"key_custody\\\":\\\"not_claimed\\\",\\\"principal_id\\\":\\\"synthetic-owner-control-principal\\\",\\\"principal_separation\\\":\\\"shared_runtime\\\",\\\"schema_version\\\":1}\",\"host_principal_claim_sha256\":\"8a0871e1974e60d2afc1f16e0ba2b681b8e2935f226002bce81533ab2718b700\",\"owner_github_id\":494383370,\"provenance_tier\":\"self_asserted\",\"schema_version\":1,\"server_observed_corroboration\":\"none\"}",
+        "payload": {
+          "authority_state": "inert",
+          "authorizes_execution": false,
+          "binding_json": "{\"channel_session_id\":\"channel-session-c57b127e5947af58b1597cb51fa705f3\",\"owner_github_id\":494383370,\"owner_public_key\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"schema_version\":1,\"session_expires_at\":\"2030-01-02T03:20:05+00:00\",\"session_issued_at\":\"2030-01-02T03:00:00+00:00\",\"signature_algorithm\":\"ed25519\"}",
+          "binding_sha256": "15fafd5a626ab2b0466eac21295f7ffab42ce85ea8ea6600af07a68b917d75f3",
+          "channel_session_id": "channel-session-c57b127e5947af58b1597cb51fa705f3",
+          "enrolled_at": "2030-01-02T03:00:05+00:00",
+          "enrollment_context": "postgres_record_store",
+          "host_principal_claim_json": "{\"gesture_source\":\"local_interactive\",\"host_instance_id\":\"synthetic-owner-control-host\",\"key_custody\":\"not_claimed\",\"principal_id\":\"synthetic-owner-control-principal\",\"principal_separation\":\"shared_runtime\",\"schema_version\":1}",
+          "host_principal_claim_sha256": "8a0871e1974e60d2afc1f16e0ba2b681b8e2935f226002bce81533ab2718b700",
+          "owner_github_id": 494383370,
+          "provenance_tier": "self_asserted",
+          "schema_version": 1,
+          "server_observed_corroboration": "none"
+        },
+        "sha256": "914fe5d0d3c194192143c22b17f9a35b0da63ee6e162efc19148f401e4421003"
+      },
+      "result": {
+        "authority_state": "inert",
+        "authorizes_execution": false,
+        "provenance_tier": "self_asserted",
+        "server_observed_corroboration": "none"
+      }
+    },
+    {
+      "claim": {
+        "canonical_json": "{\"gesture_source\":\"not_claimed\",\"host_instance_id\":\"synthetic-owner-control-host\",\"key_custody\":\"software_backed\",\"principal_id\":\"synthetic-owner-control-principal\",\"principal_separation\":\"shared_runtime\",\"schema_version\":1}",
+        "payload": {
+          "gesture_source": "not_claimed",
+          "host_instance_id": "synthetic-owner-control-host",
+          "key_custody": "software_backed",
+          "principal_id": "synthetic-owner-control-principal",
+          "principal_separation": "shared_runtime",
+          "schema_version": 1
+        },
+        "sha256": "f573dea5665186980e1045f758826c7332380342af891758e6274956c57ad95b"
+      },
+      "enrollment_provenance": {
+        "canonical_json": "{\"authority_state\":\"inert\",\"authorizes_execution\":false,\"binding_json\":\"{\\\"channel_session_id\\\":\\\"channel-session-c57b127e5947af58b1597cb51fa705f3\\\",\\\"owner_github_id\\\":494383370,\\\"owner_public_key\\\":\\\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\\\",\\\"schema_version\\\":1,\\\"session_expires_at\\\":\\\"2030-01-02T03:20:05+00:00\\\",\\\"session_issued_at\\\":\\\"2030-01-02T03:00:00+00:00\\\",\\\"signature_algorithm\\\":\\\"ed25519\\\"}\",\"binding_sha256\":\"15fafd5a626ab2b0466eac21295f7ffab42ce85ea8ea6600af07a68b917d75f3\",\"channel_session_id\":\"channel-session-c57b127e5947af58b1597cb51fa705f3\",\"enrolled_at\":\"2030-01-02T03:00:05+00:00\",\"enrollment_context\":\"postgres_record_store\",\"host_principal_claim_json\":\"{\\\"gesture_source\\\":\\\"not_claimed\\\",\\\"host_instance_id\\\":\\\"synthetic-owner-control-host\\\",\\\"key_custody\\\":\\\"software_backed\\\",\\\"principal_id\\\":\\\"synthetic-owner-control-principal\\\",\\\"principal_separation\\\":\\\"shared_runtime\\\",\\\"schema_version\\\":1}\",\"host_principal_claim_sha256\":\"f573dea5665186980e1045f758826c7332380342af891758e6274956c57ad95b\",\"owner_github_id\":494383370,\"provenance_tier\":\"self_asserted\",\"schema_version\":1,\"server_observed_corroboration\":\"none\"}",
+        "payload": {
+          "authority_state": "inert",
+          "authorizes_execution": false,
+          "binding_json": "{\"channel_session_id\":\"channel-session-c57b127e5947af58b1597cb51fa705f3\",\"owner_github_id\":494383370,\"owner_public_key\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"schema_version\":1,\"session_expires_at\":\"2030-01-02T03:20:05+00:00\",\"session_issued_at\":\"2030-01-02T03:00:00+00:00\",\"signature_algorithm\":\"ed25519\"}",
+          "binding_sha256": "15fafd5a626ab2b0466eac21295f7ffab42ce85ea8ea6600af07a68b917d75f3",
+          "channel_session_id": "channel-session-c57b127e5947af58b1597cb51fa705f3",
+          "enrolled_at": "2030-01-02T03:00:05+00:00",
+          "enrollment_context": "postgres_record_store",
+          "host_principal_claim_json": "{\"gesture_source\":\"not_claimed\",\"host_instance_id\":\"synthetic-owner-control-host\",\"key_custody\":\"software_backed\",\"principal_id\":\"synthetic-owner-control-principal\",\"principal_separation\":\"shared_runtime\",\"schema_version\":1}",
+          "host_principal_claim_sha256": "f573dea5665186980e1045f758826c7332380342af891758e6274956c57ad95b",
+          "owner_github_id": 494383370,
+          "provenance_tier": "self_asserted",
+          "schema_version": 1,
+          "server_observed_corroboration": "none"
+        },
+        "sha256": "7a5adc565038a80af44cb6e0ea90003292bad135056e20378d5a8609863af645"
+      },
+      "result": {
+        "authority_state": "inert",
+        "authorizes_execution": false,
+        "provenance_tier": "self_asserted",
+        "server_observed_corroboration": "none"
+      }
+    },
+    {
+      "claim": {
+        "canonical_json": "{\"gesture_source\":\"local_interactive\",\"host_instance_id\":\"synthetic-owner-control-host\",\"key_custody\":\"software_backed\",\"principal_id\":\"synthetic-owner-control-principal\",\"principal_separation\":\"shared_runtime\",\"schema_version\":1}",
+        "payload": {
+          "gesture_source": "local_interactive",
+          "host_instance_id": "synthetic-owner-control-host",
+          "key_custody": "software_backed",
+          "principal_id": "synthetic-owner-control-principal",
+          "principal_separation": "shared_runtime",
+          "schema_version": 1
+        },
+        "sha256": "b557f53516d0990cecb57ba36147f8e613dc4c0e3ed40629802a7b3ab500110e"
+      },
+      "enrollment_provenance": {
+        "canonical_json": "{\"authority_state\":\"inert\",\"authorizes_execution\":false,\"binding_json\":\"{\\\"channel_session_id\\\":\\\"channel-session-c57b127e5947af58b1597cb51fa705f3\\\",\\\"owner_github_id\\\":494383370,\\\"owner_public_key\\\":\\\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\\\",\\\"schema_version\\\":1,\\\"session_expires_at\\\":\\\"2030-01-02T03:20:05+00:00\\\",\\\"session_issued_at\\\":\\\"2030-01-02T03:00:00+00:00\\\",\\\"signature_algorithm\\\":\\\"ed25519\\\"}\",\"binding_sha256\":\"15fafd5a626ab2b0466eac21295f7ffab42ce85ea8ea6600af07a68b917d75f3\",\"channel_session_id\":\"channel-session-c57b127e5947af58b1597cb51fa705f3\",\"enrolled_at\":\"2030-01-02T03:00:05+00:00\",\"enrollment_context\":\"postgres_record_store\",\"host_principal_claim_json\":\"{\\\"gesture_source\\\":\\\"local_interactive\\\",\\\"host_instance_id\\\":\\\"synthetic-owner-control-host\\\",\\\"key_custody\\\":\\\"software_backed\\\",\\\"principal_id\\\":\\\"synthetic-owner-control-principal\\\",\\\"principal_separation\\\":\\\"shared_runtime\\\",\\\"schema_version\\\":1}\",\"host_principal_claim_sha256\":\"b557f53516d0990cecb57ba36147f8e613dc4c0e3ed40629802a7b3ab500110e\",\"owner_github_id\":494383370,\"provenance_tier\":\"self_asserted\",\"schema_version\":1,\"server_observed_corroboration\":\"none\"}",
+        "payload": {
+          "authority_state": "inert",
+          "authorizes_execution": false,
+          "binding_json": "{\"channel_session_id\":\"channel-session-c57b127e5947af58b1597cb51fa705f3\",\"owner_github_id\":494383370,\"owner_public_key\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"schema_version\":1,\"session_expires_at\":\"2030-01-02T03:20:05+00:00\",\"session_issued_at\":\"2030-01-02T03:00:00+00:00\",\"signature_algorithm\":\"ed25519\"}",
+          "binding_sha256": "15fafd5a626ab2b0466eac21295f7ffab42ce85ea8ea6600af07a68b917d75f3",
+          "channel_session_id": "channel-session-c57b127e5947af58b1597cb51fa705f3",
+          "enrolled_at": "2030-01-02T03:00:05+00:00",
+          "enrollment_context": "postgres_record_store",
+          "host_principal_claim_json": "{\"gesture_source\":\"local_interactive\",\"host_instance_id\":\"synthetic-owner-control-host\",\"key_custody\":\"software_backed\",\"principal_id\":\"synthetic-owner-control-principal\",\"principal_separation\":\"shared_runtime\",\"schema_version\":1}",
+          "host_principal_claim_sha256": "b557f53516d0990cecb57ba36147f8e613dc4c0e3ed40629802a7b3ab500110e",
+          "owner_github_id": 494383370,
+          "provenance_tier": "self_asserted",
+          "schema_version": 1,
+          "server_observed_corroboration": "none"
+        },
+        "sha256": "7c04858a43bc0e232777aa426f549cdbd3ddb45851370abe3aa0acfe43709cb7"
+      },
+      "result": {
+        "authority_state": "inert",
+        "authorizes_execution": false,
+        "provenance_tier": "self_asserted",
+        "server_observed_corroboration": "none"
+      }
+    },
+    {
+      "claim": {
+        "canonical_json": "{\"gesture_source\":\"not_claimed\",\"host_instance_id\":\"synthetic-owner-control-host\",\"key_custody\":\"hardware_backed\",\"principal_id\":\"synthetic-owner-control-principal\",\"principal_separation\":\"shared_runtime\",\"schema_version\":1}",
+        "payload": {
+          "gesture_source": "not_claimed",
+          "host_instance_id": "synthetic-owner-control-host",
+          "key_custody": "hardware_backed",
+          "principal_id": "synthetic-owner-control-principal",
+          "principal_separation": "shared_runtime",
+          "schema_version": 1
+        },
+        "sha256": "8e467c1886ddd1c918854434a343e671a55452b071ef5c29915de1e3702f7b1b"
+      },
+      "enrollment_provenance": {
+        "canonical_json": "{\"authority_state\":\"inert\",\"authorizes_execution\":false,\"binding_json\":\"{\\\"channel_session_id\\\":\\\"channel-session-c57b127e5947af58b1597cb51fa705f3\\\",\\\"owner_github_id\\\":494383370,\\\"owner_public_key\\\":\\\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\\\",\\\"schema_version\\\":1,\\\"session_expires_at\\\":\\\"2030-01-02T03:20:05+00:00\\\",\\\"session_issued_at\\\":\\\"2030-01-02T03:00:00+00:00\\\",\\\"signature_algorithm\\\":\\\"ed25519\\\"}\",\"binding_sha256\":\"15fafd5a626ab2b0466eac21295f7ffab42ce85ea8ea6600af07a68b917d75f3\",\"channel_session_id\":\"channel-session-c57b127e5947af58b1597cb51fa705f3\",\"enrolled_at\":\"2030-01-02T03:00:05+00:00\",\"enrollment_context\":\"postgres_record_store\",\"host_principal_claim_json\":\"{\\\"gesture_source\\\":\\\"not_claimed\\\",\\\"host_instance_id\\\":\\\"synthetic-owner-control-host\\\",\\\"key_custody\\\":\\\"hardware_backed\\\",\\\"principal_id\\\":\\\"synthetic-owner-control-principal\\\",\\\"principal_separation\\\":\\\"shared_runtime\\\",\\\"schema_version\\\":1}\",\"host_principal_claim_sha256\":\"8e467c1886ddd1c918854434a343e671a55452b071ef5c29915de1e3702f7b1b\",\"owner_github_id\":494383370,\"provenance_tier\":\"self_asserted\",\"schema_version\":1,\"server_observed_corroboration\":\"none\"}",
+        "payload": {
+          "authority_state": "inert",
+          "authorizes_execution": false,
+          "binding_json": "{\"channel_session_id\":\"channel-session-c57b127e5947af58b1597cb51fa705f3\",\"owner_github_id\":494383370,\"owner_public_key\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"schema_version\":1,\"session_expires_at\":\"2030-01-02T03:20:05+00:00\",\"session_issued_at\":\"2030-01-02T03:00:00+00:00\",\"signature_algorithm\":\"ed25519\"}",
+          "binding_sha256": "15fafd5a626ab2b0466eac21295f7ffab42ce85ea8ea6600af07a68b917d75f3",
+          "channel_session_id": "channel-session-c57b127e5947af58b1597cb51fa705f3",
+          "enrolled_at": "2030-01-02T03:00:05+00:00",
+          "enrollment_context": "postgres_record_store",
+          "host_principal_claim_json": "{\"gesture_source\":\"not_claimed\",\"host_instance_id\":\"synthetic-owner-control-host\",\"key_custody\":\"hardware_backed\",\"principal_id\":\"synthetic-owner-control-principal\",\"principal_separation\":\"shared_runtime\",\"schema_version\":1}",
+          "host_principal_claim_sha256": "8e467c1886ddd1c918854434a343e671a55452b071ef5c29915de1e3702f7b1b",
+          "owner_github_id": 494383370,
+          "provenance_tier": "self_asserted",
+          "schema_version": 1,
+          "server_observed_corroboration": "none"
+        },
+        "sha256": "dfce4e68a847015121005843837e0f91adc485b8b59421b6097bbb1179b06414"
+      },
+      "result": {
+        "authority_state": "inert",
+        "authorizes_execution": false,
+        "provenance_tier": "self_asserted",
+        "server_observed_corroboration": "none"
+      }
+    },
+    {
+      "claim": {
+        "canonical_json": "{\"gesture_source\":\"local_interactive\",\"host_instance_id\":\"synthetic-owner-control-host\",\"key_custody\":\"hardware_backed\",\"principal_id\":\"synthetic-owner-control-principal\",\"principal_separation\":\"shared_runtime\",\"schema_version\":1}",
+        "payload": {
+          "gesture_source": "local_interactive",
+          "host_instance_id": "synthetic-owner-control-host",
+          "key_custody": "hardware_backed",
+          "principal_id": "synthetic-owner-control-principal",
+          "principal_separation": "shared_runtime",
+          "schema_version": 1
+        },
+        "sha256": "a430ca7d928ec0a2afac5131a6313daf5c74e710f1c8a75f8c89d8bbd9c80bed"
+      },
+      "enrollment_provenance": {
+        "canonical_json": "{\"authority_state\":\"inert\",\"authorizes_execution\":false,\"binding_json\":\"{\\\"channel_session_id\\\":\\\"channel-session-c57b127e5947af58b1597cb51fa705f3\\\",\\\"owner_github_id\\\":494383370,\\\"owner_public_key\\\":\\\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\\\",\\\"schema_version\\\":1,\\\"session_expires_at\\\":\\\"2030-01-02T03:20:05+00:00\\\",\\\"session_issued_at\\\":\\\"2030-01-02T03:00:00+00:00\\\",\\\"signature_algorithm\\\":\\\"ed25519\\\"}\",\"binding_sha256\":\"15fafd5a626ab2b0466eac21295f7ffab42ce85ea8ea6600af07a68b917d75f3\",\"channel_session_id\":\"channel-session-c57b127e5947af58b1597cb51fa705f3\",\"enrolled_at\":\"2030-01-02T03:00:05+00:00\",\"enrollment_context\":\"postgres_record_store\",\"host_principal_claim_json\":\"{\\\"gesture_source\\\":\\\"local_interactive\\\",\\\"host_instance_id\\\":\\\"synthetic-owner-control-host\\\",\\\"key_custody\\\":\\\"hardware_backed\\\",\\\"principal_id\\\":\\\"synthetic-owner-control-principal\\\",\\\"principal_separation\\\":\\\"shared_runtime\\\",\\\"schema_version\\\":1}\",\"host_principal_claim_sha256\":\"a430ca7d928ec0a2afac5131a6313daf5c74e710f1c8a75f8c89d8bbd9c80bed\",\"owner_github_id\":494383370,\"provenance_tier\":\"self_asserted\",\"schema_version\":1,\"server_observed_corroboration\":\"none\"}",
+        "payload": {
+          "authority_state": "inert",
+          "authorizes_execution": false,
+          "binding_json": "{\"channel_session_id\":\"channel-session-c57b127e5947af58b1597cb51fa705f3\",\"owner_github_id\":494383370,\"owner_public_key\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"schema_version\":1,\"session_expires_at\":\"2030-01-02T03:20:05+00:00\",\"session_issued_at\":\"2030-01-02T03:00:00+00:00\",\"signature_algorithm\":\"ed25519\"}",
+          "binding_sha256": "15fafd5a626ab2b0466eac21295f7ffab42ce85ea8ea6600af07a68b917d75f3",
+          "channel_session_id": "channel-session-c57b127e5947af58b1597cb51fa705f3",
+          "enrolled_at": "2030-01-02T03:00:05+00:00",
+          "enrollment_context": "postgres_record_store",
+          "host_principal_claim_json": "{\"gesture_source\":\"local_interactive\",\"host_instance_id\":\"synthetic-owner-control-host\",\"key_custody\":\"hardware_backed\",\"principal_id\":\"synthetic-owner-control-principal\",\"principal_separation\":\"shared_runtime\",\"schema_version\":1}",
+          "host_principal_claim_sha256": "a430ca7d928ec0a2afac5131a6313daf5c74e710f1c8a75f8c89d8bbd9c80bed",
+          "owner_github_id": 494383370,
+          "provenance_tier": "self_asserted",
+          "schema_version": 1,
+          "server_observed_corroboration": "none"
+        },
+        "sha256": "706856753c055cc4be51409468163aa72d6e84994efcf6f61c68700171db63cc"
+      },
+      "result": {
+        "authority_state": "inert",
+        "authorizes_execution": false,
+        "provenance_tier": "self_asserted",
+        "server_observed_corroboration": "none"
+      }
+    },
+    {
+      "claim": {
+        "canonical_json": "{\"gesture_source\":\"not_claimed\",\"host_instance_id\":\"synthetic-owner-control-host\",\"key_custody\":\"not_claimed\",\"principal_id\":\"synthetic-owner-control-principal\",\"principal_separation\":\"separate_os_principal\",\"schema_version\":1}",
+        "payload": {
+          "gesture_source": "not_claimed",
+          "host_instance_id": "synthetic-owner-control-host",
+          "key_custody": "not_claimed",
+          "principal_id": "synthetic-owner-control-principal",
+          "principal_separation": "separate_os_principal",
+          "schema_version": 1
+        },
+        "sha256": "dfc7492eb22ee51b4f8b63479dfc3964dc55ed809c81ae332c57112cbd28d569"
+      },
+      "enrollment_provenance": {
+        "canonical_json": "{\"authority_state\":\"inert\",\"authorizes_execution\":false,\"binding_json\":\"{\\\"channel_session_id\\\":\\\"channel-session-c57b127e5947af58b1597cb51fa705f3\\\",\\\"owner_github_id\\\":494383370,\\\"owner_public_key\\\":\\\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\\\",\\\"schema_version\\\":1,\\\"session_expires_at\\\":\\\"2030-01-02T03:20:05+00:00\\\",\\\"session_issued_at\\\":\\\"2030-01-02T03:00:00+00:00\\\",\\\"signature_algorithm\\\":\\\"ed25519\\\"}\",\"binding_sha256\":\"15fafd5a626ab2b0466eac21295f7ffab42ce85ea8ea6600af07a68b917d75f3\",\"channel_session_id\":\"channel-session-c57b127e5947af58b1597cb51fa705f3\",\"enrolled_at\":\"2030-01-02T03:00:05+00:00\",\"enrollment_context\":\"postgres_record_store\",\"host_principal_claim_json\":\"{\\\"gesture_source\\\":\\\"not_claimed\\\",\\\"host_instance_id\\\":\\\"synthetic-owner-control-host\\\",\\\"key_custody\\\":\\\"not_claimed\\\",\\\"principal_id\\\":\\\"synthetic-owner-control-principal\\\",\\\"principal_separation\\\":\\\"separate_os_principal\\\",\\\"schema_version\\\":1}\",\"host_principal_claim_sha256\":\"dfc7492eb22ee51b4f8b63479dfc3964dc55ed809c81ae332c57112cbd28d569\",\"owner_github_id\":494383370,\"provenance_tier\":\"self_asserted\",\"schema_version\":1,\"server_observed_corroboration\":\"none\"}",
+        "payload": {
+          "authority_state": "inert",
+          "authorizes_execution": false,
+          "binding_json": "{\"channel_session_id\":\"channel-session-c57b127e5947af58b1597cb51fa705f3\",\"owner_github_id\":494383370,\"owner_public_key\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"schema_version\":1,\"session_expires_at\":\"2030-01-02T03:20:05+00:00\",\"session_issued_at\":\"2030-01-02T03:00:00+00:00\",\"signature_algorithm\":\"ed25519\"}",
+          "binding_sha256": "15fafd5a626ab2b0466eac21295f7ffab42ce85ea8ea6600af07a68b917d75f3",
+          "channel_session_id": "channel-session-c57b127e5947af58b1597cb51fa705f3",
+          "enrolled_at": "2030-01-02T03:00:05+00:00",
+          "enrollment_context": "postgres_record_store",
+          "host_principal_claim_json": "{\"gesture_source\":\"not_claimed\",\"host_instance_id\":\"synthetic-owner-control-host\",\"key_custody\":\"not_claimed\",\"principal_id\":\"synthetic-owner-control-principal\",\"principal_separation\":\"separate_os_principal\",\"schema_version\":1}",
+          "host_principal_claim_sha256": "dfc7492eb22ee51b4f8b63479dfc3964dc55ed809c81ae332c57112cbd28d569",
+          "owner_github_id": 494383370,
+          "provenance_tier": "self_asserted",
+          "schema_version": 1,
+          "server_observed_corroboration": "none"
+        },
+        "sha256": "28d0fe2d1842853ff07e7daa35174057bf80fdefa8d6ec92d4e59dbf3d1c0aa5"
+      },
+      "result": {
+        "authority_state": "inert",
+        "authorizes_execution": false,
+        "provenance_tier": "self_asserted",
+        "server_observed_corroboration": "none"
+      }
+    },
+    {
+      "claim": {
+        "canonical_json": "{\"gesture_source\":\"local_interactive\",\"host_instance_id\":\"synthetic-owner-control-host\",\"key_custody\":\"not_claimed\",\"principal_id\":\"synthetic-owner-control-principal\",\"principal_separation\":\"separate_os_principal\",\"schema_version\":1}",
+        "payload": {
+          "gesture_source": "local_interactive",
+          "host_instance_id": "synthetic-owner-control-host",
+          "key_custody": "not_claimed",
+          "principal_id": "synthetic-owner-control-principal",
+          "principal_separation": "separate_os_principal",
+          "schema_version": 1
+        },
+        "sha256": "7594e14a21ec2bbe8c1a066e846b4e4469bb87f9a622d674308620511aae5820"
+      },
+      "enrollment_provenance": {
+        "canonical_json": "{\"authority_state\":\"inert\",\"authorizes_execution\":false,\"binding_json\":\"{\\\"channel_session_id\\\":\\\"channel-session-c57b127e5947af58b1597cb51fa705f3\\\",\\\"owner_github_id\\\":494383370,\\\"owner_public_key\\\":\\\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\\\",\\\"schema_version\\\":1,\\\"session_expires_at\\\":\\\"2030-01-02T03:20:05+00:00\\\",\\\"session_issued_at\\\":\\\"2030-01-02T03:00:00+00:00\\\",\\\"signature_algorithm\\\":\\\"ed25519\\\"}\",\"binding_sha256\":\"15fafd5a626ab2b0466eac21295f7ffab42ce85ea8ea6600af07a68b917d75f3\",\"channel_session_id\":\"channel-session-c57b127e5947af58b1597cb51fa705f3\",\"enrolled_at\":\"2030-01-02T03:00:05+00:00\",\"enrollment_context\":\"postgres_record_store\",\"host_principal_claim_json\":\"{\\\"gesture_source\\\":\\\"local_interactive\\\",\\\"host_instance_id\\\":\\\"synthetic-owner-control-host\\\",\\\"key_custody\\\":\\\"not_claimed\\\",\\\"principal_id\\\":\\\"synthetic-owner-control-principal\\\",\\\"principal_separation\\\":\\\"separate_os_principal\\\",\\\"schema_version\\\":1}\",\"host_principal_claim_sha256\":\"7594e14a21ec2bbe8c1a066e846b4e4469bb87f9a622d674308620511aae5820\",\"owner_github_id\":494383370,\"provenance_tier\":\"self_asserted\",\"schema_version\":1,\"server_observed_corroboration\":\"none\"}",
+        "payload": {
+          "authority_state": "inert",
+          "authorizes_execution": false,
+          "binding_json": "{\"channel_session_id\":\"channel-session-c57b127e5947af58b1597cb51fa705f3\",\"owner_github_id\":494383370,\"owner_public_key\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"schema_version\":1,\"session_expires_at\":\"2030-01-02T03:20:05+00:00\",\"session_issued_at\":\"2030-01-02T03:00:00+00:00\",\"signature_algorithm\":\"ed25519\"}",
+          "binding_sha256": "15fafd5a626ab2b0466eac21295f7ffab42ce85ea8ea6600af07a68b917d75f3",
+          "channel_session_id": "channel-session-c57b127e5947af58b1597cb51fa705f3",
+          "enrolled_at": "2030-01-02T03:00:05+00:00",
+          "enrollment_context": "postgres_record_store",
+          "host_principal_claim_json": "{\"gesture_source\":\"local_interactive\",\"host_instance_id\":\"synthetic-owner-control-host\",\"key_custody\":\"not_claimed\",\"principal_id\":\"synthetic-owner-control-principal\",\"principal_separation\":\"separate_os_principal\",\"schema_version\":1}",
+          "host_principal_claim_sha256": "7594e14a21ec2bbe8c1a066e846b4e4469bb87f9a622d674308620511aae5820",
+          "owner_github_id": 494383370,
+          "provenance_tier": "self_asserted",
+          "schema_version": 1,
+          "server_observed_corroboration": "none"
+        },
+        "sha256": "b2fabfeb792f6b0b46a9e8fb800847b2b6405b1f17e5dd40f4133f2b57382e78"
+      },
+      "result": {
+        "authority_state": "inert",
+        "authorizes_execution": false,
+        "provenance_tier": "self_asserted",
+        "server_observed_corroboration": "none"
+      }
+    },
+    {
+      "claim": {
+        "canonical_json": "{\"gesture_source\":\"not_claimed\",\"host_instance_id\":\"synthetic-owner-control-host\",\"key_custody\":\"software_backed\",\"principal_id\":\"synthetic-owner-control-principal\",\"principal_separation\":\"separate_os_principal\",\"schema_version\":1}",
+        "payload": {
+          "gesture_source": "not_claimed",
+          "host_instance_id": "synthetic-owner-control-host",
+          "key_custody": "software_backed",
+          "principal_id": "synthetic-owner-control-principal",
+          "principal_separation": "separate_os_principal",
+          "schema_version": 1
+        },
+        "sha256": "8a4114448d815b7ebea7ddba518888a05066c5a27e3ba79e75b89e53179c1de2"
+      },
+      "enrollment_provenance": {
+        "canonical_json": "{\"authority_state\":\"inert\",\"authorizes_execution\":false,\"binding_json\":\"{\\\"channel_session_id\\\":\\\"channel-session-c57b127e5947af58b1597cb51fa705f3\\\",\\\"owner_github_id\\\":494383370,\\\"owner_public_key\\\":\\\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\\\",\\\"schema_version\\\":1,\\\"session_expires_at\\\":\\\"2030-01-02T03:20:05+00:00\\\",\\\"session_issued_at\\\":\\\"2030-01-02T03:00:00+00:00\\\",\\\"signature_algorithm\\\":\\\"ed25519\\\"}\",\"binding_sha256\":\"15fafd5a626ab2b0466eac21295f7ffab42ce85ea8ea6600af07a68b917d75f3\",\"channel_session_id\":\"channel-session-c57b127e5947af58b1597cb51fa705f3\",\"enrolled_at\":\"2030-01-02T03:00:05+00:00\",\"enrollment_context\":\"postgres_record_store\",\"host_principal_claim_json\":\"{\\\"gesture_source\\\":\\\"not_claimed\\\",\\\"host_instance_id\\\":\\\"synthetic-owner-control-host\\\",\\\"key_custody\\\":\\\"software_backed\\\",\\\"principal_id\\\":\\\"synthetic-owner-control-principal\\\",\\\"principal_separation\\\":\\\"separate_os_principal\\\",\\\"schema_version\\\":1}\",\"host_principal_claim_sha256\":\"8a4114448d815b7ebea7ddba518888a05066c5a27e3ba79e75b89e53179c1de2\",\"owner_github_id\":494383370,\"provenance_tier\":\"self_asserted\",\"schema_version\":1,\"server_observed_corroboration\":\"none\"}",
+        "payload": {
+          "authority_state": "inert",
+          "authorizes_execution": false,
+          "binding_json": "{\"channel_session_id\":\"channel-session-c57b127e5947af58b1597cb51fa705f3\",\"owner_github_id\":494383370,\"owner_public_key\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"schema_version\":1,\"session_expires_at\":\"2030-01-02T03:20:05+00:00\",\"session_issued_at\":\"2030-01-02T03:00:00+00:00\",\"signature_algorithm\":\"ed25519\"}",
+          "binding_sha256": "15fafd5a626ab2b0466eac21295f7ffab42ce85ea8ea6600af07a68b917d75f3",
+          "channel_session_id": "channel-session-c57b127e5947af58b1597cb51fa705f3",
+          "enrolled_at": "2030-01-02T03:00:05+00:00",
+          "enrollment_context": "postgres_record_store",
+          "host_principal_claim_json": "{\"gesture_source\":\"not_claimed\",\"host_instance_id\":\"synthetic-owner-control-host\",\"key_custody\":\"software_backed\",\"principal_id\":\"synthetic-owner-control-principal\",\"principal_separation\":\"separate_os_principal\",\"schema_version\":1}",
+          "host_principal_claim_sha256": "8a4114448d815b7ebea7ddba518888a05066c5a27e3ba79e75b89e53179c1de2",
+          "owner_github_id": 494383370,
+          "provenance_tier": "self_asserted",
+          "schema_version": 1,
+          "server_observed_corroboration": "none"
+        },
+        "sha256": "0f5c710c1d16d677fb55d82ebe2aa88bbe482b4982448cc0dbe3b6781844bc37"
+      },
+      "result": {
+        "authority_state": "inert",
+        "authorizes_execution": false,
+        "provenance_tier": "self_asserted",
+        "server_observed_corroboration": "none"
+      }
+    },
+    {
+      "claim": {
+        "canonical_json": "{\"gesture_source\":\"local_interactive\",\"host_instance_id\":\"synthetic-owner-control-host\",\"key_custody\":\"software_backed\",\"principal_id\":\"synthetic-owner-control-principal\",\"principal_separation\":\"separate_os_principal\",\"schema_version\":1}",
+        "payload": {
+          "gesture_source": "local_interactive",
+          "host_instance_id": "synthetic-owner-control-host",
+          "key_custody": "software_backed",
+          "principal_id": "synthetic-owner-control-principal",
+          "principal_separation": "separate_os_principal",
+          "schema_version": 1
+        },
+        "sha256": "1875c5fba6b885df78bf02d46e6b444955e995d1637fc29ca25fd9db464dd379"
+      },
+      "enrollment_provenance": {
+        "canonical_json": "{\"authority_state\":\"inert\",\"authorizes_execution\":false,\"binding_json\":\"{\\\"channel_session_id\\\":\\\"channel-session-c57b127e5947af58b1597cb51fa705f3\\\",\\\"owner_github_id\\\":494383370,\\\"owner_public_key\\\":\\\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\\\",\\\"schema_version\\\":1,\\\"session_expires_at\\\":\\\"2030-01-02T03:20:05+00:00\\\",\\\"session_issued_at\\\":\\\"2030-01-02T03:00:00+00:00\\\",\\\"signature_algorithm\\\":\\\"ed25519\\\"}\",\"binding_sha256\":\"15fafd5a626ab2b0466eac21295f7ffab42ce85ea8ea6600af07a68b917d75f3\",\"channel_session_id\":\"channel-session-c57b127e5947af58b1597cb51fa705f3\",\"enrolled_at\":\"2030-01-02T03:00:05+00:00\",\"enrollment_context\":\"postgres_record_store\",\"host_principal_claim_json\":\"{\\\"gesture_source\\\":\\\"local_interactive\\\",\\\"host_instance_id\\\":\\\"synthetic-owner-control-host\\\",\\\"key_custody\\\":\\\"software_backed\\\",\\\"principal_id\\\":\\\"synthetic-owner-control-principal\\\",\\\"principal_separation\\\":\\\"separate_os_principal\\\",\\\"schema_version\\\":1}\",\"host_principal_claim_sha256\":\"1875c5fba6b885df78bf02d46e6b444955e995d1637fc29ca25fd9db464dd379\",\"owner_github_id\":494383370,\"provenance_tier\":\"self_asserted\",\"schema_version\":1,\"server_observed_corroboration\":\"none\"}",
+        "payload": {
+          "authority_state": "inert",
+          "authorizes_execution": false,
+          "binding_json": "{\"channel_session_id\":\"channel-session-c57b127e5947af58b1597cb51fa705f3\",\"owner_github_id\":494383370,\"owner_public_key\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"schema_version\":1,\"session_expires_at\":\"2030-01-02T03:20:05+00:00\",\"session_issued_at\":\"2030-01-02T03:00:00+00:00\",\"signature_algorithm\":\"ed25519\"}",
+          "binding_sha256": "15fafd5a626ab2b0466eac21295f7ffab42ce85ea8ea6600af07a68b917d75f3",
+          "channel_session_id": "channel-session-c57b127e5947af58b1597cb51fa705f3",
+          "enrolled_at": "2030-01-02T03:00:05+00:00",
+          "enrollment_context": "postgres_record_store",
+          "host_principal_claim_json": "{\"gesture_source\":\"local_interactive\",\"host_instance_id\":\"synthetic-owner-control-host\",\"key_custody\":\"software_backed\",\"principal_id\":\"synthetic-owner-control-principal\",\"principal_separation\":\"separate_os_principal\",\"schema_version\":1}",
+          "host_principal_claim_sha256": "1875c5fba6b885df78bf02d46e6b444955e995d1637fc29ca25fd9db464dd379",
+          "owner_github_id": 494383370,
+          "provenance_tier": "self_asserted",
+          "schema_version": 1,
+          "server_observed_corroboration": "none"
+        },
+        "sha256": "4a672e98901cef7e1e6f7ad449de96f38c43a8fd3210ed9f3b74372d7e7fe829"
+      },
+      "result": {
+        "authority_state": "inert",
+        "authorizes_execution": false,
+        "provenance_tier": "self_asserted",
+        "server_observed_corroboration": "none"
+      }
+    },
+    {
+      "claim": {
+        "canonical_json": "{\"gesture_source\":\"not_claimed\",\"host_instance_id\":\"synthetic-owner-control-host\",\"key_custody\":\"hardware_backed\",\"principal_id\":\"synthetic-owner-control-principal\",\"principal_separation\":\"separate_os_principal\",\"schema_version\":1}",
+        "payload": {
+          "gesture_source": "not_claimed",
+          "host_instance_id": "synthetic-owner-control-host",
+          "key_custody": "hardware_backed",
+          "principal_id": "synthetic-owner-control-principal",
+          "principal_separation": "separate_os_principal",
+          "schema_version": 1
+        },
+        "sha256": "f48a4519fb4f44d94a1bb282572825849a05bb5742eb0adf6da14c24c1fc0e9c"
+      },
+      "enrollment_provenance": {
+        "canonical_json": "{\"authority_state\":\"inert\",\"authorizes_execution\":false,\"binding_json\":\"{\\\"channel_session_id\\\":\\\"channel-session-c57b127e5947af58b1597cb51fa705f3\\\",\\\"owner_github_id\\\":494383370,\\\"owner_public_key\\\":\\\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\\\",\\\"schema_version\\\":1,\\\"session_expires_at\\\":\\\"2030-01-02T03:20:05+00:00\\\",\\\"session_issued_at\\\":\\\"2030-01-02T03:00:00+00:00\\\",\\\"signature_algorithm\\\":\\\"ed25519\\\"}\",\"binding_sha256\":\"15fafd5a626ab2b0466eac21295f7ffab42ce85ea8ea6600af07a68b917d75f3\",\"channel_session_id\":\"channel-session-c57b127e5947af58b1597cb51fa705f3\",\"enrolled_at\":\"2030-01-02T03:00:05+00:00\",\"enrollment_context\":\"postgres_record_store\",\"host_principal_claim_json\":\"{\\\"gesture_source\\\":\\\"not_claimed\\\",\\\"host_instance_id\\\":\\\"synthetic-owner-control-host\\\",\\\"key_custody\\\":\\\"hardware_backed\\\",\\\"principal_id\\\":\\\"synthetic-owner-control-principal\\\",\\\"principal_separation\\\":\\\"separate_os_principal\\\",\\\"schema_version\\\":1}\",\"host_principal_claim_sha256\":\"f48a4519fb4f44d94a1bb282572825849a05bb5742eb0adf6da14c24c1fc0e9c\",\"owner_github_id\":494383370,\"provenance_tier\":\"self_asserted\",\"schema_version\":1,\"server_observed_corroboration\":\"none\"}",
+        "payload": {
+          "authority_state": "inert",
+          "authorizes_execution": false,
+          "binding_json": "{\"channel_session_id\":\"channel-session-c57b127e5947af58b1597cb51fa705f3\",\"owner_github_id\":494383370,\"owner_public_key\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"schema_version\":1,\"session_expires_at\":\"2030-01-02T03:20:05+00:00\",\"session_issued_at\":\"2030-01-02T03:00:00+00:00\",\"signature_algorithm\":\"ed25519\"}",
+          "binding_sha256": "15fafd5a626ab2b0466eac21295f7ffab42ce85ea8ea6600af07a68b917d75f3",
+          "channel_session_id": "channel-session-c57b127e5947af58b1597cb51fa705f3",
+          "enrolled_at": "2030-01-02T03:00:05+00:00",
+          "enrollment_context": "postgres_record_store",
+          "host_principal_claim_json": "{\"gesture_source\":\"not_claimed\",\"host_instance_id\":\"synthetic-owner-control-host\",\"key_custody\":\"hardware_backed\",\"principal_id\":\"synthetic-owner-control-principal\",\"principal_separation\":\"separate_os_principal\",\"schema_version\":1}",
+          "host_principal_claim_sha256": "f48a4519fb4f44d94a1bb282572825849a05bb5742eb0adf6da14c24c1fc0e9c",
+          "owner_github_id": 494383370,
+          "provenance_tier": "self_asserted",
+          "schema_version": 1,
+          "server_observed_corroboration": "none"
+        },
+        "sha256": "fa33e2d2bd23578e016f450d0a7f8f0da6a54ae6284930431b8b10f8d814d178"
+      },
+      "result": {
+        "authority_state": "inert",
+        "authorizes_execution": false,
+        "provenance_tier": "self_asserted",
+        "server_observed_corroboration": "none"
+      }
+    },
+    {
+      "claim": {
+        "canonical_json": "{\"gesture_source\":\"local_interactive\",\"host_instance_id\":\"synthetic-owner-control-host\",\"key_custody\":\"hardware_backed\",\"principal_id\":\"synthetic-owner-control-principal\",\"principal_separation\":\"separate_os_principal\",\"schema_version\":1}",
+        "payload": {
+          "gesture_source": "local_interactive",
+          "host_instance_id": "synthetic-owner-control-host",
+          "key_custody": "hardware_backed",
+          "principal_id": "synthetic-owner-control-principal",
+          "principal_separation": "separate_os_principal",
+          "schema_version": 1
+        },
+        "sha256": "adb54db27d702bc7ea1bfcf2962638e9374bf66c831ccca2f225c69ca3e79927"
+      },
+      "enrollment_provenance": {
+        "canonical_json": "{\"authority_state\":\"inert\",\"authorizes_execution\":false,\"binding_json\":\"{\\\"channel_session_id\\\":\\\"channel-session-c57b127e5947af58b1597cb51fa705f3\\\",\\\"owner_github_id\\\":494383370,\\\"owner_public_key\\\":\\\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\\\",\\\"schema_version\\\":1,\\\"session_expires_at\\\":\\\"2030-01-02T03:20:05+00:00\\\",\\\"session_issued_at\\\":\\\"2030-01-02T03:00:00+00:00\\\",\\\"signature_algorithm\\\":\\\"ed25519\\\"}\",\"binding_sha256\":\"15fafd5a626ab2b0466eac21295f7ffab42ce85ea8ea6600af07a68b917d75f3\",\"channel_session_id\":\"channel-session-c57b127e5947af58b1597cb51fa705f3\",\"enrolled_at\":\"2030-01-02T03:00:05+00:00\",\"enrollment_context\":\"postgres_record_store\",\"host_principal_claim_json\":\"{\\\"gesture_source\\\":\\\"local_interactive\\\",\\\"host_instance_id\\\":\\\"synthetic-owner-control-host\\\",\\\"key_custody\\\":\\\"hardware_backed\\\",\\\"principal_id\\\":\\\"synthetic-owner-control-principal\\\",\\\"principal_separation\\\":\\\"separate_os_principal\\\",\\\"schema_version\\\":1}\",\"host_principal_claim_sha256\":\"adb54db27d702bc7ea1bfcf2962638e9374bf66c831ccca2f225c69ca3e79927\",\"owner_github_id\":494383370,\"provenance_tier\":\"self_asserted\",\"schema_version\":1,\"server_observed_corroboration\":\"none\"}",
+        "payload": {
+          "authority_state": "inert",
+          "authorizes_execution": false,
+          "binding_json": "{\"channel_session_id\":\"channel-session-c57b127e5947af58b1597cb51fa705f3\",\"owner_github_id\":494383370,\"owner_public_key\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"schema_version\":1,\"session_expires_at\":\"2030-01-02T03:20:05+00:00\",\"session_issued_at\":\"2030-01-02T03:00:00+00:00\",\"signature_algorithm\":\"ed25519\"}",
+          "binding_sha256": "15fafd5a626ab2b0466eac21295f7ffab42ce85ea8ea6600af07a68b917d75f3",
+          "channel_session_id": "channel-session-c57b127e5947af58b1597cb51fa705f3",
+          "enrolled_at": "2030-01-02T03:00:05+00:00",
+          "enrollment_context": "postgres_record_store",
+          "host_principal_claim_json": "{\"gesture_source\":\"local_interactive\",\"host_instance_id\":\"synthetic-owner-control-host\",\"key_custody\":\"hardware_backed\",\"principal_id\":\"synthetic-owner-control-principal\",\"principal_separation\":\"separate_os_principal\",\"schema_version\":1}",
+          "host_principal_claim_sha256": "adb54db27d702bc7ea1bfcf2962638e9374bf66c831ccca2f225c69ca3e79927",
+          "owner_github_id": 494383370,
+          "provenance_tier": "self_asserted",
+          "schema_version": 1,
+          "server_observed_corroboration": "none"
+        },
+        "sha256": "1931ff3091cdf7f1e1b76505424e8fc085901889cea5cd479e3640262de0da4a"
+      },
+      "result": {
+        "authority_state": "inert",
+        "authorizes_execution": false,
+        "provenance_tier": "self_asserted",
+        "server_observed_corroboration": "none"
+      }
+    }
+  ],
+  "schema_version": 4,
   "schemas": {
     "approval_request": {
       "$defs": {

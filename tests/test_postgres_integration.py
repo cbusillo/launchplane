@@ -67,6 +67,9 @@ from control_plane.contracts.owner_control_shadow_verifier import (
     OwnerControlChallengeIssueRequest,
     OwnerControlIssuedChallengeRecord,
 )
+from control_plane.contracts.owner_control_enrollment_provenance import (
+    OwnerControlHostPrincipalClaim,
+)
 from control_plane.contracts.merge_train_controller_state import (
     MergeTrainControllerAdoptionRejectedError,
     MergeTrainControllerLeaseHeldError,
@@ -2462,6 +2465,16 @@ def _owner_control_shadow_binding(private_key: Ed25519PrivateKey) -> ChannelBind
     )
 
 
+def _owner_control_host_principal_claim() -> OwnerControlHostPrincipalClaim:
+    return OwnerControlHostPrincipalClaim(
+        host_instance_id="owner-control-postgres-host",
+        principal_id="owner-control-postgres-principal",
+        principal_separation="not_claimed",
+        key_custody="not_claimed",
+        gesture_source="not_claimed",
+    )
+
+
 def _seed_owner_control_shadow_issue_provenance(
     store: PostgresRecordStore,
 ) -> PrivilegedOperationRecord:
@@ -2564,7 +2577,10 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
         with _store_for_fresh_head_database() as store:
             private_key = Ed25519PrivateKey.generate()
             binding = _owner_control_shadow_binding(private_key)
-            store.enroll_owner_control_channel_session(binding)
+            store.enroll_owner_control_channel_session(
+                binding,
+                host_principal_claim=_owner_control_host_principal_claim(),
+            )
             operation = _seed_owner_control_shadow_issue_provenance(store)
             issue_request = OwnerControlChallengeIssueRequest(
                 channel_session_id=binding.channel_session_id,
@@ -2604,7 +2620,10 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
         with _store_for_fresh_head_database() as store:
             private_key = Ed25519PrivateKey.generate()
             binding = _owner_control_shadow_binding(private_key)
-            store.enroll_owner_control_channel_session(binding)
+            store.enroll_owner_control_channel_session(
+                binding,
+                host_principal_claim=_owner_control_host_principal_claim(),
+            )
             operation = _seed_owner_control_shadow_issue_provenance(store)
             issue_request = OwnerControlChallengeIssueRequest(
                 channel_session_id=binding.channel_session_id,
@@ -2682,7 +2701,10 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
         with _store_for_fresh_head_database() as store:
             private_key = Ed25519PrivateKey.generate()
             binding = _owner_control_shadow_binding(private_key)
-            store.enroll_owner_control_channel_session(binding)
+            store.enroll_owner_control_channel_session(
+                binding,
+                host_principal_claim=_owner_control_host_principal_claim(),
+            )
             operation = _seed_owner_control_shadow_issue_provenance(store)
             issued = store.issue_owner_control_challenge(
                 OwnerControlChallengeIssueRequest(

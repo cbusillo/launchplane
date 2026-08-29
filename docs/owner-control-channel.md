@@ -121,16 +121,19 @@ contains the JSON schemas, canonicalization declaration, and byte/digest golden
 vectors for every descriptor currently registered in
 `control_plane.privileged_operation_registry`.
 
-The artifact container is schema version `3`; the embedded approval, response,
+The artifact container is schema version `4`; the embedded approval, response,
 binding, signature-payload, envelope, and shadow-verifier record models remain
 schema version `1`. Version `2` added the signed-channel declarations and
 vectors. Version `3` adds deterministic server-state verification and reactive
 challenge-lifecycle vectors while preserving every version-2 section at its
-pinned canonical SHA-256. The compatibility declaration names those preserved
-section digests and requires consumers to reject unknown container versions.
+pinned canonical SHA-256. Version `4` adds separate enrollment-provenance
+schemas, declarations, exhaustive caller-claim vectors, and negative storage
+vectors. Its compatibility declaration pins every version-3 top-level section;
+the existing wire, verification-state, and challenge-lifecycle sections remain
+byte-identical. Consumers must reject unknown container versions.
 The preserved `signature_declaration.contract_schema_version` remains `2`
 because it identifies the unchanged signed-channel declaration; the top-level
-schema and compatibility block are authoritative for the version-3 container.
+schema and compatibility block are authoritative for the version-4 container.
 
 Descriptor vectors derive all synthetic identity values from the descriptor ID,
 so registering another descriptor does not churn existing vectors. Negative
@@ -151,6 +154,14 @@ the strict models from the JSON payloads and replay both sections through the
 real verifier and lifecycle functions, so adding or changing an outcome cannot
 silently leave the shared artifact behind.
 
+`provenance_vectors` exhaust every currently supported combination of principal
+separation, key custody, and gesture-source claims. Every combination derives
+only `self_asserted`, has `server_observed_corroboration: "none"`, remains
+`inert`, and sets `authorizes_execution: false`. Negative provenance vectors
+cover claim drift, unsupported fields and versions, attempts to raise trust
+without corroboration, missing stored provenance, and rejection of every
+published synthetic conformance public key at runtime enrollment.
+
 Regenerate and verify the checked artifact with:
 
 ```bash
@@ -166,8 +177,14 @@ operator, policy authority, session credential, or live endpoint data.
 
 `control_plane.contracts.owner_control_shadow_verifier` defines server-state
 records separate from the published wire contract. PostgreSQL persists enrolled
-channel sessions, issued single-use challenges, and append-only verification
-events. A separate append-only challenge-lifecycle ledger records reactive
+channel sessions, immutable one-to-one enrollment provenance, issued single-use
+challenges, and append-only verification events. Enrollment accepts an exact
+`OwnerControlHostPrincipalClaim` and writes the session plus provenance in one
+transaction. The record repeats the exact canonical channel-binding bytes and
+digest, stores the exact canonical claim bytes and digest, and shares the
+session's database enrollment timestamp. Re-enrollment is idempotent only for
+the exact binding and claim; any claim drift fails closed. A separate
+append-only challenge-lifecycle ledger records reactive
 non-verification transitions such as `issued -> expired` before re-issuance;
 it carries exact challenge/session/operation identifiers, request and binding
 digests, timestamp bounds, and inert non-authorizing markers without an
@@ -180,12 +197,21 @@ challenge permits at most eight audited verification attempts; the eighth
 non-terminal rejection closes the challenge as rejected, and later attempts
 cannot append more events.
 
+The closed claim values describe only what the caller says about principal
+separation, software or hardware-backed key custody, and local gesture sourcing.
+Launchplane implements no independent corroboration source in this slice, so
+even `hardware_backed` or `separate_os_principal` cannot raise trust above
+`self_asserted`. Published artifact keys are fixtures only and are explicitly
+rejected by storage enrollment. Challenge issuance also refuses a session whose
+provenance row is absent, and shadow verification refuses to consume an already
+issued challenge if the bound session's provenance is missing.
+
 Challenge issuance remains an unrouted service-internal storage API. It accepts
 only the enrolled channel-session ID, planned operation ID, and bounded TTL,
 then derives the complete `ApprovalRequest` from the locked operation, active
 policy, enrolled owner, server-generated nonce, and database-clock bounds. The
-remaining transport, enrollment-provenance, and trusted-host principal boundary
-requires separate review before any route exists. Unknown challenge nonces create no durable
+remaining transport and trusted-host corroboration boundary requires separate
+review before any route exists. Unknown challenge nonces create no durable
 state.
 
 Every stored event and returned result has `verifier_mode: "shadow"` and

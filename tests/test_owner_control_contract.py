@@ -31,6 +31,10 @@ from control_plane.contracts.owner_control_shadow_verifier import (
     evaluate_owner_control_shadow_verification,
     terminalize_expired_owner_control_challenge_record,
 )
+from control_plane.contracts.owner_control_enrollment_provenance import (
+    OwnerControlEnrollmentProvenanceRecord,
+    OwnerControlHostPrincipalClaim,
+)
 from control_plane.contracts.privileged_operation import (
     ManagedSecretReencryptionPlanInput,
     privileged_operation_request_digest,
@@ -256,20 +260,96 @@ class OwnerControlArtifactTests(unittest.TestCase):
         if expected_message := vector.get("error_message_contains"):
             self.assertIn(expected_message, errors[0]["msg"])
 
-    def test_v3_contract_preserves_every_v2_section(self) -> None:
+    def test_v4_contract_pins_every_v3_section_and_preserves_v3_payloads(self) -> None:
         artifact = build_owner_control_contract()
         compatibility = artifact["compatibility"]
 
-        self.assertEqual(artifact["schema_version"], 3)
-        self.assertEqual(compatibility["container_schema_version"], 3)
-        self.assertEqual(compatibility["previous_container_schema_version"], 2)
+        self.assertEqual(artifact["schema_version"], 4)
+        self.assertEqual(compatibility["container_schema_version"], 4)
+        self.assertEqual(compatibility["previous_container_schema_version"], 3)
         self.assertEqual(compatibility["unknown_container_versions"], "reject")
         self.assertEqual(compatibility["wire_model_schema_versions"], [1])
         self.assertEqual(compatibility["shadow_verifier_schema_versions"], [1])
+        self.assertEqual(compatibility["enrollment_provenance_schema_versions"], [1])
         self.assertEqual(artifact["signature_declaration"]["contract_schema_version"], 2)
         for section, expected_sha256 in compatibility["preserved_v2_section_sha256"].items():
             with self.subTest(section=section):
                 self.assertEqual(canonical_json_sha256(artifact[section]), expected_sha256)
+        preserved_v3 = compatibility["preserved_v3_section_sha256"]
+        self.assertEqual(
+            set(preserved_v3),
+            {
+                "canonical_json",
+                "canonicalization_vectors",
+                "challenge_lifecycle_vectors",
+                "compatibility",
+                "confirmation_golden_vectors",
+                "golden_vectors",
+                "negative_confirmation_vectors",
+                "negative_vectors",
+                "schema_version",
+                "schemas",
+                "signature_declaration",
+                "verification_state_vectors",
+            },
+        )
+        self.assertEqual(preserved_v3["schema_version"], canonical_json_sha256(3))
+        self.assertEqual(
+            preserved_v3["compatibility"],
+            "cb8720ac7b08fd92ade453489b127546a98908f858408e7ac56c2bbd05525982",
+        )
+        for section, expected_sha256 in preserved_v3.items():
+            if section in {"schema_version", "compatibility"}:
+                continue
+            with self.subTest(v3_section=section):
+                self.assertEqual(canonical_json_sha256(artifact[section]), expected_sha256)
+
+    def test_provenance_vectors_are_exhaustive_inert_and_canonical(self) -> None:
+        artifact = build_owner_control_contract()
+        vectors = artifact["provenance_vectors"]
+
+        self.assertEqual(len(vectors), 18)
+        combinations: set[tuple[str, str, str]] = set()
+        for vector in vectors:
+            claim = OwnerControlHostPrincipalClaim.model_validate(vector["claim"]["payload"])
+            provenance = OwnerControlEnrollmentProvenanceRecord.model_validate(
+                vector["enrollment_provenance"]["payload"]
+            )
+            combinations.add((claim.principal_separation, claim.key_custody, claim.gesture_source))
+            self.assertEqual(
+                vector["claim"]["canonical_json"],
+                canonical_json_bytes(claim.model_dump(mode="json")).decode(),
+            )
+            self.assertEqual(
+                vector["enrollment_provenance"]["canonical_json"],
+                canonical_json_bytes(provenance.model_dump(mode="json")).decode(),
+            )
+            self.assertEqual(vector["result"]["provenance_tier"], "self_asserted")
+            self.assertEqual(vector["result"]["server_observed_corroboration"], "none")
+            self.assertEqual(vector["result"]["authority_state"], "inert")
+            self.assertFalse(vector["result"]["authorizes_execution"])
+        self.assertEqual(len(combinations), 18)
+
+    def test_negative_provenance_vectors_fail_closed(self) -> None:
+        artifact = build_owner_control_contract()
+        models: dict[str, type[BaseModel]] = {
+            "owner_control_host_principal_claim": OwnerControlHostPrincipalClaim,
+            "owner_control_enrollment_provenance": OwnerControlEnrollmentProvenanceRecord,
+        }
+        synthetic_key_vectors = []
+        for vector in artifact["negative_provenance_vectors"]:
+            if vector.get("model"):
+                with self.subTest(rule=vector["rule"]):
+                    with self.assertRaises(ValidationError):
+                        models[vector["model"]].model_validate(vector["payload"])
+            elif vector["rule"] == "published-synthetic-conformance-key-is-rejected":
+                synthetic_key_vectors.append(vector)
+                self.assertTrue(vector["runtime_guard_matches"])
+                self.assertEqual(vector["result"], "reject")
+            else:
+                self.assertEqual(vector["rule"], "missing-enrollment-provenance-is-rejected")
+                self.assertEqual(vector["result"], "reject")
+        self.assertEqual(len(synthetic_key_vectors), 3)
 
     def test_existing_approval_and_challenge_vectors_remain_byte_compatible(self) -> None:
         vector = next(

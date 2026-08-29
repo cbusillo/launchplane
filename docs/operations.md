@@ -1720,6 +1720,15 @@ revision that matches the detected historical table set before applying later
 migrations. Empty databases still run the full migration chain from the first
 revision.
 
+The owner-control enrollment-provenance migration is intentionally fail-before-
+change. If any legacy owner-control channel session exists without a provenance
+row, upgrade stops before creating the new table; it never invents a claim or
+deploys a state in which challenge issuance silently trusts legacy enrollment.
+Reach an empty legacy-session set only through a separately reviewed operator
+process, then retry migration. Downgrade likewise stops while provenance rows
+exist. Do not bypass either guard with direct SQL, a synthetic conformance key,
+or a temporary authorization grant.
+
 Current derived-state behavior:
 
 - accepted deployment evidence also refreshes current environment inventory for
