@@ -1505,7 +1505,7 @@ class SchemaMigrationTests(unittest.TestCase):
             for primary_key in CRITICAL_PRIMARY_KEYS
         }
 
-        self.assertEqual(EXPECTED_ALEMBIC_HEAD_REVISION, "f6a1c3e5b7d9")
+        self.assertEqual(EXPECTED_ALEMBIC_HEAD_REVISION, "a7c9e1f3b5d7")
         self.assertNotIn(
             ("launchplane_human_sessions", "launchplane_human_sessions_github_id_idx"),
             indexes,
@@ -1537,10 +1537,25 @@ class SchemaMigrationTests(unittest.TestCase):
             primary_keys["launchplane_owner_control_shadow_verification_events"],
             ("event_id",),
         )
+        self.assertEqual(
+            column_types[("launchplane_owner_control_challenge_lifecycle_events", "payload")],
+            ("jsonb",),
+        )
+        self.assertEqual(
+            primary_keys["launchplane_owner_control_challenge_lifecycle_events"],
+            ("event_id",),
+        )
         self.assertIn(
             (
                 "launchplane_owner_control_shadow_verification_events",
                 "launchplane_owner_control_shadow_event_challenge_idx",
+            ),
+            indexes,
+        )
+        self.assertIn(
+            (
+                "launchplane_owner_control_challenge_lifecycle_events",
+                "launchplane_owner_control_lifecycle_event_challenge_idx",
             ),
             indexes,
         )
@@ -1796,6 +1811,19 @@ class SchemaMigrationTests(unittest.TestCase):
                     )
                     if (name := index.get("name")) is not None
                 }
+                lifecycle_event_indexes = {
+                    str(name): index
+                    for index in inspector.get_indexes(
+                        "launchplane_owner_control_challenge_lifecycle_events"
+                    )
+                    if (name := index.get("name")) is not None
+                }
+                lifecycle_event_columns = {
+                    str(column["name"])
+                    for column in inspector.get_columns(
+                        "launchplane_owner_control_challenge_lifecycle_events"
+                    )
+                }
             finally:
                 engine.dispose()
             command.downgrade(config, "f2241a0b1c2d")
@@ -1810,6 +1838,7 @@ class SchemaMigrationTests(unittest.TestCase):
                 "launchplane_owner_control_channel_sessions",
                 "launchplane_owner_control_issued_challenges",
                 "launchplane_owner_control_shadow_verification_events",
+                "launchplane_owner_control_challenge_lifecycle_events",
             }.issubset(table_names)
         )
         self.assertTrue(
@@ -1834,6 +1863,26 @@ class SchemaMigrationTests(unittest.TestCase):
             }.issubset(challenge_columns)
         )
         self.assertIn("launchplane_owner_control_shadow_event_challenge_idx", event_indexes)
+        self.assertTrue(
+            {
+                "event_id",
+                "challenge_id",
+                "challenge_nonce",
+                "operation_id",
+                "from_state",
+                "to_state",
+                "transition_reason",
+                "challenge_expires_at",
+                "occurred_at",
+                "authorizes_execution",
+                "authority_state",
+                "payload",
+            }.issubset(lifecycle_event_columns)
+        )
+        self.assertIn(
+            "launchplane_owner_control_lifecycle_event_challenge_idx",
+            lifecycle_event_indexes,
+        )
         active_operation_index = challenge_indexes[
             "launchplane_owner_control_challenge_active_operation_uidx"
         ]
@@ -1842,6 +1891,50 @@ class SchemaMigrationTests(unittest.TestCase):
         self.assertNotIn("launchplane_owner_control_channel_sessions", downgraded_tables)
         self.assertNotIn("launchplane_owner_control_issued_challenges", downgraded_tables)
         self.assertNotIn("launchplane_owner_control_shadow_verification_events", downgraded_tables)
+        self.assertNotIn(
+            "launchplane_owner_control_challenge_lifecycle_events",
+            downgraded_tables,
+        )
+
+    def test_owner_control_lifecycle_migration_refuses_nonempty_downgrade(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = (
+                f"sqlite+pysqlite:///{Path(temporary_directory_name) / 'records.sqlite3'}"
+            )
+            config = alembic_config(database_url)
+            command.upgrade(config, EXPECTED_ALEMBIC_HEAD_REVISION)
+            engine = create_engine(database_url)
+            try:
+                with engine.begin() as connection:
+                    connection.execute(
+                        text(
+                            "insert into launchplane_owner_control_challenge_lifecycle_events "
+                            "(event_id, challenge_id, challenge_nonce, channel_session_id, "
+                            "operation_id, approval_request_sha256, binding_sha256, from_state, "
+                            "to_state, transition_reason, challenge_expires_at, occurred_at, "
+                            "authorizes_execution, authority_state, payload) values "
+                            "(:event_id, :challenge_id, :challenge_nonce, :channel_session_id, "
+                            ":operation_id, :approval_request_sha256, :binding_sha256, 'issued', "
+                            "'expired', 'expired', :challenge_expires_at, :occurred_at, false, "
+                            "'inert', '{}')"
+                        ),
+                        {
+                            "event_id": "owner-control-lifecycle-event-test",
+                            "challenge_id": "owner-control-challenge-test",
+                            "challenge_nonce": "owner-control-challenge-nonce-test",
+                            "channel_session_id": "owner-control-session-test",
+                            "operation_id": "privileged-operation-0123456789abcdef0123456789abcdef",
+                            "approval_request_sha256": "a" * 64,
+                            "binding_sha256": "b" * 64,
+                            "challenge_expires_at": "2026-08-28T12:00:00+00:00",
+                            "occurred_at": "2026-08-28T12:00:00+00:00",
+                        },
+                    )
+            finally:
+                engine.dispose()
+
+            with self.assertRaisesRegex(RuntimeError, "audit events exist"):
+                command.downgrade(config, "f6a1c3e5b7d9")
 
 
 if __name__ == "__main__":

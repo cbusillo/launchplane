@@ -10,7 +10,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
 AUTHZ_COMPATIBILITY_FLOOR_REVISION = "f3b5d7e9a1c2"
-EXPECTED_ALEMBIC_HEAD_REVISION = "f6a1c3e5b7d9"
+EXPECTED_ALEMBIC_HEAD_REVISION = "a7c9e1f3b5d7"
 RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS = (EXPECTED_ALEMBIC_HEAD_REVISION,)
 _AUTHZ_POLICY_TABLE = "launchplane_authz_policies"
 _AUTHZ_POLICY_WRITE_FENCE_TRIGGER = "launchplane_authz_policy_write_fence"
@@ -458,6 +458,11 @@ CRITICAL_POSTGRES_COLUMN_TYPES: tuple[CriticalColumnType, ...] = (
     ),
     CriticalColumnType(
         "launchplane_owner_control_shadow_verification_events",
+        "payload",
+        ("jsonb",),
+    ),
+    CriticalColumnType(
+        "launchplane_owner_control_challenge_lifecycle_events",
         "payload",
         ("jsonb",),
     ),
@@ -1003,6 +1008,11 @@ CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
         "launchplane_owner_control_shadow_event_session_idx",
         ("channel_session_id", "occurred_at"),
     ),
+    CriticalIndex(
+        "launchplane_owner_control_challenge_lifecycle_events",
+        "launchplane_owner_control_lifecycle_event_challenge_idx",
+        ("challenge_nonce", "occurred_at"),
+    ),
 )
 
 CRITICAL_PRIMARY_KEYS: tuple[CriticalPrimaryKey, ...] = (
@@ -1111,6 +1121,10 @@ CRITICAL_PRIMARY_KEYS: tuple[CriticalPrimaryKey, ...] = (
     ),
     CriticalPrimaryKey(
         "launchplane_owner_control_shadow_verification_events",
+        ("event_id",),
+    ),
+    CriticalPrimaryKey(
+        "launchplane_owner_control_challenge_lifecycle_events",
         ("event_id",),
     ),
 )

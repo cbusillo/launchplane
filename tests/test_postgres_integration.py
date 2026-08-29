@@ -63,7 +63,10 @@ from control_plane.contracts.owner_control import (
     owner_control_channel_binding_sha256,
     owner_control_signature_payload_bytes,
 )
-from control_plane.contracts.owner_control_shadow_verifier import OwnerControlChallengeIssueRequest
+from control_plane.contracts.owner_control_shadow_verifier import (
+    OwnerControlChallengeIssueRequest,
+    OwnerControlIssuedChallengeRecord,
+)
 from control_plane.contracts.merge_train_controller_state import (
     MergeTrainControllerAdoptionRejectedError,
     MergeTrainControllerLeaseHeldError,
@@ -2596,6 +2599,84 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
 
         self.assertEqual(issued_records[0], issued_records[1])
         self.assertEqual(active_count, 1)
+
+    def test_owner_control_reissuance_terminalizes_expired_challenge_once(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            private_key = Ed25519PrivateKey.generate()
+            binding = _owner_control_shadow_binding(private_key)
+            store.enroll_owner_control_channel_session(binding)
+            operation = _seed_owner_control_shadow_issue_provenance(store)
+            issue_request = OwnerControlChallengeIssueRequest(
+                channel_session_id=binding.channel_session_id,
+                operation_id=operation.operation_id,
+                expires_in_seconds=1,
+            )
+            with patch.object(
+                store,
+                "_owner_control_shadow_timestamp",
+                return_value="2026-08-28T12:00:00+00:00",
+            ):
+                expired_candidate = store.issue_owner_control_challenge(issue_request)
+            second_store = PostgresRecordStore(database_url=store.database_url)
+            barrier = threading.Barrier(2)
+
+            def reissue_once(
+                active_store: PostgresRecordStore,
+            ) -> OwnerControlIssuedChallengeRecord:
+                with patch.object(
+                    active_store,
+                    "_owner_control_shadow_timestamp",
+                    return_value="2026-08-28T12:00:02+00:00",
+                ):
+                    barrier.wait(timeout=10)
+                    return active_store.issue_owner_control_challenge(issue_request)
+
+            try:
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    issued_records = tuple(executor.map(reissue_once, (store, second_store)))
+                engine = create_engine(store.database_url)
+                try:
+                    with engine.connect() as connection:
+                        active_count = connection.scalar(
+                            text(
+                                "select count(*) from "
+                                "launchplane_owner_control_issued_challenges "
+                                "where operation_id = :operation_id and state = 'issued'"
+                            ),
+                            {"operation_id": operation.operation_id},
+                        )
+                        lifecycle_count = connection.scalar(
+                            text(
+                                "select count(*) from "
+                                "launchplane_owner_control_challenge_lifecycle_events "
+                                "where challenge_id = :challenge_id"
+                            ),
+                            {"challenge_id": expired_candidate.challenge_id},
+                        )
+                        shadow_count = connection.scalar(
+                            text(
+                                "select count(*) from "
+                                "launchplane_owner_control_shadow_verification_events "
+                                "where challenge_id = :challenge_id"
+                            ),
+                            {"challenge_id": expired_candidate.challenge_id},
+                        )
+                finally:
+                    engine.dispose()
+            finally:
+                second_store.close()
+
+            expired = store.read_owner_control_issued_challenge(
+                challenge_nonce=expired_candidate.challenge_nonce
+            )
+
+        self.assertEqual(issued_records[0], issued_records[1])
+        self.assertNotEqual(issued_records[0].challenge_id, expired_candidate.challenge_id)
+        self.assertEqual(expired.state, "expired")
+        self.assertEqual(expired.attempt_count, 0)
+        self.assertEqual(active_count, 1)
+        self.assertEqual(lifecycle_count, 1)
+        self.assertEqual(shadow_count, 0)
 
     def test_owner_control_shadow_verification_consumes_one_challenge_once(self) -> None:
         with _store_for_fresh_head_database() as store:

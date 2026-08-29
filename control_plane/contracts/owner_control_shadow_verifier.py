@@ -29,6 +29,7 @@ _CANONICAL_TIMESTAMP_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}
 
 OwnerControlChannelSessionStatus = Literal["enrolled", "revoked"]
 OwnerControlChallengeState = Literal["issued", "consumed", "expired", "rejected"]
+OwnerControlChallengeLifecycleTransitionReason = Literal["expired"]
 OwnerControlShadowVerificationStatus = Literal["verified", "rejected"]
 OwnerControlShadowVerificationReason = Literal[
     "unknown_channel_session",
@@ -110,6 +111,26 @@ def owner_control_verification_event_id(
         }
     )
     return f"owner-control-shadow-event-{digest[:32]}"
+
+
+def owner_control_challenge_lifecycle_event_id(
+    *,
+    challenge_id: str,
+    from_state: Literal["issued"],
+    to_state: Literal["expired"],
+    transition_reason: OwnerControlChallengeLifecycleTransitionReason,
+) -> str:
+    """Return the deterministic identifier for one non-verification transition."""
+
+    digest = canonical_json_sha256(
+        {
+            "challenge_id": challenge_id,
+            "from_state": from_state,
+            "to_state": to_state,
+            "transition_reason": transition_reason,
+        }
+    )
+    return f"owner-control-lifecycle-event-{digest[:32]}"
 
 
 class OwnerControlChannelSessionRecord(BaseModel):
@@ -267,6 +288,43 @@ class OwnerControlIssuedChallengeRecord(BaseModel):
     def channel_binding(self) -> ChannelBindingRecord:
         binding = ChannelBindingRecord.model_validate_json(self.binding_json)
         return binding
+
+
+class OwnerControlChallengeLifecycleEventRecord(BaseModel):
+    """Append-only non-verification transition for one stored challenge."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    schema_version: Literal[1] = OWNER_CONTROL_SHADOW_VERIFIER_SCHEMA_VERSION
+    event_id: str = Field(pattern=_SERVER_IDENTIFIER_PATTERN.pattern)
+    challenge_id: str = Field(pattern=_SERVER_IDENTIFIER_PATTERN.pattern)
+    challenge_nonce: str = Field(min_length=16, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")
+    channel_session_id: str = Field(pattern=_SERVER_IDENTIFIER_PATTERN.pattern)
+    operation_id: str = Field(pattern=r"^privileged-operation-[0-9a-f]{32}$")
+    approval_request_sha256: str = Field(pattern=_SHA256_PATTERN.pattern)
+    binding_sha256: str = Field(pattern=_SHA256_PATTERN.pattern)
+    from_state: Literal["issued"] = "issued"
+    to_state: Literal["expired"] = "expired"
+    transition_reason: OwnerControlChallengeLifecycleTransitionReason = "expired"
+    challenge_expires_at: str
+    occurred_at: str
+    authorizes_execution: Literal[False] = False
+    authority_state: Literal["inert"] = OWNER_CONTROL_SHADOW_AUTHORITY_STATE
+
+    @model_validator(mode="after")
+    def _validate_record(self) -> "OwnerControlChallengeLifecycleEventRecord":
+        expires_at = _canonical_timestamp(self.challenge_expires_at, "challenge_expires_at")
+        occurred_at = _canonical_timestamp(self.occurred_at, "occurred_at")
+        if occurred_at < expires_at:
+            raise ValueError("occurred_at must not precede challenge_expires_at")
+        if self.event_id != owner_control_challenge_lifecycle_event_id(
+            challenge_id=self.challenge_id,
+            from_state=self.from_state,
+            to_state=self.to_state,
+            transition_reason=self.transition_reason,
+        ):
+            raise ValueError("event_id must derive from the exact lifecycle transition")
+        return self
 
 
 class OwnerControlShadowVerificationEventRecord(BaseModel):
@@ -434,6 +492,48 @@ def issue_owner_control_challenge_record(
         binding_json=session.binding_json,
         binding_sha256=session.binding_sha256,
     )
+
+
+def terminalize_expired_owner_control_challenge_record(
+    record: OwnerControlIssuedChallengeRecord,
+    *,
+    observed_at: str,
+) -> tuple[OwnerControlIssuedChallengeRecord, OwnerControlChallengeLifecycleEventRecord]:
+    """Expire one issued challenge without consuming a verification attempt."""
+
+    observed_at_value = _canonical_timestamp(observed_at, "observed_at")
+    expires_at_value = _canonical_timestamp(record.expires_at, "expires_at")
+    if record.state != "issued":
+        raise OwnerControlShadowVerifierConflictError(
+            "Only issued owner-control challenges can be terminalized as expired."
+        )
+    if expires_at_value > observed_at_value:
+        raise OwnerControlShadowVerifierConflictError("Owner-control challenge has not expired.")
+    event_id = owner_control_challenge_lifecycle_event_id(
+        challenge_id=record.challenge_id,
+        from_state="issued",
+        to_state="expired",
+        transition_reason="expired",
+    )
+    event = OwnerControlChallengeLifecycleEventRecord(
+        event_id=event_id,
+        challenge_id=record.challenge_id,
+        challenge_nonce=record.challenge_nonce,
+        channel_session_id=record.channel_session_id,
+        operation_id=record.operation_id,
+        approval_request_sha256=record.approval_request_sha256,
+        binding_sha256=record.binding_sha256,
+        challenge_expires_at=record.expires_at,
+        occurred_at=observed_at,
+    )
+    terminalized = OwnerControlIssuedChallengeRecord.model_validate(
+        {
+            **record.model_dump(),
+            "state": "expired",
+            "terminal_event_id": event.event_id,
+        }
+    )
+    return terminalized, event
 
 
 def evaluate_owner_control_shadow_verification(

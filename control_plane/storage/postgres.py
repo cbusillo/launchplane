@@ -125,6 +125,7 @@ from control_plane.contracts.owner_control import (
 from control_plane.contracts.owner_control_shadow_verifier import (
     OWNER_CONTROL_SHADOW_MAX_ATTEMPTS,
     OwnerControlChannelSessionRecord,
+    OwnerControlChallengeLifecycleEventRecord,
     OwnerControlChallengeIssueRequest,
     OwnerControlIssuedChallengeRecord,
     OwnerControlShadowVerificationEvaluation,
@@ -134,6 +135,7 @@ from control_plane.contracts.owner_control_shadow_verifier import (
     build_owner_control_channel_session_record,
     evaluate_owner_control_shadow_verification,
     issue_owner_control_challenge_record,
+    terminalize_expired_owner_control_challenge_record,
     owner_control_confirmation_envelope_sha256,
     owner_control_verification_event_id,
     revoke_owner_control_channel_session_record,
@@ -1164,6 +1166,70 @@ class LaunchplaneOwnerControlIssuedChallengeRow(Base):
     attempt_count: Mapped[int] = mapped_column(Integer, nullable=False)
     consumed_at: Mapped[str | None] = mapped_column(String, nullable=True)
     terminal_event_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    authority_state: Mapped[str] = mapped_column(
+        String,
+        nullable=False,
+        server_default="inert",
+    )
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneOwnerControlChallengeLifecycleEventRow(Base):
+    __tablename__ = "launchplane_owner_control_challenge_lifecycle_events"
+    __table_args__ = (
+        CheckConstraint(
+            "from_state = 'issued'",
+            name="launchplane_owner_control_lifecycle_event_from_state_ck",
+        ),
+        CheckConstraint(
+            "to_state = 'expired'",
+            name="launchplane_owner_control_lifecycle_event_to_state_ck",
+        ),
+        CheckConstraint(
+            "transition_reason = 'expired'",
+            name="launchplane_owner_control_lifecycle_event_reason_ck",
+        ),
+        CheckConstraint(
+            "occurred_at >= challenge_expires_at",
+            name="launchplane_owner_control_lifecycle_event_time_ck",
+        ),
+        CheckConstraint(
+            "authorizes_execution = false",
+            name="launchplane_owner_control_lifecycle_event_authorization_ck",
+        ),
+        CheckConstraint(
+            "authority_state = 'inert'",
+            name="launchplane_owner_control_lifecycle_event_authority_ck",
+        ),
+        UniqueConstraint(
+            "challenge_id",
+            "transition_reason",
+            name="launchplane_owner_control_lifecycle_event_transition_uq",
+        ),
+        Index(
+            "launchplane_owner_control_lifecycle_event_challenge_idx",
+            "challenge_nonce",
+            desc("occurred_at"),
+        ),
+    )
+
+    event_id: Mapped[str] = mapped_column(String, primary_key=True)
+    challenge_id: Mapped[str] = mapped_column(String, nullable=False)
+    challenge_nonce: Mapped[str] = mapped_column(String, nullable=False)
+    channel_session_id: Mapped[str] = mapped_column(String, nullable=False)
+    operation_id: Mapped[str] = mapped_column(String, nullable=False)
+    approval_request_sha256: Mapped[str] = mapped_column(String, nullable=False)
+    binding_sha256: Mapped[str] = mapped_column(String, nullable=False)
+    from_state: Mapped[str] = mapped_column(String, nullable=False)
+    to_state: Mapped[str] = mapped_column(String, nullable=False)
+    transition_reason: Mapped[str] = mapped_column(String, nullable=False)
+    challenge_expires_at: Mapped[str] = mapped_column(String, nullable=False)
+    occurred_at: Mapped[str] = mapped_column(String, nullable=False)
+    authorizes_execution: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        server_default=false(),
+    )
     authority_state: Mapped[str] = mapped_column(
         String,
         nullable=False,
@@ -9342,6 +9408,28 @@ class PostgresRecordStore(HumanSessionStore):
         row.authority_state = record.authority_state
         row.payload = self._payload_dict(record)
 
+    def _owner_control_challenge_lifecycle_event_row_from_record(
+        self,
+        record: OwnerControlChallengeLifecycleEventRecord,
+    ) -> LaunchplaneOwnerControlChallengeLifecycleEventRow:
+        return LaunchplaneOwnerControlChallengeLifecycleEventRow(
+            event_id=record.event_id,
+            challenge_id=record.challenge_id,
+            challenge_nonce=record.challenge_nonce,
+            channel_session_id=record.channel_session_id,
+            operation_id=record.operation_id,
+            approval_request_sha256=record.approval_request_sha256,
+            binding_sha256=record.binding_sha256,
+            from_state=record.from_state,
+            to_state=record.to_state,
+            transition_reason=record.transition_reason,
+            challenge_expires_at=record.challenge_expires_at,
+            occurred_at=record.occurred_at,
+            authorizes_execution=record.authorizes_execution,
+            authority_state=record.authority_state,
+            payload=self._payload_dict(record),
+        )
+
     def enroll_owner_control_channel_session(
         self,
         binding: ChannelBindingRecord,
@@ -9421,6 +9509,11 @@ class PostgresRecordStore(HumanSessionStore):
                 operation_id=issue_request.operation_id,
             )
             policy_record = self._locked_active_authz_policy_record(session)
+            existing_row = self._owner_control_active_challenge_row_for_operation(
+                session,
+                operation_id=operation.operation_id,
+                for_update=True,
+            )
             issued_at = self._owner_control_shadow_timestamp(session)
             issued_at_value = datetime.fromisoformat(issued_at)
             operation_expires_at = datetime.fromisoformat(operation.expires_at).astimezone(
@@ -9456,36 +9549,54 @@ class PostgresRecordStore(HumanSessionStore):
                 )
             except OwnerControlChallengeProvenanceError as error:
                 raise OwnerControlShadowVerifierConflictError(str(error)) from error
-            existing_row = self._owner_control_active_challenge_row_for_operation(
-                session,
-                operation_id=operation.operation_id,
-                for_update=True,
-            )
             if existing_row is not None:
                 existing_record = self._owner_control_issued_challenge_record_from_row(existing_row)
                 existing_expires_at = datetime.fromisoformat(existing_record.expires_at)
                 if existing_expires_at <= issued_at_value:
-                    raise OwnerControlShadowVerifierConflictError(
-                        "Expired owner-control challenges require an audited terminal transition."
+                    terminalized_record, lifecycle_event = (
+                        terminalize_expired_owner_control_challenge_record(
+                            existing_record,
+                            observed_at=issued_at,
+                        )
                     )
-                if (
-                    existing_record.channel_session_id == session_record.channel_session_id
-                    and existing_record.binding_sha256 == session_record.binding_sha256
-                    and existing_expires_at <= expires_at_value
-                    and owner_control_challenge_semantics(existing_record.approval_request())
-                    == owner_control_challenge_semantics(candidate)
-                ):
-                    session.rollback()
-                    return existing_record
-                raise OwnerControlShadowVerifierConflictError(
-                    "An active owner-control challenge already binds this operation."
-                )
+                    self._sync_owner_control_issued_challenge_row(
+                        existing_row,
+                        terminalized_record,
+                    )
+                    session.add(
+                        self._owner_control_challenge_lifecycle_event_row_from_record(
+                            lifecycle_event
+                        )
+                    )
+                    session.flush()
+                else:
+                    if (
+                        existing_record.channel_session_id == session_record.channel_session_id
+                        and existing_record.binding_sha256 == session_record.binding_sha256
+                        and existing_expires_at <= expires_at_value
+                        and owner_control_challenge_semantics(existing_record.approval_request())
+                        == owner_control_challenge_semantics(candidate)
+                    ):
+                        session.rollback()
+                        return existing_record
+                    raise OwnerControlShadowVerifierConflictError(
+                        "An active owner-control challenge already binds this operation."
+                    )
             record = issue_owner_control_challenge_record(
                 issue_request=issue_request,
                 session=session_record,
                 approval_request=candidate,
             )
             session.add(self._owner_control_issued_challenge_row_from_record(record))
+            session.flush()
+            final_observed_at = self._owner_control_shadow_timestamp(session)
+            if datetime.fromisoformat(record.expires_at) <= datetime.fromisoformat(
+                final_observed_at
+            ):
+                session.rollback()
+                raise OwnerControlShadowVerifierConflictError(
+                    "Owner-control challenge expired before issuance committed."
+                )
             session.commit()
             return record
 
@@ -9642,6 +9753,33 @@ class PostgresRecordStore(HumanSessionStore):
             model_type=OwnerControlIssuedChallengeRecord,
             orm_model=LaunchplaneOwnerControlIssuedChallengeRow,
             filters=(LaunchplaneOwnerControlIssuedChallengeRow.challenge_nonce == challenge_nonce,),
+        )
+
+    def list_owner_control_challenge_lifecycle_events(
+        self,
+        *,
+        challenge_nonce: str = "",
+        operation_id: str = "",
+        limit: int | None = None,
+    ) -> tuple[OwnerControlChallengeLifecycleEventRecord, ...]:
+        filters: list[object] = []
+        if challenge_nonce:
+            filters.append(
+                LaunchplaneOwnerControlChallengeLifecycleEventRow.challenge_nonce == challenge_nonce
+            )
+        if operation_id:
+            filters.append(
+                LaunchplaneOwnerControlChallengeLifecycleEventRow.operation_id == operation_id
+            )
+        return self._list_models(
+            model_type=OwnerControlChallengeLifecycleEventRecord,
+            orm_model=LaunchplaneOwnerControlChallengeLifecycleEventRow,
+            filters=filters,
+            order_by=(
+                LaunchplaneOwnerControlChallengeLifecycleEventRow.occurred_at.desc(),
+                LaunchplaneOwnerControlChallengeLifecycleEventRow.event_id.desc(),
+            ),
+            limit=limit,
         )
 
     def list_owner_control_shadow_verification_events(
