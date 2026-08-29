@@ -121,11 +121,16 @@ contains the JSON schemas, canonicalization declaration, and byte/digest golden
 vectors for every descriptor currently registered in
 `control_plane.privileged_operation_registry`.
 
-The artifact container is schema version `2`; the embedded approval, response,
-binding, signature-payload, and envelope models remain schema version `1`.
-Version `2` adds the signed-channel declarations and vectors while preserving
-the legacy version-1 canonicalization, approval, response, and negative-vector
-bytes.
+The artifact container is schema version `3`; the embedded approval, response,
+binding, signature-payload, envelope, and shadow-verifier record models remain
+schema version `1`. Version `2` added the signed-channel declarations and
+vectors. Version `3` adds deterministic server-state verification and reactive
+challenge-lifecycle vectors while preserving every version-2 section at its
+pinned canonical SHA-256. The compatibility declaration names those preserved
+section digests and requires consumers to reject unknown container versions.
+The preserved `signature_declaration.contract_schema_version` remains `2`
+because it identifies the unchanged signed-channel declaration; the top-level
+schema and compatibility block are authoritative for the version-3 container.
 
 Descriptor vectors derive all synthetic identity values from the descriptor ID,
 so registering another descriptor does not churn existing vectors. Negative
@@ -134,6 +139,17 @@ and cover version, digest, timestamp, nonce, issuance/expiry ordering, exact
 request binding, confirmation-time rejection, review-key uniqueness, and review
 text normalization. Timestamp vectors cover both lexical UTC form and calendar
 validity.
+
+`verification_state_vectors` carry synthetic channel-session state, issued
+challenge state, one confirmation envelope, a whole-second observation time,
+and the exact inert shadow evaluation. Their rejection-reason set must equal
+the complete `OwnerControlShadowVerificationReason` literal, and at least one
+vector must verify successfully. `challenge_lifecycle_vectors` separately
+replay the exact-boundary `issued -> expired` transition, preserving attempt
+count and emitting no envelope digest or verification sequence. Tests rebuild
+the strict models from the JSON payloads and replay both sections through the
+real verifier and lifecycle functions, so adding or changing an outcome cannot
+silently leave the shared artifact behind.
 
 Regenerate and verify the checked artifact with:
 
@@ -164,13 +180,13 @@ challenge permits at most eight audited verification attempts; the eighth
 non-terminal rejection closes the challenge as rejected, and later attempts
 cannot append more events.
 
-Challenge issuance accepts an exact `ApprovalRequest` only through an unrouted
-service-internal storage API. This slice does not claim that arbitrary supplied
-request fields are trusted or derive a challenge from a live privileged
-operation; the database service replaces the nonce and timestamp bounds with a
-server-generated nonce and database-clock values. The remaining
-operation-binding and transport boundary requires a separate review before any
-route exists. Unknown challenge nonces create no durable state.
+Challenge issuance remains an unrouted service-internal storage API. It accepts
+only the enrolled channel-session ID, planned operation ID, and bounded TTL,
+then derives the complete `ApprovalRequest` from the locked operation, active
+policy, enrolled owner, server-generated nonce, and database-clock bounds. The
+remaining transport, enrollment-provenance, and trusted-host principal boundary
+requires separate review before any route exists. Unknown challenge nonces create no durable
+state.
 
 Every stored event and returned result has `verifier_mode: "shadow"` and
 `authorizes_execution: false`. The slice adds no HTTP route, authorization

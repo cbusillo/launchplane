@@ -2664,9 +2664,12 @@ review plus bounded diff and CAS/read-back evidence. See
 `docs/privileged-operations.md` for the full evidence and authorization
 boundary.
 
-The checked `contracts/owner-control-contract.json` artifact is not a record or
-runtime authority. It supplies deterministic cross-host serialization and
-synthetic golden vectors only.
+The checked schema-version-3 `contracts/owner-control-contract.json` artifact is
+not a record or runtime authority. It supplies deterministic cross-host
+serialization, synthetic wire/signature vectors, complete shadow-verifier
+outcome vectors, and one reactive expiry-lifecycle vector only. Its
+compatibility declaration pins every version-2 section digest so the additive
+server-state evidence cannot rewrite the existing wire contract silently.
 
 Owner-control shadow-verifier state is persisted only in PostgreSQL through
 `PostgresRecordStore`: `launchplane_owner_control_channel_sessions` stores one

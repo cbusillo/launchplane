@@ -64,6 +64,91 @@
       "sha256": "07db6c156108fd238db2691d759e6fe5d8f8649fb5e9c8130dc3f98342ba5ae2"
     }
   ],
+  "challenge_lifecycle_vectors": [
+    {
+      "expected_lifecycle_event": {
+        "approval_request_sha256": "a60572025b121241d44c3f28ce22715841e348765dd50cfa514861e89334d9eb",
+        "authority_state": "inert",
+        "authorizes_execution": false,
+        "binding_sha256": "278ee07f98754104407f5d42aadf5bd47090faaddc7db14c6a125b8d3bc56e1b",
+        "challenge_expires_at": "2030-01-02T03:09:05+00:00",
+        "challenge_id": "owner-control-challenge-a60572025b121241d44c3f28ce227158",
+        "challenge_nonce": "owner-control-b565a7b3115d408e250eeffe65af9513",
+        "channel_session_id": "channel-session-c57b127e5947af58b1597cb51fa705f3",
+        "event_id": "owner-control-lifecycle-event-4d643827e23fa0678377e4bbe7aaba9e",
+        "from_state": "issued",
+        "occurred_at": "2030-01-02T03:09:05+00:00",
+        "operation_id": "privileged-operation-1d762a6ac3895594ed85ba7aa9c39330",
+        "schema_version": 1,
+        "to_state": "expired",
+        "transition_reason": "expired"
+      },
+      "expected_terminalized_challenge": {
+        "approval_request_json": "{\"descriptor_id\":\"managed-authz-policy-set\",\"descriptor_version\":1,\"evidence_digest\":\"df6da961581b149a28639add56e3b08401b3bed6afb07ad0c7b5ca3d51632be9\",\"expires_at\":\"2030-01-02T03:09:05+00:00\",\"issued_at\":\"2030-01-02T03:00:05+00:00\",\"nonce\":\"owner-control-b565a7b3115d408e250eeffe65af9513\",\"operation_id\":\"privileged-operation-1d762a6ac3895594ed85ba7aa9c39330\",\"owner_github_id\":494383370,\"plan_digest\":\"edf23f94b33d1188e34e143e7aff91075ec941053b3b95d367a45de67b1fe1d7\",\"policy_record_id\":\"owner-policy-1d762a6ac3895594ed85\",\"policy_revision\":1,\"policy_sha256\":\"b379db2fe113e77eef0b3bb05aec804189d9f0b359e67d941d837c7de59e6f8e\",\"pre_state_digest\":\"46df3876ade6b39b0edfbd3b8ea1a408173bbe5d8cc7154cea4d63e5d057239f\",\"request_digest\":\"e0e31f55312d2562bf610587d7a21b5badeed50224284b08d1662924379b4539\",\"schema_version\":1,\"server_review\":{\"items\":[{\"key\":\"descriptor\",\"label\":\"Operation class\",\"value\":\"managed-authz-policy-set\"},{\"key\":\"safety_class\",\"label\":\"Safety class\",\"value\":\"policy_admin\"}],\"review_id\":\"review-1d762a6ac3895594ed85ba7a\",\"schema_version\":1,\"summary\":\"Review this exact privileged operation before confirming.\",\"title\":\"Owner approval required\"}}",
+        "approval_request_sha256": "a60572025b121241d44c3f28ce22715841e348765dd50cfa514861e89334d9eb",
+        "attempt_count": 0,
+        "authority_state": "inert",
+        "binding_json": "{\"channel_session_id\":\"channel-session-c57b127e5947af58b1597cb51fa705f3\",\"owner_github_id\":494383370,\"owner_public_key\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\",\"schema_version\":1,\"session_expires_at\":\"2030-01-02T03:20:05+00:00\",\"session_issued_at\":\"2030-01-02T03:00:00+00:00\",\"signature_algorithm\":\"ed25519\"}",
+        "binding_sha256": "278ee07f98754104407f5d42aadf5bd47090faaddc7db14c6a125b8d3bc56e1b",
+        "challenge_id": "owner-control-challenge-a60572025b121241d44c3f28ce227158",
+        "challenge_nonce": "owner-control-b565a7b3115d408e250eeffe65af9513",
+        "channel_session_id": "channel-session-c57b127e5947af58b1597cb51fa705f3",
+        "consumed_at": null,
+        "descriptor_id": "managed-authz-policy-set",
+        "expires_at": "2030-01-02T03:09:05+00:00",
+        "issued_at": "2030-01-02T03:00:05+00:00",
+        "operation_id": "privileged-operation-1d762a6ac3895594ed85ba7aa9c39330",
+        "owner_github_id": 494383370,
+        "schema_version": 1,
+        "state": "expired",
+        "terminal_event_id": "owner-control-lifecycle-event-4d643827e23fa0678377e4bbe7aaba9e"
+      },
+      "issued_challenge": {
+        "approval_request_json": "{\"descriptor_id\":\"managed-authz-policy-set\",\"descriptor_version\":1,\"evidence_digest\":\"df6da961581b149a28639add56e3b08401b3bed6afb07ad0c7b5ca3d51632be9\",\"expires_at\":\"2030-01-02T03:09:05+00:00\",\"issued_at\":\"2030-01-02T03:00:05+00:00\",\"nonce\":\"owner-control-b565a7b3115d408e250eeffe65af9513\",\"operation_id\":\"privileged-operation-1d762a6ac3895594ed85ba7aa9c39330\",\"owner_github_id\":494383370,\"plan_digest\":\"edf23f94b33d1188e34e143e7aff91075ec941053b3b95d367a45de67b1fe1d7\",\"policy_record_id\":\"owner-policy-1d762a6ac3895594ed85\",\"policy_revision\":1,\"policy_sha256\":\"b379db2fe113e77eef0b3bb05aec804189d9f0b359e67d941d837c7de59e6f8e\",\"pre_state_digest\":\"46df3876ade6b39b0edfbd3b8ea1a408173bbe5d8cc7154cea4d63e5d057239f\",\"request_digest\":\"e0e31f55312d2562bf610587d7a21b5badeed50224284b08d1662924379b4539\",\"schema_version\":1,\"server_review\":{\"items\":[{\"key\":\"descriptor\",\"label\":\"Operation class\",\"value\":\"managed-authz-policy-set\"},{\"key\":\"safety_class\",\"label\":\"Safety class\",\"value\":\"policy_admin\"}],\"review_id\":\"review-1d762a6ac3895594ed85ba7a\",\"schema_version\":1,\"summary\":\"Review this exact privileged operation before confirming.\",\"title\":\"Owner approval required\"}}",
+        "approval_request_sha256": "a60572025b121241d44c3f28ce22715841e348765dd50cfa514861e89334d9eb",
+        "attempt_count": 0,
+        "authority_state": "inert",
+        "binding_json": "{\"channel_session_id\":\"channel-session-c57b127e5947af58b1597cb51fa705f3\",\"owner_github_id\":494383370,\"owner_public_key\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\",\"schema_version\":1,\"session_expires_at\":\"2030-01-02T03:20:05+00:00\",\"session_issued_at\":\"2030-01-02T03:00:00+00:00\",\"signature_algorithm\":\"ed25519\"}",
+        "binding_sha256": "278ee07f98754104407f5d42aadf5bd47090faaddc7db14c6a125b8d3bc56e1b",
+        "challenge_id": "owner-control-challenge-a60572025b121241d44c3f28ce227158",
+        "challenge_nonce": "owner-control-b565a7b3115d408e250eeffe65af9513",
+        "channel_session_id": "channel-session-c57b127e5947af58b1597cb51fa705f3",
+        "consumed_at": null,
+        "descriptor_id": "managed-authz-policy-set",
+        "expires_at": "2030-01-02T03:09:05+00:00",
+        "issued_at": "2030-01-02T03:00:05+00:00",
+        "operation_id": "privileged-operation-1d762a6ac3895594ed85ba7aa9c39330",
+        "owner_github_id": 494383370,
+        "schema_version": 1,
+        "state": "issued",
+        "terminal_event_id": null
+      },
+      "name": "issued-to-expired-at-boundary",
+      "observed_at": "2030-01-02T03:09:05+00:00"
+    }
+  ],
+  "compatibility": {
+    "change_kind": "additive-server-state-vectors",
+    "container_schema_version": 3,
+    "preserved_v2_section_sha256": {
+      "canonical_json": "0c6b6454d737943d01d4621c217ff8412552a0bf0c69a0f50a761d38ac0e7d1f",
+      "canonicalization_vectors": "ca481ff769bba537310c8568b56850f5d12ebc0c90ace9ea2dc39ff714daa6a8",
+      "confirmation_golden_vectors": "58391f364a79ab321596d30200b87c9d29be366eaa1386a9ff4c242c8b38d50a",
+      "golden_vectors": "6955c5c8bb228c21bc6a68a4ddb7cf22456cd51615ffe6e421b0fa04f15d9584",
+      "negative_confirmation_vectors": "9d529ca0f5153c8c3eb3eb4862311efc6dc3c1dc7e5df55824ebde13194eb46d",
+      "negative_vectors": "232d29bc542df455c9f54a3196a2a4d41cb0912155f92d060c850df99c835b29",
+      "schemas": "00a8524a65afd637c8cfc88ef44e780154addc759b813a831f3ddf2ce1490bd0",
+      "signature_declaration": "7d9c62d55792931383d4a02ed99d31e21c67b5ce714c01d9144dc2a3bed34f72"
+    },
+    "previous_container_schema_version": 2,
+    "shadow_verifier_schema_versions": [
+      1
+    ],
+    "unknown_container_versions": "reject",
+    "wire_model_schema_versions": [
+      1
+    ]
+  },
   "confirmation_golden_vectors": [
     {
       "challenge_response": {
@@ -1916,7 +2001,7 @@
       "rule": "review-item-text-has-no-surrounding-whitespace"
     }
   ],
-  "schema_version": 2,
+  "schema_version": 3,
   "schemas": {
     "approval_request": {
       "$defs": {
@@ -3062,5 +3147,1159 @@
     "public_key_encoding": "base64url-unpadded",
     "signature_bytes": 64,
     "signature_encoding": "base64url-unpadded"
-  }
+  },
+  "verification_state_vectors": [
+    {
+      "channel_session": {
+        "authority_state": "inert",
+        "binding_json": "{\"channel_session_id\":\"channel-session-c57b127e5947af58b1597cb51fa705f3\",\"owner_github_id\":494383370,\"owner_public_key\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\",\"schema_version\":1,\"session_expires_at\":\"2030-01-02T03:20:05+00:00\",\"session_issued_at\":\"2030-01-02T03:00:00+00:00\",\"signature_algorithm\":\"ed25519\"}",
+        "binding_sha256": "278ee07f98754104407f5d42aadf5bd47090faaddc7db14c6a125b8d3bc56e1b",
+        "channel_session_id": "channel-session-c57b127e5947af58b1597cb51fa705f3",
+        "enrolled_at": "2030-01-02T03:00:05+00:00",
+        "owner_github_id": 494383370,
+        "revoked_at": null,
+        "schema_version": 1,
+        "status": "enrolled"
+      },
+      "confirmation_envelope": {
+        "challenge_response": {
+          "approval_request": {
+            "descriptor_id": "managed-authz-policy-set",
+            "descriptor_version": 1,
+            "evidence_digest": "df6da961581b149a28639add56e3b08401b3bed6afb07ad0c7b5ca3d51632be9",
+            "expires_at": "2030-01-02T03:09:05+00:00",
+            "issued_at": "2030-01-02T03:00:05+00:00",
+            "nonce": "owner-control-b565a7b3115d408e250eeffe65af9513",
+            "operation_id": "privileged-operation-1d762a6ac3895594ed85ba7aa9c39330",
+            "owner_github_id": 494383370,
+            "plan_digest": "edf23f94b33d1188e34e143e7aff91075ec941053b3b95d367a45de67b1fe1d7",
+            "policy_record_id": "owner-policy-1d762a6ac3895594ed85",
+            "policy_revision": 1,
+            "policy_sha256": "b379db2fe113e77eef0b3bb05aec804189d9f0b359e67d941d837c7de59e6f8e",
+            "pre_state_digest": "46df3876ade6b39b0edfbd3b8ea1a408173bbe5d8cc7154cea4d63e5d057239f",
+            "request_digest": "e0e31f55312d2562bf610587d7a21b5badeed50224284b08d1662924379b4539",
+            "schema_version": 1,
+            "server_review": {
+              "items": [
+                {
+                  "key": "descriptor",
+                  "label": "Operation class",
+                  "value": "managed-authz-policy-set"
+                },
+                {
+                  "key": "safety_class",
+                  "label": "Safety class",
+                  "value": "policy_admin"
+                }
+              ],
+              "review_id": "review-1d762a6ac3895594ed85ba7a",
+              "schema_version": 1,
+              "summary": "Review this exact privileged operation before confirming.",
+              "title": "Owner approval required"
+            }
+          },
+          "approval_request_digest": "a60572025b121241d44c3f28ce22715841e348765dd50cfa514861e89334d9eb",
+          "channel_binding_sha256": "278ee07f98754104407f5d42aadf5bd47090faaddc7db14c6a125b8d3bc56e1b",
+          "confirmed_at": "2030-01-02T03:04:05+00:00",
+          "decision": "approved",
+          "schema_version": 1
+        },
+        "channel_binding": {
+          "channel_session_id": "channel-session-c57b127e5947af58b1597cb51fa705f3",
+          "owner_github_id": 494383370,
+          "owner_public_key": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+          "schema_version": 1,
+          "session_expires_at": "2030-01-02T03:20:05+00:00",
+          "session_issued_at": "2030-01-02T03:00:00+00:00",
+          "signature_algorithm": "ed25519"
+        },
+        "schema_version": 1,
+        "signature": "5yFpKp48lfzpkxnf92lkEyl5hnYCrMeRNUdUKkOjA15CKokgDqsRDN8bNnJI_AMxFcD93fOuZxrG1Hh7rCDfCw",
+        "signature_algorithm": "ed25519"
+      },
+      "expected": {
+        "authority_state": "inert",
+        "authorizes_execution": false,
+        "consume_challenge": true,
+        "rejection_reason": null,
+        "resulting_challenge_state": "consumed",
+        "verification_status": "verified",
+        "verifier_mode": "shadow"
+      },
+      "issued_challenge": {
+        "approval_request_json": "{\"descriptor_id\":\"managed-authz-policy-set\",\"descriptor_version\":1,\"evidence_digest\":\"df6da961581b149a28639add56e3b08401b3bed6afb07ad0c7b5ca3d51632be9\",\"expires_at\":\"2030-01-02T03:09:05+00:00\",\"issued_at\":\"2030-01-02T03:00:05+00:00\",\"nonce\":\"owner-control-b565a7b3115d408e250eeffe65af9513\",\"operation_id\":\"privileged-operation-1d762a6ac3895594ed85ba7aa9c39330\",\"owner_github_id\":494383370,\"plan_digest\":\"edf23f94b33d1188e34e143e7aff91075ec941053b3b95d367a45de67b1fe1d7\",\"policy_record_id\":\"owner-policy-1d762a6ac3895594ed85\",\"policy_revision\":1,\"policy_sha256\":\"b379db2fe113e77eef0b3bb05aec804189d9f0b359e67d941d837c7de59e6f8e\",\"pre_state_digest\":\"46df3876ade6b39b0edfbd3b8ea1a408173bbe5d8cc7154cea4d63e5d057239f\",\"request_digest\":\"e0e31f55312d2562bf610587d7a21b5badeed50224284b08d1662924379b4539\",\"schema_version\":1,\"server_review\":{\"items\":[{\"key\":\"descriptor\",\"label\":\"Operation class\",\"value\":\"managed-authz-policy-set\"},{\"key\":\"safety_class\",\"label\":\"Safety class\",\"value\":\"policy_admin\"}],\"review_id\":\"review-1d762a6ac3895594ed85ba7a\",\"schema_version\":1,\"summary\":\"Review this exact privileged operation before confirming.\",\"title\":\"Owner approval required\"}}",
+        "approval_request_sha256": "a60572025b121241d44c3f28ce22715841e348765dd50cfa514861e89334d9eb",
+        "attempt_count": 0,
+        "authority_state": "inert",
+        "binding_json": "{\"channel_session_id\":\"channel-session-c57b127e5947af58b1597cb51fa705f3\",\"owner_github_id\":494383370,\"owner_public_key\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\",\"schema_version\":1,\"session_expires_at\":\"2030-01-02T03:20:05+00:00\",\"session_issued_at\":\"2030-01-02T03:00:00+00:00\",\"signature_algorithm\":\"ed25519\"}",
+        "binding_sha256": "278ee07f98754104407f5d42aadf5bd47090faaddc7db14c6a125b8d3bc56e1b",
+        "challenge_id": "owner-control-challenge-a60572025b121241d44c3f28ce227158",
+        "challenge_nonce": "owner-control-b565a7b3115d408e250eeffe65af9513",
+        "channel_session_id": "channel-session-c57b127e5947af58b1597cb51fa705f3",
+        "consumed_at": null,
+        "descriptor_id": "managed-authz-policy-set",
+        "expires_at": "2030-01-02T03:09:05+00:00",
+        "issued_at": "2030-01-02T03:00:05+00:00",
+        "operation_id": "privileged-operation-1d762a6ac3895594ed85ba7aa9c39330",
+        "owner_github_id": 494383370,
+        "schema_version": 1,
+        "state": "issued",
+        "terminal_event_id": null
+      },
+      "name": "verified",
+      "observed_at": "2030-01-02T03:04:05+00:00"
+    },
+    {
+      "channel_session": null,
+      "confirmation_envelope": {
+        "challenge_response": {
+          "approval_request": {
+            "descriptor_id": "managed-authz-policy-set",
+            "descriptor_version": 1,
+            "evidence_digest": "df6da961581b149a28639add56e3b08401b3bed6afb07ad0c7b5ca3d51632be9",
+            "expires_at": "2030-01-02T03:09:05+00:00",
+            "issued_at": "2030-01-02T03:00:05+00:00",
+            "nonce": "owner-control-b565a7b3115d408e250eeffe65af9513",
+            "operation_id": "privileged-operation-1d762a6ac3895594ed85ba7aa9c39330",
+            "owner_github_id": 494383370,
+            "plan_digest": "edf23f94b33d1188e34e143e7aff91075ec941053b3b95d367a45de67b1fe1d7",
+            "policy_record_id": "owner-policy-1d762a6ac3895594ed85",
+            "policy_revision": 1,
+            "policy_sha256": "b379db2fe113e77eef0b3bb05aec804189d9f0b359e67d941d837c7de59e6f8e",
+            "pre_state_digest": "46df3876ade6b39b0edfbd3b8ea1a408173bbe5d8cc7154cea4d63e5d057239f",
+            "request_digest": "e0e31f55312d2562bf610587d7a21b5badeed50224284b08d1662924379b4539",
+            "schema_version": 1,
+            "server_review": {
+              "items": [
+                {
+                  "key": "descriptor",
+                  "label": "Operation class",
+                  "value": "managed-authz-policy-set"
+                },
+                {
+                  "key": "safety_class",
+                  "label": "Safety class",
+                  "value": "policy_admin"
+                }
+              ],
+              "review_id": "review-1d762a6ac3895594ed85ba7a",
+              "schema_version": 1,
+              "summary": "Review this exact privileged operation before confirming.",
+              "title": "Owner approval required"
+            }
+          },
+          "approval_request_digest": "a60572025b121241d44c3f28ce22715841e348765dd50cfa514861e89334d9eb",
+          "channel_binding_sha256": "278ee07f98754104407f5d42aadf5bd47090faaddc7db14c6a125b8d3bc56e1b",
+          "confirmed_at": "2030-01-02T03:04:05+00:00",
+          "decision": "approved",
+          "schema_version": 1
+        },
+        "channel_binding": {
+          "channel_session_id": "channel-session-c57b127e5947af58b1597cb51fa705f3",
+          "owner_github_id": 494383370,
+          "owner_public_key": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+          "schema_version": 1,
+          "session_expires_at": "2030-01-02T03:20:05+00:00",
+          "session_issued_at": "2030-01-02T03:00:00+00:00",
+          "signature_algorithm": "ed25519"
+        },
+        "schema_version": 1,
+        "signature": "5yFpKp48lfzpkxnf92lkEyl5hnYCrMeRNUdUKkOjA15CKokgDqsRDN8bNnJI_AMxFcD93fOuZxrG1Hh7rCDfCw",
+        "signature_algorithm": "ed25519"
+      },
+      "expected": {
+        "authority_state": "inert",
+        "authorizes_execution": false,
+        "consume_challenge": false,
+        "rejection_reason": "unknown_channel_session",
+        "resulting_challenge_state": "rejected",
+        "verification_status": "rejected",
+        "verifier_mode": "shadow"
+      },
+      "issued_challenge": null,
+      "name": "unknown-channel-session",
+      "observed_at": "2030-01-02T03:04:05+00:00"
+    },
+    {
+      "channel_session": {
+        "authority_state": "inert",
+        "binding_json": "{\"channel_session_id\":\"channel-session-c57b127e5947af58b1597cb51fa705f3\",\"owner_github_id\":494383370,\"owner_public_key\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\",\"schema_version\":1,\"session_expires_at\":\"2030-01-02T03:20:05+00:00\",\"session_issued_at\":\"2030-01-02T03:00:00+00:00\",\"signature_algorithm\":\"ed25519\"}",
+        "binding_sha256": "278ee07f98754104407f5d42aadf5bd47090faaddc7db14c6a125b8d3bc56e1b",
+        "channel_session_id": "channel-session-c57b127e5947af58b1597cb51fa705f3",
+        "enrolled_at": "2030-01-02T03:00:05+00:00",
+        "owner_github_id": 494383370,
+        "revoked_at": null,
+        "schema_version": 1,
+        "status": "enrolled"
+      },
+      "confirmation_envelope": {
+        "challenge_response": {
+          "approval_request": {
+            "descriptor_id": "managed-authz-policy-set",
+            "descriptor_version": 1,
+            "evidence_digest": "df6da961581b149a28639add56e3b08401b3bed6afb07ad0c7b5ca3d51632be9",
+            "expires_at": "2030-01-02T03:09:05+00:00",
+            "issued_at": "2030-01-02T03:00:05+00:00",
+            "nonce": "owner-control-b565a7b3115d408e250eeffe65af9513",
+            "operation_id": "privileged-operation-1d762a6ac3895594ed85ba7aa9c39330",
+            "owner_github_id": 494383370,
+            "plan_digest": "edf23f94b33d1188e34e143e7aff91075ec941053b3b95d367a45de67b1fe1d7",
+            "policy_record_id": "owner-policy-1d762a6ac3895594ed85",
+            "policy_revision": 1,
+            "policy_sha256": "b379db2fe113e77eef0b3bb05aec804189d9f0b359e67d941d837c7de59e6f8e",
+            "pre_state_digest": "46df3876ade6b39b0edfbd3b8ea1a408173bbe5d8cc7154cea4d63e5d057239f",
+            "request_digest": "e0e31f55312d2562bf610587d7a21b5badeed50224284b08d1662924379b4539",
+            "schema_version": 1,
+            "server_review": {
+              "items": [
+                {
+                  "key": "descriptor",
+                  "label": "Operation class",
+                  "value": "managed-authz-policy-set"
+                },
+                {
+                  "key": "safety_class",
+                  "label": "Safety class",
+                  "value": "policy_admin"
+                }
+              ],
+              "review_id": "review-1d762a6ac3895594ed85ba7a",
+              "schema_version": 1,
+              "summary": "Review this exact privileged operation before confirming.",
+              "title": "Owner approval required"
+            }
+          },
+          "approval_request_digest": "a60572025b121241d44c3f28ce22715841e348765dd50cfa514861e89334d9eb",
+          "channel_binding_sha256": "278ee07f98754104407f5d42aadf5bd47090faaddc7db14c6a125b8d3bc56e1b",
+          "confirmed_at": "2030-01-02T03:04:05+00:00",
+          "decision": "approved",
+          "schema_version": 1
+        },
+        "channel_binding": {
+          "channel_session_id": "channel-session-c57b127e5947af58b1597cb51fa705f3",
+          "owner_github_id": 494383370,
+          "owner_public_key": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+          "schema_version": 1,
+          "session_expires_at": "2030-01-02T03:20:05+00:00",
+          "session_issued_at": "2030-01-02T03:00:00+00:00",
+          "signature_algorithm": "ed25519"
+        },
+        "schema_version": 1,
+        "signature": "5yFpKp48lfzpkxnf92lkEyl5hnYCrMeRNUdUKkOjA15CKokgDqsRDN8bNnJI_AMxFcD93fOuZxrG1Hh7rCDfCw",
+        "signature_algorithm": "ed25519"
+      },
+      "expected": {
+        "authority_state": "inert",
+        "authorizes_execution": false,
+        "consume_challenge": false,
+        "rejection_reason": "unknown_challenge",
+        "resulting_challenge_state": "rejected",
+        "verification_status": "rejected",
+        "verifier_mode": "shadow"
+      },
+      "issued_challenge": null,
+      "name": "unknown-challenge",
+      "observed_at": "2030-01-02T03:04:05+00:00"
+    },
+    {
+      "channel_session": {
+        "authority_state": "inert",
+        "binding_json": "{\"channel_session_id\":\"channel-session-c57b127e5947af58b1597cb51fa705f3\",\"owner_github_id\":494383370,\"owner_public_key\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\",\"schema_version\":1,\"session_expires_at\":\"2030-01-02T03:20:05+00:00\",\"session_issued_at\":\"2030-01-02T03:00:00+00:00\",\"signature_algorithm\":\"ed25519\"}",
+        "binding_sha256": "278ee07f98754104407f5d42aadf5bd47090faaddc7db14c6a125b8d3bc56e1b",
+        "channel_session_id": "channel-session-c57b127e5947af58b1597cb51fa705f3",
+        "enrolled_at": "2030-01-02T03:00:05+00:00",
+        "owner_github_id": 494383370,
+        "revoked_at": "2030-01-02T03:03:05+00:00",
+        "schema_version": 1,
+        "status": "revoked"
+      },
+      "confirmation_envelope": {
+        "challenge_response": {
+          "approval_request": {
+            "descriptor_id": "managed-authz-policy-set",
+            "descriptor_version": 1,
+            "evidence_digest": "df6da961581b149a28639add56e3b08401b3bed6afb07ad0c7b5ca3d51632be9",
+            "expires_at": "2030-01-02T03:09:05+00:00",
+            "issued_at": "2030-01-02T03:00:05+00:00",
+            "nonce": "owner-control-b565a7b3115d408e250eeffe65af9513",
+            "operation_id": "privileged-operation-1d762a6ac3895594ed85ba7aa9c39330",
+            "owner_github_id": 494383370,
+            "plan_digest": "edf23f94b33d1188e34e143e7aff91075ec941053b3b95d367a45de67b1fe1d7",
+            "policy_record_id": "owner-policy-1d762a6ac3895594ed85",
+            "policy_revision": 1,
+            "policy_sha256": "b379db2fe113e77eef0b3bb05aec804189d9f0b359e67d941d837c7de59e6f8e",
+            "pre_state_digest": "46df3876ade6b39b0edfbd3b8ea1a408173bbe5d8cc7154cea4d63e5d057239f",
+            "request_digest": "e0e31f55312d2562bf610587d7a21b5badeed50224284b08d1662924379b4539",
+            "schema_version": 1,
+            "server_review": {
+              "items": [
+                {
+                  "key": "descriptor",
+                  "label": "Operation class",
+                  "value": "managed-authz-policy-set"
+                },
+                {
+                  "key": "safety_class",
+                  "label": "Safety class",
+                  "value": "policy_admin"
+                }
+              ],
+              "review_id": "review-1d762a6ac3895594ed85ba7a",
+              "schema_version": 1,
+              "summary": "Review this exact privileged operation before confirming.",
+              "title": "Owner approval required"
+            }
+          },
+          "approval_request_digest": "a60572025b121241d44c3f28ce22715841e348765dd50cfa514861e89334d9eb",
+          "channel_binding_sha256": "278ee07f98754104407f5d42aadf5bd47090faaddc7db14c6a125b8d3bc56e1b",
+          "confirmed_at": "2030-01-02T03:04:05+00:00",
+          "decision": "approved",
+          "schema_version": 1
+        },
+        "channel_binding": {
+          "channel_session_id": "channel-session-c57b127e5947af58b1597cb51fa705f3",
+          "owner_github_id": 494383370,
+          "owner_public_key": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+          "schema_version": 1,
+          "session_expires_at": "2030-01-02T03:20:05+00:00",
+          "session_issued_at": "2030-01-02T03:00:00+00:00",
+          "signature_algorithm": "ed25519"
+        },
+        "schema_version": 1,
+        "signature": "5yFpKp48lfzpkxnf92lkEyl5hnYCrMeRNUdUKkOjA15CKokgDqsRDN8bNnJI_AMxFcD93fOuZxrG1Hh7rCDfCw",
+        "signature_algorithm": "ed25519"
+      },
+      "expected": {
+        "authority_state": "inert",
+        "authorizes_execution": false,
+        "consume_challenge": false,
+        "rejection_reason": "channel_session_revoked",
+        "resulting_challenge_state": "rejected",
+        "verification_status": "rejected",
+        "verifier_mode": "shadow"
+      },
+      "issued_challenge": {
+        "approval_request_json": "{\"descriptor_id\":\"managed-authz-policy-set\",\"descriptor_version\":1,\"evidence_digest\":\"df6da961581b149a28639add56e3b08401b3bed6afb07ad0c7b5ca3d51632be9\",\"expires_at\":\"2030-01-02T03:09:05+00:00\",\"issued_at\":\"2030-01-02T03:00:05+00:00\",\"nonce\":\"owner-control-b565a7b3115d408e250eeffe65af9513\",\"operation_id\":\"privileged-operation-1d762a6ac3895594ed85ba7aa9c39330\",\"owner_github_id\":494383370,\"plan_digest\":\"edf23f94b33d1188e34e143e7aff91075ec941053b3b95d367a45de67b1fe1d7\",\"policy_record_id\":\"owner-policy-1d762a6ac3895594ed85\",\"policy_revision\":1,\"policy_sha256\":\"b379db2fe113e77eef0b3bb05aec804189d9f0b359e67d941d837c7de59e6f8e\",\"pre_state_digest\":\"46df3876ade6b39b0edfbd3b8ea1a408173bbe5d8cc7154cea4d63e5d057239f\",\"request_digest\":\"e0e31f55312d2562bf610587d7a21b5badeed50224284b08d1662924379b4539\",\"schema_version\":1,\"server_review\":{\"items\":[{\"key\":\"descriptor\",\"label\":\"Operation class\",\"value\":\"managed-authz-policy-set\"},{\"key\":\"safety_class\",\"label\":\"Safety class\",\"value\":\"policy_admin\"}],\"review_id\":\"review-1d762a6ac3895594ed85ba7a\",\"schema_version\":1,\"summary\":\"Review this exact privileged operation before confirming.\",\"title\":\"Owner approval required\"}}",
+        "approval_request_sha256": "a60572025b121241d44c3f28ce22715841e348765dd50cfa514861e89334d9eb",
+        "attempt_count": 0,
+        "authority_state": "inert",
+        "binding_json": "{\"channel_session_id\":\"channel-session-c57b127e5947af58b1597cb51fa705f3\",\"owner_github_id\":494383370,\"owner_public_key\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\",\"schema_version\":1,\"session_expires_at\":\"2030-01-02T03:20:05+00:00\",\"session_issued_at\":\"2030-01-02T03:00:00+00:00\",\"signature_algorithm\":\"ed25519\"}",
+        "binding_sha256": "278ee07f98754104407f5d42aadf5bd47090faaddc7db14c6a125b8d3bc56e1b",
+        "challenge_id": "owner-control-challenge-a60572025b121241d44c3f28ce227158",
+        "challenge_nonce": "owner-control-b565a7b3115d408e250eeffe65af9513",
+        "channel_session_id": "channel-session-c57b127e5947af58b1597cb51fa705f3",
+        "consumed_at": null,
+        "descriptor_id": "managed-authz-policy-set",
+        "expires_at": "2030-01-02T03:09:05+00:00",
+        "issued_at": "2030-01-02T03:00:05+00:00",
+        "operation_id": "privileged-operation-1d762a6ac3895594ed85ba7aa9c39330",
+        "owner_github_id": 494383370,
+        "schema_version": 1,
+        "state": "issued",
+        "terminal_event_id": null
+      },
+      "name": "channel-session-revoked",
+      "observed_at": "2030-01-02T03:04:05+00:00"
+    },
+    {
+      "channel_session": {
+        "authority_state": "inert",
+        "binding_json": "{\"channel_session_id\":\"channel-session-c57b127e5947af58b1597cb51fa705f3\",\"owner_github_id\":494383370,\"owner_public_key\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\",\"schema_version\":1,\"session_expires_at\":\"2030-01-02T03:20:05+00:00\",\"session_issued_at\":\"2030-01-02T03:00:00+00:00\",\"signature_algorithm\":\"ed25519\"}",
+        "binding_sha256": "278ee07f98754104407f5d42aadf5bd47090faaddc7db14c6a125b8d3bc56e1b",
+        "channel_session_id": "channel-session-c57b127e5947af58b1597cb51fa705f3",
+        "enrolled_at": "2030-01-02T03:00:05+00:00",
+        "owner_github_id": 494383370,
+        "revoked_at": null,
+        "schema_version": 1,
+        "status": "enrolled"
+      },
+      "confirmation_envelope": {
+        "challenge_response": {
+          "approval_request": {
+            "descriptor_id": "managed-authz-policy-set",
+            "descriptor_version": 1,
+            "evidence_digest": "df6da961581b149a28639add56e3b08401b3bed6afb07ad0c7b5ca3d51632be9",
+            "expires_at": "2030-01-02T03:09:05+00:00",
+            "issued_at": "2030-01-02T03:00:05+00:00",
+            "nonce": "owner-control-b565a7b3115d408e250eeffe65af9513",
+            "operation_id": "privileged-operation-1d762a6ac3895594ed85ba7aa9c39330",
+            "owner_github_id": 494383370,
+            "plan_digest": "edf23f94b33d1188e34e143e7aff91075ec941053b3b95d367a45de67b1fe1d7",
+            "policy_record_id": "owner-policy-1d762a6ac3895594ed85",
+            "policy_revision": 1,
+            "policy_sha256": "b379db2fe113e77eef0b3bb05aec804189d9f0b359e67d941d837c7de59e6f8e",
+            "pre_state_digest": "46df3876ade6b39b0edfbd3b8ea1a408173bbe5d8cc7154cea4d63e5d057239f",
+            "request_digest": "e0e31f55312d2562bf610587d7a21b5badeed50224284b08d1662924379b4539",
+            "schema_version": 1,
+            "server_review": {
+              "items": [
+                {
+                  "key": "descriptor",
+                  "label": "Operation class",
+                  "value": "managed-authz-policy-set"
+                },
+                {
+                  "key": "safety_class",
+                  "label": "Safety class",
+                  "value": "policy_admin"
+                }
+              ],
+              "review_id": "review-1d762a6ac3895594ed85ba7a",
+              "schema_version": 1,
+              "summary": "Review this exact privileged operation before confirming.",
+              "title": "Owner approval required"
+            }
+          },
+          "approval_request_digest": "a60572025b121241d44c3f28ce22715841e348765dd50cfa514861e89334d9eb",
+          "channel_binding_sha256": "278ee07f98754104407f5d42aadf5bd47090faaddc7db14c6a125b8d3bc56e1b",
+          "confirmed_at": "2030-01-02T03:04:05+00:00",
+          "decision": "approved",
+          "schema_version": 1
+        },
+        "channel_binding": {
+          "channel_session_id": "channel-session-c57b127e5947af58b1597cb51fa705f3",
+          "owner_github_id": 494383370,
+          "owner_public_key": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+          "schema_version": 1,
+          "session_expires_at": "2030-01-02T03:20:05+00:00",
+          "session_issued_at": "2030-01-02T03:00:00+00:00",
+          "signature_algorithm": "ed25519"
+        },
+        "schema_version": 1,
+        "signature": "5yFpKp48lfzpkxnf92lkEyl5hnYCrMeRNUdUKkOjA15CKokgDqsRDN8bNnJI_AMxFcD93fOuZxrG1Hh7rCDfCw",
+        "signature_algorithm": "ed25519"
+      },
+      "expected": {
+        "authority_state": "inert",
+        "authorizes_execution": false,
+        "consume_challenge": false,
+        "rejection_reason": "channel_session_expired",
+        "resulting_challenge_state": "expired",
+        "verification_status": "rejected",
+        "verifier_mode": "shadow"
+      },
+      "issued_challenge": {
+        "approval_request_json": "{\"descriptor_id\":\"managed-authz-policy-set\",\"descriptor_version\":1,\"evidence_digest\":\"df6da961581b149a28639add56e3b08401b3bed6afb07ad0c7b5ca3d51632be9\",\"expires_at\":\"2030-01-02T03:09:05+00:00\",\"issued_at\":\"2030-01-02T03:00:05+00:00\",\"nonce\":\"owner-control-b565a7b3115d408e250eeffe65af9513\",\"operation_id\":\"privileged-operation-1d762a6ac3895594ed85ba7aa9c39330\",\"owner_github_id\":494383370,\"plan_digest\":\"edf23f94b33d1188e34e143e7aff91075ec941053b3b95d367a45de67b1fe1d7\",\"policy_record_id\":\"owner-policy-1d762a6ac3895594ed85\",\"policy_revision\":1,\"policy_sha256\":\"b379db2fe113e77eef0b3bb05aec804189d9f0b359e67d941d837c7de59e6f8e\",\"pre_state_digest\":\"46df3876ade6b39b0edfbd3b8ea1a408173bbe5d8cc7154cea4d63e5d057239f\",\"request_digest\":\"e0e31f55312d2562bf610587d7a21b5badeed50224284b08d1662924379b4539\",\"schema_version\":1,\"server_review\":{\"items\":[{\"key\":\"descriptor\",\"label\":\"Operation class\",\"value\":\"managed-authz-policy-set\"},{\"key\":\"safety_class\",\"label\":\"Safety class\",\"value\":\"policy_admin\"}],\"review_id\":\"review-1d762a6ac3895594ed85ba7a\",\"schema_version\":1,\"summary\":\"Review this exact privileged operation before confirming.\",\"title\":\"Owner approval required\"}}",
+        "approval_request_sha256": "a60572025b121241d44c3f28ce22715841e348765dd50cfa514861e89334d9eb",
+        "attempt_count": 0,
+        "authority_state": "inert",
+        "binding_json": "{\"channel_session_id\":\"channel-session-c57b127e5947af58b1597cb51fa705f3\",\"owner_github_id\":494383370,\"owner_public_key\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\",\"schema_version\":1,\"session_expires_at\":\"2030-01-02T03:20:05+00:00\",\"session_issued_at\":\"2030-01-02T03:00:00+00:00\",\"signature_algorithm\":\"ed25519\"}",
+        "binding_sha256": "278ee07f98754104407f5d42aadf5bd47090faaddc7db14c6a125b8d3bc56e1b",
+        "challenge_id": "owner-control-challenge-a60572025b121241d44c3f28ce227158",
+        "challenge_nonce": "owner-control-b565a7b3115d408e250eeffe65af9513",
+        "channel_session_id": "channel-session-c57b127e5947af58b1597cb51fa705f3",
+        "consumed_at": null,
+        "descriptor_id": "managed-authz-policy-set",
+        "expires_at": "2030-01-02T03:09:05+00:00",
+        "issued_at": "2030-01-02T03:00:05+00:00",
+        "operation_id": "privileged-operation-1d762a6ac3895594ed85ba7aa9c39330",
+        "owner_github_id": 494383370,
+        "schema_version": 1,
+        "state": "issued",
+        "terminal_event_id": null
+      },
+      "name": "channel-session-expired",
+      "observed_at": "2030-01-02T03:20:06+00:00"
+    },
+    {
+      "channel_session": {
+        "authority_state": "inert",
+        "binding_json": "{\"channel_session_id\":\"channel-session-5802cd3ec3ad1c7ce24a9b3bb529c59a\",\"owner_github_id\":494383370,\"owner_public_key\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\",\"schema_version\":1,\"session_expires_at\":\"2030-01-02T03:20:05+00:00\",\"session_issued_at\":\"2030-01-02T03:00:00+00:00\",\"signature_algorithm\":\"ed25519\"}",
+        "binding_sha256": "a8b5e6f5ce4700ae19ea182fe387914b8361356397622868a6254f7e771f2bd7",
+        "channel_session_id": "channel-session-5802cd3ec3ad1c7ce24a9b3bb529c59a",
+        "enrolled_at": "2030-01-02T03:00:05+00:00",
+        "owner_github_id": 494383370,
+        "revoked_at": null,
+        "schema_version": 1,
+        "status": "enrolled"
+      },
+      "confirmation_envelope": {
+        "challenge_response": {
+          "approval_request": {
+            "descriptor_id": "managed-authz-policy-set",
+            "descriptor_version": 1,
+            "evidence_digest": "df6da961581b149a28639add56e3b08401b3bed6afb07ad0c7b5ca3d51632be9",
+            "expires_at": "2030-01-02T03:09:05+00:00",
+            "issued_at": "2030-01-02T03:00:05+00:00",
+            "nonce": "owner-control-b565a7b3115d408e250eeffe65af9513",
+            "operation_id": "privileged-operation-1d762a6ac3895594ed85ba7aa9c39330",
+            "owner_github_id": 494383370,
+            "plan_digest": "edf23f94b33d1188e34e143e7aff91075ec941053b3b95d367a45de67b1fe1d7",
+            "policy_record_id": "owner-policy-1d762a6ac3895594ed85",
+            "policy_revision": 1,
+            "policy_sha256": "b379db2fe113e77eef0b3bb05aec804189d9f0b359e67d941d837c7de59e6f8e",
+            "pre_state_digest": "46df3876ade6b39b0edfbd3b8ea1a408173bbe5d8cc7154cea4d63e5d057239f",
+            "request_digest": "e0e31f55312d2562bf610587d7a21b5badeed50224284b08d1662924379b4539",
+            "schema_version": 1,
+            "server_review": {
+              "items": [
+                {
+                  "key": "descriptor",
+                  "label": "Operation class",
+                  "value": "managed-authz-policy-set"
+                },
+                {
+                  "key": "safety_class",
+                  "label": "Safety class",
+                  "value": "policy_admin"
+                }
+              ],
+              "review_id": "review-1d762a6ac3895594ed85ba7a",
+              "schema_version": 1,
+              "summary": "Review this exact privileged operation before confirming.",
+              "title": "Owner approval required"
+            }
+          },
+          "approval_request_digest": "a60572025b121241d44c3f28ce22715841e348765dd50cfa514861e89334d9eb",
+          "channel_binding_sha256": "278ee07f98754104407f5d42aadf5bd47090faaddc7db14c6a125b8d3bc56e1b",
+          "confirmed_at": "2030-01-02T03:04:05+00:00",
+          "decision": "approved",
+          "schema_version": 1
+        },
+        "channel_binding": {
+          "channel_session_id": "channel-session-c57b127e5947af58b1597cb51fa705f3",
+          "owner_github_id": 494383370,
+          "owner_public_key": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+          "schema_version": 1,
+          "session_expires_at": "2030-01-02T03:20:05+00:00",
+          "session_issued_at": "2030-01-02T03:00:00+00:00",
+          "signature_algorithm": "ed25519"
+        },
+        "schema_version": 1,
+        "signature": "5yFpKp48lfzpkxnf92lkEyl5hnYCrMeRNUdUKkOjA15CKokgDqsRDN8bNnJI_AMxFcD93fOuZxrG1Hh7rCDfCw",
+        "signature_algorithm": "ed25519"
+      },
+      "expected": {
+        "authority_state": "inert",
+        "authorizes_execution": false,
+        "consume_challenge": false,
+        "rejection_reason": "challenge_channel_session_mismatch",
+        "resulting_challenge_state": "rejected",
+        "verification_status": "rejected",
+        "verifier_mode": "shadow"
+      },
+      "issued_challenge": {
+        "approval_request_json": "{\"descriptor_id\":\"managed-authz-policy-set\",\"descriptor_version\":1,\"evidence_digest\":\"df6da961581b149a28639add56e3b08401b3bed6afb07ad0c7b5ca3d51632be9\",\"expires_at\":\"2030-01-02T03:09:05+00:00\",\"issued_at\":\"2030-01-02T03:00:05+00:00\",\"nonce\":\"owner-control-b565a7b3115d408e250eeffe65af9513\",\"operation_id\":\"privileged-operation-1d762a6ac3895594ed85ba7aa9c39330\",\"owner_github_id\":494383370,\"plan_digest\":\"edf23f94b33d1188e34e143e7aff91075ec941053b3b95d367a45de67b1fe1d7\",\"policy_record_id\":\"owner-policy-1d762a6ac3895594ed85\",\"policy_revision\":1,\"policy_sha256\":\"b379db2fe113e77eef0b3bb05aec804189d9f0b359e67d941d837c7de59e6f8e\",\"pre_state_digest\":\"46df3876ade6b39b0edfbd3b8ea1a408173bbe5d8cc7154cea4d63e5d057239f\",\"request_digest\":\"e0e31f55312d2562bf610587d7a21b5badeed50224284b08d1662924379b4539\",\"schema_version\":1,\"server_review\":{\"items\":[{\"key\":\"descriptor\",\"label\":\"Operation class\",\"value\":\"managed-authz-policy-set\"},{\"key\":\"safety_class\",\"label\":\"Safety class\",\"value\":\"policy_admin\"}],\"review_id\":\"review-1d762a6ac3895594ed85ba7a\",\"schema_version\":1,\"summary\":\"Review this exact privileged operation before confirming.\",\"title\":\"Owner approval required\"}}",
+        "approval_request_sha256": "a60572025b121241d44c3f28ce22715841e348765dd50cfa514861e89334d9eb",
+        "attempt_count": 0,
+        "authority_state": "inert",
+        "binding_json": "{\"channel_session_id\":\"channel-session-c57b127e5947af58b1597cb51fa705f3\",\"owner_github_id\":494383370,\"owner_public_key\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\",\"schema_version\":1,\"session_expires_at\":\"2030-01-02T03:20:05+00:00\",\"session_issued_at\":\"2030-01-02T03:00:00+00:00\",\"signature_algorithm\":\"ed25519\"}",
+        "binding_sha256": "278ee07f98754104407f5d42aadf5bd47090faaddc7db14c6a125b8d3bc56e1b",
+        "challenge_id": "owner-control-challenge-a60572025b121241d44c3f28ce227158",
+        "challenge_nonce": "owner-control-b565a7b3115d408e250eeffe65af9513",
+        "channel_session_id": "channel-session-c57b127e5947af58b1597cb51fa705f3",
+        "consumed_at": null,
+        "descriptor_id": "managed-authz-policy-set",
+        "expires_at": "2030-01-02T03:09:05+00:00",
+        "issued_at": "2030-01-02T03:00:05+00:00",
+        "operation_id": "privileged-operation-1d762a6ac3895594ed85ba7aa9c39330",
+        "owner_github_id": 494383370,
+        "schema_version": 1,
+        "state": "issued",
+        "terminal_event_id": null
+      },
+      "name": "challenge-channel-session-mismatch",
+      "observed_at": "2030-01-02T03:04:05+00:00"
+    },
+    {
+      "channel_session": {
+        "authority_state": "inert",
+        "binding_json": "{\"channel_session_id\":\"channel-session-c57b127e5947af58b1597cb51fa705f3\",\"owner_github_id\":494383370,\"owner_public_key\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\",\"schema_version\":1,\"session_expires_at\":\"2030-01-02T03:20:05+00:00\",\"session_issued_at\":\"2030-01-02T03:00:00+00:00\",\"signature_algorithm\":\"ed25519\"}",
+        "binding_sha256": "278ee07f98754104407f5d42aadf5bd47090faaddc7db14c6a125b8d3bc56e1b",
+        "channel_session_id": "channel-session-c57b127e5947af58b1597cb51fa705f3",
+        "enrolled_at": "2030-01-02T03:00:05+00:00",
+        "owner_github_id": 494383370,
+        "revoked_at": null,
+        "schema_version": 1,
+        "status": "enrolled"
+      },
+      "confirmation_envelope": {
+        "challenge_response": {
+          "approval_request": {
+            "descriptor_id": "managed-authz-policy-set",
+            "descriptor_version": 1,
+            "evidence_digest": "df6da961581b149a28639add56e3b08401b3bed6afb07ad0c7b5ca3d51632be9",
+            "expires_at": "2030-01-02T03:09:05+00:00",
+            "issued_at": "2030-01-02T03:00:05+00:00",
+            "nonce": "owner-control-b565a7b3115d408e250eeffe65af9513",
+            "operation_id": "privileged-operation-1d762a6ac3895594ed85ba7aa9c39330",
+            "owner_github_id": 494383370,
+            "plan_digest": "edf23f94b33d1188e34e143e7aff91075ec941053b3b95d367a45de67b1fe1d7",
+            "policy_record_id": "owner-policy-1d762a6ac3895594ed85",
+            "policy_revision": 1,
+            "policy_sha256": "b379db2fe113e77eef0b3bb05aec804189d9f0b359e67d941d837c7de59e6f8e",
+            "pre_state_digest": "46df3876ade6b39b0edfbd3b8ea1a408173bbe5d8cc7154cea4d63e5d057239f",
+            "request_digest": "e0e31f55312d2562bf610587d7a21b5badeed50224284b08d1662924379b4539",
+            "schema_version": 1,
+            "server_review": {
+              "items": [
+                {
+                  "key": "descriptor",
+                  "label": "Operation class",
+                  "value": "managed-authz-policy-set"
+                },
+                {
+                  "key": "safety_class",
+                  "label": "Safety class",
+                  "value": "policy_admin"
+                }
+              ],
+              "review_id": "review-1d762a6ac3895594ed85ba7a",
+              "schema_version": 1,
+              "summary": "Review this exact privileged operation before confirming.",
+              "title": "Owner approval required"
+            }
+          },
+          "approval_request_digest": "a60572025b121241d44c3f28ce22715841e348765dd50cfa514861e89334d9eb",
+          "channel_binding_sha256": "278ee07f98754104407f5d42aadf5bd47090faaddc7db14c6a125b8d3bc56e1b",
+          "confirmed_at": "2030-01-02T03:04:05+00:00",
+          "decision": "approved",
+          "schema_version": 1
+        },
+        "channel_binding": {
+          "channel_session_id": "channel-session-c57b127e5947af58b1597cb51fa705f3",
+          "owner_github_id": 494383370,
+          "owner_public_key": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+          "schema_version": 1,
+          "session_expires_at": "2030-01-02T03:20:05+00:00",
+          "session_issued_at": "2030-01-02T03:00:00+00:00",
+          "signature_algorithm": "ed25519"
+        },
+        "schema_version": 1,
+        "signature": "5yFpKp48lfzpkxnf92lkEyl5hnYCrMeRNUdUKkOjA15CKokgDqsRDN8bNnJI_AMxFcD93fOuZxrG1Hh7rCDfCw",
+        "signature_algorithm": "ed25519"
+      },
+      "expected": {
+        "authority_state": "inert",
+        "authorizes_execution": false,
+        "consume_challenge": false,
+        "rejection_reason": "challenge_expired",
+        "resulting_challenge_state": "expired",
+        "verification_status": "rejected",
+        "verifier_mode": "shadow"
+      },
+      "issued_challenge": {
+        "approval_request_json": "{\"descriptor_id\":\"managed-authz-policy-set\",\"descriptor_version\":1,\"evidence_digest\":\"df6da961581b149a28639add56e3b08401b3bed6afb07ad0c7b5ca3d51632be9\",\"expires_at\":\"2030-01-02T03:09:05+00:00\",\"issued_at\":\"2030-01-02T03:00:05+00:00\",\"nonce\":\"owner-control-b565a7b3115d408e250eeffe65af9513\",\"operation_id\":\"privileged-operation-1d762a6ac3895594ed85ba7aa9c39330\",\"owner_github_id\":494383370,\"plan_digest\":\"edf23f94b33d1188e34e143e7aff91075ec941053b3b95d367a45de67b1fe1d7\",\"policy_record_id\":\"owner-policy-1d762a6ac3895594ed85\",\"policy_revision\":1,\"policy_sha256\":\"b379db2fe113e77eef0b3bb05aec804189d9f0b359e67d941d837c7de59e6f8e\",\"pre_state_digest\":\"46df3876ade6b39b0edfbd3b8ea1a408173bbe5d8cc7154cea4d63e5d057239f\",\"request_digest\":\"e0e31f55312d2562bf610587d7a21b5badeed50224284b08d1662924379b4539\",\"schema_version\":1,\"server_review\":{\"items\":[{\"key\":\"descriptor\",\"label\":\"Operation class\",\"value\":\"managed-authz-policy-set\"},{\"key\":\"safety_class\",\"label\":\"Safety class\",\"value\":\"policy_admin\"}],\"review_id\":\"review-1d762a6ac3895594ed85ba7a\",\"schema_version\":1,\"summary\":\"Review this exact privileged operation before confirming.\",\"title\":\"Owner approval required\"}}",
+        "approval_request_sha256": "a60572025b121241d44c3f28ce22715841e348765dd50cfa514861e89334d9eb",
+        "attempt_count": 0,
+        "authority_state": "inert",
+        "binding_json": "{\"channel_session_id\":\"channel-session-c57b127e5947af58b1597cb51fa705f3\",\"owner_github_id\":494383370,\"owner_public_key\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\",\"schema_version\":1,\"session_expires_at\":\"2030-01-02T03:20:05+00:00\",\"session_issued_at\":\"2030-01-02T03:00:00+00:00\",\"signature_algorithm\":\"ed25519\"}",
+        "binding_sha256": "278ee07f98754104407f5d42aadf5bd47090faaddc7db14c6a125b8d3bc56e1b",
+        "challenge_id": "owner-control-challenge-a60572025b121241d44c3f28ce227158",
+        "challenge_nonce": "owner-control-b565a7b3115d408e250eeffe65af9513",
+        "channel_session_id": "channel-session-c57b127e5947af58b1597cb51fa705f3",
+        "consumed_at": null,
+        "descriptor_id": "managed-authz-policy-set",
+        "expires_at": "2030-01-02T03:09:05+00:00",
+        "issued_at": "2030-01-02T03:00:05+00:00",
+        "operation_id": "privileged-operation-1d762a6ac3895594ed85ba7aa9c39330",
+        "owner_github_id": 494383370,
+        "schema_version": 1,
+        "state": "issued",
+        "terminal_event_id": null
+      },
+      "name": "challenge-expired",
+      "observed_at": "2030-01-02T03:09:06+00:00"
+    },
+    {
+      "channel_session": {
+        "authority_state": "inert",
+        "binding_json": "{\"channel_session_id\":\"channel-session-c57b127e5947af58b1597cb51fa705f3\",\"owner_github_id\":494383370,\"owner_public_key\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\",\"schema_version\":1,\"session_expires_at\":\"2030-01-02T03:20:05+00:00\",\"session_issued_at\":\"2030-01-02T03:00:00+00:00\",\"signature_algorithm\":\"ed25519\"}",
+        "binding_sha256": "278ee07f98754104407f5d42aadf5bd47090faaddc7db14c6a125b8d3bc56e1b",
+        "channel_session_id": "channel-session-c57b127e5947af58b1597cb51fa705f3",
+        "enrolled_at": "2030-01-02T03:00:05+00:00",
+        "owner_github_id": 494383370,
+        "revoked_at": null,
+        "schema_version": 1,
+        "status": "enrolled"
+      },
+      "confirmation_envelope": {
+        "challenge_response": {
+          "approval_request": {
+            "descriptor_id": "managed-authz-policy-set",
+            "descriptor_version": 1,
+            "evidence_digest": "df6da961581b149a28639add56e3b08401b3bed6afb07ad0c7b5ca3d51632be9",
+            "expires_at": "2030-01-02T03:09:05+00:00",
+            "issued_at": "2030-01-02T03:00:05+00:00",
+            "nonce": "owner-control-b565a7b3115d408e250eeffe65af9513",
+            "operation_id": "privileged-operation-1d762a6ac3895594ed85ba7aa9c39330",
+            "owner_github_id": 494383370,
+            "plan_digest": "edf23f94b33d1188e34e143e7aff91075ec941053b3b95d367a45de67b1fe1d7",
+            "policy_record_id": "owner-policy-1d762a6ac3895594ed85",
+            "policy_revision": 1,
+            "policy_sha256": "b379db2fe113e77eef0b3bb05aec804189d9f0b359e67d941d837c7de59e6f8e",
+            "pre_state_digest": "46df3876ade6b39b0edfbd3b8ea1a408173bbe5d8cc7154cea4d63e5d057239f",
+            "request_digest": "e0e31f55312d2562bf610587d7a21b5badeed50224284b08d1662924379b4539",
+            "schema_version": 1,
+            "server_review": {
+              "items": [
+                {
+                  "key": "descriptor",
+                  "label": "Operation class",
+                  "value": "managed-authz-policy-set"
+                },
+                {
+                  "key": "safety_class",
+                  "label": "Safety class",
+                  "value": "policy_admin"
+                }
+              ],
+              "review_id": "review-1d762a6ac3895594ed85ba7a",
+              "schema_version": 1,
+              "summary": "Review this exact privileged operation before confirming.",
+              "title": "Owner approval required"
+            }
+          },
+          "approval_request_digest": "a60572025b121241d44c3f28ce22715841e348765dd50cfa514861e89334d9eb",
+          "channel_binding_sha256": "278ee07f98754104407f5d42aadf5bd47090faaddc7db14c6a125b8d3bc56e1b",
+          "confirmed_at": "2030-01-02T03:04:05+00:00",
+          "decision": "approved",
+          "schema_version": 1
+        },
+        "channel_binding": {
+          "channel_session_id": "channel-session-c57b127e5947af58b1597cb51fa705f3",
+          "owner_github_id": 494383370,
+          "owner_public_key": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+          "schema_version": 1,
+          "session_expires_at": "2030-01-02T03:20:05+00:00",
+          "session_issued_at": "2030-01-02T03:00:00+00:00",
+          "signature_algorithm": "ed25519"
+        },
+        "schema_version": 1,
+        "signature": "5yFpKp48lfzpkxnf92lkEyl5hnYCrMeRNUdUKkOjA15CKokgDqsRDN8bNnJI_AMxFcD93fOuZxrG1Hh7rCDfCw",
+        "signature_algorithm": "ed25519"
+      },
+      "expected": {
+        "authority_state": "inert",
+        "authorizes_execution": false,
+        "consume_challenge": false,
+        "rejection_reason": "challenge_replayed",
+        "resulting_challenge_state": "consumed",
+        "verification_status": "rejected",
+        "verifier_mode": "shadow"
+      },
+      "issued_challenge": {
+        "approval_request_json": "{\"descriptor_id\":\"managed-authz-policy-set\",\"descriptor_version\":1,\"evidence_digest\":\"df6da961581b149a28639add56e3b08401b3bed6afb07ad0c7b5ca3d51632be9\",\"expires_at\":\"2030-01-02T03:09:05+00:00\",\"issued_at\":\"2030-01-02T03:00:05+00:00\",\"nonce\":\"owner-control-b565a7b3115d408e250eeffe65af9513\",\"operation_id\":\"privileged-operation-1d762a6ac3895594ed85ba7aa9c39330\",\"owner_github_id\":494383370,\"plan_digest\":\"edf23f94b33d1188e34e143e7aff91075ec941053b3b95d367a45de67b1fe1d7\",\"policy_record_id\":\"owner-policy-1d762a6ac3895594ed85\",\"policy_revision\":1,\"policy_sha256\":\"b379db2fe113e77eef0b3bb05aec804189d9f0b359e67d941d837c7de59e6f8e\",\"pre_state_digest\":\"46df3876ade6b39b0edfbd3b8ea1a408173bbe5d8cc7154cea4d63e5d057239f\",\"request_digest\":\"e0e31f55312d2562bf610587d7a21b5badeed50224284b08d1662924379b4539\",\"schema_version\":1,\"server_review\":{\"items\":[{\"key\":\"descriptor\",\"label\":\"Operation class\",\"value\":\"managed-authz-policy-set\"},{\"key\":\"safety_class\",\"label\":\"Safety class\",\"value\":\"policy_admin\"}],\"review_id\":\"review-1d762a6ac3895594ed85ba7a\",\"schema_version\":1,\"summary\":\"Review this exact privileged operation before confirming.\",\"title\":\"Owner approval required\"}}",
+        "approval_request_sha256": "a60572025b121241d44c3f28ce22715841e348765dd50cfa514861e89334d9eb",
+        "attempt_count": 1,
+        "authority_state": "inert",
+        "binding_json": "{\"channel_session_id\":\"channel-session-c57b127e5947af58b1597cb51fa705f3\",\"owner_github_id\":494383370,\"owner_public_key\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\",\"schema_version\":1,\"session_expires_at\":\"2030-01-02T03:20:05+00:00\",\"session_issued_at\":\"2030-01-02T03:00:00+00:00\",\"signature_algorithm\":\"ed25519\"}",
+        "binding_sha256": "278ee07f98754104407f5d42aadf5bd47090faaddc7db14c6a125b8d3bc56e1b",
+        "challenge_id": "owner-control-challenge-a60572025b121241d44c3f28ce227158",
+        "challenge_nonce": "owner-control-b565a7b3115d408e250eeffe65af9513",
+        "channel_session_id": "channel-session-c57b127e5947af58b1597cb51fa705f3",
+        "consumed_at": "2030-01-02T03:04:05+00:00",
+        "descriptor_id": "managed-authz-policy-set",
+        "expires_at": "2030-01-02T03:09:05+00:00",
+        "issued_at": "2030-01-02T03:00:05+00:00",
+        "operation_id": "privileged-operation-1d762a6ac3895594ed85ba7aa9c39330",
+        "owner_github_id": 494383370,
+        "schema_version": 1,
+        "state": "consumed",
+        "terminal_event_id": "owner-control-shadow-event-3353c3d994b679f0482ce365c75b7a19"
+      },
+      "name": "challenge-replayed",
+      "observed_at": "2030-01-02T03:05:05+00:00"
+    },
+    {
+      "channel_session": {
+        "authority_state": "inert",
+        "binding_json": "{\"channel_session_id\":\"channel-session-c57b127e5947af58b1597cb51fa705f3\",\"owner_github_id\":494383370,\"owner_public_key\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\",\"schema_version\":1,\"session_expires_at\":\"2030-01-02T03:20:05+00:00\",\"session_issued_at\":\"2030-01-02T03:00:00+00:00\",\"signature_algorithm\":\"ed25519\"}",
+        "binding_sha256": "278ee07f98754104407f5d42aadf5bd47090faaddc7db14c6a125b8d3bc56e1b",
+        "channel_session_id": "channel-session-c57b127e5947af58b1597cb51fa705f3",
+        "enrolled_at": "2030-01-02T03:00:05+00:00",
+        "owner_github_id": 494383370,
+        "revoked_at": null,
+        "schema_version": 1,
+        "status": "enrolled"
+      },
+      "confirmation_envelope": {
+        "challenge_response": {
+          "approval_request": {
+            "descriptor_id": "managed-authz-policy-set",
+            "descriptor_version": 1,
+            "evidence_digest": "df6da961581b149a28639add56e3b08401b3bed6afb07ad0c7b5ca3d51632be9",
+            "expires_at": "2030-01-02T03:09:05+00:00",
+            "issued_at": "2030-01-02T03:00:05+00:00",
+            "nonce": "owner-control-b565a7b3115d408e250eeffe65af9513",
+            "operation_id": "privileged-operation-1d762a6ac3895594ed85ba7aa9c39330",
+            "owner_github_id": 494383370,
+            "plan_digest": "edf23f94b33d1188e34e143e7aff91075ec941053b3b95d367a45de67b1fe1d7",
+            "policy_record_id": "owner-policy-1d762a6ac3895594ed85",
+            "policy_revision": 1,
+            "policy_sha256": "b379db2fe113e77eef0b3bb05aec804189d9f0b359e67d941d837c7de59e6f8e",
+            "pre_state_digest": "46df3876ade6b39b0edfbd3b8ea1a408173bbe5d8cc7154cea4d63e5d057239f",
+            "request_digest": "e0e31f55312d2562bf610587d7a21b5badeed50224284b08d1662924379b4539",
+            "schema_version": 1,
+            "server_review": {
+              "items": [
+                {
+                  "key": "descriptor",
+                  "label": "Operation class",
+                  "value": "managed-authz-policy-set"
+                },
+                {
+                  "key": "safety_class",
+                  "label": "Safety class",
+                  "value": "policy_admin"
+                }
+              ],
+              "review_id": "review-1d762a6ac3895594ed85ba7a",
+              "schema_version": 1,
+              "summary": "Review this exact privileged operation before confirming.",
+              "title": "Owner approval required"
+            }
+          },
+          "approval_request_digest": "a60572025b121241d44c3f28ce22715841e348765dd50cfa514861e89334d9eb",
+          "channel_binding_sha256": "8216068b33dced4a9d9add414eb022fa0a93f65ad350dac964d21cbf7c5a2d2e",
+          "confirmed_at": "2030-01-02T03:04:05+00:00",
+          "decision": "approved",
+          "schema_version": 1
+        },
+        "channel_binding": {
+          "channel_session_id": "channel-session-c57b127e5947af58b1597cb51fa705f3",
+          "owner_github_id": 494383370,
+          "owner_public_key": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+          "schema_version": 1,
+          "session_expires_at": "2030-01-02T03:19:05+00:00",
+          "session_issued_at": "2030-01-02T03:00:00+00:00",
+          "signature_algorithm": "ed25519"
+        },
+        "schema_version": 1,
+        "signature": "PNSAZXRskxNeDOqCNGys08Lh1UF4y2iPUg_H8NF-ckoy03VY2qBaHWF0cK-pz6yXJooraEU7eeXvztjjj9x0AA",
+        "signature_algorithm": "ed25519"
+      },
+      "expected": {
+        "authority_state": "inert",
+        "authorizes_execution": false,
+        "consume_challenge": false,
+        "rejection_reason": "stored_binding_mismatch",
+        "resulting_challenge_state": "issued",
+        "verification_status": "rejected",
+        "verifier_mode": "shadow"
+      },
+      "issued_challenge": {
+        "approval_request_json": "{\"descriptor_id\":\"managed-authz-policy-set\",\"descriptor_version\":1,\"evidence_digest\":\"df6da961581b149a28639add56e3b08401b3bed6afb07ad0c7b5ca3d51632be9\",\"expires_at\":\"2030-01-02T03:09:05+00:00\",\"issued_at\":\"2030-01-02T03:00:05+00:00\",\"nonce\":\"owner-control-b565a7b3115d408e250eeffe65af9513\",\"operation_id\":\"privileged-operation-1d762a6ac3895594ed85ba7aa9c39330\",\"owner_github_id\":494383370,\"plan_digest\":\"edf23f94b33d1188e34e143e7aff91075ec941053b3b95d367a45de67b1fe1d7\",\"policy_record_id\":\"owner-policy-1d762a6ac3895594ed85\",\"policy_revision\":1,\"policy_sha256\":\"b379db2fe113e77eef0b3bb05aec804189d9f0b359e67d941d837c7de59e6f8e\",\"pre_state_digest\":\"46df3876ade6b39b0edfbd3b8ea1a408173bbe5d8cc7154cea4d63e5d057239f\",\"request_digest\":\"e0e31f55312d2562bf610587d7a21b5badeed50224284b08d1662924379b4539\",\"schema_version\":1,\"server_review\":{\"items\":[{\"key\":\"descriptor\",\"label\":\"Operation class\",\"value\":\"managed-authz-policy-set\"},{\"key\":\"safety_class\",\"label\":\"Safety class\",\"value\":\"policy_admin\"}],\"review_id\":\"review-1d762a6ac3895594ed85ba7a\",\"schema_version\":1,\"summary\":\"Review this exact privileged operation before confirming.\",\"title\":\"Owner approval required\"}}",
+        "approval_request_sha256": "a60572025b121241d44c3f28ce22715841e348765dd50cfa514861e89334d9eb",
+        "attempt_count": 0,
+        "authority_state": "inert",
+        "binding_json": "{\"channel_session_id\":\"channel-session-c57b127e5947af58b1597cb51fa705f3\",\"owner_github_id\":494383370,\"owner_public_key\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\",\"schema_version\":1,\"session_expires_at\":\"2030-01-02T03:20:05+00:00\",\"session_issued_at\":\"2030-01-02T03:00:00+00:00\",\"signature_algorithm\":\"ed25519\"}",
+        "binding_sha256": "278ee07f98754104407f5d42aadf5bd47090faaddc7db14c6a125b8d3bc56e1b",
+        "challenge_id": "owner-control-challenge-a60572025b121241d44c3f28ce227158",
+        "challenge_nonce": "owner-control-b565a7b3115d408e250eeffe65af9513",
+        "channel_session_id": "channel-session-c57b127e5947af58b1597cb51fa705f3",
+        "consumed_at": null,
+        "descriptor_id": "managed-authz-policy-set",
+        "expires_at": "2030-01-02T03:09:05+00:00",
+        "issued_at": "2030-01-02T03:00:05+00:00",
+        "operation_id": "privileged-operation-1d762a6ac3895594ed85ba7aa9c39330",
+        "owner_github_id": 494383370,
+        "schema_version": 1,
+        "state": "issued",
+        "terminal_event_id": null
+      },
+      "name": "stored-binding-mismatch",
+      "observed_at": "2030-01-02T03:04:05+00:00"
+    },
+    {
+      "channel_session": {
+        "authority_state": "inert",
+        "binding_json": "{\"channel_session_id\":\"channel-session-c57b127e5947af58b1597cb51fa705f3\",\"owner_github_id\":494383370,\"owner_public_key\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\",\"schema_version\":1,\"session_expires_at\":\"2030-01-02T03:20:05+00:00\",\"session_issued_at\":\"2030-01-02T03:00:00+00:00\",\"signature_algorithm\":\"ed25519\"}",
+        "binding_sha256": "278ee07f98754104407f5d42aadf5bd47090faaddc7db14c6a125b8d3bc56e1b",
+        "channel_session_id": "channel-session-c57b127e5947af58b1597cb51fa705f3",
+        "enrolled_at": "2030-01-02T03:00:05+00:00",
+        "owner_github_id": 494383370,
+        "revoked_at": null,
+        "schema_version": 1,
+        "status": "enrolled"
+      },
+      "confirmation_envelope": {
+        "challenge_response": {
+          "approval_request": {
+            "descriptor_id": "managed-authz-policy-set",
+            "descriptor_version": 1,
+            "evidence_digest": "df6da961581b149a28639add56e3b08401b3bed6afb07ad0c7b5ca3d51632be9",
+            "expires_at": "2030-01-02T03:09:05+00:00",
+            "issued_at": "2030-01-02T03:00:05+00:00",
+            "nonce": "owner-control-b565a7b3115d408e250eeffe65af9513",
+            "operation_id": "privileged-operation-1d762a6ac3895594ed85ba7aa9c39330",
+            "owner_github_id": 494383370,
+            "plan_digest": "edf23f94b33d1188e34e143e7aff91075ec941053b3b95d367a45de67b1fe1d7",
+            "policy_record_id": "owner-policy-1d762a6ac3895594ed85",
+            "policy_revision": 2,
+            "policy_sha256": "b379db2fe113e77eef0b3bb05aec804189d9f0b359e67d941d837c7de59e6f8e",
+            "pre_state_digest": "46df3876ade6b39b0edfbd3b8ea1a408173bbe5d8cc7154cea4d63e5d057239f",
+            "request_digest": "e0e31f55312d2562bf610587d7a21b5badeed50224284b08d1662924379b4539",
+            "schema_version": 1,
+            "server_review": {
+              "items": [
+                {
+                  "key": "descriptor",
+                  "label": "Operation class",
+                  "value": "managed-authz-policy-set"
+                },
+                {
+                  "key": "safety_class",
+                  "label": "Safety class",
+                  "value": "policy_admin"
+                }
+              ],
+              "review_id": "review-1d762a6ac3895594ed85ba7a",
+              "schema_version": 1,
+              "summary": "Review this exact privileged operation before confirming.",
+              "title": "Owner approval required"
+            }
+          },
+          "approval_request_digest": "5b58aec46c4a7c90aea53bc89d537d2a317c4f3fde8e09f310b2d724ce7f2784",
+          "channel_binding_sha256": "278ee07f98754104407f5d42aadf5bd47090faaddc7db14c6a125b8d3bc56e1b",
+          "confirmed_at": "2030-01-02T03:04:05+00:00",
+          "decision": "approved",
+          "schema_version": 1
+        },
+        "channel_binding": {
+          "channel_session_id": "channel-session-c57b127e5947af58b1597cb51fa705f3",
+          "owner_github_id": 494383370,
+          "owner_public_key": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+          "schema_version": 1,
+          "session_expires_at": "2030-01-02T03:20:05+00:00",
+          "session_issued_at": "2030-01-02T03:00:00+00:00",
+          "signature_algorithm": "ed25519"
+        },
+        "schema_version": 1,
+        "signature": "An7lEaGVJEJj28I6_qTwGOMtRqupS8YnlzSv5z-9digIpm5mAxmyFeAwmIdaWBiKoe80LS5t3GdI00OmbTQcCA",
+        "signature_algorithm": "ed25519"
+      },
+      "expected": {
+        "authority_state": "inert",
+        "authorizes_execution": false,
+        "consume_challenge": false,
+        "rejection_reason": "stored_approval_request_mismatch",
+        "resulting_challenge_state": "issued",
+        "verification_status": "rejected",
+        "verifier_mode": "shadow"
+      },
+      "issued_challenge": {
+        "approval_request_json": "{\"descriptor_id\":\"managed-authz-policy-set\",\"descriptor_version\":1,\"evidence_digest\":\"df6da961581b149a28639add56e3b08401b3bed6afb07ad0c7b5ca3d51632be9\",\"expires_at\":\"2030-01-02T03:09:05+00:00\",\"issued_at\":\"2030-01-02T03:00:05+00:00\",\"nonce\":\"owner-control-b565a7b3115d408e250eeffe65af9513\",\"operation_id\":\"privileged-operation-1d762a6ac3895594ed85ba7aa9c39330\",\"owner_github_id\":494383370,\"plan_digest\":\"edf23f94b33d1188e34e143e7aff91075ec941053b3b95d367a45de67b1fe1d7\",\"policy_record_id\":\"owner-policy-1d762a6ac3895594ed85\",\"policy_revision\":1,\"policy_sha256\":\"b379db2fe113e77eef0b3bb05aec804189d9f0b359e67d941d837c7de59e6f8e\",\"pre_state_digest\":\"46df3876ade6b39b0edfbd3b8ea1a408173bbe5d8cc7154cea4d63e5d057239f\",\"request_digest\":\"e0e31f55312d2562bf610587d7a21b5badeed50224284b08d1662924379b4539\",\"schema_version\":1,\"server_review\":{\"items\":[{\"key\":\"descriptor\",\"label\":\"Operation class\",\"value\":\"managed-authz-policy-set\"},{\"key\":\"safety_class\",\"label\":\"Safety class\",\"value\":\"policy_admin\"}],\"review_id\":\"review-1d762a6ac3895594ed85ba7a\",\"schema_version\":1,\"summary\":\"Review this exact privileged operation before confirming.\",\"title\":\"Owner approval required\"}}",
+        "approval_request_sha256": "a60572025b121241d44c3f28ce22715841e348765dd50cfa514861e89334d9eb",
+        "attempt_count": 0,
+        "authority_state": "inert",
+        "binding_json": "{\"channel_session_id\":\"channel-session-c57b127e5947af58b1597cb51fa705f3\",\"owner_github_id\":494383370,\"owner_public_key\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\",\"schema_version\":1,\"session_expires_at\":\"2030-01-02T03:20:05+00:00\",\"session_issued_at\":\"2030-01-02T03:00:00+00:00\",\"signature_algorithm\":\"ed25519\"}",
+        "binding_sha256": "278ee07f98754104407f5d42aadf5bd47090faaddc7db14c6a125b8d3bc56e1b",
+        "challenge_id": "owner-control-challenge-a60572025b121241d44c3f28ce227158",
+        "challenge_nonce": "owner-control-b565a7b3115d408e250eeffe65af9513",
+        "channel_session_id": "channel-session-c57b127e5947af58b1597cb51fa705f3",
+        "consumed_at": null,
+        "descriptor_id": "managed-authz-policy-set",
+        "expires_at": "2030-01-02T03:09:05+00:00",
+        "issued_at": "2030-01-02T03:00:05+00:00",
+        "operation_id": "privileged-operation-1d762a6ac3895594ed85ba7aa9c39330",
+        "owner_github_id": 494383370,
+        "schema_version": 1,
+        "state": "issued",
+        "terminal_event_id": null
+      },
+      "name": "stored-approval-request-mismatch",
+      "observed_at": "2030-01-02T03:04:05+00:00"
+    },
+    {
+      "channel_session": {
+        "authority_state": "inert",
+        "binding_json": "{\"channel_session_id\":\"channel-session-c57b127e5947af58b1597cb51fa705f3\",\"owner_github_id\":494383370,\"owner_public_key\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\",\"schema_version\":1,\"session_expires_at\":\"2030-01-02T03:20:05+00:00\",\"session_issued_at\":\"2030-01-02T03:00:00+00:00\",\"signature_algorithm\":\"ed25519\"}",
+        "binding_sha256": "278ee07f98754104407f5d42aadf5bd47090faaddc7db14c6a125b8d3bc56e1b",
+        "channel_session_id": "channel-session-c57b127e5947af58b1597cb51fa705f3",
+        "enrolled_at": "2030-01-02T03:00:05+00:00",
+        "owner_github_id": 494383370,
+        "revoked_at": null,
+        "schema_version": 1,
+        "status": "enrolled"
+      },
+      "confirmation_envelope": {
+        "challenge_response": {
+          "approval_request": {
+            "descriptor_id": "managed-authz-policy-set",
+            "descriptor_version": 1,
+            "evidence_digest": "df6da961581b149a28639add56e3b08401b3bed6afb07ad0c7b5ca3d51632be9",
+            "expires_at": "2030-01-02T03:09:05+00:00",
+            "issued_at": "2030-01-02T03:00:05+00:00",
+            "nonce": "owner-control-b565a7b3115d408e250eeffe65af9513",
+            "operation_id": "privileged-operation-1d762a6ac3895594ed85ba7aa9c39330",
+            "owner_github_id": 494383370,
+            "plan_digest": "edf23f94b33d1188e34e143e7aff91075ec941053b3b95d367a45de67b1fe1d7",
+            "policy_record_id": "owner-policy-1d762a6ac3895594ed85",
+            "policy_revision": 1,
+            "policy_sha256": "b379db2fe113e77eef0b3bb05aec804189d9f0b359e67d941d837c7de59e6f8e",
+            "pre_state_digest": "46df3876ade6b39b0edfbd3b8ea1a408173bbe5d8cc7154cea4d63e5d057239f",
+            "request_digest": "e0e31f55312d2562bf610587d7a21b5badeed50224284b08d1662924379b4539",
+            "schema_version": 1,
+            "server_review": {
+              "items": [
+                {
+                  "key": "descriptor",
+                  "label": "Operation class",
+                  "value": "managed-authz-policy-set"
+                },
+                {
+                  "key": "safety_class",
+                  "label": "Safety class",
+                  "value": "policy_admin"
+                }
+              ],
+              "review_id": "review-1d762a6ac3895594ed85ba7a",
+              "schema_version": 1,
+              "summary": "Review this exact privileged operation before confirming.",
+              "title": "Owner approval required"
+            }
+          },
+          "approval_request_digest": "a60572025b121241d44c3f28ce22715841e348765dd50cfa514861e89334d9eb",
+          "channel_binding_sha256": "278ee07f98754104407f5d42aadf5bd47090faaddc7db14c6a125b8d3bc56e1b",
+          "confirmed_at": "2030-01-02T03:04:05+00:00",
+          "decision": "approved",
+          "schema_version": 1
+        },
+        "channel_binding": {
+          "channel_session_id": "channel-session-c57b127e5947af58b1597cb51fa705f3",
+          "owner_github_id": 494383370,
+          "owner_public_key": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+          "schema_version": 1,
+          "session_expires_at": "2030-01-02T03:20:05+00:00",
+          "session_issued_at": "2030-01-02T03:00:00+00:00",
+          "signature_algorithm": "ed25519"
+        },
+        "schema_version": 1,
+        "signature": "0xp7R16BOOuqxNxoz66e6PvuGGszeRq4HDkASdJOvTIFaKpnj-j3dtiGHANF6hcY1DuGdKRHTXKhw-EoLjqvAA",
+        "signature_algorithm": "ed25519"
+      },
+      "expected": {
+        "authority_state": "inert",
+        "authorizes_execution": false,
+        "consume_challenge": false,
+        "rejection_reason": "signature_invalid",
+        "resulting_challenge_state": "issued",
+        "verification_status": "rejected",
+        "verifier_mode": "shadow"
+      },
+      "issued_challenge": {
+        "approval_request_json": "{\"descriptor_id\":\"managed-authz-policy-set\",\"descriptor_version\":1,\"evidence_digest\":\"df6da961581b149a28639add56e3b08401b3bed6afb07ad0c7b5ca3d51632be9\",\"expires_at\":\"2030-01-02T03:09:05+00:00\",\"issued_at\":\"2030-01-02T03:00:05+00:00\",\"nonce\":\"owner-control-b565a7b3115d408e250eeffe65af9513\",\"operation_id\":\"privileged-operation-1d762a6ac3895594ed85ba7aa9c39330\",\"owner_github_id\":494383370,\"plan_digest\":\"edf23f94b33d1188e34e143e7aff91075ec941053b3b95d367a45de67b1fe1d7\",\"policy_record_id\":\"owner-policy-1d762a6ac3895594ed85\",\"policy_revision\":1,\"policy_sha256\":\"b379db2fe113e77eef0b3bb05aec804189d9f0b359e67d941d837c7de59e6f8e\",\"pre_state_digest\":\"46df3876ade6b39b0edfbd3b8ea1a408173bbe5d8cc7154cea4d63e5d057239f\",\"request_digest\":\"e0e31f55312d2562bf610587d7a21b5badeed50224284b08d1662924379b4539\",\"schema_version\":1,\"server_review\":{\"items\":[{\"key\":\"descriptor\",\"label\":\"Operation class\",\"value\":\"managed-authz-policy-set\"},{\"key\":\"safety_class\",\"label\":\"Safety class\",\"value\":\"policy_admin\"}],\"review_id\":\"review-1d762a6ac3895594ed85ba7a\",\"schema_version\":1,\"summary\":\"Review this exact privileged operation before confirming.\",\"title\":\"Owner approval required\"}}",
+        "approval_request_sha256": "a60572025b121241d44c3f28ce22715841e348765dd50cfa514861e89334d9eb",
+        "attempt_count": 0,
+        "authority_state": "inert",
+        "binding_json": "{\"channel_session_id\":\"channel-session-c57b127e5947af58b1597cb51fa705f3\",\"owner_github_id\":494383370,\"owner_public_key\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\",\"schema_version\":1,\"session_expires_at\":\"2030-01-02T03:20:05+00:00\",\"session_issued_at\":\"2030-01-02T03:00:00+00:00\",\"signature_algorithm\":\"ed25519\"}",
+        "binding_sha256": "278ee07f98754104407f5d42aadf5bd47090faaddc7db14c6a125b8d3bc56e1b",
+        "challenge_id": "owner-control-challenge-a60572025b121241d44c3f28ce227158",
+        "challenge_nonce": "owner-control-b565a7b3115d408e250eeffe65af9513",
+        "channel_session_id": "channel-session-c57b127e5947af58b1597cb51fa705f3",
+        "consumed_at": null,
+        "descriptor_id": "managed-authz-policy-set",
+        "expires_at": "2030-01-02T03:09:05+00:00",
+        "issued_at": "2030-01-02T03:00:05+00:00",
+        "operation_id": "privileged-operation-1d762a6ac3895594ed85ba7aa9c39330",
+        "owner_github_id": 494383370,
+        "schema_version": 1,
+        "state": "issued",
+        "terminal_event_id": null
+      },
+      "name": "signature-invalid",
+      "observed_at": "2030-01-02T03:04:05+00:00"
+    },
+    {
+      "channel_session": {
+        "authority_state": "inert",
+        "binding_json": "{\"channel_session_id\":\"channel-session-c57b127e5947af58b1597cb51fa705f3\",\"owner_github_id\":494383370,\"owner_public_key\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\",\"schema_version\":1,\"session_expires_at\":\"2030-01-02T03:20:05+00:00\",\"session_issued_at\":\"2030-01-02T03:00:00+00:00\",\"signature_algorithm\":\"ed25519\"}",
+        "binding_sha256": "278ee07f98754104407f5d42aadf5bd47090faaddc7db14c6a125b8d3bc56e1b",
+        "channel_session_id": "channel-session-c57b127e5947af58b1597cb51fa705f3",
+        "enrolled_at": "2030-01-02T03:00:05+00:00",
+        "owner_github_id": 494383370,
+        "revoked_at": null,
+        "schema_version": 1,
+        "status": "enrolled"
+      },
+      "confirmation_envelope": {
+        "challenge_response": {
+          "approval_request": {
+            "descriptor_id": "managed-authz-policy-set",
+            "descriptor_version": 1,
+            "evidence_digest": "df6da961581b149a28639add56e3b08401b3bed6afb07ad0c7b5ca3d51632be9",
+            "expires_at": "2030-01-02T03:09:05+00:00",
+            "issued_at": "2030-01-02T03:00:05+00:00",
+            "nonce": "owner-control-b565a7b3115d408e250eeffe65af9513",
+            "operation_id": "privileged-operation-1d762a6ac3895594ed85ba7aa9c39330",
+            "owner_github_id": 494383370,
+            "plan_digest": "edf23f94b33d1188e34e143e7aff91075ec941053b3b95d367a45de67b1fe1d7",
+            "policy_record_id": "owner-policy-1d762a6ac3895594ed85",
+            "policy_revision": 1,
+            "policy_sha256": "b379db2fe113e77eef0b3bb05aec804189d9f0b359e67d941d837c7de59e6f8e",
+            "pre_state_digest": "46df3876ade6b39b0edfbd3b8ea1a408173bbe5d8cc7154cea4d63e5d057239f",
+            "request_digest": "e0e31f55312d2562bf610587d7a21b5badeed50224284b08d1662924379b4539",
+            "schema_version": 1,
+            "server_review": {
+              "items": [
+                {
+                  "key": "descriptor",
+                  "label": "Operation class",
+                  "value": "managed-authz-policy-set"
+                },
+                {
+                  "key": "safety_class",
+                  "label": "Safety class",
+                  "value": "policy_admin"
+                }
+              ],
+              "review_id": "review-1d762a6ac3895594ed85ba7a",
+              "schema_version": 1,
+              "summary": "Review this exact privileged operation before confirming.",
+              "title": "Owner approval required"
+            }
+          },
+          "approval_request_digest": "a60572025b121241d44c3f28ce22715841e348765dd50cfa514861e89334d9eb",
+          "channel_binding_sha256": "278ee07f98754104407f5d42aadf5bd47090faaddc7db14c6a125b8d3bc56e1b",
+          "confirmed_at": "2030-01-02T03:04:05+00:00",
+          "decision": "approved",
+          "schema_version": 1
+        },
+        "channel_binding": {
+          "channel_session_id": "channel-session-c57b127e5947af58b1597cb51fa705f3",
+          "owner_github_id": 494383370,
+          "owner_public_key": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+          "schema_version": 1,
+          "session_expires_at": "2030-01-02T03:20:05+00:00",
+          "session_issued_at": "2030-01-02T03:00:00+00:00",
+          "signature_algorithm": "ed25519"
+        },
+        "schema_version": 1,
+        "signature": "5yFpKp48lfzpkxnf92lkEyl5hnYCrMeRNUdUKkOjA15CKokgDqsRDN8bNnJI_AMxFcD93fOuZxrG1Hh7rCDfCw",
+        "signature_algorithm": "ed25519"
+      },
+      "expected": {
+        "authority_state": "inert",
+        "authorizes_execution": false,
+        "consume_challenge": false,
+        "rejection_reason": "attempt_budget_exhausted",
+        "resulting_challenge_state": "rejected",
+        "verification_status": "rejected",
+        "verifier_mode": "shadow"
+      },
+      "issued_challenge": {
+        "approval_request_json": "{\"descriptor_id\":\"managed-authz-policy-set\",\"descriptor_version\":1,\"evidence_digest\":\"df6da961581b149a28639add56e3b08401b3bed6afb07ad0c7b5ca3d51632be9\",\"expires_at\":\"2030-01-02T03:09:05+00:00\",\"issued_at\":\"2030-01-02T03:00:05+00:00\",\"nonce\":\"owner-control-b565a7b3115d408e250eeffe65af9513\",\"operation_id\":\"privileged-operation-1d762a6ac3895594ed85ba7aa9c39330\",\"owner_github_id\":494383370,\"plan_digest\":\"edf23f94b33d1188e34e143e7aff91075ec941053b3b95d367a45de67b1fe1d7\",\"policy_record_id\":\"owner-policy-1d762a6ac3895594ed85\",\"policy_revision\":1,\"policy_sha256\":\"b379db2fe113e77eef0b3bb05aec804189d9f0b359e67d941d837c7de59e6f8e\",\"pre_state_digest\":\"46df3876ade6b39b0edfbd3b8ea1a408173bbe5d8cc7154cea4d63e5d057239f\",\"request_digest\":\"e0e31f55312d2562bf610587d7a21b5badeed50224284b08d1662924379b4539\",\"schema_version\":1,\"server_review\":{\"items\":[{\"key\":\"descriptor\",\"label\":\"Operation class\",\"value\":\"managed-authz-policy-set\"},{\"key\":\"safety_class\",\"label\":\"Safety class\",\"value\":\"policy_admin\"}],\"review_id\":\"review-1d762a6ac3895594ed85ba7a\",\"schema_version\":1,\"summary\":\"Review this exact privileged operation before confirming.\",\"title\":\"Owner approval required\"}}",
+        "approval_request_sha256": "a60572025b121241d44c3f28ce22715841e348765dd50cfa514861e89334d9eb",
+        "attempt_count": 8,
+        "authority_state": "inert",
+        "binding_json": "{\"channel_session_id\":\"channel-session-c57b127e5947af58b1597cb51fa705f3\",\"owner_github_id\":494383370,\"owner_public_key\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\",\"schema_version\":1,\"session_expires_at\":\"2030-01-02T03:20:05+00:00\",\"session_issued_at\":\"2030-01-02T03:00:00+00:00\",\"signature_algorithm\":\"ed25519\"}",
+        "binding_sha256": "278ee07f98754104407f5d42aadf5bd47090faaddc7db14c6a125b8d3bc56e1b",
+        "challenge_id": "owner-control-challenge-a60572025b121241d44c3f28ce227158",
+        "challenge_nonce": "owner-control-b565a7b3115d408e250eeffe65af9513",
+        "channel_session_id": "channel-session-c57b127e5947af58b1597cb51fa705f3",
+        "consumed_at": null,
+        "descriptor_id": "managed-authz-policy-set",
+        "expires_at": "2030-01-02T03:09:05+00:00",
+        "issued_at": "2030-01-02T03:00:05+00:00",
+        "operation_id": "privileged-operation-1d762a6ac3895594ed85ba7aa9c39330",
+        "owner_github_id": 494383370,
+        "schema_version": 1,
+        "state": "rejected",
+        "terminal_event_id": "owner-control-shadow-event-b3490a811f1a513800461fedb60053cf"
+      },
+      "name": "attempt-budget-exhausted",
+      "observed_at": "2030-01-02T03:05:05+00:00"
+    }
+  ]
 }
