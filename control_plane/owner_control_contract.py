@@ -277,7 +277,7 @@ def _signed_confirmation_envelope(
     *,
     binding: ChannelBindingRecord,
     request: ApprovalRequest,
-    private_key: Ed25519PrivateKey | None = None,
+    signer: Ed25519PrivateKey | None = None,
 ) -> OwnerControlConfirmationEnvelope:
     response = ChallengeResponse(
         approval_request=request,
@@ -286,12 +286,12 @@ def _signed_confirmation_envelope(
         channel_binding_sha256=owner_control_channel_binding_sha256(binding),
         confirmed_at="2030-01-02T03:04:05+00:00",
     )
-    signing_key = private_key or _artifact_synthetic_private_key()
+    resolved_signer = signer or _artifact_synthetic_private_key()
     return OwnerControlConfirmationEnvelope(
         channel_binding=binding,
         challenge_response=response,
         signature_algorithm="ed25519",
-        signature=_base64url(signing_key.sign(owner_control_signature_payload_bytes(response))),
+        signature=_base64url(resolved_signer.sign(owner_control_signature_payload_bytes(response))),
     )
 
 
@@ -524,7 +524,7 @@ def _verification_state_vectors() -> list[dict[str, Any]]:
             envelope=_signed_confirmation_envelope(
                 binding=binding,
                 request=request,
-                private_key=_artifact_synthetic_wrong_private_key(),
+                signer=_artifact_synthetic_wrong_private_key(),
             ),
             channel_session=session,
             issued_challenge=challenge,
