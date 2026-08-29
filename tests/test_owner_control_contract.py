@@ -4,6 +4,7 @@ import copy
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import Any, get_args
 import unittest
 
 from pydantic import BaseModel, ValidationError
@@ -21,6 +22,14 @@ from control_plane.contracts.owner_control import (
     owner_control_challenge_response_digest,
     owner_control_signature_payload_bytes,
     verify_owner_control_confirmation_signature,
+)
+from control_plane.contracts.owner_control_shadow_verifier import (
+    OwnerControlChallengeLifecycleEventRecord,
+    OwnerControlChannelSessionRecord,
+    OwnerControlIssuedChallengeRecord,
+    OwnerControlShadowVerificationReason,
+    evaluate_owner_control_shadow_verification,
+    terminalize_expired_owner_control_challenge_record,
 )
 from control_plane.contracts.privileged_operation import (
     ManagedSecretReencryptionPlanInput,
@@ -236,6 +245,32 @@ class OwnerControlContractModelTests(unittest.TestCase):
 
 
 class OwnerControlArtifactTests(unittest.TestCase):
+    def _assert_named_validation_error(
+        self,
+        error: ValidationError,
+        vector: dict[str, Any],
+    ) -> None:
+        errors = error.errors()
+        self.assertEqual(len(errors), 1)
+        self.assertEqual(list(errors[0]["loc"]), vector["error_location"])
+        if expected_message := vector.get("error_message_contains"):
+            self.assertIn(expected_message, errors[0]["msg"])
+
+    def test_v3_contract_preserves_every_v2_section(self) -> None:
+        artifact = build_owner_control_contract()
+        compatibility = artifact["compatibility"]
+
+        self.assertEqual(artifact["schema_version"], 3)
+        self.assertEqual(compatibility["container_schema_version"], 3)
+        self.assertEqual(compatibility["previous_container_schema_version"], 2)
+        self.assertEqual(compatibility["unknown_container_versions"], "reject")
+        self.assertEqual(compatibility["wire_model_schema_versions"], [1])
+        self.assertEqual(compatibility["shadow_verifier_schema_versions"], [1])
+        self.assertEqual(artifact["signature_declaration"]["contract_schema_version"], 2)
+        for section, expected_sha256 in compatibility["preserved_v2_section_sha256"].items():
+            with self.subTest(section=section):
+                self.assertEqual(canonical_json_sha256(artifact[section]), expected_sha256)
+
     def test_existing_approval_and_challenge_vectors_remain_byte_compatible(self) -> None:
         vector = next(
             vector
@@ -329,10 +364,118 @@ class OwnerControlArtifactTests(unittest.TestCase):
                 )
                 self.assertTrue(verify_owner_control_confirmation_signature(envelope))
 
+    def test_verification_state_vectors_cover_and_replay_every_outcome(self) -> None:
+        vectors = build_owner_control_contract()["verification_state_vectors"]
+        expected_reasons = set(get_args(OwnerControlShadowVerificationReason))
+        actual_reasons = {
+            vector["expected"]["rejection_reason"]
+            for vector in vectors
+            if vector["expected"]["rejection_reason"] is not None
+        }
+
+        self.assertEqual(actual_reasons, expected_reasons)
+        self.assertTrue(
+            any(vector["expected"]["verification_status"] == "verified" for vector in vectors)
+        )
+        for vector in vectors:
+            with self.subTest(name=vector["name"]):
+                session_payload = vector["channel_session"]
+                challenge_payload = vector["issued_challenge"]
+                evaluation = evaluate_owner_control_shadow_verification(
+                    envelope=OwnerControlConfirmationEnvelope.model_validate_json(
+                        json.dumps(vector["confirmation_envelope"])
+                    ),
+                    channel_session=(
+                        OwnerControlChannelSessionRecord.model_validate_json(
+                            json.dumps(session_payload)
+                        )
+                        if session_payload is not None
+                        else None
+                    ),
+                    issued_challenge=(
+                        OwnerControlIssuedChallengeRecord.model_validate_json(
+                            json.dumps(challenge_payload)
+                        )
+                        if challenge_payload is not None
+                        else None
+                    ),
+                    observed_at=vector["observed_at"],
+                )
+                expected = vector["expected"]
+                self.assertEqual(
+                    evaluation.model_dump(mode="json"),
+                    {
+                        "verification_status": expected["verification_status"],
+                        "rejection_reason": expected["rejection_reason"],
+                        "consume_challenge": expected["consume_challenge"],
+                        "resulting_challenge_state": expected["resulting_challenge_state"],
+                    },
+                )
+                self.assertEqual(expected["verifier_mode"], "shadow")
+                self.assertFalse(expected["authorizes_execution"])
+                self.assertEqual(expected["authority_state"], "inert")
+
+    def test_lifecycle_vector_replays_exact_boundary_without_attempt_consumption(self) -> None:
+        vectors = build_owner_control_contract()["challenge_lifecycle_vectors"]
+
+        self.assertEqual(len(vectors), 1)
+        vector = vectors[0]
+        issued = OwnerControlIssuedChallengeRecord.model_validate_json(
+            json.dumps(vector["issued_challenge"])
+        )
+        terminalized, event = terminalize_expired_owner_control_challenge_record(
+            issued,
+            observed_at=vector["observed_at"],
+        )
+
+        self.assertEqual(
+            terminalized.model_dump(mode="json"),
+            vector["expected_terminalized_challenge"],
+        )
+        self.assertEqual(
+            event,
+            OwnerControlChallengeLifecycleEventRecord.model_validate_json(
+                json.dumps(vector["expected_lifecycle_event"])
+            ),
+        )
+        self.assertEqual(terminalized.attempt_count, issued.attempt_count)
+        self.assertEqual(event.occurred_at, issued.expires_at)
+        self.assertFalse(event.authorizes_execution)
+        self.assertNotIn("envelope_sha256", vector["expected_lifecycle_event"])
+        self.assertNotIn("sequence", vector["expected_lifecycle_event"])
+
+    def test_server_state_vectors_are_public_safe(self) -> None:
+        artifact = build_owner_control_contract()
+        serialized = json.dumps(
+            {
+                "verification_state_vectors": artifact["verification_state_vectors"],
+                "challenge_lifecycle_vectors": artifact["challenge_lifecycle_vectors"],
+            },
+            sort_keys=True,
+        ).lower()
+
+        for forbidden_value in (
+            *(scheme + "://" for scheme in ("http", "https")),
+            "private_key",
+            "access_token",
+            "credential",
+            "repository",
+            "tenant",
+            "endpoint",
+        ):
+            with self.subTest(forbidden_value=forbidden_value):
+                self.assertNotIn(forbidden_value, serialized)
+
     def test_validator_rejects_contract_drift(self) -> None:
         artifact = build_owner_control_contract()
         changed = copy.deepcopy(artifact)
         changed["golden_vectors"][0]["approval_request"]["sha256"] = "0" * 64
+
+        with self.assertRaises(OwnerControlContractError):
+            validate_owner_control_contract(changed)
+
+        changed = copy.deepcopy(artifact)
+        changed["verification_state_vectors"][0]["expected"]["authorizes_execution"] = True
 
         with self.assertRaises(OwnerControlContractError):
             validate_owner_control_contract(changed)
@@ -349,11 +492,7 @@ class OwnerControlArtifactTests(unittest.TestCase):
             with self.subTest(rule=vector["rule"]):
                 with self.assertRaises(ValidationError) as raised:
                     models[vector["model"]].model_validate_json(json.dumps(vector["payload"]))
-                errors = raised.exception.errors()
-                self.assertEqual(len(errors), 1)
-                self.assertEqual(list(errors[0]["loc"]), vector["error_location"])
-                if expected_message := vector.get("error_message_contains"):
-                    self.assertIn(expected_message, errors[0]["msg"])
+                self._assert_named_validation_error(raised.exception, vector)
 
     def test_negative_confirmation_vectors_fail_closed(self) -> None:
         artifact = build_owner_control_contract()
@@ -369,11 +508,7 @@ class OwnerControlArtifactTests(unittest.TestCase):
                     OwnerControlConfirmationEnvelope.model_validate_json(
                         json.dumps(vector["payload"])
                     )
-                errors = raised.exception.errors()
-                self.assertEqual(len(errors), 1)
-                self.assertEqual(list(errors[0]["loc"]), vector["error_location"])
-                if expected_message := vector.get("error_message_contains"):
-                    self.assertIn(expected_message, errors[0]["msg"])
+                self._assert_named_validation_error(raised.exception, vector)
 
     def test_checked_artifact_matches_generated_contract(self) -> None:
         checked = json.loads(

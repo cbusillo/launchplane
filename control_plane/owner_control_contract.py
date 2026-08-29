@@ -4,7 +4,7 @@ import base64
 import json
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, get_args
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -23,6 +23,23 @@ from control_plane.contracts.owner_control import (
     owner_control_signature_payload,
     owner_control_signature_payload_bytes,
 )
+from control_plane.contracts.owner_control_shadow_verifier import (
+    OWNER_CONTROL_SHADOW_AUTHORITY_STATE,
+    OWNER_CONTROL_SHADOW_MAX_ATTEMPTS,
+    OWNER_CONTROL_SHADOW_VERIFIER_MODE,
+    OWNER_CONTROL_SHADOW_VERIFIER_SCHEMA_VERSION,
+    OwnerControlChallengeIssueRequest,
+    OwnerControlChannelSessionRecord,
+    OwnerControlIssuedChallengeRecord,
+    OwnerControlShadowVerificationReason,
+    build_owner_control_channel_session_record,
+    evaluate_owner_control_shadow_verification,
+    issue_owner_control_challenge_record,
+    owner_control_confirmation_envelope_sha256,
+    owner_control_verification_event_id,
+    revoke_owner_control_channel_session_record,
+    terminalize_expired_owner_control_challenge_record,
+)
 from control_plane.contracts.privileged_operation import (
     PrivilegedOperationDescriptorId,
     PrivilegedOperationSafetyClass,
@@ -31,10 +48,21 @@ from control_plane.privileged_operation_registry import list_privileged_operatio
 from control_plane.privileged_operation_registry import read_privileged_operation_descriptor
 
 
-OWNER_CONTROL_CONTRACT_SCHEMA_VERSION = 2
+OWNER_CONTROL_CONTRACT_SCHEMA_VERSION = 3
+_OWNER_CONTROL_PREVIOUS_CONTRACT_SCHEMA_VERSION = 2
 _OWNER_CONTROL_VECTOR_SCHEMA_VERSION = 1
 _ARTIFACT_SYNTHETIC_PRIVATE_KEY_SEED = bytes(range(32))
 _ARTIFACT_SYNTHETIC_WRONG_PRIVATE_KEY_SEED = bytes(range(31, -1, -1))
+_PRESERVED_V2_SECTION_SHA256 = {
+    "canonical_json": "0c6b6454d737943d01d4621c217ff8412552a0bf0c69a0f50a761d38ac0e7d1f",
+    "canonicalization_vectors": "ca481ff769bba537310c8568b56850f5d12ebc0c90ace9ea2dc39ff714daa6a8",
+    "confirmation_golden_vectors": "58391f364a79ab321596d30200b87c9d29be366eaa1386a9ff4c242c8b38d50a",
+    "golden_vectors": "6955c5c8bb228c21bc6a68a4ddb7cf22456cd51615ffe6e421b0fa04f15d9584",
+    "negative_confirmation_vectors": "9d529ca0f5153c8c3eb3eb4862311efc6dc3c1dc7e5df55824ebde13194eb46d",
+    "negative_vectors": "232d29bc542df455c9f54a3196a2a4d41cb0912155f92d060c850df99c835b29",
+    "schemas": "00a8524a65afd637c8cfc88ef44e780154addc759b813a831f3ddf2ce1490bd0",
+    "signature_declaration": "7d9c62d55792931383d4a02ed99d31e21c67b5ce714c01d9144dc2a3bed34f72",
+}
 
 
 class OwnerControlContractError(ValueError):
@@ -243,6 +271,305 @@ def _confirmation_models_for_descriptor(
         ),
     )
     return binding, response, envelope
+
+
+def _signed_confirmation_envelope(
+    *,
+    binding: ChannelBindingRecord,
+    request: ApprovalRequest,
+    signer: Ed25519PrivateKey | None = None,
+) -> OwnerControlConfirmationEnvelope:
+    response = ChallengeResponse(
+        approval_request=request,
+        approval_request_digest=owner_control_approval_request_digest(request),
+        decision="approved",
+        channel_binding_sha256=owner_control_channel_binding_sha256(binding),
+        confirmed_at="2030-01-02T03:04:05+00:00",
+    )
+    resolved_signer = signer or _artifact_synthetic_private_key()
+    return OwnerControlConfirmationEnvelope(
+        channel_binding=binding,
+        challenge_response=response,
+        signature_algorithm="ed25519",
+        signature=_base64url(resolved_signer.sign(owner_control_signature_payload_bytes(response))),
+    )
+
+
+def _shadow_verifier_fixture_models() -> tuple[
+    ApprovalRequest,
+    ChannelBindingRecord,
+    OwnerControlChannelSessionRecord,
+    OwnerControlIssuedChallengeRecord,
+    OwnerControlConfirmationEnvelope,
+]:
+    descriptor = read_privileged_operation_descriptor("managed-authz-policy-set").descriptor
+    request = _approval_request_for_descriptor(
+        descriptor_id=descriptor.descriptor_id,
+        safety_class=descriptor.safety_class,
+    )
+    binding = ChannelBindingRecord(
+        channel_session_id=f"channel-session-{_digest_for_vector(descriptor_id=descriptor.descriptor_id, label='verification-session')[:32]}",
+        owner_github_id=request.owner_github_id,
+        signature_algorithm="ed25519",
+        owner_public_key=_synthetic_owner_public_key(_artifact_synthetic_private_key()),
+        session_issued_at="2030-01-02T03:00:00+00:00",
+        session_expires_at="2030-01-02T03:20:05+00:00",
+    )
+    session = build_owner_control_channel_session_record(
+        binding=binding,
+        enrolled_at=request.issued_at,
+    )
+    challenge = issue_owner_control_challenge_record(
+        issue_request=OwnerControlChallengeIssueRequest(
+            channel_session_id=binding.channel_session_id,
+            operation_id=request.operation_id,
+            expires_in_seconds=540,
+        ),
+        session=session,
+        approval_request=request,
+    )
+    envelope = _signed_confirmation_envelope(binding=binding, request=request)
+    return request, binding, session, challenge, envelope
+
+
+def _verification_state_vector(
+    *,
+    name: str,
+    envelope: OwnerControlConfirmationEnvelope,
+    channel_session: OwnerControlChannelSessionRecord | None,
+    issued_challenge: OwnerControlIssuedChallengeRecord | None,
+    observed_at: str,
+) -> dict[str, Any]:
+    evaluation = evaluate_owner_control_shadow_verification(
+        envelope=envelope,
+        channel_session=channel_session,
+        issued_challenge=issued_challenge,
+        observed_at=observed_at,
+    )
+    return {
+        "name": name,
+        "observed_at": observed_at,
+        "channel_session": (
+            channel_session.model_dump(mode="json") if channel_session is not None else None
+        ),
+        "issued_challenge": (
+            issued_challenge.model_dump(mode="json") if issued_challenge is not None else None
+        ),
+        "confirmation_envelope": envelope.model_dump(mode="json"),
+        "expected": {
+            **evaluation.model_dump(mode="json"),
+            "verifier_mode": OWNER_CONTROL_SHADOW_VERIFIER_MODE,
+            "authorizes_execution": False,
+            "authority_state": OWNER_CONTROL_SHADOW_AUTHORITY_STATE,
+        },
+    }
+
+
+def _terminal_challenge(
+    challenge: OwnerControlIssuedChallengeRecord,
+    *,
+    envelope: OwnerControlConfirmationEnvelope,
+    state: Literal["consumed", "rejected"],
+) -> OwnerControlIssuedChallengeRecord:
+    verification_status: Literal["verified", "rejected"]
+    rejection_reason: OwnerControlShadowVerificationReason | None
+    if state == "consumed":
+        verification_status = "verified"
+        rejection_reason = None
+        sequence = 1
+        updates: dict[str, object] = {
+            "state": "consumed",
+            "attempt_count": sequence,
+            "consumed_at": "2030-01-02T03:04:05+00:00",
+        }
+    else:
+        verification_status = "rejected"
+        rejection_reason = "signature_invalid"
+        sequence = OWNER_CONTROL_SHADOW_MAX_ATTEMPTS
+        updates = {
+            "state": "rejected",
+            "attempt_count": sequence,
+        }
+    updates["terminal_event_id"] = owner_control_verification_event_id(
+        challenge_id=challenge.challenge_id,
+        sequence=sequence,
+        envelope_sha256=owner_control_confirmation_envelope_sha256(envelope),
+        verification_status=verification_status,
+        rejection_reason=rejection_reason,
+    )
+    return OwnerControlIssuedChallengeRecord.model_validate({**challenge.model_dump(), **updates})
+
+
+def _verification_state_vectors() -> list[dict[str, Any]]:
+    request, binding, session, challenge, envelope = _shadow_verifier_fixture_models()
+    revoked_session = revoke_owner_control_channel_session_record(
+        session,
+        revoked_at="2030-01-02T03:03:05+00:00",
+    )
+    mismatched_binding = ChannelBindingRecord(
+        channel_session_id=f"channel-session-{_digest_for_vector(descriptor_id=request.descriptor_id, label='mismatched-session')[:32]}",
+        owner_github_id=request.owner_github_id,
+        signature_algorithm="ed25519",
+        owner_public_key=binding.owner_public_key,
+        session_issued_at=binding.session_issued_at,
+        session_expires_at=binding.session_expires_at,
+    )
+    mismatched_session = build_owner_control_channel_session_record(
+        binding=mismatched_binding,
+        enrolled_at=request.issued_at,
+    )
+    alternate_binding = ChannelBindingRecord(
+        channel_session_id=binding.channel_session_id,
+        owner_github_id=binding.owner_github_id,
+        signature_algorithm="ed25519",
+        owner_public_key=binding.owner_public_key,
+        session_issued_at=binding.session_issued_at,
+        session_expires_at="2030-01-02T03:19:05+00:00",
+    )
+    alternate_request = ApprovalRequest.model_validate(
+        {
+            **request.model_dump(),
+            "policy_revision": request.policy_revision + 1,
+        }
+    )
+    consumed_challenge = _terminal_challenge(
+        challenge,
+        envelope=envelope,
+        state="consumed",
+    )
+    rejected_challenge = _terminal_challenge(
+        challenge,
+        envelope=envelope,
+        state="rejected",
+    )
+    vectors = [
+        _verification_state_vector(
+            name="verified",
+            envelope=envelope,
+            channel_session=session,
+            issued_challenge=challenge,
+            observed_at="2030-01-02T03:04:05+00:00",
+        ),
+        _verification_state_vector(
+            name="unknown-channel-session",
+            envelope=envelope,
+            channel_session=None,
+            issued_challenge=None,
+            observed_at="2030-01-02T03:04:05+00:00",
+        ),
+        _verification_state_vector(
+            name="unknown-challenge",
+            envelope=envelope,
+            channel_session=session,
+            issued_challenge=None,
+            observed_at="2030-01-02T03:04:05+00:00",
+        ),
+        _verification_state_vector(
+            name="channel-session-revoked",
+            envelope=envelope,
+            channel_session=revoked_session,
+            issued_challenge=challenge,
+            observed_at="2030-01-02T03:04:05+00:00",
+        ),
+        _verification_state_vector(
+            name="channel-session-expired",
+            envelope=envelope,
+            channel_session=session,
+            issued_challenge=challenge,
+            observed_at="2030-01-02T03:20:06+00:00",
+        ),
+        _verification_state_vector(
+            name="challenge-channel-session-mismatch",
+            envelope=envelope,
+            channel_session=mismatched_session,
+            issued_challenge=challenge,
+            observed_at="2030-01-02T03:04:05+00:00",
+        ),
+        _verification_state_vector(
+            name="challenge-expired",
+            envelope=envelope,
+            channel_session=session,
+            issued_challenge=challenge,
+            observed_at="2030-01-02T03:09:06+00:00",
+        ),
+        _verification_state_vector(
+            name="challenge-replayed",
+            envelope=envelope,
+            channel_session=session,
+            issued_challenge=consumed_challenge,
+            observed_at="2030-01-02T03:05:05+00:00",
+        ),
+        _verification_state_vector(
+            name="stored-binding-mismatch",
+            envelope=_signed_confirmation_envelope(
+                binding=alternate_binding,
+                request=request,
+            ),
+            channel_session=session,
+            issued_challenge=challenge,
+            observed_at="2030-01-02T03:04:05+00:00",
+        ),
+        _verification_state_vector(
+            name="stored-approval-request-mismatch",
+            envelope=_signed_confirmation_envelope(
+                binding=binding,
+                request=alternate_request,
+            ),
+            channel_session=session,
+            issued_challenge=challenge,
+            observed_at="2030-01-02T03:04:05+00:00",
+        ),
+        _verification_state_vector(
+            name="signature-invalid",
+            envelope=_signed_confirmation_envelope(
+                binding=binding,
+                request=request,
+                signer=_artifact_synthetic_wrong_private_key(),
+            ),
+            channel_session=session,
+            issued_challenge=challenge,
+            observed_at="2030-01-02T03:04:05+00:00",
+        ),
+        _verification_state_vector(
+            name="attempt-budget-exhausted",
+            envelope=envelope,
+            channel_session=session,
+            issued_challenge=rejected_challenge,
+            observed_at="2030-01-02T03:05:05+00:00",
+        ),
+    ]
+    expected_reasons = set(get_args(OwnerControlShadowVerificationReason))
+    actual_reasons = {
+        vector["expected"]["rejection_reason"]
+        for vector in vectors
+        if vector["expected"]["rejection_reason"] is not None
+    }
+    if actual_reasons != expected_reasons:
+        raise OwnerControlContractError(
+            "Owner-control verification vectors must cover every rejection reason"
+        )
+    if not any(vector["expected"]["verification_status"] == "verified" for vector in vectors):
+        raise OwnerControlContractError(
+            "Owner-control verification vectors must include a verified outcome"
+        )
+    return vectors
+
+
+def _challenge_lifecycle_vectors() -> list[dict[str, Any]]:
+    _, _, _, challenge, _ = _shadow_verifier_fixture_models()
+    terminalized, event = terminalize_expired_owner_control_challenge_record(
+        challenge,
+        observed_at=challenge.expires_at,
+    )
+    return [
+        {
+            "name": "issued-to-expired-at-boundary",
+            "observed_at": challenge.expires_at,
+            "issued_challenge": challenge.model_dump(mode="json"),
+            "expected_terminalized_challenge": terminalized.model_dump(mode="json"),
+            "expected_lifecycle_event": event.model_dump(mode="json"),
+        }
+    ]
 
 
 def _canonicalization_vectors() -> list[dict[str, Any]]:
@@ -564,14 +891,35 @@ def _signature_declaration() -> dict[str, Any]:
         "signature_bytes": 64,
         "signature_encoding": "base64url-unpadded",
         "legacy_golden_channel_binding": "synthetic-placeholder-not-channel-binding-record",
-        "contract_schema_version": OWNER_CONTROL_CONTRACT_SCHEMA_VERSION,
+        "contract_schema_version": _OWNER_CONTROL_PREVIOUS_CONTRACT_SCHEMA_VERSION,
     }
+
+
+def _compatibility_declaration() -> dict[str, Any]:
+    return {
+        "container_schema_version": OWNER_CONTROL_CONTRACT_SCHEMA_VERSION,
+        "previous_container_schema_version": _OWNER_CONTROL_PREVIOUS_CONTRACT_SCHEMA_VERSION,
+        "change_kind": "additive-server-state-vectors",
+        "unknown_container_versions": "reject",
+        "wire_model_schema_versions": [1],
+        "shadow_verifier_schema_versions": [OWNER_CONTROL_SHADOW_VERIFIER_SCHEMA_VERSION],
+        "preserved_v2_section_sha256": dict(_PRESERVED_V2_SECTION_SHA256),
+    }
+
+
+def _validate_preserved_v2_sections(artifact: Mapping[str, Any]) -> None:
+    for section, expected_sha256 in _PRESERVED_V2_SECTION_SHA256.items():
+        if canonical_json_sha256(artifact[section]) != expected_sha256:
+            raise OwnerControlContractError(
+                f"Owner-control v2 section {section!r} changed without a compatibility break"
+            )
 
 
 def _build_owner_control_contract() -> dict[str, Any]:
     descriptors = list_privileged_operation_descriptors()
     return {
         "schema_version": OWNER_CONTROL_CONTRACT_SCHEMA_VERSION,
+        "compatibility": _compatibility_declaration(),
         "canonical_json": {
             "encoding": "utf-8",
             "ensure_ascii": True,
@@ -612,13 +960,17 @@ def _build_owner_control_contract() -> dict[str, Any]:
         ],
         "negative_vectors": _negative_vectors(),
         "negative_confirmation_vectors": _negative_confirmation_vectors(),
+        "verification_state_vectors": _verification_state_vectors(),
+        "challenge_lifecycle_vectors": _challenge_lifecycle_vectors(),
     }
 
 
 def build_owner_control_contract() -> dict[str, Any]:
     """Build the deterministic, public owner-control conformance artifact."""
 
-    return _build_owner_control_contract()
+    artifact = _build_owner_control_contract()
+    _validate_preserved_v2_sections(artifact)
+    return artifact
 
 
 def _require_exact_keys(value: Mapping[str, Any], expected: set[str], location: str) -> None:
@@ -636,6 +988,7 @@ def validate_owner_control_contract(artifact: Mapping[str, Any]) -> None:
         artifact,
         {
             "schema_version",
+            "compatibility",
             "canonical_json",
             "signature_declaration",
             "canonicalization_vectors",
@@ -644,12 +997,17 @@ def validate_owner_control_contract(artifact: Mapping[str, Any]) -> None:
             "confirmation_golden_vectors",
             "negative_vectors",
             "negative_confirmation_vectors",
+            "verification_state_vectors",
+            "challenge_lifecycle_vectors",
         },
         "root",
     )
     if artifact["schema_version"] != OWNER_CONTROL_CONTRACT_SCHEMA_VERSION:
         raise OwnerControlContractError("Unsupported owner-control contract schema version")
     expected = _build_owner_control_contract()
+    if artifact["compatibility"] != expected["compatibility"]:
+        raise OwnerControlContractError("Owner-control compatibility declaration drifted")
+    _validate_preserved_v2_sections(artifact)
     if artifact["canonical_json"] != expected["canonical_json"]:
         raise OwnerControlContractError("Owner-control canonical JSON declaration drifted")
     if artifact["signature_declaration"] != expected["signature_declaration"]:
@@ -669,6 +1027,10 @@ def validate_owner_control_contract(artifact: Mapping[str, Any]) -> None:
         raise OwnerControlContractError("Owner-control negative vectors drifted")
     if artifact["negative_confirmation_vectors"] != expected["negative_confirmation_vectors"]:
         raise OwnerControlContractError("Owner-control negative confirmation vectors drifted")
+    if artifact["verification_state_vectors"] != expected["verification_state_vectors"]:
+        raise OwnerControlContractError("Owner-control verification state vectors drifted")
+    if artifact["challenge_lifecycle_vectors"] != expected["challenge_lifecycle_vectors"]:
+        raise OwnerControlContractError("Owner-control challenge lifecycle vectors drifted")
 
 
 def write_owner_control_contract(output_path: Path) -> Path:

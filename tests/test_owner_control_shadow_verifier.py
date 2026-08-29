@@ -944,11 +944,8 @@ class OwnerControlShadowVerifierStorageTests(unittest.TestCase):
 
 
 class OwnerControlShadowVerifierFreezeBoundaryTests(unittest.TestCase):
-    def test_published_wire_contract_remains_frozen(self) -> None:
-        frozen_paths = (
-            "contracts/owner-control-contract.json",
-            "control_plane/contracts/owner_control.py",
-        )
+    def test_published_wire_models_remain_frozen(self) -> None:
+        frozen_paths = ("control_plane/contracts/owner_control.py",)
 
         for path in frozen_paths:
             with self.subTest(path=path):
