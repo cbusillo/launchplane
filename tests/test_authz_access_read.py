@@ -310,6 +310,68 @@ class AuthzAccessReadHttpTests(unittest.IsolatedAsyncioTestCase):
         ):
             self.assertNotIn(private_value, serialized)
 
+    async def test_browser_repository_scope_post_requires_origin(self) -> None:
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "schema_version": 2,
+                "github_humans": [
+                    {
+                        "github_ids": [12345],
+                        "roles": ["admin"],
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": [AUTHZ_REPOSITORY_SCOPE_READ_ACTION],
+                    }
+                ],
+            }
+        )
+        session_store = InMemoryHumanSessionStore()
+        session_manager = HumanSessionManager(
+            config=GitHubOAuthConfig(
+                client_id="client-id",
+                client_secret="client-secret",
+                public_url="https://launchplane.example",
+                session_secret="session-secret",
+                cookie_secure=False,
+            ),
+            session_store=session_store,
+        )
+        session = session_manager.issue(
+            GitHubHumanIdentity(
+                login="browser-admin",
+                github_id=12345,
+                name="Browser Admin",
+                email="browser-admin@example.test",
+                organizations=frozenset(),
+                teams=frozenset(),
+                role="admin",
+            )
+        )
+        headers = build_browser_mutation_request_headers(
+            origin="https://launchplane.example",
+            csrf_token=session_manager.csrf_token(session),
+        )
+        headers["Cookie"] = session_manager.session_cookie_header(session).split(";", 1)[0]
+        headers.pop("Origin")
+        with _database_app(policy, human_session_manager=session_manager) as (
+            _store,
+            _record,
+            app,
+        ):
+            session_before = session_store.read_session(session.session_id)
+            async with lifespan_client(app) as client:
+                response = await client.post(
+                    "/v1/authz-diagnostics/repository-scope/read",
+                    headers=headers,
+                    json={"candidates": []},
+                )
+            session_after = session_store.read_session(session.session_id)
+
+        self.assertEqual(response.status_code, 403, response.text)
+        self.assertEqual(response.json()["error"]["code"], "browser_mutation_denied")
+        self.assertNotIn("set-cookie", response.headers)
+        self.assertEqual(session_after, session_before)
+
     async def test_repository_scope_authorization_precedes_route_database_reads(self) -> None:
         policy = LaunchplaneAuthzPolicy.model_validate(
             {
@@ -754,6 +816,13 @@ class AuthzAccessReadHttpTests(unittest.IsolatedAsyncioTestCase):
                         headers=rejected_headers,
                         json={"candidate_policy": policy.model_dump(mode="json")},
                     )
+                    absent_origin_headers = dict(headers)
+                    absent_origin_headers.pop("Origin")
+                    absent_origin_response = await client.post(
+                        "/v1/authz-diagnostics/candidate-policy/preview",
+                        headers=absent_origin_headers,
+                        json={"candidate_policy": policy.model_dump(mode="json")},
+                    )
                 session_after_preview = session_store.read_session(session.session_id)
             finally:
                 store.close()
@@ -765,6 +834,11 @@ class AuthzAccessReadHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rejected_response.status_code, 403, rejected_response.text)
         self.assertEqual(
             rejected_response.json()["error"]["code"],
+            "browser_mutation_denied",
+        )
+        self.assertEqual(absent_origin_response.status_code, 403, absent_origin_response.text)
+        self.assertEqual(
+            absent_origin_response.json()["error"]["code"],
             "browser_mutation_denied",
         )
 

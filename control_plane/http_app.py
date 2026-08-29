@@ -737,6 +737,7 @@ from control_plane.service_human_auth import (
     build_pkce_verifier,
     safe_oauth_return_to,
     validate_browser_mutation_request_headers,
+    validate_browser_sensitive_read_request_headers,
 )
 from control_plane.storage.factory import build_shared_record_store
 from control_plane.storage.factory import storage_backend_name
@@ -4454,7 +4455,12 @@ def create_launchplane_fastapi_app(
         if session is None or human_session_manager is None:
             raise _authentication_required_error("Authorization header is required.")
         try:
-            csrf_token = validate_browser_mutation_request_headers(
+            validate_browser_request_headers = (
+                validate_browser_sensitive_read_request_headers
+                if request.method == "GET"
+                else validate_browser_mutation_request_headers
+            )
+            csrf_token = validate_browser_request_headers(
                 expected_origin=human_session_manager.public_origin,
                 origin_values=tuple(request.headers.getlist("Origin")),
                 sec_fetch_site_values=tuple(request.headers.getlist("Sec-Fetch-Site")),

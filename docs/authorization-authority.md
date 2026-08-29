@@ -150,9 +150,16 @@ operation and mode enums, and allowlisted nonnegative numeric counts. Neither
 route returns raw policy or audit payloads, principal identifiers, selectors,
 managed rule IDs or hashes, reasons, key IDs, tokens, or free text.
 
-Browser administrators must provide the existing strict same-origin,
-`Sec-Fetch-*`, and CSRF proof. Validation neither renews the session nor rotates
-the CSRF token. Successes and every error class are `Cache-Control: no-store`,
+Browser administrators must provide strict same-origin `Sec-Fetch-*` metadata
+and CSRF proof. Same-origin browser GET requests normally omit `Origin`, so this
+sensitive-read validator accepts zero or one `Origin` value, validates it
+against the configured public origin when present, and always rejects duplicate
+or cross-origin values. It still requires `Sec-Fetch-Site: same-origin`, a
+`cors` or `same-origin` mode, `Sec-Fetch-Dest: empty`, and one valid CSRF token.
+The stricter mutation validator continues to require exactly one matching
+`Origin` for POST requests. Sensitive-read validation neither renews the session
+nor rotates the CSRF token. Successes and every error class are
+`Cache-Control: no-store`,
 and the routes do not write denial, session, policy, idempotency, audit, outbox,
 provider, runtime, deployment, secret, or other persistent state. This slice
 adds no proposal, export, rollback, mutation, workflow, UI, or authorization

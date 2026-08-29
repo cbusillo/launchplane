@@ -325,6 +325,12 @@ class AuthzAdministrationReadHttpTests(unittest.IsolatedAsyncioTestCase):
         ):
             session_before = session_store.read_session(session_id)
             async with lifespan_client(app) as client:
+                absent_origin_headers = dict(headers)
+                absent_origin_headers.pop("Origin")
+                absent_origin_response = await client.get(
+                    "/v1/authz-policies/administration",
+                    headers=absent_origin_headers,
+                )
                 response = await client.get(
                     "/v1/authz-policies/administration",
                     headers=headers,
@@ -343,6 +349,9 @@ class AuthzAdministrationReadHttpTests(unittest.IsolatedAsyncioTestCase):
                 )
             session_after = session_store.read_session(session_id)
 
+        self.assertEqual(absent_origin_response.status_code, 200, absent_origin_response.text)
+        self.assertEqual(absent_origin_response.headers["cache-control"], "no-store")
+        self.assertNotIn("set-cookie", absent_origin_response.headers)
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.headers["cache-control"], "no-store")
         self.assertNotIn("set-cookie", response.headers)
@@ -355,6 +364,50 @@ class AuthzAdministrationReadHttpTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(rejected.headers["cache-control"], "no-store")
             self.assertEqual(rejected.json()["error"]["code"], "browser_mutation_denied")
             self.assertNotIn("set-cookie", rejected.headers)
+
+    async def test_browser_without_origin_reaches_authorization_denial_without_writes(
+        self,
+    ) -> None:
+        manager, session_store = _human_session_manager()
+        identity = GitHubHumanIdentity(
+            login="browser-admin",
+            github_id=101,
+            name="Browser Admin",
+            email="browser-admin@example.test",
+            organizations=frozenset(),
+            teams=frozenset(),
+            role="admin",
+        )
+        headers, session_id, csrf_token = _browser_headers(manager, identity)
+        headers.pop("Origin")
+        policy = _github_human_policy(include_administration_action=False)
+        with _database_app(policy, human_session_manager=manager) as (
+            store,
+            _active_record,
+            app,
+        ):
+            session_before = session_store.read_session(session_id)
+            async with lifespan_client(app) as client:
+                with patch.object(
+                    store,
+                    "write_authz_denial_record",
+                    create=True,
+                    side_effect=AssertionError("administration denial must not write"),
+                ):
+                    response = await client.get(
+                        "/v1/authz-policies/administration",
+                        headers=headers,
+                    )
+            session_after = session_store.read_session(session_id)
+
+        self.assertEqual(response.status_code, 403, response.text)
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+        self.assertNotIn("set-cookie", response.headers)
+        self.assertEqual(session_after, session_before)
+        self.assertIsNotNone(session_before)
+        assert session_before is not None
+        self.assertTrue(manager.csrf_token_is_valid(session_before, csrf_token))
 
     async def test_administration_read_requires_both_runtime_and_fresh_database_grants(
         self,

@@ -328,11 +328,14 @@ cleanup scope so the store is always closed.
     `repository_owner_id` selectors for GitHub Actions rules.)
   - The two bounded administration GET routes require an eligible GitHub or
     local administrator, runtime and fresh active-DB authorization for the
-    ungranted `authz_policy_administration.read` action, strict same-origin/CSRF
-    proof for browser sessions, PostgreSQL record storage, and exactly one active
-    policy. They are `no-store`, nonrenewing, nonpersisting reads and expose no
-    raw policy, raw audit, principal identity, selector, managed-rule identity,
-    proposal, export, rollback, or mutation surface.
+    ungranted `authz_policy_administration.read` action, strict same-origin Fetch
+    Metadata and CSRF proof for browser sessions, PostgreSQL record storage, and
+    exactly one active policy. Same-origin GETs may omit `Origin`; the service
+    validates it when present and rejects duplicates or mismatches, while POST
+    mutation validation still requires exactly one matching `Origin`. The GETs
+    are `no-store`, nonrenewing, nonpersisting reads and expose no raw policy,
+    raw audit, principal identity, selector, managed-rule identity, proposal,
+    export, rollback, or mutation surface.
 
 - Every Code local automation work-request routes:
   - `GET /v1/every-code/summary` (native FastAPI for bearer-token,
