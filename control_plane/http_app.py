@@ -14584,25 +14584,6 @@ def create_launchplane_fastapi_app(
         identity: GitHubHumanIdentity,
         trace_id: str,
     ) -> None:
-        activation_state = (
-            control_plane_authz_policy_activation.authz_policy_operation_activation_state(
-                active_record.policy
-            )
-        )
-        if activation_state == "active":
-            raise _launchplane_http_error(
-                status_code=410,
-                trace_id=trace_id,
-                code="authz_policy_operation_activation_retired",
-                message="The privileged-policy operation activation bridge is retired.",
-            )
-        if activation_state == "conflict":
-            raise _launchplane_http_error(
-                status_code=409,
-                trace_id=trace_id,
-                code="authz_policy_operation_activation_conflict",
-                message="The activation managed set conflicts with the compiled bridge contract.",
-            )
         if not control_plane_authz_grant_service.authz_policy_allows_immutable_github_id_administration(
             policy=active_record.policy,
             github_id=identity.github_id,
@@ -14626,6 +14607,25 @@ def create_launchplane_fastapi_app(
                 ),
                 authz_policy_provenance=AuthzPolicyProvenance.from_record(active_record),
             )
+        activation_state = (
+            control_plane_authz_policy_activation.authz_policy_operation_activation_state(
+                active_record.policy
+            )
+        )
+        if activation_state == "active":
+            raise _launchplane_http_error(
+                status_code=410,
+                trace_id=trace_id,
+                code="authz_policy_operation_activation_retired",
+                message="The privileged-policy operation activation bridge is retired.",
+            )
+        if activation_state == "conflict":
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="authz_policy_operation_activation_conflict",
+                message="The activation managed set conflicts with the compiled bridge contract.",
+            )
 
     def build_authz_policy_operation_activation_response(
         *,
@@ -14647,7 +14647,6 @@ def create_launchplane_fastapi_app(
             mode=mode,
             applying_github_id=identity.github_id,
             previous_record=route_result.previous_authz_policy_record,
-            resulting_record=resulting_record,
             candidate_policy=route_result.updated_policy,
             diff=diff,
             changed=route_result.changed,

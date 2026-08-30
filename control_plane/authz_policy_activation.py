@@ -157,14 +157,16 @@ def authz_policy_operation_activation_evidence(
     mode: Literal["dry_run", "apply"],
     applying_github_id: int,
     previous_record: LaunchplaneAuthzPolicyRecord,
-    resulting_record: LaunchplaneAuthzPolicyRecord,
     candidate_policy: LaunchplaneAuthzPolicy,
     diff: AuthzManagedPolicyDiff,
     changed: bool,
 ) -> dict[str, object]:
     return {
         "mode": mode,
-        "bridge_state": "retired" if mode == "apply" else "available",
+        "activation_state": {
+            "observed": authz_policy_operation_activation_state(previous_record.policy),
+            "candidate": authz_policy_operation_activation_state(candidate_policy),
+        },
         "managed_set_id": AUTHZ_POLICY_OPERATION_ACTIVATION_MANAGED_SET_ID,
         "managed_rule_id": AUTHZ_POLICY_OPERATION_ACTIVATION_MANAGED_RULE_ID,
         "principal_type": "github_human",
@@ -192,10 +194,4 @@ def authz_policy_operation_activation_evidence(
         "policy_safety_blockers": [
             blocker.model_dump(mode="json") for blocker in diff.policy_safety_blockers
         ],
-        "resulting_policy": {
-            "record_id": resulting_record.record_id,
-            "revision": resulting_record.revision,
-            "policy_sha256": resulting_record.policy_sha256,
-            "activation_state": authz_policy_operation_activation_state(resulting_record.policy),
-        },
     }

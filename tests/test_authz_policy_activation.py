@@ -43,6 +43,18 @@ def _human_identity(*, github_id: int = 123) -> GitHubHumanIdentity:
     )
 
 
+def _reader_identity() -> GitHubHumanIdentity:
+    return GitHubHumanIdentity(
+        login="example-reader",
+        github_id=789,
+        name="Example Reader",
+        email="reader@example.test",
+        organizations=frozenset(),
+        teams=frozenset(),
+        role="read_only",
+    )
+
+
 def _admin_rule(*, github_id: int, managed_rule_id: str) -> dict[str, object]:
     return {
         "managed_set_id": "test.policy-administrators",
@@ -59,6 +71,17 @@ def _policy(*, independent_admin: bool = True) -> LaunchplaneAuthzPolicy:
     rules = [_admin_rule(github_id=123, managed_rule_id="applying-admin")]
     if independent_admin:
         rules.append(_admin_rule(github_id=456, managed_rule_id="independent-admin"))
+    rules.append(
+        {
+            "managed_set_id": "test.activation-reader",
+            "managed_rule_id": "non-admin-reader",
+            "github_ids": [789],
+            "roles": ["read_only"],
+            "products": ["launchplane"],
+            "contexts": ["launchplane"],
+            "actions": ["authz_policy_health.read"],
+        }
+    )
     return LaunchplaneAuthzPolicy.model_validate(
         {
             "schema_version": 2,
@@ -212,9 +235,8 @@ class AuthzPolicyOperationActivationHttpTests(unittest.IsolatedAsyncioTestCase):
                     self.assertTrue(activation["changed"])
                     self.assertTrue(activation["applying_admin_retained"])
                     self.assertTrue(activation["independent_admin_reachable"])
-                    self.assertEqual(
-                        activation["resulting_policy"]["activation_state"], "available"
-                    )
+                    self.assertEqual(activation["activation_state"]["observed"], "available")
+                    self.assertEqual(activation["activation_state"]["candidate"], "active")
                     review_digest = activation["review_digest"]
                     apply_payload = {
                         "reason": "Activate the reviewed privileged-policy lifecycle.",
@@ -249,12 +271,11 @@ class AuthzPolicyOperationActivationHttpTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(applied.status_code, 202, applied.text)
                     applied_payload = applied.json()
                     self.assertEqual(
-                        applied_payload["result"]["activation"]["bridge_state"], "retired"
+                        applied_payload["result"]["activation"]["activation_state"]["observed"],
+                        "available",
                     )
                     self.assertEqual(
-                        applied_payload["result"]["activation"]["resulting_policy"][
-                            "activation_state"
-                        ],
+                        applied_payload["result"]["activation"]["activation_state"]["candidate"],
                         "active",
                     )
                     replayed = await client.post(
@@ -290,6 +311,24 @@ class AuthzPolicyOperationActivationHttpTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(
                         conflicting_replay.json()["error"]["code"],
                         "idempotency_key_reused",
+                    )
+                    reader_session = session_manager.issue(_reader_identity())
+                    concealed_retirement = await client.post(
+                        _DRY_RUN_ROUTE,
+                        headers={
+                            **_browser_mutation_headers(session_manager, reader_session),
+                            "Content-Type": "application/json",
+                        },
+                        content=json.dumps({"reason": "Inspect activation state."}),
+                    )
+                    self.assertEqual(
+                        concealed_retirement.status_code,
+                        403,
+                        concealed_retirement.text,
+                    )
+                    self.assertEqual(
+                        concealed_retirement.json()["error"]["code"],
+                        "authorization_denied",
                     )
                     retired_apply = await client.post(
                         _APPLY_ROUTE,
@@ -337,7 +376,7 @@ class AuthzPolicyOperationActivationHttpTests(unittest.IsolatedAsyncioTestCase):
             ),
             123,
         )
-        self.assertEqual(len(active_record.policy.github_humans), 3)
+        self.assertEqual(len(active_record.policy.github_humans), 4)
         self.assertEqual(
             {
                 rule.managed_rule_id
