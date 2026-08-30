@@ -585,8 +585,9 @@ def runner_control_plan(
     default=True,
     show_default=True,
     help=(
-        "Whether an existing lane requires aggregate baseline readiness before adoption or "
-        "remove/recreate is recommended. Absent-lane create recommendations are not baseline-gated."
+        "Whether non-ready aggregate baseline evidence blocks planning. Existing lanes and "
+        "absent lanes with observed failures are blocked; only an absent lane with a "
+        "zero-observation packet is exempt."
     ),
 )
 @click.option(

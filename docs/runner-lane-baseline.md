@@ -212,14 +212,15 @@ otherwise-valid create, adoption-verification, and remove/recreate plans remain
 `capability_ready: false` and expose no mutation capability.
 
 Baseline readiness has different timing for absent-lane planning and existing
-lane remediation. An absent lane may be policy-ready for `recommend_create`
-only when the supplied readiness packet has zero observed lanes, zero compliant
-lanes, and no violations. A non-ready packet with existing fleet observations
-or violations blocks even an absent-lane recommendation. By default, any
-matching existing lane must have a ready aggregate baseline packet before the
-planner can recommend adoption verification or remove/recreate; otherwise it
-returns `decision: blocked` with `baseline_not_ready`. The operator may
-explicitly disable this coarse pre-action gate with
+lane remediation. An absent lane may remain policy-ready for
+`recommend_create` despite a non-ready packet only when that packet has zero
+observed lanes, zero compliant lanes, and no violations. A non-ready packet
+with existing fleet observations or violations blocks even an absent-lane
+recommendation. By default, any matching existing lane must have a ready
+aggregate baseline packet before the planner can recommend adoption
+verification or remove/recreate; otherwise it returns `decision: blocked` with
+`baseline_not_ready`. The operator may explicitly disable this coarse
+pre-action gate with
 `--allow-missing-baseline-readiness`, but the recommendation remains blocked by
 `supervised_maintainer_required` and does not become completion evidence. The
 current readiness packet is fleet-aggregate evidence and does not prove that
