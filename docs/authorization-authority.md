@@ -185,6 +185,40 @@ or action inventory. The route and all of its errors are
 denial, audit, idempotency, outbox, policy, operation, provider, runtime, or
 secret write. No additional diagnostic grant or credential is required.
 
+Issue `#2277` adds one narrow browser-human activation bridge for the compiled
+privileged-policy operation managed set. The bridge has separate dry-run and
+apply POST routes, accepts only a bounded reason, the reviewed dry-run digest on
+apply, and an `Idempotency-Key`, and derives the immutable GitHub ID exclusively
+from the authenticated Launchplane session. Both routes require strict
+same-origin fetch metadata and a single-use CSRF token. Bearer, workflow,
+terminal-agent, local-operator, and local-admin identities fail before policy
+evaluation.
+
+The bridge does not trust the session role or mutable login, organization, or
+team selectors. It reloads the single active DB policy and requires an exact
+immutable-ID human administrator rule with explicit `admin` role, literal
+`authz_policy_grant.write`, and exact `launchplane` product/context scope. Its
+code-compiled managed set contains one GitHub-human rule for that same immutable
+ID and exactly `authz_policy_operation.propose`,
+`authz_policy_operation.read`, `authz_policy_operation.approve`,
+`authz_policy_operation.revoke`, and `authz_policy_operation.cancel`. It cannot
+create workflow, terminal-agent, local-operator, local-admin, wildcard,
+provider, deployment, or unrelated authority.
+
+Dry-run binds the observed active record ID, revision, policy digest, candidate
+revision and digest, desired-set digest, exact action set, applying-admin
+continuity, and distinct reachable-administrator evidence. Apply repeats that
+compiled request with the reviewed digest, non-empty reason, immutable-ID-scoped
+idempotency, active-policy compare-and-swap, and exact record/revision/digest and
+policy read-back. The written record uses the distinct
+`service:authz-policy-operation-activation` source. Once the exact managed set
+is active, both activation routes return the terminal
+`authz_policy_operation_activation_retired` result; an occupied but non-exact
+set fails as a conflict. This state-derived retirement is not total-lockout
+recovery, a recurring break-glass path, or operator-configured authority. The
+routes remain hidden from the general OpenAPI surface so the bridge can be
+deleted after production activation evidence is preserved.
+
 The next read-only administration slice adds
 `authz_policy_candidate_preview.read` for an authenticated GitHub administrator
 or local administrator. It accepts one complete schema-v2 candidate policy and
