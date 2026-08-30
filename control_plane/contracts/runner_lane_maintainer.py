@@ -218,14 +218,6 @@ def plan_runner_lane_maintainer(
                     f"runner desired state is missing required label: {label}",
                 )
             )
-    if policy.require_baseline_readiness and not baseline_readiness.ready:
-        blockers.append(
-            _blocker(
-                "baseline_not_ready",
-                f"runner lane baseline is not ready: {baseline_readiness.summary}",
-            )
-        )
-
     matching_lanes = tuple(
         lane for lane in inventory.lanes if lane.name.strip().lower() == desired_state.lane_name
     )
@@ -245,6 +237,17 @@ def plan_runner_lane_maintainer(
                     "existing_lane_not_managed",
                     "existing runner lane is not marked as Launchplane-managed: "
                     f"{desired_state.lane_name}",
+                )
+            )
+        if (
+            lane.status == "online"
+            and policy.require_baseline_readiness
+            and not baseline_readiness.ready
+        ):
+            blockers.append(
+                _blocker(
+                    "baseline_not_ready",
+                    f"runner lane baseline is not ready: {baseline_readiness.summary}",
                 )
             )
 
@@ -391,9 +394,7 @@ def _normalized_path(value: str) -> str:
         if segment in {"", "."}:
             continue
         if segment == "..":
-            if segments:
-                segments.pop()
-            continue
+            raise ValueError("runner lane maintainer paths must not contain '..' components")
         segments.append(segment)
     return "/" + "/".join(segments)
 

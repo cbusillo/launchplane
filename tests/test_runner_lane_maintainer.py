@@ -90,21 +90,48 @@ class RunnerLaneMaintainerPlanTests(unittest.TestCase):
         self.assertTrue(plan.capability_ready)
         self.assertEqual([blocker.code for blocker in plan.blockers], ["existing_lane_not_managed"])
 
-    def test_plan_blocks_without_baseline_readiness(self) -> None:
+    def test_plan_recommends_create_before_baseline_is_available(self) -> None:
         plan = plan_runner_lane_maintainer(
             policy=_policy(),
             desired_state=_desired_state(),
             inventory=_inventory(lanes=()),
-            baseline_readiness=RunnerLaneBaselineReadiness(
-                ready=False,
-                observed_lanes=0,
-                compliant_lanes=0,
-                violations=(),
-                summary="no runner lane baseline observations supplied",
-            ),
+            baseline_readiness=_unavailable_baseline(),
         )
 
         self.assertEqual(plan.status, "blocked")
+        self.assertEqual(plan.decision, "recommend_create")
+        self.assertTrue(plan.policy_ready)
+        self.assertFalse(plan.capability_ready)
+        self.assertEqual(
+            [blocker.code for blocker in plan.blockers], ["supervised_maintainer_required"]
+        )
+
+    def test_plan_recommends_remove_recreate_before_baseline_is_available(self) -> None:
+        plan = plan_runner_lane_maintainer(
+            policy=_policy(),
+            desired_state=_desired_state(),
+            inventory=_inventory(lanes=(_lane(status="offline", github_id=21),)),
+            baseline_readiness=_unavailable_baseline(),
+        )
+
+        self.assertEqual(plan.status, "blocked")
+        self.assertEqual(plan.decision, "recommend_remove_recreate")
+        self.assertTrue(plan.policy_ready)
+        self.assertFalse(plan.capability_ready)
+        self.assertEqual(
+            [blocker.code for blocker in plan.blockers], ["supervised_maintainer_required"]
+        )
+
+    def test_plan_blocks_online_lane_without_baseline_readiness(self) -> None:
+        plan = plan_runner_lane_maintainer(
+            policy=_policy(),
+            desired_state=_desired_state(),
+            inventory=_inventory(lanes=(_lane(status="online"),)),
+            baseline_readiness=_unavailable_baseline(),
+        )
+
+        self.assertEqual(plan.status, "blocked")
+        self.assertEqual(plan.decision, "blocked")
         self.assertFalse(plan.policy_ready)
         self.assertTrue(plan.capability_ready)
         self.assertEqual([blocker.code for blocker in plan.blockers], ["baseline_not_ready"])
@@ -171,6 +198,24 @@ class RunnerLaneMaintainerPlanTests(unittest.TestCase):
                 service_user="launchplane-runner-hygiene",
                 systemd_unit_name=_UNIT_NAME,
                 labels=("self-hosted", "launchplane", "launchplane-managed"),
+            )
+
+    def test_desired_state_rejects_parent_path_components(self) -> None:
+        with self.assertRaisesRegex(ValueError, "must not contain '\\.\\.' components"):
+            RunnerLaneDesiredState(
+                repository="cbusillo/odoo-tenant-cm-website",
+                host_name="chris-testing",
+                lane_name="cm-website-chris-testing",
+                runner_directory="/home/launchplane-runner-hygiene/actions-runners/../cm-website-chris-testing",
+                service_user="launchplane-runner-hygiene",
+                systemd_unit_name=_UNIT_NAME,
+                labels=("self-hosted", "launchplane", "launchplane-managed"),
+            )
+
+    def test_policy_rejects_parent_path_components_in_allowed_roots(self) -> None:
+        with self.assertRaisesRegex(ValueError, "must not contain '\\.\\.' components"):
+            RunnerLaneMaintainerPolicy(
+                allowed_registration_roots=("/home/launchplane-runner-hygiene/../actions-runners",),
             )
 
     def test_desired_state_requires_systemd_unit_for_lane(self) -> None:
@@ -248,6 +293,16 @@ def _ready_baseline() -> RunnerLaneBaselineReadiness:
         compliant_lanes=1,
         violations=(),
         summary="runner lane baseline satisfied",
+    )
+
+
+def _unavailable_baseline() -> RunnerLaneBaselineReadiness:
+    return RunnerLaneBaselineReadiness(
+        ready=False,
+        observed_lanes=0,
+        compliant_lanes=0,
+        violations=(),
+        summary="no runner lane baseline observations supplied",
     )
 
 

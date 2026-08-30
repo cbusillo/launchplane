@@ -209,11 +209,24 @@ perform that action. Until the supervised host maintainer exists,
 otherwise-valid create, adoption-verification, and remove/recreate plans remain
 `status: blocked` with the typed capability blocker
 `supervised_maintainer_required`. These packets set `policy_ready: true` and
-`capability_ready: false`. Policy blockers such as an unapproved host, unsafe
-runner directory, missing managed label, duplicate lane name, repository
-mismatch, or failed baseline readiness produce `decision: blocked` with
-`policy_ready: false` and must be resolved before any host mutation can be
-considered.
+`capability_ready: false` and expose no mutation capability.
+
+Baseline readiness has different timing for pre-action planning and completed
+lane evidence. An absent lane may be policy-ready for `recommend_create`, and an
+offline managed lane may be policy-ready for `recommend_remove_recreate`, when
+baseline observations are unavailable because the future supervised action must
+create or recreate the running service first. Baseline readiness is then a
+required post-action completion check before the lane can be admitted for
+product jobs. An existing online lane must already pass baseline readiness for
+the planner to recommend adoption verification; otherwise it returns
+`decision: blocked` with `baseline_not_ready`.
+
+Other policy blockers such as an unapproved host, unsafe runner directory,
+missing managed label, duplicate lane name, or repository mismatch also produce
+`decision: blocked` with `policy_ready: false` and must be resolved before any
+host mutation can be considered. Desired runner directories and allowed
+registration roots reject explicit `..` path components rather than resolving
+them into a different path.
 
 ## Lifecycle Executors
 
