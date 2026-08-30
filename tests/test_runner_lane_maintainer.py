@@ -106,7 +106,7 @@ class RunnerLaneMaintainerPlanTests(unittest.TestCase):
             [blocker.code for blocker in plan.blockers], ["supervised_maintainer_required"]
         )
 
-    def test_plan_recommends_remove_recreate_before_baseline_is_available(self) -> None:
+    def test_plan_blocks_offline_lane_without_baseline_readiness(self) -> None:
         plan = plan_runner_lane_maintainer(
             policy=_policy(),
             desired_state=_desired_state(),
@@ -115,12 +115,10 @@ class RunnerLaneMaintainerPlanTests(unittest.TestCase):
         )
 
         self.assertEqual(plan.status, "blocked")
-        self.assertEqual(plan.decision, "recommend_remove_recreate")
-        self.assertTrue(plan.policy_ready)
-        self.assertFalse(plan.capability_ready)
-        self.assertEqual(
-            [blocker.code for blocker in plan.blockers], ["supervised_maintainer_required"]
-        )
+        self.assertEqual(plan.decision, "blocked")
+        self.assertFalse(plan.policy_ready)
+        self.assertTrue(plan.capability_ready)
+        self.assertEqual([blocker.code for blocker in plan.blockers], ["baseline_not_ready"])
 
     def test_plan_blocks_online_lane_without_baseline_readiness(self) -> None:
         plan = plan_runner_lane_maintainer(
@@ -135,6 +133,36 @@ class RunnerLaneMaintainerPlanTests(unittest.TestCase):
         self.assertFalse(plan.policy_ready)
         self.assertTrue(plan.capability_ready)
         self.assertEqual([blocker.code for blocker in plan.blockers], ["baseline_not_ready"])
+
+    def test_plan_blocks_lane_with_unknown_status(self) -> None:
+        plan = plan_runner_lane_maintainer(
+            policy=_policy(),
+            desired_state=_desired_state(),
+            inventory=_inventory(lanes=(_lane(status="unknown"),)),
+            baseline_readiness=_ready_baseline(),
+        )
+
+        self.assertEqual(plan.status, "blocked")
+        self.assertEqual(plan.decision, "blocked")
+        self.assertFalse(plan.policy_ready)
+        self.assertTrue(plan.capability_ready)
+        self.assertEqual([blocker.code for blocker in plan.blockers], ["lane_status_unknown"])
+
+    def test_plan_can_disable_baseline_gate_for_online_lane(self) -> None:
+        plan = plan_runner_lane_maintainer(
+            policy=_policy(require_baseline_readiness=False),
+            desired_state=_desired_state(),
+            inventory=_inventory(lanes=(_lane(status="online"),)),
+            baseline_readiness=_unavailable_baseline(),
+        )
+
+        self.assertEqual(plan.status, "blocked")
+        self.assertEqual(plan.decision, "recommend_verify_adoption")
+        self.assertTrue(plan.policy_ready)
+        self.assertFalse(plan.capability_ready)
+        self.assertEqual(
+            [blocker.code for blocker in plan.blockers], ["supervised_maintainer_required"]
+        )
 
     def test_plan_blocks_unsafe_or_out_of_policy_state(self) -> None:
         plan = plan_runner_lane_maintainer(
@@ -251,16 +279,47 @@ class RunnerLaneMaintainerCliTests(unittest.TestCase):
         payload = json.loads(result.output)
         self.assertEqual(payload["plan"]["decision"], "recommend_create")
 
+    def test_cli_blocks_existing_lane_without_baseline_readiness(self) -> None:
+        result = _invoke_cli(
+            lanes=(_lane(status="online"),),
+            baseline_readiness=_unavailable_baseline(),
+        )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["plan"]["decision"], "blocked")
+        self.assertEqual(payload["plan"]["blockers"][0]["code"], "baseline_not_ready")
+
+    def test_cli_can_disable_baseline_gate_for_existing_lane(self) -> None:
+        result = _invoke_cli(
+            lanes=(_lane(status="online"),),
+            baseline_readiness=_unavailable_baseline(),
+            allow_missing_baseline=True,
+        )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["plan"]["decision"], "recommend_verify_adoption")
+        self.assertEqual(
+            [blocker["code"] for blocker in payload["plan"]["blockers"]],
+            ["supervised_maintainer_required"],
+        )
+
 
 _UNIT_NAME = "launchplane-runner@cm-website-chris-testing.service"
 
 
-def _policy(*, approved_hosts: tuple[str, ...] = ("chris-testing",)) -> RunnerLaneMaintainerPolicy:
+def _policy(
+    *,
+    approved_hosts: tuple[str, ...] = ("chris-testing",),
+    require_baseline_readiness: bool = True,
+) -> RunnerLaneMaintainerPolicy:
     return RunnerLaneMaintainerPolicy(
         allowed_repositories=("cbusillo/odoo-tenant-cm-website",),
         approved_hosts=approved_hosts,
         allowed_registration_roots=("/home/launchplane-runner-hygiene/actions-runners",),
         allowed_service_users=("launchplane-runner-hygiene",),
+        require_baseline_readiness=require_baseline_readiness,
     )
 
 
@@ -337,7 +396,13 @@ def _lane(
     )
 
 
-def _invoke_cli(*, lanes: tuple[RunnerLaneRecord, ...], nested_baseline: bool = False) -> Result:
+def _invoke_cli(
+    *,
+    lanes: tuple[RunnerLaneRecord, ...],
+    nested_baseline: bool = False,
+    baseline_readiness: RunnerLaneBaselineReadiness | None = None,
+    allow_missing_baseline: bool = False,
+) -> Result:
     with TemporaryDirectory() as temp_dir:
         temp_path = Path(temp_dir)
         inventory_file = temp_path / "inventory.json"
@@ -346,52 +411,54 @@ def _invoke_cli(*, lanes: tuple[RunnerLaneRecord, ...], nested_baseline: bool = 
             json.dumps(_inventory(lanes=lanes).model_dump(mode="json")),
             encoding="utf-8",
         )
-        baseline_payload: dict[str, object] = _ready_baseline().model_dump(mode="json")
+        baseline_payload: dict[str, object] = (baseline_readiness or _ready_baseline()).model_dump(
+            mode="json"
+        )
         if nested_baseline:
             baseline_payload = {"readiness": baseline_payload}
         baseline_file.write_text(json.dumps(baseline_payload), encoding="utf-8")
 
-        return CliRunner().invoke(
-            CLI_MAIN,
-            [
-                "work-graph",
-                "runner-maintainer-plan",
-                "--repository",
-                "cbusillo/odoo-tenant-cm-website",
-                "--host-name",
-                "chris-testing",
-                "--lane-name",
-                "cm-website-chris-testing",
-                "--runner-directory",
-                "/home/launchplane-runner-hygiene/actions-runners/cm-website-chris-testing",
-                "--service-user",
-                "launchplane-runner-hygiene",
-                "--systemd-unit-name",
-                _UNIT_NAME,
-                "--label",
-                "self-hosted",
-                "--label",
-                "launchplane",
-                "--label",
-                "launchplane-managed",
-                "--label",
-                "chris-testing",
-                "--label",
-                "cm-website",
-                "--allowed-repository",
-                "cbusillo/odoo-tenant-cm-website",
-                "--approved-host",
-                "chris-testing",
-                "--allowed-registration-root",
-                "/home/launchplane-runner-hygiene/actions-runners",
-                "--allowed-service-user",
-                "launchplane-runner-hygiene",
-                "--inventory-file",
-                str(inventory_file),
-                "--baseline-readiness-file",
-                str(baseline_file),
-            ],
-        )
+        arguments = [
+            "work-graph",
+            "runner-maintainer-plan",
+            "--repository",
+            "cbusillo/odoo-tenant-cm-website",
+            "--host-name",
+            "chris-testing",
+            "--lane-name",
+            "cm-website-chris-testing",
+            "--runner-directory",
+            "/home/launchplane-runner-hygiene/actions-runners/cm-website-chris-testing",
+            "--service-user",
+            "launchplane-runner-hygiene",
+            "--systemd-unit-name",
+            _UNIT_NAME,
+            "--label",
+            "self-hosted",
+            "--label",
+            "launchplane",
+            "--label",
+            "launchplane-managed",
+            "--label",
+            "chris-testing",
+            "--label",
+            "cm-website",
+            "--allowed-repository",
+            "cbusillo/odoo-tenant-cm-website",
+            "--approved-host",
+            "chris-testing",
+            "--allowed-registration-root",
+            "/home/launchplane-runner-hygiene/actions-runners",
+            "--allowed-service-user",
+            "launchplane-runner-hygiene",
+            "--inventory-file",
+            str(inventory_file),
+            "--baseline-readiness-file",
+            str(baseline_file),
+        ]
+        if allow_missing_baseline:
+            arguments.append("--allow-missing-baseline-readiness")
+        return CliRunner().invoke(CLI_MAIN, arguments)
 
 
 if __name__ == "__main__":

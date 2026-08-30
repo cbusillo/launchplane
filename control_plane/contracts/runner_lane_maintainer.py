@@ -26,6 +26,7 @@ RunnerLaneMaintainerBlockerCode = Literal[
     "host_not_allowed",
     "inventory_repository_mismatch",
     "lane_name_ambiguous",
+    "lane_status_unknown",
     "repository_not_allowed",
     "runner_directory_not_allowed",
     "service_user_not_allowed",
@@ -239,11 +240,14 @@ def plan_runner_lane_maintainer(
                     f"{desired_state.lane_name}",
                 )
             )
-        if (
-            lane.status == "online"
-            and policy.require_baseline_readiness
-            and not baseline_readiness.ready
-        ):
+        if lane.status not in {"online", "offline"}:
+            blockers.append(
+                _blocker(
+                    "lane_status_unknown",
+                    f"existing runner lane has an unsupported status: {lane.status}",
+                )
+            )
+        if policy.require_baseline_readiness and not baseline_readiness.ready:
             blockers.append(
                 _blocker(
                     "baseline_not_ready",

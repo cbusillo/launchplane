@@ -584,7 +584,10 @@ def runner_control_plan(
     "--require-baseline-readiness/--allow-missing-baseline-readiness",
     default=True,
     show_default=True,
-    help="Whether an existing online lane must pass baseline readiness before adoption is recommended.",
+    help=(
+        "Whether an existing lane requires aggregate baseline readiness before adoption or "
+        "remove/recreate is recommended. Absent-lane create recommendations are not baseline-gated."
+    ),
 )
 @click.option(
     "--inventory-file",
