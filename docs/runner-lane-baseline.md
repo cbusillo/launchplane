@@ -213,23 +213,29 @@ otherwise-valid create, adoption-verification, and remove/recreate plans remain
 
 Baseline readiness has different timing for absent-lane planning and existing
 lane remediation. An absent lane may be policy-ready for `recommend_create`
-when no baseline observation can exist yet. Any matching existing lane must
-have a ready aggregate baseline packet before the planner can recommend
-adoption verification or remove/recreate; otherwise it returns
-`decision: blocked` with `baseline_not_ready`. The current readiness packet is
-fleet-aggregate evidence and does not prove that the desired lane itself was
-observed. A future supervised executor must bind post-action baseline evidence
-to the exact lane before it can claim completion or product-job admission; this
-read-only planner does not implement that completion gate.
+only when the supplied readiness packet has zero observed lanes, zero compliant
+lanes, and no violations. A non-ready packet with existing fleet observations
+or violations blocks even an absent-lane recommendation. By default, any
+matching existing lane must have a ready aggregate baseline packet before the
+planner can recommend adoption verification or remove/recreate; otherwise it
+returns `decision: blocked` with `baseline_not_ready`. The operator may
+explicitly disable this coarse pre-action gate with
+`--allow-missing-baseline-readiness`, but the recommendation remains blocked by
+`supervised_maintainer_required` and does not become completion evidence. The
+current readiness packet is fleet-aggregate evidence and does not prove that
+the desired lane itself was observed. A future supervised executor must bind
+post-action baseline evidence to the exact lane before it can claim completion
+or product-job admission; this read-only planner does not implement that
+completion gate.
 
 Other policy blockers such as an unapproved host, unsafe runner directory,
-missing managed label, duplicate lane name, or repository mismatch also produce
-`decision: blocked` with `policy_ready: false` and must be resolved before any
-host mutation can be considered. The maintainer planner's desired runner
-directories and allowed registration roots reject explicit `..` path
-components rather than resolving them into a different path. Registration and
-retirement remain separate lifecycle contracts and are not covered by this
-planner validation.
+missing managed label, unsupported observed lane status, duplicate lane name,
+or repository mismatch also produce `decision: blocked` with
+`policy_ready: false` and must be resolved before any host mutation can be
+considered. The maintainer planner's desired runner directories and allowed
+registration roots reject explicit `..` path components rather than resolving
+them into a different path. Registration and retirement remain separate
+lifecycle contracts and are not covered by this planner validation.
 
 ## Lifecycle Executors
 

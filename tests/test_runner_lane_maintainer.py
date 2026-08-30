@@ -12,6 +12,7 @@ from click.testing import Result
 
 from control_plane.cli import main
 from control_plane.contracts.runner_lane_baseline import RunnerLaneBaselineReadiness
+from control_plane.contracts.runner_lane_baseline import RunnerLaneBaselineViolation
 from control_plane.contracts.runner_lane_inventory import RunnerLaneInventory
 from control_plane.contracts.runner_lane_inventory import RunnerLaneRecord
 from control_plane.contracts.runner_lane_inventory import build_runner_lane_inventory
@@ -106,6 +107,20 @@ class RunnerLaneMaintainerPlanTests(unittest.TestCase):
             [blocker.code for blocker in plan.blockers], ["supervised_maintainer_required"]
         )
 
+    def test_plan_blocks_create_when_existing_baseline_evidence_is_not_ready(self) -> None:
+        plan = plan_runner_lane_maintainer(
+            policy=_policy(),
+            desired_state=_desired_state(),
+            inventory=_inventory(lanes=()),
+            baseline_readiness=_failing_baseline(),
+        )
+
+        self.assertEqual(plan.status, "blocked")
+        self.assertEqual(plan.decision, "blocked")
+        self.assertFalse(plan.policy_ready)
+        self.assertTrue(plan.capability_ready)
+        self.assertEqual([blocker.code for blocker in plan.blockers], ["baseline_not_ready"])
+
     def test_plan_blocks_offline_lane_without_baseline_readiness(self) -> None:
         plan = plan_runner_lane_maintainer(
             policy=_policy(),
@@ -148,6 +163,43 @@ class RunnerLaneMaintainerPlanTests(unittest.TestCase):
         self.assertTrue(plan.capability_ready)
         self.assertEqual([blocker.code for blocker in plan.blockers], ["lane_status_unknown"])
 
+    def test_plan_blocks_unknown_status_when_baseline_gate_is_disabled(self) -> None:
+        plan = plan_runner_lane_maintainer(
+            policy=_policy(require_baseline_readiness=False),
+            desired_state=_desired_state(),
+            inventory=_inventory(lanes=(_lane(status="unknown"),)),
+            baseline_readiness=_unavailable_baseline(),
+        )
+
+        self.assertEqual(plan.status, "blocked")
+        self.assertEqual(plan.decision, "blocked")
+        self.assertFalse(plan.policy_ready)
+        self.assertTrue(plan.capability_ready)
+        self.assertEqual([blocker.code for blocker in plan.blockers], ["lane_status_unknown"])
+
+    def test_plan_accepts_non_policy_observed_labels(self) -> None:
+        plan = plan_runner_lane_maintainer(
+            policy=_policy(),
+            desired_state=_desired_state(),
+            inventory=_inventory(
+                lanes=(
+                    _lane(
+                        status="online",
+                        labels=(
+                            "self-hosted",
+                            "launchplane",
+                            "launchplane-managed",
+                            "gpu:a100",
+                        ),
+                    ),
+                )
+            ),
+            baseline_readiness=_ready_baseline(),
+        )
+
+        self.assertEqual(plan.decision, "recommend_verify_adoption")
+        self.assertTrue(plan.policy_ready)
+
     def test_plan_can_disable_baseline_gate_for_online_lane(self) -> None:
         plan = plan_runner_lane_maintainer(
             policy=_policy(require_baseline_readiness=False),
@@ -158,6 +210,22 @@ class RunnerLaneMaintainerPlanTests(unittest.TestCase):
 
         self.assertEqual(plan.status, "blocked")
         self.assertEqual(plan.decision, "recommend_verify_adoption")
+        self.assertTrue(plan.policy_ready)
+        self.assertFalse(plan.capability_ready)
+        self.assertEqual(
+            [blocker.code for blocker in plan.blockers], ["supervised_maintainer_required"]
+        )
+
+    def test_plan_can_disable_baseline_gate_for_offline_lane(self) -> None:
+        plan = plan_runner_lane_maintainer(
+            policy=_policy(require_baseline_readiness=False),
+            desired_state=_desired_state(),
+            inventory=_inventory(lanes=(_lane(status="offline"),)),
+            baseline_readiness=_unavailable_baseline(),
+        )
+
+        self.assertEqual(plan.status, "blocked")
+        self.assertEqual(plan.decision, "recommend_remove_recreate")
         self.assertTrue(plan.policy_ready)
         self.assertFalse(plan.capability_ready)
         self.assertEqual(
@@ -261,7 +329,10 @@ class RunnerLaneMaintainerCliTests(unittest.TestCase):
         self.assertEqual(payload["plan"]["decision"], "recommend_create")
         self.assertTrue(payload["plan"]["policy_ready"])
         self.assertFalse(payload["plan"]["capability_ready"])
-        self.assertEqual(payload["plan"]["blockers"][0]["code"], "supervised_maintainer_required")
+        self.assertEqual(
+            [blocker["code"] for blocker in payload["plan"]["blockers"]],
+            ["supervised_maintainer_required"],
+        )
         self.assertEqual(payload["desired_state"]["systemd_unit_name"], _UNIT_NAME)
 
     def test_cli_emits_remove_recreate_decision_for_offline_lane(self) -> None:
@@ -288,7 +359,10 @@ class RunnerLaneMaintainerCliTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         payload = json.loads(result.output)
         self.assertEqual(payload["plan"]["decision"], "blocked")
-        self.assertEqual(payload["plan"]["blockers"][0]["code"], "baseline_not_ready")
+        self.assertEqual(
+            [blocker["code"] for blocker in payload["plan"]["blockers"]],
+            ["baseline_not_ready"],
+        )
 
     def test_cli_can_disable_baseline_gate_for_existing_lane(self) -> None:
         result = _invoke_cli(
@@ -303,6 +377,35 @@ class RunnerLaneMaintainerCliTests(unittest.TestCase):
         self.assertEqual(
             [blocker["code"] for blocker in payload["plan"]["blockers"]],
             ["supervised_maintainer_required"],
+        )
+
+    def test_cli_can_disable_baseline_gate_for_offline_lane(self) -> None:
+        result = _invoke_cli(
+            lanes=(_lane(status="offline"),),
+            baseline_readiness=_unavailable_baseline(),
+            allow_missing_baseline=True,
+        )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["plan"]["decision"], "recommend_remove_recreate")
+        self.assertEqual(
+            [blocker["code"] for blocker in payload["plan"]["blockers"]],
+            ["supervised_maintainer_required"],
+        )
+
+    def test_cli_blocks_lane_with_unknown_status(self) -> None:
+        result = _invoke_cli(
+            lanes=(_lane(status="unknown"),),
+            allow_missing_baseline=True,
+        )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["plan"]["decision"], "blocked")
+        self.assertEqual(
+            [blocker["code"] for blocker in payload["plan"]["blockers"]],
+            ["lane_status_unknown"],
         )
 
 
@@ -362,6 +465,22 @@ def _unavailable_baseline() -> RunnerLaneBaselineReadiness:
         compliant_lanes=0,
         violations=(),
         summary="no runner lane baseline observations supplied",
+    )
+
+
+def _failing_baseline() -> RunnerLaneBaselineReadiness:
+    return RunnerLaneBaselineReadiness(
+        ready=False,
+        observed_lanes=1,
+        compliant_lanes=0,
+        violations=(
+            RunnerLaneBaselineViolation(
+                runner_name="another-lane",
+                code="required_label_missing",
+                message="runner lane is missing required labels: launchplane-managed",
+            ),
+        ),
+        summary="runner lane baseline violations found",
     )
 
 

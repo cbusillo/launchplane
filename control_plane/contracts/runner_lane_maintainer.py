@@ -231,7 +231,7 @@ def plan_runner_lane_maintainer(
         )
     if len(matching_lanes) == 1:
         lane = matching_lanes[0]
-        lane_labels = set(_normalized_identifiers(lane.labels, "label"))
+        lane_labels = set(_normalized_observed_labels(lane.labels))
         if policy.required_managed_label not in lane_labels:
             blockers.append(
                 _blocker(
@@ -247,13 +247,22 @@ def plan_runner_lane_maintainer(
                     f"existing runner lane has an unsupported status: {lane.status}",
                 )
             )
-        if policy.require_baseline_readiness and not baseline_readiness.ready:
-            blockers.append(
-                _blocker(
-                    "baseline_not_ready",
-                    f"runner lane baseline is not ready: {baseline_readiness.summary}",
-                )
+    baseline_unavailable = (
+        baseline_readiness.observed_lanes == 0
+        and baseline_readiness.compliant_lanes == 0
+        and not baseline_readiness.violations
+    )
+    if (
+        policy.require_baseline_readiness
+        and not baseline_readiness.ready
+        and (matching_lanes or not baseline_unavailable)
+    ):
+        blockers.append(
+            _blocker(
+                "baseline_not_ready",
+                f"runner lane baseline is not ready: {baseline_readiness.summary}",
             )
+        )
 
     decision = _decision(blockers=tuple(blockers), matching_lanes=matching_lanes)
     if decision != "blocked":
@@ -369,6 +378,10 @@ def _normalized_identifiers(values: tuple[str, ...], label: str) -> tuple[str, .
     return tuple(
         sorted({_normalized_identifier(value, label) for value in values if value.strip()})
     )
+
+
+def _normalized_observed_labels(values: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(sorted({value.strip().lower() for value in values if value.strip()}))
 
 
 def _normalized_identifier(value: str, label: str) -> str:
