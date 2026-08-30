@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import hashlib
-import json
 import re
 from typing import Literal
 
@@ -170,9 +168,6 @@ def authz_policy_operation_activation_evidence(
         "managed_set_id": AUTHZ_POLICY_OPERATION_ACTIVATION_MANAGED_SET_ID,
         "managed_rule_id": AUTHZ_POLICY_OPERATION_ACTIVATION_MANAGED_RULE_ID,
         "principal_type": "github_human",
-        "applying_github_id_sha256": hashlib.sha256(
-            json.dumps(applying_github_id).encode()
-        ).hexdigest(),
         "actions": list(AUTHZ_POLICY_OPERATION_ACTIVATION_ACTIONS),
         "product": "launchplane",
         "context": "launchplane",
@@ -197,7 +192,7 @@ def authz_policy_operation_activation_evidence(
         "policy_safety_blockers": [
             blocker.model_dump(mode="json") for blocker in diff.policy_safety_blockers
         ],
-        "read_back": {
+        "resulting_policy": {
             "record_id": resulting_record.record_id,
             "revision": resulting_record.revision,
             "policy_sha256": resulting_record.policy_sha256,

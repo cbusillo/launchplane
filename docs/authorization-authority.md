@@ -205,6 +205,12 @@ ID and exactly `authz_policy_operation.propose`,
 create workflow, terminal-agent, local-operator, local-admin, wildcard,
 provider, deployment, or unrelated authority.
 
+An immutable-ID administration denial remains ordinary redacted authorization
+evidence: the service records its trace, fixed action and scope, reason category,
+and active-policy provenance. The route response and every error remain
+`Cache-Control: no-store`; no principal selector or raw policy is persisted in
+the denial record.
+
 Dry-run binds the observed active record ID, revision, policy digest, candidate
 revision and digest, desired-set digest, exact action set, applying-admin
 continuity, and distinct reachable-administrator evidence. Apply repeats that

@@ -783,6 +783,11 @@ active DB policy, and requires that ID to have an exact immutable-ID
 `authz_policy_grant.write` administrator rule. It does not rely on the session
 role or mutable login, organization, or team membership.
 
+An immutable-ID authorization failure writes the ordinary redacted denial
+record for its trace and fixed `authz_policy_grant.write` scope while keeping
+the HTTP response `Cache-Control: no-store`. No raw policy, selector, session,
+or principal detail is added to that record.
+
 The dry-run request contains only `reason`. The apply request contains only
 `reason` and `reviewed_plan_sha256`, with the stable `Idempotency-Key` in the
 header. Both bodies are exact-length JSON capped at 16 KiB. The server compiles

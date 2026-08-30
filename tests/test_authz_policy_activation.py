@@ -212,7 +212,9 @@ class AuthzPolicyOperationActivationHttpTests(unittest.IsolatedAsyncioTestCase):
                     self.assertTrue(activation["changed"])
                     self.assertTrue(activation["applying_admin_retained"])
                     self.assertTrue(activation["independent_admin_reachable"])
-                    self.assertEqual(activation["read_back"]["activation_state"], "available")
+                    self.assertEqual(
+                        activation["resulting_policy"]["activation_state"], "available"
+                    )
                     review_digest = activation["review_digest"]
                     apply_payload = {
                         "reason": "Activate the reviewed privileged-policy lifecycle.",
@@ -250,7 +252,9 @@ class AuthzPolicyOperationActivationHttpTests(unittest.IsolatedAsyncioTestCase):
                         applied_payload["result"]["activation"]["bridge_state"], "retired"
                     )
                     self.assertEqual(
-                        applied_payload["result"]["activation"]["read_back"]["activation_state"],
+                        applied_payload["result"]["activation"]["resulting_policy"][
+                            "activation_state"
+                        ],
                         "active",
                     )
                     replayed = await client.post(
@@ -489,11 +493,20 @@ class AuthzPolicyOperationActivationHttpTests(unittest.IsolatedAsyncioTestCase):
                         },
                         content=json.dumps({"reason": "forbidden"}),
                     )
+                denial_record = store.read_authz_denial_record(
+                    trace_id=response.json()["trace_id"],
+                    observed_at="2026-08-30T00:00:00Z",
+                )
             finally:
                 store.close()
 
         self.assertEqual(response.status_code, 403, response.text)
         self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+        self.assertIsNotNone(denial_record)
+        assert denial_record is not None
+        self.assertEqual(denial_record.route_path, _DRY_RUN_ROUTE)
+        self.assertEqual(denial_record.action, "authz_policy_grant.write")
+        self.assertEqual(denial_record.principal_type, "github_human")
 
     async def test_apply_requires_distinct_reachable_policy_administrator(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

@@ -1091,12 +1091,17 @@ _AUTHZ_POLICY_CANDIDATE_PREVIEW_ROUTE = "/v1/authz-diagnostics/candidate-policy/
 _AUTHZ_REPOSITORY_SCOPE_READ_ROUTE = "/v1/authz-diagnostics/repository-scope/read"
 _AUTHZ_DENIAL_EXPLANATION_ROUTE = "/v1/authz-diagnostics/denials/{trace_id}"
 _AUTHZ_POLICY_MANAGED_RECONCILE_ROUTE = "/v1/authz-policies/managed-rule-sets/reconcile"
-_AUTHZ_NONPERSISTING_SENSITIVE_ROUTES = frozenset(
+_AUTHZ_NONPERSISTING_SENSITIVE_READ_ROUTES = frozenset(
+    {
+        _AUTHZ_POLICY_ADMINISTRATION_ROUTE,
+        _AUTHZ_POLICY_REVISION_HISTORY_ROUTE,
+    }
+)
+_AUTHZ_NO_STORE_ROUTES = frozenset(
     {
         _AUTHZ_POLICY_OPERATION_ACTIVATION_DRY_RUN_ROUTE,
         _AUTHZ_POLICY_OPERATION_ACTIVATION_APPLY_ROUTE,
-        _AUTHZ_POLICY_ADMINISTRATION_ROUTE,
-        _AUTHZ_POLICY_REVISION_HISTORY_ROUTE,
+        *_AUTHZ_NONPERSISTING_SENSITIVE_READ_ROUTES,
     }
 )
 _GENERIC_WEB_PREVIEW_AUTHZ_PLAN_ROUTE = (
@@ -4039,7 +4044,7 @@ def create_launchplane_fastapi_app(
         try:
             response = cast(Response, await call_next(request))
             if request.url.path == _AUTHZ_ACTIVATION_PREFLIGHT_ROUTE or (
-                request.url.path in _AUTHZ_NONPERSISTING_SENSITIVE_ROUTES
+                request.url.path in _AUTHZ_NO_STORE_ROUTES
             ):
                 response.headers["Cache-Control"] = "no-store"
             return response
@@ -14609,6 +14614,17 @@ def create_launchplane_fastapi_app(
                 message=(
                     "Activation requires existing immutable-ID DB policy administration authority."
                 ),
+                authz_evaluation=AuthzEvaluation(
+                    decision="denied",
+                    reason_code="no_matching_grant",
+                    principal_type="github_human",
+                    action="authz_policy_grant.write",
+                    product="launchplane",
+                    context="launchplane",
+                    target_scope="global",
+                    instance_specified=False,
+                ),
+                authz_policy_provenance=AuthzPolicyProvenance.from_record(active_record),
             )
 
     def build_authz_policy_operation_activation_response(
@@ -14681,7 +14697,7 @@ def create_launchplane_fastapi_app(
                 identity=identity,
                 trace_id=trace_id,
                 now_timestamp=authz_policy_record_timestamp,
-                authorized_policy_sha256=resolved_authz_policy_runtime.policy_sha256,
+                authorized_policy_sha256=active_record.policy_sha256,
                 immutable_applying_github_id=identity.github_id,
                 source=(
                     control_plane_authz_policy_activation.AUTHZ_POLICY_OPERATION_ACTIVATION_SOURCE
@@ -14819,19 +14835,14 @@ def create_launchplane_fastapi_app(
             database_store=database_store,
             trace_id=trace_id,
         )
-        mutation_digest = hashlib.sha256(
-            "\x1f".join(
-                (
-                    activation_scope,
-                    _AUTHZ_POLICY_OPERATION_ACTIVATION_APPLY_ROUTE,
-                    normalized_idempotency_key,
-                )
-            ).encode()
-        ).hexdigest()
         audit_context: dict[str, object] = {
             "request_fingerprint": payload_fingerprint,
             "idempotency_scope_sha256": hashlib.sha256(activation_scope.encode()).hexdigest(),
-            "idempotency_record_id": f"mutation-reservation-{mutation_digest}",
+            "idempotency_record_id": build_launchplane_mutation_reservation_id(
+                scope=activation_scope,
+                route_path=_AUTHZ_POLICY_OPERATION_ACTIVATION_APPLY_ROUTE,
+                idempotency_key=normalized_idempotency_key,
+            ),
             "idempotency_key_sha256": hashlib.sha256(
                 normalized_idempotency_key.encode()
             ).hexdigest(),
@@ -23745,7 +23756,7 @@ def create_launchplane_fastapi_app(
         if (
             http_error.status_code == 403
             and code == "authorization_denied"
-            and request.url.path not in _AUTHZ_NONPERSISTING_SENSITIVE_ROUTES
+            and request.url.path not in _AUTHZ_NONPERSISTING_SENSITIVE_READ_ROUTES
         ):
             if authz_policy_provenance is None:
                 request_provenance = getattr(
@@ -23775,7 +23786,7 @@ def create_launchplane_fastapi_app(
                 **(
                     {"Cache-Control": "no-store"}
                     if request.url.path == _AUTHZ_ACTIVATION_PREFLIGHT_ROUTE
-                    or request.url.path in _AUTHZ_NONPERSISTING_SENSITIVE_ROUTES
+                    or request.url.path in _AUTHZ_NO_STORE_ROUTES
                     else {}
                 ),
             },
@@ -23818,7 +23829,7 @@ def create_launchplane_fastapi_app(
                 **(
                     {"Cache-Control": "no-store"}
                     if request.url.path == _AUTHZ_ACTIVATION_PREFLIGHT_ROUTE
-                    or request.url.path in _AUTHZ_NONPERSISTING_SENSITIVE_ROUTES
+                    or request.url.path in _AUTHZ_NO_STORE_ROUTES
                     else {}
                 ),
             },
@@ -23847,7 +23858,7 @@ def create_launchplane_fastapi_app(
                 in {
                     _AUTHZ_REPOSITORY_SCOPE_READ_ROUTE,
                     _AUTHZ_ACTIVATION_PREFLIGHT_ROUTE,
-                    *_AUTHZ_NONPERSISTING_SENSITIVE_ROUTES,
+                    *_AUTHZ_NO_STORE_ROUTES,
                 }
                 else None
             ),
@@ -23909,22 +23920,23 @@ def _launchplane_http_error(
     code: str,
     message: str,
     authz: dict[str, object] | None = None,
+    authz_evaluation: AuthzEvaluation | None = None,
     authz_policy_provenance: AuthzPolicyProvenance | None = None,
     headers: dict[str, str] | None = None,
 ) -> LaunchplaneHTTPException:
     detail: dict[str, object] = {"trace_id": trace_id, "code": code, "message": message}
     if authz is not None:
         detail["authz"] = authz
-    authz_evaluation = None
-    if code == "authorization_denied":
+    resolved_authz_evaluation = authz_evaluation
+    if code == "authorization_denied" and resolved_authz_evaluation is None:
         evaluation = current_authz_evaluation()
         if evaluation is not None and evaluation.decision == "denied":
-            authz_evaluation = evaluation
+            resolved_authz_evaluation = evaluation
     return LaunchplaneHTTPException(
         status_code=status_code,
         detail=detail,
         headers=headers,
-        authz_evaluation=authz_evaluation,
+        authz_evaluation=resolved_authz_evaluation,
         authz_policy_provenance=authz_policy_provenance,
     )
 
