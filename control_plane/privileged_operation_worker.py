@@ -502,6 +502,8 @@ def _execute_managed_authz_policy_set(
         raise ValueError("approval_provenance_missing")
     if not isinstance(record.request, ManagedAuthzPolicySetProposalInput):
         raise ValueError("executor_result_error")
+    if record.request.administrator_quorum_change is not None:
+        raise ValueError("quorum_change_requires_live_human")
     apply_request = record.request.reconcile_request(
         mode="apply",
         reviewed_plan_sha256=approval.plan_digest,

@@ -33,11 +33,12 @@ def _consume_once(
             candidate_administrator_quorum=1,
             candidate_distinct_human_administrator_count=1,
             reviewed_plan_sha256=record.reviewed_plan_sha256,
-            human_session_id=record.human_session_id,
+            human_session_id_sha256=record.human_session_id_sha256,
             github_id=record.github_id,
             idempotency_scope_sha256=record.idempotency_scope_sha256,
             idempotency_key_sha256=record.idempotency_key_sha256,
             acknowledgement_sha256=record.acknowledgement_sha256,
+            secret_sha256=record.secret_sha256,
             terminal_at="2026-08-31T12:01:00Z",
         )
         return "consumed"

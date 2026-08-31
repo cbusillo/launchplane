@@ -521,6 +521,21 @@ CRITICAL_POSTGRES_COLUMN_TYPES: tuple[CriticalColumnType, ...] = (
         "authorizes_policy",
         ("boolean", "bool"),
     ),
+    CriticalColumnType(
+        "launchplane_solo_administration_confirmations",
+        "secret_sha256",
+        ("character varying", "varchar", "text"),
+    ),
+    CriticalColumnType(
+        "launchplane_solo_administration_confirmation_events",
+        "payload",
+        ("jsonb",),
+    ),
+    CriticalColumnType(
+        "launchplane_solo_administration_confirmation_events",
+        "authorizes_policy",
+        ("boolean", "bool"),
+    ),
 )
 
 _ACTIVE_OPERATION_PREDICATE_TOKENS = ("status", "pending", "running")
@@ -548,7 +563,7 @@ CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
         "launchplane_solo_administration_confirmation_issued_binding_uq",
         (
             "reviewed_plan_sha256",
-            "human_session_id",
+            "human_session_id_sha256",
             "idempotency_scope_sha256",
             "idempotency_key_sha256",
         ),
@@ -563,7 +578,18 @@ CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
     CriticalIndex(
         "launchplane_solo_administration_confirmations",
         "launchplane_solo_administration_confirmation_session_idx",
-        ("human_session_id", "created_at"),
+        ("human_session_id_sha256", "created_at"),
+    ),
+    CriticalIndex(
+        "launchplane_solo_administration_confirmation_events",
+        "launchplane_solo_administration_confirmation_event_transition_uq",
+        ("confirmation_id", "event_type"),
+        unique=True,
+    ),
+    CriticalIndex(
+        "launchplane_solo_administration_confirmation_events",
+        "launchplane_solo_administration_confirmation_event_confirmation_idx",
+        ("confirmation_id", "occurred_at"),
     ),
     CriticalIndex(
         "launchplane_merge_admissions",

@@ -2184,9 +2184,15 @@ leaves the product unauthorized rather than silently broadening access.
 The authz planning route requires `generic_web_preview_authz.plan`, reads the
 active DB-backed policy, retains unrelated managed rules, and returns a complete
 dry-run reconcile envelope. It never writes policy. The existing
-`POST /v1/authz-policies/managed-rule-sets/reconcile` route remains the sole
-transitional workflow writer, accepts only GitHub Actions OIDC workload
-transport, and requires `authz_policy_grant.write` for apply. The separate,
+`POST /v1/authz-policies/managed-rule-sets/reconcile` route remains the policy
+writer. Routine reconciliation remains GitHub Actions-only; administrator
+quorum changes require an authenticated GitHub-human browser mutation and exact
+active DB authority. Quorum-one apply additionally requires the
+`solo_administration_confirmation_id` envelope field and the dedicated one-time
+secret header. Confirmation issuance, reads, and revocation use the
+`/v1/authz-policies/solo-administration-confirmations` browser routes with
+strict same-origin/Fetch Metadata/CSRF validation and `Cache-Control:
+no-store`. The separate,
 self-retiring issue `#2277` browser-human activation bridge can install only the
 compiled privileged-policy operation set and cannot accept a general managed
 policy payload. All other browser-human, terminal-agent, and local bearer

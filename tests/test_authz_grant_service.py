@@ -32,6 +32,7 @@ from control_plane.contracts.authz_policy_record import (
 from control_plane.service_auth import (
     GitHubActionsIdentity,
     GitHubActionsPolicyRule,
+    GitHubHumanIdentity,
     GitHubHumanPolicyRule,
     LaunchplaneAuthzPolicy,
     LocalAdminIdentity,
@@ -868,6 +869,7 @@ class AuthzManagedPolicyServiceTests(unittest.TestCase):
                     **dry_run.model_dump(mode="json"),
                     "mode": "apply",
                     "reviewed_plan_sha256": diff.plan_sha256,
+                    "solo_administration_confirmation_id": "solo-administration-confirmation-abcdefgh",
                 }
             )
 
@@ -905,7 +907,7 @@ class AuthzManagedPolicyServiceTests(unittest.TestCase):
                 "authz_policy_administrator_quorum_unsatisfied",
             ),
         )
-        with self.assertRaises(AuthzPolicySafetyError) as raised:
+        with self.assertRaises(AuthzPolicyRequestError) as raised:
             execute_managed_authz_policy_reconcile(
                 record_store=_AuthzPolicyStore((current_record,)),
                 request=apply_request(current_record),
@@ -914,10 +916,7 @@ class AuthzManagedPolicyServiceTests(unittest.TestCase):
                 now_timestamp=lambda: "2026-08-17T00:00:00Z",
                 authorized_policy_sha256=current_record.policy_sha256,
             )
-        self.assertEqual(
-            raised.exception.code,
-            "authz_policy_strict_human_admin_unreachable",
-        )
+        self.assertIn("GitHub-human browser", str(raised.exception))
 
         local_admin = LocalAdminPolicyRule(
             subjects=("recovery-admin",),
@@ -965,7 +964,15 @@ class AuthzManagedPolicyServiceTests(unittest.TestCase):
         result = execute_managed_authz_policy_reconcile(
             record_store=_AuthzPolicyStore((recoverable_record,)),
             request=apply_request(recoverable_record),
-            identity=identity,
+            identity=GitHubHumanIdentity(
+                login="independent-admin",
+                github_id=2002,
+                name="Independent Admin",
+                email="admin@example.test",
+                organizations=frozenset(),
+                teams=frozenset(),
+                role="admin",
+            ),
             trace_id="trace-independent-admin-retained",
             now_timestamp=lambda: "2026-08-17T00:00:00Z",
             authorized_policy_sha256=recoverable_record.policy_sha256,

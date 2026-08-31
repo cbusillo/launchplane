@@ -51,7 +51,10 @@ from control_plane.contracts.administrator_enrollment import (
 )
 from control_plane.contracts.solo_administration_confirmation import (
     SoloAdministrationConfirmationConflictError,
+    SoloAdministrationConfirmationConsumptionBinding,
+    SoloAdministrationConfirmationLifecycleEventRecord,
     SoloAdministrationConfirmationRecord,
+    build_solo_administration_confirmation_lifecycle_event,
     consume_solo_administration_confirmation,
     expire_solo_administration_confirmation,
     revoke_solo_administration_confirmation,
@@ -657,6 +660,7 @@ class DbOnlyMutationRequest:
     response_trace_id: str
     response_payload: dict[str, Any]
     replay_response_payload: dict[str, Any] | None = None
+    confirmation_consumption: SoloAdministrationConfirmationConsumptionBinding | None = None
     lease_seconds: int = 300
 
 
@@ -1305,13 +1309,13 @@ class LaunchplaneSoloAdministrationConfirmationRow(Base):
         ),
         Index(
             "launchplane_solo_administration_confirmation_session_idx",
-            "human_session_id",
+            "human_session_id_sha256",
             "created_at",
         ),
         Index(
             "launchplane_solo_administration_confirmation_issued_binding_uq",
             "reviewed_plan_sha256",
-            "human_session_id",
+            "human_session_id_sha256",
             "idempotency_scope_sha256",
             "idempotency_key_sha256",
             unique=True,
@@ -1331,14 +1335,55 @@ class LaunchplaneSoloAdministrationConfirmationRow(Base):
         BigInteger, nullable=False
     )
     reviewed_plan_sha256: Mapped[str] = mapped_column(String, nullable=False)
-    human_session_id: Mapped[str] = mapped_column(String, nullable=False)
+    human_session_id_sha256: Mapped[str] = mapped_column(String, nullable=False)
     github_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     idempotency_scope_sha256: Mapped[str] = mapped_column(String, nullable=False)
     idempotency_key_sha256: Mapped[str] = mapped_column(String, nullable=False)
     acknowledgement_sha256: Mapped[str] = mapped_column(String, nullable=False)
+    secret_sha256: Mapped[str] = mapped_column(String, nullable=False)
     created_at: Mapped[str] = mapped_column(String, nullable=False)
     expires_at: Mapped[str] = mapped_column(String, nullable=False)
     terminal_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    authority_state: Mapped[str] = mapped_column(String, nullable=False, server_default="inert")
+    authorizes_policy: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=false())
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneSoloAdministrationConfirmationLifecycleEventRow(Base):
+    __tablename__ = "launchplane_solo_administration_confirmation_events"
+    __table_args__ = (
+        CheckConstraint(
+            "event_type IN ('issued', 'consumed', 'revoked', 'expired')",
+            name="launchplane_solo_admin_confirmation_event_type_ck",
+        ),
+        CheckConstraint(
+            "(event_type = 'issued' AND from_state = '' AND to_state = 'issued') OR "
+            "(event_type IN ('consumed', 'revoked', 'expired') AND from_state = 'issued' "
+            "AND to_state = event_type)",
+            name="launchplane_solo_admin_confirmation_event_transition_ck",
+        ),
+        CheckConstraint(
+            "authority_state = 'inert' AND authorizes_policy = false",
+            name="launchplane_solo_admin_confirmation_event_authority_ck",
+        ),
+        UniqueConstraint(
+            "confirmation_id",
+            "event_type",
+            name="launchplane_solo_administration_confirmation_event_transition_uq",
+        ),
+        Index(
+            "launchplane_solo_administration_confirmation_event_confirmation_idx",
+            "confirmation_id",
+            "occurred_at",
+        ),
+    )
+
+    event_id: Mapped[str] = mapped_column(String, primary_key=True)
+    confirmation_id: Mapped[str] = mapped_column(String, nullable=False)
+    event_type: Mapped[str] = mapped_column(String, nullable=False)
+    from_state: Mapped[str] = mapped_column(String, nullable=False)
+    to_state: Mapped[str] = mapped_column(String, nullable=False)
+    occurred_at: Mapped[str] = mapped_column(String, nullable=False)
     authority_state: Mapped[str] = mapped_column(String, nullable=False, server_default="inert")
     authorizes_policy: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=false())
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
@@ -10179,17 +10224,34 @@ class PostgresRecordStore(HumanSessionStore):
                 record.candidate_distinct_human_administrator_count
             ),
             reviewed_plan_sha256=record.reviewed_plan_sha256,
-            human_session_id=record.human_session_id,
+            human_session_id_sha256=record.human_session_id_sha256,
             github_id=record.github_id,
             idempotency_scope_sha256=record.idempotency_scope_sha256,
             idempotency_key_sha256=record.idempotency_key_sha256,
             acknowledgement_sha256=record.acknowledgement_sha256,
+            secret_sha256=record.secret_sha256,
             created_at=record.created_at,
             expires_at=record.expires_at,
             terminal_at=record.terminal_at,
             authority_state=record.authority_state,
             authorizes_policy=record.authorizes_policy,
             payload=PostgresRecordStore._payload_dict(record),
+        )
+
+    @staticmethod
+    def _solo_administration_confirmation_event_row(
+        event: SoloAdministrationConfirmationLifecycleEventRecord,
+    ) -> LaunchplaneSoloAdministrationConfirmationLifecycleEventRow:
+        return LaunchplaneSoloAdministrationConfirmationLifecycleEventRow(
+            event_id=event.event_id,
+            confirmation_id=event.confirmation_id,
+            event_type=event.event_type,
+            from_state=event.from_state,
+            to_state=event.to_state,
+            occurred_at=event.occurred_at,
+            authority_state=event.authority_state,
+            authorizes_policy=event.authorizes_policy,
+            payload=PostgresRecordStore._payload_dict(event),
         )
 
     @staticmethod
@@ -10208,6 +10270,15 @@ class PostgresRecordStore(HumanSessionStore):
         with self._session_factory() as session:
             self._begin_serialized_write(session)
             session.add(self._solo_administration_confirmation_row(record))
+            session.add(
+                self._solo_administration_confirmation_event_row(
+                    build_solo_administration_confirmation_lifecycle_event(
+                        record=record,
+                        event_type="issued",
+                        occurred_at=record.created_at,
+                    )
+                )
+            )
             try:
                 session.commit()
                 return record, True
@@ -10224,8 +10295,8 @@ class PostgresRecordStore(HumanSessionStore):
                             LaunchplaneSoloAdministrationConfirmationRow.state == "issued",
                             LaunchplaneSoloAdministrationConfirmationRow.reviewed_plan_sha256
                             == record.reviewed_plan_sha256,
-                            LaunchplaneSoloAdministrationConfirmationRow.human_session_id
-                            == record.human_session_id,
+                            LaunchplaneSoloAdministrationConfirmationRow.human_session_id_sha256
+                            == record.human_session_id_sha256,
                             LaunchplaneSoloAdministrationConfirmationRow.idempotency_scope_sha256
                             == record.idempotency_scope_sha256,
                             LaunchplaneSoloAdministrationConfirmationRow.idempotency_key_sha256
@@ -10281,6 +10352,17 @@ class PostgresRecordStore(HumanSessionStore):
             updated = transition(current)
             if updated != current:
                 self._sync_solo_administration_confirmation_row(row, updated)
+                if updated.state == "issued" or updated.terminal_at is None:
+                    raise RuntimeError("Confirmation transition did not produce terminal evidence.")
+                session.add(
+                    self._solo_administration_confirmation_event_row(
+                        build_solo_administration_confirmation_lifecycle_event(
+                            record=updated,
+                            event_type=updated.state,
+                            occurred_at=updated.terminal_at,
+                        )
+                    )
+                )
                 session.commit()
             return updated
 
@@ -10311,11 +10393,12 @@ class PostgresRecordStore(HumanSessionStore):
         candidate_administrator_quorum: int,
         candidate_distinct_human_administrator_count: int,
         reviewed_plan_sha256: str,
-        human_session_id: str,
+        human_session_id_sha256: str,
         github_id: int,
         idempotency_scope_sha256: str,
         idempotency_key_sha256: str,
         acknowledgement_sha256: str,
+        secret_sha256: str,
         terminal_at: str,
     ) -> SoloAdministrationConfirmationRecord:
         return self._transition_solo_administration_confirmation(
@@ -10331,13 +10414,37 @@ class PostgresRecordStore(HumanSessionStore):
                     candidate_distinct_human_administrator_count
                 ),
                 reviewed_plan_sha256=reviewed_plan_sha256,
-                human_session_id=human_session_id,
+                human_session_id_sha256=human_session_id_sha256,
                 github_id=github_id,
                 idempotency_scope_sha256=idempotency_scope_sha256,
                 idempotency_key_sha256=idempotency_key_sha256,
                 acknowledgement_sha256=acknowledgement_sha256,
+                secret_sha256=secret_sha256,
                 terminal_at=terminal_at,
             ),
+        )
+
+    def list_solo_administration_confirmation_lifecycle_events(
+        self,
+        *,
+        confirmation_id: str = "",
+        limit: int | None = None,
+    ) -> tuple[SoloAdministrationConfirmationLifecycleEventRecord, ...]:
+        filters: list[object] = []
+        if confirmation_id:
+            filters.append(
+                LaunchplaneSoloAdministrationConfirmationLifecycleEventRow.confirmation_id
+                == confirmation_id
+            )
+        return self._list_models(
+            model_type=SoloAdministrationConfirmationLifecycleEventRecord,
+            orm_model=LaunchplaneSoloAdministrationConfirmationLifecycleEventRow,
+            filters=filters,
+            order_by=(
+                LaunchplaneSoloAdministrationConfirmationLifecycleEventRow.occurred_at,
+                LaunchplaneSoloAdministrationConfirmationLifecycleEventRow.event_id,
+            ),
+            limit=limit,
         )
 
     def list_owner_control_challenge_lifecycle_events(
@@ -15934,7 +16041,10 @@ class PostgresRecordStore(HumanSessionStore):
         expected_record: LaunchplaneAuthzPolicyRecord,
         replacement_record: LaunchplaneAuthzPolicyRecord | None,
         mutation: DbOnlyMutationRequest | None = None,
+        confirmation_consumption: SoloAdministrationConfirmationConsumptionBinding | None = None,
     ) -> AuthzPolicyCompareWriteResult:
+        if confirmation_consumption is None and mutation is not None:
+            confirmation_consumption = mutation.confirmation_consumption
         if expected_record.status != "active":
             raise ValueError("Authz policy compare-and-write expected record must be active.")
         if replacement_record is not None and replacement_record.status != "active":
@@ -15951,6 +16061,8 @@ class PostgresRecordStore(HumanSessionStore):
                 raise ValueError("DB-only mutation response status must be between 100 and 599.")
             if not mutation.response_trace_id.strip():
                 raise ValueError("DB-only mutation response trace id is required.")
+        if confirmation_consumption is not None and mutation is None:
+            raise ValueError("Confirmation consumption requires idempotency completion evidence.")
         statement = (
             select(LaunchplaneAuthzPolicyRow)
             .where(LaunchplaneAuthzPolicyRow.status == "active")
@@ -15966,6 +16078,7 @@ class PostgresRecordStore(HumanSessionStore):
                     statement=statement,
                     expected_record=expected_record,
                     replacement_record=replacement_record,
+                    confirmation_consumption=confirmation_consumption,
                 )
 
         reservation_insert_error: IntegrityError | None = None
@@ -16000,6 +16113,7 @@ class PostgresRecordStore(HumanSessionStore):
                     reservation_row=reservation_row,
                     mutation_reservation=stored_reservation,
                     mutation=mutation,
+                    confirmation_consumption=confirmation_consumption,
                 )
 
         with self._session_factory() as session:
@@ -16078,6 +16192,7 @@ class PostgresRecordStore(HumanSessionStore):
                 statement=statement,
                 expected_record=expected_record,
                 replacement_record=replacement_record,
+                confirmation_consumption=confirmation_consumption,
                 reservation_row=reservation_row,
                 mutation_reservation=reclaimed_reservation,
                 mutation=mutation,
@@ -16093,6 +16208,7 @@ class PostgresRecordStore(HumanSessionStore):
         reservation_row: LaunchplaneIdempotencyRow | None = None,
         mutation_reservation: LaunchplaneIdempotencyRecord | None = None,
         mutation: DbOnlyMutationRequest | None = None,
+        confirmation_consumption: SoloAdministrationConfirmationConsumptionBinding | None = None,
     ) -> AuthzPolicyCompareWriteResult:
         self._lock_active_authz_policy(session)
         active_rows = tuple(session.scalars(statement).all())
@@ -16117,6 +16233,61 @@ class PostgresRecordStore(HumanSessionStore):
                 session.delete(reservation_row)
                 session.commit()
             return AuthzPolicyCompareWriteResult(status="stale", current_record=current_record)
+
+        if confirmation_consumption is not None:
+            if replacement_record is None:
+                raise ValueError(
+                    "Confirmation consumption requires a replacement authz policy record."
+                )
+            confirmation_statement = (
+                select(LaunchplaneSoloAdministrationConfirmationRow)
+                .where(
+                    LaunchplaneSoloAdministrationConfirmationRow.confirmation_id
+                    == confirmation_consumption.confirmation_id
+                )
+                .limit(1)
+            )
+            if not self.database_url.startswith("sqlite"):
+                confirmation_statement = confirmation_statement.with_for_update()
+            confirmation_row = session.scalar(confirmation_statement)
+            if confirmation_row is None:
+                raise FileNotFoundError(confirmation_consumption.confirmation_id)
+            confirmation_record = SoloAdministrationConfirmationRecord.model_validate(
+                confirmation_row.payload
+            )
+            consumed_record = consume_solo_administration_confirmation(
+                confirmation_record,
+                active_policy_record_id=confirmation_consumption.active_policy_record_id,
+                active_policy_revision=confirmation_consumption.active_policy_revision,
+                active_policy_sha256=confirmation_consumption.active_policy_sha256,
+                candidate_policy_sha256=confirmation_consumption.candidate_policy_sha256,
+                candidate_administrator_quorum=confirmation_consumption.candidate_administrator_quorum,
+                candidate_distinct_human_administrator_count=(
+                    confirmation_consumption.candidate_distinct_human_administrator_count
+                ),
+                reviewed_plan_sha256=confirmation_consumption.reviewed_plan_sha256,
+                human_session_id_sha256=confirmation_consumption.human_session_id_sha256,
+                github_id=confirmation_consumption.github_id,
+                idempotency_scope_sha256=confirmation_consumption.idempotency_scope_sha256,
+                idempotency_key_sha256=confirmation_consumption.idempotency_key_sha256,
+                acknowledgement_sha256=confirmation_consumption.acknowledgement_sha256,
+                secret_sha256=confirmation_consumption.secret_sha256,
+                terminal_at=self._database_mutation_timestamp(session),
+            )
+            confirmation_row.state = consumed_record.state
+            confirmation_row.terminal_at = consumed_record.terminal_at
+            confirmation_row.payload = self._payload_dict(consumed_record)
+            if consumed_record.terminal_at is None:
+                raise RuntimeError("Consumed confirmation is missing terminal evidence.")
+            session.add(
+                self._solo_administration_confirmation_event_row(
+                    build_solo_administration_confirmation_lifecycle_event(
+                        record=consumed_record,
+                        event_type="consumed",
+                        occurred_at=consumed_record.terminal_at,
+                    )
+                )
+            )
 
         result_record = current_record
         status: Literal["written", "unchanged"] = "unchanged"

@@ -222,18 +222,25 @@ class GitHubOAuthClient:
             ),
         )
 
-    def authorization_url(self, *, state: str, code_challenge: str) -> str:
+    def authorization_url(
+        self, *, state: str, code_challenge: str, reauthenticate: bool = False
+    ) -> str:
         client = self._new_session(
             client_id=self._config.client_id,
             client_secret=self._config.client_secret,
             scope=" ".join(self._config.scopes),
             redirect_uri=self._config.redirect_uri,
         )
+        authorization_arguments: dict[str, object] = {
+            "state": state,
+            "code_challenge": code_challenge,
+            "code_challenge_method": "S256",
+        }
+        if reauthenticate:
+            authorization_arguments["prompt"] = "login"
         authorization_url, _ = client.create_authorization_url(
             GITHUB_AUTHORIZE_URL,
-            state=state,
-            code_challenge=code_challenge,
-            code_challenge_method="S256",
+            **authorization_arguments,
         )
         return str(authorization_url)
 

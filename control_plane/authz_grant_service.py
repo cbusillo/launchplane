@@ -334,6 +334,7 @@ class AuthzManagedPolicyReconcileEnvelope(BaseModel):
     schema_migration: AuthzSchemaMigrationMode = "reject"
     unmanaged_adoption: AuthzUnmanagedAdoptionMode = "reject"
     administrator_quorum_change: int | None = Field(default=None, ge=1)
+    solo_administration_confirmation_id: str = ""
     reason: str = ""
     related_issue: str = ""
     reviewed_plan_sha256: str = ""
@@ -352,6 +353,21 @@ class AuthzManagedPolicyReconcileEnvelope(BaseModel):
         self.reason = self.reason.strip()
         self.related_issue = self.related_issue.strip()
         self.reviewed_plan_sha256 = self.reviewed_plan_sha256.strip().lower()
+        self.solo_administration_confirmation_id = self.solo_administration_confirmation_id.strip()
+        if self.solo_administration_confirmation_id and (
+            self.mode != "apply" or self.administrator_quorum_change != 1
+        ):
+            raise ValueError(
+                "solo_administration_confirmation_id is only valid for quorum-one apply."
+            )
+        if (
+            self.mode == "apply"
+            and self.administrator_quorum_change == 1
+            and not (self.solo_administration_confirmation_id)
+        ):
+            raise ValueError(
+                "Quorum-one authz policy apply requires solo_administration_confirmation_id."
+            )
         if self.mode == "apply":
             if not self.reason:
                 raise ValueError("Managed authz policy reconciliation apply requires reason.")
@@ -2174,6 +2190,7 @@ def authz_managed_policy_reconcile_audit_payload(
         "schema_migration": request.schema_migration,
         "unmanaged_adoption": request.unmanaged_adoption,
         "administrator_quorum_change": request.administrator_quorum_change,
+        "solo_administration_confirmation_id": request.solo_administration_confirmation_id,
         "previous_administrator_quorum": diff.previous_administrator_quorum,
         "administrator_quorum": diff.administrator_quorum,
         "administrator_quorum_changed": diff.administrator_quorum_changed,
@@ -2211,6 +2228,11 @@ def execute_managed_authz_policy_reconcile(
     immutable_applying_github_id: int = 0,
     source: str = _MANAGED_AUTHZ_RECONCILE_SOURCE,
 ) -> AuthzManagedPolicyRouteResult:
+    if request.mode == "apply" and request.administrator_quorum_change is not None:
+        if not isinstance(identity, GitHubHumanIdentity):
+            raise AuthzPolicyRequestError(
+                "Administrator quorum changes require a live GitHub-human browser mutation."
+            )
     active_records = record_store.list_authz_policy_records(status="active", limit=1)
     if not active_records:
         raise ValueError("No active Launchplane authz policy record found.")

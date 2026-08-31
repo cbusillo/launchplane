@@ -114,6 +114,18 @@ through Launchplane's API and UI:
 - export and restore policy without making GitHub the durable desired-state
   store.
 
+Quorum-one recovery is a separate browser-human bridge. It requires a fresh
+GitHub session created within five minutes, exact current strict immutable-ID
+administrator authority from the active DB policy, a reviewed dry-run digest,
+the exact warning acknowledgement, a future apply idempotency key, and a
+candidate with exactly one strict human administrator and no safety or
+operational-readiness blockers. The service returns a random one-time secret
+only at issuance, stores only its SHA-256 digest, and records an immutable
+issued event followed by exactly one immutable consumed, revoked, or expired
+event. The apply route binds the confirmation to the active policy record,
+candidate, plan, session digest, GitHub ID, idempotency key, and secret inside
+the same serialized transaction as policy CAS and idempotency completion.
+
 The first DB-native read-only slice keeps those capabilities separate:
 
 - `authz_policy_effective_access.read` is restricted to an authenticated

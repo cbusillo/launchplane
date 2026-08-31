@@ -15,6 +15,9 @@ SOLO_ADMINISTRATION_CONFIRMATION_TTL_SECONDS: Final = 5 * 60
 SOLO_ADMINISTRATION_CONFIRMATION_AUTHORITY_STATE: Final[Literal["inert"]] = "inert"
 
 SoloAdministrationConfirmationState = Literal["issued", "consumed", "revoked", "expired"]
+SoloAdministrationConfirmationLifecycleEventType = Literal[
+    "issued", "consumed", "revoked", "expired"
+]
 
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _CONFIRMATION_ID_PATTERN = re.compile(
@@ -65,6 +68,13 @@ def solo_administration_confirmation_acknowledgement_sha256(acknowledgement: str
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
+def solo_administration_confirmation_human_session_id_sha256(human_session_id: str) -> str:
+    """Digest the opaque browser session identifier before persistence."""
+
+    normalized = _normalize_token(human_session_id, "human_session_id")
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
 def verify_solo_administration_acknowledgement(
     acknowledgement: str,
     acknowledgement_sha256: str,
@@ -93,14 +103,16 @@ def verify_solo_administration_confirmation_acknowledgement(
 def build_solo_administration_confirmation_id(
     *,
     reviewed_plan_sha256: str,
-    human_session_id: str,
+    human_session_id_sha256: str,
     idempotency_scope_sha256: str,
     idempotency_key_sha256: str,
 ) -> str:
     """Build the stable confirmation identity for one reviewed binding."""
 
     binding = {
-        "human_session_id": _normalize_token(human_session_id, "human_session_id"),
+        "human_session_id_sha256": _normalize_sha256(
+            human_session_id_sha256, "human_session_id_sha256"
+        ),
         "idempotency_key_sha256": _normalize_sha256(
             idempotency_key_sha256, "idempotency_key_sha256"
         ),
@@ -130,11 +142,12 @@ class SoloAdministrationConfirmationRecord(BaseModel):
     candidate_administrator_quorum: Literal[1] = 1
     candidate_distinct_human_administrator_count: Literal[1] = 1
     reviewed_plan_sha256: str
-    human_session_id: str
+    human_session_id_sha256: str
     github_id: int = Field(gt=0)
     idempotency_scope_sha256: str
     idempotency_key_sha256: str
     acknowledgement_sha256: str
+    secret_sha256: str
     created_at: str
     expires_at: str
     terminal_at: str | None = None
@@ -149,7 +162,7 @@ class SoloAdministrationConfirmationRecord(BaseModel):
             raise ValueError("confirmation_id has an invalid format")
         return normalized
 
-    @field_validator("active_policy_record_id", "human_session_id")
+    @field_validator("active_policy_record_id")
     @classmethod
     def _validate_tokens(cls, value: str, info: object) -> str:
         return _normalize_token(value, str(getattr(info, "field_name", "value")))
@@ -158,9 +171,11 @@ class SoloAdministrationConfirmationRecord(BaseModel):
         "active_policy_sha256",
         "candidate_policy_sha256",
         "reviewed_plan_sha256",
+        "human_session_id_sha256",
         "idempotency_scope_sha256",
         "idempotency_key_sha256",
         "acknowledgement_sha256",
+        "secret_sha256",
     )
     @classmethod
     def _validate_digests(cls, value: str, info: object) -> str:
@@ -183,7 +198,7 @@ class SoloAdministrationConfirmationRecord(BaseModel):
             raise ValueError("solo-administration confirmation TTL must be exactly five minutes")
         if self.confirmation_id != build_solo_administration_confirmation_id(
             reviewed_plan_sha256=self.reviewed_plan_sha256,
-            human_session_id=self.human_session_id,
+            human_session_id_sha256=self.human_session_id_sha256,
             idempotency_scope_sha256=self.idempotency_scope_sha256,
             idempotency_key_sha256=self.idempotency_key_sha256,
         ):
@@ -212,11 +227,12 @@ def issue_solo_administration_confirmation(
     active_policy_sha256: str,
     candidate_policy_sha256: str,
     reviewed_plan_sha256: str,
-    human_session_id: str,
+    human_session_id_sha256: str,
     github_id: int,
     idempotency_scope_sha256: str,
     idempotency_key_sha256: str,
     acknowledgement_sha256: str,
+    secret_sha256: str,
     created_at: str,
 ) -> SoloAdministrationConfirmationRecord:
     """Create an issued confirmation with its fixed five-minute lifetime."""
@@ -225,7 +241,7 @@ def issue_solo_administration_confirmation(
     return SoloAdministrationConfirmationRecord(
         confirmation_id=build_solo_administration_confirmation_id(
             reviewed_plan_sha256=reviewed_plan_sha256,
-            human_session_id=human_session_id,
+            human_session_id_sha256=human_session_id_sha256,
             idempotency_scope_sha256=idempotency_scope_sha256,
             idempotency_key_sha256=idempotency_key_sha256,
         ),
@@ -234,11 +250,12 @@ def issue_solo_administration_confirmation(
         active_policy_sha256=active_policy_sha256,
         candidate_policy_sha256=candidate_policy_sha256,
         reviewed_plan_sha256=reviewed_plan_sha256,
-        human_session_id=human_session_id,
+        human_session_id_sha256=human_session_id_sha256,
         github_id=github_id,
         idempotency_scope_sha256=idempotency_scope_sha256,
         idempotency_key_sha256=idempotency_key_sha256,
         acknowledgement_sha256=acknowledgement_sha256,
+        secret_sha256=secret_sha256,
         created_at=created.isoformat(),
         expires_at=(
             created + timedelta(seconds=SOLO_ADMINISTRATION_CONFIRMATION_TTL_SECONDS)
@@ -300,11 +317,12 @@ def consume_solo_administration_confirmation(
     candidate_administrator_quorum: int,
     candidate_distinct_human_administrator_count: int,
     reviewed_plan_sha256: str,
-    human_session_id: str,
+    human_session_id_sha256: str,
     github_id: int,
     idempotency_scope_sha256: str,
     idempotency_key_sha256: str,
     acknowledgement_sha256: str,
+    secret_sha256: str,
     terminal_at: str,
 ) -> SoloAdministrationConfirmationRecord:
     """Consume exactly one matching, unexpired confirmation."""
@@ -345,7 +363,10 @@ def consume_solo_administration_confirmation(
             record.reviewed_plan_sha256,
             _normalize_sha256(reviewed_plan_sha256, "reviewed_plan_sha256"),
         ),
-        (record.human_session_id, _normalize_token(human_session_id, "human_session_id")),
+        (
+            record.human_session_id_sha256,
+            _normalize_sha256(human_session_id_sha256, "human_session_id_sha256"),
+        ),
         (record.github_id, github_id),
         (
             record.idempotency_scope_sha256,
@@ -359,6 +380,7 @@ def consume_solo_administration_confirmation(
             record.acknowledgement_sha256,
             _normalize_sha256(acknowledgement_sha256, "acknowledgement_sha256"),
         ),
+        (record.secret_sha256, _normalize_sha256(secret_sha256, "secret_sha256")),
     )
     if any(
         not hmac.compare_digest(str(expected), str(supplied))
@@ -368,3 +390,119 @@ def consume_solo_administration_confirmation(
             "solo-administration confirmation binding does not match"
         )
     return _validated_update(record, state="consumed", terminal_at=timestamp.isoformat())
+
+
+class SoloAdministrationConfirmationConsumptionBinding(BaseModel):
+    """Typed exact binding required to consume a confirmation during a CAS."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    confirmation_id: str
+    active_policy_record_id: str
+    active_policy_revision: int = Field(gt=0)
+    active_policy_sha256: str
+    candidate_policy_sha256: str
+    candidate_administrator_quorum: Literal[1] = 1
+    candidate_distinct_human_administrator_count: Literal[1] = 1
+    reviewed_plan_sha256: str
+    human_session_id_sha256: str
+    github_id: int = Field(gt=0)
+    idempotency_scope_sha256: str
+    idempotency_key_sha256: str
+    acknowledgement_sha256: str
+    secret_sha256: str
+
+    @field_validator("confirmation_id", "active_policy_record_id")
+    @classmethod
+    def _validate_binding_tokens(cls, value: str, info: object) -> str:
+        return _normalize_token(value, str(getattr(info, "field_name", "value")))
+
+    @field_validator(
+        "active_policy_sha256",
+        "candidate_policy_sha256",
+        "reviewed_plan_sha256",
+        "human_session_id_sha256",
+        "idempotency_scope_sha256",
+        "idempotency_key_sha256",
+        "acknowledgement_sha256",
+        "secret_sha256",
+    )
+    @classmethod
+    def _validate_binding_digests(cls, value: str, info: object) -> str:
+        return _normalize_sha256(value, str(getattr(info, "field_name", "digest")))
+
+
+def solo_administration_confirmation_secret_sha256(secret: str) -> str:
+    normalized = _normalize_token(secret, "secret")
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def build_solo_administration_confirmation_lifecycle_event_id(
+    *, confirmation_id: str, event_type: SoloAdministrationConfirmationLifecycleEventType
+) -> str:
+    confirmation = _normalize_token(confirmation_id, "confirmation_id")
+    return f"{confirmation}-event-{event_type}"
+
+
+class SoloAdministrationConfirmationLifecycleEventRecord(BaseModel):
+    """Immutable append-only evidence for one confirmation lifecycle transition."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal[1] = SOLO_ADMINISTRATION_CONFIRMATION_SCHEMA_VERSION
+    event_id: str
+    confirmation_id: str
+    event_type: SoloAdministrationConfirmationLifecycleEventType
+    from_state: Literal["", "issued"]
+    to_state: SoloAdministrationConfirmationState
+    occurred_at: str
+    authority_state: Literal["inert"] = SOLO_ADMINISTRATION_CONFIRMATION_AUTHORITY_STATE
+    authorizes_policy: Literal[False] = False
+
+    @field_validator("event_id", "confirmation_id")
+    @classmethod
+    def _validate_event_tokens(cls, value: str, info: object) -> str:
+        return _normalize_token(value, str(getattr(info, "field_name", "value")))
+
+    @field_validator("from_state")
+    @classmethod
+    def _validate_from_state(cls, value: str) -> str:
+        if value not in {"", "issued"}:
+            raise ValueError("from_state is invalid")
+        return value
+
+    @field_validator("occurred_at")
+    @classmethod
+    def _validate_event_timestamp(cls, value: str) -> str:
+        return _timestamp(value, "occurred_at")
+
+    @model_validator(mode="after")
+    def _validate_event(self) -> "SoloAdministrationConfirmationLifecycleEventRecord":
+        expected_from_state = "" if self.event_type == "issued" else "issued"
+        if self.from_state != expected_from_state or self.to_state != self.event_type:
+            raise ValueError("confirmation lifecycle event states do not match event_type")
+        if self.event_id != build_solo_administration_confirmation_lifecycle_event_id(
+            confirmation_id=self.confirmation_id,
+            event_type=self.event_type,
+        ):
+            raise ValueError("confirmation lifecycle event_id is not deterministic")
+        return self
+
+
+def build_solo_administration_confirmation_lifecycle_event(
+    *,
+    record: SoloAdministrationConfirmationRecord,
+    event_type: SoloAdministrationConfirmationLifecycleEventType,
+    occurred_at: str,
+) -> SoloAdministrationConfirmationLifecycleEventRecord:
+    return SoloAdministrationConfirmationLifecycleEventRecord(
+        event_id=build_solo_administration_confirmation_lifecycle_event_id(
+            confirmation_id=record.confirmation_id,
+            event_type=event_type,
+        ),
+        confirmation_id=record.confirmation_id,
+        event_type=event_type,
+        from_state="" if event_type == "issued" else "issued",
+        to_state=event_type,
+        occurred_at=occurred_at,
+    )
