@@ -37,6 +37,8 @@ class FastApiBrowserMutationBoundaryTests(unittest.IsolatedAsyncioTestCase):
             "/v1/authz-diagnostics/effective-access/evaluate",
             "/v1/authz-policies/privileged-policy-operations/activation/apply",
             "/v1/authz-policies/privileged-policy-operations/activation/dry-run",
+            "/v1/authz-policies/solo-administration-confirmations",
+            "/v1/authz-policies/solo-administration-confirmations/{confirmation_id}/revoke",
             "/v1/drivers/generic-web/prod-promotion",
             "/v1/drivers/generic-web/prod-promotion-workflow",
             "/v1/merge-train/policies/import",
@@ -61,7 +63,6 @@ class FastApiBrowserMutationBoundaryTests(unittest.IsolatedAsyncioTestCase):
         }
         expected_bearer_only_routes = {
             "/v1/authz-diagnostics/github-actions/evaluate",
-            "/v1/authz-policies/managed-rule-sets/reconcile",
             "/v1/change-impact/evaluation",
             "/v1/agent/privileged-operations/plans",
             "/v1/secrets/reencrypt",
@@ -73,7 +74,7 @@ class FastApiBrowserMutationBoundaryTests(unittest.IsolatedAsyncioTestCase):
         }
         actual_routes = {"/auth/logout"}
         actual_bearer_only_routes: set[str] = set()
-        unprotected_cookie_routes: set[str] = set()
+        hybrid_identity_routes: set[str] = set()
         for route in app.routes:
             if (
                 not isinstance(route, APIRoute)
@@ -91,11 +92,14 @@ class FastApiBrowserMutationBoundaryTests(unittest.IsolatedAsyncioTestCase):
             if "read_bearer_identity" in dependency_names:
                 actual_bearer_only_routes.add(route.path)
             if dependency_names & {"read_identity", "read_work_graph_rank_identity"}:
-                unprotected_cookie_routes.add(route.path)
+                hybrid_identity_routes.add(route.path)
 
         self.assertEqual(actual_routes, expected_routes)
         self.assertEqual(actual_bearer_only_routes, expected_bearer_only_routes)
-        self.assertEqual(unprotected_cookie_routes, set())
+        self.assertEqual(
+            hybrid_identity_routes,
+            {"/v1/authz-policies/managed-rule-sets/reconcile"},
+        )
 
     @staticmethod
     def _human_app() -> tuple[FastAPI, HumanSessionManager, LaunchplaneHumanSession]:

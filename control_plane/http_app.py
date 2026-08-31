@@ -14406,6 +14406,13 @@ def create_launchplane_fastapi_app(
         confirmation_secret: str = "",
     ) -> AcceptedEvidenceResponse:
         trace_id = next_trace_id()
+        if not isinstance(identity, (GitHubActionsIdentity, GitHubHumanIdentity)):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Managed authz policy reconciliation requires GitHub Actions or a GitHub-human browser.",
+            )
         try:
             raw_payload = await request.json()
         except ValueError as error:
@@ -14501,7 +14508,7 @@ def create_launchplane_fastapi_app(
                 route_path=route_path,
                 idempotency_key=normalized_idempotency_key,
                 trace_id=trace_id,
-                check_replay=False,
+                check_replay=browser_identity,
             )
             if replay_response is not None:
                 return replay_response

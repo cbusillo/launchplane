@@ -22,7 +22,7 @@ _EVENT_TABLE = "launchplane_solo_administration_confirmation_events"
 _STATE_EXPIRY_INDEX = "launchplane_solo_administration_confirmation_state_expiry_idx"
 _SESSION_INDEX = "launchplane_solo_administration_confirmation_session_idx"
 _ISSUED_BINDING_INDEX = "launchplane_solo_administration_confirmation_issued_binding_uq"
-_EVENT_CONFIRMATION_INDEX = "launchplane_solo_administration_confirmation_event_confirmation_idx"
+_EVENT_CONFIRMATION_INDEX = "lp_solo_admin_confirmation_event_confirmation_idx"
 
 
 def _table_exists() -> bool:

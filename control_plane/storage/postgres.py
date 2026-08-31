@@ -1372,7 +1372,7 @@ class LaunchplaneSoloAdministrationConfirmationLifecycleEventRow(Base):
             name="launchplane_solo_administration_confirmation_event_transition_uq",
         ),
         Index(
-            "launchplane_solo_administration_confirmation_event_confirmation_idx",
+            "lp_solo_admin_confirmation_event_confirmation_idx",
             "confirmation_id",
             "occurred_at",
         ),
