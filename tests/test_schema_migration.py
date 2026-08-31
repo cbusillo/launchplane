@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 
 from alembic import command
 from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.exc import IntegrityError
 
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.contracts.product_owner import (
@@ -1505,7 +1506,7 @@ class SchemaMigrationTests(unittest.TestCase):
             for primary_key in CRITICAL_PRIMARY_KEYS
         }
 
-        self.assertEqual(EXPECTED_ALEMBIC_HEAD_REVISION, "a7c9e1f3b5d7")
+        self.assertEqual(EXPECTED_ALEMBIC_HEAD_REVISION, "c4e6a8b0d2f5")
         self.assertNotIn(
             ("launchplane_human_sessions", "launchplane_human_sessions_github_id_idx"),
             indexes,
@@ -1824,6 +1825,22 @@ class SchemaMigrationTests(unittest.TestCase):
                         "launchplane_owner_control_challenge_lifecycle_events"
                     )
                 }
+                enrollment_columns = {
+                    str(column["name"])
+                    for column in inspector.get_columns("launchplane_administrator_enrollments")
+                }
+                enrollment_indexes = {
+                    str(name): index
+                    for index in inspector.get_indexes("launchplane_administrator_enrollments")
+                    if (name := index.get("name")) is not None
+                }
+                enrollment_unique_constraints = {
+                    str(name): constraint
+                    for constraint in inspector.get_unique_constraints(
+                        "launchplane_administrator_enrollments"
+                    )
+                    if (name := constraint.get("name")) is not None
+                }
             finally:
                 engine.dispose()
             command.downgrade(config, "f2241a0b1c2d")
@@ -1883,6 +1900,35 @@ class SchemaMigrationTests(unittest.TestCase):
             "launchplane_owner_control_lifecycle_event_challenge_idx",
             lifecycle_event_indexes,
         )
+        self.assertTrue(
+            {
+                "enrollment_id",
+                "state",
+                "proposer_github_id",
+                "candidate_github_id",
+                "challenge_sha256",
+                "reason",
+                "provenance_sha256",
+                "control_proven_at",
+                "enrolled_at",
+                "enrolled_policy_record_id",
+                "enrolled_policy_revision",
+                "enrolled_policy_sha256",
+                "reviewed_plan_sha256",
+                "bridge_idempotency_key_sha256",
+                "authority_state",
+                "authorizes_policy",
+                "policy_bridge_state",
+                "payload",
+            }.issubset(enrollment_columns)
+        )
+        self.assertIn("launchplane_administrator_enrollment_state_expiry_idx", enrollment_indexes)
+        self.assertEqual(
+            enrollment_unique_constraints["launchplane_administrator_enrollment_challenge_uq"][
+                "column_names"
+            ],
+            ["challenge_sha256"],
+        )
         active_operation_index = challenge_indexes[
             "launchplane_owner_control_challenge_active_operation_uidx"
         ]
@@ -1895,6 +1941,7 @@ class SchemaMigrationTests(unittest.TestCase):
             "launchplane_owner_control_challenge_lifecycle_events",
             downgraded_tables,
         )
+        self.assertNotIn("launchplane_administrator_enrollments", downgraded_tables)
 
     def test_owner_control_lifecycle_migration_refuses_nonempty_downgrade(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -1935,6 +1982,105 @@ class SchemaMigrationTests(unittest.TestCase):
 
             with self.assertRaisesRegex(RuntimeError, "audit events exist"):
                 command.downgrade(config, "f6a1c3e5b7d9")
+
+    def test_administrator_enrollment_migration_refuses_nonempty_downgrade(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = (
+                f"sqlite+pysqlite:///{Path(temporary_directory_name) / 'records.sqlite3'}"
+            )
+            config = alembic_config(database_url)
+            command.upgrade(config, EXPECTED_ALEMBIC_HEAD_REVISION)
+            engine = create_engine(database_url)
+            try:
+                with engine.begin() as connection:
+                    connection.execute(
+                        text(
+                            "insert into launchplane_administrator_enrollments "
+                            "(enrollment_id, state, proposer_github_id, challenge_sha256, reason, "
+                            "provenance_sha256, created_at, expires_at, payload) values "
+                            "(:enrollment_id, 'issued', :proposer_github_id, :challenge_sha256, "
+                            ":reason, :provenance_sha256, :created_at, :expires_at, '{}')"
+                        ),
+                        {
+                            "enrollment_id": "administrator-enrollment-migration-test",
+                            "proposer_github_id": 101,
+                            "challenge_sha256": "a" * 64,
+                            "reason": "Downgrade refusal test.",
+                            "provenance_sha256": "b" * 64,
+                            "created_at": "2026-08-31T12:00:00+00:00",
+                            "expires_at": "2026-08-31T12:30:00+00:00",
+                        },
+                    )
+            finally:
+                engine.dispose()
+
+            with self.assertRaisesRegex(RuntimeError, "records exist"):
+                command.downgrade(config, "a7c9e1f3b5d7")
+
+    def test_administrator_enrollment_migration_enforces_ttl_and_policy_binding(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = (
+                f"sqlite+pysqlite:///{Path(temporary_directory_name) / 'records.sqlite3'}"
+            )
+            config = alembic_config(database_url)
+            command.upgrade(config, EXPECTED_ALEMBIC_HEAD_REVISION)
+            engine = create_engine(database_url)
+            try:
+                with self.assertRaises(IntegrityError):
+                    with engine.begin() as connection:
+                        connection.execute(
+                            text(
+                                "insert into launchplane_administrator_enrollments "
+                                "(enrollment_id, state, proposer_github_id, challenge_sha256, "
+                                "reason, provenance_sha256, created_at, expires_at, payload) values "
+                                "(:enrollment_id, 'issued', 101, :challenge_sha256, :reason, "
+                                ":provenance_sha256, :created_at, :expires_at, '{}')"
+                            ),
+                            {
+                                "enrollment_id": "administrator-enrollment-invalid-ttl",
+                                "challenge_sha256": "a" * 64,
+                                "reason": "Invalid TTL test.",
+                                "provenance_sha256": "b" * 64,
+                                "created_at": "2026-08-31T12:00:00+00:00",
+                                "expires_at": "2026-08-31T12:31:00+00:00",
+                            },
+                        )
+                with self.assertRaises(IntegrityError):
+                    with engine.begin() as connection:
+                        connection.execute(
+                            text(
+                                "insert into launchplane_administrator_enrollments "
+                                "(enrollment_id, state, proposer_github_id, candidate_github_id, "
+                                "challenge_sha256, reason, provenance_sha256, created_at, "
+                                "expires_at, control_proven_at, enrolled_at, "
+                                "enrolled_policy_record_id, enrolled_policy_revision, "
+                                "enrolled_policy_sha256, reviewed_plan_sha256, "
+                                "bridge_idempotency_key_sha256, policy_bridge_state, payload) "
+                                "values (:enrollment_id, 'enrolled', 101, 202, :challenge_sha256, "
+                                ":reason, :provenance_sha256, :created_at, :expires_at, "
+                                ":control_proven_at, :enrolled_at, :enrolled_policy_record_id, 368, "
+                                ":enrolled_policy_sha256, :reviewed_plan_sha256, "
+                                ":bridge_idempotency_key_sha256, 'applied', '{}')"
+                            ),
+                            {
+                                "enrollment_id": "administrator-enrollment-invalid-policy",
+                                "challenge_sha256": "c" * 64,
+                                "reason": "Invalid policy binding test.",
+                                "provenance_sha256": "d" * 64,
+                                "created_at": "2026-08-31T12:00:00+00:00",
+                                "expires_at": "2026-08-31T12:30:00+00:00",
+                                "control_proven_at": "2026-08-31T12:05:00+00:00",
+                                "enrolled_at": "2026-08-31T12:06:00+00:00",
+                                "enrolled_policy_record_id": (
+                                    "launchplane-authz-policy-r00000000000000000368-aaaaaaaaaaaa"
+                                ),
+                                "enrolled_policy_sha256": "b" * 64,
+                                "reviewed_plan_sha256": "e" * 64,
+                                "bridge_idempotency_key_sha256": "f" * 64,
+                            },
+                        )
+            finally:
+                engine.dispose()
 
 
 if __name__ == "__main__":

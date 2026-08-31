@@ -2701,5 +2701,25 @@ came from the lifecycle ledger or the envelope-bound shadow-verification ledger.
 Issuance never updates the privileged operation current projection or its
 append-only event ledger.
 
+`AdministratorEnrollmentRecord` is a separate, versioned, inert preparation
+record for a future second control-proven GitHub-human policy administrator.
+PostgreSQL stores it in `launchplane_administrator_enrollments`; filesystem
+storage mirrors it only for local/test/rehearsal parity. It retains an immutable
+proposer GitHub ID, a server-derived candidate GitHub ID only after a successful
+control proof, reason/provenance SHA-256 digests, lifecycle timestamps, and only an
+opaque single-use challenge SHA-256 digest—never the plaintext challenge.
+Challenges last exactly 30 minutes. The typed lifecycle is
+`issued -> control_proven -> enrolled`, with proposer-only withdrawal before
+enrollment and expiry from either nonterminal state. Exact terminal replay is
+idempotent, while conflicting replay fails closed. Final enrollment requires the
+exact active policy record ID, revision, policy digest, reviewed-plan digest,
+and bridge idempotency-key digest produced by the separately reviewed policy
+apply and read-back flow.
+The record is constrained to `authority_state = 'inert'`,
+`authorizes_policy = false`, and a lifecycle-bound bridge state that is
+`not_applied` until exact enrollment evidence is recorded and `applied`
+afterward. It has no rule, action, selector, grant, managed set, or repository
+field and cannot itself be evaluated as authorization.
+
 **Preserved history:** references to Phase 1 planning records describe the
 pre-worker lifecycle and do not constrain the current Phase 2 statuses.
