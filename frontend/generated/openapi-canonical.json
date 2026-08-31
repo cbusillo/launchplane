@@ -1513,6 +1513,17 @@
             "title": "Added Rule Count",
             "type": "integer"
           },
+          "administrator_quorum": {
+            "default": 2,
+            "minimum": 1.0,
+            "title": "Administrator Quorum",
+            "type": "integer"
+          },
+          "administrator_quorum_changed": {
+            "default": false,
+            "title": "Administrator Quorum Changed",
+            "type": "boolean"
+          },
           "adopted_rule_count": {
             "default": 0,
             "title": "Adopted Rule Count",
@@ -1582,6 +1593,12 @@
             "title": "Policy Safety Blockers",
             "type": "array"
           },
+          "previous_administrator_quorum": {
+            "default": 2,
+            "minimum": 1.0,
+            "title": "Previous Administrator Quorum",
+            "type": "integer"
+          },
           "previous_policy_sha256": {
             "title": "Previous Policy Sha256",
             "type": "string"
@@ -1593,6 +1610,11 @@
           "previous_revision": {
             "title": "Previous Revision",
             "type": "integer"
+          },
+          "quorum_satisfied": {
+            "default": false,
+            "title": "Quorum Satisfied",
+            "type": "boolean"
           },
           "removed_rule_count": {
             "default": 0,
@@ -1616,6 +1638,17 @@
             "default": false,
             "title": "Schema Migrated",
             "type": "boolean"
+          },
+          "solo_administration_active": {
+            "default": false,
+            "title": "Solo Administration Active",
+            "type": "boolean"
+          },
+          "strict_human_administrator_count": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Strict Human Administrator Count",
+            "type": "integer"
           },
           "unchanged_rule_count": {
             "default": 0,
@@ -1653,7 +1686,8 @@
             "enum": [
               "authz_policy_admin_unreachable",
               "authz_policy_applying_admin_removed",
-              "authz_policy_independent_admin_unreachable"
+              "authz_policy_strict_human_admin_unreachable",
+              "authz_policy_administrator_quorum_unsatisfied"
             ],
             "title": "Code",
             "type": "string"
@@ -2239,6 +2273,11 @@
       "AuthzPolicyHealthSummary": {
         "additionalProperties": false,
         "properties": {
+          "administrator_quorum": {
+            "minimum": 1.0,
+            "title": "Administrator Quorum",
+            "type": "integer"
+          },
           "github_actions_legacy_name_only_rule_count": {
             "minimum": 0.0,
             "title": "Github Actions Legacy Name Only Rule Count",
@@ -2254,11 +2293,22 @@
             "title": "Managed Rule Count",
             "type": "integer"
           },
+          "quorum_satisfied": {
+            "title": "Quorum Satisfied",
+            "type": "boolean"
+          },
+          "reachable_administrator_count": {
+            "minimum": 0.0,
+            "title": "Reachable Administrator Count",
+            "type": "integer"
+          },
           "reason_codes": {
             "items": {
               "enum": [
                 "authz_policy_admin_unreachable",
-                "authz_policy_independent_admin_unreachable",
+                "authz_policy_strict_human_admin_unreachable",
+                "authz_policy_administrator_quorum_unsatisfied",
+                "authz_policy_solo_administration_active",
                 "policy_schema_legacy",
                 "unmanaged_rules_present",
                 "github_actions_legacy_name_only_rules_present",
@@ -2268,6 +2318,10 @@
             },
             "title": "Reason Codes",
             "type": "array"
+          },
+          "solo_administration_active": {
+            "title": "Solo Administration Active",
+            "type": "boolean"
           },
           "state": {
             "enum": [
@@ -2287,6 +2341,10 @@
         "required": [
           "state",
           "reason_codes",
+          "administrator_quorum",
+          "reachable_administrator_count",
+          "quorum_satisfied",
+          "solo_administration_active",
           "managed_rule_count",
           "unmanaged_rule_count",
           "github_actions_legacy_name_only_rule_count",
@@ -2564,18 +2622,14 @@
       "AuthzReachableAdministratorSummary": {
         "additionalProperties": false,
         "properties": {
+          "administrator_quorum": {
+            "minimum": 1.0,
+            "title": "Administrator Quorum",
+            "type": "integer"
+          },
           "caller_has_policy_administration": {
             "title": "Caller Has Policy Administration",
             "type": "boolean"
-          },
-          "independent_from_caller_reachable": {
-            "title": "Independent From Caller Reachable",
-            "type": "boolean"
-          },
-          "independent_from_caller_rule_count": {
-            "minimum": 0.0,
-            "title": "Independent From Caller Rule Count",
-            "type": "integer"
           },
           "managed_rule_count": {
             "minimum": 0.0,
@@ -2589,9 +2643,27 @@
           "principal_rule_counts": {
             "$ref": "#/components/schemas/AuthzPrincipalRuleCounts"
           },
+          "quorum_satisfied": {
+            "title": "Quorum Satisfied",
+            "type": "boolean"
+          },
           "rule_count": {
             "minimum": 0.0,
             "title": "Rule Count",
+            "type": "integer"
+          },
+          "solo_administration_active": {
+            "title": "Solo Administration Active",
+            "type": "boolean"
+          },
+          "strict_github_human_id_count": {
+            "minimum": 0.0,
+            "title": "Strict Github Human Id Count",
+            "type": "integer"
+          },
+          "strict_github_human_rule_count": {
+            "minimum": 0.0,
+            "title": "Strict Github Human Rule Count",
             "type": "integer"
           },
           "unmanaged_rule_count": {
@@ -2607,8 +2679,11 @@
           "unmanaged_rule_count",
           "principal_rule_counts",
           "caller_has_policy_administration",
-          "independent_from_caller_reachable",
-          "independent_from_caller_rule_count"
+          "strict_github_human_rule_count",
+          "strict_github_human_id_count",
+          "administrator_quorum",
+          "quorum_satisfied",
+          "solo_administration_active"
         ],
         "title": "AuthzReachableAdministratorSummary",
         "type": "object"
@@ -11887,6 +11962,18 @@
       "LaunchplaneAuthzPolicy-Input": {
         "additionalProperties": false,
         "properties": {
+          "administrator_quorum": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Administrator Quorum"
+          },
           "github_actions": {
             "default": [],
             "items": {
@@ -12849,6 +12936,18 @@
       "ManagedAuthzPolicySetProposalInput-Input": {
         "additionalProperties": false,
         "properties": {
+          "administrator_quorum_change": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Administrator Quorum Change"
+          },
           "desired_policy": {
             "$ref": "#/components/schemas/LaunchplaneAuthzPolicy-Input"
           },
@@ -12888,6 +12987,18 @@
       "ManagedAuthzPolicySetProposalInput-Output": {
         "additionalProperties": false,
         "properties": {
+          "administrator_quorum_change": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Administrator Quorum Change"
+          },
           "desired_policy": {
             "$ref": "#/components/schemas/LaunchplaneAuthzPolicy-Output"
           },
@@ -40324,6 +40435,18 @@
                   "LaunchplaneAuthzPolicy": {
                     "additionalProperties": false,
                     "properties": {
+                      "administrator_quorum": {
+                        "anyOf": [
+                          {
+                            "minimum": 1,
+                            "type": "integer"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "Administrator Quorum"
+                      },
                       "github_actions": {
                         "default": [],
                         "items": {
@@ -40611,6 +40734,18 @@
                 },
                 "additionalProperties": false,
                 "properties": {
+                  "administrator_quorum_change": {
+                    "anyOf": [
+                      {
+                        "minimum": 1,
+                        "type": "integer"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "title": "Administrator Quorum Change"
+                  },
                   "desired_policy": {
                     "$ref": "#/$defs/LaunchplaneAuthzPolicy"
                   },

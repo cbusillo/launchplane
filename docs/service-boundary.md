@@ -795,8 +795,9 @@ one fixed GitHub-human managed rule for the authenticated ID with only the five
 `authz_policy_operation` propose/read/approve/revoke/cancel actions. Dry-run
 returns bounded observed-policy, candidate, exact-action, and continuity
 evidence. Apply uses the existing DB-only mutation reservation and active-policy
-CAS, requires the applying administrator plus a distinct reachable immutable-ID
-administrator, and verifies the exact resulting record ID, revision, digest,
+CAS, requires the applying administrator, a reachable strict immutable-ID
+GitHub-human administrator, and the effective administrator quorum, and verifies
+the exact resulting record ID, revision, digest,
 policy, managed set, and bound GitHub ID before updating in-process policy.
 
 The apply idempotency scope is the immutable GitHub ID, not the mutable login or

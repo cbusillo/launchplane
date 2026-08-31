@@ -47,6 +47,7 @@ from control_plane.privileged_operation_service import (
     approve_privileged_operation,
     create_privileged_operation_plan,
     create_typed_privileged_operation_plan,
+    PrivilegedOperationNotApprovableError,
 )
 from control_plane.privileged_operation_worker import (
     PRIVILEGED_OPERATION_EXECUTION_ROUTE,
@@ -212,6 +213,7 @@ def _prepare_approved_operation(
 def _policy_admin_record(
     *,
     revision: int = 1,
+    administrator_quorum: int | None = None,
     approver_is_policy_admin: bool = True,
     approver_organizations: tuple[str, ...] = (),
     include_same_approver_scoped_admin: bool = False,
@@ -257,7 +259,11 @@ def _policy_admin_record(
             }
         )
     policy = LaunchplaneAuthzPolicy.model_validate(
-        {"schema_version": 2, "github_humans": github_humans}
+        {
+            "schema_version": 2,
+            "administrator_quorum": administrator_quorum,
+            "github_humans": github_humans,
+        }
     )
     policy_sha256 = authz_policy_sha256(policy)
     return LaunchplaneAuthzPolicyRecord(
@@ -407,7 +413,9 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
             store = self._store(directory)
             try:
                 approval_policy = store.seed_authz_policy_if_absent(
-                    _policy_admin_record(approver_organizations=("solo-org",))
+                    _policy_admin_record(
+                        approver_organizations=("solo-org",), administrator_quorum=1
+                    )
                 )
                 operation_id = _prepare_approved_policy_operation(
                     store,
@@ -511,50 +519,32 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
         assert outer_lookup.record is not None
         self.assertEqual(outer_lookup.record.state, "reconcile_required")
 
-    def test_worker_rejects_policy_set_that_removes_independent_administrator(self) -> None:
+    def test_worker_rejects_policy_set_that_fails_administrator_quorum(self) -> None:
         with TemporaryDirectory() as directory:
             store = self._store(directory)
             try:
                 approval_policy = store.seed_authz_policy_if_absent(
                     _policy_admin_record(include_same_approver_scoped_admin=True)
                 )
-                operation_id = _prepare_approved_policy_operation(
-                    store,
-                    approval_policy=approval_policy,
-                    request=ManagedAuthzPolicySetProposalInput(
-                        managed_set_id="privileged-operations.policy-safety",
-                        reason="Attempt to remove the independent policy administrator.",
-                        desired_policy=LaunchplaneAuthzPolicy(schema_version=2),
-                    ),
-                )
-
-                execute_approved_privileged_operations_once(
-                    record_store=store,
-                    now=lambda: FIXED_NOW,
-                )
-
-                record = store.read_privileged_operation_record(operation_id)
-                active_records = store.list_authz_policy_records(status="active", limit=2)
+                with self.assertRaises(PrivilegedOperationNotApprovableError):
+                    _prepare_approved_policy_operation(
+                        store,
+                        approval_policy=approval_policy,
+                        request=ManagedAuthzPolicySetProposalInput(
+                            managed_set_id="privileged-operations.policy-safety",
+                            reason="Attempt to remove the independent policy administrator.",
+                            desired_policy=LaunchplaneAuthzPolicy(schema_version=2),
+                        ),
+                    )
             finally:
                 store.close()
-
-        self.assertEqual(record.status, "execution_failed")
-        self.assertIsInstance(record.execution, ManagedAuthzPolicySetExecutionEvidence)
-        assert isinstance(record.execution, ManagedAuthzPolicySetExecutionEvidence)
-        self.assertEqual(
-            record.execution.failure_code,
-            "authz_policy_independent_admin_unreachable",
-        )
-        self.assertFalse(record.execution.reconciliation_required)
-        self.assertEqual(len(active_records), 1)
-        self.assertEqual(active_records[0].revision, 1)
 
     def test_worker_rejects_approver_without_preexisting_policy_admin_authority(self) -> None:
         with TemporaryDirectory() as directory:
             store = self._store(directory)
             try:
                 approval_policy = store.seed_authz_policy_if_absent(
-                    _policy_admin_record(approver_is_policy_admin=False)
+                    _policy_admin_record(approver_is_policy_admin=False, administrator_quorum=1)
                 )
                 operation_id = _prepare_approved_policy_operation(
                     store,

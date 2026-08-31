@@ -216,6 +216,7 @@ class ManagedAuthzPolicySetProposalInput(BaseModel):
     schema_version: int = Field(default=1, ge=1)
     managed_set_id: str = Field(min_length=1, max_length=96)
     desired_policy: LaunchplaneAuthzPolicy
+    administrator_quorum_change: int | None = Field(default=None, ge=1)
     reason: str = Field(min_length=1, max_length=240)
     related_issue: str = Field(default="", max_length=128)
 
@@ -232,6 +233,7 @@ class ManagedAuthzPolicySetProposalInput(BaseModel):
             managed_set_id=self.managed_set_id,
             schema_migration="reject",
             unmanaged_adoption="reject",
+            administrator_quorum_change=self.administrator_quorum_change,
             reason=reason,
             related_issue=related_issue,
             desired_policy=self.desired_policy,
@@ -255,6 +257,7 @@ class ManagedAuthzPolicySetProposalInput(BaseModel):
             managed_set_id=self.managed_set_id,
             schema_migration="reject",
             unmanaged_adoption="reject",
+            administrator_quorum_change=self.administrator_quorum_change,
             reason=self.reason,
             related_issue=self.related_issue,
             reviewed_plan_sha256=reviewed_plan_sha256,

@@ -920,11 +920,19 @@ weaken that control.
 
 Managed-authz dry-runs also return `policy_safety_blockers` for candidates that
 would remove the last reachable policy administrator, remove the applying
-administrator, or leave no administrator independent from the applying
-identity. These blockers are review evidence rather than dry-run transport
-errors. Apply remains fail-closed with the corresponding bounded error code and
-does not persist the candidate while any applicable policy-safety blocker
-remains.
+administrator, leave no reachable strict immutable-ID GitHub-human
+administrator, or fail the effective administrator quorum. Existing schema-v2
+policies without `administrator_quorum` use quorum `2`; changing that value is
+only possible through the explicit `administrator_quorum_change` request field,
+never by embedding it in `desired_policy`. Quorum counts distinct immutable
+GitHub IDs from strict human administrator rules only; workflows, bots, agents,
+local identities, and mutable selectors do not count. These blockers are review
+evidence rather than dry-run transport errors. Apply remains fail-closed with
+the corresponding bounded error code and does not persist the candidate while
+any applicable policy-safety blocker remains. A satisfied quorum of `1` with
+exactly one reachable strict human is
+reported as `solo_administration_active` and remains an owner-visible attention
+state.
 
 `Tracked Target Logs` and `Odoo Website Bootstrap Override` follow this same
 two-change rollout. Their dispatch files are thin operator entrypoints pinned to

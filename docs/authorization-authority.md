@@ -102,8 +102,12 @@ through Launchplane's API and UI:
 - inspect active policy, managed sets, principals, and effective access;
 - explain denials without requiring policy-write permission;
 - propose, dry-run, review, apply, revoke, and roll back exact changes;
-- preserve the applying administrator and at least one distinct active policy
-  administrator without claiming total-lockout recovery;
+- preserve the applying administrator and at least one reachable strict
+  immutable-ID GitHub-human administrator without claiming total-lockout
+  recovery;
+- carry an explicit administrator quorum in schema-v2 policy state; records
+  without the field retain legacy quorum `2`, while quorum `1` is an explicit
+  reviewed policy change and is reported as solo administration;
 - prevent final-admin lockout and reject known readiness blockers;
 - retain immutable identity, least-privilege scope, revision, digest,
   idempotency, and audit evidence;
@@ -223,7 +227,8 @@ the denial record.
 
 Dry-run binds the observed active record ID, revision, policy digest, candidate
 revision and digest, desired-set digest, exact action set, applying-admin
-continuity, and distinct reachable-administrator evidence. Apply repeats that
+continuity, effective administrator quorum, and strict human administrator evidence. Apply
+repeats that
 compiled request with the reviewed digest, non-empty reason, immutable-ID-scoped
 idempotency, active-policy compare-and-swap, and exact record/revision/digest and
 policy read-back. The written record uses the distinct
@@ -339,14 +344,15 @@ and session revalidation. Legacy human rules retain their existing runtime
 matching semantics until a reviewed migration replaces wildcard or implicit
 selectors, while all newly reconciled managed human rules require explicit
 roles, explicit principals, exact selectors, and immutable IDs for sensitive
-access. Changed applies must also retain a policy administrator independent from
-the applying identity. Continuity recognizes only an immutable-ID-bound GitHub
+access. Changed applies must also retain the applying administrator, at least
+one strict human administrator, and enough distinct immutable GitHub IDs to
+satisfy the effective quorum. Continuity recognizes only an immutable-ID-bound GitHub
 ID-only human rule with the explicit `admin` role, literal
 `authz_policy_grant.write` action, and exact `launchplane` product/context
 selectors; roles-empty rules, mutable login, organization, team, or instance
 selectors, action-empty or wildcard actions, wildcard selectors, workflow,
-terminal, operator, and local-admin rules cannot satisfy that
-independent-administrator predicate. Any future break-glass design
+terminal, operator, and local-admin rules cannot satisfy the strict human
+administrator predicate. Any future break-glass design
 must be separately approved by the owner before implementation, use an
 independent credential and approval boundary, bind the expected active policy
 digest, make the smallest recoverable change, append audit evidence, and

@@ -174,6 +174,8 @@ export type AuthzManagedOperationalReadinessBlocker = {
 
 export type AuthzManagedPolicyDiff = {
     added_rule_count: number;
+    administrator_quorum: number;
+    administrator_quorum_changed: boolean;
     adopted_rule_count: number;
     authorization_changed: boolean;
     candidate_revision: number;
@@ -187,20 +189,24 @@ export type AuthzManagedPolicyDiff = {
     plan_sha256: string;
     policy_safety_blocker_count: number;
     policy_safety_blockers: Array<AuthzManagedPolicySafetyBlocker>;
+    previous_administrator_quorum: number;
     previous_policy_sha256: string;
     previous_record_id: string;
     previous_revision: number;
+    quorum_satisfied: boolean;
     removed_rule_count: number;
     retired_unmanaged_compatibility_rule_count: number;
     retired_unmanaged_compatibility_rules: Array<AuthzManagedCompatibilityRetirement>;
     schema_migrated: boolean;
+    solo_administration_active: boolean;
+    strict_human_administrator_count: number;
     unchanged_rule_count: number;
     unmanaged_compatibility_candidate_count: number;
     updated_rule_count: number;
 };
 
 export type AuthzManagedPolicySafetyBlocker = {
-    code: 'authz_policy_admin_unreachable' | 'authz_policy_applying_admin_removed' | 'authz_policy_independent_admin_unreachable';
+    code: 'authz_policy_admin_unreachable' | 'authz_policy_applying_admin_removed' | 'authz_policy_strict_human_admin_unreachable' | 'authz_policy_administrator_quorum_unsatisfied';
     message: string;
 };
 
@@ -771,6 +777,7 @@ export type ManagedAuthzPolicySetHumanEvidence = {
 };
 
 export type ManagedAuthzPolicySetProposalInputOutput = {
+    administrator_quorum_change: number | null;
     desired_policy: LaunchplaneAuthzPolicyOutput;
     managed_set_id: string;
     reason: string;

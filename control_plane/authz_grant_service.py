@@ -9,7 +9,7 @@ import json
 import re
 from typing import Any, Literal, Protocol, TypeAlias, cast, overload
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.authz_scope import (
     exact_instance_workflow_authz_actions,
@@ -68,6 +68,7 @@ from control_plane.service_auth import (
     TerminalAgentIdentity,
     TerminalAgentPolicyRule,
     action_safety,
+    effective_administrator_quorum,
     migrate_authz_policy_to_schema_v2,
 )
 
@@ -210,7 +211,11 @@ def _normalize_desired_authz_policy(policy: LaunchplaneAuthzPolicy) -> Launchpla
         for principal_type, rules in _authz_policy_rule_collections(policy)
     }
     return LaunchplaneAuthzPolicy.model_validate(
-        {"schema_version": policy.schema_version, **normalized_collections}
+        {
+            "schema_version": policy.schema_version,
+            "administrator_quorum": policy.administrator_quorum,
+            **normalized_collections,
+        }
     )
 
 
@@ -328,6 +333,7 @@ class AuthzManagedPolicyReconcileEnvelope(BaseModel):
     managed_set_id: str
     schema_migration: AuthzSchemaMigrationMode = "reject"
     unmanaged_adoption: AuthzUnmanagedAdoptionMode = "reject"
+    administrator_quorum_change: int | None = Field(default=None, ge=1)
     reason: str = ""
     related_issue: str = ""
     reviewed_plan_sha256: str = ""
@@ -359,6 +365,11 @@ class AuthzManagedPolicyReconcileEnvelope(BaseModel):
             )
         if self.desired_policy.schema_version != 2:
             raise ValueError("Managed authz desired policy must use schema version 2.")
+        if self.desired_policy.administrator_quorum is not None:
+            raise ValueError(
+                "Managed authz desired policy cannot declare administrator_quorum; "
+                "use administrator_quorum_change."
+            )
         self.desired_policy = _normalize_desired_authz_policy(self.desired_policy)
         if self.managed_set_id == _OWNER_ACCEPTANCE_MANAGED_SET_ID:
             _validate_owner_acceptance_managed_set(self.desired_policy)
@@ -483,7 +494,8 @@ class AuthzManagedOperationalReadinessBlocker(BaseModel):
 AuthzManagedPolicySafetyBlockerCode: TypeAlias = Literal[
     "authz_policy_admin_unreachable",
     "authz_policy_applying_admin_removed",
-    "authz_policy_independent_admin_unreachable",
+    "authz_policy_strict_human_admin_unreachable",
+    "authz_policy_administrator_quorum_unsatisfied",
 ]
 
 
@@ -506,6 +518,12 @@ class AuthzManagedPolicyDiff(BaseModel):
     desired_set_sha256: str
     plan_sha256: str
     schema_migrated: bool = False
+    previous_administrator_quorum: int = Field(default=2, ge=1)
+    administrator_quorum: int = Field(default=2, ge=1)
+    administrator_quorum_changed: bool = False
+    strict_human_administrator_count: int = Field(default=0, ge=0)
+    quorum_satisfied: bool = False
+    solo_administration_active: bool = False
     changed: bool = False
     authorization_changed: bool = False
     added_rule_count: int = 0
@@ -535,9 +553,13 @@ def _managed_policy_safety_blocker(
             "Managed authz policy reconciliation must retain policy administration "
             "authority for the applying identity."
         ),
-        "authz_policy_independent_admin_unreachable": (
-            "Managed authz policy reconciliation must retain a reachable policy "
-            "administrator independent from the applying identity."
+        "authz_policy_strict_human_admin_unreachable": (
+            "Managed authz policy reconciliation must retain at least one reachable strict "
+            "GitHub-human policy administrator."
+        ),
+        "authz_policy_administrator_quorum_unsatisfied": (
+            "Managed authz policy reconciliation must retain enough distinct strict "
+            "GitHub-human policy administrators to satisfy administrator_quorum."
         ),
     }
     return AuthzManagedPolicySafetyBlocker(code=code, message=messages[code])
@@ -554,6 +576,7 @@ def summarize_authz_policy_record(record: LaunchplaneAuthzPolicyRecord) -> dict[
         "source": record.source,
         "updated_at": record.updated_at,
         "policy_sha256": record.policy_sha256,
+        "administrator_quorum": effective_administrator_quorum(record.policy),
         "github_actions_rule_count": len(record.policy.github_actions),
         "github_actions_immutable_repository_rule_count": immutable_repository_rule_count,
         "github_actions_legacy_name_only_rule_count": (
@@ -571,6 +594,7 @@ def summarize_active_authz_policy_record(
 ) -> dict[str, object]:
     summary = summarize_authz_policy_record(record)
     summary["policy_schema_version"] = record.policy.schema_version
+    summary["administrator_quorum"] = effective_administrator_quorum(record.policy)
     rules_by_principal = tuple(_authz_policy_rule_collections(record.policy))
     managed_rules = [
         {
@@ -660,13 +684,16 @@ def summarize_authz_policy_health(
         )
         for entry in administrator_entries
     )
-    applying_github_id = (
-        caller_identity.github_id if isinstance(caller_identity, GitHubHumanIdentity) else 0
-    )
-    independent_administrator_rule_count = sum(
-        _is_strict_immutable_github_human_administrator_rule(rule)
-        and any(github_id != applying_github_id for github_id in rule.github_ids)
+    strict_human_administrator_rules = tuple(
+        rule
         for rule in policy.github_humans
+        if _is_strict_immutable_github_human_administrator_rule(rule)
+    )
+    strict_human_administrator_ids = strict_immutable_github_human_administrator_ids(policy)
+    administrator_quorum = effective_administrator_quorum(policy)
+    quorum_satisfied = len(strict_human_administrator_ids) >= administrator_quorum
+    solo_administration_active = (
+        administrator_quorum == 1 and len(strict_human_administrator_ids) == 1
     )
     managed_administrator_rule_count = sum(
         entry.rule.managed_set_id is not None for entry in administrator_entries
@@ -689,8 +716,12 @@ def summarize_authz_policy_health(
     reason_codes: list[AuthzPolicyHealthReasonCode] = []
     if not administrator_entries:
         reason_codes.append("authz_policy_admin_unreachable")
-    elif not independent_administrator_rule_count:
-        reason_codes.append("authz_policy_independent_admin_unreachable")
+    if not strict_human_administrator_ids:
+        reason_codes.append("authz_policy_strict_human_admin_unreachable")
+    if not quorum_satisfied:
+        reason_codes.append("authz_policy_administrator_quorum_unsatisfied")
+    elif solo_administration_active:
+        reason_codes.append("authz_policy_solo_administration_active")
     if policy.schema_version == 1:
         reason_codes.append("policy_schema_legacy")
     if unmanaged_rule_count:
@@ -701,7 +732,11 @@ def summarize_authz_policy_health(
         reason_codes.append("github_actions_privileged_unpinned_reusable_rules_present")
 
     health_state: AuthzPolicyHealthState
-    if "authz_policy_admin_unreachable" in reason_codes:
+    if {
+        "authz_policy_admin_unreachable",
+        "authz_policy_strict_human_admin_unreachable",
+        "authz_policy_administrator_quorum_unsatisfied",
+    } & set(reason_codes):
         health_state = "blocked"
     elif reason_codes:
         health_state = "attention_required"
@@ -712,6 +747,10 @@ def summarize_authz_policy_health(
         AuthzPolicyHealthSummary(
             state=health_state,
             reason_codes=tuple(reason_codes),
+            administrator_quorum=administrator_quorum,
+            reachable_administrator_count=len(strict_human_administrator_ids),
+            quorum_satisfied=quorum_satisfied,
+            solo_administration_active=solo_administration_active,
             managed_rule_count=len(managed_entries),
             unmanaged_rule_count=unmanaged_rule_count,
             github_actions_legacy_name_only_rule_count=legacy_name_only_rule_count,
@@ -724,14 +763,17 @@ def summarize_authz_policy_health(
             items=managed_set_items,
         ),
         AuthzReachableAdministratorSummary(
-            policy_reachable=bool(administrator_entries),
+            policy_reachable=authz_policy_retains_reachable_github_id_administration(policy=policy),
             rule_count=len(administrator_entries),
             managed_rule_count=managed_administrator_rule_count,
             unmanaged_rule_count=(len(administrator_entries) - managed_administrator_rule_count),
             principal_rule_counts=_authz_principal_rule_counts(administrator_entries),
             caller_has_policy_administration=bool(caller_administrator_rule_count),
-            independent_from_caller_reachable=bool(independent_administrator_rule_count),
-            independent_from_caller_rule_count=independent_administrator_rule_count,
+            strict_github_human_rule_count=len(strict_human_administrator_rules),
+            strict_github_human_id_count=len(strict_human_administrator_ids),
+            administrator_quorum=administrator_quorum,
+            quorum_satisfied=quorum_satisfied,
+            solo_administration_active=solo_administration_active,
         ),
     )
 
@@ -1555,7 +1597,11 @@ def _authz_policy_without_managed_identities(
         for principal_type, rules in _authz_policy_rule_collections(policy)
     }
     return LaunchplaneAuthzPolicy.model_validate(
-        {"schema_version": policy.schema_version, **collections}
+        {
+            "schema_version": policy.schema_version,
+            "administrator_quorum": policy.administrator_quorum,
+            **collections,
+        }
     )
 
 
@@ -1649,27 +1695,39 @@ def _is_strict_immutable_github_human_administrator_rule(
     )
 
 
+def strict_immutable_github_human_administrator_ids(
+    policy: LaunchplaneAuthzPolicy,
+) -> frozenset[int]:
+    return frozenset(
+        github_id
+        for rule in policy.github_humans
+        if _is_strict_immutable_github_human_administrator_rule(rule)
+        for github_id in rule.github_ids
+    )
+
+
+def authz_policy_administrator_quorum_satisfied(
+    *,
+    policy: LaunchplaneAuthzPolicy,
+) -> bool:
+    return len(
+        strict_immutable_github_human_administrator_ids(policy)
+    ) >= effective_administrator_quorum(policy)
+
+
 def authz_policy_allows_immutable_github_id_administration(
     *,
     policy: LaunchplaneAuthzPolicy,
     github_id: int,
 ) -> bool:
-    return github_id > 0 and any(
-        _is_strict_immutable_github_human_administrator_rule(rule) and github_id in rule.github_ids
-        for rule in policy.github_humans
-    )
+    return github_id > 0 and github_id in strict_immutable_github_human_administrator_ids(policy)
 
 
-def authz_policy_retains_independent_github_id_administration(
+def authz_policy_retains_reachable_github_id_administration(
     *,
     policy: LaunchplaneAuthzPolicy,
-    applying_github_id: int,
 ) -> bool:
-    return any(
-        _is_strict_immutable_github_human_administrator_rule(rule)
-        and any(github_id != applying_github_id for github_id in rule.github_ids)
-        for rule in policy.github_humans
-    )
+    return bool(strict_immutable_github_human_administrator_ids(policy))
 
 
 def _reconcile_managed_policy(
@@ -1943,11 +2001,29 @@ def plan_managed_authz_policy_reconcile(
         managed_set_id=request.managed_set_id,
         unmanaged_adoption=request.unmanaged_adoption,
     )
+    candidate_administrator_quorum = (
+        request.administrator_quorum_change
+        if request.administrator_quorum_change is not None
+        else current_policy.administrator_quorum
+    )
+    updated_policy = updated_policy.model_copy(
+        update={"administrator_quorum": candidate_administrator_quorum}
+    )
     policy_safety_blockers: tuple[AuthzManagedPolicySafetyBlocker, ...] = ()
     if _authz_policy_retains_administration(
         base_policy
     ) and not _authz_policy_retains_administration(updated_policy):
         policy_safety_blockers = (_managed_policy_safety_blocker("authz_policy_admin_unreachable"),)
+    candidate_administrator_ids = strict_immutable_github_human_administrator_ids(updated_policy)
+    candidate_administrator_quorum = effective_administrator_quorum(updated_policy)
+    if not authz_policy_retains_reachable_github_id_administration(policy=updated_policy):
+        policy_safety_blockers += (
+            _managed_policy_safety_blocker("authz_policy_strict_human_admin_unreachable"),
+        )
+    if len(candidate_administrator_ids) < candidate_administrator_quorum:
+        policy_safety_blockers += (
+            _managed_policy_safety_blocker("authz_policy_administrator_quorum_unsatisfied"),
+        )
     desired_policy_sha256 = authz_policy_sha256(updated_policy)
     changed = current_record.policy_sha256 != desired_policy_sha256
     desired_set_payload = _desired_managed_set_payload(request.desired_policy)
@@ -1971,6 +2047,8 @@ def plan_managed_authz_policy_reconcile(
         "desired_set_sha256": desired_set_sha256,
         "schema_migration": request.schema_migration,
         "unmanaged_adoption": request.unmanaged_adoption,
+        "administrator_quorum_change": request.administrator_quorum_change,
+        "administrator_quorum": candidate_administrator_quorum,
         "reason": request.reason,
         "related_issue": request.related_issue,
     }
@@ -1996,6 +2074,16 @@ def plan_managed_authz_policy_reconcile(
         desired_set_sha256=desired_set_sha256,
         plan_sha256=plan_sha256,
         schema_migrated=current_policy.schema_version != 2,
+        previous_administrator_quorum=effective_administrator_quorum(current_policy),
+        administrator_quorum=candidate_administrator_quorum,
+        administrator_quorum_changed=(
+            effective_administrator_quorum(current_policy) != candidate_administrator_quorum
+        ),
+        strict_human_administrator_count=len(candidate_administrator_ids),
+        quorum_satisfied=len(candidate_administrator_ids) >= candidate_administrator_quorum,
+        solo_administration_active=(
+            candidate_administrator_quorum == 1 and len(candidate_administrator_ids) == 1
+        ),
         changed=changed,
         authorization_changed=(
             authz_policy_sha256(_authz_policy_without_managed_identities(base_policy))
@@ -2085,6 +2173,13 @@ def authz_managed_policy_reconcile_audit_payload(
         "managed_set_id": request.managed_set_id,
         "schema_migration": request.schema_migration,
         "unmanaged_adoption": request.unmanaged_adoption,
+        "administrator_quorum_change": request.administrator_quorum_change,
+        "previous_administrator_quorum": diff.previous_administrator_quorum,
+        "administrator_quorum": diff.administrator_quorum,
+        "administrator_quorum_changed": diff.administrator_quorum_changed,
+        "strict_human_administrator_count": diff.strict_human_administrator_count,
+        "quorum_satisfied": diff.quorum_satisfied,
+        "solo_administration_active": diff.solo_administration_active,
         "desired_set_sha256": diff.desired_set_sha256,
         "plan_sha256": diff.plan_sha256,
         "operator": authz_policy_operator_payload(identity),
@@ -2151,14 +2246,6 @@ def execute_managed_authz_policy_reconcile(
         policy_safety_blockers.append(
             _managed_policy_safety_blocker("authz_policy_applying_admin_removed")
         )
-    independent_admin_retained = authz_policy_retains_independent_github_id_administration(
-        policy=updated_policy,
-        applying_github_id=immutable_applying_github_id,
-    )
-    if managed_diff.changed and not independent_admin_retained:
-        policy_safety_blockers.append(
-            _managed_policy_safety_blocker("authz_policy_independent_admin_unreachable")
-        )
     managed_diff = managed_diff.model_copy(
         update={
             "policy_safety_blocker_count": len(policy_safety_blockers),
@@ -2172,6 +2259,8 @@ def execute_managed_authz_policy_reconcile(
         for code in (
             "authz_policy_admin_unreachable",
             "authz_policy_applying_admin_removed",
+            "authz_policy_strict_human_admin_unreachable",
+            "authz_policy_administrator_quorum_unsatisfied",
         ):
             blocker = blockers_by_code.get(code)
             if blocker is not None:
@@ -2188,20 +2277,6 @@ def execute_managed_authz_policy_reconcile(
                 "blockers remain. Review the dry-run evidence and submit an exact candidate."
             ),
         )
-    if request.mode == "apply" and managed_diff.changed:
-        independent_admin_blocker = next(
-            (
-                blocker
-                for blocker in managed_diff.policy_safety_blockers
-                if blocker.code == "authz_policy_independent_admin_unreachable"
-            ),
-            None,
-        )
-        if independent_admin_blocker is not None:
-            raise AuthzPolicySafetyError(
-                code=independent_admin_blocker.code,
-                message=independent_admin_blocker.message,
-            )
     diff = managed_diff.model_dump(mode="json")
     audit = authz_managed_policy_reconcile_audit_payload(
         request=request,

@@ -85,6 +85,7 @@ def _policy(*, independent_admin: bool = True) -> LaunchplaneAuthzPolicy:
     return LaunchplaneAuthzPolicy.model_validate(
         {
             "schema_version": 2,
+            "administrator_quorum": 1,
             "github_humans": rules,
         }
     )
@@ -234,7 +235,7 @@ class AuthzPolicyOperationActivationHttpTests(unittest.IsolatedAsyncioTestCase):
                     activation = dry_run_payload["result"]["activation"]
                     self.assertTrue(activation["changed"])
                     self.assertTrue(activation["applying_admin_retained"])
-                    self.assertTrue(activation["independent_admin_reachable"])
+                    self.assertTrue(activation["quorum_satisfied"])
                     self.assertEqual(activation["activation_state"]["observed"], "available")
                     self.assertEqual(activation["activation_state"]["candidate"], "active")
                     review_digest = activation["review_digest"]
@@ -547,7 +548,7 @@ class AuthzPolicyOperationActivationHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(denial_record.action, "authz_policy_grant.write")
         self.assertEqual(denial_record.principal_type, "github_human")
 
-    async def test_apply_requires_distinct_reachable_policy_administrator(self) -> None:
+    async def test_apply_reports_and_preserves_solo_administration(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
             store = PostgresRecordStore(
@@ -581,7 +582,7 @@ class AuthzPolicyOperationActivationHttpTests(unittest.IsolatedAsyncioTestCase):
                     )
                     self.assertEqual(dry_run.status_code, 202, dry_run.text)
                     activation = dry_run.json()["result"]["activation"]
-                    self.assertFalse(activation["independent_admin_reachable"])
+                    self.assertTrue(activation["solo_administration_active"])
                     apply_response = await client.post(
                         _APPLY_ROUTE,
                         headers={
@@ -600,15 +601,15 @@ class AuthzPolicyOperationActivationHttpTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 store.close()
 
-        self.assertEqual(apply_response.status_code, 409, apply_response.text)
+        self.assertEqual(apply_response.status_code, 202, apply_response.text)
         self.assertEqual(
-            apply_response.json()["error"]["code"],
-            "authz_policy_independent_admin_unreachable",
+            apply_response.json()["result"]["activation"]["solo_administration_active"],
+            True,
         )
         self.assertEqual(len(active_records), 1)
         self.assertEqual(
             authz_policy_activation.authz_policy_operation_activation_state(
                 active_records[0].policy
             ),
-            "available",
+            "active",
         )
