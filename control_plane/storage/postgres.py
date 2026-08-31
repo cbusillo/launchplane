@@ -1369,7 +1369,7 @@ class LaunchplaneSoloAdministrationConfirmationLifecycleEventRow(Base):
         UniqueConstraint(
             "confirmation_id",
             "event_type",
-            name="launchplane_solo_administration_confirmation_event_transition_uq",
+            name="lp_solo_admin_confirmation_event_transition_uq",
         ),
         Index(
             "lp_solo_admin_confirmation_event_confirmation_idx",

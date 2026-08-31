@@ -582,7 +582,7 @@ CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
     ),
     CriticalIndex(
         "launchplane_solo_administration_confirmation_events",
-        "launchplane_solo_administration_confirmation_event_transition_uq",
+        "lp_solo_admin_confirmation_event_transition_uq",
         ("confirmation_id", "event_type"),
         unique=True,
     ),

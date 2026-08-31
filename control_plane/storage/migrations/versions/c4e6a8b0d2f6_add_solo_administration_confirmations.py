@@ -183,7 +183,7 @@ def upgrade() -> None:
             sa.UniqueConstraint(
                 "confirmation_id",
                 "event_type",
-                name="launchplane_solo_admin_confirmation_event_transition_uq",
+                name="lp_solo_admin_confirmation_event_transition_uq",
             ),
         )
     if _event_table_exists() and _EVENT_CONFIRMATION_INDEX not in {
