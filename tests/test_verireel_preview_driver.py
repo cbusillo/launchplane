@@ -231,7 +231,9 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
             "preview-verireel-testing-verireel-pr-71-generation-0003",
         )
 
-    def test_destroy_continues_when_recovery_schedule_cleanup_detects_drift(self) -> None:
+    def test_destroy_deletes_schedule_before_application_and_tolerates_schedule_drift(
+        self,
+    ) -> None:
         request = VeriReelPreviewDestroyRequest.model_validate(
             {
                 "anchor_pr_number": 71,
@@ -239,9 +241,17 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
                 "preview_slug": "pr-71",
             }
         )
-        self.delete_recovery_schedule.side_effect = click.ClickException(
-            "schedule readback drifted"
-        )
+        cleanup_order: list[str] = []
+
+        def _delete_recovery_schedule(**kwargs: object) -> None:
+            cleanup_order.append("schedule")
+            raise click.ClickException("schedule readback drifted")
+
+        def _destroy_application(**kwargs: object) -> PreviewResourceDestroyResult:
+            cleanup_order.append("application")
+            return PreviewResourceDestroyResult(status="pass")
+
+        self.delete_recovery_schedule.side_effect = _delete_recovery_schedule
 
         with (
             TemporaryDirectory() as temporary_directory_name,
@@ -272,7 +282,7 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
             ),
             patch(
                 "control_plane.workflows.verireel_preview_driver.destroy_dokploy_preview_resource",
-                return_value=PreviewResourceDestroyResult(status="pass"),
+                side_effect=_destroy_application,
             ) as destroy_resource,
             patch(
                 "control_plane.workflows.verireel_preview_driver._run_application_command_with_retries"
@@ -283,6 +293,12 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
                 request=request,
             )
 
+        self.assertEqual(cleanup_order, ["schedule", "application"])
+        self.delete_recovery_schedule.assert_called_once_with(
+            host="https://dokploy.example.com",
+            token="token-123",
+            application_id="app-preview",
+        )
         destroy_resource.assert_called_once()
         self.assertEqual(result.destroy_status, "pass")
         self.assertEqual(result.error_message, "")

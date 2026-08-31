@@ -1649,7 +1649,7 @@ def _is_strict_immutable_github_human_administrator_rule(
     )
 
 
-def _authz_policy_allows_immutable_github_id_administration(
+def authz_policy_allows_immutable_github_id_administration(
     *,
     policy: LaunchplaneAuthzPolicy,
     github_id: int,
@@ -1660,7 +1660,7 @@ def _authz_policy_allows_immutable_github_id_administration(
     )
 
 
-def _authz_policy_retains_independent_github_id_administration(
+def authz_policy_retains_independent_github_id_administration(
     *,
     policy: LaunchplaneAuthzPolicy,
     applying_github_id: int,
@@ -2074,10 +2074,11 @@ def authz_managed_policy_reconcile_audit_payload(
     diff: AuthzManagedPolicyDiff,
     trace_id: str,
     now_timestamp: TimestampProvider,
+    source: str = _MANAGED_AUTHZ_RECONCILE_SOURCE,
 ) -> dict[str, object]:
     return {
         "operation": "managed_rule_set_reconcile",
-        "source": _MANAGED_AUTHZ_RECONCILE_SOURCE,
+        "source": source,
         "mode": request.mode,
         "reason": request.reason,
         "related_issue": request.related_issue,
@@ -2113,6 +2114,7 @@ def execute_managed_authz_policy_reconcile(
     now_timestamp: TimestampProvider,
     authorized_policy_sha256: str = "",
     immutable_applying_github_id: int = 0,
+    source: str = _MANAGED_AUTHZ_RECONCILE_SOURCE,
 ) -> AuthzManagedPolicyRouteResult:
     active_records = record_store.list_authz_policy_records(status="active", limit=1)
     if not active_records:
@@ -2133,7 +2135,7 @@ def execute_managed_authz_policy_reconcile(
     )
     policy_safety_blockers = list(managed_diff.policy_safety_blockers)
     applying_admin_retained = (
-        _authz_policy_allows_immutable_github_id_administration(
+        authz_policy_allows_immutable_github_id_administration(
             policy=updated_policy,
             github_id=immutable_applying_github_id,
         )
@@ -2149,7 +2151,7 @@ def execute_managed_authz_policy_reconcile(
         policy_safety_blockers.append(
             _managed_policy_safety_blocker("authz_policy_applying_admin_removed")
         )
-    independent_admin_retained = _authz_policy_retains_independent_github_id_administration(
+    independent_admin_retained = authz_policy_retains_independent_github_id_administration(
         policy=updated_policy,
         applying_github_id=immutable_applying_github_id,
     )
@@ -2209,6 +2211,7 @@ def execute_managed_authz_policy_reconcile(
         diff=managed_diff,
         trace_id=trace_id,
         now_timestamp=now_timestamp,
+        source=source,
     )
     authz_policy_record = _dry_run_authz_policy_record(
         current_record=current_record,
@@ -2224,7 +2227,7 @@ def execute_managed_authz_policy_reconcile(
             ),
             revision=managed_diff.candidate_revision,
             status="active",
-            source=_MANAGED_AUTHZ_RECONCILE_SOURCE,
+            source=source,
             updated_at=updated_at,
             policy_sha256=managed_diff.desired_policy_sha256,
             policy=updated_policy,
@@ -2238,6 +2241,7 @@ def execute_managed_authz_policy_reconcile(
             diff=managed_diff,
             trace_id=trace_id,
             now_timestamp=now_timestamp,
+            source=source,
         )
         authz_policy_record.audit = audit
     result, driver_result = build_authz_managed_policy_reconcile_service_result(
