@@ -529,9 +529,14 @@ the approved root and starts only the matching
 `launchplane-runner@<lane>.service`. Retirement requires an exact idle managed
 lane, stops and disables that exact root-authorized service, rechecks repository
 activity and GitHub identity, deletes only that runner registration, and removes
-the verified inactive directory. The shared lock prevents runner lifecycle and
-Docker hygiene mutations from interleaving. Existing-lane adoption,
-remove/recreate, generic restarts, and scaling remain outside this slice.
+the verified inactive directory. All lifecycle roots must be scoped absolute
+paths rather than bare `/` and reject explicit parent-directory (`..`)
+components. Benign `.` components, duplicate separators, and trailing separators
+remain supported when the normalized path stays scoped. Malformed roots fail
+model validation before a planned audit is written. The shared lock prevents
+runner lifecycle and Docker hygiene mutations from interleaving. Existing-lane
+adoption, remove/recreate, generic restarts, and scaling remain outside this
+slice.
 
 ## Host Replacement Runbook
 
