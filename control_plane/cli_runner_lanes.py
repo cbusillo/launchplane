@@ -584,7 +584,11 @@ def runner_control_plan(
     "--require-baseline-readiness/--allow-missing-baseline-readiness",
     default=True,
     show_default=True,
-    help="Whether baseline readiness must pass before maintainer planning is ready.",
+    help=(
+        "Whether non-ready aggregate baseline evidence blocks planning. Existing lanes and "
+        "absent lanes with observed failures are blocked; only an absent lane with a "
+        "zero-observation packet is exempt."
+    ),
 )
 @click.option(
     "--inventory-file",
