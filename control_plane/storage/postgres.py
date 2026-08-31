@@ -41,6 +41,14 @@ from sqlalchemy.pool import NullPool
 
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.agent_write_intent import AgentWriteIntentRecord
+from control_plane.contracts.administrator_enrollment import (
+    AdministratorEnrollmentConflictError,
+    AdministratorEnrollmentRecord,
+    complete_administrator_enrollment,
+    expire_administrator_enrollment,
+    prove_administrator_enrollment_control,
+    withdraw_administrator_enrollment,
+)
 from control_plane.contracts.authz_denial_record import AuthzDenialRecord
 from control_plane.contracts.authz_policy_record import (
     AuthzPolicyCompareWriteResult,
@@ -1096,6 +1104,146 @@ class LaunchplaneOwnerControlChannelSessionRow(Base):
         String,
         nullable=False,
         server_default="inert",
+    )
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneAdministratorEnrollmentRow(Base):
+    __tablename__ = "launchplane_administrator_enrollments"
+    __table_args__ = (
+        CheckConstraint(
+            "state IN ('issued', 'control_proven', 'withdrawn', 'expired', 'enrolled')",
+            name="launchplane_administrator_enrollment_state_ck",
+        ),
+        CheckConstraint(
+            "proposer_github_id > 0 AND (candidate_github_id IS NULL OR candidate_github_id > 0)",
+            name="launchplane_administrator_enrollment_github_id_ck",
+        ),
+        CheckConstraint(
+            "expires_at > created_at",
+            name="launchplane_administrator_enrollment_expiry_ck",
+        ),
+        CheckConstraint(
+            "strftime('%s', created_at) IS NOT NULL "
+            "AND strftime('%s', expires_at) IS NOT NULL "
+            "AND CAST(strftime('%s', expires_at) AS INTEGER) "
+            "- CAST(strftime('%s', created_at) AS INTEGER) = 1800",
+            name="lp_admin_enrollment_ttl_sqlite_ck",
+        ).ddl_if(dialect="sqlite"),
+        CheckConstraint(
+            "CAST(expires_at AS timestamptz) - CAST(created_at AS timestamptz) "
+            "= INTERVAL '30 minutes'",
+            name="lp_admin_enrollment_ttl_pg_ck",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "candidate_github_id IS NULL OR candidate_github_id <> proposer_github_id",
+            name="launchplane_administrator_enrollment_distinct_human_ck",
+        ),
+        CheckConstraint(
+            "authority_state = 'inert' AND authorizes_policy = false",
+            name="launchplane_administrator_enrollment_no_authority_ck",
+        ),
+        CheckConstraint(
+            "policy_bridge_state IN ('not_applied', 'applied')",
+            name="launchplane_administrator_enrollment_bridge_state_ck",
+        ),
+        CheckConstraint(
+            "(candidate_github_id IS NULL AND control_proven_at IS NULL) OR "
+            "(candidate_github_id IS NOT NULL AND control_proven_at IS NOT NULL)",
+            name="launchplane_administrator_enrollment_control_proof_ck",
+        ),
+        CheckConstraint(
+            "control_proven_at IS NULL OR "
+            "(control_proven_at >= created_at AND control_proven_at < expires_at)",
+            name="launchplane_administrator_enrollment_control_time_ck",
+        ),
+        CheckConstraint(
+            "withdrawn_at IS NULL OR "
+            "(withdrawn_at >= COALESCE(control_proven_at, created_at) "
+            "AND withdrawn_at < expires_at)",
+            name="launchplane_administrator_enrollment_withdrawal_time_ck",
+        ),
+        CheckConstraint(
+            "expired_at IS NULL OR expired_at >= expires_at",
+            name="launchplane_administrator_enrollment_expired_time_ck",
+        ),
+        CheckConstraint(
+            "enrolled_at IS NULL OR "
+            "(control_proven_at IS NOT NULL AND enrolled_at >= control_proven_at "
+            "AND enrolled_at < expires_at)",
+            name="launchplane_administrator_enrollment_enrolled_time_ck",
+        ),
+        CheckConstraint(
+            "(enrolled_policy_record_id IS NULL AND enrolled_policy_revision IS NULL "
+            "AND enrolled_policy_sha256 IS NULL AND reviewed_plan_sha256 IS NULL "
+            "AND bridge_idempotency_key_sha256 IS NULL) OR "
+            "(enrolled_policy_record_id IS NOT NULL AND enrolled_policy_record_id <> '' "
+            "AND enrolled_policy_revision > 0 AND enrolled_policy_sha256 IS NOT NULL "
+            "AND reviewed_plan_sha256 IS NOT NULL "
+            "AND bridge_idempotency_key_sha256 IS NOT NULL)",
+            name="launchplane_administrator_enrollment_policy_evidence_ck",
+        ),
+        CheckConstraint(
+            "state <> 'enrolled' OR enrolled_policy_record_id = "
+            "'launchplane-authz-policy-r' || printf('%020d', enrolled_policy_revision) "
+            "|| '-' || substr(enrolled_policy_sha256, 1, 12)",
+            name="lp_admin_enrollment_policy_record_sqlite_ck",
+        ).ddl_if(dialect="sqlite"),
+        CheckConstraint(
+            "state <> 'enrolled' OR enrolled_policy_record_id = "
+            "'launchplane-authz-policy-r' "
+            "|| lpad(CAST(enrolled_policy_revision AS text), 20, '0') "
+            "|| '-' || substr(enrolled_policy_sha256, 1, 12)",
+            name="lp_admin_enrollment_policy_record_pg_ck",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "(state = 'issued' AND candidate_github_id IS NULL AND control_proven_at IS NULL "
+            "AND withdrawn_at IS NULL AND expired_at IS NULL AND enrolled_at IS NULL "
+            "AND enrolled_policy_record_id IS NULL AND policy_bridge_state = 'not_applied') OR "
+            "(state = 'control_proven' AND candidate_github_id IS NOT NULL "
+            "AND control_proven_at IS NOT NULL AND withdrawn_at IS NULL "
+            "AND expired_at IS NULL AND enrolled_at IS NULL "
+            "AND enrolled_policy_record_id IS NULL AND policy_bridge_state = 'not_applied') OR "
+            "(state = 'withdrawn' AND withdrawn_at IS NOT NULL AND expired_at IS NULL "
+            "AND enrolled_at IS NULL AND enrolled_policy_record_id IS NULL "
+            "AND policy_bridge_state = 'not_applied') OR "
+            "(state = 'expired' AND expired_at IS NOT NULL AND withdrawn_at IS NULL "
+            "AND enrolled_at IS NULL AND enrolled_policy_record_id IS NULL "
+            "AND policy_bridge_state = 'not_applied') OR "
+            "(state = 'enrolled' AND candidate_github_id IS NOT NULL "
+            "AND control_proven_at IS NOT NULL AND enrolled_at IS NOT NULL "
+            "AND withdrawn_at IS NULL AND expired_at IS NULL "
+            "AND enrolled_policy_record_id IS NOT NULL AND policy_bridge_state = 'applied')",
+            name="launchplane_administrator_enrollment_terminal_ck",
+        ),
+        UniqueConstraint(
+            "challenge_sha256", name="launchplane_administrator_enrollment_challenge_uq"
+        ),
+        Index("launchplane_administrator_enrollment_state_expiry_idx", "state", "expires_at"),
+    )
+
+    enrollment_id: Mapped[str] = mapped_column(String, primary_key=True)
+    state: Mapped[str] = mapped_column(String, nullable=False)
+    proposer_github_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    candidate_github_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    challenge_sha256: Mapped[str] = mapped_column(String, nullable=False)
+    reason: Mapped[str] = mapped_column(String, nullable=False)
+    provenance_sha256: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[str] = mapped_column(String, nullable=False)
+    expires_at: Mapped[str] = mapped_column(String, nullable=False)
+    control_proven_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    withdrawn_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    expired_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    enrolled_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    enrolled_policy_record_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    enrolled_policy_revision: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    enrolled_policy_sha256: Mapped[str | None] = mapped_column(String, nullable=True)
+    reviewed_plan_sha256: Mapped[str | None] = mapped_column(String, nullable=True)
+    bridge_idempotency_key_sha256: Mapped[str | None] = mapped_column(String, nullable=True)
+    authority_state: Mapped[str] = mapped_column(String, nullable=False, server_default="inert")
+    authorizes_policy: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=false())
+    policy_bridge_state: Mapped[str] = mapped_column(
+        String, nullable=False, server_default="not_applied"
     )
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
@@ -9753,6 +9901,170 @@ class PostgresRecordStore(HumanSessionStore):
             model_type=OwnerControlIssuedChallengeRecord,
             orm_model=LaunchplaneOwnerControlIssuedChallengeRow,
             filters=(LaunchplaneOwnerControlIssuedChallengeRow.challenge_nonce == challenge_nonce,),
+        )
+
+    @staticmethod
+    def _administrator_enrollment_row(
+        record: AdministratorEnrollmentRecord,
+    ) -> LaunchplaneAdministratorEnrollmentRow:
+        return LaunchplaneAdministratorEnrollmentRow(
+            enrollment_id=record.enrollment_id,
+            state=record.state,
+            proposer_github_id=record.proposer_github_id,
+            candidate_github_id=record.candidate_github_id,
+            challenge_sha256=record.challenge_sha256,
+            reason=record.reason,
+            provenance_sha256=record.provenance_sha256,
+            created_at=record.created_at,
+            expires_at=record.expires_at,
+            control_proven_at=record.control_proven_at,
+            withdrawn_at=record.withdrawn_at,
+            expired_at=record.expired_at,
+            enrolled_at=record.enrolled_at,
+            enrolled_policy_record_id=record.enrolled_policy_record_id,
+            enrolled_policy_revision=record.enrolled_policy_revision,
+            enrolled_policy_sha256=record.enrolled_policy_sha256,
+            reviewed_plan_sha256=record.reviewed_plan_sha256,
+            bridge_idempotency_key_sha256=record.bridge_idempotency_key_sha256,
+            authority_state=record.authority_state,
+            authorizes_policy=record.authorizes_policy,
+            policy_bridge_state=record.policy_bridge_state,
+            payload=PostgresRecordStore._payload_dict(record),
+        )
+
+    @staticmethod
+    def _sync_administrator_enrollment_row(
+        row: LaunchplaneAdministratorEnrollmentRow, record: AdministratorEnrollmentRecord
+    ) -> None:
+        row.state = record.state
+        row.candidate_github_id = record.candidate_github_id
+        row.control_proven_at = record.control_proven_at
+        row.withdrawn_at = record.withdrawn_at
+        row.expired_at = record.expired_at
+        row.enrolled_at = record.enrolled_at
+        row.enrolled_policy_record_id = record.enrolled_policy_record_id
+        row.enrolled_policy_revision = record.enrolled_policy_revision
+        row.enrolled_policy_sha256 = record.enrolled_policy_sha256
+        row.reviewed_plan_sha256 = record.reviewed_plan_sha256
+        row.bridge_idempotency_key_sha256 = record.bridge_idempotency_key_sha256
+        row.policy_bridge_state = record.policy_bridge_state
+        row.payload = PostgresRecordStore._payload_dict(record)
+
+    def create_administrator_enrollment_if_absent(
+        self, record: AdministratorEnrollmentRecord
+    ) -> tuple[AdministratorEnrollmentRecord, bool]:
+        with self._session_factory() as session:
+            session.add(self._administrator_enrollment_row(record))
+            try:
+                session.commit()
+                return record, True
+            except IntegrityError as error:
+                session.rollback()
+                existing_row = session.get(
+                    LaunchplaneAdministratorEnrollmentRow, record.enrollment_id
+                )
+                if existing_row is None:
+                    raise AdministratorEnrollmentConflictError(
+                        "administrator enrollment challenge digest is already reserved"
+                    ) from error
+                existing = AdministratorEnrollmentRecord.model_validate(existing_row.payload)
+                if existing != record:
+                    raise AdministratorEnrollmentConflictError(
+                        "administrator enrollment creation conflicts with persisted record"
+                    ) from error
+                return existing, False
+
+    def read_administrator_enrollment(self, enrollment_id: str) -> AdministratorEnrollmentRecord:
+        return self._read_model(
+            model_type=AdministratorEnrollmentRecord,
+            orm_model=LaunchplaneAdministratorEnrollmentRow,
+            filters=(LaunchplaneAdministratorEnrollmentRow.enrollment_id == enrollment_id,),
+        )
+
+    def _transition_administrator_enrollment(
+        self,
+        enrollment_id: str,
+        transition: Callable[[AdministratorEnrollmentRecord], AdministratorEnrollmentRecord],
+    ) -> AdministratorEnrollmentRecord:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            statement = (
+                select(LaunchplaneAdministratorEnrollmentRow)
+                .where(LaunchplaneAdministratorEnrollmentRow.enrollment_id == enrollment_id)
+                .limit(1)
+            )
+            if not self.database_url.startswith("sqlite"):
+                statement = statement.with_for_update()
+            row = session.scalar(statement)
+            if row is None:
+                raise FileNotFoundError(enrollment_id)
+            current = AdministratorEnrollmentRecord.model_validate(row.payload)
+            updated = transition(current)
+            if updated != current:
+                self._sync_administrator_enrollment_row(row, updated)
+                session.commit()
+            return updated
+
+    def prove_administrator_enrollment_control(
+        self,
+        *,
+        enrollment_id: str,
+        challenge: str,
+        server_derived_candidate_github_id: int,
+        control_proven_at: str,
+    ) -> AdministratorEnrollmentRecord:
+        return self._transition_administrator_enrollment(
+            enrollment_id,
+            lambda record: prove_administrator_enrollment_control(
+                record,
+                challenge=challenge,
+                server_derived_candidate_github_id=server_derived_candidate_github_id,
+                control_proven_at=control_proven_at,
+            ),
+        )
+
+    def expire_administrator_enrollment(
+        self, *, enrollment_id: str, expired_at: str
+    ) -> AdministratorEnrollmentRecord:
+        return self._transition_administrator_enrollment(
+            enrollment_id,
+            lambda record: expire_administrator_enrollment(record, expired_at=expired_at),
+        )
+
+    def withdraw_administrator_enrollment(
+        self, *, enrollment_id: str, proposer_github_id: int, withdrawn_at: str
+    ) -> AdministratorEnrollmentRecord:
+        return self._transition_administrator_enrollment(
+            enrollment_id,
+            lambda record: withdraw_administrator_enrollment(
+                record, proposer_github_id=proposer_github_id, withdrawn_at=withdrawn_at
+            ),
+        )
+
+    def complete_administrator_enrollment(
+        self,
+        *,
+        enrollment_id: str,
+        server_derived_candidate_github_id: int,
+        enrolled_at: str,
+        enrolled_policy_record_id: str,
+        enrolled_policy_revision: int,
+        enrolled_policy_sha256: str,
+        reviewed_plan_sha256: str,
+        bridge_idempotency_key_sha256: str,
+    ) -> AdministratorEnrollmentRecord:
+        return self._transition_administrator_enrollment(
+            enrollment_id,
+            lambda record: complete_administrator_enrollment(
+                record,
+                server_derived_candidate_github_id=server_derived_candidate_github_id,
+                enrolled_at=enrolled_at,
+                enrolled_policy_record_id=enrolled_policy_record_id,
+                enrolled_policy_revision=enrolled_policy_revision,
+                enrolled_policy_sha256=enrolled_policy_sha256,
+                reviewed_plan_sha256=reviewed_plan_sha256,
+                bridge_idempotency_key_sha256=bridge_idempotency_key_sha256,
+            ),
         )
 
     def list_owner_control_challenge_lifecycle_events(

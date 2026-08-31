@@ -44,6 +44,16 @@ or authorize approval or execution; rules that also depend on mutable login,
 organization, team, or role selectors are intentionally insufficient without a
 live authenticated human identity.
 
+Administrator-enrollment records are likewise inert evidence only. They may
+record an owner-created, 30-minute opaque challenge and a later server-derived
+candidate GitHub identity that proved control, but they do not create a policy
+administrator, grant a policy action, change a managed set, or make any route
+or workflow available. Every record is fixed to no authority. A future bridge
+may compile a final enrolled record into an owner-gated DB-native policy change
+only after separate design, review, apply, and read-back work under the active
+authorization-administration boundary. Landing enrollment storage does not
+approve or implement that bridge and does not relax `#2058`.
+
 Repository inventory follows the same authority boundary. Its
 `repository_inventory.read` and `repository_inventory.write` actions use the
 Launchplane service scope (`product=launchplane`, `context=launchplane`), but
