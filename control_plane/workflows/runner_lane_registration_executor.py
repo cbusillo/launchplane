@@ -451,18 +451,24 @@ def _redacted_command_output(value: str) -> str:
 
 
 def _normalized_path(value: str) -> str:
-    normalized = value.strip().rstrip("/")
+    normalized = value.strip()
+    if ".." in normalized.split("/"):
+        raise ValueError(
+            "runner lane registration executor registration_root must not contain "
+            "parent-directory components"
+        )
+    normalized = normalized.rstrip("/")
     if not normalized.startswith("/"):
         raise ValueError("runner lane registration executor requires absolute registration_root")
     segments: list[str] = []
     for segment in normalized.split("/"):
         if segment in {"", "."}:
             continue
-        if segment == "..":
-            if segments:
-                segments.pop()
-            continue
         segments.append(segment)
+    if not segments:
+        raise ValueError(
+            "runner lane registration executor requires scoped absolute registration_root"
+        )
     return "/" + "/".join(segments)
 
 

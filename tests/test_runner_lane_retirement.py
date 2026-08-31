@@ -161,6 +161,22 @@ class RunnerLaneRetirementPlanTests(unittest.TestCase):
         self.assertEqual([blocker.code for blocker in missing.blockers], ["lane_missing"])
         self.assertEqual([blocker.code for blocker in ambiguous.blockers], ["lane_ambiguous"])
 
+    def test_plan_blocks_canonical_path_outside_allowed_root(self) -> None:
+        plan = plan_runner_lane_retirement(
+            policy=_policy(),
+            request=_retirement_request(
+                mutate=True,
+                registration_root="/srv/actions-runners",
+            ),
+            inventory=_inventory(lanes=(_lane(),)),
+        )
+
+        self.assertEqual(plan.status, "blocked")
+        self.assertEqual(
+            [blocker.code for blocker in plan.blockers],
+            ["registration_root_not_allowed"],
+        )
+
 
 class GitHubRunnerLaneRetirementTests(unittest.TestCase):
     def test_retirer_deletes_exact_runner_and_treats_not_found_as_complete(self) -> None:
@@ -195,6 +211,30 @@ class GitHubRunnerLaneRetirementTests(unittest.TestCase):
 
 
 class RunnerLaneRetirementExecutorTests(unittest.TestCase):
+    def test_executor_request_rejects_parent_directory_components(self) -> None:
+        with self.assertRaisesRegex(ValueError, "parent-directory components"):
+            _executor_request(
+                mutate=True,
+                registration_root="/home/launchplane-runner-hygiene/actions-runners/../tmp",
+            )
+
+    def test_executor_request_rejects_unscoped_roots(self) -> None:
+        for root in ("/", "/.", "home/launchplane-runner-hygiene/actions-runners"):
+            with self.subTest(root=root):
+                with self.assertRaisesRegex(ValueError, "requires scoped absolute root"):
+                    _executor_request(mutate=True, registration_root=root)
+
+    def test_executor_request_preserves_benign_root_normalization(self) -> None:
+        request = _executor_request(
+            mutate=True,
+            registration_root="//home//launchplane-runner-hygiene/./actions-runners/",
+        )
+
+        self.assertEqual(
+            request.registration_root,
+            "/home/launchplane-runner-hygiene/actions-runners",
+        )
+
     def test_executor_rechecks_live_state_before_delete_and_removes_root(self) -> None:
         events: list[str] = []
         command_runner = _CommandRunner(
@@ -464,13 +504,14 @@ def _retirement_request(
     mutate: bool,
     active_run_ids: tuple[int, ...] = (),
     target_worker_active: bool = False,
+    registration_root: str = "/home/launchplane-runner-hygiene/actions-runners",
 ) -> RunnerLaneRegistrationRequest:
     return RunnerLaneRegistrationRequest(
         operation="retire",
         repository="cbusillo/code",
         host_name="chris-testing",
         lane_name="code-ci-1",
-        registration_root="/home/launchplane-runner-hygiene/actions-runners",
+        registration_root=registration_root,
         labels=(),
         active_run_ids=active_run_ids,
         target_worker_active=target_worker_active,
@@ -479,14 +520,18 @@ def _retirement_request(
     )
 
 
-def _executor_request(*, mutate: bool) -> RunnerLaneRetirementExecutorRequest:
+def _executor_request(
+    *,
+    mutate: bool,
+    registration_root: str = "/home/launchplane-runner-hygiene/actions-runners",
+) -> RunnerLaneRetirementExecutorRequest:
     return RunnerLaneRetirementExecutorRequest(
         repository="cbusillo/code",
         host_name="chris-testing",
         execution_lane="chris-testing-ops-gate",
         service_user="launchplane-runner-hygiene",
         lane_name="code-ci-1",
-        registration_root="/home/launchplane-runner-hygiene/actions-runners",
+        registration_root=registration_root,
         mutate=mutate,
         audit_record_key="runner-lane-retirement/2026-07-26/code-ci-1",
     )

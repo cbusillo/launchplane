@@ -522,18 +522,21 @@ def _normalized_tokens(values: tuple[str, ...]) -> tuple[str, ...]:
 
 
 def _normalized_path(value: str) -> str:
-    normalized = value.strip().rstrip("/")
+    normalized = value.strip()
+    if ".." in normalized.split("/"):
+        raise ValueError(
+            "runner lane registration paths must not contain parent-directory components"
+        )
+    normalized = normalized.rstrip("/")
     if not normalized.startswith("/"):
         raise ValueError("runner lane registration paths must be absolute")
     segments: list[str] = []
     for segment in normalized.split("/"):
         if segment in {"", "."}:
             continue
-        if segment == "..":
-            if segments:
-                segments.pop()
-            continue
         segments.append(segment)
+    if not segments:
+        raise ValueError("runner lane registration paths must be scoped absolute paths")
     return "/" + "/".join(segments)
 
 

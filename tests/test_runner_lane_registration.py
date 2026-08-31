@@ -120,6 +120,37 @@ class RunnerLaneRegistrationPlanTests(unittest.TestCase):
                 audit_record_key="runner-lane-registration/2026-06-08/cm-website/test",
             )
 
+    def test_policy_rejects_parent_directory_components(self) -> None:
+        for root in ("/opt/actions-runners/..", "/opt/.."):
+            with self.subTest(root=root):
+                with self.assertRaisesRegex(ValueError, "parent-directory components"):
+                    RunnerLaneRegistrationPolicy(allowed_registration_roots=(root,))
+
+    def test_request_rejects_parent_directory_components(self) -> None:
+        with self.assertRaisesRegex(ValueError, "parent-directory components"):
+            _request(registration_root="/opt/actions-runners/../tmp", mutate=True)
+
+    def test_contract_roots_require_absolute_paths(self) -> None:
+        with self.assertRaisesRegex(ValueError, "paths must be absolute"):
+            RunnerLaneRegistrationPolicy(allowed_registration_roots=("opt/actions-runners",))
+        with self.assertRaisesRegex(ValueError, "paths must be absolute"):
+            _request(registration_root="opt/actions-runners", mutate=True)
+
+    def test_contract_roots_reject_root_equivalent_normalization(self) -> None:
+        with self.assertRaisesRegex(ValueError, "scoped absolute paths"):
+            RunnerLaneRegistrationPolicy(allowed_registration_roots=("/.",))
+        with self.assertRaisesRegex(ValueError, "scoped absolute paths"):
+            _request(registration_root="/.", mutate=True)
+
+    def test_contract_roots_preserve_benign_normalization(self) -> None:
+        policy = RunnerLaneRegistrationPolicy(
+            allowed_registration_roots=("/opt//actions-runners/./",)
+        )
+        request = _request(registration_root="/opt//actions-runners/./", mutate=True)
+
+        self.assertEqual(policy.allowed_registration_roots, ("/opt/actions-runners",))
+        self.assertEqual(request.registration_root, "/opt/actions-runners")
+
     def test_plan_blocks_without_mutate_and_without_allowed_repo(self) -> None:
         plan = plan_runner_lane_registration(
             policy=RunnerLaneRegistrationPolicy(
@@ -136,10 +167,10 @@ class RunnerLaneRegistrationPlanTests(unittest.TestCase):
             ["mutate_not_requested", "repository_not_allowed"],
         )
 
-    def test_plan_blocks_path_traversal_outside_allowed_root(self) -> None:
+    def test_plan_blocks_canonical_path_outside_allowed_root(self) -> None:
         plan = plan_runner_lane_registration(
             policy=_policy(),
-            request=_request(registration_root="/opt/actions-runners/../tmp", mutate=True),
+            request=_request(registration_root="/srv/actions-runners", mutate=True),
             inventory=_inventory(lanes=()),
         )
 
@@ -196,6 +227,32 @@ class RunnerLaneRegistrationExecutorTests(unittest.TestCase):
     def test_executor_request_rejects_unsafe_execution_lane(self) -> None:
         with self.assertRaisesRegex(ValueError, "execution_lane must use"):
             _executor_request(mutate=True, execution_lane="ops-gate;touch bad")
+
+    def test_executor_request_rejects_parent_directory_components(self) -> None:
+        with self.assertRaisesRegex(ValueError, "parent-directory components"):
+            _executor_request(
+                mutate=True,
+                registration_root="/home/launchplane-runner-hygiene/actions-runners/../tmp",
+            )
+
+    def test_executor_request_requires_absolute_registration_root(self) -> None:
+        with self.assertRaisesRegex(ValueError, "requires absolute registration_root"):
+            _executor_request(mutate=True, registration_root="opt/actions-runners")
+
+    def test_executor_request_rejects_root_equivalent_normalization(self) -> None:
+        with self.assertRaisesRegex(ValueError, "scoped absolute registration_root"):
+            _executor_request(mutate=True, registration_root="/.")
+
+    def test_executor_request_preserves_benign_root_normalization(self) -> None:
+        request = _executor_request(
+            mutate=True,
+            registration_root="/home//launchplane-runner-hygiene/./actions-runners/",
+        )
+
+        self.assertEqual(
+            request.registration_root,
+            "/home/launchplane-runner-hygiene/actions-runners",
+        )
 
     def test_blocked_plan_posts_planned_audit_without_token_or_command(self) -> None:
         token_fetcher = _TokenFetcher()
@@ -646,6 +703,7 @@ def _executor_request(
     *,
     mutate: bool,
     execution_lane: str = "chris-testing-ops-gate",
+    registration_root: str = "/home/launchplane-runner-hygiene/actions-runners",
     runner_package_url: str = (
         "https://github.com/actions/runner/releases/download/"
         "v2.327.1/actions-runner-linux-x64-2.327.1.tar.gz"
@@ -658,7 +716,7 @@ def _executor_request(
         execution_lane=execution_lane,
         service_user="launchplane-runner-hygiene",
         lane_name="cm-website-runner-1",
-        registration_root="/home/launchplane-runner-hygiene/actions-runners",
+        registration_root=registration_root,
         runner_package_url=runner_package_url,
         labels=("self-hosted", "launchplane", "launchplane-managed"),
         mutate=mutate,
