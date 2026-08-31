@@ -197,7 +197,9 @@ class _StubGitHubOAuthClient:
         self.identity = identity
         self.code_verifier = ""
 
-    def authorization_url(self, *, state: str, code_challenge: str) -> str:
+    def authorization_url(
+        self, *, state: str, code_challenge: str, reauthenticate: bool = False
+    ) -> str:
         return f"https://github.example/authorize?state={state}&challenge={code_challenge}"
 
     def fetch_identity(
