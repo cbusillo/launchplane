@@ -18,6 +18,8 @@ from control_plane.cli import main
 from control_plane.contracts.runner_lane_inventory import RunnerLaneInventory
 from control_plane.contracts.runner_lane_inventory import RunnerLaneRecord
 from control_plane.contracts.runner_lane_inventory import build_runner_lane_inventory
+from control_plane.contracts.runner_lane_registration import RunnerLaneRegistrationAuditRecord
+from control_plane.contracts.runner_lane_registration import RunnerLaneRegistrationPlan
 from control_plane.contracts.runner_lane_registration import RunnerLaneRegistrationPolicy
 from control_plane.contracts.runner_lane_registration import RunnerLaneRegistrationRequest
 from control_plane.contracts.runner_lane_registration import RunnerLaneRegistrationTokenRecord
@@ -137,10 +139,12 @@ class RunnerLaneRegistrationPlanTests(unittest.TestCase):
             _request(registration_root="opt/actions-runners", mutate=True)
 
     def test_contract_roots_reject_root_equivalent_normalization(self) -> None:
-        with self.assertRaisesRegex(ValueError, "scoped absolute paths"):
-            RunnerLaneRegistrationPolicy(allowed_registration_roots=("/.",))
-        with self.assertRaisesRegex(ValueError, "scoped absolute paths"):
-            _request(registration_root="/.", mutate=True)
+        for root in ("/.", "/"):
+            with self.subTest(root=root):
+                with self.assertRaisesRegex(ValueError, "scoped absolute paths"):
+                    RunnerLaneRegistrationPolicy(allowed_registration_roots=(root,))
+                with self.assertRaisesRegex(ValueError, "scoped absolute paths"):
+                    _request(registration_root=root, mutate=True)
 
     def test_contract_roots_preserve_benign_normalization(self) -> None:
         policy = RunnerLaneRegistrationPolicy(
@@ -179,6 +183,51 @@ class RunnerLaneRegistrationPlanTests(unittest.TestCase):
             [blocker.code for blocker in plan.blockers],
             ["registration_root_not_allowed"],
         )
+
+    def test_plan_blocks_sibling_prefix_outside_allowed_root(self) -> None:
+        plan = plan_runner_lane_registration(
+            policy=_policy(),
+            request=_request(registration_root="/opt/actions-runners-evil", mutate=True),
+            inventory=_inventory(lanes=()),
+        )
+
+        self.assertEqual(plan.status, "blocked")
+        self.assertEqual(
+            [blocker.code for blocker in plan.blockers],
+            ["registration_root_not_allowed"],
+        )
+
+    def test_plan_rejects_parent_directory_components(self) -> None:
+        plan = plan_runner_lane_registration(
+            policy=_policy(),
+            request=_request(mutate=True),
+            inventory=_inventory(lanes=()),
+        )
+        payload = plan.model_dump(mode="json")
+        payload["registration_root"] = "/opt/actions-runners/../../etc"
+
+        with self.assertRaisesRegex(ValueError, "parent-directory components"):
+            RunnerLaneRegistrationPlan.model_validate(payload)
+
+    def test_audit_rejects_plan_registration_root_mismatch(self) -> None:
+        request = _request(mutate=True)
+        plan = plan_runner_lane_registration(
+            policy=_policy(),
+            request=request,
+            inventory=_inventory(lanes=()),
+        )
+        plan_payload = plan.model_dump(mode="json")
+        plan_payload["registration_root"] = "/opt/other-actions-runners"
+
+        with self.assertRaisesRegex(ValueError, "must match plan registration_root"):
+            RunnerLaneRegistrationAuditRecord(
+                audit_record_key=request.audit_record_key,
+                status="planned",
+                request=request,
+                plan=RunnerLaneRegistrationPlan.model_validate(plan_payload),
+                pre_inventory=_inventory(lanes=()),
+                message="registration planned",
+            )
 
     def test_plan_is_ready_for_empty_inventory_and_required_labels(self) -> None:
         plan = plan_runner_lane_registration(
@@ -240,8 +289,10 @@ class RunnerLaneRegistrationExecutorTests(unittest.TestCase):
             _executor_request(mutate=True, registration_root="opt/actions-runners")
 
     def test_executor_request_rejects_root_equivalent_normalization(self) -> None:
-        with self.assertRaisesRegex(ValueError, "scoped absolute registration_root"):
-            _executor_request(mutate=True, registration_root="/.")
+        for root in ("/.", "/"):
+            with self.subTest(root=root):
+                with self.assertRaisesRegex(ValueError, "scoped absolute registration_root"):
+                    _executor_request(mutate=True, registration_root=root)
 
     def test_executor_request_preserves_benign_root_normalization(self) -> None:
         request = _executor_request(

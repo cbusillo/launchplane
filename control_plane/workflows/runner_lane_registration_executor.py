@@ -457,9 +457,9 @@ def _normalized_path(value: str) -> str:
             "runner lane registration executor registration_root must not contain "
             "parent-directory components"
         )
-    normalized = normalized.rstrip("/")
     if not normalized.startswith("/"):
         raise ValueError("runner lane registration executor requires absolute registration_root")
+    normalized = normalized.rstrip("/")
     segments: list[str] = []
     for segment in normalized.split("/"):
         if segment in {"", "."}:

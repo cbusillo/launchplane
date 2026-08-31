@@ -147,9 +147,11 @@ class RunnerLaneRegistrationPlan(BaseModel):
         self.lane_name = _required_text(
             self.lane_name, "runner lane registration plan requires lane_name"
         )
-        self.registration_root = _required_text(
-            self.registration_root,
-            "runner lane registration plan requires registration_root",
+        self.registration_root = _normalized_path(
+            _required_text(
+                self.registration_root,
+                "runner lane registration plan requires registration_root",
+            )
         )
         self.labels = _normalized_labels(self.labels)
         self.active_run_ids = tuple(sorted(set(self.active_run_ids)))
@@ -194,6 +196,10 @@ class RunnerLaneRegistrationAuditRecord(BaseModel):
             raise ValueError("runner lane registration audit request must match plan operation")
         if self.request.lane_name != self.plan.lane_name:
             raise ValueError("runner lane registration audit request must match plan lane")
+        if self.request.registration_root != self.plan.registration_root:
+            raise ValueError(
+                "runner lane registration audit request must match plan registration_root"
+            )
         if self.pre_inventory.repository != self.request.repository:
             raise ValueError("runner lane registration pre-inventory must match request repository")
         if (
@@ -527,9 +533,9 @@ def _normalized_path(value: str) -> str:
         raise ValueError(
             "runner lane registration paths must not contain parent-directory components"
         )
-    normalized = normalized.rstrip("/")
     if not normalized.startswith("/"):
         raise ValueError("runner lane registration paths must be absolute")
+    normalized = normalized.rstrip("/")
     segments: list[str] = []
     for segment in normalized.split("/"):
         if segment in {"", "."}:
