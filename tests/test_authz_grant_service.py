@@ -234,26 +234,26 @@ class AuthzManagedPolicyServiceTests(unittest.TestCase):
         )
 
         self.assertTrue(
-            control_plane_authz_grant_service._authz_policy_allows_immutable_github_id_administration(
+            control_plane_authz_grant_service.authz_policy_allows_immutable_github_id_administration(
                 policy=policy,
                 github_id=101,
             )
         )
         for github_id in (103, 104, 105, 106, 107, 108, 109, 110):
             self.assertFalse(
-                control_plane_authz_grant_service._authz_policy_allows_immutable_github_id_administration(
+                control_plane_authz_grant_service.authz_policy_allows_immutable_github_id_administration(
                     policy=policy,
                     github_id=github_id,
                 )
             )
         self.assertTrue(
-            control_plane_authz_grant_service._authz_policy_retains_independent_github_id_administration(
+            control_plane_authz_grant_service.authz_policy_retains_independent_github_id_administration(
                 policy=policy,
                 applying_github_id=101,
             )
         )
         self.assertFalse(
-            control_plane_authz_grant_service._authz_policy_retains_independent_github_id_administration(
+            control_plane_authz_grant_service.authz_policy_retains_independent_github_id_administration(
                 policy=policy.model_copy(
                     update={
                         "github_humans": (strict_admin.model_copy(update={"github_ids": (101,)}),)

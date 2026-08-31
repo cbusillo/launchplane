@@ -19,6 +19,29 @@ def _assert_no_workflow_violations(
 
 
 class DocsContractsTests(TestCase):
+    def test_privileged_policy_operation_activation_bridge_is_documented(self) -> None:
+        authorization = Path("docs/authorization-authority.md").read_text(encoding="utf-8")
+        privileged_operations = Path("docs/privileged-operations.md").read_text(encoding="utf-8")
+        service_boundary = Path("docs/service-boundary.md").read_text(encoding="utf-8")
+
+        for required_text in (
+            "authz_policy_operation_activation_retired",
+            "service:authz-policy-operation-activation",
+            "not total-lockout",
+        ):
+            self.assertIn(required_text, authorization)
+        self.assertIn("same-key replay", privileged_operations)
+        self.assertIn("caller supplies no rule", privileged_operations)
+        self.assertIn(
+            "/v1/authz-policies/privileged-policy-operations/activation/dry-run",
+            service_boundary,
+        )
+        self.assertIn(
+            "/v1/authz-policies/privileged-policy-operations/activation/apply",
+            service_boundary,
+        )
+        self.assertIn("exact-length JSON capped at 16 KiB", service_boundary)
+
     def test_generic_web_preview_retirement_authority_is_documented(self) -> None:
         operations = Path("docs/operations.md").read_text(encoding="utf-8")
         service_boundary = Path("docs/service-boundary.md").read_text(encoding="utf-8")
