@@ -64,20 +64,20 @@ The human routes use a named GitHub-human browser dependency that:
 
 The planning and approval actions are:
 
-| Action | Safety | Surface |
-| --- | --- | --- |
-| `privileged_secret_operation.plan` | `secret_backed` | GitHub-human plan creation |
-| `privileged_secret_operation.read` | `secret_backed` | GitHub-human plan reads |
-| `privileged_secret_operation.cancel` | `secret_backed` | GitHub-human cancellation |
-| `privileged_secret_operation.approve` | `secret_backed` | GitHub-human browser approval |
-| `privileged_secret_operation.revoke` | `secret_backed` | GitHub-human browser revocation |
-| `privileged_operation_summary.read` | `read` | Counts-only agent projection |
-| `authz_policy_operation.propose` | `policy_admin` | Inert GitHub-human or terminal-agent proposal |
-| `authz_policy_operation.read` | `policy_admin` | GitHub-human policy-plan reads |
-| `authz_policy_operation.cancel` | `policy_admin` | GitHub-human policy-plan cancellation |
-| `authz_policy_operation.approve` | `policy_admin` | GitHub-human browser approval |
-| `authz_policy_operation.revoke` | `policy_admin` | GitHub-human browser revocation |
-| `privileged_policy_operation_summary.read` | `read` | Proposal-owner agent projection |
+| Action                                     | Safety          | Surface                                         |
+| ------------------------------------------ | --------------- | ----------------------------------------------- |
+| `privileged_secret_operation.plan`         | `secret_backed` | GitHub-human plan creation                      |
+| `privileged_secret_operation.read`         | `secret_backed` | GitHub-human plan reads                         |
+| `privileged_secret_operation.cancel`       | `secret_backed` | GitHub-human cancellation                       |
+| `privileged_secret_operation.approve`      | `secret_backed` | GitHub-human browser approval                   |
+| `privileged_secret_operation.revoke`       | `secret_backed` | GitHub-human browser revocation                 |
+| `privileged_operation_summary.read`        | `read`          | Counts-only agent projection                    |
+| `authz_policy_operation.propose`           | `policy_admin`  | Inert GitHub-human or terminal-agent proposal   |
+| `authz_policy_operation.read`              | `policy_admin`  | GitHub-human policy-plan reads                  |
+| `authz_policy_operation.cancel`            | `policy_admin`  | GitHub-human policy-plan cancellation           |
+| `authz_policy_operation.approve`           | `policy_admin`  | GitHub-human browser approval                   |
+| `authz_policy_operation.revoke`            | `policy_admin`  | GitHub-human browser revocation                 |
+| `privileged_policy_operation_summary.read` | `read`          | Proposal-owner agent projection                 |
 
 Approval requires exactly one managed GitHub-human rule that is pinned to
 non-empty immutable `github_ids`. Login, organization, team, or role selectors
@@ -95,6 +95,24 @@ administrator authority again, then requires the candidate policy to retain the
 applying administrator and at least one distinct reachable policy
 administrator. An approval-only rule cannot bootstrap its holder into policy
 administration.
+
+The one-time issue `#2277` activation bridge exists only to make this ordinary
+policy-operation lifecycle reachable for an already-authorized immutable-ID
+GitHub-human policy administrator. Its compiled managed set grants that one
+human ID exactly the five `authz_policy_operation.*` propose, read, approve,
+revoke, and cancel actions. It grants no agent summary, workflow, terminal,
+operator, local-admin, provider, deployment, wildcard, or policy-write action.
+The caller supplies no rule, selector, principal, action, policy body, or
+managed ID.
+
+The bridge dry-run exposes bounded active-policy, candidate, exact-action, and
+continuity evidence. Apply requires the reviewed digest, reason,
+immutable-ID-scoped idempotency, policy CAS, and exact read-back. If the active
+policy already contains the exact compiled set, the bridge is permanently
+retired by DB state and rejects new dry-runs or applies; a same-key replay can
+still return the original completed response. A conflicting use of the managed
+set fails closed. This is a temporary transport for existing DB authority, not
+an alternate policy editor, total-lockout recovery, or break-glass credential.
 
 The dry-run planner does not know which human will approve, so its evidence
 cannot include the identity-dependent applying-administrator and independent-

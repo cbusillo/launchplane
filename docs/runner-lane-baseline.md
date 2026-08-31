@@ -209,11 +209,34 @@ perform that action. Until the supervised host maintainer exists,
 otherwise-valid create, adoption-verification, and remove/recreate plans remain
 `status: blocked` with the typed capability blocker
 `supervised_maintainer_required`. These packets set `policy_ready: true` and
-`capability_ready: false`. Policy blockers such as an unapproved host, unsafe
-runner directory, missing managed label, duplicate lane name, repository
-mismatch, or failed baseline readiness produce `decision: blocked` with
+`capability_ready: false` and expose no mutation capability.
+
+Baseline readiness has different timing for absent-lane planning and existing
+lane remediation. An absent lane may remain policy-ready for
+`recommend_create` despite a non-ready packet only when that packet has zero
+observed lanes, zero compliant lanes, and no violations. A non-ready packet
+with existing fleet observations or violations blocks even an absent-lane
+recommendation. By default, any matching existing lane must have a ready
+aggregate baseline packet before the planner can recommend adoption
+verification or remove/recreate; otherwise it returns `decision: blocked` with
+`baseline_not_ready`. The operator may explicitly disable this coarse
+pre-action gate with
+`--allow-missing-baseline-readiness`, but the recommendation remains blocked by
+`supervised_maintainer_required` and does not become completion evidence. The
+current readiness packet is fleet-aggregate evidence and does not prove that
+the desired lane itself was observed. A future supervised executor must bind
+post-action baseline evidence to the exact lane before it can claim completion
+or product-job admission; this read-only planner does not implement that
+completion gate.
+
+Other policy blockers such as an unapproved host, unsafe runner directory,
+missing managed label, unsupported observed lane status, duplicate lane name,
+or repository mismatch also produce `decision: blocked` with
 `policy_ready: false` and must be resolved before any host mutation can be
-considered.
+considered. The maintainer planner's desired runner directories and allowed
+registration roots reject explicit `..` path components rather than resolving
+them into a different path. Registration and retirement remain separate
+lifecycle contracts and are not covered by this planner validation.
 
 ## Lifecycle Executors
 

@@ -26,6 +26,7 @@ RunnerLaneMaintainerBlockerCode = Literal[
     "host_not_allowed",
     "inventory_repository_mismatch",
     "lane_name_ambiguous",
+    "lane_status_unknown",
     "repository_not_allowed",
     "runner_directory_not_allowed",
     "service_user_not_allowed",
@@ -218,14 +219,6 @@ def plan_runner_lane_maintainer(
                     f"runner desired state is missing required label: {label}",
                 )
             )
-    if policy.require_baseline_readiness and not baseline_readiness.ready:
-        blockers.append(
-            _blocker(
-                "baseline_not_ready",
-                f"runner lane baseline is not ready: {baseline_readiness.summary}",
-            )
-        )
-
     matching_lanes = tuple(
         lane for lane in inventory.lanes if lane.name.strip().lower() == desired_state.lane_name
     )
@@ -238,7 +231,7 @@ def plan_runner_lane_maintainer(
         )
     if len(matching_lanes) == 1:
         lane = matching_lanes[0]
-        lane_labels = set(_normalized_identifiers(lane.labels, "label"))
+        lane_labels = set(_normalized_observed_labels(lane.labels))
         if policy.required_managed_label not in lane_labels:
             blockers.append(
                 _blocker(
@@ -247,6 +240,29 @@ def plan_runner_lane_maintainer(
                     f"{desired_state.lane_name}",
                 )
             )
+        if lane.status not in {"online", "offline"}:
+            blockers.append(
+                _blocker(
+                    "lane_status_unknown",
+                    f"existing runner lane has an unsupported status: {lane.status}",
+                )
+            )
+    baseline_unavailable = (
+        baseline_readiness.observed_lanes == 0
+        and baseline_readiness.compliant_lanes == 0
+        and not baseline_readiness.violations
+    )
+    if (
+        policy.require_baseline_readiness
+        and not baseline_readiness.ready
+        and (matching_lanes or not baseline_unavailable)
+    ):
+        blockers.append(
+            _blocker(
+                "baseline_not_ready",
+                f"runner lane baseline is not ready: {baseline_readiness.summary}",
+            )
+        )
 
     decision = _decision(blockers=tuple(blockers), matching_lanes=matching_lanes)
     if decision != "blocked":
@@ -364,6 +380,10 @@ def _normalized_identifiers(values: tuple[str, ...], label: str) -> tuple[str, .
     )
 
 
+def _normalized_observed_labels(values: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(sorted({value.strip().lower() for value in values if value.strip()}))
+
+
 def _normalized_identifier(value: str, label: str) -> str:
     normalized = value.strip().lower()
     if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", normalized):
@@ -391,9 +411,7 @@ def _normalized_path(value: str) -> str:
         if segment in {"", "."}:
             continue
         if segment == "..":
-            if segments:
-                segments.pop()
-            continue
+            raise ValueError("runner lane maintainer paths must not contain '..' components")
         segments.append(segment)
     return "/" + "/".join(segments)
 

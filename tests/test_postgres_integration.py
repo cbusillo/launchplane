@@ -4,6 +4,7 @@ import base64
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import json
 import os
@@ -22,6 +23,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError, OperationalError
 
+from control_plane import authz_grant_service, authz_policy_activation
 from control_plane.contracts.idempotency_record import (
     LaunchplaneIdempotencyRecord,
     build_launchplane_idempotency_record_id,
@@ -1584,6 +1586,130 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
         self.assertEqual(sorted(results), [False, True])
         self.assertEqual(len(active_records), 1)
         self.assertIn(active_records[0].record_id, {record.record_id for record in replacements})
+
+    def test_privileged_policy_activation_uses_atomic_cas_and_idempotency(self) -> None:
+        with _isolated_postgres_database() as database_url:
+            migrate_schema(database_url=database_url)
+            applying_identity = GitHubHumanIdentity(
+                login="postgres-owner",
+                github_id=123,
+                name="Postgres Owner",
+                email="postgres-owner@example.test",
+                organizations=frozenset(),
+                teams=frozenset(),
+                role="admin",
+            )
+            admin_rules = tuple(
+                GitHubHumanPolicyRule(
+                    managed_set_id="test.activation-admins",
+                    managed_rule_id=managed_rule_id,
+                    github_ids=(github_id,),
+                    roles=("admin",),
+                    products=("launchplane",),
+                    contexts=("launchplane",),
+                    actions=("authz_policy_grant.write",),
+                )
+                for managed_rule_id, github_id in (
+                    ("applying-admin", 123),
+                    ("independent-admin", 456),
+                )
+            )
+            policy = LaunchplaneAuthzPolicy(schema_version=2, github_humans=admin_rules)
+            policy_digest = authz_policy_sha256(policy)
+            seed_record = LaunchplaneAuthzPolicyRecord(
+                record_id=build_authz_policy_record_id(
+                    revision=1,
+                    policy_sha256=policy_digest,
+                ),
+                revision=1,
+                source="test:activation-postgres",
+                updated_at="2026-08-30T00:00:00Z",
+                policy_sha256=policy_digest,
+                policy=policy,
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                seed_record = store.seed_authz_policy_if_absent(seed_record)
+                dry_run_request = authz_policy_activation.build_authz_policy_operation_activation_reconcile_request(
+                    github_id=applying_identity.github_id,
+                    mode="dry_run",
+                    reason="Review the privileged-policy activation.",
+                )
+                dry_run_result = authz_grant_service.execute_managed_authz_policy_reconcile(
+                    record_store=store,
+                    request=dry_run_request,
+                    identity=applying_identity,
+                    trace_id="postgres-activation-dry-run",
+                    now_timestamp=lambda: "2026-08-30T00:01:00Z",
+                    authorized_policy_sha256=seed_record.policy_sha256,
+                    immutable_applying_github_id=applying_identity.github_id,
+                    source=authz_policy_activation.AUTHZ_POLICY_OPERATION_ACTIVATION_SOURCE,
+                )
+                dry_run_diff = authz_grant_service.AuthzManagedPolicyDiff.model_validate(
+                    dry_run_result.driver_result["diff"]
+                )
+                apply_request = authz_policy_activation.build_authz_policy_operation_activation_reconcile_request(
+                    github_id=applying_identity.github_id,
+                    mode="apply",
+                    reason="Review the privileged-policy activation.",
+                    reviewed_plan_sha256=dry_run_diff.plan_sha256,
+                )
+                apply_result = authz_grant_service.execute_managed_authz_policy_reconcile(
+                    record_store=store,
+                    request=apply_request,
+                    identity=applying_identity,
+                    trace_id="postgres-activation-apply",
+                    now_timestamp=lambda: "2026-08-30T00:02:00Z",
+                    authorized_policy_sha256=seed_record.policy_sha256,
+                    immutable_applying_github_id=applying_identity.github_id,
+                    source=authz_policy_activation.AUTHZ_POLICY_OPERATION_ACTIVATION_SOURCE,
+                )
+                mutation = DbOnlyMutationRequest(
+                    scope=authz_policy_activation.authz_policy_operation_activation_idempotency_scope(
+                        applying_identity.github_id
+                    ),
+                    route_path="/v1/authz-policies/privileged-policy-operations/activation/apply",
+                    idempotency_key="postgres-activation",
+                    request_fingerprint="a" * 64,
+                    lease_owner="postgres-activation-apply",
+                    response_status_code=202,
+                    response_trace_id="postgres-activation-apply",
+                    response_payload={"status": "accepted"},
+                    lease_seconds=300,
+                )
+                written = store.compare_and_write_authz_policy_record(
+                    expected_record=apply_result.previous_authz_policy_record,
+                    replacement_record=apply_result.authz_policy_record,
+                    mutation=mutation,
+                )
+                replayed = store.compare_and_write_authz_policy_record(
+                    expected_record=apply_result.previous_authz_policy_record,
+                    replacement_record=apply_result.authz_policy_record,
+                    mutation=mutation,
+                )
+                conflicting = store.compare_and_write_authz_policy_record(
+                    expected_record=apply_result.previous_authz_policy_record,
+                    replacement_record=apply_result.authz_policy_record,
+                    mutation=replace(mutation, request_fingerprint="b" * 64),
+                )
+                active_records = store.list_authz_policy_records(status="active", limit=2)
+            finally:
+                store.close()
+
+        self.assertEqual(written.status, "written")
+        self.assertEqual(replayed.status, "replayed")
+        self.assertEqual(conflicting.status, "idempotency_conflict")
+        self.assertEqual(len(active_records), 1)
+        self.assertEqual(
+            active_records[0].source,
+            authz_policy_activation.AUTHZ_POLICY_OPERATION_ACTIVATION_SOURCE,
+        )
+        self.assertEqual(
+            authz_policy_activation.authz_policy_operation_activation_state(
+                active_records[0].policy
+            ),
+            "active",
+        )
 
     def test_schema_migration_serializes_concurrent_startups(self) -> None:
         with _isolated_postgres_database() as database_url:
