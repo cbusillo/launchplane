@@ -35,6 +35,8 @@ class FastApiBrowserMutationBoundaryTests(unittest.IsolatedAsyncioTestCase):
             "/auth/logout",
             "/v1/agent/write-intents/evaluate",
             "/v1/authz-diagnostics/effective-access/evaluate",
+            "/v1/authz-policies/privileged-policy-operations/activation/apply",
+            "/v1/authz-policies/privileged-policy-operations/activation/dry-run",
             "/v1/drivers/generic-web/prod-promotion",
             "/v1/drivers/generic-web/prod-promotion-workflow",
             "/v1/merge-train/policies/import",
