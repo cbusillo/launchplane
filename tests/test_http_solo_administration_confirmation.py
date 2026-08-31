@@ -125,6 +125,31 @@ class SoloAdministrationConfirmationHttpTests(unittest.IsolatedAsyncioTestCase):
                     "reason": "Emergency solo administration recovery.",
                     "desired_policy": {"schema_version": 2},
                 }
+                wrong_secret_headers = {
+                    "Cookie": session_manager.session_cookie_header(current_session),
+                    "Idempotency-Key": "future-apply-1",
+                    "X-Solo-Administration-Confirmation-Secret": "wrong-secret",
+                    **session_manager_browser_headers(session_manager, current_session),
+                }
+                wrong_secret_response = await client.post(
+                    "/v1/authz-policies/managed-rule-sets/reconcile",
+                    json=apply_payload,
+                    headers=wrong_secret_headers,
+                )
+                self.assertEqual(wrong_secret_response.status_code, 409)
+                self.assertEqual(
+                    wrong_secret_response.json()["error"]["code"],
+                    "solo_administration_confirmation_invalid",
+                )
+                self.assertEqual(
+                    store.read_solo_administration_confirmation(confirmation_id).state,
+                    "issued",
+                )
+
+                current_session = session_manager.read_cookie_without_renewal(
+                    session_manager.session_cookie_header(session)
+                )
+                assert current_session is not None
                 apply_headers = {
                     "Cookie": session_manager.session_cookie_header(current_session),
                     "Idempotency-Key": "future-apply-1",
@@ -137,6 +162,30 @@ class SoloAdministrationConfirmationHttpTests(unittest.IsolatedAsyncioTestCase):
                     headers=apply_headers,
                 )
                 self.assertEqual(apply_response.status_code, 202)
+                self.assertEqual(
+                    store.read_solo_administration_confirmation(confirmation_id).state,
+                    "consumed",
+                )
+
+                current_session = session_manager.read_cookie_without_renewal(
+                    session_manager.session_cookie_header(session)
+                )
+                assert current_session is not None
+                replay_response = await client.post(
+                    "/v1/authz-policies/managed-rule-sets/reconcile",
+                    json=apply_payload,
+                    headers={
+                        "Cookie": session_manager.session_cookie_header(current_session),
+                        "Idempotency-Key": "future-apply-1",
+                        "X-Solo-Administration-Confirmation-Secret": secret,
+                        **session_manager_browser_headers(session_manager, current_session),
+                    },
+                )
+                self.assertEqual(replay_response.status_code, 202)
+                self.assertEqual(
+                    replay_response.json()["records"],
+                    apply_response.json()["records"],
+                )
                 self.assertEqual(
                     store.read_solo_administration_confirmation(confirmation_id).state,
                     "consumed",

@@ -14672,12 +14672,29 @@ def create_launchplane_fastapi_app(
                 acknowledgement_sha256=confirmation_record.acknowledgement_sha256,
                 secret_sha256=confirmation_secret_sha256,
             )
-        write_result = database_store.compare_and_write_authz_policy_record(
-            expected_record=route_result.previous_authz_policy_record,
-            replacement_record=(route_result.authz_policy_record if route_result.changed else None),
-            mutation=mutation,
-            confirmation_consumption=confirmation_consumption,
-        )
+        try:
+            write_result = database_store.compare_and_write_authz_policy_record(
+                expected_record=route_result.previous_authz_policy_record,
+                replacement_record=(
+                    route_result.authz_policy_record if route_result.changed else None
+                ),
+                mutation=mutation,
+                confirmation_consumption=confirmation_consumption,
+            )
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="confirmation_not_found",
+                message="The referenced solo-administration confirmation was not found.",
+            ) from error
+        except SoloAdministrationConfirmationConflictError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="solo_administration_confirmation_invalid",
+                message="The solo-administration confirmation is expired, consumed, or does not match this apply.",
+            ) from error
         if write_result.status == "replayed":
             if write_result.idempotency_record is None:
                 raise RuntimeError("Replayed authz policy write requires evidence.")
