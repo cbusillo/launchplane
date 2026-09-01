@@ -615,39 +615,43 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
 
     def test_build_batch_candidate_resets_existing_ref(self) -> None:
         candidate = _batch_candidate()
-        transport = RecordingMergeTrainGitHubTransport(
-            responses=(
-                MergeTrainGitHubError("reference exists", status_code=409),
-                {"ref": candidate.candidate_ref, "object": {"sha": "base-main"}},
-                _git_commit("base-main", "tree-base"),
-                _git_commit("head-1", "tree-head-1"),
-                _git_commit("head-2", "tree-head-2"),
-                _merge_commit("candidate-after-1", "tree-candidate-1"),
-                _github_branch(sha="candidate-after-1", tree_sha="tree-candidate-1"),
-                _git_commit(
-                    "candidate-after-1",
-                    "tree-candidate-1",
-                    parents=("base-main", "head-1"),
-                ),
-                _merge_commit("candidate-after-2", "tree-candidate-2"),
-                _github_branch(sha="candidate-after-2", tree_sha="tree-candidate-2"),
-                _git_commit(
-                    "candidate-after-2",
-                    "tree-candidate-2",
-                    parents=("candidate-after-1", "head-2"),
-                ),
-            )
-        )
+        for status_code in (409, 422):
+            with self.subTest(status_code=status_code):
+                transport = RecordingMergeTrainGitHubTransport(
+                    responses=(
+                        MergeTrainGitHubError("reference exists", status_code=status_code),
+                        {"ref": candidate.candidate_ref, "object": {"sha": "base-main"}},
+                        _git_commit("base-main", "tree-base"),
+                        _git_commit("head-1", "tree-head-1"),
+                        _git_commit("head-2", "tree-head-2"),
+                        _merge_commit("candidate-after-1", "tree-candidate-1"),
+                        _github_branch(sha="candidate-after-1", tree_sha="tree-candidate-1"),
+                        _git_commit(
+                            "candidate-after-1",
+                            "tree-candidate-1",
+                            parents=("base-main", "head-1"),
+                        ),
+                        _merge_commit("candidate-after-2", "tree-candidate-2"),
+                        _github_branch(sha="candidate-after-2", tree_sha="tree-candidate-2"),
+                        _git_commit(
+                            "candidate-after-2",
+                            "tree-candidate-2",
+                            parents=("candidate-after-1", "head-2"),
+                        ),
+                    )
+                )
 
-        GitHubMergeTrainClient(transport=transport).build_batch_candidate(candidate=candidate)
+                GitHubMergeTrainClient(transport=transport).build_batch_candidate(
+                    candidate=candidate
+                )
 
-        self.assertEqual(transport.requests[1].method, "PATCH")
-        self.assertEqual(
-            transport.requests[1].path,
-            "/repos/example/merge-train-repo/git/refs/heads/launchplane/train/example/merge-train-repo/main/"
-            f"{candidate.batch_id}",
-        )
-        self.assertEqual(transport.requests[1].body, {"sha": "base-main", "force": True})
+                self.assertEqual(transport.requests[1].method, "PATCH")
+                self.assertEqual(
+                    transport.requests[1].path,
+                    "/repos/example/merge-train-repo/git/refs/heads/launchplane/train/example/merge-train-repo/main/"
+                    f"{candidate.batch_id}",
+                )
+                self.assertEqual(transport.requests[1].body, {"sha": "base-main", "force": True})
 
     def test_build_batch_candidate_reports_conflict_without_landing_prs(self) -> None:
         candidate = _batch_candidate()

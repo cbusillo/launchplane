@@ -1172,7 +1172,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 body={"ref": reference, "sha": normalized_sha},
             )
         except MergeTrainGitHubError as error:
-            if error.status_code != 409:
+            if error.status_code not in {409, 422}:
                 raise
             reference_path = _reference_path(reference)
             self.transport.request(
