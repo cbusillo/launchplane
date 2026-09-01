@@ -26,7 +26,11 @@ from control_plane.contracts.privileged_operation import (
     PRIVILEGED_SECRET_OPERATION_READ_ACTION,
     PRIVILEGED_SECRET_OPERATION_REVOKE_ACTION,
 )
-from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
+from control_plane.contracts.authz_policy_record import (
+    LaunchplaneAuthzPolicyRecord,
+    authz_policy_sha256,
+    build_authz_policy_record_id,
+)
 from control_plane.http_routes.privileged_operations import (
     PrivilegedOperationRouteDependencies,
     register_privileged_operation_routes,
@@ -175,6 +179,38 @@ def _policy_record(policy: LaunchplaneAuthzPolicy) -> LaunchplaneAuthzPolicyReco
         updated_at="2026-08-22T19:55:00+00:00",
         policy=policy,
     )
+
+
+def _managed_authz_plan_payload(source_event_id: str) -> dict[str, object]:
+    return {
+        "descriptor_id": "managed-authz-policy-set",
+        "source_event_id": source_event_id,
+        "request": {
+            "managed_set_id": "privileged-operations.policy-planning",
+            "reason": "Review the exact managed policy plan.",
+            "desired_policy": {
+                "schema_version": 2,
+                "github_humans": [
+                    {
+                        "managed_set_id": "privileged-operations.policy-planning",
+                        "managed_rule_id": "human-policy-planner",
+                        "github_ids": [123],
+                        "roles": ["admin"],
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": [
+                            AUTHZ_POLICY_OPERATION_APPROVE_ACTION,
+                            AUTHZ_POLICY_OPERATION_CANCEL_ACTION,
+                            AUTHZ_POLICY_OPERATION_PROPOSE_ACTION,
+                            AUTHZ_POLICY_OPERATION_READ_ACTION,
+                            AUTHZ_POLICY_OPERATION_REVOKE_ACTION,
+                            "authz_policy_grant.write",
+                        ],
+                    }
+                ],
+            },
+        },
+    }
 
 
 class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
@@ -404,6 +440,80 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(revoked.status_code, 200)
         self.assertEqual(revoked.json()["record"]["status"], "revoked")
         self.assertEqual(revocation_replay.json()["write_status"], "replayed")
+
+    async def test_managed_authz_approval_rejects_stale_and_accepts_current_exact_plan(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as directory:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(directory) / "launchplane.sqlite3")
+            )
+            store.ensure_schema()
+            policy = _policy()
+            current_record = store.seed_authz_policy_if_absent(_policy_record(policy))
+            app = self._app(
+                store=store,
+                policy=policy,
+                policy_record_reader=lambda: store.list_authz_policy_records(
+                    status="active", limit=2
+                )[0],
+            )
+            try:
+                async with lifespan_client(app) as client:
+                    planned = await client.post(
+                        "/v1/privileged-operations/plans",
+                        json=_managed_authz_plan_payload("managed-policy-plan-1"),
+                    )
+                    self.assertEqual(planned.status_code, 200, planned.text)
+                    operation_id = planned.json()["record"]["operation_id"]
+                    revised_policy = policy.model_copy(update={"administrator_quorum": 2})
+                    revised_digest = authz_policy_sha256(revised_policy)
+                    revised_record = current_record.model_copy(
+                        update={
+                            "record_id": build_authz_policy_record_id(
+                                revision=current_record.revision + 1,
+                                policy_sha256=revised_digest,
+                            ),
+                            "revision": current_record.revision + 1,
+                            "source": "test:intervening-policy-revision",
+                            "policy_sha256": revised_digest,
+                            "policy": revised_policy,
+                        }
+                    )
+                    self.assertEqual(
+                        store.compare_and_write_authz_policy_record(
+                            expected_record=current_record,
+                            replacement_record=revised_record,
+                        ).status,
+                        "written",
+                    )
+                    stale_approval = await client.post(
+                        f"/v1/privileged-operations/plans/{operation_id}/approve",
+                        json={
+                            "source_event_id": "managed-policy-approval-stale",
+                            "reason": "Approve the stale managed policy plan.",
+                        },
+                    )
+                    current_plan = await client.post(
+                        "/v1/privileged-operations/plans",
+                        json=_managed_authz_plan_payload("managed-policy-plan-2"),
+                    )
+                    current_operation_id = current_plan.json()["record"]["operation_id"]
+                    current_approval = await client.post(
+                        f"/v1/privileged-operations/plans/{current_operation_id}/approve",
+                        json={
+                            "source_event_id": "managed-policy-approval-current",
+                            "reason": "Approve the current managed policy plan.",
+                        },
+                    )
+            finally:
+                store.close()
+
+        self.assertEqual(stale_approval.status_code, 409, stale_approval.text)
+        self.assertEqual(stale_approval.json()["detail"]["code"], "privileged_operation_plan_stale")
+        self.assertEqual(current_plan.status_code, 200, current_plan.text)
+        self.assertEqual(current_approval.status_code, 200, current_approval.text)
+        self.assertEqual(current_approval.json()["record"]["status"], "approved")
 
     async def test_approval_requires_an_explicit_github_id_selector(self) -> None:
         with (
