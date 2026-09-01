@@ -1,4 +1,5 @@
 import json
+from time import sleep
 from typing import Callable, Protocol, TypeVar
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
@@ -37,10 +38,11 @@ class MergeTrainGitHubError(RuntimeError):
 
 
 class MergeTrainGitHubStaleHeadError(MergeTrainGitHubError):
-    """Raised when GitHub refuses a guarded merge because the head SHA changed."""
+    """Raised when GitHub state no longer matches guarded merge evidence."""
 
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
+MERGE_REF_READ_DELAYS_SECONDS = (0.25, 0.5, 1.0, 2.0, 4.0)
 
 
 class MergeTrainGitHubTransport(Protocol):
@@ -200,10 +202,12 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             if not isinstance(payload, dict):
                 raise MergeTrainGitHubError("GitHub merge response must be a JSON object.")
             response_sha = _required_text(payload.get("sha"), "GitHub merge response requires sha.")
-            observed_candidate_sha = _base_branch_sha(
+            observed_candidate_sha = _wait_for_branch_sha(
                 transport=self.transport,
                 repository_path=repository_path,
                 base_branch=candidate_branch,
+                expected_sha=response_sha,
+                previous_sha=parent_sha,
             )
             if observed_candidate_sha != response_sha:
                 raise MergeTrainGitHubStaleHeadError(
@@ -1695,6 +1699,31 @@ def _base_branch_sha(
     )
     commit = _json_object(branch.get("commit"), "GitHub branch commit")
     return _required_text(commit.get("sha"), "GitHub branch commit requires sha.")
+
+
+def _wait_for_branch_sha(
+    *,
+    transport: MergeTrainGitHubTransport,
+    repository_path: str,
+    base_branch: str,
+    expected_sha: str,
+    previous_sha: str,
+) -> str:
+    observed_sha = _base_branch_sha(
+        transport=transport,
+        repository_path=repository_path,
+        base_branch=base_branch,
+    )
+    for delay_seconds in MERGE_REF_READ_DELAYS_SECONDS:
+        if observed_sha != previous_sha or observed_sha == expected_sha:
+            return observed_sha
+        sleep(delay_seconds)
+        observed_sha = _base_branch_sha(
+            transport=transport,
+            repository_path=repository_path,
+            base_branch=base_branch,
+        )
+    return observed_sha
 
 
 def _base_branch_identity(
