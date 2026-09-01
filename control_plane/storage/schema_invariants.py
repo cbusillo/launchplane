@@ -581,6 +581,11 @@ CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
         ("human_session_id_sha256", "created_at"),
     ),
     CriticalIndex(
+        "launchplane_solo_administration_confirmations",
+        "launchplane_solo_administration_confirmation_consumed_candidate_idx",
+        ("candidate_policy_sha256", "state"),
+    ),
+    CriticalIndex(
         "launchplane_solo_administration_confirmation_events",
         "lp_solo_admin_confirmation_event_transition_uq",
         ("confirmation_id", "event_type"),

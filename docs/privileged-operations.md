@@ -114,6 +114,16 @@ still return the original completed response. A conflicting use of the managed
 set fails closed. This is a temporary transport for existing DB authority, not
 an alternate policy editor, total-lockout recovery, or break-glass credential.
 
+The `#2277` recovery bridge is a separate, hidden browser-human surface for the
+deployed unconfirmed activation state. It only compiles three closed candidates:
+reset an exact unconfirmed activation, fresh activation, and temporary bootstrap
+retirement. A candidate that results in quorum one needs a fresh exact-digest
+confirmation; issuing it never accepts raw policy, selector, action, or rule
+input. The final retirement removes the temporary terminal-agent proposal rule
+because it grants only the overlapping proposal action and has no independent
+invariant after the managed human activation is confirmed. Any residual
+non-overlapping action on the closed temporary human rule is retained.
+
 The dry-run planner does not know which human will approve, so its evidence
 cannot include the identity-dependent applying-administrator and independent-
 administrator checks. Those checks run at approval and execution and may still

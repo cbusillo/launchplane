@@ -119,6 +119,17 @@ re-derives the role from the active policy; session role, name, email, session
 ID, and cookie values are not authorization authority. The read never rotates
 CSRF state, commits, or writes session or authorization evidence.
 
+Solo-administration confirmation records remain schema-version-1 inert evidence
+for both legacy quorum-change applies and the closed issue `#2277` recovery
+candidates. Legacy records remain readable unchanged. A consumed confirmation
+is looked up by candidate policy digest through the bounded
+`launchplane_solo_administration_confirmation_consumed_candidate_idx` index;
+this proves backing for the exact active digest without storing recovery policy
+bodies or inventing evidence for historical revisions. The recovery route adds
+only ordinary policy revision and idempotency records plus the existing
+confirmation lifecycle event; it introduces no direct database mutation record
+or mutable recovery configuration.
+
 The production schema proof runs against real PostgreSQL, not SQLite:
 
 ```bash
