@@ -67,7 +67,9 @@ def _admin_rule(*, github_id: int, managed_rule_id: str) -> dict[str, object]:
     }
 
 
-def _policy(*, independent_admin: bool = True) -> LaunchplaneAuthzPolicy:
+def _policy(
+    *, independent_admin: bool = True, administrator_quorum: int = 1
+) -> LaunchplaneAuthzPolicy:
     rules = [_admin_rule(github_id=123, managed_rule_id="applying-admin")]
     if independent_admin:
         rules.append(_admin_rule(github_id=456, managed_rule_id="independent-admin"))
@@ -85,7 +87,7 @@ def _policy(*, independent_admin: bool = True) -> LaunchplaneAuthzPolicy:
     return LaunchplaneAuthzPolicy.model_validate(
         {
             "schema_version": 2,
-            "administrator_quorum": 1,
+            "administrator_quorum": administrator_quorum,
             "github_humans": rules,
         }
     )
@@ -201,7 +203,7 @@ class AuthzPolicyOperationActivationHttpTests(unittest.IsolatedAsyncioTestCase):
                 database_url=_sqlite_database_url(root / "launchplane.sqlite3")
             )
             store.ensure_schema()
-            policy = _policy()
+            policy = _policy(administrator_quorum=2)
             store.seed_authz_policy_if_absent(_record(policy))
             session_manager = HumanSessionManager(
                 config=_github_oauth_config(),
@@ -394,7 +396,7 @@ class AuthzPolicyOperationActivationHttpTests(unittest.IsolatedAsyncioTestCase):
                 database_url=_sqlite_database_url(root / "launchplane.sqlite3")
             )
             store.ensure_schema()
-            policy = _policy()
+            policy = _policy(administrator_quorum=2)
             store.seed_authz_policy_if_absent(_record(policy))
             session_manager = HumanSessionManager(
                 config=_github_oauth_config(),
@@ -548,7 +550,7 @@ class AuthzPolicyOperationActivationHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(denial_record.action, "authz_policy_grant.write")
         self.assertEqual(denial_record.principal_type, "github_human")
 
-    async def test_apply_reports_and_preserves_solo_administration(self) -> None:
+    async def test_quorum_one_activation_requires_confirmed_recovery(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
             store = PostgresRecordStore(
@@ -580,9 +582,11 @@ class AuthzPolicyOperationActivationHttpTests(unittest.IsolatedAsyncioTestCase):
                         },
                         content=json.dumps({"reason": "Review continuity."}),
                     )
-                    self.assertEqual(dry_run.status_code, 202, dry_run.text)
-                    activation = dry_run.json()["result"]["activation"]
-                    self.assertTrue(activation["solo_administration_active"])
+                    self.assertEqual(dry_run.status_code, 409, dry_run.text)
+                    self.assertEqual(
+                        dry_run.json()["error"]["code"],
+                        "authz_policy_operation_activation_requires_recovery_confirmation",
+                    )
                     apply_response = await client.post(
                         _APPLY_ROUTE,
                         headers={
@@ -593,7 +597,7 @@ class AuthzPolicyOperationActivationHttpTests(unittest.IsolatedAsyncioTestCase):
                         content=json.dumps(
                             {
                                 "reason": "Review continuity.",
-                                "reviewed_plan_sha256": activation["review_digest"],
+                                "reviewed_plan_sha256": "0" * 64,
                             }
                         ),
                     )
@@ -601,15 +605,15 @@ class AuthzPolicyOperationActivationHttpTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 store.close()
 
-        self.assertEqual(apply_response.status_code, 202, apply_response.text)
+        self.assertEqual(apply_response.status_code, 409, apply_response.text)
         self.assertEqual(
-            apply_response.json()["result"]["activation"]["solo_administration_active"],
-            True,
+            apply_response.json()["error"]["code"],
+            "authz_policy_operation_activation_requires_recovery_confirmation",
         )
         self.assertEqual(len(active_records), 1)
         self.assertEqual(
             authz_policy_activation.authz_policy_operation_activation_state(
                 active_records[0].policy
             ),
-            "active",
+            "available",
         )

@@ -1313,6 +1313,13 @@ class LaunchplaneSoloAdministrationConfirmationRow(Base):
             "created_at",
         ),
         Index(
+            "launchplane_solo_administration_confirmation_consumed_recovery_activation_idx",
+            "candidate_policy_sha256",
+            "github_id",
+            "idempotency_scope_sha256",
+            "state",
+        ),
+        Index(
             "launchplane_solo_administration_confirmation_issued_binding_uq",
             "reviewed_plan_sha256",
             "human_session_id_sha256",
@@ -10326,6 +10333,42 @@ class PostgresRecordStore(HumanSessionStore):
                 LaunchplaneSoloAdministrationConfirmationRow.confirmation_id == confirmation_id,
             ),
         )
+
+    def has_consumed_solo_administration_confirmation(
+        self,
+        *,
+        candidate_policy_sha256: str,
+        github_id: int,
+        idempotency_scope_sha256: str,
+    ) -> bool:
+        normalized_digest = candidate_policy_sha256.strip().lower()
+        if len(normalized_digest) != 64 or any(
+            character not in "0123456789abcdef" for character in normalized_digest
+        ):
+            raise ValueError("candidate_policy_sha256 must be a lowercase SHA-256 digest")
+        normalized_scope_digest = idempotency_scope_sha256.strip().lower()
+        if len(normalized_scope_digest) != 64 or any(
+            character not in "0123456789abcdef" for character in normalized_scope_digest
+        ):
+            raise ValueError("idempotency_scope_sha256 must be a lowercase SHA-256 digest")
+        if github_id < 1:
+            raise ValueError("github_id must be positive")
+        with self._session_factory() as session:
+            return (
+                session.scalar(
+                    select(LaunchplaneSoloAdministrationConfirmationRow.confirmation_id)
+                    .where(
+                        LaunchplaneSoloAdministrationConfirmationRow.state == "consumed",
+                        LaunchplaneSoloAdministrationConfirmationRow.candidate_policy_sha256
+                        == normalized_digest,
+                        LaunchplaneSoloAdministrationConfirmationRow.github_id == github_id,
+                        LaunchplaneSoloAdministrationConfirmationRow.idempotency_scope_sha256
+                        == normalized_scope_digest,
+                    )
+                    .limit(1)
+                )
+                is not None
+            )
 
     def _transition_solo_administration_confirmation(
         self,

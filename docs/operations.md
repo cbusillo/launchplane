@@ -779,6 +779,16 @@ validation rather than widening a rule. Use dry-run and exact reviewed-digest
 apply, then remove the
 temporary selection after the DB-native policy-operation path removes its own
 bootstrap set and read-back proves the exception is gone.
+
+For the already-deployed unconfirmed activation, do not approve the inert
+`privileged-operation-78a8a92942bfb2b442530a15ad7946e2` plan and do not use a
+workflow, direct database command, or raw managed-policy payload to repair it.
+Use the deployed service's hidden browser-human recovery flow in order: reset
+only the exact active activation set with no consumed confirmation backing;
+fresh dry-run, acknowledgement, confirmation, and activation; then bootstrap
+retirement. The recovery diagnostic is read-only and returns only confirmation
+backing plus per-action managed-rule match cardinalities, never rule selectors
+or bodies.
 `LAUNCHPLANE_AUTHZ_MANAGED_SET_JSON` currently carries the primary operator set;
 `LAUNCHPLANE_AUTHZ_POLICY_RECONCILE_MANAGED_SET_JSON` owns the exact immutable
 policy-admin worker rules for the standalone authz wrapper and must declare the

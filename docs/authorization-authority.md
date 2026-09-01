@@ -126,6 +126,19 @@ event. The apply route binds the confirmation to the active policy record,
 candidate, plan, session digest, GitHub ID, idempotency key, and secret inside
 the same serialized transaction as policy CAS and idempotency completion.
 
+Issue `#2277` recovery uses that inert evidence model through separate hidden,
+browser-human-only, code-defined candidate routes. They accept a closed
+candidate ID rather than a policy body, recompile the candidate against the
+single active record for dry-run, confirmation issuance, and apply, and reject
+the apply when that fresh plan no longer matches the observed generation/digest.
+Every candidate whose resulting quorum is one requires a fresh five-minute
+session, the recovery-specific exact acknowledgement, a future candidate-scoped
+idempotency key, and an exact-digest confirmation consumed atomically with CAS.
+The only recovery sequence is: remove an exact active activation set that has no
+consumed confirmation bound to its active digest; create and confirm a fresh
+activation; then retire overlapping temporary bootstrap actions. The service
+never backfills or forges evidence for an already-active historical revision.
+
 The first DB-native read-only slice keeps those capabilities separate:
 
 - `authz_policy_effective_access.read` is restricted to an authenticated
@@ -230,6 +243,16 @@ ID and exactly `authz_policy_operation.propose`,
 `authz_policy_operation.revoke`, and `authz_policy_operation.cancel`. It cannot
 create workflow, terminal-agent, local-operator, local-admin, wildcard,
 provider, deployment, or unrelated authority.
+
+The companion recovery routes remain hidden from public OpenAPI like the
+activation bridge. They are not a policy editor: the closed candidates can only
+reset an unconfirmed exact activation, create a fresh exact activation, or
+retire the temporary bootstrap set after that fresh activation has consumed
+confirmation backing. Bootstrap retirement removes its terminal-agent proposal
+rule and removes all overlapping `authz_policy_operation.*` actions while
+preserving any non-overlapping action on the closed human bridge rule. It fails
+closed on any other bootstrap shape and verifies that each of the five actions
+then has exactly one match from `operator.privileged-policy-operation`.
 
 An immutable-ID administration denial remains ordinary redacted authorization
 evidence: the service records its trace, fixed action and scope, reason category,
