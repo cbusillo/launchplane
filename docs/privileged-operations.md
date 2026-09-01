@@ -92,9 +92,9 @@ Policy-operation approval additionally requires that the signed-in approver is
 already authorized for `authz_policy_grant.write` by an active schema-v2 rule
 with the same immutable GitHub ID. Execution checks that immutable pre-existing
 administrator authority again, then requires the candidate policy to retain the
-applying administrator and at least one distinct reachable policy
-administrator. An approval-only rule cannot bootstrap its holder into policy
-administration.
+applying administrator, at least one reachable strict immutable-ID
+GitHub-human administrator, and the effective administrator quorum. An
+approval-only rule cannot bootstrap its holder into policy administration.
 
 The one-time issue `#2277` activation bridge exists only to make this ordinary
 policy-operation lifecycle reachable for an already-authorized immutable-ID

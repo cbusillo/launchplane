@@ -185,7 +185,7 @@ class LaunchplaneServiceBootstrapTests(unittest.TestCase):
                         'actions = ["authz_policy_grant.write"]',
                         "",
                         "[[github_humans]]",
-                        "github_ids = [2002]",
+                        "github_ids = [2002, 2003]",
                         'roles = ["admin"]',
                         'products = ["launchplane"]',
                         'contexts = ["launchplane"]',

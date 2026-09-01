@@ -9,7 +9,8 @@ from control_plane.authz_grant_service import (
     AuthzManagedPolicyDiff,
     AuthzManagedPolicyReconcileEnvelope,
     authz_policy_allows_immutable_github_id_administration,
-    authz_policy_retains_independent_github_id_administration,
+    authz_policy_administrator_quorum_satisfied,
+    strict_immutable_github_human_administrator_ids,
 )
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.contracts.privileged_operation import (
@@ -19,7 +20,11 @@ from control_plane.contracts.privileged_operation import (
     AUTHZ_POLICY_OPERATION_READ_ACTION,
     AUTHZ_POLICY_OPERATION_REVOKE_ACTION,
 )
-from control_plane.service_auth import GitHubHumanPolicyRule, LaunchplaneAuthzPolicy
+from control_plane.service_auth import (
+    GitHubHumanPolicyRule,
+    LaunchplaneAuthzPolicy,
+    effective_administrator_quorum,
+)
 
 
 AUTHZ_POLICY_OPERATION_ACTIVATION_MANAGED_SET_ID = "operator.privileged-policy-operation"
@@ -181,15 +186,15 @@ def authz_policy_operation_activation_evidence(
         "candidate_policy_sha256": diff.desired_policy_sha256,
         "desired_set_sha256": diff.desired_set_sha256,
         "review_digest": diff.plan_sha256,
+        "administrator_quorum": effective_administrator_quorum(candidate_policy),
+        "strict_human_administrator_count": len(
+            strict_immutable_github_human_administrator_ids(candidate_policy)
+        ),
+        "quorum_satisfied": authz_policy_administrator_quorum_satisfied(policy=candidate_policy),
+        "solo_administration_active": diff.solo_administration_active,
         "applying_admin_retained": authz_policy_allows_immutable_github_id_administration(
             policy=candidate_policy,
             github_id=applying_github_id,
-        ),
-        "independent_admin_reachable": (
-            authz_policy_retains_independent_github_id_administration(
-                policy=candidate_policy,
-                applying_github_id=applying_github_id,
-            )
         ),
         "policy_safety_blockers": [
             blocker.model_dump(mode="json") for blocker in diff.policy_safety_blockers

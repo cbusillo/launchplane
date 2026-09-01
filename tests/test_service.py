@@ -197,7 +197,9 @@ class _StubGitHubOAuthClient:
         self.identity = identity
         self.code_verifier = ""
 
-    def authorization_url(self, *, state: str, code_challenge: str) -> str:
+    def authorization_url(
+        self, *, state: str, code_challenge: str, reauthenticate: bool = False
+    ) -> str:
         return f"https://github.example/authorize?state={state}&challenge={code_challenge}"
 
     def fetch_identity(
@@ -5731,7 +5733,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ],
                     "github_humans": [
                         {
-                            "github_ids": [2002],
+                            "github_ids": [2002, 2003],
                             "roles": ["admin"],
                             "products": ["launchplane"],
                             "contexts": ["launchplane"],
@@ -6119,7 +6121,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ],
                     "github_humans": [
                         {
-                            "github_ids": [2002],
+                            "github_ids": [2002, 2003],
                             "roles": ["admin"],
                             "products": ["launchplane"],
                             "contexts": ["launchplane"],
@@ -6410,8 +6412,8 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 headers=_fastapi_browser_mutation_headers(session_manager, cookie),
             )
 
-        self.assertEqual(status_code, 401)
-        self.assertEqual(payload["error"]["code"], "authentication_required")
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
 
     def test_managed_authz_reconcile_rejects_non_admin_workflow_authority(self) -> None:
         for action in ("product_profile.read", "launchplane_service_deploy.execute"):

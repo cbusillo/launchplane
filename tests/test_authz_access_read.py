@@ -528,6 +528,7 @@ class AuthzAccessReadHttpTests(unittest.IsolatedAsyncioTestCase):
             policy = LaunchplaneAuthzPolicy.model_validate(
                 {
                     "schema_version": 2,
+                    "administrator_quorum": 1,
                     "local_admins": [
                         {
                             "managed_set_id": "operator.authz-health",
@@ -579,8 +580,13 @@ class AuthzAccessReadHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["policy"]["record_id"], record.record_id)
         self.assertEqual(payload["policy"]["revision"], record.revision)
         self.assertEqual(payload["policy"]["policy_sha256"], record.policy_sha256)
-        self.assertEqual(payload["health"]["state"], "healthy")
-        self.assertEqual(payload["health"]["reason_codes"], [])
+        self.assertEqual(payload["health"]["state"], "attention_required")
+        self.assertEqual(
+            payload["health"]["reason_codes"], ["authz_policy_solo_administration_active"]
+        )
+        self.assertEqual(payload["health"]["administrator_quorum"], 1)
+        self.assertEqual(payload["health"]["reachable_administrator_count"], 1)
+        self.assertTrue(payload["health"]["solo_administration_active"])
         self.assertEqual(payload["managed_sets"]["total_count"], 2)
         self.assertEqual(
             [item["managed_set_id"] for item in payload["managed_sets"]["items"]],
@@ -588,7 +594,8 @@ class AuthzAccessReadHttpTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(payload["reachable_administrators"]["policy_reachable"])
         self.assertTrue(payload["reachable_administrators"]["caller_has_policy_administration"])
-        self.assertTrue(payload["reachable_administrators"]["independent_from_caller_reachable"])
+        self.assertTrue(payload["reachable_administrators"]["quorum_satisfied"])
+        self.assertTrue(payload["reachable_administrators"]["solo_administration_active"])
         serialized = json.dumps(payload, sort_keys=True)
         for secret_value in (
             "authz-admin",
@@ -1126,15 +1133,18 @@ class AuthzAccessReadHttpTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 200, response.text)
         payload = response.json()
-        self.assertEqual(payload["health"]["state"], "attention_required")
+        self.assertEqual(payload["health"]["state"], "blocked")
         self.assertEqual(
             payload["health"]["reason_codes"],
-            ["authz_policy_independent_admin_unreachable"],
+            [
+                "authz_policy_strict_human_admin_unreachable",
+                "authz_policy_administrator_quorum_unsatisfied",
+            ],
         )
         self.assertTrue(payload["reachable_administrators"]["caller_has_policy_administration"])
-        self.assertFalse(payload["reachable_administrators"]["independent_from_caller_reachable"])
+        self.assertFalse(payload["reachable_administrators"]["quorum_satisfied"])
         self.assertEqual(
-            payload["reachable_administrators"]["independent_from_caller_rule_count"],
+            payload["reachable_administrators"]["strict_github_human_id_count"],
             0,
         )
 

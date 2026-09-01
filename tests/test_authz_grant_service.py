@@ -14,12 +14,14 @@ from control_plane.authz_grant_service import (
     AuthzPolicyConflictError,
     AuthzPolicyRequestError,
     AuthzPolicySafetyError,
+    authz_policy_administrator_quorum_satisfied,
     build_authz_candidate_policy_structural_diff,
     execute_managed_authz_policy_reconcile,
     plan_managed_authz_policy_reconcile,
     preview_authz_candidate_policy,
     summarize_active_authz_policy_record,
     summarize_active_authz_policy_health_record,
+    strict_immutable_github_human_administrator_ids,
 )
 from control_plane.contracts.authz_access_read import AuthzPolicyCandidatePreviewRequest
 from control_plane.contracts.authz_policy_record import (
@@ -30,12 +32,14 @@ from control_plane.contracts.authz_policy_record import (
 from control_plane.service_auth import (
     GitHubActionsIdentity,
     GitHubActionsPolicyRule,
+    GitHubHumanIdentity,
     GitHubHumanPolicyRule,
     LaunchplaneAuthzPolicy,
     LocalAdminIdentity,
     LocalAdminPolicyRule,
     LocalOperatorPolicyRule,
     TerminalAgentPolicyRule,
+    effective_administrator_quorum,
 )
 
 
@@ -181,7 +185,167 @@ def _workflow_admin_rule(
 
 
 class AuthzManagedPolicyServiceTests(unittest.TestCase):
-    def test_continuity_requires_exact_immutable_github_human_administrators(self) -> None:
+    def test_administrator_quorum_is_legacy_compatible_and_schema_v1_rejects_it(self) -> None:
+        legacy_policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "schema_version": 2,
+                "github_actions": [
+                    {
+                        "repository": "example/repository",
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": ["example.read"],
+                    }
+                ],
+            }
+        )
+        explicit_legacy_policy = legacy_policy.model_copy(update={"administrator_quorum": None})
+
+        self.assertEqual(effective_administrator_quorum(legacy_policy), 2)
+        self.assertEqual(
+            legacy_policy.model_dump(mode="json"), explicit_legacy_policy.model_dump(mode="json")
+        )
+        self.assertEqual(
+            authz_policy_sha256(legacy_policy), authz_policy_sha256(explicit_legacy_policy)
+        )
+        self.assertEqual(
+            build_authz_policy_record_id(
+                revision=4,
+                policy_sha256=authz_policy_sha256(legacy_policy),
+            ),
+            build_authz_policy_record_id(
+                revision=4,
+                policy_sha256=authz_policy_sha256(explicit_legacy_policy),
+            ),
+        )
+        with self.assertRaises(ValidationError):
+            LaunchplaneAuthzPolicy(schema_version=1, administrator_quorum=1)
+
+    def test_quorum_counts_distinct_strict_human_ids_only(self) -> None:
+        strict_rule = GitHubHumanPolicyRule(
+            github_ids=(101, 102),
+            roles=("admin",),
+            products=("launchplane",),
+            contexts=("launchplane",),
+            actions=("authz_policy_grant.write",),
+        )
+        duplicate_rule = strict_rule.model_copy(update={"github_ids": (102, 103)})
+        policy = LaunchplaneAuthzPolicy(
+            schema_version=2,
+            administrator_quorum=3,
+            github_humans=(strict_rule, duplicate_rule),
+            github_actions=(_workflow_admin_rule(_identity()),),
+            local_admins=(
+                LocalAdminPolicyRule(
+                    subjects=("bot",),
+                    token_labels=("bot",),
+                    products=("launchplane",),
+                    contexts=("launchplane",),
+                    actions=("authz_policy_grant.write",),
+                ),
+            ),
+        )
+
+        self.assertEqual(strict_immutable_github_human_administrator_ids(policy), {101, 102, 103})
+        self.assertTrue(authz_policy_administrator_quorum_satisfied(policy=policy))
+        self.assertEqual(
+            strict_immutable_github_human_administrator_ids(
+                policy.model_copy(update={"administrator_quorum": 4})
+            ),
+            {101, 102, 103},
+        )
+        self.assertFalse(
+            authz_policy_administrator_quorum_satisfied(
+                policy=policy.model_copy(update={"administrator_quorum": 4})
+            )
+        )
+
+    def test_managed_reconcile_requires_explicit_quorum_mutation_and_evaluates_candidate(
+        self,
+    ) -> None:
+        first_admin = GitHubHumanPolicyRule(
+            managed_set_id="operator.quorum",
+            managed_rule_id="first",
+            github_ids=(101,),
+            roles=("admin",),
+            products=("launchplane",),
+            contexts=("launchplane",),
+            actions=("authz_policy_grant.write",),
+        )
+        second_admin = first_admin.model_copy(
+            update={"managed_rule_id": "second", "github_ids": (102,)}
+        )
+        current_policy = LaunchplaneAuthzPolicy(
+            schema_version=2,
+            github_humans=(first_admin, second_admin),
+        )
+        desired_policy = LaunchplaneAuthzPolicy(schema_version=2, github_humans=(first_admin,))
+        with self.assertRaises(ValidationError):
+            AuthzManagedPolicyReconcileEnvelope(
+                schema_version=2,
+                product="launchplane",
+                managed_set_id="operator.quorum",
+                desired_policy=desired_policy.model_copy(update={"administrator_quorum": 1}),
+            )
+
+        request = AuthzManagedPolicyReconcileEnvelope(
+            schema_version=2,
+            product="launchplane",
+            managed_set_id="operator.quorum",
+            administrator_quorum_change=1,
+            desired_policy=desired_policy,
+        )
+        _, _, candidate_policy, diff = plan_managed_authz_policy_reconcile(
+            record_store=_AuthzPolicyStore((_active_record_for_policy(current_policy),)),
+            request=request,
+        )
+
+        self.assertEqual(candidate_policy.administrator_quorum, 1)
+        self.assertEqual(diff.previous_administrator_quorum, 2)
+        self.assertEqual(diff.administrator_quorum, 1)
+        self.assertTrue(diff.administrator_quorum_changed)
+        self.assertTrue(diff.quorum_satisfied)
+        self.assertEqual(diff.strict_human_administrator_count, 1)
+        self.assertEqual(diff.policy_safety_blockers, ())
+
+        preserved_request = AuthzManagedPolicyReconcileEnvelope(
+            schema_version=2,
+            product="launchplane",
+            managed_set_id="operator.quorum",
+            desired_policy=desired_policy,
+        )
+        _, _, preserved_policy, preserved_diff = plan_managed_authz_policy_reconcile(
+            record_store=_AuthzPolicyStore(
+                (
+                    _active_record_for_policy(
+                        current_policy.model_copy(update={"administrator_quorum": 1})
+                    ),
+                )
+            ),
+            request=preserved_request,
+        )
+        self.assertEqual(preserved_policy.administrator_quorum, 1)
+        self.assertEqual(preserved_diff.administrator_quorum, 1)
+        self.assertFalse(preserved_diff.administrator_quorum_changed)
+
+        legacy_request = AuthzManagedPolicyReconcileEnvelope(
+            schema_version=2,
+            product="launchplane",
+            managed_set_id="operator.quorum",
+            desired_policy=desired_policy,
+        )
+        _, _, legacy_candidate, legacy_diff = plan_managed_authz_policy_reconcile(
+            record_store=_AuthzPolicyStore((_active_record_for_policy(current_policy),)),
+            request=legacy_request,
+        )
+        self.assertIsNone(legacy_candidate.administrator_quorum)
+        self.assertFalse(legacy_diff.quorum_satisfied)
+        self.assertEqual(
+            tuple(blocker.code for blocker in legacy_diff.policy_safety_blockers),
+            ("authz_policy_administrator_quorum_unsatisfied",),
+        )
+
+    def test_policy_administrator_helpers_require_exact_immutable_github_human_rules(self) -> None:
         strict_admin = GitHubHumanPolicyRule(
             github_ids=(101, 102),
             roles=("admin",),
@@ -247,19 +411,17 @@ class AuthzManagedPolicyServiceTests(unittest.TestCase):
                 )
             )
         self.assertTrue(
-            control_plane_authz_grant_service.authz_policy_retains_independent_github_id_administration(
+            control_plane_authz_grant_service.authz_policy_retains_reachable_github_id_administration(
                 policy=policy,
-                applying_github_id=101,
             )
         )
-        self.assertFalse(
-            control_plane_authz_grant_service.authz_policy_retains_independent_github_id_administration(
+        self.assertTrue(
+            control_plane_authz_grant_service.authz_policy_retains_reachable_github_id_administration(
                 policy=policy.model_copy(
                     update={
                         "github_humans": (strict_admin.model_copy(update={"github_ids": (101,)}),)
                     }
                 ),
-                applying_github_id=101,
             )
         )
 
@@ -612,10 +774,14 @@ class AuthzManagedPolicyServiceTests(unittest.TestCase):
             request=request,
         )
 
-        self.assertEqual(diff.policy_safety_blocker_count, 1)
+        self.assertEqual(diff.policy_safety_blocker_count, 3)
         self.assertEqual(
-            diff.policy_safety_blockers[0].code,
-            "authz_policy_admin_unreachable",
+            tuple(blocker.code for blocker in diff.policy_safety_blockers),
+            (
+                "authz_policy_admin_unreachable",
+                "authz_policy_strict_human_admin_unreachable",
+                "authz_policy_administrator_quorum_unsatisfied",
+            ),
         )
         self.assertIn(
             "retain at least one reachable principal",
@@ -664,13 +830,13 @@ class AuthzManagedPolicyServiceTests(unittest.TestCase):
             request=request,
         )
 
-        self.assertEqual(diff.policy_safety_blocker_count, 1)
+        self.assertEqual(diff.policy_safety_blocker_count, 3)
         self.assertEqual(
             diff.policy_safety_blockers[0].code,
             "authz_policy_admin_unreachable",
         )
 
-    def test_managed_apply_requires_independent_policy_administrator(self) -> None:
+    def test_managed_apply_requires_candidate_quorum_and_applying_admin(self) -> None:
         identity = _workflow_admin_identity()
         applying_admin = _workflow_admin_rule(identity)
         retired_rule = applying_admin.model_copy(
@@ -687,6 +853,7 @@ class AuthzManagedPolicyServiceTests(unittest.TestCase):
                 schema_version=2,
                 product="launchplane",
                 managed_set_id="operator.launchplane",
+                administrator_quorum_change=1,
                 reason="Retire the obsolete managed read rule.",
                 desired_policy=LaunchplaneAuthzPolicy(
                     schema_version=2,
@@ -702,6 +869,7 @@ class AuthzManagedPolicyServiceTests(unittest.TestCase):
                     **dry_run.model_dump(mode="json"),
                     "mode": "apply",
                     "reviewed_plan_sha256": diff.plan_sha256,
+                    "solo_administration_confirmation_id": "solo-administration-confirmation-abcdefgh",
                 }
             )
 
@@ -728,12 +896,18 @@ class AuthzManagedPolicyServiceTests(unittest.TestCase):
             authorized_policy_sha256=current_record.policy_sha256,
         )
         dry_run_diff = cast(dict[str, object], dry_run_result.driver_result["diff"])
-        self.assertEqual(dry_run_diff["policy_safety_blocker_count"], 1)
+        self.assertEqual(dry_run_diff["policy_safety_blocker_count"], 2)
         self.assertEqual(
-            cast(list[dict[str, object]], dry_run_diff["policy_safety_blockers"])[0]["code"],
-            "authz_policy_independent_admin_unreachable",
+            tuple(
+                blocker["code"]
+                for blocker in cast(list[dict[str, object]], dry_run_diff["policy_safety_blockers"])
+            ),
+            (
+                "authz_policy_strict_human_admin_unreachable",
+                "authz_policy_administrator_quorum_unsatisfied",
+            ),
         )
-        with self.assertRaises(AuthzPolicySafetyError) as raised:
+        with self.assertRaises(AuthzPolicyRequestError) as raised:
             execute_managed_authz_policy_reconcile(
                 record_store=_AuthzPolicyStore((current_record,)),
                 request=apply_request(current_record),
@@ -742,10 +916,7 @@ class AuthzManagedPolicyServiceTests(unittest.TestCase):
                 now_timestamp=lambda: "2026-08-17T00:00:00Z",
                 authorized_policy_sha256=current_record.policy_sha256,
             )
-        self.assertEqual(
-            raised.exception.code,
-            "authz_policy_independent_admin_unreachable",
-        )
+        self.assertIn("GitHub-human browser", str(raised.exception))
 
         local_admin = LocalAdminPolicyRule(
             subjects=("recovery-admin",),
@@ -777,7 +948,7 @@ class AuthzManagedPolicyServiceTests(unittest.TestCase):
         local_admin_diff = cast(dict[str, object], local_admin_result.driver_result["diff"])
         self.assertEqual(
             cast(list[dict[str, object]], local_admin_diff["policy_safety_blockers"])[0]["code"],
-            "authz_policy_independent_admin_unreachable",
+            "authz_policy_strict_human_admin_unreachable",
         )
 
         independent_admin = GitHubHumanPolicyRule(
@@ -793,7 +964,15 @@ class AuthzManagedPolicyServiceTests(unittest.TestCase):
         result = execute_managed_authz_policy_reconcile(
             record_store=_AuthzPolicyStore((recoverable_record,)),
             request=apply_request(recoverable_record),
-            identity=identity,
+            identity=GitHubHumanIdentity(
+                login="independent-admin",
+                github_id=2002,
+                name="Independent Admin",
+                email="admin@example.test",
+                organizations=frozenset(),
+                teams=frozenset(),
+                role="admin",
+            ),
             trace_id="trace-independent-admin-retained",
             now_timestamp=lambda: "2026-08-17T00:00:00Z",
             authorized_policy_sha256=recoverable_record.policy_sha256,
@@ -1893,8 +2072,19 @@ class AuthzManagedPolicyServiceTests(unittest.TestCase):
     ) -> None:
         identity = _workflow_admin_identity()
         admin_rule = _workflow_admin_rule(identity)
+        strict_human_rule = GitHubHumanPolicyRule(
+            github_ids=(123, 456),
+            roles=("admin",),
+            products=("launchplane",),
+            contexts=("launchplane",),
+            actions=("authz_policy_grant.write",),
+        )
         current_record = _active_record_for_policy(
-            LaunchplaneAuthzPolicy(schema_version=2, github_actions=(admin_rule,))
+            LaunchplaneAuthzPolicy(
+                schema_version=2,
+                github_actions=(admin_rule,),
+                github_humans=(strict_human_rule,),
+            )
         )
         dry_run = AuthzManagedPolicyReconcileEnvelope(
             schema_version=2,
@@ -2417,11 +2607,12 @@ class AuthzManagedPolicyServiceTests(unittest.TestCase):
             ),
         )
 
-        self.assertEqual(summary.health.state, "attention_required")
+        self.assertEqual(summary.health.state, "blocked")
         self.assertEqual(
             summary.health.reason_codes,
             (
-                "authz_policy_independent_admin_unreachable",
+                "authz_policy_strict_human_admin_unreachable",
+                "authz_policy_administrator_quorum_unsatisfied",
                 "policy_schema_legacy",
                 "unmanaged_rules_present",
                 "github_actions_legacy_name_only_rules_present",
@@ -2430,8 +2621,8 @@ class AuthzManagedPolicyServiceTests(unittest.TestCase):
         )
         self.assertEqual(summary.health.managed_rule_count, 0)
         self.assertEqual(summary.health.unmanaged_rule_count, 1)
-        self.assertTrue(summary.reachable_administrators.policy_reachable)
-        self.assertFalse(summary.reachable_administrators.independent_from_caller_reachable)
+        self.assertFalse(summary.reachable_administrators.policy_reachable)
+        self.assertFalse(summary.reachable_administrators.quorum_satisfied)
 
     def test_candidate_policy_structural_diff_is_bounded_and_deterministic(self) -> None:
         active_policy = LaunchplaneAuthzPolicy.model_validate(
@@ -2666,10 +2857,8 @@ class AuthzManagedPolicyServiceTests(unittest.TestCase):
         self.assertEqual(response.probes[0].candidate_evaluation.decision, "allowed")
         self.assertEqual(response.probes[0].delta, "granted")
         self.assertEqual(response.candidate_readiness.blocked_rule_count, 0)
-        self.assertTrue(response.candidate_reachable_administrators.policy_reachable)
-        self.assertFalse(
-            response.candidate_reachable_administrators.independent_from_caller_reachable
-        )
+        self.assertFalse(response.candidate_reachable_administrators.policy_reachable)
+        self.assertFalse(response.candidate_reachable_administrators.quorum_satisfied)
 
     def test_candidate_policy_preview_reuses_managed_workflow_transition_validation(
         self,

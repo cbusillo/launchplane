@@ -37,6 +37,11 @@ class _FakeOAuthSession:
     def __init__(self, payloads: dict[str, object]) -> None:
         self._payloads = payloads
         self.token_fetched = False
+        self.authorization_kwargs: dict[str, object] = {}
+
+    def create_authorization_url(self, _url: str, **kwargs: object) -> tuple[str, str]:
+        self.authorization_kwargs = kwargs
+        return "https://github.example/authorize", str(kwargs["state"])
 
     def fetch_token(self, *_args: object, **_kwargs: object) -> None:
         self.token_fetched = True
@@ -94,6 +99,17 @@ def _oauth_session() -> _FakeOAuthSession:
 
 
 class HumanSessionManagerTests(unittest.TestCase):
+    def test_oauth_reauthentication_requests_github_login_prompt(self) -> None:
+        oauth_session = _oauth_session()
+        with patch.object(GitHubOAuthClient, "_new_session", return_value=oauth_session):
+            client = GitHubOAuthClient(_oauth_config())
+            client.authorization_url(
+                state="state",
+                code_challenge="challenge",
+                reauthenticate=True,
+            )
+        self.assertEqual(oauth_session.authorization_kwargs["prompt"], "login")
+
     def test_bootstrap_admin_role_applies_before_db_human_policy_exists(self) -> None:
         manager = HumanSessionManager(
             config=GitHubOAuthConfig(

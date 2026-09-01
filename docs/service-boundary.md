@@ -795,8 +795,9 @@ one fixed GitHub-human managed rule for the authenticated ID with only the five
 `authz_policy_operation` propose/read/approve/revoke/cancel actions. Dry-run
 returns bounded observed-policy, candidate, exact-action, and continuity
 evidence. Apply uses the existing DB-only mutation reservation and active-policy
-CAS, requires the applying administrator plus a distinct reachable immutable-ID
-administrator, and verifies the exact resulting record ID, revision, digest,
+CAS, requires the applying administrator, a reachable strict immutable-ID
+GitHub-human administrator, and the effective administrator quorum, and verifies
+the exact resulting record ID, revision, digest,
 policy, managed set, and bound GitHub ID before updating in-process policy.
 
 The apply idempotency scope is the immutable GitHub ID, not the mutable login or
@@ -2183,9 +2184,15 @@ leaves the product unauthorized rather than silently broadening access.
 The authz planning route requires `generic_web_preview_authz.plan`, reads the
 active DB-backed policy, retains unrelated managed rules, and returns a complete
 dry-run reconcile envelope. It never writes policy. The existing
-`POST /v1/authz-policies/managed-rule-sets/reconcile` route remains the sole
-transitional workflow writer, accepts only GitHub Actions OIDC workload
-transport, and requires `authz_policy_grant.write` for apply. The separate,
+`POST /v1/authz-policies/managed-rule-sets/reconcile` route remains the policy
+writer. Routine reconciliation remains GitHub Actions-only; administrator
+quorum changes require an authenticated GitHub-human browser mutation and exact
+active DB authority. Quorum-one apply additionally requires the
+`solo_administration_confirmation_id` envelope field and the dedicated one-time
+secret header. Confirmation issuance, reads, and revocation use the
+`/v1/authz-policies/solo-administration-confirmations` browser routes with
+strict same-origin/Fetch Metadata/CSRF validation and `Cache-Control:
+no-store`. The separate,
 self-retiring issue `#2277` browser-human activation bridge can install only the
 compiled privileged-policy operation set and cannot accept a general managed
 policy payload. All other browser-human, terminal-agent, and local bearer

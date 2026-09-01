@@ -28,7 +28,9 @@ class _DeterministicOpenApiTokenVerifier(TokenVerifier):
 
 
 class _DeterministicGitHubOAuthLoginClient:
-    def authorization_url(self, *, state: str, code_challenge: str) -> str:
+    def authorization_url(
+        self, *, state: str, code_challenge: str, reauthenticate: bool = False
+    ) -> str:
         return (
             "https://github.example.invalid/login/oauth/authorize"
             f"?state={state}&code_challenge={code_challenge}"

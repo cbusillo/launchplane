@@ -10,7 +10,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
 AUTHZ_COMPATIBILITY_FLOOR_REVISION = "f3b5d7e9a1c2"
-EXPECTED_ALEMBIC_HEAD_REVISION = "c4e6a8b0d2f5"
+EXPECTED_ALEMBIC_HEAD_REVISION = "c4e6a8b0d2f6"
 RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS = (EXPECTED_ALEMBIC_HEAD_REVISION,)
 _AUTHZ_POLICY_TABLE = "launchplane_authz_policies"
 _AUTHZ_POLICY_WRITE_FENCE_TRIGGER = "launchplane_authz_policy_write_fence"
@@ -491,6 +491,51 @@ CRITICAL_POSTGRES_COLUMN_TYPES: tuple[CriticalColumnType, ...] = (
         "authorizes_policy",
         ("boolean", "bool"),
     ),
+    CriticalColumnType(
+        "launchplane_solo_administration_confirmations",
+        "payload",
+        ("jsonb",),
+    ),
+    CriticalColumnType(
+        "launchplane_solo_administration_confirmations",
+        "active_policy_revision",
+        ("bigint", "int8"),
+    ),
+    CriticalColumnType(
+        "launchplane_solo_administration_confirmations",
+        "candidate_administrator_quorum",
+        ("bigint", "int8"),
+    ),
+    CriticalColumnType(
+        "launchplane_solo_administration_confirmations",
+        "candidate_distinct_human_administrator_count",
+        ("bigint", "int8"),
+    ),
+    CriticalColumnType(
+        "launchplane_solo_administration_confirmations",
+        "github_id",
+        ("bigint", "int8"),
+    ),
+    CriticalColumnType(
+        "launchplane_solo_administration_confirmations",
+        "authorizes_policy",
+        ("boolean", "bool"),
+    ),
+    CriticalColumnType(
+        "launchplane_solo_administration_confirmations",
+        "secret_sha256",
+        ("character varying", "varchar", "text"),
+    ),
+    CriticalColumnType(
+        "launchplane_solo_administration_confirmation_events",
+        "payload",
+        ("jsonb",),
+    ),
+    CriticalColumnType(
+        "launchplane_solo_administration_confirmation_events",
+        "authorizes_policy",
+        ("boolean", "bool"),
+    ),
 )
 
 _ACTIVE_OPERATION_PREDICATE_TOKENS = ("status", "pending", "running")
@@ -512,6 +557,39 @@ CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
         "launchplane_administrator_enrollments",
         "launchplane_administrator_enrollment_state_expiry_idx",
         ("state", "expires_at"),
+    ),
+    CriticalIndex(
+        "launchplane_solo_administration_confirmations",
+        "launchplane_solo_administration_confirmation_issued_binding_uq",
+        (
+            "reviewed_plan_sha256",
+            "human_session_id_sha256",
+            "idempotency_scope_sha256",
+            "idempotency_key_sha256",
+        ),
+        unique=True,
+        predicate_expression="state='issued'",
+    ),
+    CriticalIndex(
+        "launchplane_solo_administration_confirmations",
+        "launchplane_solo_administration_confirmation_state_expiry_idx",
+        ("state", "expires_at"),
+    ),
+    CriticalIndex(
+        "launchplane_solo_administration_confirmations",
+        "launchplane_solo_administration_confirmation_session_idx",
+        ("human_session_id_sha256", "created_at"),
+    ),
+    CriticalIndex(
+        "launchplane_solo_administration_confirmation_events",
+        "lp_solo_admin_confirmation_event_transition_uq",
+        ("confirmation_id", "event_type"),
+        unique=True,
+    ),
+    CriticalIndex(
+        "launchplane_solo_administration_confirmation_events",
+        "lp_solo_admin_confirmation_event_confirmation_idx",
+        ("confirmation_id", "occurred_at"),
     ),
     CriticalIndex(
         "launchplane_merge_admissions",
@@ -1166,6 +1244,10 @@ CRITICAL_PRIMARY_KEYS: tuple[CriticalPrimaryKey, ...] = (
     CriticalPrimaryKey(
         "launchplane_administrator_enrollments",
         ("enrollment_id",),
+    ),
+    CriticalPrimaryKey(
+        "launchplane_solo_administration_confirmations",
+        ("confirmation_id",),
     ),
 )
 

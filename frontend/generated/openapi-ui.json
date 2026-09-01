@@ -5330,6 +5330,17 @@
             "title": "Added Rule Count",
             "type": "integer"
           },
+          "administrator_quorum": {
+            "default": 2,
+            "minimum": 1,
+            "title": "Administrator Quorum",
+            "type": "integer"
+          },
+          "administrator_quorum_changed": {
+            "default": false,
+            "title": "Administrator Quorum Changed",
+            "type": "boolean"
+          },
           "adopted_rule_count": {
             "default": 0,
             "title": "Adopted Rule Count",
@@ -5399,6 +5410,12 @@
             "title": "Policy Safety Blockers",
             "type": "array"
           },
+          "previous_administrator_quorum": {
+            "default": 2,
+            "minimum": 1,
+            "title": "Previous Administrator Quorum",
+            "type": "integer"
+          },
           "previous_policy_sha256": {
             "title": "Previous Policy Sha256",
             "type": "string"
@@ -5410,6 +5427,11 @@
           "previous_revision": {
             "title": "Previous Revision",
             "type": "integer"
+          },
+          "quorum_satisfied": {
+            "default": false,
+            "title": "Quorum Satisfied",
+            "type": "boolean"
           },
           "removed_rule_count": {
             "default": 0,
@@ -5434,6 +5456,17 @@
             "title": "Schema Migrated",
             "type": "boolean"
           },
+          "solo_administration_active": {
+            "default": false,
+            "title": "Solo Administration Active",
+            "type": "boolean"
+          },
+          "strict_human_administrator_count": {
+            "default": 0,
+            "minimum": 0,
+            "title": "Strict Human Administrator Count",
+            "type": "integer"
+          },
           "unchanged_rule_count": {
             "default": 0,
             "title": "Unchanged Rule Count",
@@ -5452,6 +5485,8 @@
         },
         "required": [
           "added_rule_count",
+          "administrator_quorum",
+          "administrator_quorum_changed",
           "adopted_rule_count",
           "authorization_changed",
           "candidate_revision",
@@ -5465,13 +5500,17 @@
           "plan_sha256",
           "policy_safety_blocker_count",
           "policy_safety_blockers",
+          "previous_administrator_quorum",
           "previous_policy_sha256",
           "previous_record_id",
           "previous_revision",
+          "quorum_satisfied",
           "removed_rule_count",
           "retired_unmanaged_compatibility_rule_count",
           "retired_unmanaged_compatibility_rules",
           "schema_migrated",
+          "solo_administration_active",
+          "strict_human_administrator_count",
           "unchanged_rule_count",
           "unmanaged_compatibility_candidate_count",
           "updated_rule_count"
@@ -5486,7 +5525,8 @@
             "enum": [
               "authz_policy_admin_unreachable",
               "authz_policy_applying_admin_removed",
-              "authz_policy_independent_admin_unreachable"
+              "authz_policy_strict_human_admin_unreachable",
+              "authz_policy_administrator_quorum_unsatisfied"
             ],
             "title": "Code",
             "type": "string"
@@ -8781,6 +8821,18 @@
       "ManagedAuthzPolicySetProposalInput-Output": {
         "additionalProperties": false,
         "properties": {
+          "administrator_quorum_change": {
+            "anyOf": [
+              {
+                "minimum": 1,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Administrator Quorum Change"
+          },
           "desired_policy": {
             "$ref": "#/components/schemas/LaunchplaneAuthzPolicy-Output"
           },
@@ -8810,6 +8862,7 @@
           }
         },
         "required": [
+          "administrator_quorum_change",
           "desired_policy",
           "managed_set_id",
           "reason",
