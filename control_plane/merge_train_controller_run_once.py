@@ -2007,11 +2007,12 @@ def try_reflow_failed_merge_train_candidate(
     dry_run_result = build_merge_train_dry_run_result(policy=policy, snapshot=snapshot)
     if dry_run_result.intended_next_action != "merge":
         return None
-    if _merge_train_candidate_matches_dry_run_queue(
+    queue_unchanged = _merge_train_candidate_matches_dry_run_queue(
         candidate=active_candidate_record.candidate,
         dry_run_result=dry_run_result,
         base_sha=snapshot.base_sha,
-    ):
+    )
+    if queue_unchanged and active_candidate_record.candidate.candidate_sha:
         return None
     candidate = build_merge_train_batch_candidate(
         dry_run_result=dry_run_result,
