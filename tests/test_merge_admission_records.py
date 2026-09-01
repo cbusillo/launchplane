@@ -251,6 +251,16 @@ class _StaticEvaluator:
         return self.evaluation
 
 
+class _CapturingEvaluator(_StaticEvaluator):
+    def __init__(self, evaluation: MergeAdmissionEvaluation) -> None:
+        super().__init__(evaluation)
+        self.kwargs: dict[str, object] = {}
+
+    def evaluate(self, **kwargs: object) -> MergeAdmissionEvaluation:
+        self.kwargs = kwargs
+        return super().evaluate(**kwargs)
+
+
 class _ProviderError(RuntimeError):
     def __init__(self, status_code: int) -> None:
         super().__init__(f"provider rejected with {status_code}")
@@ -434,6 +444,7 @@ class GuardedMergeAdmissionScenarioTests(unittest.TestCase):
         *,
         evaluator: MergeAdmissionEvaluator | None = None,
         admission_time_provider: Callable[[], str] | None = None,
+        controller_state_provider: Callable[[], MergeTrainControllerStateRecord] | None = None,
     ) -> GuardedMergeAdmission:
         return GuardedMergeAdmission(
             record_store=self.store,
@@ -447,11 +458,14 @@ class GuardedMergeAdmissionScenarioTests(unittest.TestCase):
             candidate_record=self.candidate_record,
             landing_plan_record=self.landing_record,
             controller_state=self.controller_state,
-            controller_state_provider=lambda: self.store.list_merge_train_controller_state_records(
-                repository=REPOSITORY,
-                base_branch="main",
-                limit=1,
-            )[0],
+            controller_state_provider=controller_state_provider
+            or (
+                lambda: self.store.list_merge_train_controller_state_records(
+                    repository=REPOSITORY,
+                    base_branch="main",
+                    limit=1,
+                )[0]
+            ),
             admission_time_provider=admission_time_provider or (lambda: "2026-08-11T03:01:00Z"),
             trace_id="scenario-test",
         )
@@ -474,6 +488,43 @@ class GuardedMergeAdmissionScenarioTests(unittest.TestCase):
             admission,
         )
         self.assertEqual(admission.readiness.state, "ready")
+
+    def test_refresh_before_evaluation_preserves_acquired_lease_owner(self) -> None:
+        observed_controller_state = self.controller_state.model_copy(
+            update={
+                "status": "idle",
+                "lease_owner": "",
+                "lease_acquired_at": "",
+                "lease_expires_at": "",
+                "heartbeat_at": "",
+            }
+        )
+        evaluator = _CapturingEvaluator(
+            MergeAdmissionEvaluation(
+                readiness=self._readiness(
+                    fence_evidence=_fence(
+                        controller_status="idle",
+                        observed_lease_owner="",
+                        lease_expires_at="",
+                    )
+                ),
+                structural_result=self.structural_result,
+            )
+        )
+        guard = self._guard(
+            evaluator=evaluator,
+            controller_state_provider=lambda: observed_controller_state,
+        )
+
+        with self.assertRaisesRegex(
+            MergeAdmissionDeniedError,
+            "Fresh merge readiness evidence",
+        ):
+            self._admit(guard)
+
+        self.assertEqual(evaluator.kwargs["controller_state"], observed_controller_state)
+        self.assertEqual(evaluator.kwargs["expected_lease_owner"], "controller-run-1")
+        self.assertEqual(self.store.list_merge_admission_records(), ())
 
     def test_scenario_11_missing_outcome_blocks_provider_retry(self) -> None:
         guard = self._guard()
