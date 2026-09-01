@@ -15625,7 +15625,9 @@ def create_launchplane_fastapi_app(
             github_id=identity.github_id,
             idempotency_scope_sha256=hashlib.sha256(recovery_scope.encode()).hexdigest(),
             idempotency_key_sha256=hashlib.sha256(normalized_idempotency_key.encode()).hexdigest(),
-            acknowledgement_sha256=confirmation_record.acknowledgement_sha256,
+            acknowledgement_sha256=solo_administration_confirmation_acknowledgement_sha256(
+                control_plane_authz_policy_recovery.AUTHZ_POLICY_RECOVERY_CONFIRMATION_ACKNOWLEDGEMENT
+            ),
             secret_sha256=solo_administration_confirmation_secret_sha256(confirmation_secret),
         )
         try:

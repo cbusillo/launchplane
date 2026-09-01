@@ -138,6 +138,9 @@ The only recovery sequence is: remove an exact active activation set that has no
 consumed confirmation bound to its active digest; create and confirm a fresh
 activation; then retire overlapping temporary bootstrap actions. The service
 never backfills or forges evidence for an already-active historical revision.
+Run those policy writes as one uninterrupted recovery window: any intervening
+authorization-policy revision invalidates the active-digest confirmation
+backing and must stop the cutover for a new reviewed recovery change.
 
 The first DB-native read-only slice keeps those capabilities separate:
 

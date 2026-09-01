@@ -124,7 +124,7 @@ for the closed issue `#2277` recovery candidates. Legacy records remain readable
 unchanged. A consumed confirmation is looked up by candidate policy digest,
 immutable GitHub ID, and the deterministic recovery idempotency scope through
 the bounded
-`launchplane_solo_administration_confirmation_consumed_recovery_activation_idx`
+`lp_solo_admin_confirmation_consumed_recovery_idx`
 index; this proves backing for the exact recovery activation without storing
 recovery policy bodies or inventing evidence for historical revisions. The
 recovery route adds only ordinary policy revision and idempotency records plus
