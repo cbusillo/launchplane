@@ -163,6 +163,11 @@ temporary candidate ref or branch so GitHub Actions can run checks against a
 real commit SHA. The exact ref naming and cleanup policy are part of the batch
 train implementation, not the repository policy TOML.
 
+After GitHub creates a candidate merge commit, Launchplane performs a bounded
+read-after-write convergence check before declaring the candidate ref stale.
+This tolerates transient GitHub ref-read lag without weakening the exact
+expected-commit comparison; exhaustion still fails closed as stale state.
+
 ### Candidate Validation
 
 Required checks must pass on the candidate commit that includes the queued PRs

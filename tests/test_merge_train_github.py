@@ -653,6 +653,138 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                 )
                 self.assertEqual(transport.requests[1].body, {"sha": "base-main", "force": True})
 
+    def test_build_batch_candidate_retries_eventually_consistent_ref_read(self) -> None:
+        candidate = _batch_candidate()
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                {"ref": candidate.candidate_ref, "object": {"sha": "base-main"}},
+                _git_commit("base-main", "tree-base"),
+                _git_commit("head-1", "tree-head-1"),
+                _git_commit("head-2", "tree-head-2"),
+                _merge_commit("candidate-after-1", "tree-candidate-1"),
+                _github_branch(sha="base-main", tree_sha="tree-base"),
+                _github_branch(sha="candidate-after-1", tree_sha="tree-candidate-1"),
+                _git_commit(
+                    "candidate-after-1", "tree-candidate-1", parents=("base-main", "head-1")
+                ),
+                _merge_commit("candidate-after-2", "tree-candidate-2"),
+                _github_branch(sha="candidate-after-2", tree_sha="tree-candidate-2"),
+                _git_commit(
+                    "candidate-after-2",
+                    "tree-candidate-2",
+                    parents=("candidate-after-1", "head-2"),
+                ),
+            )
+        )
+
+        with patch("control_plane.merge_train_github.sleep") as sleep_mock:
+            built_candidate = GitHubMergeTrainClient(transport=transport).build_batch_candidate(
+                candidate=candidate
+            )
+
+        self.assertEqual(built_candidate.status, "ready_for_checks")
+        self.assertEqual(built_candidate.candidate_sha, "candidate-after-2")
+        sleep_mock.assert_called_once_with(0.25)
+        self.assertEqual(
+            [request.method for request in transport.requests].count("POST"),
+            3,
+        )
+
+    def test_build_batch_candidate_accepts_expected_sha_on_final_ref_read(self) -> None:
+        candidate = _batch_candidate()
+        stale_branch = _github_branch(sha="base-main", tree_sha="tree-base")
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                {"ref": candidate.candidate_ref, "object": {"sha": "base-main"}},
+                _git_commit("base-main", "tree-base"),
+                _git_commit("head-1", "tree-head-1"),
+                _git_commit("head-2", "tree-head-2"),
+                _merge_commit("candidate-after-1", "tree-candidate-1"),
+                stale_branch,
+                stale_branch,
+                stale_branch,
+                stale_branch,
+                stale_branch,
+                _github_branch(sha="candidate-after-1", tree_sha="tree-candidate-1"),
+                _git_commit(
+                    "candidate-after-1", "tree-candidate-1", parents=("base-main", "head-1")
+                ),
+                _merge_commit("candidate-after-2", "tree-candidate-2"),
+                _github_branch(sha="candidate-after-2", tree_sha="tree-candidate-2"),
+                _git_commit(
+                    "candidate-after-2",
+                    "tree-candidate-2",
+                    parents=("candidate-after-1", "head-2"),
+                ),
+            )
+        )
+
+        with patch("control_plane.merge_train_github.sleep") as sleep_mock:
+            built_candidate = GitHubMergeTrainClient(transport=transport).build_batch_candidate(
+                candidate=candidate
+            )
+
+        self.assertEqual(built_candidate.status, "ready_for_checks")
+        self.assertEqual(
+            [call.args[0] for call in sleep_mock.call_args_list],
+            [0.25, 0.5, 1.0, 2.0, 4.0],
+        )
+
+    def test_build_batch_candidate_fails_closed_after_ref_read_exhaustion(self) -> None:
+        candidate = _batch_candidate()
+        stale_branch = _github_branch(sha="base-main", tree_sha="tree-base")
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                {"ref": candidate.candidate_ref, "object": {"sha": "base-main"}},
+                _git_commit("base-main", "tree-base"),
+                _git_commit("head-1", "tree-head-1"),
+                _git_commit("head-2", "tree-head-2"),
+                _merge_commit("candidate-after-1", "tree-candidate-1"),
+                stale_branch,
+                stale_branch,
+                stale_branch,
+                stale_branch,
+                stale_branch,
+                stale_branch,
+            )
+        )
+
+        with patch("control_plane.merge_train_github.sleep") as sleep_mock:
+            with self.assertRaisesRegex(
+                MergeTrainGitHubStaleHeadError,
+                "candidate ref did not resolve",
+            ):
+                GitHubMergeTrainClient(transport=transport).build_batch_candidate(
+                    candidate=candidate
+                )
+
+        self.assertEqual(sleep_mock.call_count, 5)
+        self.assertEqual(
+            [request.method for request in transport.requests].count("POST"),
+            2,
+        )
+
+    def test_build_batch_candidate_does_not_wait_on_unrelated_ref_sha(self) -> None:
+        candidate = _batch_candidate()
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                {"ref": candidate.candidate_ref, "object": {"sha": "base-main"}},
+                _git_commit("base-main", "tree-base"),
+                _git_commit("head-1", "tree-head-1"),
+                _git_commit("head-2", "tree-head-2"),
+                _merge_commit("candidate-after-1", "tree-candidate-1"),
+                _github_branch(sha="unexpected-sha", tree_sha="unexpected-tree"),
+            )
+        )
+
+        with patch("control_plane.merge_train_github.sleep") as sleep_mock:
+            with self.assertRaises(MergeTrainGitHubStaleHeadError):
+                GitHubMergeTrainClient(transport=transport).build_batch_candidate(
+                    candidate=candidate
+                )
+
+        sleep_mock.assert_not_called()
+
     def test_build_batch_candidate_reports_conflict_without_landing_prs(self) -> None:
         candidate = _batch_candidate()
         transport = RecordingMergeTrainGitHubTransport(
