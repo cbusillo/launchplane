@@ -14,6 +14,10 @@ GITHUB_CLI_MODULE_CONTRACTS = {
         "google.golang.org/grpc",
         "GITHUB_CLI_GRPC_VERSION",
     ),
+    "golang.org/x/crypto": (
+        "golang.org/x/crypto",
+        "GITHUB_CLI_X_CRYPTO_VERSION",
+    ),
     "golang.org/x/text": (
         "golang.org/x/text",
         "GITHUB_CLI_X_TEXT_VERSION",
