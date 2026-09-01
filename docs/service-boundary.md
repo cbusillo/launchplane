@@ -2199,7 +2199,7 @@ policy payload. All other browser-human, terminal-agent, and local bearer
 identities fail closed on the workflow route. Signed-in humans use
 the separate `managed-authz-policy-set` privileged-operation lifecycle for
 proposal review and approval; only the service-internal worker executes that
-approved path. The advanced
+approved path.
 
 The hidden issue `#2277` recovery companion routes use the same browser-only
 authentication, exact CSRF/origin checks, DB storage, idempotency, and policy
@@ -2208,6 +2208,8 @@ confirmation where the compiled candidate quorum is one, and provide one
 bounded self-diagnostic. They do not create a general recovery writer, accept
 raw policy, expose policy selectors/rule bodies, admit workflow or bearer
 callers, or mutate a historical policy revision.
+
+The advanced
 `Product Onboarding Manifest (Advanced)` workflow preserves operator-supplied
 manifest support for non-conventional products. Manifests must use neutral
 `provider_targets`; obsolete `dokploy_targets` input is rejected. Product

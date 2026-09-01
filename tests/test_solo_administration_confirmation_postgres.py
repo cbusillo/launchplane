@@ -167,7 +167,7 @@ class RealPostgresSoloAdministrationConfirmationConcurrencyTests(unittest.TestCa
                     store.has_consumed_solo_administration_confirmation(
                         candidate_policy_sha256=exact.candidate_policy_sha256,
                         github_id=exact.github_id,
-                        idempotency_scope_sha256=wrong_scope.idempotency_scope_sha256,
+                        idempotency_scope_sha256="0" * 64,
                     )
                 )
             finally:

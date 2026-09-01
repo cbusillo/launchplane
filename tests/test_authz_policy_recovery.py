@@ -172,6 +172,7 @@ class AuthzPolicyRecoveryHttpTests(unittest.IsolatedAsyncioTestCase):
                         ),
                     )
                     self.assertEqual(legacy_apply.status_code, 409, legacy_apply.text)
+                    self.assertEqual(legacy_apply.headers["cache-control"], "no-store")
                     self.assertEqual(
                         legacy_apply.json()["error"]["code"],
                         "authz_policy_operation_activation_requires_recovery_confirmation",
@@ -199,10 +200,29 @@ class AuthzPolicyRecoveryHttpTests(unittest.IsolatedAsyncioTestCase):
                         },
                     )
                     self.assertEqual(diagnostic.status_code, 200, diagnostic.text)
+                    self.assertEqual(diagnostic.headers["cache-control"], "no-store")
                     self.assertTrue(
                         diagnostic.json()["result"]["active_policy"][
                             "consumed_confirmation_backing"
                         ]
+                    )
+                    confirmed_reset = await client.post(
+                        _DRY_RUN_ROUTE,
+                        headers=self._mutation_headers(session_manager, session),
+                        content=json.dumps(
+                            {
+                                "candidate_id": (
+                                    "reset-unconfirmed-privileged-policy-operation-activation"
+                                ),
+                                "reason": "Prove confirmed activation cannot be reset.",
+                            }
+                        ),
+                    )
+                    self.assertEqual(confirmed_reset.status_code, 409, confirmed_reset.text)
+                    self.assertEqual(confirmed_reset.headers["cache-control"], "no-store")
+                    self.assertEqual(
+                        confirmed_reset.json()["error"]["code"],
+                        "authz_policy_recovery_reset_not_eligible",
                     )
                     await self._apply_candidate(
                         client=client,
@@ -244,6 +264,7 @@ class AuthzPolicyRecoveryHttpTests(unittest.IsolatedAsyncioTestCase):
             content=json.dumps({"candidate_id": candidate_id, "reason": reason}),
         )
         self.assertEqual(dry_run.status_code, 202, dry_run.text)
+        self.assertEqual(dry_run.headers["cache-control"], "no-store")
         reviewed_plan_sha256 = dry_run.json()["result"]["candidate"]["review_digest"]
         confirmation = await client.post(
             _CONFIRM_ROUTE,
@@ -263,6 +284,7 @@ class AuthzPolicyRecoveryHttpTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
         self.assertEqual(confirmation.status_code, 200, confirmation.text)
+        self.assertEqual(confirmation.headers["cache-control"], "no-store")
         confirmation_payload = confirmation.json()
         applied = await client.post(
             _APPLY_ROUTE,
@@ -281,6 +303,7 @@ class AuthzPolicyRecoveryHttpTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
         self.assertEqual(applied.status_code, 202, applied.text)
+        self.assertEqual(applied.headers["cache-control"], "no-store")
 
     def _current_session(
         self,

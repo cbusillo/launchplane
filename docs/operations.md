@@ -789,6 +789,7 @@ fresh dry-run, acknowledgement, confirmation, and activation; then bootstrap
 retirement. The recovery diagnostic is read-only and returns only confirmation
 backing plus per-action managed-rule match cardinalities, never rule selectors
 or bodies.
+
 `LAUNCHPLANE_AUTHZ_MANAGED_SET_JSON` currently carries the primary operator set;
 `LAUNCHPLANE_AUTHZ_POLICY_RECONCILE_MANAGED_SET_JSON` owns the exact immutable
 policy-admin worker rules for the standalone authz wrapper and must declare the

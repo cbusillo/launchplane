@@ -37,7 +37,10 @@ DEFAULT_LOCAL_TIMINGS_FILE = Path(".ci-cache/unittest-timings/history.json")
 LOCAL_RUN_RECORD_TYPE = "unittest_local_shard_run"
 LOCAL_PROCESS_POLL_SECONDS = 0.05
 LOCAL_PROCESS_TERMINATE_SECONDS = 5.0
-POSTGRES_INTEGRATION_MODULE = "tests.test_postgres_integration"
+POSTGRES_INTEGRATION_MODULES = (
+    "tests.test_postgres_integration",
+    "tests.test_solo_administration_confirmation_postgres",
+)
 
 
 @dataclass(frozen=True)
@@ -82,7 +85,7 @@ def run_postgres_integration_tests(database_url: str, verbosity: int) -> None:
         "-m",
         "unittest",
         "-v" if verbosity > 1 else "",
-        POSTGRES_INTEGRATION_MODULE,
+        *POSTGRES_INTEGRATION_MODULES,
     ]
     command = [argument for argument in command if argument]
     result = subprocess.run(command, cwd=Path.cwd(), env=environment, check=False)
