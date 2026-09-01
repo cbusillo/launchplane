@@ -10,7 +10,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
 AUTHZ_COMPATIBILITY_FLOOR_REVISION = "f3b5d7e9a1c2"
-EXPECTED_ALEMBIC_HEAD_REVISION = "c4e6a8b0d2f6"
+EXPECTED_ALEMBIC_HEAD_REVISION = "fb7d9e1a3c5f"
 RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS = (EXPECTED_ALEMBIC_HEAD_REVISION,)
 _AUTHZ_POLICY_TABLE = "launchplane_authz_policies"
 _AUTHZ_POLICY_WRITE_FENCE_TRIGGER = "launchplane_authz_policy_write_fence"
@@ -582,8 +582,8 @@ CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
     ),
     CriticalIndex(
         "launchplane_solo_administration_confirmations",
-        "launchplane_solo_administration_confirmation_consumed_candidate_idx",
-        ("candidate_policy_sha256", "state"),
+        "launchplane_solo_administration_confirmation_consumed_recovery_activation_idx",
+        ("candidate_policy_sha256", "github_id", "idempotency_scope_sha256", "state"),
     ),
     CriticalIndex(
         "launchplane_solo_administration_confirmation_events",

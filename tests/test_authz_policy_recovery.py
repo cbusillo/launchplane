@@ -6,6 +6,7 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from control_plane import authz_policy_recovery
+from control_plane import authz_policy_activation
 from control_plane.contracts.authz_policy_record import (
     LaunchplaneAuthzPolicyRecord,
     authz_policy_sha256,
@@ -34,6 +35,7 @@ _DRY_RUN_ROUTE = f"{_RECOVERY_PREFIX}/candidates/dry-run"
 _APPLY_ROUTE = f"{_RECOVERY_PREFIX}/candidates/apply"
 _CONFIRM_ROUTE = f"{_RECOVERY_PREFIX}/confirmations"
 _DIAGNOSTIC_ROUTE = f"{_RECOVERY_PREFIX}/diagnostic"
+_LEGACY_ACTIVATION_APPLY_ROUTE = "/v1/authz-policies/privileged-policy-operations/activation/apply"
 
 
 def _identity() -> GitHubHumanIdentity:
@@ -155,6 +157,30 @@ class AuthzPolicyRecoveryHttpTests(unittest.IsolatedAsyncioTestCase):
                         session=session,
                         candidate_id="reset-unconfirmed-privileged-policy-operation-activation",
                         idempotency_key="recovery-reset",
+                    )
+                    legacy_apply = await client.post(
+                        _LEGACY_ACTIVATION_APPLY_ROUTE,
+                        headers={
+                            **self._mutation_headers(session_manager, session),
+                            "Idempotency-Key": "legacy-after-recovery-reset",
+                        },
+                        content=json.dumps(
+                            {
+                                "reason": "Attempt the retired quorum-one activation path.",
+                                "reviewed_plan_sha256": "0" * 64,
+                            }
+                        ),
+                    )
+                    self.assertEqual(legacy_apply.status_code, 409, legacy_apply.text)
+                    self.assertEqual(
+                        legacy_apply.json()["error"]["code"],
+                        "authz_policy_operation_activation_requires_recovery_confirmation",
+                    )
+                    self.assertEqual(
+                        authz_policy_activation.authz_policy_operation_activation_state(
+                            store.list_authz_policy_records(status="active", limit=2)[0].policy
+                        ),
+                        "available",
                     )
                     await self._apply_candidate(
                         client=client,

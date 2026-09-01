@@ -106,7 +106,9 @@ The caller supplies no rule, selector, principal, action, policy body, or
 managed ID.
 
 The bridge dry-run exposes bounded active-policy, candidate, exact-action, and
-continuity evidence. Apply requires the reviewed digest, reason,
+continuity evidence. It is available only while the effective administrator
+quorum is greater than one; quorum-one activation must use the confirmed
+recovery candidate flow. Apply requires the reviewed digest, reason,
 immutable-ID-scoped idempotency, policy CAS, and exact read-back. If the active
 policy already contains the exact compiled set, the bridge is permanently
 retired by DB state and rejects new dry-runs or applies; a same-key replay can
@@ -123,6 +125,12 @@ input. The final retirement removes the temporary terminal-agent proposal rule
 because it grants only the overlapping proposal action and has no independent
 invariant after the managed human activation is confirmed. Any residual
 non-overlapping action on the closed temporary human rule is retained.
+
+Before approving a managed authz policy operation, the service re-plans the
+exact stored request against the current active policy record. A changed active
+record generation or digest, plan digest, or blocker state returns
+`privileged_operation_plan_stale` and requires a new plan. Exactly one
+immutable-ID approval rule remains required.
 
 The dry-run planner does not know which human will approve, so its evidence
 cannot include the identity-dependent applying-administrator and independent-

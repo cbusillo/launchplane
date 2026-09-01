@@ -738,6 +738,7 @@ from control_plane.service_auth import (
     bearer_identity_from_token,
     clear_authz_evaluation,
     current_authz_evaluation,
+    effective_administrator_quorum,
 )
 from control_plane.service_human_auth import (
     BROWSER_CSRF_HEADER_NAME,
@@ -14826,6 +14827,13 @@ def create_launchplane_fastapi_app(
                 ),
                 authz_policy_provenance=AuthzPolicyProvenance.from_record(active_record),
             )
+        if effective_administrator_quorum(active_record.policy) == 1:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="authz_policy_operation_activation_requires_recovery_confirmation",
+                message="Quorum-one activation must use the confirmed recovery candidate flow.",
+            )
         activation_state = (
             control_plane_authz_policy_activation.authz_policy_operation_activation_state(
                 active_record.policy
@@ -15216,8 +15224,23 @@ def create_launchplane_fastapi_app(
                 code="authorization_denied",
                 message="Recovery requires existing immutable-ID DB policy administration authority.",
             )
-        confirmed_active_activation = database_store.has_consumed_solo_administration_confirmation(
-            candidate_policy_sha256=active_record.policy_sha256
+        activation_github_id = (
+            control_plane_authz_policy_activation.authz_policy_operation_activation_github_id(
+                active_record.policy
+            )
+        )
+        confirmed_active_activation = (
+            activation_github_id > 0
+            and database_store.has_consumed_solo_administration_confirmation(
+                candidate_policy_sha256=active_record.policy_sha256,
+                github_id=activation_github_id,
+                idempotency_scope_sha256=hashlib.sha256(
+                    control_plane_authz_policy_recovery.recovery_candidate_idempotency_scope(
+                        candidate_id="activate-privileged-policy-operation",
+                        github_id=activation_github_id,
+                    ).encode()
+                ).hexdigest(),
+            )
         )
         if (
             candidate_id == "reset-unconfirmed-privileged-policy-operation-activation"
@@ -15721,8 +15744,23 @@ def create_launchplane_fastapi_app(
                 code="authorization_denied",
                 message="Recovery diagnostics require immutable-ID policy-administration authority.",
             )
-        confirmation_backing = database_store.has_consumed_solo_administration_confirmation(
-            candidate_policy_sha256=active_record.policy_sha256
+        activation_github_id = (
+            control_plane_authz_policy_activation.authz_policy_operation_activation_github_id(
+                active_record.policy
+            )
+        )
+        confirmation_backing = (
+            activation_github_id > 0
+            and database_store.has_consumed_solo_administration_confirmation(
+                candidate_policy_sha256=active_record.policy_sha256,
+                github_id=activation_github_id,
+                idempotency_scope_sha256=hashlib.sha256(
+                    control_plane_authz_policy_recovery.recovery_candidate_idempotency_scope(
+                        candidate_id="activate-privileged-policy-operation",
+                        github_id=activation_github_id,
+                    ).encode()
+                ).hexdigest(),
+            )
         )
         return accepted_evidence_response(
             trace_id=trace_id,
