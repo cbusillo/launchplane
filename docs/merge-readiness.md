@@ -118,6 +118,13 @@ affected-product subjects, the adapter emits one canonical
 impact evidence is unavailable before subjects can be resolved, that same
 unscoped facet is `unknown` and fails closed.
 
+For that successful `not_required` path, there is intentionally no historical
+Owner or engineering binding from which to recover an expected impact-policy
+digest. The live adapter therefore binds the expected impact fingerprint to the
+same current policy evaluation that proved the change has no affected-product
+subjects. Missing or non-successful impact evidence never receives this
+fallback and continues to fail closed.
+
 ## Advisory Checks
 
 The `launchplane/owner-acceptance`, `launchplane/engineering-review`, and legacy

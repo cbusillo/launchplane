@@ -16,7 +16,10 @@ from control_plane.contracts.merge_train_structural_provenance import (
     MergeTrainStructuralEntryObservation,
 )
 from control_plane.contracts.merge_readiness import MergeReadinessOwnerFacet
-from control_plane.contracts.owner_acceptance import OwnerAcceptanceAction
+from control_plane.contracts.owner_acceptance import (
+    OwnerAcceptanceAction,
+    OwnerAcceptanceDecision,
+)
 from control_plane.contracts.product_owner import (
     ProductOwnerGrant,
     ProductOwnerIdentity,
@@ -63,6 +66,7 @@ from tests.test_owner_acceptance import (
 from tests.test_merge_readiness import (
     BASE_SHA,
     HEAD_SHA,
+    POLICY_SHA,
     REPOSITORY,
     TREE_SHA,
     _evaluate,
@@ -590,6 +594,93 @@ class LiveMergeAdmissionRealStoreTests(unittest.TestCase):
 
 
 class LiveMergeAdmissionEvaluatorTests(unittest.TestCase):
+    def test_engineering_only_change_binds_current_impact_policy(self) -> None:
+        target = ChangeImpactTarget(
+            repository_id="101",
+            repository_owner_id="202",
+            repository=REPOSITORY,
+            pull_request_number=2083,
+            head_sha=HEAD_SHA,
+            tree_sha=TREE_SHA,
+        )
+        impact = ChangeImpactEvaluation(
+            status="success",
+            reason_code="change_impact_classified",
+            target=target,
+            policy_digest=POLICY_SHA,
+        )
+        evaluator = LiveMergeAdmissionEvaluator(
+            store=object(),
+            repository_evidence_provider=_UnusedRepositoryEvidenceProvider(),
+            technical_check_client=_TechnicalCheckClient(),
+        )
+
+        fingerprints = evaluator._policy_fingerprints(
+            impact=impact,
+            owner_decision=OwnerAcceptanceDecision(
+                status="not_required",
+                reason_code="engineering_only",
+                evaluated_at="2026-08-11T03:01:00Z",
+            ),
+            engineering_decision=None,
+            engineering_authority_digest=None,
+            technical_checks=_PassingTechnicalCheckClient().read_technical_checks(
+                repository=REPOSITORY,
+                base_branch="main",
+                base_sha=BASE_SHA,
+                head_sha=HEAD_SHA,
+                evaluated_at="2026-08-11T03:01:00Z",
+            ),
+            landing_policy_sha256=POLICY_SHA,
+            current_merge_train_policy_sha256=POLICY_SHA,
+        )
+
+        self.assertEqual(fingerprints.impact.expected_sha256, POLICY_SHA)
+        self.assertEqual(fingerprints.impact.current_sha256, POLICY_SHA)
+
+    def test_missing_owner_evidence_does_not_adopt_current_impact_policy(self) -> None:
+        target = ChangeImpactTarget(
+            repository_id="101",
+            repository_owner_id="202",
+            repository=REPOSITORY,
+            pull_request_number=2083,
+            head_sha=HEAD_SHA,
+            tree_sha=TREE_SHA,
+        )
+        evaluator = LiveMergeAdmissionEvaluator(
+            store=object(),
+            repository_evidence_provider=_UnusedRepositoryEvidenceProvider(),
+            technical_check_client=_TechnicalCheckClient(),
+        )
+
+        fingerprints = evaluator._policy_fingerprints(
+            impact=ChangeImpactEvaluation(
+                status="success",
+                reason_code="change_impact_classified",
+                target=target,
+                policy_digest=POLICY_SHA,
+            ),
+            owner_decision=OwnerAcceptanceDecision(
+                status="pending",
+                reason_code="acceptance_missing",
+                evaluated_at="2026-08-11T03:01:00Z",
+            ),
+            engineering_decision=None,
+            engineering_authority_digest=None,
+            technical_checks=_PassingTechnicalCheckClient().read_technical_checks(
+                repository=REPOSITORY,
+                base_branch="main",
+                base_sha=BASE_SHA,
+                head_sha=HEAD_SHA,
+                evaluated_at="2026-08-11T03:01:00Z",
+            ),
+            landing_policy_sha256=POLICY_SHA,
+            current_merge_train_policy_sha256=POLICY_SHA,
+        )
+
+        self.assertNotEqual(fingerprints.impact.expected_sha256, POLICY_SHA)
+        self.assertEqual(fingerprints.impact.current_sha256, POLICY_SHA)
+
     def test_repository_policy_controls_engineering_review_authority(self) -> None:
         candidate_record, landing_record, controller_state, structural_result = _guard_records()
         snapshot_reader = _StaticSnapshotReader(
