@@ -233,6 +233,13 @@ because a new queued PR repairs train validation, the controller may supersede
 the failed candidate batch lineage and plan a replacement candidate from the
 fresh snapshot.
 
+Candidate construction can fail before required checks run when GitHub rejects
+one rolling merge entry as stale or conflicting. The controller persists that
+candidate as `failed`, reports the exact pull request reached by the build, and
+releases the controller lease without replaying the rejected merge. The same
+queue-change rule then governs replacement planning; an unchanged queue remains
+stopped for operator attention.
+
 ## Example Policy Entries
 
 The example below is documentation/import material only. It is not packaged as a
