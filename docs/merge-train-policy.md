@@ -574,7 +574,11 @@ Controller actions have these retry/stop semantics:
 - `candidate_failed`: Candidate checks failed and still matches the current
   eligible queue. Stop and surface the candidate record id and failed check
   evidence. If the eligible queue/base changes, the next controller action may
-  become `plan_candidate` for a superseding candidate.
+  become `plan_candidate` for a superseding candidate. A failed candidate with
+  no recorded candidate SHA never reached checks, so the controller may also
+  supersede and replan it against the unchanged queue after a transient build
+  failure is repaired. Failed candidates with a recorded candidate SHA remain
+  terminal until the queue or base changes.
 - `plan_landing`: A passed candidate is ready for PR-native landing-plan
   creation. Mutate once, then call again.
 - `land_batch`: A landing plan with planned or in-progress merge entries is
