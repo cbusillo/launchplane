@@ -1,12 +1,13 @@
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal, cast
 
 from fastapi import Depends, Path, Query
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.privileged_operation import (
     ManagedAuthzPolicySetProposalInput,
+    ManagedAuthzPolicySetHumanEvidence,
     ManagedSecretReencryptionPlanInput,
     PrivilegedOperationApproval,
     PrivilegedOperationActor,
@@ -35,6 +36,10 @@ from control_plane.privileged_operation_registry import (
     PrivilegedOperationPlannerError,
     PrivilegedOperationPlanningStoreError,
     read_privileged_operation_descriptor,
+)
+from control_plane.authz_grant_service import (
+    AuthzPolicyConflictError,
+    plan_managed_authz_policy_reconcile,
 )
 from control_plane.privileged_operation_service import (
     DEFAULT_PRIVILEGED_OPERATION_TTL_SECONDS,
@@ -288,6 +293,68 @@ def register_privileged_operation_routes(
             limit=10,
         )
 
+    def require_current_managed_authz_policy_plan(
+        *,
+        record: PrivilegedOperationRecord,
+        record_store: object,
+        trace_id: str,
+    ) -> None:
+        if record.descriptor_id != "managed-authz-policy-set":
+            return
+        if not isinstance(record.evidence, ManagedAuthzPolicySetHumanEvidence):
+            raise dependencies.common.http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="privileged_operation_planning_unavailable",
+                message="Managed authz policy plan evidence is unavailable.",
+            )
+        try:
+            request = record.request
+            if not isinstance(request, ManagedAuthzPolicySetProposalInput):
+                raise TypeError("Managed authz policy operation has an invalid request.")
+            _, _, _, current_diff = plan_managed_authz_policy_reconcile(
+                record_store=cast(Any, record_store),
+                request=request.reconcile_request(),
+            )
+        except (AuthzPolicyConflictError, LookupError, TypeError, ValueError) as error:
+            raise dependencies.common.http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="privileged_operation_planning_unavailable",
+                message="Managed authz policy planning is unavailable.",
+            ) from error
+        planned_diff = record.evidence.diff
+        planned_blocker_state = (
+            record.evidence.result_status,
+            planned_diff.policy_safety_blocker_count,
+            planned_diff.policy_safety_blockers,
+            planned_diff.operational_readiness_blocked_rule_count,
+            planned_diff.operational_readiness_blockers,
+        )
+        current_blocker_state = (
+            "blocked"
+            if current_diff.policy_safety_blocker_count
+            or current_diff.operational_readiness_blocked_rule_count
+            else "ok",
+            current_diff.policy_safety_blocker_count,
+            current_diff.policy_safety_blockers,
+            current_diff.operational_readiness_blocked_rule_count,
+            current_diff.operational_readiness_blockers,
+        )
+        if (
+            planned_diff.previous_record_id != current_diff.previous_record_id
+            or planned_diff.previous_revision != current_diff.previous_revision
+            or planned_diff.previous_policy_sha256 != current_diff.previous_policy_sha256
+            or planned_diff.plan_sha256 != current_diff.plan_sha256
+            or planned_blocker_state != current_blocker_state
+        ):
+            raise dependencies.common.http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="privileged_operation_plan_stale",
+                message="The managed authz policy plan is stale and must be replanned.",
+            )
+
     def read_operation_or_error(
         *,
         record_store: object,
@@ -497,6 +564,11 @@ def register_privileged_operation_routes(
                         "administrator."
                     ),
                 )
+            require_current_managed_authz_policy_plan(
+                record=record,
+                record_store=record_store,
+                trace_id=trace_id,
+            )
             approval = PrivilegedOperationApproval(
                 approver=PrivilegedOperationActor(
                     identity_type="github_human",
