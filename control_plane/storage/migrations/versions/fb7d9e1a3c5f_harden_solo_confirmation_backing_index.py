@@ -18,8 +18,8 @@ branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 _TABLE = "launchplane_solo_administration_confirmations"
-_OLD_INDEX = "launchplane_solo_administration_confirmation_consumed_candidate_idx"
-_INDEX = "launchplane_solo_administration_confirmation_consumed_recovery_activation_idx"
+_OLD_INDEX = "lp_solo_admin_confirmation_consumed_candidate_idx"
+_INDEX = "lp_solo_admin_confirmation_consumed_recovery_idx"
 
 
 def upgrade() -> None:

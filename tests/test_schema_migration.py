@@ -1507,6 +1507,9 @@ class SchemaMigrationTests(unittest.TestCase):
         }
 
         self.assertEqual(EXPECTED_ALEMBIC_HEAD_REVISION, "fb7d9e1a3c5f")
+        self.assertFalse(
+            [index.index_name for index in CRITICAL_SCHEMA_INDEXES if len(index.index_name) > 63]
+        )
         self.assertNotIn(
             ("launchplane_human_sessions", "launchplane_human_sessions_github_id_idx"),
             indexes,

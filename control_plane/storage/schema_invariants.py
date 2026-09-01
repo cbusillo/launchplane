@@ -582,7 +582,7 @@ CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
     ),
     CriticalIndex(
         "launchplane_solo_administration_confirmations",
-        "launchplane_solo_administration_confirmation_consumed_recovery_activation_idx",
+        "lp_solo_admin_confirmation_consumed_recovery_idx",
         ("candidate_policy_sha256", "github_id", "idempotency_scope_sha256", "state"),
     ),
     CriticalIndex(

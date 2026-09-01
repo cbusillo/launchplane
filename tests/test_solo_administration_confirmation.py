@@ -259,9 +259,7 @@ class SoloAdministrationConfirmationStoreTests(unittest.TestCase):
                     indexes,
                 )
                 self.assertEqual(
-                    indexes[
-                        "launchplane_solo_administration_confirmation_consumed_recovery_activation_idx"
-                    ]["column_names"],
+                    indexes["lp_solo_admin_confirmation_consumed_recovery_idx"]["column_names"],
                     ["candidate_policy_sha256", "github_id", "idempotency_scope_sha256", "state"],
                 )
             finally:

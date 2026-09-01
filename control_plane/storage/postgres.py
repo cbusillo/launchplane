@@ -1313,7 +1313,7 @@ class LaunchplaneSoloAdministrationConfirmationRow(Base):
             "created_at",
         ),
         Index(
-            "launchplane_solo_administration_confirmation_consumed_recovery_activation_idx",
+            "lp_solo_admin_confirmation_consumed_recovery_idx",
             "candidate_policy_sha256",
             "github_id",
             "idempotency_scope_sha256",
