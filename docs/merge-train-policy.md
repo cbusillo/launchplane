@@ -354,6 +354,17 @@ uv run launchplane merge-train-policies build-import-request \
     idempotency-key: merge-train-policy-import:${{ github.run_id }}
 ```
 
+During the `#2058` authorization freeze, reviewed merge-train policy changes
+use the typed `managed-merge-train-policy-import` privileged-operation path
+instead of adding workflow, local-operator, or local-admin
+`merge_train.policy_import` authority. The privileged-operation proposal accepts
+one complete candidate record and produces redacted active/candidate digests,
+target counts, and stable policy-key changes. A signed-in immutable-ID GitHub
+human with the exact `merge_train_policy_operation.*` managed rule approves the
+plan; the service worker performs active-policy CAS, operation-scoped
+idempotency, and exact active/superseded read-back. Existing
+`authz_policy_operation.*` grants do not authorize merge-train policy imports.
+
 For local operator terminals, the compatibility CLI import path still reads the
 bearer token from `LAUNCHPLANE_SERVICE_TOKEN` unless a browser
 `--session-cookie` is supplied:

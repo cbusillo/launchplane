@@ -1,13 +1,13 @@
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Annotated, Any, Literal, cast
+from typing import Annotated, Literal
 
 from fastapi import Depends, Path, Query
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.privileged_operation import (
     ManagedAuthzPolicySetProposalInput,
-    ManagedAuthzPolicySetHumanEvidence,
+    ManagedMergeTrainPolicyImportProposalInput,
     ManagedSecretReencryptionPlanInput,
     PrivilegedOperationApproval,
     PrivilegedOperationActor,
@@ -36,10 +36,6 @@ from control_plane.privileged_operation_registry import (
     PrivilegedOperationPlannerError,
     PrivilegedOperationPlanningStoreError,
     read_privileged_operation_descriptor,
-)
-from control_plane.authz_grant_service import (
-    AuthzPolicyConflictError,
-    plan_managed_authz_policy_reconcile,
 )
 from control_plane.privileged_operation_service import (
     DEFAULT_PRIVILEGED_OPERATION_TTL_SECONDS,
@@ -111,6 +107,10 @@ class PrivilegedOperationPlanEnvelope(BaseModel):
             self.request, ManagedAuthzPolicySetProposalInput
         ):
             raise ValueError("Managed-policy descriptor requires a managed-policy request.")
+        if self.descriptor_id == "managed-merge-train-policy-import" and not isinstance(
+            self.request, ManagedMergeTrainPolicyImportProposalInput
+        ):
+            raise ValueError("Merge-train policy descriptor requires a merge-train policy request.")
         return self
 
 
@@ -118,20 +118,31 @@ class PrivilegedPolicyOperationAgentProposalEnvelope(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     schema_version: int = Field(default=1, ge=1)
-    descriptor_id: Literal["managed-authz-policy-set"] = "managed-authz-policy-set"
+    descriptor_id: Literal[
+        "managed-authz-policy-set",
+        "managed-merge-train-policy-import",
+    ] = "managed-authz-policy-set"
     source_event_id: str = Field(min_length=1, max_length=128)
     expires_in_seconds: int = Field(
         default=DEFAULT_PRIVILEGED_OPERATION_TTL_SECONDS,
         ge=MIN_PRIVILEGED_OPERATION_TTL_SECONDS,
         le=MAX_PRIVILEGED_OPERATION_TTL_SECONDS,
     )
-    request: ManagedAuthzPolicySetProposalInput
+    request: ManagedAuthzPolicySetProposalInput | ManagedMergeTrainPolicyImportProposalInput
 
     @model_validator(mode="after")
     def _validate_envelope(self) -> "PrivilegedPolicyOperationAgentProposalEnvelope":
         if self.schema_version != 1:
             raise ValueError("Unsupported privileged policy proposal envelope schema version.")
         self.source_event_id = normalize_privileged_operation_source_event_id(self.source_event_id)
+        if self.descriptor_id == "managed-authz-policy-set" and not isinstance(
+            self.request, ManagedAuthzPolicySetProposalInput
+        ):
+            raise ValueError("Managed-policy descriptor requires a managed-policy request.")
+        if self.descriptor_id == "managed-merge-train-policy-import" and not isinstance(
+            self.request, ManagedMergeTrainPolicyImportProposalInput
+        ):
+            raise ValueError("Merge-train policy descriptor requires a merge-train policy request.")
         return self
 
 
@@ -293,66 +304,37 @@ def register_privileged_operation_routes(
             limit=10,
         )
 
-    def require_current_managed_authz_policy_plan(
+    def require_current_policy_plan(
         *,
         record: PrivilegedOperationRecord,
         record_store: object,
         trace_id: str,
     ) -> None:
-        if record.descriptor_id != "managed-authz-policy-set":
+        if record.safety_class != "policy_admin":
             return
-        if not isinstance(record.evidence, ManagedAuthzPolicySetHumanEvidence):
-            raise dependencies.common.http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="privileged_operation_planning_unavailable",
-                message="Managed authz policy plan evidence is unavailable.",
-            )
         try:
-            request = record.request
-            if not isinstance(request, ManagedAuthzPolicySetProposalInput):
-                raise TypeError("Managed authz policy operation has an invalid request.")
-            _, _, _, current_diff = plan_managed_authz_policy_reconcile(
-                record_store=cast(Any, record_store),
-                request=request.reconcile_request(),
+            current_evidence = read_privileged_operation_descriptor(record.descriptor_id).planner(
+                record_store,
+                record.request,
             )
-        except (AuthzPolicyConflictError, LookupError, TypeError, ValueError) as error:
+        except (
+            PrivilegedOperationPlannerError,
+            PrivilegedOperationPlanningStoreError,
+            TypeError,
+            ValueError,
+        ) as error:
             raise dependencies.common.http_error(
                 status_code=503,
                 trace_id=trace_id,
                 code="privileged_operation_planning_unavailable",
-                message="Managed authz policy planning is unavailable.",
+                message="Privileged-operation policy planning is unavailable.",
             ) from error
-        planned_diff = record.evidence.diff
-        planned_blocker_state = (
-            record.evidence.result_status,
-            planned_diff.policy_safety_blocker_count,
-            planned_diff.policy_safety_blockers,
-            planned_diff.operational_readiness_blocked_rule_count,
-            planned_diff.operational_readiness_blockers,
-        )
-        current_blocker_state = (
-            "blocked"
-            if current_diff.policy_safety_blocker_count
-            or current_diff.operational_readiness_blocked_rule_count
-            else "ok",
-            current_diff.policy_safety_blocker_count,
-            current_diff.policy_safety_blockers,
-            current_diff.operational_readiness_blocked_rule_count,
-            current_diff.operational_readiness_blockers,
-        )
-        if (
-            planned_diff.previous_record_id != current_diff.previous_record_id
-            or planned_diff.previous_revision != current_diff.previous_revision
-            or planned_diff.previous_policy_sha256 != current_diff.previous_policy_sha256
-            or planned_diff.plan_sha256 != current_diff.plan_sha256
-            or planned_blocker_state != current_blocker_state
-        ):
+        if current_evidence != record.evidence:
             raise dependencies.common.http_error(
                 status_code=409,
                 trace_id=trace_id,
                 code="privileged_operation_plan_stale",
-                message="The managed authz policy plan is stale and must be replanned.",
+                message="The privileged-operation policy plan is stale and must be replanned.",
             )
 
     def read_operation_or_error(
@@ -564,7 +546,7 @@ def register_privileged_operation_routes(
                         "administrator."
                     ),
                 )
-            require_current_managed_authz_policy_plan(
+            require_current_policy_plan(
                 record=record,
                 record_store=record_store,
                 trace_id=trace_id,
@@ -590,9 +572,7 @@ def register_privileged_operation_routes(
                 expires_at=record.expires_at,
                 reason=envelope.reason,
                 rollback_class=(
-                    "policy_cas"
-                    if record.descriptor_id == "managed-authz-policy-set"
-                    else "key_retained"
+                    "policy_cas" if record.safety_class == "policy_admin" else "key_retained"
                 ),
             )
             result = approve_privileged_operation(
@@ -776,7 +756,10 @@ def register_privileged_operation_routes(
             action=descriptor_action(record.descriptor_id, "agent_summary_read_action"),
             trace_id=trace_id,
         )
-        if record.descriptor_id == "managed-authz-policy-set":
+        if record.descriptor_id in {
+            "managed-authz-policy-set",
+            "managed-merge-train-policy-import",
+        }:
             principal_sha256 = terminal_agent_principal_sha256(
                 subject=identity.subject,
                 token_label=identity.token_label,

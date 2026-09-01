@@ -201,6 +201,7 @@ from control_plane.trusted_maintenance import (
     TrustedMaintenanceGitHubEventFacts,
 )
 from tests.support.artifact_manifests import artifact_manifest_v2
+from tests.merge_train_policy_fixtures import build_test_merge_train_policy_record
 from tests.test_odoo_prod_retained_volume_backup_import_storage import (
     _retained_operation_for_restore_lane,
 )
@@ -1076,6 +1077,61 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
 
         self.assertEqual(records, (record,))
         self.assertIn("launchplane_privop_worker_heartbeats_freshness_idx", index_names)
+
+    def test_merge_train_policy_compare_write_uses_active_cas_and_idempotency(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            active_record = build_test_merge_train_policy_record(
+                repository="cbusillo/sellyouroutboard",
+                record_id="merge-train-policy-active",
+                updated_at="2026-08-22T19:00:00+00:00",
+            )
+            replacement_record = build_test_merge_train_policy_record(
+                repository="cbusillo/codex-skills",
+                record_id="merge-train-policy-candidate",
+                updated_at="2026-08-22T20:00:00+00:00",
+            )
+            store.write_merge_train_policy_record(active_record)
+            mutation = DbOnlyMutationRequest(
+                scope="privileged-operation-execution",
+                route_path="service-internal:privileged-operation-worker:managed-merge-train-policy-import",
+                idempotency_key="privileged-operation-postgres-merge-train-policy",
+                request_fingerprint="merge-train-policy-import-fingerprint",
+                lease_owner="postgres-integration-worker",
+                response_status_code=200,
+                response_trace_id="trace-postgres-merge-train-policy",
+                response_payload={"status": "ok"},
+            )
+
+            written = store.compare_and_write_merge_train_policy_record(
+                expected_record=active_record,
+                replacement_record=replacement_record,
+                mutation=mutation,
+            )
+            replayed = store.compare_and_write_merge_train_policy_record(
+                expected_record=active_record,
+                replacement_record=replacement_record,
+                mutation=mutation,
+            )
+            conflict = store.compare_and_write_merge_train_policy_record(
+                expected_record=active_record,
+                replacement_record=replacement_record,
+                mutation=replace(mutation, request_fingerprint="different-fingerprint"),
+            )
+            active_records = store.list_merge_train_policy_records(status="active", limit=2)
+            superseded_records = store.list_merge_train_policy_records(
+                status="superseded",
+                limit=10,
+            )
+
+        self.assertEqual(written.status, "written")
+        self.assertEqual(replayed.status, "replayed")
+        self.assertEqual(conflict.status, "idempotency_conflict")
+        self.assertEqual(
+            [record.record_id for record in active_records], [replacement_record.record_id]
+        )
+        self.assertEqual(
+            [record.record_id for record in superseded_records], [active_record.record_id]
+        )
 
     def test_runtime_schema_compatibility_reports_missing_relation(self) -> None:
         with _store_for_fresh_head_database() as store:

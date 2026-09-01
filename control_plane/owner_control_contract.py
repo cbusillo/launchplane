@@ -48,21 +48,26 @@ from control_plane.privileged_operation_registry import list_privileged_operatio
 from control_plane.privileged_operation_registry import read_privileged_operation_descriptor
 
 
-OWNER_CONTROL_CONTRACT_SCHEMA_VERSION = 3
-_OWNER_CONTROL_PREVIOUS_CONTRACT_SCHEMA_VERSION = 2
+OWNER_CONTROL_CONTRACT_SCHEMA_VERSION = 4
+_OWNER_CONTROL_PREVIOUS_CONTRACT_SCHEMA_VERSION = 3
+_OWNER_CONTROL_SIGNATURE_DECLARATION_SCHEMA_VERSION = 2
 _OWNER_CONTROL_VECTOR_SCHEMA_VERSION = 1
 _ARTIFACT_SYNTHETIC_PRIVATE_KEY_SEED = bytes(range(32))
 _ARTIFACT_SYNTHETIC_WRONG_PRIVATE_KEY_SEED = bytes(range(31, -1, -1))
 _PRESERVED_V2_SECTION_SHA256 = {
     "canonical_json": "0c6b6454d737943d01d4621c217ff8412552a0bf0c69a0f50a761d38ac0e7d1f",
     "canonicalization_vectors": "ca481ff769bba537310c8568b56850f5d12ebc0c90ace9ea2dc39ff714daa6a8",
-    "confirmation_golden_vectors": "58391f364a79ab321596d30200b87c9d29be366eaa1386a9ff4c242c8b38d50a",
-    "golden_vectors": "6955c5c8bb228c21bc6a68a4ddb7cf22456cd51615ffe6e421b0fa04f15d9584",
     "negative_confirmation_vectors": "9d529ca0f5153c8c3eb3eb4862311efc6dc3c1dc7e5df55824ebde13194eb46d",
     "negative_vectors": "232d29bc542df455c9f54a3196a2a4d41cb0912155f92d060c850df99c835b29",
-    "schemas": "00a8524a65afd637c8cfc88ef44e780154addc759b813a831f3ddf2ce1490bd0",
     "signature_declaration": "7d9c62d55792931383d4a02ed99d31e21c67b5ce714c01d9144dc2a3bed34f72",
 }
+_PRESERVED_V2_DESCRIPTOR_VECTOR_SECTION_SHA256 = {
+    "confirmation_golden_vectors": "58391f364a79ab321596d30200b87c9d29be366eaa1386a9ff4c242c8b38d50a",
+    "golden_vectors": "6955c5c8bb228c21bc6a68a4ddb7cf22456cd51615ffe6e421b0fa04f15d9584",
+}
+_PRESERVED_V2_DESCRIPTOR_IDS = frozenset(
+    ("managed-authz-policy-set", "managed-secret-reencryption")
+)
 
 
 class OwnerControlContractError(ValueError):
@@ -891,7 +896,7 @@ def _signature_declaration() -> dict[str, Any]:
         "signature_bytes": 64,
         "signature_encoding": "base64url-unpadded",
         "legacy_golden_channel_binding": "synthetic-placeholder-not-channel-binding-record",
-        "contract_schema_version": _OWNER_CONTROL_PREVIOUS_CONTRACT_SCHEMA_VERSION,
+        "contract_schema_version": _OWNER_CONTROL_SIGNATURE_DECLARATION_SCHEMA_VERSION,
     }
 
 
@@ -899,11 +904,16 @@ def _compatibility_declaration() -> dict[str, Any]:
     return {
         "container_schema_version": OWNER_CONTROL_CONTRACT_SCHEMA_VERSION,
         "previous_container_schema_version": _OWNER_CONTROL_PREVIOUS_CONTRACT_SCHEMA_VERSION,
-        "change_kind": "additive-server-state-vectors",
+        "change_kind": "additive-descriptor-wire-schema-and-vectors",
         "unknown_container_versions": "reject",
         "wire_model_schema_versions": [1],
         "shadow_verifier_schema_versions": [OWNER_CONTROL_SHADOW_VERIFIER_SCHEMA_VERSION],
         "preserved_v2_section_sha256": dict(_PRESERVED_V2_SECTION_SHA256),
+        "preserved_v2_descriptor_ids": sorted(_PRESERVED_V2_DESCRIPTOR_IDS),
+        "preserved_v2_descriptor_vector_section_sha256": dict(
+            _PRESERVED_V2_DESCRIPTOR_VECTOR_SECTION_SHA256
+        ),
+        "schema_change": "descriptor literal expanded for managed-merge-train-policy-import",
     }
 
 
@@ -912,6 +922,16 @@ def _validate_preserved_v2_sections(artifact: Mapping[str, Any]) -> None:
         if canonical_json_sha256(artifact[section]) != expected_sha256:
             raise OwnerControlContractError(
                 f"Owner-control v2 section {section!r} changed without a compatibility break"
+            )
+    for section, expected_sha256 in _PRESERVED_V2_DESCRIPTOR_VECTOR_SECTION_SHA256.items():
+        section_value = [
+            vector
+            for vector in artifact[section]
+            if vector.get("descriptor_id") in _PRESERVED_V2_DESCRIPTOR_IDS
+        ]
+        if canonical_json_sha256(section_value) != expected_sha256:
+            raise OwnerControlContractError(
+                f"Owner-control v2 descriptor-scoped section {section!r} changed without a compatibility break"
             )
 
 

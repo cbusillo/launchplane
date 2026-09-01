@@ -2,7 +2,7 @@ import hashlib
 import json
 import tomllib
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Literal, NamedTuple, cast
 
 from pydantic import (
     BaseModel,
@@ -23,6 +23,25 @@ MergeTrainEngineeringReviewMode = Literal["advisory", "required"]
 MergeTrainPolicyRecordStatus = Literal["active", "superseded"]
 MergeTrainSchedulerRunnerMode = Literal["level1", "controller"]
 MERGE_TRAIN_POLICY_TARGETS_READ_ACTION = "merge_train.policy_targets"
+
+
+MergeTrainPolicyCompareWriteStatus = Literal[
+    "written",
+    "unchanged",
+    "stale",
+    "missing",
+    "ambiguous_active",
+    "replayed",
+    "idempotency_conflict",
+    "reservation_in_progress",
+    "reconciliation_required",
+]
+
+
+class MergeTrainPolicyCompareWriteResult(NamedTuple):
+    status: MergeTrainPolicyCompareWriteStatus
+    current_record: "MergeTrainPolicyRecord | None" = None
+    idempotency_record: object | None = None
 
 
 class MergeTrainEnqueuePolicy(BaseModel):

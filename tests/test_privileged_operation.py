@@ -10,6 +10,11 @@ from unittest.mock import patch
 from control_plane.contracts.privileged_operation import (
     AUTHZ_POLICY_OPERATION_APPROVE_ACTION,
     AUTHZ_POLICY_OPERATION_PROPOSE_ACTION,
+    MERGE_TRAIN_POLICY_OPERATION_APPROVE_ACTION,
+    MERGE_TRAIN_POLICY_OPERATION_PROPOSE_ACTION,
+    ManagedMergeTrainPolicyImportAgentSummary,
+    ManagedMergeTrainPolicyImportHumanEvidence,
+    ManagedMergeTrainPolicyImportProposalInput,
     ManagedSecretReencryptionHumanEvidence,
     ManagedSecretReencryptionPlanInput,
     PRIVILEGED_OPERATION_SUMMARY_READ_ACTION,
@@ -29,8 +34,10 @@ from control_plane.contracts.privileged_operation import (
     privileged_operation_request_digest,
 )
 from control_plane.privileged_operation_registry import (
+    MANAGED_MERGE_TRAIN_POLICY_IMPORT_DESCRIPTOR,
     MANAGED_SECRET_REENCRYPTION_DESCRIPTOR,
     RegisteredPrivilegedOperationDescriptor,
+    plan_managed_merge_train_policy_import,
     plan_managed_secret_reencryption,
 )
 from control_plane.privileged_operation_service import (
@@ -42,6 +49,7 @@ from control_plane.privileged_operation_service import (
 from control_plane.service_auth import action_safety
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
+from tests.merge_train_policy_fixtures import build_test_merge_train_policy_record
 
 
 def _test_key(offset: int) -> str:
@@ -112,6 +120,8 @@ class PrivilegedOperationContractTests(unittest.TestCase):
         self.assertEqual(action_safety(PRIVILEGED_OPERATION_SUMMARY_READ_ACTION), "read")
         self.assertEqual(action_safety(AUTHZ_POLICY_OPERATION_PROPOSE_ACTION), "policy_admin")
         self.assertEqual(action_safety(AUTHZ_POLICY_OPERATION_APPROVE_ACTION), "policy_admin")
+        self.assertEqual(action_safety(MERGE_TRAIN_POLICY_OPERATION_PROPOSE_ACTION), "policy_admin")
+        self.assertEqual(action_safety(MERGE_TRAIN_POLICY_OPERATION_APPROVE_ACTION), "policy_admin")
 
     def test_secret_actor_json_and_id_remain_compatible_while_policy_ids_are_namespaced(
         self,
@@ -131,7 +141,13 @@ class PrivilegedOperationContractTests(unittest.TestCase):
             actor=PrivilegedOperationAgentActor(principal_sha256="d" * 64),
             source_event_id=record.source_event_id,
         )
+        merge_train_policy_operation_id = build_privileged_operation_id_for_actor(
+            descriptor_id="managed-merge-train-policy-import",
+            actor=PrivilegedOperationAgentActor(principal_sha256="d" * 64),
+            source_event_id=record.source_event_id,
+        )
         self.assertNotEqual(policy_operation_id, record.operation_id)
+        self.assertNotEqual(merge_train_policy_operation_id, policy_operation_id)
 
     def test_agent_summary_is_counts_only(self) -> None:
         rendered = privileged_operation_agent_summary(_record()).model_dump_json()
@@ -168,6 +184,87 @@ class PrivilegedOperationContractTests(unittest.TestCase):
         self.assertFalse(reencrypt.call_args.kwargs["apply"])
         self.assertEqual(evidence.unreadable_secret_count, 1)
         self.assertNotIn("secret-private-id", evidence.model_dump_json())
+
+    def test_merge_train_policy_import_planner_binds_redacted_target_change_evidence(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            store = FilesystemRecordStore(Path(temporary_directory))
+            active_record = build_test_merge_train_policy_record(
+                repository="cbusillo/sellyouroutboard",
+                record_id="merge-train-policy-active",
+                updated_at="2026-08-22T19:00:00+00:00",
+            )
+            candidate_record = build_test_merge_train_policy_record(
+                repository="cbusillo/codex-skills",
+                record_id="merge-train-policy-candidate",
+                updated_at="2026-08-22T20:00:00+00:00",
+            )
+            store.write_merge_train_policy_record(active_record)
+
+            evidence = plan_managed_merge_train_policy_import(
+                store,
+                ManagedMergeTrainPolicyImportProposalInput(
+                    record=candidate_record,
+                    reason="Review exact merge-train policy enrollment.",
+                    related_issue="cbusillo/launchplane#2296",
+                ),
+            )
+
+        self.assertEqual(evidence.active_record_id, "merge-train-policy-active")
+        self.assertEqual(evidence.candidate_record_id, "merge-train-policy-candidate")
+        self.assertEqual(evidence.added_policy_keys, ("cbusillo/codex-skills:main",))
+        self.assertEqual(evidence.removed_policy_keys, ("cbusillo/sellyouroutboard:main",))
+        rendered = evidence.model_dump_json()
+        self.assertNotIn("GH_TOKEN", rendered)
+        self.assertNotIn("launchplane-merge-train", rendered)
+
+    def test_merge_train_policy_import_record_rejects_authz_policy_evidence(self) -> None:
+        request = ManagedMergeTrainPolicyImportProposalInput(
+            record=build_test_merge_train_policy_record(),
+            reason="Review exact merge-train policy enrollment.",
+        )
+        evidence = ManagedMergeTrainPolicyImportHumanEvidence(
+            plan_digest="c" * 64,
+            active_record_id="active",
+            active_updated_at="2026-08-22T19:00:00+00:00",
+            active_policy_sha256="a" * 64,
+            active_target_count=1,
+            candidate_record_id="candidate",
+            candidate_policy_sha256="b" * 64,
+            candidate_target_count=1,
+            changed_policy_keys=("cbusillo/sellyouroutboard:main",),
+        )
+        actor = PrivilegedOperationAgentActor(principal_sha256="d" * 64)
+        record = PrivilegedOperationRecord(
+            operation_id=build_privileged_operation_id_for_actor(
+                descriptor_id="managed-merge-train-policy-import",
+                actor=actor,
+                source_event_id="merge-train-plan",
+            ),
+            descriptor_id="managed-merge-train-policy-import",
+            descriptor_version=1,
+            safety_class="policy_admin",
+            status="planned",
+            source_event_id="merge-train-plan",
+            requested_by=actor,
+            request=request,
+            request_digest=privileged_operation_request_digest(request),
+            evidence=evidence,
+            evidence_digest=privileged_operation_evidence_digest(evidence),
+            created_at="2026-08-22T20:00:00+00:00",
+            updated_at="2026-08-22T20:00:00+00:00",
+            expires_at="2026-08-22T20:30:00+00:00",
+        )
+
+        summary = privileged_operation_agent_summary(record)
+
+        assert isinstance(summary, ManagedMergeTrainPolicyImportAgentSummary)
+        self.assertEqual(summary.descriptor_id, "managed-merge-train-policy-import")
+        self.assertEqual(summary.added_policy_keys, ())
+        self.assertEqual(summary.changed_policy_keys, ("cbusillo/sellyouroutboard:main",))
+        self.assertEqual(
+            MANAGED_MERGE_TRAIN_POLICY_IMPORT_DESCRIPTOR.plan_action,
+            MERGE_TRAIN_POLICY_OPERATION_PROPOSE_ACTION,
+        )
 
 
 class PrivilegedOperationStorageTests(unittest.TestCase):

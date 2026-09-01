@@ -1637,6 +1637,13 @@ The manual Merge Train Policy Import workflow uses GitHub OIDC with
 `merge_train.policy_import` authority for product/context `launchplane`. It does
 not inherit Launchplane self-deploy authority; use that workflow for DB-backed
 merge-train policy imports instead of direct DB writes from a local checkout.
+While issue `#2058` keeps routine workflow/local authorization grants frozen,
+new reviewed merge-train policy imports must go through
+`managed-merge-train-policy-import` privileged operations. Do not add a workflow
+secret/grant, local-operator grant, raw route proxy, or direct database fallback
+to perform a policy import; activate only the exact
+`merge_train_policy_operation.*` managed rules through the existing DB-native
+managed-authz privileged-operation lifecycle.
 
 The Dokploy-hosted Launchplane target should consume `DOCKER_IMAGE_REFERENCE` from
 its env so deploy automation can switch the service by immutable digest and

@@ -1506,7 +1506,7 @@ class SchemaMigrationTests(unittest.TestCase):
             for primary_key in CRITICAL_PRIMARY_KEYS
         }
 
-        self.assertEqual(EXPECTED_ALEMBIC_HEAD_REVISION, "fb7d9e1a3c5f")
+        self.assertEqual(EXPECTED_ALEMBIC_HEAD_REVISION, "fbc9d1e3a5b7")
         self.assertFalse(
             [index.index_name for index in CRITICAL_SCHEMA_INDEXES if len(index.index_name) > 63]
         )
@@ -1579,6 +1579,23 @@ class SchemaMigrationTests(unittest.TestCase):
                     "launchplane_privileged_operation_events_operation_sequence_uidx",
                 )
             ].unique
+        )
+        self.assertTrue(
+            indexes[
+                (
+                    "launchplane_merge_train_policies",
+                    "launchplane_merge_train_policies_active_uidx",
+                )
+            ].unique
+        )
+        self.assertEqual(
+            indexes[
+                (
+                    "launchplane_merge_train_policies",
+                    "launchplane_merge_train_policies_active_uidx",
+                )
+            ].predicate_expression,
+            "status='active'",
         )
         self.assertEqual(
             column_types[("launchplane_authz_denials", "payload")],

@@ -785,6 +785,47 @@ export type ManagedAuthzPolicySetProposalInputOutput = {
     schema_version: number;
 };
 
+export type ManagedMergeTrainPolicyImportExecutionEvidence = {
+    active_policy_count: number;
+    changed: boolean;
+    failure_code: string;
+    previous_policy_sha256: string;
+    previous_record_id: string;
+    reconciliation_required: boolean;
+    result_digest: string;
+    result_status: 'ok' | 'error';
+    resulting_policy_sha256: string;
+    resulting_record_id: string;
+    schema_version: number;
+    superseded_policy_sha256: string;
+    superseded_record_id: string;
+};
+
+export type ManagedMergeTrainPolicyImportHumanEvidence = {
+    active_policy_sha256: string;
+    active_record_id: string;
+    active_status: 'active';
+    active_target_count: number;
+    active_updated_at: string;
+    added_policy_keys: Array<string>;
+    candidate_policy_sha256: string;
+    candidate_record_id: string;
+    candidate_target_count: number;
+    changed_policy_keys: Array<string>;
+    plan_digest: string;
+    removed_policy_keys: Array<string>;
+    result_status: 'ok';
+    schema_version: number;
+    unchanged_policy_keys: Array<string>;
+};
+
+export type ManagedMergeTrainPolicyImportProposalInputOutput = {
+    reason: string;
+    record: MergeTrainPolicyRecordOutput;
+    related_issue: string;
+    schema_version: number;
+};
+
 export type ManagedSecretReencryptionHumanEvidence = {
     active_key_id: string;
     configured_secret_count: number;
@@ -1134,6 +1175,19 @@ export type MergeTrainDryRunQueueEntrySummary = {
     url: string;
 };
 
+export type MergeTrainEnqueuePolicyOutput = {
+    [key: string]: unknown;
+};
+
+export type MergeTrainGitHubTokenSource = {
+    env_var: string;
+};
+
+export type MergeTrainIdentity = {
+    kind: 'github_actions_oidc' | 'github_app' | 'github_token_secret';
+    name: string;
+};
+
 export type MergeTrainLatestDryRunSummary = {
     eligible_count: number;
     intended_next_action: string;
@@ -1141,6 +1195,21 @@ export type MergeTrainLatestDryRunSummary = {
     queue_count: number;
     queue_entries: Array<MergeTrainDryRunQueueEntrySummary>;
     selected_pr_number: number | null;
+};
+
+export type MergeTrainPolicyOutput = {
+    policies: Array<MergeTrainRepositoryPolicyOutput>;
+    schema_version: number;
+};
+
+export type MergeTrainPolicyRecordOutput = {
+    policy: MergeTrainPolicyOutput;
+    policy_sha256: string;
+    record_id: string;
+    schema_version: number;
+    source: string;
+    status: 'active' | 'superseded';
+    updated_at: string;
 };
 
 export type MergeTrainPolicySummary = {
@@ -1162,6 +1231,22 @@ export type MergeTrainPolicyTargetsResponse = {
     status: 'ok';
     targets: Array<MergeTrainPolicyTarget>;
     trace_id: string;
+};
+
+export type MergeTrainRepositoryPolicyOutput = {
+    base_branch: string;
+    blocked_label: string;
+    engineering_review_mode: 'advisory' | 'required';
+    enqueue: MergeTrainEnqueuePolicyOutput;
+    enqueue_label: string;
+    failure_policy: 'pause_train' | 'continue_after_blocking_pr';
+    github_token: MergeTrainGitHubTokenSource;
+    merge_identity: MergeTrainIdentity;
+    merge_method: 'merge' | 'squash' | 'rebase';
+    repository: string;
+    scheduler: MergeTrainSchedulerPolicy;
+    service_authz: MergeTrainServiceAuthz;
+    stack_child_disposition_label: string;
 };
 
 export type MergeTrainRunRecord = {
@@ -1670,7 +1755,7 @@ export type PrivilegedOperationAgentActor = {
 
 export type PrivilegedOperationApproval = {
     approver: PrivilegedOperationActor;
-    descriptor_id: 'managed-secret-reencryption' | 'managed-authz-policy-set';
+    descriptor_id: 'managed-secret-reencryption' | 'managed-authz-policy-set' | 'managed-merge-train-policy-import';
     descriptor_version: number;
     evidence_digest: string;
     expires_at: string;
@@ -1738,14 +1823,14 @@ export type PrivilegedOperationListResponse = {
 export type PrivilegedOperationRecord = {
     approval: PrivilegedOperationApproval | null;
     created_at: string;
-    descriptor_id: 'managed-secret-reencryption' | 'managed-authz-policy-set';
+    descriptor_id: 'managed-secret-reencryption' | 'managed-authz-policy-set' | 'managed-merge-train-policy-import';
     descriptor_version: number;
-    evidence: ManagedSecretReencryptionHumanEvidence | ManagedAuthzPolicySetHumanEvidence;
+    evidence: ManagedSecretReencryptionHumanEvidence | ManagedAuthzPolicySetHumanEvidence | ManagedMergeTrainPolicyImportHumanEvidence;
     evidence_digest: string;
-    execution: PrivilegedOperationExecutionEvidence | ManagedAuthzPolicySetExecutionEvidence | null;
+    execution: PrivilegedOperationExecutionEvidence | ManagedAuthzPolicySetExecutionEvidence | ManagedMergeTrainPolicyImportExecutionEvidence | null;
     expires_at: string;
     operation_id: string;
-    request: ManagedSecretReencryptionPlanInput | ManagedAuthzPolicySetProposalInputOutput;
+    request: ManagedSecretReencryptionPlanInput | ManagedAuthzPolicySetProposalInputOutput | ManagedMergeTrainPolicyImportProposalInputOutput;
     request_digest: string;
     requested_by: PrivilegedOperationActor | PrivilegedOperationAgentActor;
     safety_class: 'secret_backed' | 'policy_admin';
@@ -3601,7 +3686,7 @@ export type ListHumanPrivilegedOperationsData = {
     path?: never;
     query?: {
         status?: 'planned' | 'approved' | 'revoked' | 'executing' | 'executed' | 'execution_failed' | 'expired' | 'cancelled' | null;
-        descriptor_id?: 'managed-secret-reencryption' | 'managed-authz-policy-set';
+        descriptor_id?: 'managed-secret-reencryption' | 'managed-authz-policy-set' | 'managed-merge-train-policy-import';
         limit?: number;
     };
     url: '/v1/privileged-operations/plans';

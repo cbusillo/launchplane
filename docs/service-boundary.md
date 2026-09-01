@@ -3966,6 +3966,15 @@ with `apply=False`. Browser-human approval/revocation routes remain governed;
 there is no HTTP execute or apply endpoint. Approval can be claimed immediately
 by the supervised worker, so revocation is possible only before claim.
 
+`managed-merge-train-policy-import` uses those existing generic routes with the
+dedicated `merge_train_policy_operation.*` action family. Browser humans review
+the exact candidate policy record; terminal agents can only propose and read
+their own redacted summary when explicitly granted the dedicated summary action.
+Execution is service-worker-only: it re-plans, reauthorizes the immutable
+approver, performs descriptor-specific active merge-train policy CAS and
+idempotency, and verifies exactly one active candidate plus the expected
+superseded prior record before recording terminal success.
+
 Responses and stored records follow the redaction contract in
 `docs/privileged-operations.md`.
 
