@@ -241,6 +241,24 @@ class _FakeFailingMergeTrainGitHubClient(_FakeMergeTrainGitHubClient):
         return candidate.model_copy(update={"required_checks_status": "fail", "status": "failed"})
 
 
+class _StaleCandidateMergeTrainGitHubClient(_FakeMergeTrainGitHubClient):
+    def build_batch_candidate(
+        self,
+        *,
+        candidate: MergeTrainBatchCandidate,
+        checkpoint: (
+            Callable[[MergeTrainBatchCandidate, MergeTrainBatchEntry | None, str], None] | None
+        ) = None,
+    ) -> MergeTrainBatchCandidate:
+        if checkpoint is not None:
+            checkpoint(candidate, None, "reset_candidate_ref")
+            checkpoint(candidate, None, "candidate_ref_ready")
+            checkpoint(candidate, candidate.entries[0], "merge_candidate_entry")
+        raise MergeTrainGitHubStaleHeadError(
+            "Candidate entry conflicts with the rolling merge base.", status_code=409
+        )
+
+
 class _StaleLandingMergeTrainGitHubClient(_FakeMergeTrainGitHubClient):
     def land_batch_candidate(
         self,
