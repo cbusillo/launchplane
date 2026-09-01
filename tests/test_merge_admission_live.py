@@ -318,6 +318,7 @@ def _evaluate_owner_live(
             observed_head_sha=evidence.target.head_sha,
             observed_head_tree_sha=evidence.target.tree_sha,
             controller_state=controller_state,
+            expected_lease_owner=controller_state.lease_owner,
             stack_collapse_record=None,
             evaluated_at="2026-08-11T03:01:00Z",
         )
@@ -689,6 +690,7 @@ class LiveMergeAdmissionEvaluatorTests(unittest.TestCase):
                         observed_head_sha=HEAD_SHA,
                         observed_head_tree_sha=TREE_SHA,
                         controller_state=controller_state,
+                        expected_lease_owner=controller_state.lease_owner,
                         stack_collapse_record=None,
                         evaluated_at="2026-08-11T03:01:00Z",
                     )
@@ -745,6 +747,7 @@ class LiveMergeAdmissionEvaluatorTests(unittest.TestCase):
                     observed_head_sha=HEAD_SHA,
                     observed_head_tree_sha="2" * 40,
                     controller_state=controller_state,
+                    expected_lease_owner=controller_state.lease_owner,
                     stack_collapse_record=None,
                     evaluated_at="2026-08-11T03:01:00Z",
                 )
@@ -790,6 +793,7 @@ class LiveMergeAdmissionEvaluatorTests(unittest.TestCase):
                 observed_head_sha=HEAD_SHA,
                 observed_head_tree_sha="2" * 40,
                 controller_state=controller_state,
+                expected_lease_owner=controller_state.lease_owner,
                 stack_collapse_record=None,
                 evaluated_at="2026-08-11T03:01:00Z",
             )

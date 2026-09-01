@@ -100,6 +100,58 @@ class GovernanceProjectionTests(unittest.TestCase):
             evaluator.kwargs["landing_plan_record"],
             landing_record,
         )
+        self.assertEqual(
+            evaluator.kwargs["expected_lease_owner"],
+            controller_state.lease_owner,
+        )
+
+    def test_live_readiness_provider_requires_running_controller_lease(self) -> None:
+        candidate_record, landing_record, controller_state, _structural_result = _guard_records()
+        evidence = _repository_evidence(
+            head=candidate_record.candidate.entries[0].head_sha,
+            base_sha=candidate_record.candidate.base_sha,
+        ).model_copy(
+            update={
+                "target": _repository_evidence().target.model_copy(
+                    update={
+                        "repository": candidate_record.candidate.repository,
+                        "pull_request_number": candidate_record.candidate.entries[
+                            0
+                        ].pull_request_number,
+                        "head_sha": candidate_record.candidate.entries[0].head_sha,
+                        "tree_sha": candidate_record.candidate.entries[0].head_tree_sha,
+                    }
+                )
+            }
+        )
+        idle_controller_state = controller_state.model_copy(
+            update={
+                "status": "idle",
+                "lease_owner": "",
+                "lease_acquired_at": "",
+                "lease_expires_at": "",
+                "heartbeat_at": "",
+            }
+        )
+        with TemporaryDirectory() as directory:
+            store = _store(Path(directory))
+            store.write_merge_train_batch_candidate_record(candidate_record)
+            store.write_merge_train_batch_landing_plan_record(landing_record)
+            store.write_merge_train_controller_state_record(idle_controller_state)
+            provider = LiveGovernanceCurrentReadinessProvider(
+                github_token=lambda _env_var: self.fail("idle controller used a token")
+            )
+
+            result = provider(
+                store=store,
+                repository_evidence=evidence,
+                base_branch="main",
+                evaluated_at=NOW,
+                github_token_env_var="GH_TOKEN",
+            )
+
+        self.assertEqual(result.availability, "unavailable")
+        self.assertEqual(result.reason_code, "current_evidence_unavailable")
 
     def test_live_readiness_provider_treats_terminal_lineage_as_inactive(self) -> None:
         candidate_record, landing_record, controller_state, _structural_result = _guard_records()

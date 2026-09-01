@@ -23,7 +23,10 @@ and GitHub queue for every entry rather than treating request-start policy or
 stored candidate order as live evidence.
 
 Only `ready` Level 2 evidence plus `exact` or `recorded_rolling` structural
-evidence may produce an admission. The admission binds the complete L2 and
+evidence may produce an admission. The guarded caller binds the expected lease
+owner from its acquired controller authority before each fresh controller-state
+observation, so a cleared or replaced lease becomes a normal fail-closed L2
+result rather than new authority. The admission binds the complete L2 and
 structural results, candidate and landing-plan digests, current lease identity,
 algorithm version, attempt sequence, and exact Git identities. Storage creation
 is insert-only. The storage transaction re-reads the persisted controller lease,

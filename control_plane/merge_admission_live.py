@@ -116,6 +116,7 @@ class LiveMergeAdmissionEvaluator:
         observed_head_sha: str,
         observed_head_tree_sha: str,
         controller_state: MergeTrainControllerStateRecord,
+        expected_lease_owner: str,
         stack_collapse_record: MergeTrainStackCollapsePlanRecord | None,
         evaluated_at: str,
     ) -> MergeAdmissionEvaluation:
@@ -262,7 +263,7 @@ class LiveMergeAdmissionEvaluator:
             candidate_record=candidate_record,
             structural_candidate_status=structural_result.status,
             controller_state=controller_state,
-            expected_lease_owner=controller_state.lease_owner,
+            expected_lease_owner=expected_lease_owner,
             observed_effect_sha=landing_plan.candidate_sha,
             evaluated_at=evaluated_at,
         )
