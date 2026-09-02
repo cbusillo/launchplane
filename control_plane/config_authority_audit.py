@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import subprocess
 import tomllib
@@ -2631,6 +2631,11 @@ def _candidate_is_interesting(*, path: str, key: str, value: object) -> bool:
         return False
     if normalized.startswith(".github/workflows/") and _dependency_health_action_input_name(key):
         return True
+    if normalized.startswith(".github/workflows/") and key in {
+        "BASELINE_LOCKFILE",
+        "CANDIDATE_LOCKFILE",
+    }:
+        return True
     if normalized.startswith(".github/workflows/") and key == "TRIVY_IMAGE":
         return True
     if normalized == LAUNCHPLANE_CONFIG_AUTHORITY_WORKFLOW_PATH and (
@@ -3280,6 +3285,8 @@ def _is_dependency_health_workflow_mechanic(
     value: object,
 ) -> bool:
     value_text = _string_value(value).strip()
+    if key in {"BASELINE_LOCKFILE", "CANDIDATE_LOCKFILE"}:
+        return _is_repository_relative_package_lock_path(value_text)
     if key == "uses":
         return _is_immutable_launchplane_dependency_health_action_reference(value_text)
     if key == "TRIVY_IMAGE":
@@ -3309,6 +3316,7 @@ def _is_dependency_health_workflow_mechanic(
         return (
             _is_github_same_job_step_output_reference(value_text)
             or value_text == _dependabot_target_advisory_text_expression()
+            or _is_dependabot_production_scope_target_advisory_text_expression(value_text)
         )
     if input_name == "output-directory":
         return _is_step_output_path(value_text, suffix="/evaluation")
@@ -3329,6 +3337,32 @@ def _dependabot_target_advisory_text_expression() -> str:
         "github.event.pull_request.user.login == 'dependabot[bot]' && "
         "steps.dependabot.outputs.dependency-type != 'direct:development' && "
         "github.event.pull_request.body || '' }}"
+    )
+
+
+def _is_dependabot_production_scope_target_advisory_text_expression(
+    value: str,
+) -> bool:
+    return (
+        re.fullmatch(
+            r"\$\{\{ github\.event_name == 'pull_request' && "
+            r"github\.event\.pull_request\.user\.login == 'dependabot\[bot\]' && "
+            r"steps\.[A-Za-z_][A-Za-z0-9_-]*\.outputs\.production-scope == 'true' && "
+            r"github\.event\.pull_request\.body \|\| '' \}\}",
+            value,
+        )
+        is not None
+    )
+
+
+def _is_repository_relative_package_lock_path(value: str) -> bool:
+    path = PurePosixPath(value)
+    return bool(
+        value
+        and not path.is_absolute()
+        and ".." not in path.parts
+        and len(path.parts) > 1
+        and path.name == "package-lock.json"
     )
 
 
