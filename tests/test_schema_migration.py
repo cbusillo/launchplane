@@ -98,6 +98,117 @@ class SchemaMigrationTests(unittest.TestCase):
             ),
         )
 
+    def test_merge_train_policy_migration_ignores_invalid_superseded_timestamp(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            database_url = f"sqlite+pysqlite:///{database_path}"
+            config = alembic_config(database_url)
+            command.upgrade(config, "fb7d9e1a3c5f")
+            engine = create_engine(database_url)
+            active_payload = {
+                "schema_version": 1,
+                "record_id": "merge-train-policy-active",
+                "status": "active",
+                "source": "test",
+                "updated_at": "2026-09-02T00:00:00Z",
+                "policy_sha256": "a" * 64,
+                "policy": {"schema_version": 1, "policies": []},
+            }
+            superseded_payload = {
+                **active_payload,
+                "record_id": "merge-train-policy-superseded",
+                "status": "superseded",
+                "updated_at": "not-a-timestamp",
+                "policy_sha256": "b" * 64,
+            }
+            with engine.begin() as connection:
+                for payload in (active_payload, superseded_payload):
+                    connection.execute(
+                        text(
+                            "INSERT INTO launchplane_merge_train_policies "
+                            "(record_id, status, source, updated_at, policy_sha256, payload) "
+                            "VALUES (:record_id, :status, 'test', :updated_at, "
+                            ":policy_sha256, :payload)"
+                        ),
+                        {
+                            "record_id": payload["record_id"],
+                            "status": payload["status"],
+                            "updated_at": payload["updated_at"],
+                            "policy_sha256": payload["policy_sha256"],
+                            "payload": json.dumps(payload),
+                        },
+                    )
+            engine.dispose()
+
+            command.upgrade(config, EXPECTED_ALEMBIC_HEAD_REVISION)
+            engine = create_engine(database_url)
+            try:
+                with engine.connect() as connection:
+                    rows = tuple(
+                        connection.execute(
+                            text(
+                                "SELECT record_id, status "
+                                "FROM launchplane_merge_train_policies ORDER BY record_id"
+                            )
+                        )
+                    )
+            finally:
+                engine.dispose()
+
+        self.assertEqual(
+            rows,
+            (
+                ("merge-train-policy-active", "active"),
+                ("merge-train-policy-superseded", "superseded"),
+            ),
+        )
+
+    def test_merge_train_policy_migration_rejects_ambiguous_latest_active_timestamp(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            database_url = f"sqlite+pysqlite:///{database_path}"
+            config = alembic_config(database_url)
+            command.upgrade(config, "fb7d9e1a3c5f")
+            engine = create_engine(database_url)
+            payload = {
+                "schema_version": 1,
+                "status": "active",
+                "source": "test",
+                "updated_at": "2026-09-02T00:00:00Z",
+                "policy": {"schema_version": 1, "policies": []},
+            }
+            with engine.begin() as connection:
+                for index in range(2):
+                    record_id = f"merge-train-policy-active-{index}"
+                    record_payload = {
+                        **payload,
+                        "record_id": record_id,
+                        "policy_sha256": str(index) * 64,
+                    }
+                    connection.execute(
+                        text(
+                            "INSERT INTO launchplane_merge_train_policies "
+                            "(record_id, status, source, updated_at, policy_sha256, payload) "
+                            "VALUES (:record_id, 'active', 'test', :updated_at, "
+                            ":policy_sha256, :payload)"
+                        ),
+                        {
+                            "record_id": record_id,
+                            "updated_at": record_payload["updated_at"],
+                            "policy_sha256": record_payload["policy_sha256"],
+                            "payload": json.dumps(record_payload),
+                        },
+                    )
+            engine.dispose()
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "multiple active records share the latest updated_at timestamp",
+            ):
+                command.upgrade(config, EXPECTED_ALEMBIC_HEAD_REVISION)
+
     def test_postgres_any_array_predicate_matches_equivalent_in_expression(self) -> None:
         observed_expressions = (
             "status = ANY (ARRAY['pending'::character varying, 'active'::character varying])",

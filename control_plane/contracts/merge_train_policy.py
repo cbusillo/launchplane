@@ -249,6 +249,7 @@ class MergeTrainPolicyRecord(BaseModel):
         self.updated_at = _normalize_required_value(
             self.updated_at, "merge train policy record requires updated_at"
         )
+        normalize_merge_train_policy_timestamp(self.updated_at)
         computed_sha256 = self.policy.policy_sha256
         if not self.policy_sha256:
             self.policy_sha256 = computed_sha256

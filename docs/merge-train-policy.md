@@ -365,6 +365,15 @@ plan; the service worker performs active-policy CAS, operation-scoped
 idempotency, and exact active/superseded read-back. Existing
 `authz_policy_operation.*` grants do not authorize merge-train policy imports.
 
+Policy record timestamps must be timezone-aware ISO-8601 values. The schema
+migration that installs the one-active-record fence inspects only active legacy
+records, keeps the uniquely latest active record, and supersedes older active
+records. If the latest active timestamp is invalid or tied, the migration stops
+explicitly instead of guessing. Resolve exactly one active row through the
+approved database-repair procedure, updating both the promoted `status` column
+and `payload.status`, then rerun the migration; do not use an ordinary import as
+a migration-repair shortcut.
+
 For local operator terminals, the compatibility CLI import path still reads the
 bearer token from `LAUNCHPLANE_SERVICE_TOKEN` unless a browser
 `--session-cookie` is supplied:

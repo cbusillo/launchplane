@@ -2678,7 +2678,9 @@ boundary.
 Managed merge-train policy import records retain the exact candidate policy
 record for authorized human review, while human evidence and agent summaries
 store only active/candidate IDs and digests, active updated time, target counts,
-and stable policy-key change buckets. PostgreSQL enforces one active
+and stable policy-key change buckets. Record timestamps must be timezone-aware,
+and a privileged candidate record ID cannot reuse any active or superseded
+history ID. PostgreSQL enforces one active
 `launchplane_merge_train_policies` record with a partial unique active index;
 the privileged worker uses atomic expected-active-policy compare-and-write,
 operation-scoped idempotency, and exact active/superseded read-back before an
@@ -2688,10 +2690,10 @@ The checked schema-version-4 `contracts/owner-control-contract.json` artifact is
 not a record or runtime authority. It supplies deterministic cross-host
 serialization, synthetic wire/signature vectors, complete shadow-verifier
 outcome vectors, and one reactive expiry-lifecycle vector only. Its
-compatibility declaration pins exact version-2 section digests plus
-descriptor-scoped vector digests for the descriptors present in version `2`, so
-additive descriptor and server-state evidence cannot rewrite existing wire
-coverage silently.
+compatibility declaration pins exact version-2 section digests,
+descriptor-scoped vector digests for the descriptors present in version `2`,
+and unchanged version-2 schema digests, so additive descriptor and server-state
+evidence cannot rewrite existing wire coverage silently.
 
 Owner-control shadow-verifier state is persisted only in PostgreSQL through
 `PostgresRecordStore`: `launchplane_owner_control_channel_sessions` stores one

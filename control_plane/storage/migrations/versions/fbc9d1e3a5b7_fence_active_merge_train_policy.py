@@ -67,9 +67,10 @@ def _canonicalize_active_records() -> None:
             )
         ).mappings()
     )
+    active_rows = tuple(row for row in rows if row["status"] == "active")
     rows_with_timestamps = tuple(
         (row, _legacy_updated_at(str(row["updated_at"]), record_id=str(row["record_id"])))
-        for row in rows
+        for row in active_rows
     )
     ordered_rows = tuple(
         row
@@ -78,18 +79,14 @@ def _canonicalize_active_records() -> None:
             key=lambda item: (item[1], str(item[0]["record_id"])),
         )
     )
-    active_timestamps = tuple(
-        timestamp for row, timestamp in rows_with_timestamps if row["status"] == "active"
-    )
+    active_timestamps = tuple(timestamp for _, timestamp in rows_with_timestamps)
     if len(active_timestamps) > 1 and active_timestamps.count(max(active_timestamps)) > 1:
         raise RuntimeError(
             "Cannot canonicalize Launchplane merge-train policy history because multiple "
             "active records share the latest updated_at timestamp. Resolve the active "
             "record explicitly before applying this migration."
         )
-    active_record_ids = tuple(
-        str(row["record_id"]) for row in ordered_rows if row["status"] == "active"
-    )
+    active_record_ids = tuple(str(row["record_id"]) for row in ordered_rows)
     retained_active_record_id = active_record_ids[-1] if active_record_ids else ""
     for row in ordered_rows:
         record_id = str(row["record_id"])

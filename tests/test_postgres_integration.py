@@ -1208,6 +1208,39 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
             ),
         )
 
+    def test_merge_train_policy_compare_write_rejects_record_id_from_history(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            historical_record = build_test_merge_train_policy_record(
+                repository="cbusillo/odoo-devkit",
+                record_id="merge-train-policy-historical",
+                updated_at="2026-08-22T18:00:00+00:00",
+            ).model_copy(update={"status": "superseded"})
+            active_record = build_test_merge_train_policy_record(
+                repository="cbusillo/sellyouroutboard",
+                record_id="merge-train-policy-active",
+                updated_at="2026-08-22T19:00:00+00:00",
+            )
+            replacement_record = build_test_merge_train_policy_record(
+                repository="cbusillo/codex-skills",
+                record_id=historical_record.record_id,
+                updated_at="2026-08-22T20:00:00+00:00",
+            )
+            store.write_merge_train_policy_record(historical_record)
+            store.write_merge_train_policy_record(active_record)
+
+            result = store.compare_and_write_merge_train_policy_record(
+                expected_record=active_record,
+                replacement_record=replacement_record,
+            )
+            active_records = store.list_merge_train_policy_records(status="active")
+            stored_historical_record = store.read_merge_train_policy_record(
+                historical_record.record_id
+            )
+
+        self.assertEqual(result.status, "record_id_conflict")
+        self.assertEqual(active_records, (active_record,))
+        self.assertEqual(stored_historical_record, historical_record)
+
     def test_runtime_schema_compatibility_reports_missing_relation(self) -> None:
         with _store_for_fresh_head_database() as store:
             with self.assertRaisesRegex(

@@ -1856,11 +1856,8 @@ class FilesystemRecordStore:
             raise ValueError("Merge-train policy compare-and-write replacement must be active.")
         record_type = "launchplane_merge_train_policies"
         with self._exclusive_record_lock(record_type, "active"):
-            active_records = [
-                record
-                for record in self._list_models_locked(MergeTrainPolicyRecord, record_type)
-                if record.status == "active"
-            ]
+            policy_records = self._list_models_locked(MergeTrainPolicyRecord, record_type)
+            active_records = [record for record in policy_records if record.status == "active"]
             if not active_records:
                 return MergeTrainPolicyCompareWriteResult(status="missing")
             if len(active_records) > 1:
@@ -1877,6 +1874,12 @@ class FilesystemRecordStore:
             if (
                 current_record.record_id == replacement_record.record_id
                 and current_record.policy_sha256 != replacement_record.policy_sha256
+            ):
+                return MergeTrainPolicyCompareWriteResult(
+                    status="record_id_conflict", current_record=current_record
+                )
+            if replacement_record.record_id != current_record.record_id and any(
+                record.record_id == replacement_record.record_id for record in policy_records
             ):
                 return MergeTrainPolicyCompareWriteResult(
                     status="record_id_conflict", current_record=current_record

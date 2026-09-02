@@ -8048,6 +8048,48 @@ env_var = "GH_TOKEN"
             [record.record_id for record in superseded_records], [active_record.record_id]
         )
 
+    def test_merge_train_policy_compare_write_rejects_record_id_from_history(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            try:
+                historical_record = build_test_merge_train_policy_record(
+                    repository="cbusillo/odoo-devkit",
+                    record_id="merge-train-policy-historical",
+                    updated_at="2026-05-13T20:00:00Z",
+                ).model_copy(update={"status": "superseded"})
+                active_record = build_test_merge_train_policy_record(
+                    repository="cbusillo/sellyouroutboard",
+                    record_id="merge-train-policy-active",
+                    updated_at="2026-05-13T21:00:00Z",
+                )
+                replacement_record = build_test_merge_train_policy_record(
+                    repository="cbusillo/codex-skills",
+                    record_id=historical_record.record_id,
+                    updated_at="2026-05-13T22:00:00Z",
+                )
+                store.write_merge_train_policy_record(historical_record)
+                store.write_merge_train_policy_record(active_record)
+
+                result = store.compare_and_write_merge_train_policy_record(
+                    expected_record=active_record,
+                    replacement_record=replacement_record,
+                )
+                active_records = store.list_merge_train_policy_records(status="active")
+                stored_historical_record = store.read_merge_train_policy_record(
+                    historical_record.record_id
+                )
+            finally:
+                store.close()
+
+        self.assertEqual(result.status, "record_id_conflict")
+        self.assertEqual(active_records, (active_record,))
+        self.assertEqual(stored_historical_record, historical_record)
+
     def test_merge_train_policy_plain_write_supersedes_previous_active_record(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = PostgresRecordStore(

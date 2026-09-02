@@ -14951,6 +14951,20 @@ class PostgresRecordStore(HumanSessionStore):
             return MergeTrainPolicyCompareWriteResult(
                 status="record_id_conflict", current_record=current_record
             )
+        if (
+            replacement_record.record_id != current_record.record_id
+            and session.get(
+                LaunchplaneMergeTrainPolicyRow,
+                replacement_record.record_id,
+            )
+            is not None
+        ):
+            if reservation_row is not None:
+                session.delete(reservation_row)
+                session.commit()
+            return MergeTrainPolicyCompareWriteResult(
+                status="record_id_conflict", current_record=current_record
+            )
 
         result_record = current_record
         status: Literal["written", "unchanged"] = "unchanged"

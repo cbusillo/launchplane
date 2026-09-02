@@ -300,7 +300,8 @@ def plan_managed_merge_train_policy_import(
             "Merge-train policy import planner received an invalid request type."
         )
     list_records = getattr(record_store, "list_merge_train_policy_records", None)
-    if not callable(list_records):
+    read_record = getattr(record_store, "read_merge_train_policy_record", None)
+    if not callable(list_records) or not callable(read_record):
         raise PrivilegedOperationPlanningStoreError(
             "Merge-train policy import planning requires merge-train policy storage."
         )
@@ -329,6 +330,19 @@ def plan_managed_merge_train_policy_import(
         raise PrivilegedOperationPlannerError(
             "Merge-train policy import candidate must use a new record ID when policy changes."
         )
+    if candidate_record.record_id != active_record.record_id:
+        try:
+            read_record(candidate_record.record_id)
+        except (KeyError, LookupError, OSError):
+            pass
+        except (TypeError, ValueError) as error:
+            raise PrivilegedOperationPlannerError(
+                "Merge-train policy import planning could not verify candidate record history."
+            ) from error
+        else:
+            raise PrivilegedOperationPlannerError(
+                "Merge-train policy import candidate record ID already exists in policy history."
+            )
     active_payloads = _policy_key_payloads(active_record)
     candidate_payloads = _policy_key_payloads(candidate_record)
     active_keys = set(active_payloads)

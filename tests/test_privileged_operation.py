@@ -243,6 +243,33 @@ class PrivilegedOperationContractTests(unittest.TestCase):
             ):
                 plan_managed_merge_train_policy_import(store, request)
 
+    def test_merge_train_policy_import_planner_rejects_record_id_from_history(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            store = FilesystemRecordStore(Path(temporary_directory))
+            historical_record = build_test_merge_train_policy_record(
+                repository="cbusillo/odoo-devkit",
+                record_id="merge-train-policy-historical",
+            ).model_copy(update={"status": "superseded"})
+            active_record = build_test_merge_train_policy_record(
+                repository="cbusillo/sellyouroutboard",
+                record_id="merge-train-policy-active",
+            )
+            store.write_merge_train_policy_record(historical_record)
+            store.write_merge_train_policy_record(active_record)
+            request = ManagedMergeTrainPolicyImportProposalInput(
+                record=build_test_merge_train_policy_record(
+                    repository="cbusillo/codex-skills",
+                    record_id=historical_record.record_id,
+                ),
+                reason="Review exact merge-train policy enrollment.",
+            )
+
+            with self.assertRaisesRegex(
+                PrivilegedOperationPlannerError,
+                "already exists in policy history",
+            ):
+                plan_managed_merge_train_policy_import(store, request)
+
     def test_merge_train_policy_import_record_rejects_authz_policy_evidence(self) -> None:
         request = ManagedMergeTrainPolicyImportProposalInput(
             record=build_test_merge_train_policy_record(),

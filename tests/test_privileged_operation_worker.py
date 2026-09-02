@@ -1565,6 +1565,85 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
         self.assertEqual(len(active_records), 1)
         self.assertEqual(active_records[0].revision, 2)
 
+    def test_stale_merge_train_policy_execution_recovers_from_inner_cas_readback(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as directory:
+            store = self._store(directory)
+            try:
+                approval_policy = store.seed_authz_policy_if_absent(
+                    _merge_train_policy_admin_record()
+                )
+                operation_id = _prepare_approved_merge_train_policy_import(
+                    store,
+                    approval_policy=approval_policy,
+                )
+                original_transition = store.transition_privileged_operation
+
+                def crash_after_policy_effect(
+                    record: PrivilegedOperationRecord,
+                    event: PrivilegedOperationEventRecord,
+                ) -> PrivilegedOperationEventWriteStatus:
+                    if record.status == "executed":
+                        raise KeyboardInterrupt("simulated merge-train policy worker crash")
+                    return original_transition(record, event)
+
+                with (
+                    patch.object(
+                        store,
+                        "transition_privileged_operation",
+                        side_effect=crash_after_policy_effect,
+                    ),
+                    self.assertRaises(KeyboardInterrupt),
+                ):
+                    execute_approved_privileged_operations_once(
+                        record_store=store,
+                        now=lambda: FIXED_NOW,
+                    )
+
+                executing = store.read_privileged_operation_record(operation_id)
+                outer_lookup = store.lookup_existing_mutation_reservation(
+                    route_path=PRIVILEGED_OPERATION_EXECUTION_ROUTE,
+                    idempotency_key=operation_id,
+                    request_fingerprint=privileged_operation_execution_fingerprint(executing),
+                )
+                self.assertIsNotNone(outer_lookup.record)
+                outer_reservation = outer_lookup.record
+                assert outer_reservation is not None
+                store.mark_mutation_reconcile_required(
+                    reservation=outer_reservation,
+                    reconciliation_key=operation_id,
+                )
+
+                recovered = execute_approved_privileged_operations_once(
+                    record_store=store,
+                    now=lambda: FIXED_NOW,
+                )
+
+                current = store.read_privileged_operation_record(operation_id)
+                active_records = store.list_merge_train_policy_records(status="active", limit=2)
+                superseded_records = store.list_merge_train_policy_records(
+                    status="superseded",
+                    limit=10,
+                )
+            finally:
+                store.close()
+
+        self.assertEqual(executing.status, "executing")
+        self.assertEqual([record.operation_id for record in recovered], [operation_id])
+        self.assertEqual(current.status, "executed")
+        self.assertIsInstance(current.execution, ManagedMergeTrainPolicyImportExecutionEvidence)
+        assert isinstance(current.execution, ManagedMergeTrainPolicyImportExecutionEvidence)
+        self.assertFalse(current.execution.reconciliation_required)
+        self.assertEqual(
+            [record.record_id for record in active_records],
+            ["merge-train-policy-candidate"],
+        )
+        self.assertEqual(
+            [record.record_id for record in superseded_records],
+            ["merge-train-policy-active"],
+        )
+
     def test_removed_github_id_rule_fails_before_effect_without_reconciliation(self) -> None:
         approval_policy = _policy_record(revision=3)
         active_policy = _policy_record(revision=4, github_ids=(999,))
