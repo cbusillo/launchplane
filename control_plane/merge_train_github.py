@@ -257,9 +257,10 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             candidate.candidate_sha,
             "Merge train batch candidate SHA is required before observing checks.",
         )
-        check_status = _required_checks_status(
+        check_status = _candidate_required_checks_status(
             transport=self.transport,
             repository_path=repository_path,
+            base_branch=candidate.base_branch,
             encoded_head_sha=quote(candidate_sha, safe=""),
         )
         candidate_status = "ready_for_checks"
@@ -1824,6 +1825,179 @@ def _required_checks_status(
     return _combine_check_statuses(
         _combined_status_state(status_payload), _check_runs_status(check_runs_payload)
     )
+
+
+def _candidate_required_checks_status(
+    *,
+    transport: MergeTrainGitHubTransport,
+    repository_path: str,
+    base_branch: str,
+    encoded_head_sha: str,
+) -> MergeTrainCheckStatus:
+    required_checks = _required_branch_checks(
+        transport=transport,
+        repository_path=repository_path,
+        base_branch=base_branch,
+    )
+    status_payload = _list_commit_statuses(
+        transport=transport,
+        repository_path=repository_path,
+        encoded_head_sha=encoded_head_sha,
+    )
+    check_runs_payload = _list_check_runs(
+        transport=transport,
+        repository_path=repository_path,
+        encoded_head_sha=encoded_head_sha,
+    )
+    observed_status = _combine_check_statuses(
+        _combined_status_state(status_payload),
+        _check_runs_status(check_runs_payload),
+    )
+    required_status, missing_required_checks = _required_check_evidence_status(
+        required_checks=required_checks,
+        status_payload=status_payload,
+        check_runs_payload=check_runs_payload,
+    )
+    if observed_status == "pass" and required_status == "pending" and missing_required_checks:
+        raise MergeTrainGitHubError(
+            "Merge train candidate is missing required check evidence: "
+            + ", ".join(missing_required_checks)
+        )
+    return _combine_check_statuses(observed_status, required_status)
+
+
+def _required_branch_checks(
+    *,
+    transport: MergeTrainGitHubTransport,
+    repository_path: str,
+    base_branch: str,
+) -> tuple[tuple[str, int | None], ...]:
+    encoded_base_branch = quote(base_branch, safe="")
+    try:
+        raw_payload = transport.request(
+            method="GET",
+            path=(
+                f"/repos/{repository_path}/branches/{encoded_base_branch}"
+                "/protection/required_status_checks"
+            ),
+        )
+    except MergeTrainGitHubError as error:
+        if error.status_code in {403, 404}:
+            raise MergeTrainGitHubError(
+                "Merge train candidate validation requires a readable protected-branch "
+                "required-check policy and GitHub administration: read permission.",
+                status_code=error.status_code,
+            ) from error
+        raise
+    payload = _json_object(raw_payload, "GitHub required status checks response")
+    required_checks: dict[tuple[str, int | None], tuple[str, int | None]] = {}
+    raw_checks = payload.get("checks")
+    if raw_checks is not None:
+        if not isinstance(raw_checks, list):
+            raise MergeTrainGitHubError(
+                "GitHub required status checks response checks must be a list."
+            )
+        for item in raw_checks:
+            check = _json_object(item, "GitHub required status check")
+            context = _required_text(
+                check.get("context"), "GitHub required status check requires context."
+            )
+            raw_app_id = check.get("app_id")
+            if raw_app_id is not None and (
+                isinstance(raw_app_id, bool)
+                or not isinstance(raw_app_id, int)
+                or raw_app_id == 0
+                or raw_app_id < -1
+            ):
+                raise MergeTrainGitHubError(
+                    "GitHub required status check app_id must be positive, -1, or null."
+                )
+            app_id = raw_app_id if isinstance(raw_app_id, int) and raw_app_id > 0 else None
+            required_checks[(context.casefold(), app_id)] = (context, app_id)
+    if not required_checks:
+        raw_contexts = payload.get("contexts")
+        if not isinstance(raw_contexts, list):
+            raise MergeTrainGitHubError(
+                "GitHub required status checks response contexts must be a list."
+            )
+        for item in raw_contexts:
+            context = _required_text(item, "GitHub required status check context is required.")
+            required_checks[(context.casefold(), None)] = (context, None)
+    if not required_checks:
+        raise MergeTrainGitHubError(
+            "Merge train candidate validation requires at least one protected-branch status check."
+        )
+    return tuple(
+        required_checks[key]
+        for key in sorted(
+            required_checks,
+            key=lambda item: (item[0], item[1] if item[1] is not None else -1),
+        )
+    )
+
+
+def _required_check_evidence_status(
+    *,
+    required_checks: tuple[tuple[str, int | None], ...],
+    status_payload: dict[str, object],
+    check_runs_payload: dict[str, object],
+) -> tuple[MergeTrainCheckStatus, tuple[str, ...]]:
+    raw_statuses = status_payload.get("statuses")
+    if not isinstance(raw_statuses, list):
+        raise MergeTrainGitHubError("GitHub combined status response must include statuses.")
+    raw_check_runs = check_runs_payload.get("check_runs")
+    if not isinstance(raw_check_runs, list):
+        raise MergeTrainGitHubError("GitHub check runs response must include check_runs.")
+    commit_statuses: dict[str, MergeTrainCheckStatus] = {}
+    for item in raw_statuses:
+        status = _json_object(item, "GitHub commit status")
+        context = _required_text(status.get("context"), "GitHub commit status requires context.")
+        normalized_context = context.casefold()
+        if is_launchplane_projected_check(context) or normalized_context in commit_statuses:
+            continue
+        commit_statuses[normalized_context] = _commit_status_state(status)
+    check_runs: list[tuple[str, int | None, MergeTrainCheckStatus]] = []
+    for item in raw_check_runs:
+        check_run = _json_object(item, "GitHub check run")
+        name = _required_text(check_run.get("name"), "GitHub check run requires name.")
+        if is_launchplane_projected_check(name):
+            continue
+        app = check_run.get("app")
+        app_id: int | None = None
+        if isinstance(app, dict):
+            raw_app_id = app.get("id")
+            if isinstance(raw_app_id, int) and not isinstance(raw_app_id, bool):
+                app_id = raw_app_id
+        check_runs.append((name.casefold(), app_id, _check_run_status(check_run)))
+    required_statuses: list[MergeTrainCheckStatus] = []
+    missing_required_checks: list[str] = []
+    for context, required_app_id in required_checks:
+        normalized_context = context.casefold()
+        matching_statuses = [
+            status
+            for name, app_id, status in check_runs
+            if name == normalized_context and (required_app_id is None or app_id == required_app_id)
+        ]
+        if required_app_id is None:
+            commit_status = commit_statuses.get(normalized_context)
+            if commit_status is not None:
+                matching_statuses.append(commit_status)
+        if not matching_statuses:
+            required_statuses.append("pending")
+            missing_required_checks.append(
+                context if required_app_id is None else f"{context} (app_id={required_app_id})"
+            )
+        elif any(status == "fail" for status in matching_statuses):
+            required_statuses.append("fail")
+        elif all(status == "pass" for status in matching_statuses):
+            required_statuses.append("pass")
+        else:
+            required_statuses.append("pending")
+    if any(status == "fail" for status in required_statuses):
+        return "fail", tuple(missing_required_checks)
+    if all(status == "pass" for status in required_statuses):
+        return "pass", ()
+    return "pending", tuple(missing_required_checks)
 
 
 def _list_commit_statuses(

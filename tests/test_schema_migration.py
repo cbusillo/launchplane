@@ -1673,7 +1673,7 @@ class SchemaMigrationTests(unittest.TestCase):
             for primary_key in CRITICAL_PRIMARY_KEYS
         }
 
-        self.assertEqual(EXPECTED_ALEMBIC_HEAD_REVISION, "fbc9d1e3a5b7")
+        self.assertEqual(EXPECTED_ALEMBIC_HEAD_REVISION, "b8d0f2a4c6e8")
         self.assertFalse(
             [index.index_name for index in CRITICAL_SCHEMA_INDEXES if len(index.index_name) > 63]
         )
@@ -2016,6 +2016,12 @@ class SchemaMigrationTests(unittest.TestCase):
                         "launchplane_owner_control_challenge_lifecycle_events"
                     )
                 }
+                provenance_columns = {
+                    str(column["name"])
+                    for column in inspector.get_columns(
+                        "launchplane_owner_control_enrollment_provenance"
+                    )
+                }
                 enrollment_columns = {
                     str(column["name"])
                     for column in inspector.get_columns("launchplane_administrator_enrollments")
@@ -2047,7 +2053,23 @@ class SchemaMigrationTests(unittest.TestCase):
                 "launchplane_owner_control_issued_challenges",
                 "launchplane_owner_control_shadow_verification_events",
                 "launchplane_owner_control_challenge_lifecycle_events",
+                "launchplane_owner_control_enrollment_provenance",
             }.issubset(table_names)
+        )
+        self.assertTrue(
+            {
+                "channel_session_id",
+                "owner_github_id",
+                "binding_sha256",
+                "host_principal_claim_sha256",
+                "enrolled_at",
+                "enrollment_context",
+                "server_observed_corroboration",
+                "provenance_tier",
+                "authorizes_execution",
+                "authority_state",
+                "payload",
+            }.issubset(provenance_columns)
         )
         self.assertTrue(
             {
@@ -2132,7 +2154,99 @@ class SchemaMigrationTests(unittest.TestCase):
             "launchplane_owner_control_challenge_lifecycle_events",
             downgraded_tables,
         )
+        self.assertNotIn(
+            "launchplane_owner_control_enrollment_provenance",
+            downgraded_tables,
+        )
         self.assertNotIn("launchplane_administrator_enrollments", downgraded_tables)
+
+    def test_owner_control_provenance_upgrade_refuses_legacy_sessions(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = (
+                f"sqlite+pysqlite:///{Path(temporary_directory_name) / 'records.sqlite3'}"
+            )
+            config = alembic_config(database_url)
+            command.upgrade(config, "fbc9d1e3a5b7")
+            engine = create_engine(database_url)
+            try:
+                with engine.begin() as connection:
+                    connection.execute(
+                        text(
+                            "insert into launchplane_owner_control_channel_sessions "
+                            "(channel_session_id, owner_github_id, status, session_issued_at, "
+                            "session_expires_at, binding_sha256, enrolled_at, revoked_at, "
+                            "authority_state, payload) values "
+                            "('legacy-session', 1, 'enrolled', '2026-08-29T12:00:00+00:00', "
+                            "'2026-08-29T13:00:00+00:00', :digest, "
+                            "'2026-08-29T12:01:00+00:00', null, 'inert', '{}')"
+                        ),
+                        {"digest": "1" * 64},
+                    )
+            finally:
+                engine.dispose()
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "while legacy session rows exist",
+            ):
+                command.upgrade(config, EXPECTED_ALEMBIC_HEAD_REVISION)
+
+            engine = create_engine(database_url)
+            try:
+                self.assertNotIn(
+                    "launchplane_owner_control_enrollment_provenance",
+                    set(inspect(engine).get_table_names()),
+                )
+            finally:
+                engine.dispose()
+
+    def test_owner_control_provenance_migration_refuses_nonempty_downgrade(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = (
+                f"sqlite+pysqlite:///{Path(temporary_directory_name) / 'records.sqlite3'}"
+            )
+            config = alembic_config(database_url)
+            command.upgrade(config, EXPECTED_ALEMBIC_HEAD_REVISION)
+            engine = create_engine(database_url)
+            try:
+                with engine.begin() as connection:
+                    connection.execute(
+                        text(
+                            "insert into launchplane_owner_control_channel_sessions "
+                            "(channel_session_id, owner_github_id, status, session_issued_at, "
+                            "session_expires_at, binding_sha256, enrolled_at, revoked_at, "
+                            "authority_state, payload) values "
+                            "('provenance-session', 1, 'enrolled', "
+                            "'2026-08-29T12:00:00+00:00', '2026-08-29T13:00:00+00:00', "
+                            ":binding_digest, '2026-08-29T12:01:00+00:00', null, "
+                            "'inert', '{}')"
+                        ),
+                        {"binding_digest": "1" * 64},
+                    )
+                    connection.execute(
+                        text(
+                            "insert into launchplane_owner_control_enrollment_provenance "
+                            "(channel_session_id, owner_github_id, binding_sha256, "
+                            "host_principal_claim_sha256, enrolled_at, enrollment_context, "
+                            "server_observed_corroboration, provenance_tier, authority_state, "
+                            "authorizes_execution, payload) values "
+                            "('provenance-session', 1, :binding_digest, :claim_digest, "
+                            "'2026-08-29T12:01:00+00:00', 'postgres_record_store', 'none', "
+                            "'self_asserted', 'inert', false, '{}')"
+                        ),
+                        {
+                            "binding_digest": "1" * 64,
+                            "claim_digest": "2" * 64,
+                        },
+                    )
+            finally:
+                engine.dispose()
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "while records exist",
+            ):
+                command.downgrade(config, "fbc9d1e3a5b7")
 
     def test_owner_control_lifecycle_migration_refuses_nonempty_downgrade(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

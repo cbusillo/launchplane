@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - main
+      - "launchplane/train/**"
   schedule:
     - cron: "23 6 * * 2"
   workflow_dispatch:
@@ -15,8 +16,11 @@ permissions:
 
 concurrency:
   group: >-
-    ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+    ${{ github.workflow }}-${{ github.event_name == 'push' &&
+    !(startsWith(github.ref, 'refs/heads/launchplane/train/') &&
+    !github.event.created && !github.event.forced) && github.sha ||
+    (github.event.pull_request.number || github.ref) }}
+  cancel-in-progress: ${{ github.event_name != 'push' || (startsWith(github.ref, 'refs/heads/launchplane/train/') && !github.event.created && !github.event.forced) }}
 
 jobs:
   analyze:
