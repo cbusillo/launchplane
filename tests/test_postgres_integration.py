@@ -1133,6 +1133,81 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
             [record.record_id for record in superseded_records], [active_record.record_id]
         )
 
+    def test_merge_train_policy_database_trigger_fences_direct_active_writes(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            first_record = build_test_merge_train_policy_record(
+                repository="cbusillo/sellyouroutboard",
+                record_id="merge-train-policy-direct-first",
+                updated_at="2026-09-02T00:00:00+00:00",
+            )
+            second_record = build_test_merge_train_policy_record(
+                repository="cbusillo/codex-skills",
+                record_id="merge-train-policy-direct-second",
+                updated_at="2026-09-02T00:01:00+00:00",
+            )
+            engine = create_engine(store.database_url)
+            try:
+                with engine.begin() as connection:
+                    for record in (first_record, second_record):
+                        connection.execute(
+                            text(
+                                "INSERT INTO launchplane_merge_train_policies "
+                                "(record_id, status, source, updated_at, policy_sha256, payload) "
+                                "VALUES (:record_id, :status, :source, :updated_at, "
+                                ":policy_sha256, CAST(:payload AS JSONB))"
+                            ),
+                            {
+                                "record_id": record.record_id,
+                                "status": record.status,
+                                "source": record.source,
+                                "updated_at": record.updated_at,
+                                "policy_sha256": record.policy_sha256,
+                                "payload": json.dumps(record.model_dump(mode="json")),
+                            },
+                        )
+                    inserted_rows = tuple(
+                        connection.execute(
+                            text(
+                                "SELECT record_id, status, payload ->> 'status' "
+                                "FROM launchplane_merge_train_policies ORDER BY record_id"
+                            )
+                        )
+                    )
+                    connection.execute(
+                        text(
+                            "UPDATE launchplane_merge_train_policies "
+                            "SET status = 'active', "
+                            "payload = jsonb_set(payload, '{status}', '\"active\"'::jsonb, true) "
+                            "WHERE record_id = :record_id"
+                        ),
+                        {"record_id": first_record.record_id},
+                    )
+                    reactivated_rows = tuple(
+                        connection.execute(
+                            text(
+                                "SELECT record_id, status, payload ->> 'status' "
+                                "FROM launchplane_merge_train_policies ORDER BY record_id"
+                            )
+                        )
+                    )
+            finally:
+                engine.dispose()
+
+        self.assertEqual(
+            inserted_rows,
+            (
+                (first_record.record_id, "superseded", "superseded"),
+                (second_record.record_id, "active", "active"),
+            ),
+        )
+        self.assertEqual(
+            reactivated_rows,
+            (
+                (first_record.record_id, "active", "active"),
+                (second_record.record_id, "superseded", "superseded"),
+            ),
+        )
+
     def test_runtime_schema_compatibility_reports_missing_relation(self) -> None:
         with _store_for_fresh_head_database() as store:
             with self.assertRaisesRegex(

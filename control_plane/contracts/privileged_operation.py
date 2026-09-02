@@ -7,7 +7,10 @@ from typing import Literal, TypeAlias
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
-from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
+from control_plane.contracts.merge_train_policy import (
+    MergeTrainPolicyRecord,
+    normalize_merge_train_policy_timestamp,
+)
 from control_plane.authz_grant_service import (
     AuthzManagedPolicyDiff,
     AuthzManagedPolicyReconcileEnvelope,
@@ -313,6 +316,7 @@ class ManagedMergeTrainPolicyImportProposalInput(BaseModel):
             raise ValueError("Unsupported merge-train policy import schema version.")
         if self.record.status != "active":
             raise ValueError("Merge-train policy import candidate record must be active.")
+        normalize_merge_train_policy_timestamp(self.record.updated_at)
         object.__setattr__(self, "reason", _required_token(self.reason, "reason"))
         object.__setattr__(self, "related_issue", self.related_issue.strip())
         return self

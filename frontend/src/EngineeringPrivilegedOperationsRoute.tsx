@@ -69,7 +69,18 @@ export function EngineeringPrivilegedOperationsRoute({
               onClick={() => setDescriptorId("managed-authz-policy-set")}
               type="button"
             >
-              Policy changes
+              Access policy
+            </button>
+            <button
+              aria-pressed={
+                descriptorId === "managed-merge-train-policy-import"
+              }
+              onClick={() =>
+                setDescriptorId("managed-merge-train-policy-import")
+              }
+              type="button"
+            >
+              Merge-train policy
             </button>
           </div>
           <EngineeringResourceControls
@@ -147,10 +158,13 @@ function PrivilegedOperationPlanCard({
 }) {
   const evidence = record.evidence;
   const policyEvidence = "diff" in evidence ? evidence : null;
+  const mergeTrainEvidence =
+    "candidate_record_id" in evidence ? evidence : null;
   const secretEvidence =
     "configured_secret_count" in evidence ? evidence : null;
   const policyRequest =
     "desired_policy" in record.request ? record.request : null;
+  const mergeTrainRequest = "record" in record.request ? record.request : null;
   const [mutationMessage, setMutationMessage] = useState("");
   const canApprove =
     record.status === "planned" &&
@@ -190,6 +204,8 @@ function PrivilegedOperationPlanCard({
           <span className="engineering-kicker">
             {policyEvidence
               ? "Managed authorization policy"
+              : mergeTrainEvidence
+                ? "Managed merge-train policy"
               : "Managed-secret re-encryption"}
           </span>
           <h2>{record.request.reason}</h2>
@@ -270,6 +286,29 @@ function PrivilegedOperationPlanCard({
             </div>
           </>
         ) : null}
+        {mergeTrainEvidence ? (
+          <>
+            <div>
+              <dt>Active targets</dt>
+              <dd>{mergeTrainEvidence.active_target_count}</dd>
+            </div>
+            <div>
+              <dt>Candidate targets</dt>
+              <dd>{mergeTrainEvidence.candidate_target_count}</dd>
+            </div>
+            <div>
+              <dt>Added</dt>
+              <dd>{mergeTrainEvidence.added_policy_keys.length}</dd>
+            </div>
+            <div>
+              <dt>Changed / removed</dt>
+              <dd>
+                {mergeTrainEvidence.changed_policy_keys.length +
+                  mergeTrainEvidence.removed_policy_keys.length}
+              </dd>
+            </div>
+          </>
+        ) : null}
       </dl>
 
       <dl className="privileged-operation-details">
@@ -328,6 +367,46 @@ function PrivilegedOperationPlanCard({
             </div>
           </>
         ) : null}
+        {mergeTrainEvidence && mergeTrainRequest ? (
+          <>
+            <div>
+              <dt>Active record</dt>
+              <dd>
+                <code>{mergeTrainEvidence.active_record_id}</code>
+              </dd>
+            </div>
+            <div>
+              <dt>Candidate record</dt>
+              <dd>
+                <code>{mergeTrainEvidence.candidate_record_id}</code>
+              </dd>
+            </div>
+            <div>
+              <dt>Candidate policy SHA</dt>
+              <dd>
+                <code className="privileged-operation-digest">
+                  {mergeTrainEvidence.candidate_policy_sha256}
+                </code>
+              </dd>
+            </div>
+            <div>
+              <dt>Added targets</dt>
+              <dd>{keyList(mergeTrainEvidence.added_policy_keys)}</dd>
+            </div>
+            <div>
+              <dt>Changed targets</dt>
+              <dd>{keyList(mergeTrainEvidence.changed_policy_keys)}</dd>
+            </div>
+            <div>
+              <dt>Removed targets</dt>
+              <dd>{keyList(mergeTrainEvidence.removed_policy_keys)}</dd>
+            </div>
+            <div>
+              <dt>Related issue</dt>
+              <dd>{mergeTrainRequest.related_issue || "Not supplied"}</dd>
+            </div>
+          </>
+        ) : null}
         <div>
           <dt>Plan expires</dt>
           <dd>{formatTime(record.expires_at)}</dd>
@@ -346,6 +425,12 @@ function PrivilegedOperationPlanCard({
         <details className="privileged-operation-policy-review">
           <summary>Review exact desired policy</summary>
           <pre>{JSON.stringify(policyRequest.desired_policy, null, 2)}</pre>
+        </details>
+      ) : null}
+      {mergeTrainRequest ? (
+        <details className="privileged-operation-policy-review">
+          <summary>Review exact candidate merge-train policy</summary>
+          <pre>{JSON.stringify(mergeTrainRequest.record, null, 2)}</pre>
         </details>
       ) : null}
 
@@ -429,6 +514,8 @@ function privilegedOperationFixture(
     records:
       descriptorId === "managed-authz-policy-set"
         ? [policyFixtureRecord()]
+        : descriptorId === "managed-merge-train-policy-import"
+          ? [mergeTrainPolicyFixtureRecord()]
         : [
             {
               schema_version: 1,
@@ -473,6 +560,98 @@ function privilegedOperationFixture(
               terminal_reason: "",
             },
           ],
+  };
+}
+
+function mergeTrainPolicyFixtureRecord(): PrivilegedOperationRecord {
+  return {
+    schema_version: 1,
+    operation_id: "privileged-operation-abcdef0123456789abcdef0123456789",
+    descriptor_id: "managed-merge-train-policy-import",
+    descriptor_version: 1,
+    safety_class: "policy_admin",
+    status: "planned",
+    source_event_id: "fixture-merge-train-policy-request-1",
+    requested_by: {
+      identity_type: "terminal_agent",
+      login: "terminal-agent",
+      principal_sha256: "4".repeat(64),
+    },
+    request: {
+      schema_version: 1,
+      reason: "Add the Launchplane repository to the guarded merge train",
+      related_issue: "cbusillo/launchplane#2296",
+      record: {
+        schema_version: 1,
+        record_id: "merge-train-policy-20260902T000100Z-candidate",
+        status: "active",
+        source: "privileged-operation",
+        updated_at: "2026-09-02T00:01:00+00:00",
+        policy_sha256: "6".repeat(64),
+        policy: {
+          schema_version: 1,
+          policies: [
+            mergeTrainRepositoryFixture("cbusillo/codex-skills"),
+            mergeTrainRepositoryFixture("cbusillo/launchplane"),
+          ],
+        },
+      },
+    },
+    request_digest: "7".repeat(64),
+    evidence: {
+      schema_version: 1,
+      result_status: "ok",
+      plan_digest: "8".repeat(64),
+      active_record_id: "merge-train-policy-20260901T230000Z-active",
+      active_status: "active",
+      active_updated_at: "2026-09-01T23:00:00+00:00",
+      active_policy_sha256: "9".repeat(64),
+      active_target_count: 1,
+      candidate_record_id: "merge-train-policy-20260902T000100Z-candidate",
+      candidate_policy_sha256: "6".repeat(64),
+      candidate_target_count: 2,
+      added_policy_keys: ["cbusillo/launchplane:main"],
+      removed_policy_keys: [],
+      changed_policy_keys: [],
+      unchanged_policy_keys: ["cbusillo/codex-skills:main"],
+    },
+    evidence_digest: "a".repeat(64),
+    created_at: "2026-09-02T00:02:00+00:00",
+    updated_at: "2026-09-02T00:02:00+00:00",
+    expires_at: "2026-09-02T00:32:00+00:00",
+    approval: null,
+    execution: null,
+    terminal_at: "",
+    terminal_reason: "",
+  };
+}
+
+function mergeTrainRepositoryFixture(repository: string) {
+  return {
+    repository,
+    base_branch: "main",
+    enqueue_label: "ready-to-merge",
+    blocked_label: "merge-blocked",
+    stack_child_disposition_label: "",
+    merge_method: "merge" as const,
+    failure_policy: "pause_train" as const,
+    engineering_review_mode: "required" as const,
+    enqueue: {},
+    merge_identity: {
+      kind: "github_app" as const,
+      name: "launchplane-merge-train",
+    },
+    github_token: { env_var: "LAUNCHPLANE_GITHUB_TOKEN" },
+    scheduler: {
+      enabled: false,
+      runner_mode: "controller" as const,
+      mutate: false,
+    },
+    service_authz: {
+      action: "merge_train.run_once",
+      product: "launchplane",
+      context: "launchplane",
+    },
   };
 }
 

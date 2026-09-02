@@ -36,6 +36,7 @@ from control_plane.contracts.privileged_operation import (
 from control_plane.privileged_operation_registry import (
     MANAGED_MERGE_TRAIN_POLICY_IMPORT_DESCRIPTOR,
     MANAGED_SECRET_REENCRYPTION_DESCRIPTOR,
+    PrivilegedOperationPlannerError,
     RegisteredPrivilegedOperationDescriptor,
     plan_managed_merge_train_policy_import,
     plan_managed_secret_reencryption,
@@ -210,12 +211,37 @@ class PrivilegedOperationContractTests(unittest.TestCase):
             )
 
         self.assertEqual(evidence.active_record_id, "merge-train-policy-active")
+        self.assertEqual(evidence.active_updated_at, "2026-08-22T19:00:00+00:00")
         self.assertEqual(evidence.candidate_record_id, "merge-train-policy-candidate")
         self.assertEqual(evidence.added_policy_keys, ("cbusillo/codex-skills:main",))
         self.assertEqual(evidence.removed_policy_keys, ("cbusillo/sellyouroutboard:main",))
         rendered = evidence.model_dump_json()
         self.assertNotIn("GH_TOKEN", rendered)
         self.assertNotIn("launchplane-merge-train", rendered)
+
+    def test_merge_train_policy_import_planner_rejects_changed_policy_with_reused_record_id(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            store = FilesystemRecordStore(Path(temporary_directory))
+            active_record = build_test_merge_train_policy_record(
+                repository="cbusillo/sellyouroutboard",
+                record_id="merge-train-policy-shared",
+            )
+            store.write_merge_train_policy_record(active_record)
+            request = ManagedMergeTrainPolicyImportProposalInput(
+                record=build_test_merge_train_policy_record(
+                    repository="cbusillo/codex-skills",
+                    record_id="merge-train-policy-shared",
+                ),
+                reason="Review exact merge-train policy enrollment.",
+            )
+
+            with self.assertRaisesRegex(
+                PrivilegedOperationPlannerError,
+                "must use a new record ID",
+            ):
+                plan_managed_merge_train_policy_import(store, request)
 
     def test_merge_train_policy_import_record_rejects_authz_policy_evidence(self) -> None:
         request = ManagedMergeTrainPolicyImportProposalInput(

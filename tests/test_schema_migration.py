@@ -42,6 +42,62 @@ from control_plane.storage.schema_migration import (
 
 
 class SchemaMigrationTests(unittest.TestCase):
+    def test_merge_train_policy_migration_fences_plain_active_inserts(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            database_url = f"sqlite+pysqlite:///{database_path}"
+            command.upgrade(alembic_config(database_url), EXPECTED_ALEMBIC_HEAD_REVISION)
+            engine = create_engine(database_url)
+            first_payload = {
+                "schema_version": 1,
+                "record_id": "merge-train-policy-first",
+                "status": "active",
+                "source": "test",
+                "updated_at": "2026-09-02T00:00:00Z",
+                "policy_sha256": "a" * 64,
+                "policy": {"schema_version": 1, "policies": []},
+            }
+            second_payload = {
+                **first_payload,
+                "record_id": "merge-train-policy-second",
+                "updated_at": "2026-09-02T00:01:00Z",
+                "policy_sha256": "b" * 64,
+            }
+
+            with engine.begin() as connection:
+                for payload in (first_payload, second_payload):
+                    connection.execute(
+                        text(
+                            "INSERT INTO launchplane_merge_train_policies "
+                            "(record_id, status, source, updated_at, policy_sha256, payload) "
+                            "VALUES (:record_id, 'active', 'test', :updated_at, "
+                            ":policy_sha256, :payload)"
+                        ),
+                        {
+                            "record_id": payload["record_id"],
+                            "updated_at": payload["updated_at"],
+                            "policy_sha256": payload["policy_sha256"],
+                            "payload": json.dumps(payload),
+                        },
+                    )
+                rows = tuple(
+                    connection.execute(
+                        text(
+                            "SELECT record_id, status, json_extract(payload, '$.status') "
+                            "FROM launchplane_merge_train_policies ORDER BY record_id"
+                        )
+                    )
+                )
+            engine.dispose()
+
+        self.assertEqual(
+            rows,
+            (
+                ("merge-train-policy-first", "superseded", "superseded"),
+                ("merge-train-policy-second", "active", "active"),
+            ),
+        )
+
     def test_postgres_any_array_predicate_matches_equivalent_in_expression(self) -> None:
         observed_expressions = (
             "status = ANY (ARRAY['pending'::character varying, 'active'::character varying])",

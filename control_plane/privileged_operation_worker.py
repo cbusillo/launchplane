@@ -17,7 +17,10 @@ from control_plane.contracts.idempotency_record import (
     LaunchplaneIdempotencyRecord,
     complete_launchplane_mutation_reservation,
 )
-from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
+from control_plane.contracts.merge_train_policy import (
+    MergeTrainPolicyRecord,
+    normalize_merge_train_policy_timestamp,
+)
 from control_plane.contracts.privileged_operation import (
     ManagedAuthzPolicySetExecutionEvidence,
     ManagedAuthzPolicySetProposalInput,
@@ -149,6 +152,8 @@ class PrivilegedOperationExecutionStore(PrivilegedOperationStore, Protocol):
         status: str = "",
         limit: int | None = None,
     ) -> tuple[MergeTrainPolicyRecord, ...]: ...
+
+    def read_merge_train_policy_record(self, record_id: str) -> MergeTrainPolicyRecord: ...
 
 
 class PrivilegedOperationWorkerHeartbeatStore(Protocol):
@@ -676,7 +681,8 @@ def _execute_managed_merge_train_policy_import(
     if (
         expected_record.record_id != evidence.active_record_id
         or expected_record.policy_sha256 != evidence.active_policy_sha256
-        or expected_record.updated_at != evidence.active_updated_at
+        or normalize_merge_train_policy_timestamp(expected_record.updated_at)
+        != evidence.active_updated_at
     ):
         raise ValueError("approved_plan_drift")
     candidate_record = record.request.record
@@ -709,42 +715,38 @@ def _execute_managed_merge_train_policy_import(
         raise ValueError("approved_plan_drift")
     if write_result.status not in {"written", "unchanged", "replayed"}:
         raise ValueError("merge_train_policy_write_conflict")
-    if write_result.status == "written":
+    if write_result.status in {"written", "replayed"} and changed:
         on_effect_completed()
     active_after = store.list_merge_train_policy_records(status="active", limit=2)
     if len(active_after) != 1:
         raise ValueError("merge_train_policy_readback_failed")
     resulting_record = active_after[0]
-    expected_resulting_record = (
-        candidate_record if write_result.status != "unchanged" else expected_record
-    )
+    expected_resulting_record = candidate_record if changed else expected_record
     if (
         resulting_record.record_id != expected_resulting_record.record_id
         or resulting_record.policy_sha256 != expected_resulting_record.policy_sha256
         or resulting_record.status != "active"
     ):
         raise ValueError("merge_train_policy_readback_failed")
-    superseded_records = tuple(
-        policy_record
-        for policy_record in store.list_merge_train_policy_records(status="superseded", limit=100)
-        if policy_record.record_id == expected_record.record_id
-    )
     superseded_record: MergeTrainPolicyRecord | None
-    if write_result.status == "unchanged":
+    if not changed:
         superseded_record = None
-    elif (
-        len(superseded_records) == 1
-        and superseded_records[0].policy_sha256 == expected_record.policy_sha256
-    ):
-        superseded_record = superseded_records[0]
     else:
-        raise ValueError("merge_train_policy_readback_failed")
+        try:
+            superseded_record = store.read_merge_train_policy_record(expected_record.record_id)
+        except (KeyError, LookupError, OSError) as error:
+            raise ValueError("merge_train_policy_readback_failed") from error
+        if (
+            superseded_record.status != "superseded"
+            or superseded_record.policy_sha256 != expected_record.policy_sha256
+        ):
+            raise ValueError("merge_train_policy_readback_failed")
     return _merge_train_policy_execution_evidence(
         record=record,
         previous_record=expected_record,
         resulting_record=resulting_record,
         superseded_record=superseded_record,
-        changed=write_result.status == "written",
+        changed=changed,
         authorization_policy_sha256=authorization.policy_sha256,
     )
 
@@ -856,17 +858,15 @@ def _recover_managed_merge_train_policy_import(
     previous_record = resulting_record
     superseded_record = None
     if changed:
-        superseded_matches = tuple(
-            policy_record
-            for policy_record in store.list_merge_train_policy_records(
-                status="superseded", limit=100
-            )
-            if policy_record.record_id == evidence.active_record_id
-            and policy_record.policy_sha256 == evidence.active_policy_sha256
-        )
-        if len(superseded_matches) != 1:
+        try:
+            superseded_record = store.read_merge_train_policy_record(evidence.active_record_id)
+        except (KeyError, LookupError, OSError) as error:
+            raise ValueError("merge_train_policy_readback_failed") from error
+        if (
+            superseded_record.status != "superseded"
+            or superseded_record.policy_sha256 != evidence.active_policy_sha256
+        ):
             raise ValueError("merge_train_policy_readback_failed")
-        superseded_record = superseded_matches[0]
         previous_record = superseded_record.model_copy(update={"status": "active"})
     return _merge_train_policy_execution_evidence(
         record=record,

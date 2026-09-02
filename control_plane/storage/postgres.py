@@ -5094,6 +5094,14 @@ class PostgresRecordStore(HumanSessionStore):
             {"lock_name": f"launchplane:route-binding:{binding_key}"},
         )
 
+    def _lock_merge_train_policy_write(self, session: Any) -> None:
+        if self.database_url.startswith("sqlite"):
+            return
+        session.execute(
+            text("select pg_advisory_xact_lock(hashtextextended(:lock_name, 0))"),
+            {"lock_name": "launchplane:active-merge-train-policy"},
+        )
+
     def _lock_public_ingress_incident_write(
         self,
         session: Any,
@@ -14702,15 +14710,48 @@ class PostgresRecordStore(HumanSessionStore):
         )
 
     def write_merge_train_policy_record(self, record: MergeTrainPolicyRecord) -> None:
-        self._write_row(
-            LaunchplaneMergeTrainPolicyRow(
-                record_id=record.record_id,
-                status=record.status,
-                source=record.source,
-                updated_at=record.updated_at,
-                policy_sha256=record.policy_sha256,
-                payload=self._payload_dict(record),
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_merge_train_policy_write(session)
+            existing_row = session.get(LaunchplaneMergeTrainPolicyRow, record.record_id)
+            if existing_row is not None and existing_row.policy_sha256 != record.policy_sha256:
+                raise ValueError(
+                    "Merge-train policy record ID cannot be reused for different policy content."
+                )
+            if record.status == "active":
+                active_rows = tuple(
+                    session.scalars(
+                        select(LaunchplaneMergeTrainPolicyRow).where(
+                            LaunchplaneMergeTrainPolicyRow.status == "active",
+                            LaunchplaneMergeTrainPolicyRow.record_id != record.record_id,
+                        )
+                    ).all()
+                )
+                for active_row in active_rows:
+                    active_record = self._read_payload(
+                        model_type=MergeTrainPolicyRecord,
+                        payload=active_row.payload,
+                    )
+                    superseded_record = active_record.model_copy(update={"status": "superseded"})
+                    active_row.status = "superseded"
+                    active_row.payload = self._payload_dict(superseded_record)
+            session.merge(
+                LaunchplaneMergeTrainPolicyRow(
+                    record_id=record.record_id,
+                    status=record.status,
+                    source=record.source,
+                    updated_at=record.updated_at,
+                    policy_sha256=record.policy_sha256,
+                    payload=self._payload_dict(record),
+                )
             )
+            session.commit()
+
+    def read_merge_train_policy_record(self, record_id: str) -> MergeTrainPolicyRecord:
+        return self._read_model(
+            model_type=MergeTrainPolicyRecord,
+            orm_model=LaunchplaneMergeTrainPolicyRow,
+            filters=(LaunchplaneMergeTrainPolicyRow.record_id == record_id,),
         )
 
     def compare_and_write_merge_train_policy_record(
@@ -14874,6 +14915,7 @@ class PostgresRecordStore(HumanSessionStore):
         mutation_reservation: LaunchplaneIdempotencyRecord | None = None,
         mutation: DbOnlyMutationRequest | None = None,
     ) -> MergeTrainPolicyCompareWriteResult:
+        self._lock_merge_train_policy_write(session)
         active_rows = tuple(session.scalars(statement).all())
         if not active_rows:
             if reservation_row is not None:
@@ -14899,6 +14941,16 @@ class PostgresRecordStore(HumanSessionStore):
                 session.delete(reservation_row)
                 session.commit()
             return MergeTrainPolicyCompareWriteResult(status="stale", current_record=current_record)
+        if (
+            current_record.record_id == replacement_record.record_id
+            and current_record.policy_sha256 != replacement_record.policy_sha256
+        ):
+            if reservation_row is not None:
+                session.delete(reservation_row)
+                session.commit()
+            return MergeTrainPolicyCompareWriteResult(
+                status="record_id_conflict", current_record=current_record
+            )
 
         result_record = current_record
         status: Literal["written", "unchanged"] = "unchanged"

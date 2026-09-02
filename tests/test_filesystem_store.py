@@ -2391,6 +2391,35 @@ class FilesystemRecordStoreTests(unittest.TestCase):
             [record.record_id for record in superseded_records], [active_record.record_id]
         )
 
+    def test_merge_train_policy_plain_write_supersedes_previous_active_record(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name))
+            first_record = MergeTrainPolicyRecord(
+                record_id="merge-train-policy-first",
+                status="active",
+                source="test",
+                updated_at="2026-05-13T21:00:00Z",
+                policy=build_test_merge_train_policy(repository="cbusillo/sellyouroutboard"),
+            )
+            second_record = MergeTrainPolicyRecord(
+                record_id="merge-train-policy-second",
+                status="active",
+                source="test",
+                updated_at="2026-05-13T22:00:00Z",
+                policy=build_test_merge_train_policy(repository="cbusillo/codex-skills"),
+            )
+
+            store.write_merge_train_policy_record(first_record)
+            store.write_merge_train_policy_record(second_record)
+
+            active_records = store.list_merge_train_policy_records(status="active")
+            superseded_records = store.list_merge_train_policy_records(status="superseded")
+
+        self.assertEqual(active_records, (second_record,))
+        self.assertEqual(
+            [record.record_id for record in superseded_records], [first_record.record_id]
+        )
+
     def test_write_and_list_merge_train_batch_candidate_records(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name)

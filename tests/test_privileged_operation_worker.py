@@ -397,12 +397,12 @@ def _prepare_approved_merge_train_policy_import(
     resolved_active = active_record or build_test_merge_train_policy_record(
         repository="cbusillo/sellyouroutboard",
         record_id="merge-train-policy-active",
-        updated_at="2026-08-22T19:00:00+00:00",
+        updated_at="2026-08-22T19:00:00Z",
     )
     resolved_candidate = candidate_record or build_test_merge_train_policy_record(
         repository="cbusillo/codex-skills",
         record_id="merge-train-policy-candidate",
-        updated_at="2026-08-22T20:00:00+00:00",
+        updated_at="2026-08-22T20:00:00Z",
     )
     store.write_merge_train_policy_record(resolved_active)
     actor = PrivilegedOperationActor(
@@ -621,6 +621,41 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
         self.assertEqual(record.execution.failure_code, "approved_plan_drift")
         self.assertFalse(record.execution.reconciliation_required)
         self.assertEqual(active_records[0].record_id, "merge-train-policy-drift")
+
+    def test_worker_reads_exact_superseded_policy_beyond_history_window(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = self._store(directory)
+            try:
+                approval_policy = store.seed_authz_policy_if_absent(
+                    _merge_train_policy_admin_record()
+                )
+                operation_id = _prepare_approved_merge_train_policy_import(
+                    store,
+                    approval_policy=approval_policy,
+                )
+                for index in range(101):
+                    store.write_merge_train_policy_record(
+                        build_test_merge_train_policy_record(
+                            repository=f"cbusillo/history-{index}",
+                            record_id=f"merge-train-policy-history-{index:03d}",
+                            updated_at=f"2026-09-02T01:{index // 60:02d}:{index % 60:02d}Z",
+                        ).model_copy(update={"status": "superseded"})
+                    )
+
+                completed = execute_approved_privileged_operations_once(
+                    record_store=store,
+                    now=lambda: FIXED_NOW,
+                )
+
+                record = store.read_privileged_operation_record(operation_id)
+            finally:
+                store.close()
+
+        self.assertEqual([item.operation_id for item in completed], [operation_id])
+        self.assertEqual(record.status, "executed")
+        self.assertIsInstance(record.execution, ManagedMergeTrainPolicyImportExecutionEvidence)
+        assert isinstance(record.execution, ManagedMergeTrainPolicyImportExecutionEvidence)
+        self.assertEqual(record.execution.superseded_record_id, "merge-train-policy-active")
 
     def test_policy_readback_failure_after_cas_requires_reconciliation(self) -> None:
         with TemporaryDirectory() as directory:

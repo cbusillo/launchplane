@@ -1,6 +1,7 @@
 import hashlib
 import json
 import tomllib
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, NamedTuple, cast
 
@@ -31,6 +32,7 @@ MergeTrainPolicyCompareWriteStatus = Literal[
     "stale",
     "missing",
     "ambiguous_active",
+    "record_id_conflict",
     "replayed",
     "idempotency_conflict",
     "reservation_in_progress",
@@ -42,6 +44,17 @@ class MergeTrainPolicyCompareWriteResult(NamedTuple):
     status: MergeTrainPolicyCompareWriteStatus
     current_record: "MergeTrainPolicyRecord | None" = None
     idempotency_record: object | None = None
+
+
+def normalize_merge_train_policy_timestamp(value: str) -> str:
+    normalized_value = value.strip().replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized_value)
+    except ValueError as error:
+        raise ValueError("merge train policy timestamp must be ISO-8601") from error
+    if parsed.tzinfo is None:
+        raise ValueError("merge train policy timestamp must include a timezone")
+    return parsed.astimezone(timezone.utc).isoformat()
 
 
 class MergeTrainEnqueuePolicy(BaseModel):

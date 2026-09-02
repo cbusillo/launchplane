@@ -13,7 +13,10 @@ from control_plane.authz_grant_service import (
     plan_managed_authz_policy_reconcile,
 )
 from control_plane.contracts.canonical_json import canonical_json_sha256
-from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
+from control_plane.contracts.merge_train_policy import (
+    MergeTrainPolicyRecord,
+    normalize_merge_train_policy_timestamp,
+)
 from control_plane.contracts.privileged_operation import (
     AUTHZ_POLICY_OPERATION_APPROVE_ACTION,
     AUTHZ_POLICY_OPERATION_CANCEL_ACTION,
@@ -311,8 +314,21 @@ def plan_managed_merge_train_policy_import(
         raise PrivilegedOperationPlannerError(
             "Merge-train policy import planning requires exactly one active policy record."
         )
-    active_record = MergeTrainPolicyRecord.model_validate(active_records[0])
+    try:
+        active_record = MergeTrainPolicyRecord.model_validate(active_records[0])
+        active_updated_at = normalize_merge_train_policy_timestamp(active_record.updated_at)
+    except ValueError as error:
+        raise PrivilegedOperationPlannerError(
+            "Merge-train policy import planning found an invalid active policy record."
+        ) from error
     candidate_record = request.record
+    if (
+        candidate_record.record_id == active_record.record_id
+        and candidate_record.policy_sha256 != active_record.policy_sha256
+    ):
+        raise PrivilegedOperationPlannerError(
+            "Merge-train policy import candidate must use a new record ID when policy changes."
+        )
     active_payloads = _policy_key_payloads(active_record)
     candidate_payloads = _policy_key_payloads(candidate_record)
     active_keys = set(active_payloads)
@@ -337,7 +353,7 @@ def plan_managed_merge_train_policy_import(
         "schema_version": 1,
         "descriptor_id": "managed-merge-train-policy-import",
         "active_record_id": active_record.record_id,
-        "active_updated_at": active_record.updated_at,
+        "active_updated_at": active_updated_at,
         "active_policy_sha256": active_record.policy_sha256,
         "active_target_count": len(active_record.policy.policies),
         "candidate_record_id": candidate_record.record_id,
@@ -353,7 +369,7 @@ def plan_managed_merge_train_policy_import(
     return ManagedMergeTrainPolicyImportHumanEvidence(
         plan_digest=canonical_json_sha256(plan_payload),
         active_record_id=active_record.record_id,
-        active_updated_at=active_record.updated_at,
+        active_updated_at=active_updated_at,
         active_policy_sha256=active_record.policy_sha256,
         active_target_count=len(active_record.policy.policies),
         candidate_record_id=candidate_record.record_id,

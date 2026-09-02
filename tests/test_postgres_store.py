@@ -8048,6 +8048,39 @@ env_var = "GH_TOKEN"
             [record.record_id for record in superseded_records], [active_record.record_id]
         )
 
+    def test_merge_train_policy_plain_write_supersedes_previous_active_record(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            try:
+                first_record = build_test_merge_train_policy_record(
+                    repository="cbusillo/sellyouroutboard",
+                    record_id="merge-train-policy-first",
+                    updated_at="2026-05-13T21:00:00Z",
+                )
+                second_record = build_test_merge_train_policy_record(
+                    repository="cbusillo/codex-skills",
+                    record_id="merge-train-policy-second",
+                    updated_at="2026-05-13T22:00:00Z",
+                )
+
+                store.write_merge_train_policy_record(first_record)
+                store.write_merge_train_policy_record(second_record)
+
+                active_records = store.list_merge_train_policy_records(status="active")
+                superseded_records = store.list_merge_train_policy_records(status="superseded")
+            finally:
+                store.close()
+
+        self.assertEqual(active_records, (second_record,))
+        self.assertEqual(
+            [record.record_id for record in superseded_records], [first_record.record_id]
+        )
+
     def test_merge_train_batch_candidate_records_round_trip(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = PostgresRecordStore(

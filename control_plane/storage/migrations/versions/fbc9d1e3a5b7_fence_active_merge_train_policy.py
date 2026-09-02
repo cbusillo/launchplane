@@ -21,6 +21,10 @@ depends_on: str | Sequence[str] | None = None
 
 _TABLE = "launchplane_merge_train_policies"
 _ACTIVE_INDEX = "launchplane_merge_train_policies_active_uidx"
+_WRITE_TRIGGER = "launchplane_merge_train_policy_write_fence"
+_WRITE_FUNCTION = "launchplane_fence_merge_train_policy_write"
+_SQLITE_ACTIVE_INSERT_TRIGGER = "launchplane_merge_train_policy_active_insert_fence"
+_SQLITE_ACTIVE_UPDATE_TRIGGER = "launchplane_merge_train_policy_active_update_fence"
 
 
 def _index_exists(index_name: str) -> bool:
@@ -103,6 +107,80 @@ def _canonicalize_active_records() -> None:
 
 def upgrade() -> None:
     _canonicalize_active_records()
+    if op.get_bind().dialect.name == "postgresql":
+        op.execute(
+            sa.text(
+                f"""
+                CREATE OR REPLACE FUNCTION {_WRITE_FUNCTION}()
+                RETURNS trigger
+                LANGUAGE plpgsql
+                AS $$
+                BEGIN
+                    PERFORM pg_advisory_xact_lock(
+                        hashtextextended('launchplane:active-merge-train-policy', 0)
+                    );
+                    IF NEW.status = 'active' THEN
+                        UPDATE {_TABLE}
+                        SET status = 'superseded',
+                            payload = jsonb_set(
+                                payload,
+                                '{{status}}',
+                                '"superseded"'::jsonb,
+                                true
+                            )
+                        WHERE status = 'active'
+                          AND record_id <> NEW.record_id;
+                    END IF;
+                    RETURN NEW;
+                END;
+                $$
+                """
+            )
+        )
+        op.execute(sa.text(f"DROP TRIGGER IF EXISTS {_WRITE_TRIGGER} ON {_TABLE}"))
+        op.execute(
+            sa.text(
+                f"""
+                CREATE TRIGGER {_WRITE_TRIGGER}
+                BEFORE INSERT OR UPDATE OF status ON {_TABLE}
+                FOR EACH ROW
+                EXECUTE FUNCTION {_WRITE_FUNCTION}()
+                """
+            )
+        )
+    else:
+        op.execute(
+            sa.text(
+                f"""
+                CREATE TRIGGER IF NOT EXISTS {_SQLITE_ACTIVE_INSERT_TRIGGER}
+                BEFORE INSERT ON {_TABLE}
+                WHEN NEW.status = 'active'
+                BEGIN
+                    UPDATE {_TABLE}
+                    SET status = 'superseded',
+                        payload = json_set(payload, '$.status', 'superseded')
+                    WHERE status = 'active'
+                      AND record_id <> NEW.record_id;
+                END
+                """
+            )
+        )
+        op.execute(
+            sa.text(
+                f"""
+                CREATE TRIGGER IF NOT EXISTS {_SQLITE_ACTIVE_UPDATE_TRIGGER}
+                BEFORE UPDATE OF status ON {_TABLE}
+                WHEN NEW.status = 'active'
+                BEGIN
+                    UPDATE {_TABLE}
+                    SET status = 'superseded',
+                        payload = json_set(payload, '$.status', 'superseded')
+                    WHERE status = 'active'
+                      AND record_id <> NEW.record_id;
+                END
+                """
+            )
+        )
     if not _index_exists(_ACTIVE_INDEX):
         op.create_index(
             _ACTIVE_INDEX,
@@ -115,5 +193,11 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    if op.get_bind().dialect.name == "postgresql":
+        op.execute(sa.text(f"DROP TRIGGER IF EXISTS {_WRITE_TRIGGER} ON {_TABLE}"))
+        op.execute(sa.text(f"DROP FUNCTION IF EXISTS {_WRITE_FUNCTION}()"))
+    else:
+        op.execute(sa.text(f"DROP TRIGGER IF EXISTS {_SQLITE_ACTIVE_UPDATE_TRIGGER}"))
+        op.execute(sa.text(f"DROP TRIGGER IF EXISTS {_SQLITE_ACTIVE_INSERT_TRIGGER}"))
     if _index_exists(_ACTIVE_INDEX):
         op.drop_index(_ACTIVE_INDEX, table_name=_TABLE)

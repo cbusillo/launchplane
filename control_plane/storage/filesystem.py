@@ -1803,7 +1803,41 @@ class FilesystemRecordStore:
         return self._write_model("launchplane_merge_train_runs", record.run_id, record)
 
     def write_merge_train_policy_record(self, record: MergeTrainPolicyRecord) -> Path:
-        return self._write_model("launchplane_merge_train_policies", record.record_id, record)
+        record_type = "launchplane_merge_train_policies"
+        with self._exclusive_record_lock(record_type, "active"):
+            existing_records = self._list_models_locked(MergeTrainPolicyRecord, record_type)
+            existing_record = next(
+                (item for item in existing_records if item.record_id == record.record_id),
+                None,
+            )
+            if (
+                existing_record is not None
+                and existing_record.policy_sha256 != record.policy_sha256
+            ):
+                raise ValueError(
+                    "Merge-train policy record ID cannot be reused for different policy content."
+                )
+            if record.status == "active":
+                for active_record in existing_records:
+                    if (
+                        active_record.status != "active"
+                        or active_record.record_id == record.record_id
+                    ):
+                        continue
+                    superseded_record = active_record.model_copy(update={"status": "superseded"})
+                    self._write_model_locked(
+                        record_type,
+                        superseded_record.record_id,
+                        superseded_record,
+                    )
+            return self._write_model_locked(record_type, record.record_id, record)
+
+    def read_merge_train_policy_record(self, record_id: str) -> MergeTrainPolicyRecord:
+        return self._read_model(
+            MergeTrainPolicyRecord,
+            "launchplane_merge_train_policies",
+            record_id,
+        )
 
     def compare_and_write_merge_train_policy_record(
         self,
@@ -1839,6 +1873,13 @@ class FilesystemRecordStore:
             ):
                 return MergeTrainPolicyCompareWriteResult(
                     status="stale", current_record=current_record
+                )
+            if (
+                current_record.record_id == replacement_record.record_id
+                and current_record.policy_sha256 != replacement_record.policy_sha256
+            ):
+                return MergeTrainPolicyCompareWriteResult(
+                    status="record_id_conflict", current_record=current_record
                 )
             if current_record.policy_sha256 == replacement_record.policy_sha256:
                 return MergeTrainPolicyCompareWriteResult(
