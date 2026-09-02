@@ -25,6 +25,11 @@ route, execute action, static execution credential, or agent execution path.
   reconciliation planner with `mode="dry_run"` only. Its request contains one
   managed set, the exact desired schema-v2 policy fragment, reason, and optional
   related issue. Planning never writes the active authorization policy.
+  Historical requests created before the optional
+  `administrator_quorum_change` field remain readable when that value is absent
+  or `null`: validation accepts only the two exact canonical digest projections
+  for those equivalent shapes. New records continue to write the current digest,
+  and every other request-digest mismatch fails closed.
 - `managed-merge-train-policy-import` version 1 accepts one complete schema-
   valid candidate merge-train policy record, a reason, and optional related
   issue. Its planner reads exactly one active merge-train policy record and

@@ -709,8 +709,7 @@ class PrivilegedOperationRecord(BaseModel):
             "evidence_digest",
             _sha256(self.evidence_digest, "evidence_digest"),
         )
-        expected_request_digest = privileged_operation_request_digest(self.request)
-        if self.request_digest != expected_request_digest:
+        if self.request_digest not in privileged_operation_request_digest_candidates(self.request):
             raise ValueError("Privileged-operation request_digest does not match request")
         expected_evidence_digest = privileged_operation_evidence_digest(self.evidence)
         if self.evidence_digest != expected_evidence_digest:
@@ -944,6 +943,21 @@ PrivilegedOperationSummary: TypeAlias = (
 
 def privileged_operation_request_digest(request: PrivilegedOperationRequest) -> str:
     return _digest_payload(request.model_dump(mode="json"))
+
+
+def privileged_operation_request_digest_candidates(
+    request: PrivilegedOperationRequest,
+) -> frozenset[str]:
+    payload = request.model_dump(mode="json")
+    candidates = {_digest_payload(payload)}
+    if (
+        isinstance(request, ManagedAuthzPolicySetProposalInput)
+        and request.administrator_quorum_change is None
+    ):
+        legacy_payload = dict(payload)
+        legacy_payload.pop("administrator_quorum_change", None)
+        candidates.add(_digest_payload(legacy_payload))
+    return frozenset(candidates)
 
 
 def privileged_operation_evidence_digest(

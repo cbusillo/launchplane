@@ -13,6 +13,7 @@ from typing import cast
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, ConfigDict
 
+from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.privileged_operation import (
     AUTHZ_POLICY_OPERATION_APPROVE_ACTION,
     AUTHZ_POLICY_OPERATION_CANCEL_ACTION,
@@ -50,7 +51,10 @@ from control_plane.service_auth import (
     TerminalAgentIdentity,
 )
 from control_plane.storage.filesystem import FilesystemRecordStore
-from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.storage.postgres import (
+    LaunchplanePrivilegedOperationRow,
+    PostgresRecordStore,
+)
 from tests.support.http import lifespan_client
 from tests.support.stores import _sqlite_database_url
 
@@ -567,6 +571,50 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("retirement_blocked_key_ids", summary_payload)
         self.assertNotIn("request", summary_payload)
         self.assertIn("configured_secret_count", summary_payload)
+
+    async def test_human_list_reads_historical_authz_request_digest(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(temporary_directory) / "launchplane.sqlite3")
+            )
+            store.ensure_schema()
+            policy = _policy()
+            store.seed_authz_policy_if_absent(_policy_record(policy))
+            app = self._app(
+                store=store,
+                policy=policy,
+                policy_record_reader=lambda: store.list_authz_policy_records(
+                    status="active", limit=2
+                )[0],
+            )
+            try:
+                async with lifespan_client(app) as client:
+                    create_response = await client.post(
+                        "/v1/privileged-operations/plans",
+                        json=_managed_authz_plan_payload("historical-authz-plan"),
+                    )
+                    self.assertEqual(create_response.status_code, 200, create_response.text)
+                    operation_id = create_response.json()["record"]["operation_id"]
+                    with store._session_factory() as session:  # noqa: SLF001
+                        row = session.get(LaunchplanePrivilegedOperationRow, operation_id)
+                        assert row is not None
+                        payload = dict(row.payload)
+                        payload["request_digest"] = canonical_json_sha256(payload["request"])
+                        row.payload = payload
+                        session.commit()
+
+                    list_response = await client.get(
+                        "/v1/privileged-operations/plans",
+                        params={
+                            "descriptor_id": "managed-authz-policy-set",
+                            "limit": 50,
+                        },
+                    )
+            finally:
+                store.close()
+
+        self.assertEqual(list_response.status_code, 200, list_response.text)
+        self.assertEqual(list_response.json()["total"], 1)
 
     async def test_human_approval_and_revocation_are_replay_safe(self) -> None:
         with (
