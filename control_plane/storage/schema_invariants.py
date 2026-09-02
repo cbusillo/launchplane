@@ -15,6 +15,9 @@ RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS = (EXPECTED_ALEMBIC_HEAD_REVISION,)
 _AUTHZ_POLICY_TABLE = "launchplane_authz_policies"
 _AUTHZ_POLICY_WRITE_FENCE_TRIGGER = "launchplane_authz_policy_write_fence"
 _AUTHZ_POLICY_WRITE_FENCE_FUNCTION = "launchplane_fence_authz_policy_write"
+_MERGE_TRAIN_POLICY_TABLE = "launchplane_merge_train_policies"
+_MERGE_TRAIN_POLICY_WRITE_FENCE_TRIGGER = "launchplane_merge_train_policy_write_fence"
+_MERGE_TRAIN_POLICY_WRITE_FENCE_FUNCTION = "launchplane_fence_merge_train_policy_write"
 
 
 class SchemaInspectorProtocol(Protocol):
@@ -56,6 +59,11 @@ class CriticalPrimaryKey:
 
 
 CRITICAL_POSTGRES_COLUMN_TYPES: tuple[CriticalColumnType, ...] = (
+    CriticalColumnType(
+        "launchplane_merge_train_policies",
+        "payload",
+        ("jsonb",),
+    ),
     CriticalColumnType(
         "launchplane_merge_admissions",
         "payload",
@@ -471,6 +479,76 @@ CRITICAL_POSTGRES_COLUMN_TYPES: tuple[CriticalColumnType, ...] = (
         "payload",
         ("jsonb",),
     ),
+    CriticalColumnType(
+        "launchplane_administrator_enrollments",
+        "payload",
+        ("jsonb",),
+    ),
+    CriticalColumnType(
+        "launchplane_administrator_enrollments",
+        "proposer_github_id",
+        ("bigint", "int8"),
+    ),
+    CriticalColumnType(
+        "launchplane_administrator_enrollments",
+        "candidate_github_id",
+        ("bigint", "int8"),
+    ),
+    CriticalColumnType(
+        "launchplane_administrator_enrollments",
+        "enrolled_policy_revision",
+        ("bigint", "int8"),
+    ),
+    CriticalColumnType(
+        "launchplane_administrator_enrollments",
+        "authorizes_policy",
+        ("boolean", "bool"),
+    ),
+    CriticalColumnType(
+        "launchplane_solo_administration_confirmations",
+        "payload",
+        ("jsonb",),
+    ),
+    CriticalColumnType(
+        "launchplane_solo_administration_confirmations",
+        "active_policy_revision",
+        ("bigint", "int8"),
+    ),
+    CriticalColumnType(
+        "launchplane_solo_administration_confirmations",
+        "candidate_administrator_quorum",
+        ("bigint", "int8"),
+    ),
+    CriticalColumnType(
+        "launchplane_solo_administration_confirmations",
+        "candidate_distinct_human_administrator_count",
+        ("bigint", "int8"),
+    ),
+    CriticalColumnType(
+        "launchplane_solo_administration_confirmations",
+        "github_id",
+        ("bigint", "int8"),
+    ),
+    CriticalColumnType(
+        "launchplane_solo_administration_confirmations",
+        "authorizes_policy",
+        ("boolean", "bool"),
+    ),
+    CriticalColumnType(
+        "launchplane_solo_administration_confirmations",
+        "secret_sha256",
+        ("character varying", "varchar", "text"),
+    ),
+    CriticalColumnType(
+        "launchplane_solo_administration_confirmation_events",
+        "payload",
+        ("jsonb",),
+    ),
+    CriticalColumnType(
+        "launchplane_solo_administration_confirmation_events",
+        "authorizes_policy",
+        ("boolean", "bool"),
+    ),
 )
 
 _ACTIVE_OPERATION_PREDICATE_TOKENS = ("status", "pending", "running")
@@ -482,6 +560,55 @@ _ODOO_STABLE_ACTIVE_OPERATION_PREDICATE_TOKENS = (
 )
 
 CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
+    CriticalIndex(
+        "launchplane_administrator_enrollments",
+        "launchplane_administrator_enrollment_challenge_uq",
+        ("challenge_sha256",),
+        unique=True,
+    ),
+    CriticalIndex(
+        "launchplane_administrator_enrollments",
+        "launchplane_administrator_enrollment_state_expiry_idx",
+        ("state", "expires_at"),
+    ),
+    CriticalIndex(
+        "launchplane_solo_administration_confirmations",
+        "launchplane_solo_administration_confirmation_issued_binding_uq",
+        (
+            "reviewed_plan_sha256",
+            "human_session_id_sha256",
+            "idempotency_scope_sha256",
+            "idempotency_key_sha256",
+        ),
+        unique=True,
+        predicate_expression="state='issued'",
+    ),
+    CriticalIndex(
+        "launchplane_solo_administration_confirmations",
+        "launchplane_solo_administration_confirmation_state_expiry_idx",
+        ("state", "expires_at"),
+    ),
+    CriticalIndex(
+        "launchplane_solo_administration_confirmations",
+        "launchplane_solo_administration_confirmation_session_idx",
+        ("human_session_id_sha256", "created_at"),
+    ),
+    CriticalIndex(
+        "launchplane_solo_administration_confirmations",
+        "lp_solo_admin_confirmation_consumed_recovery_idx",
+        ("candidate_policy_sha256", "github_id", "idempotency_scope_sha256", "state"),
+    ),
+    CriticalIndex(
+        "launchplane_solo_administration_confirmation_events",
+        "lp_solo_admin_confirmation_event_transition_uq",
+        ("confirmation_id", "event_type"),
+        unique=True,
+    ),
+    CriticalIndex(
+        "launchplane_solo_administration_confirmation_events",
+        "lp_solo_admin_confirmation_event_confirmation_idx",
+        ("confirmation_id", "occurred_at"),
+    ),
     CriticalIndex(
         "launchplane_merge_admissions",
         "launchplane_merge_admissions_attempt_uidx",
@@ -522,6 +649,13 @@ CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
     CriticalIndex(
         "launchplane_authz_policies",
         "launchplane_authz_policies_active_uidx",
+        ("status",),
+        unique=True,
+        predicate_expression="status='active'",
+    ),
+    CriticalIndex(
+        "launchplane_merge_train_policies",
+        "launchplane_merge_train_policies_active_uidx",
         ("status",),
         unique=True,
         predicate_expression="status='active'",
@@ -1136,6 +1270,14 @@ CRITICAL_PRIMARY_KEYS: tuple[CriticalPrimaryKey, ...] = (
         "launchplane_owner_control_challenge_lifecycle_events",
         ("event_id",),
     ),
+    CriticalPrimaryKey(
+        "launchplane_administrator_enrollments",
+        ("enrollment_id",),
+    ),
+    CriticalPrimaryKey(
+        "launchplane_solo_administration_confirmations",
+        ("confirmation_id",),
+    ),
 )
 
 
@@ -1160,6 +1302,7 @@ def verify_postgres_schema_invariants(engine: Engine) -> None:
             table_names=set(inspector.get_table_names()),
         ),
         *authz_policy_write_fence_errors(engine),
+        *merge_train_policy_write_fence_errors(engine),
     ]
     if errors:
         joined_errors = "; ".join(errors)
@@ -1320,6 +1463,47 @@ def _verify_alembic_head(engine: Engine) -> str:
 
 
 def authz_policy_write_fence_errors(engine: Engine) -> list[str]:
+    return _postgres_write_fence_errors(
+        engine=engine,
+        table_name=_AUTHZ_POLICY_TABLE,
+        trigger_name=_AUTHZ_POLICY_WRITE_FENCE_TRIGGER,
+        function_name=_AUTHZ_POLICY_WRITE_FENCE_FUNCTION,
+        trigger_fragments=("before insert or update of status",),
+        function_fragments=(
+            "pg_advisory_xact_lock",
+            "new.revision is null",
+            "new.status = 'active'",
+            "jsonb_set",
+        ),
+    )
+
+
+def merge_train_policy_write_fence_errors(engine: Engine) -> list[str]:
+    return _postgres_write_fence_errors(
+        engine=engine,
+        table_name=_MERGE_TRAIN_POLICY_TABLE,
+        trigger_name=_MERGE_TRAIN_POLICY_WRITE_FENCE_TRIGGER,
+        function_name=_MERGE_TRAIN_POLICY_WRITE_FENCE_FUNCTION,
+        trigger_fragments=("before insert or update of status",),
+        function_fragments=(
+            "pg_advisory_xact_lock",
+            "launchplane:active-merge-train-policy",
+            "new.status = 'active'",
+            "record_id <> new.record_id",
+            "jsonb_set",
+        ),
+    )
+
+
+def _postgres_write_fence_errors(
+    *,
+    engine: Engine,
+    table_name: str,
+    trigger_name: str,
+    function_name: str,
+    trigger_fragments: tuple[str, ...],
+    function_fragments: tuple[str, ...],
+) -> list[str]:
     with engine.connect() as connection:
         trigger_row = (
             connection.execute(
@@ -1336,8 +1520,8 @@ def authz_policy_write_fence_errors(engine: Engine) -> list[str]:
                     "and not t.tgisinternal"
                 ),
                 {
-                    "table_name": _AUTHZ_POLICY_TABLE,
-                    "trigger_name": _AUTHZ_POLICY_WRITE_FENCE_TRIGGER,
+                    "table_name": table_name,
+                    "trigger_name": trigger_name,
                 },
             )
             .mappings()
@@ -1353,48 +1537,32 @@ def authz_policy_write_fence_errors(engine: Engine) -> list[str]:
                     "and p.proname = :function_name "
                     "and pg_get_function_identity_arguments(p.oid) = ''"
                 ),
-                {"function_name": _AUTHZ_POLICY_WRITE_FENCE_FUNCTION},
+                {"function_name": function_name},
             )
             .mappings()
             .one_or_none()
         )
     errors: list[str] = []
     if trigger_row is None:
-        errors.append(
-            f"{_AUTHZ_POLICY_TABLE} missing required trigger {_AUTHZ_POLICY_WRITE_FENCE_TRIGGER}"
-        )
+        errors.append(f"{table_name} missing required trigger {trigger_name}")
     else:
-        if str(trigger_row["function_name"]) != _AUTHZ_POLICY_WRITE_FENCE_FUNCTION:
+        if str(trigger_row["function_name"]) != function_name:
             errors.append(
-                f"{_AUTHZ_POLICY_WRITE_FENCE_TRIGGER} invokes "
-                f"{trigger_row['function_name']}; expected {_AUTHZ_POLICY_WRITE_FENCE_FUNCTION}"
+                f"{trigger_name} invokes {trigger_row['function_name']}; expected {function_name}"
             )
         if str(trigger_row["enabled"]) not in {"O", "A"}:
-            errors.append(f"{_AUTHZ_POLICY_WRITE_FENCE_TRIGGER} is disabled")
+            errors.append(f"{trigger_name} is disabled")
         trigger_definition = " ".join(str(trigger_row["definition"]).lower().split())
-        for expected_fragment in (
-            "before insert or update of status",
-            f"execute function {_AUTHZ_POLICY_WRITE_FENCE_FUNCTION}()",
-        ):
+        for expected_fragment in (*trigger_fragments, f"execute function {function_name}()"):
             if expected_fragment not in trigger_definition:
-                errors.append(
-                    f"{_AUTHZ_POLICY_WRITE_FENCE_TRIGGER} definition is missing "
-                    f"{expected_fragment!r}"
-                )
+                errors.append(f"{trigger_name} definition is missing {expected_fragment!r}")
     if function_row is None:
-        errors.append(f"missing required function {_AUTHZ_POLICY_WRITE_FENCE_FUNCTION}()")
+        errors.append(f"missing required function {function_name}()")
     else:
         function_definition = " ".join(str(function_row["definition"]).lower().split())
-        for expected_fragment in (
-            "pg_advisory_xact_lock",
-            "new.revision is null",
-            "new.status = 'active'",
-            "jsonb_set",
-        ):
+        for expected_fragment in function_fragments:
             if expected_fragment not in function_definition:
-                errors.append(
-                    f"{_AUTHZ_POLICY_WRITE_FENCE_FUNCTION}() is missing {expected_fragment!r}"
-                )
+                errors.append(f"{function_name}() is missing {expected_fragment!r}")
     return errors
 
 

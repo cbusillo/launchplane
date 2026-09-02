@@ -41,6 +41,7 @@ from control_plane.contracts.privileged_operation import (
 )
 from control_plane.owner_control_contract import (
     OwnerControlContractError,
+    _preserve_v2_descriptor_enums,
     build_owner_control_contract,
     validate_owner_control_contract,
     write_owner_control_contract,
@@ -260,13 +261,14 @@ class OwnerControlArtifactTests(unittest.TestCase):
         if expected_message := vector.get("error_message_contains"):
             self.assertIn(expected_message, errors[0]["msg"])
 
-    def test_v4_contract_pins_every_v3_section_and_preserves_v3_payloads(self) -> None:
+    def test_v5_contract_pins_v4_and_preserves_existing_v2_payloads(self) -> None:
         artifact = build_owner_control_contract()
         compatibility = artifact["compatibility"]
 
-        self.assertEqual(artifact["schema_version"], 4)
-        self.assertEqual(compatibility["container_schema_version"], 4)
-        self.assertEqual(compatibility["previous_container_schema_version"], 3)
+        self.assertEqual(artifact["schema_version"], 5)
+        self.assertEqual(compatibility["container_schema_version"], 5)
+        self.assertEqual(compatibility["previous_container_schema_version"], 4)
+        self.assertEqual(compatibility["change_kind"], "additive-enrollment-provenance")
         self.assertEqual(compatibility["unknown_container_versions"], "reject")
         self.assertEqual(compatibility["wire_model_schema_versions"], [1])
         self.assertEqual(compatibility["shadow_verifier_schema_versions"], [1])
@@ -275,9 +277,28 @@ class OwnerControlArtifactTests(unittest.TestCase):
         for section, expected_sha256 in compatibility["preserved_v2_section_sha256"].items():
             with self.subTest(section=section):
                 self.assertEqual(canonical_json_sha256(artifact[section]), expected_sha256)
-        preserved_v3 = compatibility["preserved_v3_section_sha256"]
+        preserved_descriptors = set(compatibility["preserved_v2_descriptor_ids"])
+        for section, expected_sha256 in compatibility[
+            "preserved_v2_descriptor_vector_section_sha256"
+        ].items():
+            with self.subTest(section=section):
+                section_value = [
+                    vector
+                    for vector in artifact[section]
+                    if vector["descriptor_id"] in preserved_descriptors
+                ]
+                self.assertEqual(canonical_json_sha256(section_value), expected_sha256)
+        for schema_name, expected_sha256 in compatibility["preserved_v2_schema_sha256"].items():
+            with self.subTest(schema=schema_name):
+                self.assertEqual(
+                    canonical_json_sha256(
+                        _preserve_v2_descriptor_enums(artifact["schemas"][schema_name])
+                    ),
+                    expected_sha256,
+                )
+        preserved_v4 = compatibility["preserved_v4_section_sha256"]
         self.assertEqual(
-            set(preserved_v3),
+            set(preserved_v4),
             {
                 "canonical_json",
                 "canonicalization_vectors",
@@ -293,15 +314,15 @@ class OwnerControlArtifactTests(unittest.TestCase):
                 "verification_state_vectors",
             },
         )
-        self.assertEqual(preserved_v3["schema_version"], canonical_json_sha256(3))
+        self.assertEqual(preserved_v4["schema_version"], canonical_json_sha256(4))
         self.assertEqual(
-            preserved_v3["compatibility"],
-            "cb8720ac7b08fd92ade453489b127546a98908f858408e7ac56c2bbd05525982",
+            preserved_v4["compatibility"],
+            "62115e1e9d322dad345d0a48e4523445285d05281a52a4d94a18e1fcb3d27937",
         )
-        for section, expected_sha256 in preserved_v3.items():
+        for section, expected_sha256 in preserved_v4.items():
             if section in {"schema_version", "compatibility"}:
                 continue
-            with self.subTest(v3_section=section):
+            with self.subTest(v4_section=section):
                 self.assertEqual(canonical_json_sha256(artifact[section]), expected_sha256)
 
     def test_provenance_vectors_are_exhaustive_inert_and_canonical(self) -> None:

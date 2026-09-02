@@ -4,6 +4,7 @@ import base64
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import json
 import os
@@ -22,6 +23,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError, OperationalError
 
+from control_plane import authz_grant_service, authz_policy_activation
 from control_plane.contracts.idempotency_record import (
     LaunchplaneIdempotencyRecord,
     build_launchplane_idempotency_record_id,
@@ -202,6 +204,7 @@ from control_plane.trusted_maintenance import (
     TrustedMaintenanceGitHubEventFacts,
 )
 from tests.support.artifact_manifests import artifact_manifest_v2
+from tests.merge_train_policy_fixtures import build_test_merge_train_policy_record
 from tests.test_odoo_prod_retained_volume_backup_import_storage import (
     _retained_operation_for_restore_lane,
 )
@@ -1078,6 +1081,169 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
         self.assertEqual(records, (record,))
         self.assertIn("launchplane_privop_worker_heartbeats_freshness_idx", index_names)
 
+    def test_merge_train_policy_compare_write_uses_active_cas_and_idempotency(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            active_record = build_test_merge_train_policy_record(
+                repository="cbusillo/sellyouroutboard",
+                record_id="merge-train-policy-active",
+                updated_at="2026-08-22T19:00:00+00:00",
+            )
+            replacement_record = build_test_merge_train_policy_record(
+                repository="cbusillo/codex-skills",
+                record_id="merge-train-policy-candidate",
+                updated_at="2026-08-22T20:00:00+00:00",
+            )
+            store.write_merge_train_policy_record(active_record)
+            mutation = DbOnlyMutationRequest(
+                scope="privileged-operation-execution",
+                route_path="service-internal:privileged-operation-worker:managed-merge-train-policy-import",
+                idempotency_key="privileged-operation-postgres-merge-train-policy",
+                request_fingerprint="merge-train-policy-import-fingerprint",
+                lease_owner="postgres-integration-worker",
+                response_status_code=200,
+                response_trace_id="trace-postgres-merge-train-policy",
+                response_payload={"status": "ok"},
+            )
+
+            written = store.compare_and_write_merge_train_policy_record(
+                expected_record=active_record,
+                replacement_record=replacement_record,
+                mutation=mutation,
+            )
+            replayed = store.compare_and_write_merge_train_policy_record(
+                expected_record=active_record,
+                replacement_record=replacement_record,
+                mutation=mutation,
+            )
+            conflict = store.compare_and_write_merge_train_policy_record(
+                expected_record=active_record,
+                replacement_record=replacement_record,
+                mutation=replace(mutation, request_fingerprint="different-fingerprint"),
+            )
+            active_records = store.list_merge_train_policy_records(status="active", limit=2)
+            superseded_records = store.list_merge_train_policy_records(
+                status="superseded",
+                limit=10,
+            )
+
+        self.assertEqual(written.status, "written")
+        self.assertEqual(replayed.status, "replayed")
+        self.assertEqual(conflict.status, "idempotency_conflict")
+        self.assertEqual(
+            [record.record_id for record in active_records], [replacement_record.record_id]
+        )
+        self.assertEqual(
+            [record.record_id for record in superseded_records], [active_record.record_id]
+        )
+
+    def test_merge_train_policy_database_trigger_fences_direct_active_writes(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            first_record = build_test_merge_train_policy_record(
+                repository="cbusillo/sellyouroutboard",
+                record_id="merge-train-policy-direct-first",
+                updated_at="2026-09-02T00:00:00+00:00",
+            )
+            second_record = build_test_merge_train_policy_record(
+                repository="cbusillo/codex-skills",
+                record_id="merge-train-policy-direct-second",
+                updated_at="2026-09-02T00:01:00+00:00",
+            )
+            engine = create_engine(store.database_url)
+            try:
+                with engine.begin() as connection:
+                    for record in (first_record, second_record):
+                        connection.execute(
+                            text(
+                                "INSERT INTO launchplane_merge_train_policies "
+                                "(record_id, status, source, updated_at, policy_sha256, payload) "
+                                "VALUES (:record_id, :status, :source, :updated_at, "
+                                ":policy_sha256, CAST(:payload AS JSONB))"
+                            ),
+                            {
+                                "record_id": record.record_id,
+                                "status": record.status,
+                                "source": record.source,
+                                "updated_at": record.updated_at,
+                                "policy_sha256": record.policy_sha256,
+                                "payload": json.dumps(record.model_dump(mode="json")),
+                            },
+                        )
+                    inserted_rows = tuple(
+                        connection.execute(
+                            text(
+                                "SELECT record_id, status, payload ->> 'status' "
+                                "FROM launchplane_merge_train_policies ORDER BY record_id"
+                            )
+                        )
+                    )
+                    connection.execute(
+                        text(
+                            "UPDATE launchplane_merge_train_policies "
+                            "SET status = 'active', "
+                            "payload = jsonb_set(payload, '{status}', '\"active\"'::jsonb, true) "
+                            "WHERE record_id = :record_id"
+                        ),
+                        {"record_id": first_record.record_id},
+                    )
+                    reactivated_rows = tuple(
+                        connection.execute(
+                            text(
+                                "SELECT record_id, status, payload ->> 'status' "
+                                "FROM launchplane_merge_train_policies ORDER BY record_id"
+                            )
+                        )
+                    )
+            finally:
+                engine.dispose()
+
+        self.assertEqual(
+            inserted_rows,
+            (
+                (first_record.record_id, "superseded", "superseded"),
+                (second_record.record_id, "active", "active"),
+            ),
+        )
+        self.assertEqual(
+            reactivated_rows,
+            (
+                (first_record.record_id, "active", "active"),
+                (second_record.record_id, "superseded", "superseded"),
+            ),
+        )
+
+    def test_merge_train_policy_compare_write_rejects_record_id_from_history(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            historical_record = build_test_merge_train_policy_record(
+                repository="cbusillo/odoo-devkit",
+                record_id="merge-train-policy-historical",
+                updated_at="2026-08-22T18:00:00+00:00",
+            ).model_copy(update={"status": "superseded"})
+            active_record = build_test_merge_train_policy_record(
+                repository="cbusillo/sellyouroutboard",
+                record_id="merge-train-policy-active",
+                updated_at="2026-08-22T19:00:00+00:00",
+            )
+            replacement_record = build_test_merge_train_policy_record(
+                repository="cbusillo/codex-skills",
+                record_id=historical_record.record_id,
+                updated_at="2026-08-22T20:00:00+00:00",
+            )
+            store.write_merge_train_policy_record(historical_record)
+            store.write_merge_train_policy_record(active_record)
+
+            result = store.compare_and_write_merge_train_policy_record(
+                expected_record=active_record,
+                replacement_record=replacement_record,
+            )
+            active_records = store.list_merge_train_policy_records(status="active")
+            stored_historical_record = store.read_merge_train_policy_record(
+                historical_record.record_id
+            )
+
+        self.assertEqual(result.status, "record_id_conflict")
+        self.assertEqual(active_records, (active_record,))
+        self.assertEqual(stored_historical_record, historical_record)
+
     def test_runtime_schema_compatibility_reports_missing_relation(self) -> None:
         with _store_for_fresh_head_database() as store:
             with self.assertRaisesRegex(
@@ -1588,6 +1754,130 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
         self.assertEqual(len(active_records), 1)
         self.assertIn(active_records[0].record_id, {record.record_id for record in replacements})
 
+    def test_privileged_policy_activation_uses_atomic_cas_and_idempotency(self) -> None:
+        with _isolated_postgres_database() as database_url:
+            migrate_schema(database_url=database_url)
+            applying_identity = GitHubHumanIdentity(
+                login="postgres-owner",
+                github_id=123,
+                name="Postgres Owner",
+                email="postgres-owner@example.test",
+                organizations=frozenset(),
+                teams=frozenset(),
+                role="admin",
+            )
+            admin_rules = tuple(
+                GitHubHumanPolicyRule(
+                    managed_set_id="test.activation-admins",
+                    managed_rule_id=managed_rule_id,
+                    github_ids=(github_id,),
+                    roles=("admin",),
+                    products=("launchplane",),
+                    contexts=("launchplane",),
+                    actions=("authz_policy_grant.write",),
+                )
+                for managed_rule_id, github_id in (
+                    ("applying-admin", 123),
+                    ("independent-admin", 456),
+                )
+            )
+            policy = LaunchplaneAuthzPolicy(schema_version=2, github_humans=admin_rules)
+            policy_digest = authz_policy_sha256(policy)
+            seed_record = LaunchplaneAuthzPolicyRecord(
+                record_id=build_authz_policy_record_id(
+                    revision=1,
+                    policy_sha256=policy_digest,
+                ),
+                revision=1,
+                source="test:activation-postgres",
+                updated_at="2026-08-30T00:00:00Z",
+                policy_sha256=policy_digest,
+                policy=policy,
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                seed_record = store.seed_authz_policy_if_absent(seed_record)
+                dry_run_request = authz_policy_activation.build_authz_policy_operation_activation_reconcile_request(
+                    github_id=applying_identity.github_id,
+                    mode="dry_run",
+                    reason="Review the privileged-policy activation.",
+                )
+                dry_run_result = authz_grant_service.execute_managed_authz_policy_reconcile(
+                    record_store=store,
+                    request=dry_run_request,
+                    identity=applying_identity,
+                    trace_id="postgres-activation-dry-run",
+                    now_timestamp=lambda: "2026-08-30T00:01:00Z",
+                    authorized_policy_sha256=seed_record.policy_sha256,
+                    immutable_applying_github_id=applying_identity.github_id,
+                    source=authz_policy_activation.AUTHZ_POLICY_OPERATION_ACTIVATION_SOURCE,
+                )
+                dry_run_diff = authz_grant_service.AuthzManagedPolicyDiff.model_validate(
+                    dry_run_result.driver_result["diff"]
+                )
+                apply_request = authz_policy_activation.build_authz_policy_operation_activation_reconcile_request(
+                    github_id=applying_identity.github_id,
+                    mode="apply",
+                    reason="Review the privileged-policy activation.",
+                    reviewed_plan_sha256=dry_run_diff.plan_sha256,
+                )
+                apply_result = authz_grant_service.execute_managed_authz_policy_reconcile(
+                    record_store=store,
+                    request=apply_request,
+                    identity=applying_identity,
+                    trace_id="postgres-activation-apply",
+                    now_timestamp=lambda: "2026-08-30T00:02:00Z",
+                    authorized_policy_sha256=seed_record.policy_sha256,
+                    immutable_applying_github_id=applying_identity.github_id,
+                    source=authz_policy_activation.AUTHZ_POLICY_OPERATION_ACTIVATION_SOURCE,
+                )
+                mutation = DbOnlyMutationRequest(
+                    scope=authz_policy_activation.authz_policy_operation_activation_idempotency_scope(
+                        applying_identity.github_id
+                    ),
+                    route_path="/v1/authz-policies/privileged-policy-operations/activation/apply",
+                    idempotency_key="postgres-activation",
+                    request_fingerprint="a" * 64,
+                    lease_owner="postgres-activation-apply",
+                    response_status_code=202,
+                    response_trace_id="postgres-activation-apply",
+                    response_payload={"status": "accepted"},
+                    lease_seconds=300,
+                )
+                written = store.compare_and_write_authz_policy_record(
+                    expected_record=apply_result.previous_authz_policy_record,
+                    replacement_record=apply_result.authz_policy_record,
+                    mutation=mutation,
+                )
+                replayed = store.compare_and_write_authz_policy_record(
+                    expected_record=apply_result.previous_authz_policy_record,
+                    replacement_record=apply_result.authz_policy_record,
+                    mutation=mutation,
+                )
+                conflicting = store.compare_and_write_authz_policy_record(
+                    expected_record=apply_result.previous_authz_policy_record,
+                    replacement_record=apply_result.authz_policy_record,
+                    mutation=replace(mutation, request_fingerprint="b" * 64),
+                )
+                active_records = store.list_authz_policy_records(status="active", limit=2)
+            finally:
+                store.close()
+
+        self.assertEqual(written.status, "written")
+        self.assertEqual(replayed.status, "replayed")
+        self.assertEqual(conflicting.status, "idempotency_conflict")
+        self.assertEqual(len(active_records), 1)
+        self.assertEqual(
+            active_records[0].source,
+            authz_policy_activation.AUTHZ_POLICY_OPERATION_ACTIVATION_SOURCE,
+        )
+        self.assertEqual(
+            authz_policy_activation.authz_policy_operation_activation_state(
+                active_records[0].policy
+            ),
+            "active",
+        )
+
     def test_schema_migration_serializes_concurrent_startups(self) -> None:
         with _isolated_postgres_database() as database_url:
             alembic_command.upgrade(
@@ -1893,6 +2183,26 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                         )
                     )
                 with self.assertRaisesRegex(RuntimeError, "authz_policy_write_fence is disabled"):
+                    verify_postgres_schema_invariants(engine)
+            finally:
+                engine.dispose()
+
+    def test_schema_verification_rejects_disabled_merge_train_policy_write_fence(self) -> None:
+        with _isolated_postgres_database() as database_url:
+            _upgrade_empty_database_to_head(database_url)
+            engine = create_engine(database_url)
+            try:
+                with engine.begin() as connection:
+                    connection.execute(
+                        text(
+                            "ALTER TABLE launchplane_merge_train_policies DISABLE TRIGGER "
+                            "launchplane_merge_train_policy_write_fence"
+                        )
+                    )
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "merge_train_policy_write_fence is disabled",
+                ):
                     verify_postgres_schema_invariants(engine)
             finally:
                 engine.dispose()

@@ -17,9 +17,16 @@ from control_plane.contracts.idempotency_record import (
     LaunchplaneIdempotencyRecord,
     complete_launchplane_mutation_reservation,
 )
+from control_plane.contracts.merge_train_policy import (
+    MergeTrainPolicyRecord,
+    normalize_merge_train_policy_timestamp,
+)
 from control_plane.contracts.privileged_operation import (
     ManagedAuthzPolicySetExecutionEvidence,
     ManagedAuthzPolicySetProposalInput,
+    ManagedMergeTrainPolicyImportExecutionEvidence,
+    ManagedMergeTrainPolicyImportHumanEvidence,
+    ManagedMergeTrainPolicyImportProposalInput,
     PrivilegedOperationActor,
     PrivilegedOperationConflictError,
     PrivilegedOperationEventRecord,
@@ -56,6 +63,9 @@ PRIVILEGED_OPERATION_EXECUTION_SCOPE = "privileged-operation-execution"
 PRIVILEGED_OPERATION_EXECUTION_ROUTE = "service-internal:privileged-operation-worker"
 PRIVILEGED_POLICY_OPERATION_WRITE_ROUTE = (
     "service-internal:privileged-operation-worker:managed-authz-policy-set"
+)
+PRIVILEGED_MERGE_TRAIN_POLICY_WRITE_ROUTE = (
+    "service-internal:privileged-operation-worker:managed-merge-train-policy-import"
 )
 PRIVILEGED_OPERATION_EXECUTION_LEASE_SECONDS = 300
 
@@ -127,6 +137,23 @@ class PrivilegedOperationExecutionStore(PrivilegedOperationStore, Protocol):
         status: str = "",
         limit: int | None = None,
     ) -> tuple[LaunchplaneAuthzPolicyRecord, ...]: ...
+
+    def compare_and_write_merge_train_policy_record(
+        self,
+        *,
+        expected_record: MergeTrainPolicyRecord,
+        replacement_record: MergeTrainPolicyRecord,
+        mutation: DbOnlyMutationRequest | None = None,
+    ) -> Any: ...
+
+    def list_merge_train_policy_records(
+        self,
+        *,
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[MergeTrainPolicyRecord, ...]: ...
+
+    def read_merge_train_policy_record(self, record_id: str) -> MergeTrainPolicyRecord: ...
 
 
 class PrivilegedOperationWorkerHeartbeatStore(Protocol):
@@ -461,6 +488,50 @@ def _policy_execution_evidence(
     )
 
 
+def _merge_train_policy_execution_evidence(
+    *,
+    record: PrivilegedOperationRecord,
+    previous_record: MergeTrainPolicyRecord,
+    resulting_record: MergeTrainPolicyRecord,
+    superseded_record: MergeTrainPolicyRecord | None,
+    changed: bool,
+    authorization_policy_sha256: str,
+) -> ManagedMergeTrainPolicyImportExecutionEvidence:
+    return ManagedMergeTrainPolicyImportExecutionEvidence(
+        result_status="ok",
+        result_digest=_digest(
+            {
+                "operation_id": record.operation_id,
+                "plan_digest": record.approval.plan_digest if record.approval is not None else "",
+                "authorization_policy_sha256": authorization_policy_sha256,
+                "changed": changed,
+                "previous_record_id": previous_record.record_id,
+                "previous_policy_sha256": previous_record.policy_sha256,
+                "resulting_record_id": resulting_record.record_id,
+                "resulting_policy_sha256": resulting_record.policy_sha256,
+                "superseded_record_id": superseded_record.record_id
+                if superseded_record is not None
+                else "",
+                "superseded_policy_sha256": superseded_record.policy_sha256
+                if superseded_record is not None
+                else "",
+                "active_policy_count": 1,
+            }
+        ),
+        changed=changed,
+        previous_record_id=previous_record.record_id,
+        previous_policy_sha256=previous_record.policy_sha256,
+        resulting_record_id=resulting_record.record_id,
+        resulting_policy_sha256=resulting_record.policy_sha256,
+        superseded_record_id=superseded_record.record_id if superseded_record is not None else "",
+        superseded_policy_sha256=superseded_record.policy_sha256
+        if superseded_record is not None
+        else "",
+        active_policy_count=1,
+        reconciliation_required=False,
+    )
+
+
 def _failed_execution_evidence(
     *,
     record: PrivilegedOperationRecord,
@@ -469,6 +540,20 @@ def _failed_execution_evidence(
 ) -> PrivilegedOperationTerminalEvidence:
     if record.descriptor_id == "managed-authz-policy-set":
         return ManagedAuthzPolicySetExecutionEvidence(
+            result_status="error",
+            result_digest=_digest(
+                {
+                    "operation_id": record.operation_id,
+                    "failure_code": failure_code,
+                    "reconciliation_required": reconciliation_required,
+                }
+            ),
+            changed=False,
+            reconciliation_required=reconciliation_required,
+            failure_code=failure_code,
+        )
+    if record.descriptor_id == "managed-merge-train-policy-import":
+        return ManagedMergeTrainPolicyImportExecutionEvidence(
             result_status="error",
             result_digest=_digest(
                 {
@@ -502,6 +587,8 @@ def _execute_managed_authz_policy_set(
         raise ValueError("approval_provenance_missing")
     if not isinstance(record.request, ManagedAuthzPolicySetProposalInput):
         raise ValueError("executor_result_error")
+    if record.request.administrator_quorum_change is not None:
+        raise ValueError("quorum_change_requires_live_human")
     apply_request = record.request.reconcile_request(
         mode="apply",
         reviewed_plan_sha256=approval.plan_digest,
@@ -572,6 +659,117 @@ def _execute_managed_authz_policy_set(
     )
 
 
+def _execute_managed_merge_train_policy_import(
+    *,
+    store: PrivilegedOperationExecutionStore,
+    record: PrivilegedOperationRecord,
+    authorization: DurableOperationAuthorization,
+    on_effect_completed: Callable[[], None],
+) -> ManagedMergeTrainPolicyImportExecutionEvidence:
+    approval = record.approval
+    if approval is None:
+        raise ValueError("approval_provenance_missing")
+    if not isinstance(record.request, ManagedMergeTrainPolicyImportProposalInput):
+        raise ValueError("executor_result_error")
+    if not isinstance(record.evidence, ManagedMergeTrainPolicyImportHumanEvidence):
+        raise ValueError("executor_result_error")
+    evidence = record.evidence
+    active_records = store.list_merge_train_policy_records(status="active", limit=2)
+    if len(active_records) != 1:
+        raise ValueError("merge_train_policy_readback_failed")
+    expected_record = active_records[0]
+    if (
+        expected_record.record_id != evidence.active_record_id
+        or expected_record.policy_sha256 != evidence.active_policy_sha256
+        or normalize_merge_train_policy_timestamp(expected_record.updated_at)
+        != evidence.active_updated_at
+    ):
+        raise ValueError("approved_plan_drift")
+    candidate_record = record.request.record
+    changed = candidate_record.policy_sha256 != expected_record.policy_sha256
+    response_payload = {
+        "status": "ok",
+        "operation_id": record.operation_id,
+        "changed": changed,
+        "active_record_id": candidate_record.record_id if changed else expected_record.record_id,
+        "active_policy_sha256": candidate_record.policy_sha256,
+        "superseded_record_id": expected_record.record_id if changed else "",
+        "superseded_policy_sha256": expected_record.policy_sha256 if changed else "",
+    }
+    write_result = store.compare_and_write_merge_train_policy_record(
+        expected_record=expected_record,
+        replacement_record=candidate_record,
+        mutation=DbOnlyMutationRequest(
+            scope=PRIVILEGED_OPERATION_EXECUTION_SCOPE,
+            route_path=PRIVILEGED_MERGE_TRAIN_POLICY_WRITE_ROUTE,
+            idempotency_key=record.operation_id,
+            request_fingerprint=_merge_train_policy_import_request_fingerprint(record),
+            lease_owner=record.operation_id,
+            response_status_code=200,
+            response_trace_id=f"privileged-operation:{record.operation_id}",
+            response_payload=response_payload,
+            lease_seconds=PRIVILEGED_OPERATION_EXECUTION_LEASE_SECONDS,
+        ),
+    )
+    if write_result.status == "stale":
+        raise ValueError("approved_plan_drift")
+    if write_result.status not in {"written", "unchanged", "replayed"}:
+        raise ValueError("merge_train_policy_write_conflict")
+    if write_result.status in {"written", "replayed"} and changed:
+        on_effect_completed()
+    active_after = store.list_merge_train_policy_records(status="active", limit=2)
+    if len(active_after) != 1:
+        raise ValueError("merge_train_policy_readback_failed")
+    resulting_record = active_after[0]
+    expected_resulting_record = candidate_record if changed else expected_record
+    if (
+        resulting_record.record_id != expected_resulting_record.record_id
+        or resulting_record.policy_sha256 != expected_resulting_record.policy_sha256
+        or resulting_record.status != "active"
+    ):
+        raise ValueError("merge_train_policy_readback_failed")
+    superseded_record: MergeTrainPolicyRecord | None
+    if not changed:
+        superseded_record = None
+    else:
+        try:
+            superseded_record = store.read_merge_train_policy_record(expected_record.record_id)
+        except (KeyError, LookupError, OSError) as error:
+            raise ValueError("merge_train_policy_readback_failed") from error
+        if (
+            superseded_record.status != "superseded"
+            or superseded_record.policy_sha256 != expected_record.policy_sha256
+        ):
+            raise ValueError("merge_train_policy_readback_failed")
+    return _merge_train_policy_execution_evidence(
+        record=record,
+        previous_record=expected_record,
+        resulting_record=resulting_record,
+        superseded_record=superseded_record,
+        changed=changed,
+        authorization_policy_sha256=authorization.policy_sha256,
+    )
+
+
+def _merge_train_policy_import_request_fingerprint(record: PrivilegedOperationRecord) -> str:
+    if record.approval is None:
+        raise ValueError("approval_provenance_missing")
+    if not isinstance(record.request, ManagedMergeTrainPolicyImportProposalInput):
+        raise ValueError("executor_result_error")
+    if not isinstance(record.evidence, ManagedMergeTrainPolicyImportHumanEvidence):
+        raise ValueError("executor_result_error")
+    return _digest(
+        {
+            "operation_id": record.operation_id,
+            "active_record_id": record.evidence.active_record_id,
+            "active_policy_sha256": record.evidence.active_policy_sha256,
+            "candidate_record_id": record.request.record.record_id,
+            "candidate_policy_sha256": record.request.record.policy_sha256,
+            "plan_digest": record.approval.plan_digest,
+        }
+    )
+
+
 def _recover_managed_authz_policy_set(
     *,
     store: PrivilegedOperationExecutionStore,
@@ -623,6 +821,63 @@ def _recover_managed_authz_policy_set(
     )
 
 
+def _recover_managed_merge_train_policy_import(
+    *,
+    store: PrivilegedOperationExecutionStore,
+    record: PrivilegedOperationRecord,
+    authorization: DurableOperationAuthorization,
+) -> ManagedMergeTrainPolicyImportExecutionEvidence:
+    if not isinstance(record.request, ManagedMergeTrainPolicyImportProposalInput):
+        raise ValueError("execution_recovery_failed")
+    if not isinstance(record.evidence, ManagedMergeTrainPolicyImportHumanEvidence):
+        raise ValueError("execution_recovery_failed")
+    evidence = record.evidence
+    lookup = store.lookup_existing_mutation_reservation(
+        route_path=PRIVILEGED_MERGE_TRAIN_POLICY_WRITE_ROUTE,
+        idempotency_key=record.operation_id,
+        request_fingerprint=_merge_train_policy_import_request_fingerprint(record),
+    )
+    if lookup.status != "found" or lookup.record is None or lookup.record.state != "completed":
+        raise ValueError("execution_recovery_failed")
+    active_records = store.list_merge_train_policy_records(status="active", limit=2)
+    if len(active_records) != 1:
+        raise ValueError("merge_train_policy_readback_failed")
+    resulting_record = active_records[0]
+    candidate_record = record.request.record
+    changed = candidate_record.policy_sha256 != evidence.active_policy_sha256
+    if changed and (
+        resulting_record.record_id != candidate_record.record_id
+        or resulting_record.policy_sha256 != candidate_record.policy_sha256
+    ):
+        raise ValueError("merge_train_policy_readback_failed")
+    if not changed and (
+        resulting_record.record_id != evidence.active_record_id
+        or resulting_record.policy_sha256 != evidence.active_policy_sha256
+    ):
+        raise ValueError("merge_train_policy_readback_failed")
+    previous_record = resulting_record
+    superseded_record = None
+    if changed:
+        try:
+            superseded_record = store.read_merge_train_policy_record(evidence.active_record_id)
+        except (KeyError, LookupError, OSError) as error:
+            raise ValueError("merge_train_policy_readback_failed") from error
+        if (
+            superseded_record.status != "superseded"
+            or superseded_record.policy_sha256 != evidence.active_policy_sha256
+        ):
+            raise ValueError("merge_train_policy_readback_failed")
+        previous_record = superseded_record.model_copy(update={"status": "active"})
+    return _merge_train_policy_execution_evidence(
+        record=record,
+        previous_record=previous_record,
+        resulting_record=resulting_record,
+        superseded_record=superseded_record,
+        changed=changed,
+        authorization_policy_sha256=authorization.policy_sha256,
+    )
+
+
 def _result_count(payload: dict[str, object], field_name: str) -> int:
     value = payload.get(field_name, 0)
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
@@ -642,6 +897,8 @@ def _failure_code(error: Exception) -> str:
         "authz_policy_write_conflict",
         "execution_recovery_failed",
         "executor_result_error",
+        "merge_train_policy_readback_failed",
+        "merge_train_policy_write_conflict",
         "mutation_reservation_completion_failed",
     }
     normalized = str(error).strip()
@@ -687,6 +944,12 @@ def reconcile_stale_privileged_operations(
             )
             if record.descriptor_id == "managed-authz-policy-set":
                 terminal_evidence = _recover_managed_authz_policy_set(
+                    store=store,
+                    record=record,
+                    authorization=authorization,
+                )
+            elif record.descriptor_id == "managed-merge-train-policy-import":
+                terminal_evidence = _recover_managed_merge_train_policy_import(
                     store=store,
                     record=record,
                     authorization=authorization,
@@ -841,6 +1104,18 @@ def execute_approved_privileged_operations_once(
                     record=claimed,
                     authorization=authorization,
                     now=now,
+                    on_effect_completed=mark_effect_completed,
+                )
+            elif claimed.descriptor_id == "managed-merge-train-policy-import":
+
+                def mark_effect_completed() -> None:
+                    nonlocal effect_completed
+                    effect_completed = True
+
+                operation_execution = _execute_managed_merge_train_policy_import(
+                    store=store,
+                    record=claimed,
+                    authorization=authorization,
                     on_effect_completed=mark_effect_completed,
                 )
             else:

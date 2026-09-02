@@ -12,14 +12,27 @@ from control_plane.authz_grant_service import (
     AuthzPolicyConflictError,
     plan_managed_authz_policy_reconcile,
 )
+from control_plane.contracts.canonical_json import canonical_json_sha256
+from control_plane.contracts.merge_train_policy import (
+    MergeTrainPolicyRecord,
+    normalize_merge_train_policy_timestamp,
+)
 from control_plane.contracts.privileged_operation import (
     AUTHZ_POLICY_OPERATION_APPROVE_ACTION,
     AUTHZ_POLICY_OPERATION_CANCEL_ACTION,
     AUTHZ_POLICY_OPERATION_PROPOSE_ACTION,
     AUTHZ_POLICY_OPERATION_READ_ACTION,
     AUTHZ_POLICY_OPERATION_REVOKE_ACTION,
+    MERGE_TRAIN_POLICY_OPERATION_APPROVE_ACTION,
+    MERGE_TRAIN_POLICY_OPERATION_CANCEL_ACTION,
+    MERGE_TRAIN_POLICY_OPERATION_PROPOSE_ACTION,
+    MERGE_TRAIN_POLICY_OPERATION_READ_ACTION,
+    MERGE_TRAIN_POLICY_OPERATION_REVOKE_ACTION,
+    MERGE_TRAIN_POLICY_OPERATION_SUMMARY_READ_ACTION,
     ManagedAuthzPolicySetHumanEvidence,
     ManagedAuthzPolicySetProposalInput,
+    ManagedMergeTrainPolicyImportHumanEvidence,
+    ManagedMergeTrainPolicyImportProposalInput,
     ManagedSecretReencryptionHumanEvidence,
     ManagedSecretReencryptionPlanInput,
     PRIVILEGED_OPERATION_SUMMARY_READ_ACTION,
@@ -125,6 +138,18 @@ MANAGED_AUTHZ_POLICY_SET_DESCRIPTOR = PrivilegedOperationDescriptor(
     approve_action=AUTHZ_POLICY_OPERATION_APPROVE_ACTION,
     revoke_action=AUTHZ_POLICY_OPERATION_REVOKE_ACTION,
     agent_summary_read_action=PRIVILEGED_POLICY_OPERATION_SUMMARY_READ_ACTION,
+)
+
+MANAGED_MERGE_TRAIN_POLICY_IMPORT_DESCRIPTOR = PrivilegedOperationDescriptor(
+    descriptor_id="managed-merge-train-policy-import",
+    descriptor_version=1,
+    safety_class="policy_admin",
+    plan_action=MERGE_TRAIN_POLICY_OPERATION_PROPOSE_ACTION,
+    human_read_action=MERGE_TRAIN_POLICY_OPERATION_READ_ACTION,
+    cancel_action=MERGE_TRAIN_POLICY_OPERATION_CANCEL_ACTION,
+    approve_action=MERGE_TRAIN_POLICY_OPERATION_APPROVE_ACTION,
+    revoke_action=MERGE_TRAIN_POLICY_OPERATION_REVOKE_ACTION,
+    agent_summary_read_action=MERGE_TRAIN_POLICY_OPERATION_SUMMARY_READ_ACTION,
 )
 
 
@@ -259,6 +284,118 @@ def plan_managed_authz_policy_set(
     )
 
 
+def _policy_key_payloads(record: MergeTrainPolicyRecord) -> dict[str, dict[str, object]]:
+    return {
+        repository_policy.policy_key: repository_policy.model_dump(mode="json")
+        for repository_policy in record.policy.policies
+    }
+
+
+def plan_managed_merge_train_policy_import(
+    record_store: object,
+    request: PrivilegedOperationRequest,
+) -> ManagedMergeTrainPolicyImportHumanEvidence:
+    if not isinstance(request, ManagedMergeTrainPolicyImportProposalInput):
+        raise PrivilegedOperationPlannerError(
+            "Merge-train policy import planner received an invalid request type."
+        )
+    list_records = getattr(record_store, "list_merge_train_policy_records", None)
+    read_record = getattr(record_store, "read_merge_train_policy_record", None)
+    if not callable(list_records) or not callable(read_record):
+        raise PrivilegedOperationPlanningStoreError(
+            "Merge-train policy import planning requires merge-train policy storage."
+        )
+    try:
+        active_records = tuple(list_records(status="active", limit=2))
+    except (TypeError, ValueError) as error:
+        raise PrivilegedOperationPlannerError(
+            "Merge-train policy import planning failed before evidence was produced."
+        ) from error
+    if len(active_records) != 1:
+        raise PrivilegedOperationPlannerError(
+            "Merge-train policy import planning requires exactly one active policy record."
+        )
+    try:
+        active_record = MergeTrainPolicyRecord.model_validate(active_records[0])
+        active_updated_at = normalize_merge_train_policy_timestamp(active_record.updated_at)
+    except ValueError as error:
+        raise PrivilegedOperationPlannerError(
+            "Merge-train policy import planning found an invalid active policy record."
+        ) from error
+    candidate_record = request.record
+    if (
+        candidate_record.record_id == active_record.record_id
+        and candidate_record.policy_sha256 != active_record.policy_sha256
+    ):
+        raise PrivilegedOperationPlannerError(
+            "Merge-train policy import candidate must use a new record ID when policy changes."
+        )
+    if candidate_record.record_id != active_record.record_id:
+        try:
+            read_record(candidate_record.record_id)
+        except (FileNotFoundError, KeyError):
+            pass
+        except (OSError, TypeError, ValueError) as error:
+            raise PrivilegedOperationPlannerError(
+                "Merge-train policy import planning could not verify candidate record history."
+            ) from error
+        else:
+            raise PrivilegedOperationPlannerError(
+                "Merge-train policy import candidate record ID already exists in policy history."
+            )
+    active_payloads = _policy_key_payloads(active_record)
+    candidate_payloads = _policy_key_payloads(candidate_record)
+    active_keys = set(active_payloads)
+    candidate_keys = set(candidate_payloads)
+    added_keys = tuple(sorted(candidate_keys - active_keys))
+    removed_keys = tuple(sorted(active_keys - candidate_keys))
+    changed_keys = tuple(
+        sorted(
+            policy_key
+            for policy_key in active_keys.intersection(candidate_keys)
+            if active_payloads[policy_key] != candidate_payloads[policy_key]
+        )
+    )
+    unchanged_keys = tuple(
+        sorted(
+            policy_key
+            for policy_key in active_keys.intersection(candidate_keys)
+            if active_payloads[policy_key] == candidate_payloads[policy_key]
+        )
+    )
+    plan_payload = {
+        "schema_version": 1,
+        "descriptor_id": "managed-merge-train-policy-import",
+        "active_record_id": active_record.record_id,
+        "active_updated_at": active_updated_at,
+        "active_policy_sha256": active_record.policy_sha256,
+        "active_target_count": len(active_record.policy.policies),
+        "candidate_record_id": candidate_record.record_id,
+        "candidate_policy_sha256": candidate_record.policy_sha256,
+        "candidate_target_count": len(candidate_record.policy.policies),
+        "added_policy_keys": added_keys,
+        "removed_policy_keys": removed_keys,
+        "changed_policy_keys": changed_keys,
+        "unchanged_policy_keys": unchanged_keys,
+        "reason": request.reason,
+        "related_issue": request.related_issue,
+    }
+    return ManagedMergeTrainPolicyImportHumanEvidence(
+        plan_digest=canonical_json_sha256(plan_payload),
+        active_record_id=active_record.record_id,
+        active_updated_at=active_updated_at,
+        active_policy_sha256=active_record.policy_sha256,
+        active_target_count=len(active_record.policy.policies),
+        candidate_record_id=candidate_record.record_id,
+        candidate_policy_sha256=candidate_record.policy_sha256,
+        candidate_target_count=len(candidate_record.policy.policies),
+        added_policy_keys=added_keys,
+        removed_policy_keys=removed_keys,
+        changed_policy_keys=changed_keys,
+        unchanged_policy_keys=unchanged_keys,
+    )
+
+
 _REGISTRY: dict[PrivilegedOperationDescriptorId, RegisteredPrivilegedOperationDescriptor] = {
     "managed-secret-reencryption": RegisteredPrivilegedOperationDescriptor(
         descriptor=MANAGED_SECRET_REENCRYPTION_DESCRIPTOR,
@@ -267,6 +404,10 @@ _REGISTRY: dict[PrivilegedOperationDescriptorId, RegisteredPrivilegedOperationDe
     "managed-authz-policy-set": RegisteredPrivilegedOperationDescriptor(
         descriptor=MANAGED_AUTHZ_POLICY_SET_DESCRIPTOR,
         planner=plan_managed_authz_policy_set,
+    ),
+    "managed-merge-train-policy-import": RegisteredPrivilegedOperationDescriptor(
+        descriptor=MANAGED_MERGE_TRAIN_POLICY_IMPORT_DESCRIPTOR,
+        planner=plan_managed_merge_train_policy_import,
     ),
 }
 

@@ -16,6 +16,7 @@ from pydantic import (
     AfterValidator,
     BaseModel,
     ConfigDict,
+    Field,
     SerializerFunctionWrapHandler,
     model_serializer,
     model_validator,
@@ -756,7 +757,9 @@ def action_safety(action: str) -> AgentConsumerActionSafety:
     if not normalized_action:
         return "read"
     action_parts = tuple(part for part in re.split(r"[_.-]+", normalized_action) if part)
-    if normalized_action.startswith("authz_policy") or normalized_action in {
+    if normalized_action.startswith(
+        ("authz_policy", "merge_train_policy_operation")
+    ) or normalized_action in {
         "change_impact_policy.write",
         "engineering_review_authority.write",
         "product_owner_policy.write",
@@ -912,6 +915,7 @@ class LaunchplaneAuthzPolicy(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     schema_version: AuthzPolicySchemaVersion = 1
+    administrator_quorum: int | None = Field(default=None, ge=1)
     github_actions: tuple[GitHubActionsPolicyRule, ...] = ()
     github_humans: tuple[GitHubHumanPolicyRule, ...] = ()
     terminal_agents: tuple[TerminalAgentPolicyRule, ...] = ()
@@ -920,6 +924,8 @@ class LaunchplaneAuthzPolicy(BaseModel):
 
     @model_validator(mode="after")
     def _validate_instance_rule_schema(self) -> "LaunchplaneAuthzPolicy":
+        if self.schema_version == 1 and self.administrator_quorum is not None:
+            raise ValueError("Schema-v1 authz policies cannot declare administrator_quorum.")
         instance_actions = instance_scoped_authz_actions()
         exclusively_instance_actions = exclusively_instance_scoped_authz_actions()
         managed_identities: set[tuple[str, str]] = set()
@@ -967,6 +973,8 @@ class LaunchplaneAuthzPolicy(BaseModel):
         for rule in payload.get("github_humans", ()):
             if not rule.get("github_ids"):
                 rule.pop("github_ids", None)
+        if self.administrator_quorum is None:
+            payload.pop("administrator_quorum", None)
         if self.schema_version == 1:
             for rule_collection_name in (
                 "github_actions",
@@ -1266,6 +1274,7 @@ def migrate_authz_policy_to_schema_v2(
 
     return LaunchplaneAuthzPolicy(
         schema_version=2,
+        administrator_quorum=policy.administrator_quorum,
         github_actions=tuple(
             migrated_rule
             for rule in policy.github_actions
@@ -1288,6 +1297,10 @@ def migrate_authz_policy_to_schema_v2(
             migrated_rule for rule in policy.local_admins for migrated_rule in migrated_rules(rule)
         ),
     )
+
+
+def effective_administrator_quorum(policy: LaunchplaneAuthzPolicy) -> int:
+    return policy.administrator_quorum or 2
 
 
 def parse_authz_policy_toml(policy_toml: str) -> LaunchplaneAuthzPolicy:

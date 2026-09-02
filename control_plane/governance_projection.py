@@ -159,6 +159,9 @@ class LiveGovernanceCurrentReadinessProvider:
             )
             if not controller_records:
                 return _unavailable_readiness()
+            controller_state = controller_records[0]
+            if controller_state.status != "running" or not controller_state.lease_owner:
+                return _unavailable_readiness()
             token = self.github_token(github_token_env_var).strip()
             if not token:
                 return _unavailable_readiness()
@@ -195,7 +198,8 @@ class LiveGovernanceCurrentReadinessProvider:
                 observed_base_tree_sha=observed_base_tree_sha,
                 observed_head_sha=repository_evidence.target.head_sha,
                 observed_head_tree_sha=repository_evidence.target.tree_sha,
-                controller_state=controller_records[0],
+                controller_state=controller_state,
+                expected_lease_owner=controller_state.lease_owner,
                 stack_collapse_record=stack_collapse_record,
                 evaluated_at=evaluated_at,
             )

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 import os
-import posixpath
 import pwd
 import re
 from time import sleep
@@ -514,10 +513,19 @@ def _redacted_command_output(value: str) -> str:
 
 
 def _normalized_path(value: str) -> str:
-    normalized = posixpath.normpath(value.strip())
-    if not normalized.startswith("/") or normalized == "/":
+    normalized = value.strip()
+    if ".." in normalized.split("/"):
+        raise ValueError(
+            "runner lane retirement executor registration_root must not contain "
+            "parent-directory components"
+        )
+    normalized = normalized.rstrip("/")
+    if not normalized.startswith("/"):
         raise ValueError("runner lane retirement executor requires scoped absolute root")
-    return normalized
+    segments = [segment for segment in normalized.split("/") if segment not in {"", "."}]
+    if not segments:
+        raise ValueError("runner lane retirement executor requires scoped absolute root")
+    return "/" + "/".join(segments)
 
 
 def _required_text(value: str, message: str) -> str:

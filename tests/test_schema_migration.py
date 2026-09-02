@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 
 from alembic import command
 from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.exc import IntegrityError
 
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.contracts.product_owner import (
@@ -41,6 +42,173 @@ from control_plane.storage.schema_migration import (
 
 
 class SchemaMigrationTests(unittest.TestCase):
+    def test_merge_train_policy_migration_fences_plain_active_inserts(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            database_url = f"sqlite+pysqlite:///{database_path}"
+            command.upgrade(alembic_config(database_url), EXPECTED_ALEMBIC_HEAD_REVISION)
+            engine = create_engine(database_url)
+            first_payload = {
+                "schema_version": 1,
+                "record_id": "merge-train-policy-first",
+                "status": "active",
+                "source": "test",
+                "updated_at": "2026-09-02T00:00:00Z",
+                "policy_sha256": "a" * 64,
+                "policy": {"schema_version": 1, "policies": []},
+            }
+            second_payload = {
+                **first_payload,
+                "record_id": "merge-train-policy-second",
+                "updated_at": "2026-09-02T00:01:00Z",
+                "policy_sha256": "b" * 64,
+            }
+
+            with engine.begin() as connection:
+                for payload in (first_payload, second_payload):
+                    connection.execute(
+                        text(
+                            "INSERT INTO launchplane_merge_train_policies "
+                            "(record_id, status, source, updated_at, policy_sha256, payload) "
+                            "VALUES (:record_id, 'active', 'test', :updated_at, "
+                            ":policy_sha256, :payload)"
+                        ),
+                        {
+                            "record_id": payload["record_id"],
+                            "updated_at": payload["updated_at"],
+                            "policy_sha256": payload["policy_sha256"],
+                            "payload": json.dumps(payload),
+                        },
+                    )
+                rows = tuple(
+                    connection.execute(
+                        text(
+                            "SELECT record_id, status, json_extract(payload, '$.status') "
+                            "FROM launchplane_merge_train_policies ORDER BY record_id"
+                        )
+                    )
+                )
+            engine.dispose()
+
+        self.assertEqual(
+            rows,
+            (
+                ("merge-train-policy-first", "superseded", "superseded"),
+                ("merge-train-policy-second", "active", "active"),
+            ),
+        )
+
+    def test_merge_train_policy_migration_ignores_invalid_superseded_timestamp(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            database_url = f"sqlite+pysqlite:///{database_path}"
+            config = alembic_config(database_url)
+            command.upgrade(config, "fb7d9e1a3c5f")
+            engine = create_engine(database_url)
+            active_payload = {
+                "schema_version": 1,
+                "record_id": "merge-train-policy-active",
+                "status": "active",
+                "source": "test",
+                "updated_at": "2026-09-02T00:00:00Z",
+                "policy_sha256": "a" * 64,
+                "policy": {"schema_version": 1, "policies": []},
+            }
+            superseded_payload = {
+                **active_payload,
+                "record_id": "merge-train-policy-superseded",
+                "status": "superseded",
+                "updated_at": "not-a-timestamp",
+                "policy_sha256": "b" * 64,
+            }
+            with engine.begin() as connection:
+                for payload in (active_payload, superseded_payload):
+                    connection.execute(
+                        text(
+                            "INSERT INTO launchplane_merge_train_policies "
+                            "(record_id, status, source, updated_at, policy_sha256, payload) "
+                            "VALUES (:record_id, :status, 'test', :updated_at, "
+                            ":policy_sha256, :payload)"
+                        ),
+                        {
+                            "record_id": payload["record_id"],
+                            "status": payload["status"],
+                            "updated_at": payload["updated_at"],
+                            "policy_sha256": payload["policy_sha256"],
+                            "payload": json.dumps(payload),
+                        },
+                    )
+            engine.dispose()
+
+            command.upgrade(config, EXPECTED_ALEMBIC_HEAD_REVISION)
+            engine = create_engine(database_url)
+            try:
+                with engine.connect() as connection:
+                    rows = tuple(
+                        connection.execute(
+                            text(
+                                "SELECT record_id, status "
+                                "FROM launchplane_merge_train_policies ORDER BY record_id"
+                            )
+                        )
+                    )
+            finally:
+                engine.dispose()
+
+        self.assertEqual(
+            rows,
+            (
+                ("merge-train-policy-active", "active"),
+                ("merge-train-policy-superseded", "superseded"),
+            ),
+        )
+
+    def test_merge_train_policy_migration_rejects_ambiguous_latest_active_timestamp(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            database_url = f"sqlite+pysqlite:///{database_path}"
+            config = alembic_config(database_url)
+            command.upgrade(config, "fb7d9e1a3c5f")
+            engine = create_engine(database_url)
+            payload = {
+                "schema_version": 1,
+                "status": "active",
+                "source": "test",
+                "updated_at": "2026-09-02T00:00:00Z",
+                "policy": {"schema_version": 1, "policies": []},
+            }
+            with engine.begin() as connection:
+                for index in range(2):
+                    record_id = f"merge-train-policy-active-{index}"
+                    record_payload = {
+                        **payload,
+                        "record_id": record_id,
+                        "policy_sha256": str(index) * 64,
+                    }
+                    connection.execute(
+                        text(
+                            "INSERT INTO launchplane_merge_train_policies "
+                            "(record_id, status, source, updated_at, policy_sha256, payload) "
+                            "VALUES (:record_id, 'active', 'test', :updated_at, "
+                            ":policy_sha256, :payload)"
+                        ),
+                        {
+                            "record_id": record_id,
+                            "updated_at": record_payload["updated_at"],
+                            "policy_sha256": record_payload["policy_sha256"],
+                            "payload": json.dumps(record_payload),
+                        },
+                    )
+            engine.dispose()
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "multiple active records share the latest updated_at timestamp",
+            ):
+                command.upgrade(config, EXPECTED_ALEMBIC_HEAD_REVISION)
+
     def test_postgres_any_array_predicate_matches_equivalent_in_expression(self) -> None:
         observed_expressions = (
             "status = ANY (ARRAY['pending'::character varying, 'active'::character varying])",
@@ -1506,6 +1674,9 @@ class SchemaMigrationTests(unittest.TestCase):
         }
 
         self.assertEqual(EXPECTED_ALEMBIC_HEAD_REVISION, "b8d0f2a4c6e8")
+        self.assertFalse(
+            [index.index_name for index in CRITICAL_SCHEMA_INDEXES if len(index.index_name) > 63]
+        )
         self.assertNotIn(
             ("launchplane_human_sessions", "launchplane_human_sessions_github_id_idx"),
             indexes,
@@ -1516,6 +1687,10 @@ class SchemaMigrationTests(unittest.TestCase):
         )
         self.assertEqual(
             column_types[("launchplane_privileged_operation_events", "payload")],
+            ("jsonb",),
+        )
+        self.assertEqual(
+            column_types[("launchplane_merge_train_policies", "payload")],
             ("jsonb",),
         )
         self.assertEqual(
@@ -1575,6 +1750,23 @@ class SchemaMigrationTests(unittest.TestCase):
                     "launchplane_privileged_operation_events_operation_sequence_uidx",
                 )
             ].unique
+        )
+        self.assertTrue(
+            indexes[
+                (
+                    "launchplane_merge_train_policies",
+                    "launchplane_merge_train_policies_active_uidx",
+                )
+            ].unique
+        )
+        self.assertEqual(
+            indexes[
+                (
+                    "launchplane_merge_train_policies",
+                    "launchplane_merge_train_policies_active_uidx",
+                )
+            ].predicate_expression,
+            "status='active'",
         )
         self.assertEqual(
             column_types[("launchplane_authz_denials", "payload")],
@@ -1830,6 +2022,22 @@ class SchemaMigrationTests(unittest.TestCase):
                         "launchplane_owner_control_enrollment_provenance"
                     )
                 }
+                enrollment_columns = {
+                    str(column["name"])
+                    for column in inspector.get_columns("launchplane_administrator_enrollments")
+                }
+                enrollment_indexes = {
+                    str(name): index
+                    for index in inspector.get_indexes("launchplane_administrator_enrollments")
+                    if (name := index.get("name")) is not None
+                }
+                enrollment_unique_constraints = {
+                    str(name): constraint
+                    for constraint in inspector.get_unique_constraints(
+                        "launchplane_administrator_enrollments"
+                    )
+                    if (name := constraint.get("name")) is not None
+                }
             finally:
                 engine.dispose()
             command.downgrade(config, "f2241a0b1c2d")
@@ -1905,6 +2113,35 @@ class SchemaMigrationTests(unittest.TestCase):
             "launchplane_owner_control_lifecycle_event_challenge_idx",
             lifecycle_event_indexes,
         )
+        self.assertTrue(
+            {
+                "enrollment_id",
+                "state",
+                "proposer_github_id",
+                "candidate_github_id",
+                "challenge_sha256",
+                "reason",
+                "provenance_sha256",
+                "control_proven_at",
+                "enrolled_at",
+                "enrolled_policy_record_id",
+                "enrolled_policy_revision",
+                "enrolled_policy_sha256",
+                "reviewed_plan_sha256",
+                "bridge_idempotency_key_sha256",
+                "authority_state",
+                "authorizes_policy",
+                "policy_bridge_state",
+                "payload",
+            }.issubset(enrollment_columns)
+        )
+        self.assertIn("launchplane_administrator_enrollment_state_expiry_idx", enrollment_indexes)
+        self.assertEqual(
+            enrollment_unique_constraints["launchplane_administrator_enrollment_challenge_uq"][
+                "column_names"
+            ],
+            ["challenge_sha256"],
+        )
         active_operation_index = challenge_indexes[
             "launchplane_owner_control_challenge_active_operation_uidx"
         ]
@@ -1921,6 +2158,7 @@ class SchemaMigrationTests(unittest.TestCase):
             "launchplane_owner_control_enrollment_provenance",
             downgraded_tables,
         )
+        self.assertNotIn("launchplane_administrator_enrollments", downgraded_tables)
 
     def test_owner_control_provenance_upgrade_refuses_legacy_sessions(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -1928,7 +2166,7 @@ class SchemaMigrationTests(unittest.TestCase):
                 f"sqlite+pysqlite:///{Path(temporary_directory_name) / 'records.sqlite3'}"
             )
             config = alembic_config(database_url)
-            command.upgrade(config, "a7c9e1f3b5d7")
+            command.upgrade(config, "fbc9d1e3a5b7")
             engine = create_engine(database_url)
             try:
                 with engine.begin() as connection:
@@ -2008,7 +2246,7 @@ class SchemaMigrationTests(unittest.TestCase):
                 RuntimeError,
                 "while records exist",
             ):
-                command.downgrade(config, "a7c9e1f3b5d7")
+                command.downgrade(config, "fbc9d1e3a5b7")
 
     def test_owner_control_lifecycle_migration_refuses_nonempty_downgrade(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -2049,6 +2287,105 @@ class SchemaMigrationTests(unittest.TestCase):
 
             with self.assertRaisesRegex(RuntimeError, "audit events exist"):
                 command.downgrade(config, "f6a1c3e5b7d9")
+
+    def test_administrator_enrollment_migration_refuses_nonempty_downgrade(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = (
+                f"sqlite+pysqlite:///{Path(temporary_directory_name) / 'records.sqlite3'}"
+            )
+            config = alembic_config(database_url)
+            command.upgrade(config, EXPECTED_ALEMBIC_HEAD_REVISION)
+            engine = create_engine(database_url)
+            try:
+                with engine.begin() as connection:
+                    connection.execute(
+                        text(
+                            "insert into launchplane_administrator_enrollments "
+                            "(enrollment_id, state, proposer_github_id, challenge_sha256, reason, "
+                            "provenance_sha256, created_at, expires_at, payload) values "
+                            "(:enrollment_id, 'issued', :proposer_github_id, :challenge_sha256, "
+                            ":reason, :provenance_sha256, :created_at, :expires_at, '{}')"
+                        ),
+                        {
+                            "enrollment_id": "administrator-enrollment-migration-test",
+                            "proposer_github_id": 101,
+                            "challenge_sha256": "a" * 64,
+                            "reason": "Downgrade refusal test.",
+                            "provenance_sha256": "b" * 64,
+                            "created_at": "2026-08-31T12:00:00+00:00",
+                            "expires_at": "2026-08-31T12:30:00+00:00",
+                        },
+                    )
+            finally:
+                engine.dispose()
+
+            with self.assertRaisesRegex(RuntimeError, "records exist"):
+                command.downgrade(config, "a7c9e1f3b5d7")
+
+    def test_administrator_enrollment_migration_enforces_ttl_and_policy_binding(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = (
+                f"sqlite+pysqlite:///{Path(temporary_directory_name) / 'records.sqlite3'}"
+            )
+            config = alembic_config(database_url)
+            command.upgrade(config, EXPECTED_ALEMBIC_HEAD_REVISION)
+            engine = create_engine(database_url)
+            try:
+                with self.assertRaises(IntegrityError):
+                    with engine.begin() as connection:
+                        connection.execute(
+                            text(
+                                "insert into launchplane_administrator_enrollments "
+                                "(enrollment_id, state, proposer_github_id, challenge_sha256, "
+                                "reason, provenance_sha256, created_at, expires_at, payload) values "
+                                "(:enrollment_id, 'issued', 101, :challenge_sha256, :reason, "
+                                ":provenance_sha256, :created_at, :expires_at, '{}')"
+                            ),
+                            {
+                                "enrollment_id": "administrator-enrollment-invalid-ttl",
+                                "challenge_sha256": "a" * 64,
+                                "reason": "Invalid TTL test.",
+                                "provenance_sha256": "b" * 64,
+                                "created_at": "2026-08-31T12:00:00+00:00",
+                                "expires_at": "2026-08-31T12:31:00+00:00",
+                            },
+                        )
+                with self.assertRaises(IntegrityError):
+                    with engine.begin() as connection:
+                        connection.execute(
+                            text(
+                                "insert into launchplane_administrator_enrollments "
+                                "(enrollment_id, state, proposer_github_id, candidate_github_id, "
+                                "challenge_sha256, reason, provenance_sha256, created_at, "
+                                "expires_at, control_proven_at, enrolled_at, "
+                                "enrolled_policy_record_id, enrolled_policy_revision, "
+                                "enrolled_policy_sha256, reviewed_plan_sha256, "
+                                "bridge_idempotency_key_sha256, policy_bridge_state, payload) "
+                                "values (:enrollment_id, 'enrolled', 101, 202, :challenge_sha256, "
+                                ":reason, :provenance_sha256, :created_at, :expires_at, "
+                                ":control_proven_at, :enrolled_at, :enrolled_policy_record_id, 368, "
+                                ":enrolled_policy_sha256, :reviewed_plan_sha256, "
+                                ":bridge_idempotency_key_sha256, 'applied', '{}')"
+                            ),
+                            {
+                                "enrollment_id": "administrator-enrollment-invalid-policy",
+                                "challenge_sha256": "c" * 64,
+                                "reason": "Invalid policy binding test.",
+                                "provenance_sha256": "d" * 64,
+                                "created_at": "2026-08-31T12:00:00+00:00",
+                                "expires_at": "2026-08-31T12:30:00+00:00",
+                                "control_proven_at": "2026-08-31T12:05:00+00:00",
+                                "enrolled_at": "2026-08-31T12:06:00+00:00",
+                                "enrolled_policy_record_id": (
+                                    "launchplane-authz-policy-r00000000000000000368-aaaaaaaaaaaa"
+                                ),
+                                "enrolled_policy_sha256": "b" * 64,
+                                "reviewed_plan_sha256": "e" * 64,
+                                "bridge_idempotency_key_sha256": "f" * 64,
+                            },
+                        )
+            finally:
+                engine.dispose()
 
 
 if __name__ == "__main__":

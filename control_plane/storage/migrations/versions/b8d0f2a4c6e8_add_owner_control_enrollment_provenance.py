@@ -1,7 +1,7 @@
 """Add immutable owner-control enrollment provenance.
 
 Revision ID: b8d0f2a4c6e8
-Revises: a7c9e1f3b5d7
+Revises: fbc9d1e3a5b7
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from sqlalchemy.dialects import postgresql
 
 
 revision: str = "b8d0f2a4c6e8"
-down_revision: str | None = "a7c9e1f3b5d7"
+down_revision: str | None = "fbc9d1e3a5b7"
 branch_labels: tuple[str, ...] | None = None
 depends_on: tuple[str, ...] | None = None
 

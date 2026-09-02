@@ -129,35 +129,48 @@
   ],
   "compatibility": {
     "change_kind": "additive-enrollment-provenance",
-    "container_schema_version": 4,
+    "container_schema_version": 5,
     "enrollment_provenance_schema_versions": [
       1
     ],
+    "preserved_v2_descriptor_ids": [
+      "managed-authz-policy-set",
+      "managed-secret-reencryption"
+    ],
+    "preserved_v2_descriptor_vector_section_sha256": {
+      "confirmation_golden_vectors": "58391f364a79ab321596d30200b87c9d29be366eaa1386a9ff4c242c8b38d50a",
+      "golden_vectors": "6955c5c8bb228c21bc6a68a4ddb7cf22456cd51615ffe6e421b0fa04f15d9584"
+    },
+    "preserved_v2_schema_sha256": {
+      "approval_request": "6cc0379a8323715191aea8a605b594d6500a2937c6d46c45caa9cea313b3b8b4",
+      "challenge_response": "1fc009f4497b88caacf1c7273c0e7e932936cd23a24f5d3e1846f235da1082d0",
+      "channel_binding_record": "399e8f1ee814e60f6973290d5da0a542add174bb2926ab2cc2dff583c18c1a94",
+      "owner_control_confirmation_envelope": "b3e15f59f63efdeff5d95e621af981959c6d5ec2c71e1ae15351967722ee589f",
+      "owner_control_signature_payload": "002b5e22c57ac17b6f7915486e29f2d3d11aee7e0b44505050b1366c23ee8c00",
+      "server_review_payload": "b4b0d9e55212190615e9d4247ff459c15309ab1a10a715df92432585b9f34855"
+    },
     "preserved_v2_section_sha256": {
       "canonical_json": "0c6b6454d737943d01d4621c217ff8412552a0bf0c69a0f50a761d38ac0e7d1f",
       "canonicalization_vectors": "ca481ff769bba537310c8568b56850f5d12ebc0c90ace9ea2dc39ff714daa6a8",
-      "confirmation_golden_vectors": "58391f364a79ab321596d30200b87c9d29be366eaa1386a9ff4c242c8b38d50a",
-      "golden_vectors": "6955c5c8bb228c21bc6a68a4ddb7cf22456cd51615ffe6e421b0fa04f15d9584",
       "negative_confirmation_vectors": "9d529ca0f5153c8c3eb3eb4862311efc6dc3c1dc7e5df55824ebde13194eb46d",
       "negative_vectors": "232d29bc542df455c9f54a3196a2a4d41cb0912155f92d060c850df99c835b29",
-      "schemas": "00a8524a65afd637c8cfc88ef44e780154addc759b813a831f3ddf2ce1490bd0",
       "signature_declaration": "7d9c62d55792931383d4a02ed99d31e21c67b5ce714c01d9144dc2a3bed34f72"
     },
-    "preserved_v3_section_sha256": {
+    "preserved_v4_section_sha256": {
       "canonical_json": "0c6b6454d737943d01d4621c217ff8412552a0bf0c69a0f50a761d38ac0e7d1f",
       "canonicalization_vectors": "ca481ff769bba537310c8568b56850f5d12ebc0c90ace9ea2dc39ff714daa6a8",
       "challenge_lifecycle_vectors": "81a1d62ee2c9268366e052da78221ab13d8946b276c0a06c1009296357a89807",
-      "compatibility": "cb8720ac7b08fd92ade453489b127546a98908f858408e7ac56c2bbd05525982",
-      "confirmation_golden_vectors": "58391f364a79ab321596d30200b87c9d29be366eaa1386a9ff4c242c8b38d50a",
-      "golden_vectors": "6955c5c8bb228c21bc6a68a4ddb7cf22456cd51615ffe6e421b0fa04f15d9584",
+      "compatibility": "62115e1e9d322dad345d0a48e4523445285d05281a52a4d94a18e1fcb3d27937",
+      "confirmation_golden_vectors": "763f4795b9b25d725f394d4df13f8a713e253429aa31457a84cc88c7f9f71b7a",
+      "golden_vectors": "b8e51053225c281d68d6dff7d8a1e5963ac7a2396dc48a691a4da3a12fe8b303",
       "negative_confirmation_vectors": "9d529ca0f5153c8c3eb3eb4862311efc6dc3c1dc7e5df55824ebde13194eb46d",
       "negative_vectors": "232d29bc542df455c9f54a3196a2a4d41cb0912155f92d060c850df99c835b29",
-      "schema_version": "4e07408562bedb8b60ce05c1decfe3ad16b72230967de01f640b7e4729b49fce",
-      "schemas": "00a8524a65afd637c8cfc88ef44e780154addc759b813a831f3ddf2ce1490bd0",
+      "schema_version": "4b227777d4dd1fc61c6f884f48641d02b4d121d3fd328cb08b5531fcacdabf8a",
+      "schemas": "1fdb3187f24ee64f95a8f7753ec64b93d72d1f3b92ea118db00d43a798263f0c",
       "signature_declaration": "7d9c62d55792931383d4a02ed99d31e21c67b5ce714c01d9144dc2a3bed34f72",
       "verification_state_vectors": "4c199bf64618845f098ac12ef992a21111ab87a6e91e5325f962db3e8174c8df"
     },
-    "previous_container_schema_version": 3,
+    "previous_container_schema_version": 4,
     "shadow_verifier_schema_versions": [
       1
     ],
@@ -338,6 +351,180 @@
           "schema_version": 1
         },
         "sha256": "d4e381e653d1de2252a06c4e0e150318d938e27a6da8b0791a3820431652f56e"
+      },
+      "verification": "valid"
+    },
+    {
+      "challenge_response": {
+        "canonical_json": "{\"approval_request\":{\"descriptor_id\":\"managed-merge-train-policy-import\",\"descriptor_version\":1,\"evidence_digest\":\"ef5bf74db2c315f2c945a94c96097da89da87a9d2db8c5567318359f56b9c8d8\",\"expires_at\":\"2030-01-02T03:09:05+00:00\",\"issued_at\":\"2030-01-02T03:00:05+00:00\",\"nonce\":\"owner-control-477680c2675e5006abc5259a68a08890\",\"operation_id\":\"privileged-operation-fbe10ac18e12fa50d904f1492c60eb52\",\"owner_github_id\":4225929569,\"plan_digest\":\"a4778b01429eb6bf689d786aa9ddf12e55cec2d00741cbb76239fa92bc33cb72\",\"policy_record_id\":\"owner-policy-fbe10ac18e12fa50d904\",\"policy_revision\":1,\"policy_sha256\":\"64f8c4a82a4ec6a88d3c0fab8793ad8f262ab303cbca7aaf393b10afdcdf7f60\",\"pre_state_digest\":\"b129e41dc6da3d3f4a8e40f881f8e3b5839fde16f2902481c80924f5c017123b\",\"request_digest\":\"330893bdc60fcf718d1033a94adb848e2a82e193961ad40b46a92310bb815b84\",\"schema_version\":1,\"server_review\":{\"items\":[{\"key\":\"descriptor\",\"label\":\"Operation class\",\"value\":\"managed-merge-train-policy-import\"},{\"key\":\"safety_class\",\"label\":\"Safety class\",\"value\":\"policy_admin\"}],\"review_id\":\"review-fbe10ac18e12fa50d904f149\",\"schema_version\":1,\"summary\":\"Review this exact privileged operation before confirming.\",\"title\":\"Owner approval required\"}},\"approval_request_digest\":\"c6262ae3b8680628991ca1bfd9e628075485311f0cba346c48170de3d714c0ba\",\"channel_binding_sha256\":\"316f35b5fae728a1aa6096f49830fca81f8931e3b50e5348012d42580f9856da\",\"confirmed_at\":\"2030-01-02T03:04:05+00:00\",\"decision\":\"approved\",\"schema_version\":1}",
+        "payload": {
+          "approval_request": {
+            "descriptor_id": "managed-merge-train-policy-import",
+            "descriptor_version": 1,
+            "evidence_digest": "ef5bf74db2c315f2c945a94c96097da89da87a9d2db8c5567318359f56b9c8d8",
+            "expires_at": "2030-01-02T03:09:05+00:00",
+            "issued_at": "2030-01-02T03:00:05+00:00",
+            "nonce": "owner-control-477680c2675e5006abc5259a68a08890",
+            "operation_id": "privileged-operation-fbe10ac18e12fa50d904f1492c60eb52",
+            "owner_github_id": 4225929569,
+            "plan_digest": "a4778b01429eb6bf689d786aa9ddf12e55cec2d00741cbb76239fa92bc33cb72",
+            "policy_record_id": "owner-policy-fbe10ac18e12fa50d904",
+            "policy_revision": 1,
+            "policy_sha256": "64f8c4a82a4ec6a88d3c0fab8793ad8f262ab303cbca7aaf393b10afdcdf7f60",
+            "pre_state_digest": "b129e41dc6da3d3f4a8e40f881f8e3b5839fde16f2902481c80924f5c017123b",
+            "request_digest": "330893bdc60fcf718d1033a94adb848e2a82e193961ad40b46a92310bb815b84",
+            "schema_version": 1,
+            "server_review": {
+              "items": [
+                {
+                  "key": "descriptor",
+                  "label": "Operation class",
+                  "value": "managed-merge-train-policy-import"
+                },
+                {
+                  "key": "safety_class",
+                  "label": "Safety class",
+                  "value": "policy_admin"
+                }
+              ],
+              "review_id": "review-fbe10ac18e12fa50d904f149",
+              "schema_version": 1,
+              "summary": "Review this exact privileged operation before confirming.",
+              "title": "Owner approval required"
+            }
+          },
+          "approval_request_digest": "c6262ae3b8680628991ca1bfd9e628075485311f0cba346c48170de3d714c0ba",
+          "channel_binding_sha256": "316f35b5fae728a1aa6096f49830fca81f8931e3b50e5348012d42580f9856da",
+          "confirmed_at": "2030-01-02T03:04:05+00:00",
+          "decision": "approved",
+          "schema_version": 1
+        },
+        "sha256": "d70f074ada0d9bc82db3b53e9ff37503c3e100b4ebfd196a1d151ba9c11f5f3d"
+      },
+      "channel_binding": {
+        "canonical_json": "{\"channel_session_id\":\"channel-session-b854b961ffa622278b88b8dfaf34973c\",\"owner_github_id\":4225929569,\"owner_public_key\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\",\"schema_version\":1,\"session_expires_at\":\"2030-01-02T03:09:05+00:00\",\"session_issued_at\":\"2030-01-02T03:00:05+00:00\",\"signature_algorithm\":\"ed25519\"}",
+        "payload": {
+          "channel_session_id": "channel-session-b854b961ffa622278b88b8dfaf34973c",
+          "owner_github_id": 4225929569,
+          "owner_public_key": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+          "schema_version": 1,
+          "session_expires_at": "2030-01-02T03:09:05+00:00",
+          "session_issued_at": "2030-01-02T03:00:05+00:00",
+          "signature_algorithm": "ed25519"
+        },
+        "sha256": "316f35b5fae728a1aa6096f49830fca81f8931e3b50e5348012d42580f9856da"
+      },
+      "confirmation_envelope": {
+        "canonical_json": "{\"challenge_response\":{\"approval_request\":{\"descriptor_id\":\"managed-merge-train-policy-import\",\"descriptor_version\":1,\"evidence_digest\":\"ef5bf74db2c315f2c945a94c96097da89da87a9d2db8c5567318359f56b9c8d8\",\"expires_at\":\"2030-01-02T03:09:05+00:00\",\"issued_at\":\"2030-01-02T03:00:05+00:00\",\"nonce\":\"owner-control-477680c2675e5006abc5259a68a08890\",\"operation_id\":\"privileged-operation-fbe10ac18e12fa50d904f1492c60eb52\",\"owner_github_id\":4225929569,\"plan_digest\":\"a4778b01429eb6bf689d786aa9ddf12e55cec2d00741cbb76239fa92bc33cb72\",\"policy_record_id\":\"owner-policy-fbe10ac18e12fa50d904\",\"policy_revision\":1,\"policy_sha256\":\"64f8c4a82a4ec6a88d3c0fab8793ad8f262ab303cbca7aaf393b10afdcdf7f60\",\"pre_state_digest\":\"b129e41dc6da3d3f4a8e40f881f8e3b5839fde16f2902481c80924f5c017123b\",\"request_digest\":\"330893bdc60fcf718d1033a94adb848e2a82e193961ad40b46a92310bb815b84\",\"schema_version\":1,\"server_review\":{\"items\":[{\"key\":\"descriptor\",\"label\":\"Operation class\",\"value\":\"managed-merge-train-policy-import\"},{\"key\":\"safety_class\",\"label\":\"Safety class\",\"value\":\"policy_admin\"}],\"review_id\":\"review-fbe10ac18e12fa50d904f149\",\"schema_version\":1,\"summary\":\"Review this exact privileged operation before confirming.\",\"title\":\"Owner approval required\"}},\"approval_request_digest\":\"c6262ae3b8680628991ca1bfd9e628075485311f0cba346c48170de3d714c0ba\",\"channel_binding_sha256\":\"316f35b5fae728a1aa6096f49830fca81f8931e3b50e5348012d42580f9856da\",\"confirmed_at\":\"2030-01-02T03:04:05+00:00\",\"decision\":\"approved\",\"schema_version\":1},\"channel_binding\":{\"channel_session_id\":\"channel-session-b854b961ffa622278b88b8dfaf34973c\",\"owner_github_id\":4225929569,\"owner_public_key\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\",\"schema_version\":1,\"session_expires_at\":\"2030-01-02T03:09:05+00:00\",\"session_issued_at\":\"2030-01-02T03:00:05+00:00\",\"signature_algorithm\":\"ed25519\"},\"schema_version\":1,\"signature\":\"2UYvRDuJ7Poyfp1pFSLszzY55e6m8O06NJ3vQiw5_vaEN-9H4bwTX12zgBrVb98--CXGfIWCQvcklgu11rnuBw\",\"signature_algorithm\":\"ed25519\"}",
+        "payload": {
+          "challenge_response": {
+            "approval_request": {
+              "descriptor_id": "managed-merge-train-policy-import",
+              "descriptor_version": 1,
+              "evidence_digest": "ef5bf74db2c315f2c945a94c96097da89da87a9d2db8c5567318359f56b9c8d8",
+              "expires_at": "2030-01-02T03:09:05+00:00",
+              "issued_at": "2030-01-02T03:00:05+00:00",
+              "nonce": "owner-control-477680c2675e5006abc5259a68a08890",
+              "operation_id": "privileged-operation-fbe10ac18e12fa50d904f1492c60eb52",
+              "owner_github_id": 4225929569,
+              "plan_digest": "a4778b01429eb6bf689d786aa9ddf12e55cec2d00741cbb76239fa92bc33cb72",
+              "policy_record_id": "owner-policy-fbe10ac18e12fa50d904",
+              "policy_revision": 1,
+              "policy_sha256": "64f8c4a82a4ec6a88d3c0fab8793ad8f262ab303cbca7aaf393b10afdcdf7f60",
+              "pre_state_digest": "b129e41dc6da3d3f4a8e40f881f8e3b5839fde16f2902481c80924f5c017123b",
+              "request_digest": "330893bdc60fcf718d1033a94adb848e2a82e193961ad40b46a92310bb815b84",
+              "schema_version": 1,
+              "server_review": {
+                "items": [
+                  {
+                    "key": "descriptor",
+                    "label": "Operation class",
+                    "value": "managed-merge-train-policy-import"
+                  },
+                  {
+                    "key": "safety_class",
+                    "label": "Safety class",
+                    "value": "policy_admin"
+                  }
+                ],
+                "review_id": "review-fbe10ac18e12fa50d904f149",
+                "schema_version": 1,
+                "summary": "Review this exact privileged operation before confirming.",
+                "title": "Owner approval required"
+              }
+            },
+            "approval_request_digest": "c6262ae3b8680628991ca1bfd9e628075485311f0cba346c48170de3d714c0ba",
+            "channel_binding_sha256": "316f35b5fae728a1aa6096f49830fca81f8931e3b50e5348012d42580f9856da",
+            "confirmed_at": "2030-01-02T03:04:05+00:00",
+            "decision": "approved",
+            "schema_version": 1
+          },
+          "channel_binding": {
+            "channel_session_id": "channel-session-b854b961ffa622278b88b8dfaf34973c",
+            "owner_github_id": 4225929569,
+            "owner_public_key": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+            "schema_version": 1,
+            "session_expires_at": "2030-01-02T03:09:05+00:00",
+            "session_issued_at": "2030-01-02T03:00:05+00:00",
+            "signature_algorithm": "ed25519"
+          },
+          "schema_version": 1,
+          "signature": "2UYvRDuJ7Poyfp1pFSLszzY55e6m8O06NJ3vQiw5_vaEN-9H4bwTX12zgBrVb98--CXGfIWCQvcklgu11rnuBw",
+          "signature_algorithm": "ed25519"
+        },
+        "sha256": "89e954d567574a1a5c9ddf97b36536824fd2e975c079196d9ac8f8b810b74dc7"
+      },
+      "descriptor_id": "managed-merge-train-policy-import",
+      "descriptor_version": 1,
+      "signature_payload": {
+        "canonical_json": "{\"challenge_response\":{\"approval_request\":{\"descriptor_id\":\"managed-merge-train-policy-import\",\"descriptor_version\":1,\"evidence_digest\":\"ef5bf74db2c315f2c945a94c96097da89da87a9d2db8c5567318359f56b9c8d8\",\"expires_at\":\"2030-01-02T03:09:05+00:00\",\"issued_at\":\"2030-01-02T03:00:05+00:00\",\"nonce\":\"owner-control-477680c2675e5006abc5259a68a08890\",\"operation_id\":\"privileged-operation-fbe10ac18e12fa50d904f1492c60eb52\",\"owner_github_id\":4225929569,\"plan_digest\":\"a4778b01429eb6bf689d786aa9ddf12e55cec2d00741cbb76239fa92bc33cb72\",\"policy_record_id\":\"owner-policy-fbe10ac18e12fa50d904\",\"policy_revision\":1,\"policy_sha256\":\"64f8c4a82a4ec6a88d3c0fab8793ad8f262ab303cbca7aaf393b10afdcdf7f60\",\"pre_state_digest\":\"b129e41dc6da3d3f4a8e40f881f8e3b5839fde16f2902481c80924f5c017123b\",\"request_digest\":\"330893bdc60fcf718d1033a94adb848e2a82e193961ad40b46a92310bb815b84\",\"schema_version\":1,\"server_review\":{\"items\":[{\"key\":\"descriptor\",\"label\":\"Operation class\",\"value\":\"managed-merge-train-policy-import\"},{\"key\":\"safety_class\",\"label\":\"Safety class\",\"value\":\"policy_admin\"}],\"review_id\":\"review-fbe10ac18e12fa50d904f149\",\"schema_version\":1,\"summary\":\"Review this exact privileged operation before confirming.\",\"title\":\"Owner approval required\"}},\"approval_request_digest\":\"c6262ae3b8680628991ca1bfd9e628075485311f0cba346c48170de3d714c0ba\",\"channel_binding_sha256\":\"316f35b5fae728a1aa6096f49830fca81f8931e3b50e5348012d42580f9856da\",\"confirmed_at\":\"2030-01-02T03:04:05+00:00\",\"decision\":\"approved\",\"schema_version\":1},\"domain\":\"launchplane-owner-control-confirmation-v1\",\"schema_version\":1}",
+        "payload": {
+          "challenge_response": {
+            "approval_request": {
+              "descriptor_id": "managed-merge-train-policy-import",
+              "descriptor_version": 1,
+              "evidence_digest": "ef5bf74db2c315f2c945a94c96097da89da87a9d2db8c5567318359f56b9c8d8",
+              "expires_at": "2030-01-02T03:09:05+00:00",
+              "issued_at": "2030-01-02T03:00:05+00:00",
+              "nonce": "owner-control-477680c2675e5006abc5259a68a08890",
+              "operation_id": "privileged-operation-fbe10ac18e12fa50d904f1492c60eb52",
+              "owner_github_id": 4225929569,
+              "plan_digest": "a4778b01429eb6bf689d786aa9ddf12e55cec2d00741cbb76239fa92bc33cb72",
+              "policy_record_id": "owner-policy-fbe10ac18e12fa50d904",
+              "policy_revision": 1,
+              "policy_sha256": "64f8c4a82a4ec6a88d3c0fab8793ad8f262ab303cbca7aaf393b10afdcdf7f60",
+              "pre_state_digest": "b129e41dc6da3d3f4a8e40f881f8e3b5839fde16f2902481c80924f5c017123b",
+              "request_digest": "330893bdc60fcf718d1033a94adb848e2a82e193961ad40b46a92310bb815b84",
+              "schema_version": 1,
+              "server_review": {
+                "items": [
+                  {
+                    "key": "descriptor",
+                    "label": "Operation class",
+                    "value": "managed-merge-train-policy-import"
+                  },
+                  {
+                    "key": "safety_class",
+                    "label": "Safety class",
+                    "value": "policy_admin"
+                  }
+                ],
+                "review_id": "review-fbe10ac18e12fa50d904f149",
+                "schema_version": 1,
+                "summary": "Review this exact privileged operation before confirming.",
+                "title": "Owner approval required"
+              }
+            },
+            "approval_request_digest": "c6262ae3b8680628991ca1bfd9e628075485311f0cba346c48170de3d714c0ba",
+            "channel_binding_sha256": "316f35b5fae728a1aa6096f49830fca81f8931e3b50e5348012d42580f9856da",
+            "confirmed_at": "2030-01-02T03:04:05+00:00",
+            "decision": "approved",
+            "schema_version": 1
+          },
+          "domain": "launchplane-owner-control-confirmation-v1",
+          "schema_version": 1
+        },
+        "sha256": "8ab23865ebc15d89b40ab04f04b48c45dacb03adb170e6ea6c9fc1838b5b51d0"
       },
       "verification": "valid"
     },
@@ -604,6 +791,95 @@
         "sha256": "4506266fb13d70228e460dc724dd02337d1367f87003ca118c0eb44dea6d0fd1"
       },
       "descriptor_id": "managed-authz-policy-set",
+      "descriptor_version": 1
+    },
+    {
+      "approval_request": {
+        "canonical_json": "{\"descriptor_id\":\"managed-merge-train-policy-import\",\"descriptor_version\":1,\"evidence_digest\":\"ef5bf74db2c315f2c945a94c96097da89da87a9d2db8c5567318359f56b9c8d8\",\"expires_at\":\"2030-01-02T03:09:05+00:00\",\"issued_at\":\"2030-01-02T03:00:05+00:00\",\"nonce\":\"owner-control-477680c2675e5006abc5259a68a08890\",\"operation_id\":\"privileged-operation-fbe10ac18e12fa50d904f1492c60eb52\",\"owner_github_id\":4225929569,\"plan_digest\":\"a4778b01429eb6bf689d786aa9ddf12e55cec2d00741cbb76239fa92bc33cb72\",\"policy_record_id\":\"owner-policy-fbe10ac18e12fa50d904\",\"policy_revision\":1,\"policy_sha256\":\"64f8c4a82a4ec6a88d3c0fab8793ad8f262ab303cbca7aaf393b10afdcdf7f60\",\"pre_state_digest\":\"b129e41dc6da3d3f4a8e40f881f8e3b5839fde16f2902481c80924f5c017123b\",\"request_digest\":\"330893bdc60fcf718d1033a94adb848e2a82e193961ad40b46a92310bb815b84\",\"schema_version\":1,\"server_review\":{\"items\":[{\"key\":\"descriptor\",\"label\":\"Operation class\",\"value\":\"managed-merge-train-policy-import\"},{\"key\":\"safety_class\",\"label\":\"Safety class\",\"value\":\"policy_admin\"}],\"review_id\":\"review-fbe10ac18e12fa50d904f149\",\"schema_version\":1,\"summary\":\"Review this exact privileged operation before confirming.\",\"title\":\"Owner approval required\"}}",
+        "payload": {
+          "descriptor_id": "managed-merge-train-policy-import",
+          "descriptor_version": 1,
+          "evidence_digest": "ef5bf74db2c315f2c945a94c96097da89da87a9d2db8c5567318359f56b9c8d8",
+          "expires_at": "2030-01-02T03:09:05+00:00",
+          "issued_at": "2030-01-02T03:00:05+00:00",
+          "nonce": "owner-control-477680c2675e5006abc5259a68a08890",
+          "operation_id": "privileged-operation-fbe10ac18e12fa50d904f1492c60eb52",
+          "owner_github_id": 4225929569,
+          "plan_digest": "a4778b01429eb6bf689d786aa9ddf12e55cec2d00741cbb76239fa92bc33cb72",
+          "policy_record_id": "owner-policy-fbe10ac18e12fa50d904",
+          "policy_revision": 1,
+          "policy_sha256": "64f8c4a82a4ec6a88d3c0fab8793ad8f262ab303cbca7aaf393b10afdcdf7f60",
+          "pre_state_digest": "b129e41dc6da3d3f4a8e40f881f8e3b5839fde16f2902481c80924f5c017123b",
+          "request_digest": "330893bdc60fcf718d1033a94adb848e2a82e193961ad40b46a92310bb815b84",
+          "schema_version": 1,
+          "server_review": {
+            "items": [
+              {
+                "key": "descriptor",
+                "label": "Operation class",
+                "value": "managed-merge-train-policy-import"
+              },
+              {
+                "key": "safety_class",
+                "label": "Safety class",
+                "value": "policy_admin"
+              }
+            ],
+            "review_id": "review-fbe10ac18e12fa50d904f149",
+            "schema_version": 1,
+            "summary": "Review this exact privileged operation before confirming.",
+            "title": "Owner approval required"
+          }
+        },
+        "sha256": "c6262ae3b8680628991ca1bfd9e628075485311f0cba346c48170de3d714c0ba"
+      },
+      "challenge_response": {
+        "canonical_json": "{\"approval_request\":{\"descriptor_id\":\"managed-merge-train-policy-import\",\"descriptor_version\":1,\"evidence_digest\":\"ef5bf74db2c315f2c945a94c96097da89da87a9d2db8c5567318359f56b9c8d8\",\"expires_at\":\"2030-01-02T03:09:05+00:00\",\"issued_at\":\"2030-01-02T03:00:05+00:00\",\"nonce\":\"owner-control-477680c2675e5006abc5259a68a08890\",\"operation_id\":\"privileged-operation-fbe10ac18e12fa50d904f1492c60eb52\",\"owner_github_id\":4225929569,\"plan_digest\":\"a4778b01429eb6bf689d786aa9ddf12e55cec2d00741cbb76239fa92bc33cb72\",\"policy_record_id\":\"owner-policy-fbe10ac18e12fa50d904\",\"policy_revision\":1,\"policy_sha256\":\"64f8c4a82a4ec6a88d3c0fab8793ad8f262ab303cbca7aaf393b10afdcdf7f60\",\"pre_state_digest\":\"b129e41dc6da3d3f4a8e40f881f8e3b5839fde16f2902481c80924f5c017123b\",\"request_digest\":\"330893bdc60fcf718d1033a94adb848e2a82e193961ad40b46a92310bb815b84\",\"schema_version\":1,\"server_review\":{\"items\":[{\"key\":\"descriptor\",\"label\":\"Operation class\",\"value\":\"managed-merge-train-policy-import\"},{\"key\":\"safety_class\",\"label\":\"Safety class\",\"value\":\"policy_admin\"}],\"review_id\":\"review-fbe10ac18e12fa50d904f149\",\"schema_version\":1,\"summary\":\"Review this exact privileged operation before confirming.\",\"title\":\"Owner approval required\"}},\"approval_request_digest\":\"c6262ae3b8680628991ca1bfd9e628075485311f0cba346c48170de3d714c0ba\",\"channel_binding_sha256\":\"b179224b1440e1550bd2f314a1be491193f3f2717e48bb364148a40ac4d6d672\",\"confirmed_at\":\"2030-01-02T03:04:05+00:00\",\"decision\":\"approved\",\"schema_version\":1}",
+        "payload": {
+          "approval_request": {
+            "descriptor_id": "managed-merge-train-policy-import",
+            "descriptor_version": 1,
+            "evidence_digest": "ef5bf74db2c315f2c945a94c96097da89da87a9d2db8c5567318359f56b9c8d8",
+            "expires_at": "2030-01-02T03:09:05+00:00",
+            "issued_at": "2030-01-02T03:00:05+00:00",
+            "nonce": "owner-control-477680c2675e5006abc5259a68a08890",
+            "operation_id": "privileged-operation-fbe10ac18e12fa50d904f1492c60eb52",
+            "owner_github_id": 4225929569,
+            "plan_digest": "a4778b01429eb6bf689d786aa9ddf12e55cec2d00741cbb76239fa92bc33cb72",
+            "policy_record_id": "owner-policy-fbe10ac18e12fa50d904",
+            "policy_revision": 1,
+            "policy_sha256": "64f8c4a82a4ec6a88d3c0fab8793ad8f262ab303cbca7aaf393b10afdcdf7f60",
+            "pre_state_digest": "b129e41dc6da3d3f4a8e40f881f8e3b5839fde16f2902481c80924f5c017123b",
+            "request_digest": "330893bdc60fcf718d1033a94adb848e2a82e193961ad40b46a92310bb815b84",
+            "schema_version": 1,
+            "server_review": {
+              "items": [
+                {
+                  "key": "descriptor",
+                  "label": "Operation class",
+                  "value": "managed-merge-train-policy-import"
+                },
+                {
+                  "key": "safety_class",
+                  "label": "Safety class",
+                  "value": "policy_admin"
+                }
+              ],
+              "review_id": "review-fbe10ac18e12fa50d904f149",
+              "schema_version": 1,
+              "summary": "Review this exact privileged operation before confirming.",
+              "title": "Owner approval required"
+            }
+          },
+          "approval_request_digest": "c6262ae3b8680628991ca1bfd9e628075485311f0cba346c48170de3d714c0ba",
+          "channel_binding_sha256": "b179224b1440e1550bd2f314a1be491193f3f2717e48bb364148a40ac4d6d672",
+          "confirmed_at": "2030-01-02T03:04:05+00:00",
+          "decision": "approved",
+          "schema_version": 1
+        },
+        "sha256": "5afb3463b03374865a1884781da84cb18101cbb136b7dfd71a5a97ceeb589778"
+      },
+      "descriptor_id": "managed-merge-train-policy-import",
       "descriptor_version": 1
     },
     {
@@ -2983,7 +3259,7 @@
       }
     }
   ],
-  "schema_version": 4,
+  "schema_version": 5,
   "schemas": {
     "approval_request": {
       "$defs": {
@@ -3070,7 +3346,8 @@
         "descriptor_id": {
           "enum": [
             "managed-secret-reencryption",
-            "managed-authz-policy-set"
+            "managed-authz-policy-set",
+            "managed-merge-train-policy-import"
           ],
           "title": "Descriptor Id",
           "type": "string"
@@ -3181,7 +3458,8 @@
             "descriptor_id": {
               "enum": [
                 "managed-secret-reencryption",
-                "managed-authz-policy-set"
+                "managed-authz-policy-set",
+                "managed-merge-train-policy-import"
               ],
               "title": "Descriptor Id",
               "type": "string"
@@ -3467,7 +3745,8 @@
             "descriptor_id": {
               "enum": [
                 "managed-secret-reencryption",
-                "managed-authz-policy-set"
+                "managed-authz-policy-set",
+                "managed-merge-train-policy-import"
               ],
               "title": "Descriptor Id",
               "type": "string"
@@ -3791,7 +4070,8 @@
             "descriptor_id": {
               "enum": [
                 "managed-secret-reencryption",
-                "managed-authz-policy-set"
+                "managed-authz-policy-set",
+                "managed-merge-train-policy-import"
               ],
               "title": "Descriptor Id",
               "type": "string"

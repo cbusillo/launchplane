@@ -116,6 +116,7 @@ class LiveMergeAdmissionEvaluator:
         observed_head_sha: str,
         observed_head_tree_sha: str,
         controller_state: MergeTrainControllerStateRecord,
+        expected_lease_owner: str,
         stack_collapse_record: MergeTrainStackCollapsePlanRecord | None,
         evaluated_at: str,
     ) -> MergeAdmissionEvaluation:
@@ -262,7 +263,7 @@ class LiveMergeAdmissionEvaluator:
             candidate_record=candidate_record,
             structural_candidate_status=structural_result.status,
             controller_state=controller_state,
-            expected_lease_owner=controller_state.lease_owner,
+            expected_lease_owner=expected_lease_owner,
             observed_effect_sha=landing_plan.candidate_sha,
             evaluated_at=evaluated_at,
         )
@@ -436,11 +437,17 @@ class LiveMergeAdmissionEvaluator:
         ).strip()
         if decision_impact_digest:
             expected_impact_digests.add(decision_impact_digest)
-        expected_impact = (
-            next(iter(expected_impact_digests))
-            if len(expected_impact_digests) == 1
-            else _MISSING_POLICY_SHA256
-        )
+        if len(expected_impact_digests) == 1:
+            expected_impact = next(iter(expected_impact_digests))
+        elif (
+            not expected_impact_digests
+            and owner_decision.status == "not_required"
+            and impact.status == "success"
+            and impact.policy_digest
+        ):
+            expected_impact = impact.policy_digest
+        else:
+            expected_impact = _MISSING_POLICY_SHA256
         expected_engineering = (
             str(getattr(engineering_decision, "authority_digest", "")).strip()
             or _MISSING_POLICY_SHA256

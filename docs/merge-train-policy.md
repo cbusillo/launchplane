@@ -163,6 +163,11 @@ temporary candidate ref or branch so GitHub Actions can run checks against a
 real commit SHA. The exact ref naming and cleanup policy are part of the batch
 train implementation, not the repository policy TOML.
 
+After GitHub creates a candidate merge commit, Launchplane performs a bounded
+read-after-write convergence check before declaring the candidate ref stale.
+This tolerates transient GitHub ref-read lag without weakening the exact
+expected-commit comparison; exhaustion still fails closed as stale state.
+
 ### Candidate Validation
 
 Required checks must pass on the candidate commit that includes the queued PRs
@@ -232,6 +237,13 @@ base SHA still match that candidate. If the eligible queue changes, for example
 because a new queued PR repairs train validation, the controller may supersede
 the failed candidate batch lineage and plan a replacement candidate from the
 fresh snapshot.
+
+Candidate construction can fail before required checks run when GitHub rejects
+one rolling merge entry as stale or conflicting. The controller persists that
+candidate as `failed`, reports the exact pull request reached by the build, and
+releases the controller lease without replaying the rejected merge. The same
+queue-change rule then governs replacement planning; an unchanged queue remains
+stopped for operator attention.
 
 ## Example Policy Entries
 
@@ -341,6 +353,26 @@ uv run launchplane merge-train-policies build-import-request \
     payload-file: merge-train-policy-import-request.json
     idempotency-key: merge-train-policy-import:${{ github.run_id }}
 ```
+
+During the `#2058` authorization freeze, reviewed merge-train policy changes
+use the typed `managed-merge-train-policy-import` privileged-operation path
+instead of adding workflow, local-operator, or local-admin
+`merge_train.policy_import` authority. The privileged-operation proposal accepts
+one complete candidate record and produces redacted active/candidate digests,
+target counts, and stable policy-key changes. A signed-in immutable-ID GitHub
+human with the exact `merge_train_policy_operation.*` managed rule approves the
+plan; the service worker performs active-policy CAS, operation-scoped
+idempotency, and exact active/superseded read-back. Existing
+`authz_policy_operation.*` grants do not authorize merge-train policy imports.
+
+Policy record timestamps must be timezone-aware ISO-8601 values. The schema
+migration that installs the one-active-record fence inspects only active legacy
+records, keeps the uniquely latest active record, and supersedes older active
+records. If the latest active timestamp is invalid or tied, the migration stops
+explicitly instead of guessing. Resolve exactly one active row through the
+approved database-repair procedure, updating both the promoted `status` column
+and `payload.status`, then rerun the migration; do not use an ordinary import as
+a migration-repair shortcut.
 
 For local operator terminals, the compatibility CLI import path still reads the
 bearer token from `LAUNCHPLANE_SERVICE_TOKEN` unless a browser
@@ -562,7 +594,11 @@ Controller actions have these retry/stop semantics:
 - `candidate_failed`: Candidate checks failed and still matches the current
   eligible queue. Stop and surface the candidate record id and failed check
   evidence. If the eligible queue/base changes, the next controller action may
-  become `plan_candidate` for a superseding candidate.
+  become `plan_candidate` for a superseding candidate. A failed candidate with
+  no recorded candidate SHA never reached checks, so the controller may also
+  supersede and replan it against the unchanged queue after a transient build
+  failure is repaired. Failed candidates with a recorded candidate SHA remain
+  terminal until the queue or base changes.
 - `plan_landing`: A passed candidate is ready for PR-native landing-plan
   creation. Mutate once, then call again.
 - `land_batch`: A landing plan with planned or in-progress merge entries is

@@ -29,6 +29,8 @@ from requests.exceptions import RequestException
 from sqlalchemy.exc import SQLAlchemyError
 from control_plane import authz_grant_service as control_plane_authz_grant_service
 from control_plane import authz_activation_preflight as control_plane_authz_activation_preflight
+from control_plane import authz_policy_activation as control_plane_authz_policy_activation
+from control_plane import authz_policy_recovery as control_plane_authz_policy_recovery
 from control_plane import authz_diagnostics as control_plane_authz_diagnostics
 from control_plane import authz_repository_scope as control_plane_authz_repository_scope
 from control_plane import ingress_route_scope as control_plane_ingress_route_scope
@@ -102,6 +104,15 @@ from control_plane.contracts.authz_access_read import (
     EffectiveAccessEvaluateRequest,
     EffectiveAccessEvaluateResponse,
     EffectiveAccessRequestSummary,
+)
+from control_plane.contracts.solo_administration_confirmation import (
+    SoloAdministrationConfirmationConflictError,
+    SoloAdministrationConfirmationConsumptionBinding,
+    SoloAdministrationConfirmationRecord,
+    issue_solo_administration_confirmation as build_issued_solo_administration_confirmation,
+    solo_administration_confirmation_acknowledgement_sha256,
+    solo_administration_confirmation_human_session_id_sha256,
+    solo_administration_confirmation_secret_sha256,
 )
 from control_plane.contracts.authz_denial_record import build_authz_denial_record
 from control_plane.contracts.owner_acceptance import OwnerAcceptanceDecisionStatus
@@ -727,6 +738,7 @@ from control_plane.service_auth import (
     bearer_identity_from_token,
     clear_authz_evaluation,
     current_authz_evaluation,
+    effective_administrator_quorum,
 )
 from control_plane.service_human_auth import (
     BROWSER_CSRF_HEADER_NAME,
@@ -877,6 +889,25 @@ _OWNER_ACCEPTANCE_MAX_BODY_BYTES = 16 * 1024
 _CHANGE_IMPACT_EVALUATION_MAX_BODY_BYTES = 16 * 1024
 _CHANGE_IMPACT_POLICY_MAX_BODY_BYTES = 64 * 1024
 _PRIVILEGED_OPERATION_MAX_BODY_BYTES = 256 * 1024
+_AUTHZ_POLICY_OPERATION_ACTIVATION_MAX_BODY_BYTES = 16 * 1024
+_AUTHZ_POLICY_OPERATION_ACTIVATION_DRY_RUN_ROUTE = (
+    "/v1/authz-policies/privileged-policy-operations/activation/dry-run"
+)
+_AUTHZ_POLICY_OPERATION_ACTIVATION_APPLY_ROUTE = (
+    "/v1/authz-policies/privileged-policy-operations/activation/apply"
+)
+_AUTHZ_POLICY_RECOVERY_CANDIDATE_DRY_RUN_ROUTE = (
+    f"{control_plane_authz_policy_recovery.AUTHZ_POLICY_RECOVERY_ROUTE_PREFIX}/candidates/dry-run"
+)
+_AUTHZ_POLICY_RECOVERY_CANDIDATE_APPLY_ROUTE = (
+    f"{control_plane_authz_policy_recovery.AUTHZ_POLICY_RECOVERY_ROUTE_PREFIX}/candidates/apply"
+)
+_AUTHZ_POLICY_RECOVERY_CONFIRMATION_ROUTE = (
+    f"{control_plane_authz_policy_recovery.AUTHZ_POLICY_RECOVERY_ROUTE_PREFIX}/confirmations"
+)
+_AUTHZ_POLICY_RECOVERY_DIAGNOSTIC_ROUTE = (
+    f"{control_plane_authz_policy_recovery.AUTHZ_POLICY_RECOVERY_ROUTE_PREFIX}/diagnostic"
+)
 _PRODUCT_HEALTH_MONITORING_APPLY_ROUTE = "/v1/product-profiles/health-monitoring/apply"
 _PRODUCT_PRELAUNCH_REBUILD_POLICY_APPLY_ROUTE = "/v1/product-profiles/prelaunch-rebuild/apply"
 _PRODUCT_STABLE_LANE_REPAIR_APPLY_ROUTE = "/v1/product-profiles/stable-lane-repair/apply"
@@ -942,6 +973,36 @@ _BOUNDED_REQUEST_BODY_CONTRACTS: dict[str, tuple[str, int, bool, bool]] = {
     PRIVILEGED_OPERATION_AGENT_PLANS_ROUTE: (
         "Agent privileged-operation proposal",
         _PRIVILEGED_OPERATION_MAX_BODY_BYTES,
+        True,
+        True,
+    ),
+    _AUTHZ_POLICY_OPERATION_ACTIVATION_DRY_RUN_ROUTE: (
+        "Privileged-policy operation activation dry-run",
+        _AUTHZ_POLICY_OPERATION_ACTIVATION_MAX_BODY_BYTES,
+        True,
+        True,
+    ),
+    _AUTHZ_POLICY_OPERATION_ACTIVATION_APPLY_ROUTE: (
+        "Privileged-policy operation activation apply",
+        _AUTHZ_POLICY_OPERATION_ACTIVATION_MAX_BODY_BYTES,
+        True,
+        True,
+    ),
+    _AUTHZ_POLICY_RECOVERY_CANDIDATE_DRY_RUN_ROUTE: (
+        "Privileged-policy operation recovery dry-run",
+        _AUTHZ_POLICY_OPERATION_ACTIVATION_MAX_BODY_BYTES,
+        True,
+        True,
+    ),
+    _AUTHZ_POLICY_RECOVERY_CANDIDATE_APPLY_ROUTE: (
+        "Privileged-policy operation recovery apply",
+        _AUTHZ_POLICY_OPERATION_ACTIVATION_MAX_BODY_BYTES,
+        True,
+        True,
+    ),
+    _AUTHZ_POLICY_RECOVERY_CONFIRMATION_ROUTE: (
+        "Privileged-policy operation recovery confirmation",
+        _AUTHZ_POLICY_OPERATION_ACTIVATION_MAX_BODY_BYTES,
         True,
         True,
     ),
@@ -1071,10 +1132,27 @@ _AUTHZ_POLICY_CANDIDATE_PREVIEW_ROUTE = "/v1/authz-diagnostics/candidate-policy/
 _AUTHZ_REPOSITORY_SCOPE_READ_ROUTE = "/v1/authz-diagnostics/repository-scope/read"
 _AUTHZ_DENIAL_EXPLANATION_ROUTE = "/v1/authz-diagnostics/denials/{trace_id}"
 _AUTHZ_POLICY_MANAGED_RECONCILE_ROUTE = "/v1/authz-policies/managed-rule-sets/reconcile"
+_SOLO_ADMINISTRATION_CONFIRMATION_ROUTE = "/v1/authz-policies/solo-administration-confirmations"
+_SOLO_ADMINISTRATION_CONFIRMATION_SECRET_HEADER = "X-Solo-Administration-Confirmation-Secret"
+SOLO_ADMINISTRATION_CONFIRMATION_ACKNOWLEDGEMENT = (
+    "I understand that reducing administrator quorum to one removes the second-person "
+    "authorization requirement and must only be used for an emergency recovery."
+)
 _AUTHZ_NONPERSISTING_SENSITIVE_READ_ROUTES = frozenset(
     {
         _AUTHZ_POLICY_ADMINISTRATION_ROUTE,
         _AUTHZ_POLICY_REVISION_HISTORY_ROUTE,
+    }
+)
+_AUTHZ_NO_STORE_ROUTES = frozenset(
+    {
+        _AUTHZ_POLICY_OPERATION_ACTIVATION_DRY_RUN_ROUTE,
+        _AUTHZ_POLICY_OPERATION_ACTIVATION_APPLY_ROUTE,
+        _AUTHZ_POLICY_RECOVERY_CANDIDATE_DRY_RUN_ROUTE,
+        _AUTHZ_POLICY_RECOVERY_CANDIDATE_APPLY_ROUTE,
+        _AUTHZ_POLICY_RECOVERY_CONFIRMATION_ROUTE,
+        _AUTHZ_POLICY_RECOVERY_DIAGNOSTIC_ROUTE,
+        *_AUTHZ_NONPERSISTING_SENSITIVE_READ_ROUTES,
     }
 )
 _GENERIC_WEB_PREVIEW_AUTHZ_PLAN_ROUTE = (
@@ -1107,7 +1185,9 @@ class PreviewDesiredStateWriteStore(Protocol):
 
 
 class GitHubOAuthLoginClient(Protocol):
-    def authorization_url(self, *, state: str, code_challenge: str) -> str: ...
+    def authorization_url(
+        self, *, state: str, code_challenge: str, reauthenticate: bool = False
+    ) -> str: ...
 
     def fetch_identity(
         self,
@@ -1145,6 +1225,42 @@ class LaunchplaneErrorResponse(BaseModel):
         default=None,
         json_schema_extra={"x-launchplane-optional-response": True},
     )
+
+
+class SoloAdministrationConfirmationIssueRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reconcile: control_plane_authz_grant_service.AuthzManagedPolicyReconcileEnvelope
+    reviewed_plan_sha256: str
+    acknowledgement: str
+
+    @model_validator(mode="after")
+    def _validate_request(self) -> "SoloAdministrationConfirmationIssueRequest":
+        if self.reconcile.mode != "dry_run":
+            raise ValueError("Confirmation issuance requires a dry-run reconcile payload.")
+        if self.reconcile.administrator_quorum_change != 1:
+            raise ValueError("Confirmation issuance requires administrator_quorum_change=1.")
+        if self.reviewed_plan_sha256.strip().lower() == "":
+            raise ValueError("Confirmation issuance requires reviewed_plan_sha256.")
+        if self.acknowledgement != SOLO_ADMINISTRATION_CONFIRMATION_ACKNOWLEDGEMENT:
+            raise ValueError("Confirmation acknowledgement text does not match the warning.")
+        return self
+
+
+class SoloAdministrationConfirmationResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["issued", "consumed", "revoked", "expired"]
+    state: Literal["issued", "consumed", "revoked", "expired"]
+    confirmation_id: str
+    active_policy_record_id: str
+    active_policy_revision: int
+    active_policy_sha256: str
+    candidate_policy_sha256: str
+    reviewed_plan_sha256: str
+    github_id: int
+    expires_at: str
+    secret: str | None = None
 
 
 @dataclass(frozen=True)
@@ -4017,7 +4133,8 @@ def create_launchplane_fastapi_app(
         try:
             response = cast(Response, await call_next(request))
             if request.url.path == _AUTHZ_ACTIVATION_PREFLIGHT_ROUTE or (
-                request.url.path in _AUTHZ_NONPERSISTING_SENSITIVE_READ_ROUTES
+                request.url.path in _AUTHZ_NO_STORE_ROUTES
+                or request.url.path.startswith(_SOLO_ADMINISTRATION_CONFIRMATION_ROUTE)
             ):
                 response.headers["Cache-Control"] = "no-store"
             return response
@@ -4240,7 +4357,7 @@ def create_launchplane_fastapi_app(
             ).model_dump(mode="json"),
         )
 
-    def login_github_oauth(return_to: str = "/") -> Response:
+    def login_github_oauth(return_to: str = "/", reauthenticate: bool = False) -> Response:
         trace_id = next_trace_id()
         if human_session_manager is None or github_oauth_client is None:
             return reject_github_oauth_not_configured(trace_id)
@@ -4255,6 +4372,7 @@ def create_launchplane_fastapi_app(
             url=github_oauth_client.authorization_url(
                 state=state,
                 code_challenge=code_challenge,
+                reauthenticate=reauthenticate,
             ),
             status_code=302,
             headers={"Cache-Control": "no-store"},
@@ -14139,7 +14257,15 @@ def create_launchplane_fastapi_app(
             )
             if replay_response is not None:
                 return replay_response
-            database_store.write_merge_train_policy_record(policy_import_request.record)
+            try:
+                database_store.write_merge_train_policy_record(policy_import_request.record)
+            except ValueError as error:
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="merge_train_policy_record_conflict",
+                    message="Merge-train policy record identity conflicts with stored history.",
+                ) from error
         result: dict[str, object] = {
             "mode": policy_import_request.mode,
             "record": {
@@ -14321,17 +14447,15 @@ def create_launchplane_fastapi_app(
         identity: LaunchplaneIdentity,
         record_store: object,
         idempotency_key: str,
+        confirmation_secret: str = "",
     ) -> AcceptedEvidenceResponse:
         trace_id = next_trace_id()
-        if not isinstance(identity, GitHubActionsIdentity):
+        if not isinstance(identity, (GitHubActionsIdentity, GitHubHumanIdentity)):
             raise _launchplane_http_error(
                 status_code=403,
                 trace_id=trace_id,
                 code="authorization_denied",
-                message=(
-                    "Managed authz policy reconciliation requires GitHub Actions workload "
-                    "transport."
-                ),
+                message="Managed authz policy reconciliation requires GitHub Actions or a GitHub-human browser.",
             )
         try:
             raw_payload = await request.json()
@@ -14346,12 +14470,55 @@ def create_launchplane_fastapi_app(
             raw_payload=raw_payload,
             trace_id=trace_id,
         )
+        browser_identity = isinstance(identity, GitHubHumanIdentity)
+        browser_github_id = identity.github_id if isinstance(identity, GitHubHumanIdentity) else 0
+        if browser_identity:
+            if authz_request.administrator_quorum_change is None:
+                raise _launchplane_http_error(
+                    status_code=403,
+                    trace_id=trace_id,
+                    code="authorization_denied",
+                    message="Routine authz reconciliation requires GitHub Actions workload transport.",
+                )
+            session = getattr(request.state, "launchplane_human_session", None)
+            if not isinstance(session, LaunchplaneHumanSession):
+                reject_browser_mutation()
+            session = consume_browser_mutation_request(request=request, session=session)
+        elif not isinstance(identity, GitHubActionsIdentity):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Managed authz policy reconciliation requires GitHub Actions or a GitHub-human browser.",
+            )
+        elif authz_request.administrator_quorum_change is not None:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="browser_mutation_required",
+                message="Administrator quorum changes require a live GitHub-human browser session.",
+            )
         database_store = require_authz_policy_database_store(
             record_store=record_store,
             trace_id=trace_id,
             message="Managed authz policy reconciliation requires Launchplane database storage.",
         )
-        if not resolved_authz_policy_runtime.policy.allows(
+        if browser_identity:
+            active_record = read_single_active_authz_policy_record(
+                database_store=database_store,
+                trace_id=trace_id,
+            )
+            if not control_plane_authz_grant_service.authz_policy_allows_immutable_github_id_administration(
+                policy=active_record.policy,
+                github_id=browser_github_id,
+            ):
+                raise _launchplane_http_error(
+                    status_code=403,
+                    trace_id=trace_id,
+                    code="authorization_denied",
+                    message="Administrator authority changed; reauthenticate and retry.",
+                )
+        if not browser_identity and not resolved_authz_policy_runtime.policy.allows(
             identity=identity,
             action="authz_policy_grant.write",
             product=authz_request.product,
@@ -14385,10 +14552,54 @@ def create_launchplane_fastapi_app(
                 route_path=route_path,
                 idempotency_key=normalized_idempotency_key,
                 trace_id=trace_id,
-                check_replay=False,
+                check_replay=browser_identity,
             )
             if replay_response is not None:
                 return replay_response
+        confirmation_record: SoloAdministrationConfirmationRecord | None = None
+        if authz_request.solo_administration_confirmation_id:
+            if not browser_identity:
+                raise _launchplane_http_error(
+                    status_code=403,
+                    trace_id=trace_id,
+                    code="browser_mutation_required",
+                    message="Solo-administration confirmation requires a live GitHub-human browser session.",
+                )
+            confirmation_secret = (
+                confirmation_secret
+                or request.headers.get(_SOLO_ADMINISTRATION_CONFIRMATION_SECRET_HEADER, "")
+            ).strip()
+            if not confirmation_secret:
+                raise _launchplane_http_error(
+                    status_code=400,
+                    trace_id=trace_id,
+                    code="confirmation_secret_required",
+                    message="Quorum-one apply requires the one-time confirmation secret header.",
+                )
+            try:
+                confirmation_record = database_store.read_solo_administration_confirmation(
+                    authz_request.solo_administration_confirmation_id
+                )
+            except FileNotFoundError as error:
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="confirmation_not_found",
+                    message="The referenced solo-administration confirmation was not found.",
+                ) from error
+            session = getattr(request.state, "launchplane_human_session", None)
+            if not isinstance(session, LaunchplaneHumanSession):
+                reject_browser_mutation()
+            if confirmation_record.github_id != browser_github_id:
+                raise _launchplane_http_error(
+                    status_code=403,
+                    trace_id=trace_id,
+                    code="confirmation_binding_mismatch",
+                    message="The confirmation is bound to a different GitHub administrator.",
+                )
+            confirmation_secret_sha256 = solo_administration_confirmation_secret_sha256(
+                confirmation_secret
+            )
         try:
             route_result = control_plane_authz_grant_service.execute_managed_authz_policy_reconcile(
                 record_store=database_store,
@@ -14397,6 +14608,7 @@ def create_launchplane_fastapi_app(
                 trace_id=trace_id,
                 now_timestamp=authz_policy_record_timestamp,
                 authorized_policy_sha256=resolved_authz_policy_runtime.policy_sha256,
+                immutable_applying_github_id=browser_github_id,
             )
         except control_plane_authz_grant_service.AuthzPolicyRequestError as error:
             raise _launchplane_http_error(
@@ -14475,11 +14687,58 @@ def create_launchplane_fastapi_app(
             response_payload=response.model_dump(mode="json", exclude_none=True),
             lease_seconds=int(_DB_ONLY_MUTATION_LEASE.total_seconds()),
         )
-        write_result = database_store.compare_and_write_authz_policy_record(
-            expected_record=route_result.previous_authz_policy_record,
-            replacement_record=(route_result.authz_policy_record if route_result.changed else None),
-            mutation=mutation,
-        )
+        confirmation_consumption = None
+        if confirmation_record is not None:
+            if not isinstance(identity, GitHubHumanIdentity):
+                raise RuntimeError("Confirmation consumption requires a GitHub-human identity.")
+            session = getattr(request.state, "launchplane_human_session", None)
+            if not isinstance(session, LaunchplaneHumanSession):
+                raise RuntimeError("Confirmation consumption requires a live human session.")
+            confirmation_consumption = SoloAdministrationConfirmationConsumptionBinding(
+                confirmation_id=confirmation_record.confirmation_id,
+                active_policy_record_id=route_result.previous_authz_policy_record.record_id,
+                active_policy_revision=route_result.previous_authz_policy_record.revision,
+                active_policy_sha256=route_result.previous_authz_policy_record.policy_sha256,
+                candidate_policy_sha256=route_result.authz_policy_record.policy_sha256,
+                candidate_administrator_quorum=1,
+                candidate_distinct_human_administrator_count=1,
+                reviewed_plan_sha256=authz_request.reviewed_plan_sha256,
+                human_session_id_sha256=solo_administration_confirmation_human_session_id_sha256(
+                    session.session_id
+                ),
+                github_id=identity.github_id,
+                idempotency_scope_sha256=hashlib.sha256(
+                    idempotency_scope(identity).encode()
+                ).hexdigest(),
+                idempotency_key_sha256=hashlib.sha256(
+                    normalized_idempotency_key.encode()
+                ).hexdigest(),
+                acknowledgement_sha256=confirmation_record.acknowledgement_sha256,
+                secret_sha256=confirmation_secret_sha256,
+            )
+        try:
+            write_result = database_store.compare_and_write_authz_policy_record(
+                expected_record=route_result.previous_authz_policy_record,
+                replacement_record=(
+                    route_result.authz_policy_record if route_result.changed else None
+                ),
+                mutation=mutation,
+                confirmation_consumption=confirmation_consumption,
+            )
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="confirmation_not_found",
+                message="The referenced solo-administration confirmation was not found.",
+            ) from error
+        except SoloAdministrationConfirmationConflictError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="solo_administration_confirmation_invalid",
+                message="The solo-administration confirmation is expired, consumed, or does not match this apply.",
+            ) from error
         if write_result.status == "replayed":
             if write_result.idempotency_record is None:
                 raise RuntimeError("Replayed authz policy write requires evidence.")
@@ -14550,6 +14809,991 @@ def create_launchplane_fastapi_app(
             control_plane_root=resolved_control_plane_root,
         )
         return response
+
+    def require_authz_policy_operation_activation_available(
+        *,
+        active_record: LaunchplaneAuthzPolicyRecord,
+        identity: GitHubHumanIdentity,
+        trace_id: str,
+    ) -> None:
+        if not control_plane_authz_grant_service.authz_policy_allows_immutable_github_id_administration(
+            policy=active_record.policy,
+            github_id=identity.github_id,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message=(
+                    "Activation requires existing immutable-ID DB policy administration authority."
+                ),
+                authz_evaluation=AuthzEvaluation(
+                    decision="denied",
+                    reason_code="no_matching_grant",
+                    principal_type="github_human",
+                    action="authz_policy_grant.write",
+                    product="launchplane",
+                    context="launchplane",
+                    target_scope="global",
+                    instance_specified=False,
+                ),
+                authz_policy_provenance=AuthzPolicyProvenance.from_record(active_record),
+            )
+        if effective_administrator_quorum(active_record.policy) == 1:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="authz_policy_operation_activation_requires_recovery_confirmation",
+                message="Quorum-one activation must use the confirmed recovery candidate flow.",
+            )
+        activation_state = (
+            control_plane_authz_policy_activation.authz_policy_operation_activation_state(
+                active_record.policy
+            )
+        )
+        if activation_state == "active":
+            raise _launchplane_http_error(
+                status_code=410,
+                trace_id=trace_id,
+                code="authz_policy_operation_activation_retired",
+                message="The privileged-policy operation activation bridge is retired.",
+            )
+        if activation_state == "conflict":
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="authz_policy_operation_activation_conflict",
+                message="The activation managed set conflicts with the compiled bridge contract.",
+            )
+
+    def build_authz_policy_operation_activation_response(
+        *,
+        mode: Literal["dry_run", "apply"],
+        identity: GitHubHumanIdentity,
+        route_result: control_plane_authz_grant_service.AuthzManagedPolicyRouteResult,
+        trace_id: str,
+    ) -> AcceptedEvidenceResponse:
+        diff_payload = route_result.driver_result.get("diff")
+        if not isinstance(diff_payload, dict):
+            raise RuntimeError("Activation reconciliation requires typed diff evidence.")
+        diff = control_plane_authz_grant_service.AuthzManagedPolicyDiff.model_validate(diff_payload)
+        resulting_record = (
+            route_result.authz_policy_record
+            if mode == "apply"
+            else route_result.previous_authz_policy_record
+        )
+        evidence = control_plane_authz_policy_activation.authz_policy_operation_activation_evidence(
+            mode=mode,
+            applying_github_id=identity.github_id,
+            previous_record=route_result.previous_authz_policy_record,
+            candidate_policy=route_result.updated_policy,
+            diff=diff,
+            changed=route_result.changed,
+        )
+        return accepted_evidence_response(
+            trace_id=trace_id,
+            records={
+                "authz_policy_record_id": resulting_record.record_id,
+                "managed_set_id": (
+                    control_plane_authz_policy_activation.AUTHZ_POLICY_OPERATION_ACTIVATION_MANAGED_SET_ID
+                ),
+            },
+            result={
+                "activation": evidence,
+                "reconcile": route_result.driver_result,
+            },
+        )
+
+    def execute_authz_policy_operation_activation(
+        *,
+        mode: Literal["dry_run", "apply"],
+        reason: str,
+        reviewed_plan_sha256: str,
+        identity: GitHubHumanIdentity,
+        database_store: PostgresRecordStore,
+        trace_id: str,
+    ) -> control_plane_authz_grant_service.AuthzManagedPolicyRouteResult:
+        active_record = read_single_active_authz_policy_record(
+            database_store=database_store,
+            trace_id=trace_id,
+        )
+        require_authz_policy_operation_activation_available(
+            active_record=active_record,
+            identity=identity,
+            trace_id=trace_id,
+        )
+        activation_request = control_plane_authz_policy_activation.build_authz_policy_operation_activation_reconcile_request(
+            github_id=identity.github_id,
+            mode=mode,
+            reason=reason,
+            reviewed_plan_sha256=reviewed_plan_sha256,
+        )
+        try:
+            route_result = control_plane_authz_grant_service.execute_managed_authz_policy_reconcile(
+                record_store=database_store,
+                request=activation_request,
+                identity=identity,
+                trace_id=trace_id,
+                now_timestamp=authz_policy_record_timestamp,
+                authorized_policy_sha256=active_record.policy_sha256,
+                immutable_applying_github_id=identity.github_id,
+                source=(
+                    control_plane_authz_policy_activation.AUTHZ_POLICY_OPERATION_ACTIVATION_SOURCE
+                ),
+            )
+        except control_plane_authz_grant_service.AuthzPolicyRequestError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message=str(error),
+            ) from error
+        except control_plane_authz_grant_service.AuthzPolicySafetyError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code=error.code,
+                message=str(error),
+            ) from error
+        except control_plane_authz_grant_service.AuthzPolicyConflictError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="authz_policy_conflict",
+                message=str(error),
+            ) from error
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="authz_policy_unavailable",
+                message="Launchplane active authz policy is unavailable.",
+            ) from error
+        if (
+            not route_result.changed
+            or control_plane_authz_policy_activation.authz_policy_operation_activation_state(
+                route_result.updated_policy
+            )
+            != "active"
+            or control_plane_authz_policy_activation.authz_policy_operation_activation_github_id(
+                route_result.updated_policy
+            )
+            != identity.github_id
+        ):
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="authz_policy_operation_activation_conflict",
+                message="The compiled activation candidate did not produce the exact managed set.",
+            )
+        return route_result
+
+    def dry_run_authz_policy_operation_activation(
+        envelope: control_plane_authz_policy_activation.AuthzPolicyOperationActivationDryRunRequest,
+        response: Response,
+        identity: Annotated[
+            GitHubHumanIdentity,
+            Depends(read_github_human_browser_mutation_identity),
+        ],
+        record_store: Annotated[object, Depends(get_record_store)],
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        response.headers["Cache-Control"] = "no-store"
+        database_store = require_authz_policy_database_store(
+            record_store=record_store,
+            trace_id=trace_id,
+            message="Activation dry-run requires Launchplane database storage.",
+        )
+        route_result = execute_authz_policy_operation_activation(
+            mode="dry_run",
+            reason=envelope.reason,
+            reviewed_plan_sha256="",
+            identity=identity,
+            database_store=database_store,
+            trace_id=trace_id,
+        )
+        return build_authz_policy_operation_activation_response(
+            mode="dry_run",
+            identity=identity,
+            route_result=route_result,
+            trace_id=trace_id,
+        )
+
+    async def apply_authz_policy_operation_activation(
+        envelope: control_plane_authz_policy_activation.AuthzPolicyOperationActivationApplyRequest,
+        response: Response,
+        request: Request,
+        identity: Annotated[
+            GitHubHumanIdentity,
+            Depends(read_github_human_browser_mutation_identity),
+        ],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        response.headers["Cache-Control"] = "no-store"
+        database_store = require_authz_policy_database_store(
+            record_store=record_store,
+            trace_id=trace_id,
+            message="Activation apply requires Launchplane database storage.",
+        )
+        normalized_idempotency_key = idempotency_key.strip()
+        if not normalized_idempotency_key:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="idempotency_key_required",
+                message="Activation apply requires an Idempotency-Key.",
+            )
+        activation_scope = control_plane_authz_policy_activation.authz_policy_operation_activation_idempotency_scope(
+            identity.github_id
+        )
+        (
+            normalized_idempotency_key,
+            payload_fingerprint,
+            replay_response,
+        ) = await replay_apply_idempotency(
+            request=request,
+            record_store=database_store,
+            identity=identity,
+            route_path=_AUTHZ_POLICY_OPERATION_ACTIVATION_APPLY_ROUTE,
+            idempotency_key=normalized_idempotency_key,
+            trace_id=trace_id,
+            check_replay=True,
+            request_payload=envelope.model_dump(mode="json"),
+            idempotency_scope_override=activation_scope,
+        )
+        if replay_response is not None:
+            return replay_response
+        route_result = execute_authz_policy_operation_activation(
+            mode="apply",
+            reason=envelope.reason,
+            reviewed_plan_sha256=envelope.reviewed_plan_sha256,
+            identity=identity,
+            database_store=database_store,
+            trace_id=trace_id,
+        )
+        audit_context: dict[str, object] = {
+            "request_fingerprint": payload_fingerprint,
+            "idempotency_scope_sha256": hashlib.sha256(activation_scope.encode()).hexdigest(),
+            "idempotency_record_id": build_launchplane_mutation_reservation_id(
+                scope=activation_scope,
+                route_path=_AUTHZ_POLICY_OPERATION_ACTIVATION_APPLY_ROUTE,
+                idempotency_key=normalized_idempotency_key,
+            ),
+            "idempotency_key_sha256": hashlib.sha256(
+                normalized_idempotency_key.encode()
+            ).hexdigest(),
+        }
+        route_result.authz_policy_record.audit.update(audit_context)
+        response_audit = route_result.driver_result.get("audit")
+        if isinstance(response_audit, dict):
+            response_audit.update(audit_context)
+        accepted_response = build_authz_policy_operation_activation_response(
+            mode="apply",
+            identity=identity,
+            route_result=route_result,
+            trace_id=trace_id,
+        )
+        write_result = database_store.compare_and_write_authz_policy_record(
+            expected_record=route_result.previous_authz_policy_record,
+            replacement_record=route_result.authz_policy_record,
+            mutation=DbOnlyMutationRequest(
+                scope=activation_scope,
+                route_path=_AUTHZ_POLICY_OPERATION_ACTIVATION_APPLY_ROUTE,
+                idempotency_key=normalized_idempotency_key,
+                request_fingerprint=payload_fingerprint,
+                lease_owner=trace_id,
+                response_status_code=202,
+                response_trace_id=trace_id,
+                response_payload=accepted_response.model_dump(mode="json", exclude_none=True),
+                lease_seconds=int(_DB_ONLY_MUTATION_LEASE.total_seconds()),
+            ),
+        )
+        if write_result.status == "replayed":
+            if write_result.idempotency_record is None:
+                raise RuntimeError("Replayed activation write requires evidence.")
+            return replay_idempotent_response(
+                trace_id=trace_id,
+                stored_record=write_result.idempotency_record,
+                route_path=_AUTHZ_POLICY_OPERATION_ACTIVATION_APPLY_ROUTE,
+            )
+        if write_result.status == "idempotency_conflict":
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="idempotency_key_reused",
+                message="Idempotency-Key was already used for a different activation request.",
+            )
+        if write_result.status == "reservation_in_progress":
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="mutation_in_progress",
+                message="A matching activation mutation is already running.",
+            )
+        if write_result.status == "reconciliation_required":
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="mutation_reconciliation_required",
+                message="The activation mutation requires reconciliation before retry.",
+            )
+        if write_result.status == "stale":
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="authz_policy_plan_stale",
+                message="The reviewed activation plan is stale.",
+            )
+        if write_result.status == "ambiguous_active":
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="active_authz_policy_ambiguous",
+                message="Multiple active Launchplane authz policy records were found.",
+            )
+        if write_result.status == "missing":
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="authz_policy_unavailable",
+                message="Launchplane active authz policy is unavailable.",
+            )
+        if write_result.status != "written":
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="authz_policy_operation_activation_conflict",
+                message="Activation did not produce a new active authorization policy.",
+            )
+        resulting_record = write_result.current_record
+        if resulting_record is None:
+            active_records = database_store.list_authz_policy_records(status="active", limit=2)
+            if len(active_records) != 1:
+                raise _launchplane_http_error(
+                    status_code=503,
+                    trace_id=trace_id,
+                    code="authz_policy_operation_activation_readback_failed",
+                    message="Activation policy read-back failed.",
+                )
+            resulting_record = active_records[0]
+        expected_record = route_result.authz_policy_record
+        if (
+            resulting_record.record_id != expected_record.record_id
+            or resulting_record.revision != expected_record.revision
+            or resulting_record.policy_sha256 != expected_record.policy_sha256
+            or resulting_record.policy != route_result.updated_policy
+            or control_plane_authz_policy_activation.authz_policy_operation_activation_state(
+                resulting_record.policy
+            )
+            != "active"
+            or control_plane_authz_policy_activation.authz_policy_operation_activation_github_id(
+                resulting_record.policy
+            )
+            != identity.github_id
+        ):
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="authz_policy_operation_activation_readback_failed",
+                message="Activation policy read-back failed.",
+            )
+        resolved_authz_policy_runtime.update(
+            resulting_record.policy,
+            policy_sha256=resulting_record.policy_sha256,
+            source="db",
+            record_id=resulting_record.record_id,
+            revision=resulting_record.revision,
+        )
+        reconcile_all_manager_preview_approvals_best_effort(
+            record_store=database_store,
+            control_plane_root=resolved_control_plane_root,
+        )
+        return accepted_response
+
+    def execute_authz_policy_recovery_candidate(
+        *,
+        candidate_id: control_plane_authz_policy_recovery.AuthzPolicyRecoveryCandidateId,
+        mode: Literal["dry_run", "apply"],
+        reason: str,
+        reviewed_plan_sha256: str,
+        identity: GitHubHumanIdentity,
+        database_store: PostgresRecordStore,
+        trace_id: str,
+    ) -> control_plane_authz_grant_service.AuthzManagedPolicyRouteResult:
+        active_record = read_single_active_authz_policy_record(
+            database_store=database_store,
+            trace_id=trace_id,
+        )
+        if not control_plane_authz_grant_service.authz_policy_allows_immutable_github_id_administration(
+            policy=active_record.policy,
+            github_id=identity.github_id,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Recovery requires existing immutable-ID DB policy administration authority.",
+            )
+        activation_github_id = (
+            control_plane_authz_policy_activation.authz_policy_operation_activation_github_id(
+                active_record.policy
+            )
+        )
+        confirmed_active_activation = (
+            activation_github_id > 0
+            and database_store.has_consumed_solo_administration_confirmation(
+                candidate_policy_sha256=active_record.policy_sha256,
+                github_id=activation_github_id,
+                idempotency_scope_sha256=hashlib.sha256(
+                    control_plane_authz_policy_recovery.recovery_candidate_idempotency_scope(
+                        candidate_id="activate-privileged-policy-operation",
+                        github_id=activation_github_id,
+                    ).encode()
+                ).hexdigest(),
+            )
+        )
+        if (
+            candidate_id == "reset-unconfirmed-privileged-policy-operation-activation"
+            and confirmed_active_activation
+        ):
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="authz_policy_recovery_reset_not_eligible",
+                message="The exact active activation set already has consumed confirmation backing.",
+            )
+        if (
+            candidate_id == "retire-privileged-operation-bootstrap"
+            and not confirmed_active_activation
+        ):
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="authz_policy_recovery_bootstrap_retirement_blocked",
+                message="Bootstrap retirement requires a freshly confirmed active activation set.",
+            )
+        try:
+            recovery_request = control_plane_authz_policy_recovery.build_authz_policy_recovery_candidate_reconcile_request(
+                policy=active_record.policy,
+                github_id=identity.github_id,
+                candidate_id=candidate_id,
+                mode=mode,
+                reason=reason,
+                reviewed_plan_sha256=reviewed_plan_sha256,
+            )
+            route_result = control_plane_authz_grant_service.execute_managed_authz_policy_reconcile(
+                record_store=database_store,
+                request=recovery_request,
+                identity=identity,
+                trace_id=trace_id,
+                now_timestamp=authz_policy_record_timestamp,
+                authorized_policy_sha256=active_record.policy_sha256,
+                immutable_applying_github_id=identity.github_id,
+                source=control_plane_authz_policy_recovery.AUTHZ_POLICY_RECOVERY_SOURCE,
+            )
+        except control_plane_authz_grant_service.AuthzPolicyRequestError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message=str(error),
+            ) from error
+        except control_plane_authz_grant_service.AuthzPolicySafetyError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code=error.code,
+                message=str(error),
+            ) from error
+        except (control_plane_authz_grant_service.AuthzPolicyConflictError, ValueError) as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="authz_policy_recovery_conflict",
+                message=str(error),
+            ) from error
+        if (
+            not route_result.changed
+            or not control_plane_authz_policy_recovery.recovery_candidate_is_safe(
+                candidate_id=candidate_id,
+                policy=route_result.updated_policy,
+                github_id=identity.github_id,
+            )
+        ):
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="authz_policy_recovery_conflict",
+                message="The code-defined recovery candidate did not produce the required policy shape.",
+            )
+        return route_result
+
+    def recovery_candidate_response(
+        *,
+        mode: Literal["dry_run", "apply"],
+        candidate_id: control_plane_authz_policy_recovery.AuthzPolicyRecoveryCandidateId,
+        identity: GitHubHumanIdentity,
+        route_result: control_plane_authz_grant_service.AuthzManagedPolicyRouteResult,
+        trace_id: str,
+    ) -> AcceptedEvidenceResponse:
+        diff_payload = route_result.driver_result.get("diff")
+        if not isinstance(diff_payload, dict):
+            raise RuntimeError("Recovery candidate reconciliation requires typed diff evidence.")
+        diff = control_plane_authz_grant_service.AuthzManagedPolicyDiff.model_validate(diff_payload)
+        resulting_record = (
+            route_result.authz_policy_record
+            if mode == "apply"
+            else route_result.previous_authz_policy_record
+        )
+        return accepted_evidence_response(
+            trace_id=trace_id,
+            records={
+                "authz_policy_record_id": resulting_record.record_id,
+                "candidate_id": candidate_id,
+            },
+            result={
+                "candidate": {
+                    "candidate_id": candidate_id,
+                    "candidate_policy_sha256": diff.desired_policy_sha256,
+                    "candidate_revision": diff.candidate_revision,
+                    "requires_solo_administration_confirmation": (
+                        control_plane_authz_policy_recovery.recovery_candidate_requires_solo_confirmation(
+                            route_result.updated_policy
+                        )
+                    ),
+                    "review_digest": diff.plan_sha256,
+                },
+                "reconcile": route_result.driver_result,
+            },
+        )
+
+    def dry_run_authz_policy_recovery_candidate(
+        envelope: control_plane_authz_policy_recovery.AuthzPolicyRecoveryCandidateRequest,
+        response: Response,
+        identity: Annotated[
+            GitHubHumanIdentity,
+            Depends(read_github_human_browser_mutation_identity),
+        ],
+        record_store: Annotated[object, Depends(get_record_store)],
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        response.headers["Cache-Control"] = "no-store"
+        database_store = require_authz_policy_database_store(
+            record_store=record_store,
+            trace_id=trace_id,
+            message="Recovery dry-run requires Launchplane database storage.",
+        )
+        route_result = execute_authz_policy_recovery_candidate(
+            candidate_id=envelope.candidate_id,
+            mode="dry_run",
+            reason=envelope.reason,
+            reviewed_plan_sha256="",
+            identity=identity,
+            database_store=database_store,
+            trace_id=trace_id,
+        )
+        return recovery_candidate_response(
+            mode="dry_run",
+            candidate_id=envelope.candidate_id,
+            identity=identity,
+            route_result=route_result,
+            trace_id=trace_id,
+        )
+
+    async def issue_authz_policy_recovery_confirmation(
+        envelope: control_plane_authz_policy_recovery.AuthzPolicyRecoveryConfirmationIssueRequest,
+        response: Response,
+        request: Request,
+        identity: Annotated[
+            GitHubHumanIdentity,
+            Depends(read_github_human_browser_mutation_identity),
+        ],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> SoloAdministrationConfirmationResponse:
+        trace_id = next_trace_id()
+        response.headers["Cache-Control"] = "no-store"
+        session = getattr(request.state, "launchplane_human_session", None)
+        if not isinstance(session, LaunchplaneHumanSession):
+            raise _launchplane_http_error(
+                status_code=401,
+                trace_id=trace_id,
+                code="authentication_required",
+                message="A live GitHub-human session is required.",
+            )
+        now = datetime.now(timezone.utc)
+        if now < session.created_at or now - session.created_at > timedelta(minutes=5):
+            raise _launchplane_http_error(
+                status_code=401,
+                trace_id=trace_id,
+                code="reauthentication_required",
+                message="A fresh GitHub-human session created within five minutes is required.",
+            )
+        normalized_idempotency_key = idempotency_key.strip()
+        if not normalized_idempotency_key:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="idempotency_key_required",
+                message="Recovery confirmation issuance requires a future apply Idempotency-Key.",
+            )
+        database_store = require_authz_policy_database_store(
+            record_store=record_store,
+            trace_id=trace_id,
+            message="Recovery confirmations require Launchplane database storage.",
+        )
+        route_result = execute_authz_policy_recovery_candidate(
+            candidate_id=envelope.candidate_id,
+            mode="dry_run",
+            reason=envelope.reason,
+            reviewed_plan_sha256="",
+            identity=identity,
+            database_store=database_store,
+            trace_id=trace_id,
+        )
+        diff_payload = route_result.driver_result.get("diff")
+        if not isinstance(diff_payload, dict):
+            raise RuntimeError("Recovery confirmation requires typed diff evidence.")
+        diff = control_plane_authz_grant_service.AuthzManagedPolicyDiff.model_validate(diff_payload)
+        if envelope.reviewed_plan_sha256 != diff.plan_sha256:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="reviewed_plan_mismatch",
+                message="The supplied reviewed plan digest does not match the server recomputation.",
+            )
+        if not control_plane_authz_policy_recovery.recovery_candidate_requires_solo_confirmation(
+            route_result.updated_policy
+        ):
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="confirmation_not_required",
+                message="The compiled recovery candidate does not use administrator quorum one.",
+            )
+        active_record = route_result.previous_authz_policy_record
+        confirmation_scope = (
+            control_plane_authz_policy_recovery.recovery_candidate_idempotency_scope(
+                candidate_id=envelope.candidate_id,
+                github_id=identity.github_id,
+            )
+        )
+        secret = secrets.token_urlsafe(32)
+        record = build_issued_solo_administration_confirmation(
+            active_policy_record_id=active_record.record_id,
+            active_policy_revision=active_record.revision,
+            active_policy_sha256=active_record.policy_sha256,
+            candidate_policy_sha256=diff.desired_policy_sha256,
+            reviewed_plan_sha256=diff.plan_sha256,
+            human_session_id_sha256=solo_administration_confirmation_human_session_id_sha256(
+                session.session_id
+            ),
+            github_id=identity.github_id,
+            idempotency_scope_sha256=hashlib.sha256(confirmation_scope.encode()).hexdigest(),
+            idempotency_key_sha256=hashlib.sha256(normalized_idempotency_key.encode()).hexdigest(),
+            acknowledgement_sha256=solo_administration_confirmation_acknowledgement_sha256(
+                envelope.acknowledgement
+            ),
+            secret_sha256=solo_administration_confirmation_secret_sha256(secret),
+            created_at=now.replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+        )
+        try:
+            stored_record, created = database_store.issue_solo_administration_confirmation(record)
+        except SoloAdministrationConfirmationConflictError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="confirmation_conflict",
+                message="Recovery confirmation issuance conflicts with existing evidence.",
+            ) from error
+        if not created:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="confirmation_replayed",
+                message="The recovery confirmation was already issued and its secret cannot be replayed.",
+            )
+        return solo_administration_confirmation_response(stored_record, secret=secret)
+
+    async def apply_authz_policy_recovery_candidate(
+        envelope: control_plane_authz_policy_recovery.AuthzPolicyRecoveryCandidateApplyRequest,
+        response: Response,
+        request: Request,
+        identity: Annotated[
+            GitHubHumanIdentity,
+            Depends(read_github_human_browser_mutation_identity),
+        ],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+        confirmation_secret: Annotated[
+            str, Header(alias=_SOLO_ADMINISTRATION_CONFIRMATION_SECRET_HEADER)
+        ] = "",
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        response.headers["Cache-Control"] = "no-store"
+        normalized_idempotency_key = idempotency_key.strip()
+        if not normalized_idempotency_key:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="idempotency_key_required",
+                message="Recovery apply requires an Idempotency-Key.",
+            )
+        if not confirmation_secret.strip():
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="confirmation_secret_required",
+                message="Recovery apply requires the one-time confirmation secret.",
+            )
+        database_store = require_authz_policy_database_store(
+            record_store=record_store,
+            trace_id=trace_id,
+            message="Recovery apply requires Launchplane database storage.",
+        )
+        recovery_scope = control_plane_authz_policy_recovery.recovery_candidate_idempotency_scope(
+            candidate_id=envelope.candidate_id,
+            github_id=identity.github_id,
+        )
+        (
+            normalized_idempotency_key,
+            payload_fingerprint,
+            replay_response,
+        ) = await replay_apply_idempotency(
+            request=request,
+            record_store=database_store,
+            identity=identity,
+            route_path=_AUTHZ_POLICY_RECOVERY_CANDIDATE_APPLY_ROUTE,
+            idempotency_key=normalized_idempotency_key,
+            trace_id=trace_id,
+            check_replay=True,
+            request_payload=envelope.model_dump(mode="json"),
+            idempotency_scope_override=recovery_scope,
+        )
+        if replay_response is not None:
+            return replay_response
+        route_result = execute_authz_policy_recovery_candidate(
+            candidate_id=envelope.candidate_id,
+            mode="apply",
+            reason=envelope.reason,
+            reviewed_plan_sha256=envelope.reviewed_plan_sha256,
+            identity=identity,
+            database_store=database_store,
+            trace_id=trace_id,
+        )
+        session = getattr(request.state, "launchplane_human_session", None)
+        if not isinstance(session, LaunchplaneHumanSession):
+            raise RuntimeError("Recovery confirmation consumption requires a live human session.")
+        try:
+            confirmation_record = database_store.read_solo_administration_confirmation(
+                envelope.solo_administration_confirmation_id
+            )
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="confirmation_not_found",
+                message="The referenced recovery confirmation was not found.",
+            ) from error
+        audit_context = {
+            "request_fingerprint": payload_fingerprint,
+            "idempotency_scope_sha256": hashlib.sha256(recovery_scope.encode()).hexdigest(),
+            "idempotency_record_id": build_launchplane_mutation_reservation_id(
+                scope=recovery_scope,
+                route_path=_AUTHZ_POLICY_RECOVERY_CANDIDATE_APPLY_ROUTE,
+                idempotency_key=normalized_idempotency_key,
+            ),
+            "idempotency_key_sha256": hashlib.sha256(
+                normalized_idempotency_key.encode()
+            ).hexdigest(),
+            "solo_administration_confirmation_id": confirmation_record.confirmation_id,
+            "recovery_candidate_id": envelope.candidate_id,
+        }
+        route_result.authz_policy_record.audit.update(audit_context)
+        response_audit = route_result.driver_result.get("audit")
+        if isinstance(response_audit, dict):
+            response_audit.update(audit_context)
+        accepted_response = recovery_candidate_response(
+            mode="apply",
+            candidate_id=envelope.candidate_id,
+            identity=identity,
+            route_result=route_result,
+            trace_id=trace_id,
+        )
+        confirmation_consumption = SoloAdministrationConfirmationConsumptionBinding(
+            confirmation_id=confirmation_record.confirmation_id,
+            active_policy_record_id=route_result.previous_authz_policy_record.record_id,
+            active_policy_revision=route_result.previous_authz_policy_record.revision,
+            active_policy_sha256=route_result.previous_authz_policy_record.policy_sha256,
+            candidate_policy_sha256=authz_policy_sha256(route_result.updated_policy),
+            candidate_administrator_quorum=1,
+            candidate_distinct_human_administrator_count=1,
+            reviewed_plan_sha256=envelope.reviewed_plan_sha256,
+            human_session_id_sha256=solo_administration_confirmation_human_session_id_sha256(
+                session.session_id
+            ),
+            github_id=identity.github_id,
+            idempotency_scope_sha256=hashlib.sha256(recovery_scope.encode()).hexdigest(),
+            idempotency_key_sha256=hashlib.sha256(normalized_idempotency_key.encode()).hexdigest(),
+            acknowledgement_sha256=solo_administration_confirmation_acknowledgement_sha256(
+                control_plane_authz_policy_recovery.AUTHZ_POLICY_RECOVERY_CONFIRMATION_ACKNOWLEDGEMENT
+            ),
+            secret_sha256=solo_administration_confirmation_secret_sha256(confirmation_secret),
+        )
+        try:
+            write_result = database_store.compare_and_write_authz_policy_record(
+                expected_record=route_result.previous_authz_policy_record,
+                replacement_record=route_result.authz_policy_record,
+                mutation=DbOnlyMutationRequest(
+                    scope=recovery_scope,
+                    route_path=_AUTHZ_POLICY_RECOVERY_CANDIDATE_APPLY_ROUTE,
+                    idempotency_key=normalized_idempotency_key,
+                    request_fingerprint=payload_fingerprint,
+                    lease_owner=trace_id,
+                    response_status_code=202,
+                    response_trace_id=trace_id,
+                    response_payload=accepted_response.model_dump(mode="json", exclude_none=True),
+                    lease_seconds=int(_DB_ONLY_MUTATION_LEASE.total_seconds()),
+                ),
+                confirmation_consumption=confirmation_consumption,
+            )
+        except (FileNotFoundError, SoloAdministrationConfirmationConflictError) as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="solo_administration_confirmation_invalid",
+                message="The recovery confirmation is expired, consumed, or does not match this apply.",
+            ) from error
+        if write_result.status == "replayed":
+            if write_result.idempotency_record is None:
+                raise RuntimeError("Replayed recovery write requires evidence.")
+            return replay_idempotent_response(
+                trace_id=trace_id,
+                stored_record=write_result.idempotency_record,
+                route_path=_AUTHZ_POLICY_RECOVERY_CANDIDATE_APPLY_ROUTE,
+            )
+        if write_result.status == "idempotency_conflict":
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="idempotency_key_reused",
+                message="Idempotency-Key was already used for a different recovery request.",
+            )
+        if write_result.status in {"reservation_in_progress", "reconciliation_required", "stale"}:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="authz_policy_plan_stale",
+                message="The reviewed recovery candidate is stale or requires reconciliation.",
+            )
+        if write_result.status != "written" or write_result.current_record is None:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="authz_policy_recovery_conflict",
+                message="Recovery did not produce a new active authorization policy.",
+            )
+        resulting_record = write_result.current_record
+        if (
+            resulting_record.record_id != route_result.authz_policy_record.record_id
+            or resulting_record.revision != route_result.authz_policy_record.revision
+            or resulting_record.policy_sha256 != route_result.authz_policy_record.policy_sha256
+            or not control_plane_authz_policy_recovery.recovery_candidate_is_safe(
+                candidate_id=envelope.candidate_id,
+                policy=resulting_record.policy,
+                github_id=identity.github_id,
+            )
+        ):
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="authz_policy_recovery_readback_failed",
+                message="Recovery policy read-back failed.",
+            )
+        resolved_authz_policy_runtime.update(
+            resulting_record.policy,
+            policy_sha256=resulting_record.policy_sha256,
+            source="db",
+            record_id=resulting_record.record_id,
+            revision=resulting_record.revision,
+        )
+        reconcile_all_manager_preview_approvals_best_effort(
+            record_store=database_store,
+            control_plane_root=resolved_control_plane_root,
+        )
+        return accepted_response
+
+    def read_authz_policy_recovery_diagnostic(
+        response: Response,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_nonpersisting_sensitive_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        response.headers["Cache-Control"] = "no-store"
+        if not isinstance(identity, GitHubHumanIdentity):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Recovery diagnostics require a GitHub-human browser session.",
+            )
+        database_store = require_authz_policy_database_store(
+            record_store=record_store,
+            trace_id=trace_id,
+            message="Recovery diagnostics require Launchplane database storage.",
+        )
+        active_record = read_single_active_authz_policy_record(
+            database_store=database_store,
+            trace_id=trace_id,
+        )
+        if not control_plane_authz_grant_service.authz_policy_allows_immutable_github_id_administration(
+            policy=active_record.policy,
+            github_id=identity.github_id,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Recovery diagnostics require immutable-ID policy-administration authority.",
+            )
+        activation_github_id = (
+            control_plane_authz_policy_activation.authz_policy_operation_activation_github_id(
+                active_record.policy
+            )
+        )
+        confirmation_backing = (
+            activation_github_id > 0
+            and database_store.has_consumed_solo_administration_confirmation(
+                candidate_policy_sha256=active_record.policy_sha256,
+                github_id=activation_github_id,
+                idempotency_scope_sha256=hashlib.sha256(
+                    control_plane_authz_policy_recovery.recovery_candidate_idempotency_scope(
+                        candidate_id="activate-privileged-policy-operation",
+                        github_id=activation_github_id,
+                    ).encode()
+                ).hexdigest(),
+            )
+        )
+        return accepted_evidence_response(
+            trace_id=trace_id,
+            records={"authz_policy_record_id": active_record.record_id},
+            result={
+                "active_policy": {
+                    "revision": active_record.revision,
+                    "policy_sha256": active_record.policy_sha256,
+                    "activation_state": control_plane_authz_policy_activation.authz_policy_operation_activation_state(
+                        active_record.policy
+                    ),
+                    "consumed_confirmation_backing": confirmation_backing,
+                },
+                "action_match_cardinality": control_plane_authz_policy_recovery.recovery_action_match_cardinality(
+                    policy=active_record.policy,
+                    github_id=identity.github_id,
+                ),
+            },
+        )
 
     async def read_active_authz_policy(
         identity: Annotated[LaunchplaneIdentity, Depends(read_browser_mutation_identity)],
@@ -15253,16 +16497,332 @@ def create_launchplane_fastapi_app(
 
     async def reconcile_managed_authz_policy(
         request: Request,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_bearer_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+        confirmation_secret: Annotated[
+            str, Header(alias=_SOLO_ADMINISTRATION_CONFIRMATION_SECRET_HEADER)
+        ] = "",
     ) -> AcceptedEvidenceResponse:
         return await apply_managed_authz_policy_route(
             request=request,
             identity=identity,
             record_store=record_store,
             idempotency_key=idempotency_key,
+            confirmation_secret=confirmation_secret,
         )
+
+    def solo_administration_confirmation_response(
+        record: SoloAdministrationConfirmationRecord,
+        *,
+        secret: str | None = None,
+    ) -> SoloAdministrationConfirmationResponse:
+        return SoloAdministrationConfirmationResponse(
+            status=record.state,
+            state=record.state,
+            confirmation_id=record.confirmation_id,
+            active_policy_record_id=record.active_policy_record_id,
+            active_policy_revision=record.active_policy_revision,
+            active_policy_sha256=record.active_policy_sha256,
+            candidate_policy_sha256=record.candidate_policy_sha256,
+            reviewed_plan_sha256=record.reviewed_plan_sha256,
+            github_id=record.github_id,
+            expires_at=record.expires_at,
+            secret=secret,
+        )
+
+    async def issue_solo_administration_confirmation(
+        request: Request,
+        identity: Annotated[
+            GitHubHumanIdentity, Depends(read_github_human_browser_mutation_identity)
+        ],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> SoloAdministrationConfirmationResponse:
+        trace_id = next_trace_id()
+        response_headers = {"Cache-Control": "no-store"}
+        session = getattr(request.state, "launchplane_human_session", None)
+        if not isinstance(session, LaunchplaneHumanSession):
+            raise _launchplane_http_error(
+                status_code=401,
+                trace_id=trace_id,
+                code="authentication_required",
+                message="A live GitHub-human session is required.",
+                headers=response_headers,
+            )
+        now = datetime.now(timezone.utc)
+        if now < session.created_at or now - session.created_at > timedelta(minutes=5):
+            raise _launchplane_http_error(
+                status_code=401,
+                trace_id=trace_id,
+                code="reauthentication_required",
+                message="A fresh GitHub-human session created within five minutes is required.",
+                headers=response_headers,
+            )
+        normalized_idempotency_key = idempotency_key.strip()
+        if not normalized_idempotency_key:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="idempotency_key_required",
+                message="Confirmation issuance requires a future apply Idempotency-Key.",
+                headers=response_headers,
+            )
+        database_store = require_authz_policy_database_store(
+            record_store=record_store,
+            trace_id=trace_id,
+            message="Solo-administration confirmations require Launchplane database storage.",
+        )
+        try:
+            raw_payload = await request.json()
+            issue_request = SoloAdministrationConfirmationIssueRequest.model_validate(raw_payload)
+        except (ValueError, ValidationError) as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Confirmation issuance payload failed validation.",
+                headers=response_headers,
+            ) from error
+        active_record = read_single_active_authz_policy_record(
+            database_store=database_store,
+            trace_id=trace_id,
+        )
+        if not control_plane_authz_grant_service.authz_policy_allows_immutable_github_id_administration(
+            policy=active_record.policy,
+            github_id=identity.github_id,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Only the exact current strict-human administrator may issue a confirmation.",
+                headers=response_headers,
+            )
+        try:
+            _, current_record, candidate_policy, diff = (
+                control_plane_authz_grant_service.plan_managed_authz_policy_reconcile(
+                    record_store=database_store,
+                    request=issue_request.reconcile,
+                )
+            )
+        except (
+            control_plane_authz_grant_service.AuthzPolicyConflictError,
+            ValueError,
+        ) as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="authz_policy_plan_stale",
+                message="The confirmation dry-run could not be reconciled with current policy.",
+                headers=response_headers,
+            ) from error
+        if current_record != active_record:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="authz_policy_plan_stale",
+                message="The confirmation dry-run observed a stale active policy.",
+                headers=response_headers,
+            )
+        if issue_request.reviewed_plan_sha256.strip().lower() != diff.plan_sha256:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="reviewed_plan_mismatch",
+                message="The supplied reviewed plan digest does not match the server recomputation.",
+                headers=response_headers,
+            )
+        if (
+            not diff.changed
+            or not diff.administrator_quorum_changed
+            or diff.administrator_quorum != 1
+            or diff.strict_human_administrator_count != 1
+            or not diff.quorum_satisfied
+            or diff.policy_safety_blocker_count
+            or diff.operational_readiness_blocked_rule_count
+            or not control_plane_authz_grant_service.authz_policy_allows_immutable_github_id_administration(
+                policy=candidate_policy,
+                github_id=identity.github_id,
+            )
+        ):
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="confirmation_blocked",
+                message="The candidate policy does not satisfy solo-administration safety requirements.",
+                headers=response_headers,
+            )
+        created_at = now.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        secret = secrets.token_urlsafe(32)
+        scope = idempotency_scope(identity)
+        record = build_issued_solo_administration_confirmation(
+            active_policy_record_id=active_record.record_id,
+            active_policy_revision=active_record.revision,
+            active_policy_sha256=active_record.policy_sha256,
+            candidate_policy_sha256=diff.desired_policy_sha256,
+            reviewed_plan_sha256=diff.plan_sha256,
+            human_session_id_sha256=solo_administration_confirmation_human_session_id_sha256(
+                session.session_id
+            ),
+            github_id=identity.github_id,
+            idempotency_scope_sha256=hashlib.sha256(scope.encode()).hexdigest(),
+            idempotency_key_sha256=hashlib.sha256(normalized_idempotency_key.encode()).hexdigest(),
+            acknowledgement_sha256=solo_administration_confirmation_acknowledgement_sha256(
+                issue_request.acknowledgement
+            ),
+            secret_sha256=solo_administration_confirmation_secret_sha256(secret),
+            created_at=created_at,
+        )
+        try:
+            stored_record, created = database_store.issue_solo_administration_confirmation(record)
+        except control_plane_authz_grant_service.AuthzPolicyConflictError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="confirmation_conflict",
+                message="Confirmation issuance conflicts with existing evidence.",
+                headers=response_headers,
+            ) from error
+        except Exception as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="confirmation_conflict",
+                message="Confirmation issuance could not be completed.",
+                headers=response_headers,
+            ) from error
+        if not created:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="confirmation_replayed",
+                message="The confirmation was already issued and its secret cannot be replayed.",
+                headers=response_headers,
+            )
+        return solo_administration_confirmation_response(stored_record, secret=secret)
+
+    async def read_solo_administration_confirmation(
+        request: Request,
+        response: Response,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_nonpersisting_sensitive_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        confirmation_id: str,
+    ) -> SoloAdministrationConfirmationResponse:
+        trace_id = next_trace_id()
+        response.headers["Cache-Control"] = "no-store"
+        if not isinstance(identity, GitHubHumanIdentity):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Confirmation evidence requires a GitHub-human browser session.",
+            )
+        database_store = require_authz_policy_database_store(
+            record_store=record_store,
+            trace_id=trace_id,
+            message="Confirmation evidence requires Launchplane database storage.",
+        )
+        session = read_nonrenewing_human_session(cookie_header=request.headers.get("Cookie", ""))
+        if session is None:
+            raise _authentication_required_error("A live GitHub-human session is required.")
+        try:
+            record = database_store.read_solo_administration_confirmation(confirmation_id)
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="confirmation_not_found",
+                message="Confirmation evidence was not found.",
+            ) from error
+        active_record = read_single_active_authz_policy_record(
+            database_store=database_store,
+            trace_id=trace_id,
+        )
+        if (
+            record.github_id != identity.github_id
+            or record.human_session_id_sha256
+            != solo_administration_confirmation_human_session_id_sha256(session.session_id)
+            or not control_plane_authz_grant_service.authz_policy_allows_immutable_github_id_administration(
+                policy=active_record.policy,
+                github_id=identity.github_id,
+            )
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Confirmation evidence is not bound to this current administrator session.",
+            )
+        if record.state == "issued" and datetime.fromisoformat(
+            record.expires_at.replace("Z", "+00:00")
+        ) <= datetime.now(timezone.utc):
+            record = database_store.expire_solo_administration_confirmation(
+                confirmation_id=record.confirmation_id,
+                terminal_at=datetime.now(timezone.utc)
+                .replace(microsecond=0)
+                .isoformat()
+                .replace("+00:00", "Z"),
+            )
+        return solo_administration_confirmation_response(record)
+
+    async def revoke_solo_administration_confirmation(
+        request: Request,
+        identity: Annotated[
+            GitHubHumanIdentity, Depends(read_github_human_browser_mutation_identity)
+        ],
+        record_store: Annotated[object, Depends(get_record_store)],
+        confirmation_id: str,
+    ) -> SoloAdministrationConfirmationResponse:
+        trace_id = next_trace_id()
+        response_headers = {"Cache-Control": "no-store"}
+        database_store = require_authz_policy_database_store(
+            record_store=record_store,
+            trace_id=trace_id,
+            message="Confirmation revocation requires Launchplane database storage.",
+        )
+        session = getattr(request.state, "launchplane_human_session", None)
+        if not isinstance(session, LaunchplaneHumanSession):
+            raise _authentication_required_error("A live GitHub-human session is required.")
+        try:
+            record = database_store.read_solo_administration_confirmation(confirmation_id)
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="confirmation_not_found",
+                message="Confirmation evidence was not found.",
+                headers=response_headers,
+            ) from error
+        if (
+            record.github_id != identity.github_id
+            or record.human_session_id_sha256
+            != solo_administration_confirmation_human_session_id_sha256(session.session_id)
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Confirmation evidence is not bound to this administrator session.",
+                headers=response_headers,
+            )
+        try:
+            revoked = database_store.revoke_solo_administration_confirmation(
+                confirmation_id=confirmation_id,
+                terminal_at=datetime.now(timezone.utc)
+                .replace(microsecond=0)
+                .isoformat()
+                .replace("+00:00", "Z"),
+            )
+        except (ValueError, SoloAdministrationConfirmationConflictError) as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="confirmation_not_revocable",
+                message="Confirmation evidence is no longer revocable.",
+                headers=response_headers,
+            ) from error
+        return solo_administration_confirmation_response(revoked)
 
     async def apply_live_target_runtime(
         request: Request,
@@ -23002,6 +24562,104 @@ def create_launchplane_fastapi_app(
     )
 
     app.add_api_route(
+        _AUTHZ_POLICY_OPERATION_ACTIVATION_DRY_RUN_ROUTE,
+        dry_run_authz_policy_operation_activation,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        include_in_schema=False,
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            410: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _AUTHZ_POLICY_OPERATION_ACTIVATION_APPLY_ROUTE,
+        apply_authz_policy_operation_activation,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        include_in_schema=False,
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            410: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _AUTHZ_POLICY_RECOVERY_CANDIDATE_DRY_RUN_ROUTE,
+        dry_run_authz_policy_recovery_candidate,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        include_in_schema=False,
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+    app.add_api_route(
+        _AUTHZ_POLICY_RECOVERY_CONFIRMATION_ROUTE,
+        issue_authz_policy_recovery_confirmation,
+        methods=["POST"],
+        response_model=SoloAdministrationConfirmationResponse,
+        response_model_exclude_none=True,
+        include_in_schema=False,
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+    app.add_api_route(
+        _AUTHZ_POLICY_RECOVERY_CANDIDATE_APPLY_ROUTE,
+        apply_authz_policy_recovery_candidate,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        include_in_schema=False,
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+    app.add_api_route(
+        _AUTHZ_POLICY_RECOVERY_DIAGNOSTIC_ROUTE,
+        read_authz_policy_recovery_diagnostic,
+        methods=["GET"],
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        include_in_schema=False,
+        responses={
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
         _AUTHZ_POLICY_MANAGED_RECONCILE_ROUTE,
         reconcile_managed_authz_policy,
         methods=["POST"],
@@ -23023,6 +24681,65 @@ def create_launchplane_fastapi_app(
         operation_id="reconcile_managed_authz_policy",
         summary="Reconcile managed authz policy rules",
         responses=authz_policy_route_responses,
+    )
+
+    app.add_api_route(
+        _SOLO_ADMINISTRATION_CONFIRMATION_ROUTE,
+        issue_solo_administration_confirmation,
+        methods=["POST"],
+        response_model=SoloAdministrationConfirmationResponse,
+        response_model_exclude_none=True,
+        operation_id="issue_solo_administration_confirmation",
+        summary="Issue a one-time solo-administration confirmation",
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": _openapi_model_schema(SoloAdministrationConfirmationIssueRequest)
+                    }
+                },
+            }
+        },
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+    app.add_api_route(
+        f"{_SOLO_ADMINISTRATION_CONFIRMATION_ROUTE}/{{confirmation_id}}",
+        read_solo_administration_confirmation,
+        methods=["GET"],
+        response_model=SoloAdministrationConfirmationResponse,
+        response_model_exclude_none=True,
+        operation_id="read_solo_administration_confirmation",
+        summary="Read one-time solo-administration confirmation evidence",
+        responses={
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+    app.add_api_route(
+        f"{_SOLO_ADMINISTRATION_CONFIRMATION_ROUTE}/{{confirmation_id}}/revoke",
+        revoke_solo_administration_confirmation,
+        methods=["POST"],
+        response_model=SoloAdministrationConfirmationResponse,
+        response_model_exclude_none=True,
+        operation_id="revoke_solo_administration_confirmation",
+        summary="Revoke one-time solo-administration confirmation evidence",
+        responses={
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
     )
 
     app.add_api_route(
@@ -23327,7 +25044,8 @@ def create_launchplane_fastapi_app(
                 **(
                     {"Cache-Control": "no-store"}
                     if request.url.path == _AUTHZ_ACTIVATION_PREFLIGHT_ROUTE
-                    or request.url.path in _AUTHZ_NONPERSISTING_SENSITIVE_READ_ROUTES
+                    or request.url.path in _AUTHZ_NO_STORE_ROUTES
+                    or request.url.path.startswith(_SOLO_ADMINISTRATION_CONFIRMATION_ROUTE)
                     else {}
                 ),
             },
@@ -23370,7 +25088,8 @@ def create_launchplane_fastapi_app(
                 **(
                     {"Cache-Control": "no-store"}
                     if request.url.path == _AUTHZ_ACTIVATION_PREFLIGHT_ROUTE
-                    or request.url.path in _AUTHZ_NONPERSISTING_SENSITIVE_READ_ROUTES
+                    or request.url.path in _AUTHZ_NO_STORE_ROUTES
+                    or request.url.path.startswith(_SOLO_ADMINISTRATION_CONFIRMATION_ROUTE)
                     else {}
                 ),
             },
@@ -23399,8 +25118,9 @@ def create_launchplane_fastapi_app(
                 in {
                     _AUTHZ_REPOSITORY_SCOPE_READ_ROUTE,
                     _AUTHZ_ACTIVATION_PREFLIGHT_ROUTE,
-                    *_AUTHZ_NONPERSISTING_SENSITIVE_READ_ROUTES,
+                    *_AUTHZ_NO_STORE_ROUTES,
                 }
+                or request.url.path.startswith(_SOLO_ADMINISTRATION_CONFIRMATION_ROUTE)
                 else None
             ),
         )
@@ -23461,22 +25181,23 @@ def _launchplane_http_error(
     code: str,
     message: str,
     authz: dict[str, object] | None = None,
+    authz_evaluation: AuthzEvaluation | None = None,
     authz_policy_provenance: AuthzPolicyProvenance | None = None,
     headers: dict[str, str] | None = None,
 ) -> LaunchplaneHTTPException:
     detail: dict[str, object] = {"trace_id": trace_id, "code": code, "message": message}
     if authz is not None:
         detail["authz"] = authz
-    authz_evaluation = None
-    if code == "authorization_denied":
+    resolved_authz_evaluation = authz_evaluation
+    if code == "authorization_denied" and resolved_authz_evaluation is None:
         evaluation = current_authz_evaluation()
         if evaluation is not None and evaluation.decision == "denied":
-            authz_evaluation = evaluation
+            resolved_authz_evaluation = evaluation
     return LaunchplaneHTTPException(
         status_code=status_code,
         detail=detail,
         headers=headers,
-        authz_evaluation=authz_evaluation,
+        authz_evaluation=resolved_authz_evaluation,
         authz_policy_provenance=authz_policy_provenance,
     )
 

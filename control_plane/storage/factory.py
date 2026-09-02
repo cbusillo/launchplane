@@ -22,6 +22,8 @@ PRIVILEGED_OPERATION_WORKER_REQUIRED_RELATIONS = (
     "launchplane_authz_policies",
     "launchplane_authz_policies_revision_uidx",
     "launchplane_authz_policies_active_uidx",
+    "launchplane_merge_train_policies",
+    "launchplane_merge_train_policies_active_uidx",
     "launchplane_secrets",
     "launchplane_secrets_scope_name_idx",
     "launchplane_secrets_lookup_idx",

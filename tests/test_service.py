@@ -197,7 +197,9 @@ class _StubGitHubOAuthClient:
         self.identity = identity
         self.code_verifier = ""
 
-    def authorization_url(self, *, state: str, code_challenge: str) -> str:
+    def authorization_url(
+        self, *, state: str, code_challenge: str, reauthenticate: bool = False
+    ) -> str:
         return f"https://github.example/authorize?state={state}&challenge={code_challenge}"
 
     def fetch_identity(
@@ -1851,11 +1853,35 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 control_plane_root_path=root,
                 database_url=database_url,
             )
+            first_record = build_test_merge_train_policy_record(
+                repository="cbusillo/sellyouroutboard",
+                record_id="merge-train-policy-previous-service-import",
+                updated_at="2026-09-02T00:00:00Z",
+            )
             record = build_test_merge_train_policy_record(
                 repository="cbusillo/codex-skills",
                 record_id="merge-train-policy-codex-skills-service-import",
+                updated_at="2026-09-02T00:01:00Z",
+            )
+            conflicting_record = build_test_merge_train_policy_record(
+                repository="cbusillo/odoo-devkit",
+                record_id=record.record_id,
+                updated_at="2026-09-02T00:02:00Z",
             )
 
+            first_status_code, _ = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/merge-train/policies/import",
+                payload={
+                    "schema_version": 1,
+                    "product": "launchplane",
+                    "mode": "apply",
+                    "reason": "Configure the previous merge-train target.",
+                    "record": first_record.model_dump(mode="json"),
+                },
+                headers={"Idempotency-Key": "merge-train-policy:previous"},
+            )
             status_code, payload = _invoke_app(
                 app,
                 method="POST",
@@ -1869,16 +1895,39 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
                 headers={"Idempotency-Key": "merge-train-policy:codex-skills"},
             )
+            conflict_status_code, conflict_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/merge-train/policies/import",
+                payload={
+                    "schema_version": 1,
+                    "product": "launchplane",
+                    "mode": "apply",
+                    "reason": "Reject record identity reuse.",
+                    "record": conflicting_record.model_dump(mode="json"),
+                },
+                headers={"Idempotency-Key": "merge-train-policy:conflict"},
+            )
             store = PostgresRecordStore(database_url=database_url)
             try:
                 records = store.list_merge_train_policy_records(status="active")
+                superseded_records = store.list_merge_train_policy_records(status="superseded")
             finally:
                 store.close()
 
+        self.assertEqual(first_status_code, 202)
         self.assertEqual(status_code, 202)
+        self.assertEqual(conflict_status_code, 409)
+        self.assertEqual(
+            conflict_payload["error"]["code"],
+            "merge_train_policy_record_conflict",
+        )
         self.assertEqual(payload["result"]["mode"], "apply")
         self.assertEqual(payload["result"]["record"]["policy_keys"], ["cbusillo/codex-skills:main"])
         self.assertEqual([stored.record_id for stored in records], [record.record_id])
+        self.assertEqual(
+            [stored.record_id for stored in superseded_records], [first_record.record_id]
+        )
 
     def test_merge_train_policy_import_endpoint_dry_run_does_not_write_record(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -2717,10 +2766,12 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertEqual(result.output.strip(), str(output_path))
-        self.assertEqual(payload["schema_version"], 4)
+        self.assertEqual(payload["schema_version"], 5)
         self.assertTrue(payload["golden_vectors"])
         self.assertTrue(payload["verification_state_vectors"])
         self.assertTrue(payload["challenge_lifecycle_vectors"])
+        self.assertTrue(payload["provenance_vectors"])
+        self.assertTrue(payload["negative_provenance_vectors"])
 
     def test_product_onboarding_endpoint_writes_full_launchplane_owned_bundle(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -5731,7 +5782,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ],
                     "github_humans": [
                         {
-                            "github_ids": [2002],
+                            "github_ids": [2002, 2003],
                             "roles": ["admin"],
                             "products": ["launchplane"],
                             "contexts": ["launchplane"],
@@ -6119,7 +6170,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ],
                     "github_humans": [
                         {
-                            "github_ids": [2002],
+                            "github_ids": [2002, 2003],
                             "roles": ["admin"],
                             "products": ["launchplane"],
                             "contexts": ["launchplane"],
@@ -6410,8 +6461,8 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 headers=_fastapi_browser_mutation_headers(session_manager, cookie),
             )
 
-        self.assertEqual(status_code, 401)
-        self.assertEqual(payload["error"]["code"], "authentication_required")
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
 
     def test_managed_authz_reconcile_rejects_non_admin_workflow_authority(self) -> None:
         for action in ("product_profile.read", "launchplane_service_deploy.execute"):

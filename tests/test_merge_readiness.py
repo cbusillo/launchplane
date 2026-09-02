@@ -837,6 +837,88 @@ class MergeReadinessDeterminismTests(unittest.TestCase):
 
 
 class MergeReadinessLiveAdapterTests(unittest.TestCase):
+    def test_cleared_observed_lease_uses_explicit_expected_owner(self) -> None:
+        controller_state = MergeTrainControllerStateRecord(
+            controller_key=build_merge_train_controller_key(
+                repository=REPOSITORY,
+                base_branch="main",
+            ),
+            repository=REPOSITORY,
+            base_branch="main",
+            policy_key="default",
+            policy_sha256=POLICY_SHA,
+            status="idle",
+            updated_at=EVALUATED_AT,
+        )
+
+        result = evaluate_merge_readiness_from_live_evidence(
+            target=_target(),
+            owner_decision=OwnerAcceptanceDecision(
+                status="not_required",
+                reason_code="engineering_only",
+                evaluated_at=EVALUATED_AT,
+            ),
+            engineering_decision=None,
+            engineering_runs=(),
+            technical_checks=None,
+            policy_fingerprints=_all_missing_policy_fingerprints(),
+            candidate_record=None,
+            structural_candidate_status="unknown",
+            controller_state=controller_state,
+            expected_lease_owner="controller-run-1",
+            observed_effect_sha=CANDIDATE_SHA,
+            evaluated_at=EVALUATED_AT,
+        )
+
+        self.assertEqual(result.fence.state, "blocked_candidate_identity")
+        self.assertEqual(
+            result.fence.evidence.expected_lease_owner,
+            "controller-run-1",
+        )
+        self.assertEqual(result.fence.evidence.observed_lease_owner, "")
+        self.assertIn("controller_lease_missing", result.fence.reason_codes)
+
+    def test_replaced_observed_lease_uses_explicit_expected_owner(self) -> None:
+        controller_state = MergeTrainControllerStateRecord(
+            controller_key=build_merge_train_controller_key(
+                repository=REPOSITORY,
+                base_branch="main",
+            ),
+            repository=REPOSITORY,
+            base_branch="main",
+            policy_key="default",
+            policy_sha256=POLICY_SHA,
+            status="running",
+            updated_at=EVALUATED_AT,
+            lease_owner="controller-run-2",
+            lease_acquired_at="2026-08-11T02:59:00Z",
+            lease_expires_at="2026-08-11T03:10:00Z",
+            heartbeat_at="2026-08-11T03:00:00Z",
+        )
+
+        result = evaluate_merge_readiness_from_live_evidence(
+            target=_target(),
+            owner_decision=OwnerAcceptanceDecision(
+                status="not_required",
+                reason_code="engineering_only",
+                evaluated_at=EVALUATED_AT,
+            ),
+            engineering_decision=None,
+            engineering_runs=(),
+            technical_checks=None,
+            policy_fingerprints=_all_missing_policy_fingerprints(),
+            candidate_record=None,
+            structural_candidate_status="unknown",
+            controller_state=controller_state,
+            expected_lease_owner="controller-run-1",
+            observed_effect_sha=CANDIDATE_SHA,
+            evaluated_at=EVALUATED_AT,
+        )
+
+        self.assertEqual(result.fence.state, "blocked_candidate_identity")
+        self.assertIn("controller_lease_lost", result.fence.reason_codes)
+        self.assertNotIn("controller_lease_held", result.fence.reason_codes)
+
     def test_adapter_consumes_existing_evidence_without_writes_or_advisory_authority(
         self,
     ) -> None:

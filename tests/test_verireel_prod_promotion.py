@@ -11,6 +11,7 @@ from control_plane.contracts.promotion_record import ArtifactIdentityReference, 
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.workflows.verireel_prod_promotion import (
     VeriReelProdPromotionRequest,
+    _default_migration_command,
     execute_verireel_prod_promotion,
 )
 from control_plane.workflows.verireel_rollout import VeriReelRolloutVerificationResult
@@ -21,6 +22,12 @@ from control_plane.workflows.verireel_billing_recovery_schedule import (
 
 
 class VeriReelProdPromotionWorkflowTests(unittest.TestCase):
+    def test_default_migration_command_uses_runtime_prisma_binary(self) -> None:
+        self.assertEqual(
+            _default_migration_command(),
+            "./node_modules/.bin/prisma migrate deploy --config prisma.config.ts",
+        )
+
     def setUp(self) -> None:
         self.enterContext(
             patch(

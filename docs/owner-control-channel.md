@@ -121,19 +121,20 @@ contains the JSON schemas, canonicalization declaration, and byte/digest golden
 vectors for every descriptor currently registered in
 `control_plane.privileged_operation_registry`.
 
-The artifact container is schema version `4`; the embedded approval, response,
+The artifact container is schema version `5`; the embedded approval, response,
 binding, signature-payload, envelope, and shadow-verifier record models remain
 schema version `1`. Version `2` added the signed-channel declarations and
 vectors. Version `3` adds deterministic server-state verification and reactive
-challenge-lifecycle vectors while preserving every version-2 section at its
-pinned canonical SHA-256. Version `4` adds separate enrollment-provenance
-schemas, declarations, exhaustive caller-claim vectors, and negative storage
-vectors. Its compatibility declaration pins every version-3 top-level section;
-the existing wire, verification-state, and challenge-lifecycle sections remain
-byte-identical. Consumers must reject unknown container versions.
+challenge-lifecycle vectors. Version `4` adds
+`managed-merge-train-policy-import` descriptor, schema, and vector coverage.
+Version `5` adds separate enrollment-provenance schemas, declarations,
+exhaustive caller-claim vectors, and negative storage vectors. Its compatibility
+declaration pins every version-4 top-level section while retaining the exact
+version-2 section, descriptor-scoped vector, and schema digests already carried
+by version `4`. Consumers must reject unknown container versions.
 The preserved `signature_declaration.contract_schema_version` remains `2`
 because it identifies the unchanged signed-channel declaration; the top-level
-schema and compatibility block are authoritative for the version-4 container.
+schema and compatibility block are authoritative for the version-5 container.
 
 Descriptor vectors derive all synthetic identity values from the descriptor ID,
 so registering another descriptor does not churn existing vectors. Negative

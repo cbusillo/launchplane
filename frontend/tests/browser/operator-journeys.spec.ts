@@ -1203,8 +1203,20 @@ test.describe("operator journeys", () => {
     await expect(page.getByRole("button", { name: "Approve plan" })).toBeVisible();
     await expect(page.getByRole("button", { name: /execute/i })).toHaveCount(0);
     await expect(page.getByText(/secret-version/i)).toHaveCount(0);
+    await page.getByRole("button", { name: "Merge-train policy" }).click();
+    await expect(page.getByText("Managed merge-train policy")).toBeVisible();
+    await expect(page.getByText("cbusillo/launchplane:main")).toBeVisible();
+    await expect(
+      page.getByText("Review exact candidate merge-train policy"),
+    ).toBeVisible();
+    await expect(page.getByRole("button", { name: "Approve plan" })).toBeVisible();
+    await expect(page.getByRole("button", { name: /execute/i })).toHaveCount(0);
     await assertDocumentBasics(page);
-    await captureScreenshot(page, testInfo, "privileged-operation-plans-human-governed");
+    await captureScreenshot(
+      page,
+      testInfo,
+      "privileged-operation-merge-train-policy-review",
+    );
     diagnostics.assertClean();
   });
 });

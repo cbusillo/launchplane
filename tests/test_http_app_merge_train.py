@@ -18,6 +18,7 @@ from control_plane.contracts.merge_train_stack_collapse import (
     execute_merge_train_stack_collapse_plan,
 )
 from control_plane.http_app import create_launchplane_fastapi_app
+from control_plane.merge_admission import MergeAdmissionDeniedError
 from control_plane.merge_train_controller_run_once import MERGE_TRAIN_CONTROLLER_ACTIVE_ACTION
 from control_plane.service_auth import (
     BearerIdentityConfig,
@@ -51,6 +52,7 @@ from tests.http_app_test_support import (
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_with_codex_skills
 from tests.support.auth import _identity, _local_operator_policy, _StubVerifier
 from tests.support.merge_train import (
+    _AdmissionInvokingMergeTrainGitHubClient,
     _BlockedAdmissionMergeTrainGitHubClient,
     _CleanupFailingMergeTrainGitHubClient,
     _FakeCollapsedRootStackedMergeTrainSnapshotReader,
@@ -73,8 +75,31 @@ from tests.support.merge_train import (
     _seed_merge_train_policy,
     _seed_merge_train_stack_collapse_plan_record,
     _StackCollapseWriteFailingFilesystemRecordStore,
+    _StaleCandidateMergeTrainGitHubClient,
     _StaleLandingMergeTrainGitHubClient,
 )
+
+
+class _FenceCapturingAdmissionEvaluator:
+    expected_lease_owner = ""
+    observed_lease_owner = ""
+
+    def __init__(self, **_: object) -> None:
+        type(self).expected_lease_owner = ""
+        type(self).observed_lease_owner = ""
+
+    def evaluate(self, **kwargs: object) -> object:
+        controller_state = kwargs["controller_state"]
+        expected_lease_owner = kwargs["expected_lease_owner"]
+        observed_lease_owner = getattr(controller_state, "lease_owner")
+        if not isinstance(expected_lease_owner, str) or not isinstance(observed_lease_owner, str):
+            raise AssertionError("controller lease owners must be strings")
+        type(self).expected_lease_owner = expected_lease_owner
+        type(self).observed_lease_owner = observed_lease_owner
+        raise MergeAdmissionDeniedError(
+            "test admission fence block",
+            reason_code="merge_readiness_not_ready",
+        )
 
 
 class FastApiMergeTrainReadTests(unittest.IsolatedAsyncioTestCase):
@@ -1697,6 +1722,66 @@ class FastApiMergeTrainRunOnceTests(unittest.IsolatedAsyncioTestCase):
 
 
 class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_land_batch_binds_acquired_owner_before_live_observation(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            with (
+                patch(
+                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainSnapshotReader",
+                    _FakeMergeTrainSnapshotReader,
+                ),
+                patch(
+                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                    _AdmissionInvokingMergeTrainGitHubClient,
+                ),
+                patch(
+                    "control_plane.http_app.LiveMergeAdmissionEvaluator",
+                    _FenceCapturingAdmissionEvaluator,
+                ),
+            ):
+                responses = [
+                    await _post_merge_train_controller_run_once(
+                        app,
+                        {
+                            "schema_version": 1,
+                            "repository": "cbusillo/sellyouroutboard",
+                            "base_branch": "main",
+                            "mutate": True,
+                        },
+                    )
+                    for _ in range(5)
+                ]
+            controller_state = store.list_merge_train_controller_state_records(
+                repository="cbusillo/sellyouroutboard",
+                base_branch="main",
+                limit=1,
+            )[0]
+
+        self.assertTrue(all(response.status_code == 202 for response in responses))
+        self.assertEqual(responses[4].json()["result"]["controller_action"], "block")
+        self.assertTrue(
+            _FenceCapturingAdmissionEvaluator.expected_lease_owner.startswith(
+                "merge-train-controller:"
+            )
+        )
+        self.assertEqual(
+            _FenceCapturingAdmissionEvaluator.observed_lease_owner,
+            _FenceCapturingAdmissionEvaluator.expected_lease_owner,
+        )
+        self.assertEqual(controller_state.status, "idle")
+        self.assertEqual(controller_state.last_phase, "admit_pull_request")
+        self.assertEqual(store.list_merge_admission_records(), ())
+
     async def test_advances_unstacked_batch_flow(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
@@ -2049,6 +2134,181 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
                 for entry in build_payload["result"]["candidate"]["entries"]
             ],
             [1, 2],
+        )
+
+    async def test_reflows_candidate_after_build_stale_state(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            request_payload = {
+                "schema_version": 1,
+                "repository": "cbusillo/sellyouroutboard",
+                "base_branch": "main",
+                "mutate": True,
+            }
+            with (
+                patch(
+                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainSnapshotReader",
+                    _FakeMergeTrainSnapshotReader,
+                ),
+                patch(
+                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                    _FakeMergeTrainGitHubClient,
+                ),
+            ):
+                await _post_merge_train_controller_run_once(app, request_payload)
+            with patch(
+                "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                _StaleCandidateMergeTrainGitHubClient,
+            ):
+                failed_response = await _post_merge_train_controller_run_once(app, request_payload)
+            with (
+                patch(
+                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainSnapshotReader",
+                    _FakeExpandedMergeTrainSnapshotReader,
+                ),
+                patch(
+                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                    _FakeMergeTrainGitHubClient,
+                ),
+            ):
+                reflow_response = await _post_merge_train_controller_run_once(app, request_payload)
+
+        failed_payload = failed_response.json()
+        reflow_payload = reflow_response.json()
+        self.assertEqual(failed_response.status_code, 202)
+        self.assertEqual(failed_payload["result"]["controller_action"], "candidate_failed")
+        self.assertEqual(failed_payload["result"]["candidate"]["status"], "failed")
+        self.assertEqual(
+            failed_payload["result"]["error"]["code"],
+            "merge_train_github_stale_state",
+        )
+        self.assertEqual(
+            failed_payload["result"]["details"],
+            {"failed_pull_request_number": 1, "github_status_code": 409},
+        )
+        self.assertEqual(reflow_response.status_code, 202)
+        self.assertEqual(reflow_payload["result"]["controller_action"], "plan_candidate")
+        self.assertEqual(
+            [
+                entry["pull_request_number"]
+                for entry in reflow_payload["result"]["candidate"]["entries"]
+            ],
+            [1, 2],
+        )
+
+    async def test_reflows_unbuilt_failed_candidate_with_unchanged_queue(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            request_payload = {
+                "schema_version": 1,
+                "repository": "cbusillo/sellyouroutboard",
+                "base_branch": "main",
+                "mutate": True,
+            }
+            with (
+                patch(
+                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainSnapshotReader",
+                    _FakeMergeTrainSnapshotReader,
+                ),
+                patch(
+                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                    _FakeMergeTrainGitHubClient,
+                ),
+            ):
+                await _post_merge_train_controller_run_once(app, request_payload)
+            with patch(
+                "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                _StaleCandidateMergeTrainGitHubClient,
+            ):
+                failed_response = await _post_merge_train_controller_run_once(app, request_payload)
+            with patch(
+                "control_plane.merge_train_controller_run_once.GitHubMergeTrainSnapshotReader",
+                _FakeMergeTrainSnapshotReader,
+            ):
+                reflow_response = await _post_merge_train_controller_run_once(app, request_payload)
+
+        failed_payload = failed_response.json()
+        reflow_payload = reflow_response.json()
+        self.assertEqual(failed_payload["result"]["candidate"]["candidate_sha"], "")
+        self.assertEqual(reflow_response.status_code, 202)
+        self.assertEqual(reflow_payload["result"]["controller_action"], "plan_candidate")
+        self.assertEqual(
+            reflow_payload["result"]["superseded_merge_train_batch_candidate_record_id"],
+            failed_payload["records"]["merge_train_batch_candidate_record_id"],
+        )
+
+    async def test_keeps_checked_failed_candidate_terminal_with_unchanged_queue(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            request_payload = {
+                "schema_version": 1,
+                "repository": "cbusillo/sellyouroutboard",
+                "base_branch": "main",
+                "mutate": True,
+            }
+            with (
+                patch(
+                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainSnapshotReader",
+                    _FakeMergeTrainSnapshotReader,
+                ),
+                patch(
+                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                    _FakeMergeTrainGitHubClient,
+                ),
+            ):
+                await _post_merge_train_controller_run_once(app, request_payload)
+                await _post_merge_train_controller_run_once(app, request_payload)
+            with patch(
+                "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                _FakeFailingMergeTrainGitHubClient,
+            ):
+                failed_response = await _post_merge_train_controller_run_once(app, request_payload)
+            with patch(
+                "control_plane.merge_train_controller_run_once.GitHubMergeTrainSnapshotReader",
+                _FakeMergeTrainSnapshotReader,
+            ):
+                terminal_response = await _post_merge_train_controller_run_once(
+                    app, request_payload
+                )
+
+        failed_payload = failed_response.json()
+        terminal_payload = terminal_response.json()
+        self.assertTrue(failed_payload["result"]["candidate"]["candidate_sha"])
+        self.assertEqual(terminal_response.status_code, 202)
+        self.assertEqual(terminal_payload["result"]["controller_action"], "candidate_failed")
+        self.assertEqual(
+            terminal_payload["records"]["merge_train_batch_candidate_record_id"],
+            failed_payload["records"]["merge_train_batch_candidate_record_id"],
         )
 
     async def test_advances_stacked_batch_flow(self) -> None:

@@ -4695,7 +4695,9 @@ class _StubFastApiGitHubOAuthClient:
         self.authorization_state = ""
         self.code_verifier = ""
 
-    def authorization_url(self, *, state: str, code_challenge: str) -> str:
+    def authorization_url(
+        self, *, state: str, code_challenge: str, reauthenticate: bool = False
+    ) -> str:
         self.authorization_state = state
         return f"https://github.example/authorize?state={state}&challenge={code_challenge}"
 

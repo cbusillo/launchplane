@@ -651,6 +651,8 @@ The cookie-capable mutation inventory is intentionally limited to:
 - `POST /v1/product-config/apply`
 - `POST /v1/merge-train/policies/import`
 - `POST /v1/authz-policies/managed-rule-sets/reconcile`
+- `POST /v1/authz-policies/privileged-policy-operations/activation/dry-run`
+- `POST /v1/authz-policies/privileged-policy-operations/activation/apply`
 - `POST /v1/tenant-admission/technical-human-waivers/apply`
 - `POST /v1/tenant-admission/trusted-maintenance-policies/apply`
 
@@ -770,6 +772,41 @@ limited to allowed/denied, an hour-bounded evaluation time, an opaque keyed poli
 generation, and a trace ID. The route and all errors are
 `Cache-Control: no-store`; the path performs no durable write and requires no
 separate diagnostic authorization grant.
+
+`POST /v1/authz-policies/privileged-policy-operations/activation/dry-run` and
+`POST /v1/authz-policies/privileged-policy-operations/activation/apply` are the
+temporary issue `#2277` browser-human activation bridge. Both routes require an
+authenticated GitHub-human session, strict same-origin/fetch-metadata headers,
+and single-use CSRF proof; every bearer and non-human identity is rejected. The
+service derives the immutable GitHub ID from the session, reloads the singleton
+active DB policy, and requires that ID to have an exact immutable-ID
+`authz_policy_grant.write` administrator rule. It does not rely on the session
+role or mutable login, organization, or team membership.
+
+An immutable-ID authorization failure writes the ordinary redacted denial
+record for its trace and fixed `authz_policy_grant.write` scope while keeping
+the HTTP response `Cache-Control: no-store`. No raw policy, selector, session,
+or principal detail is added to that record.
+
+The dry-run request contains only `reason`. The apply request contains only
+`reason` and `reviewed_plan_sha256`, with the stable `Idempotency-Key` in the
+header. Both bodies are exact-length JSON capped at 16 KiB. The server compiles
+one fixed GitHub-human managed rule for the authenticated ID with only the five
+`authz_policy_operation` propose/read/approve/revoke/cancel actions. Dry-run
+returns bounded observed-policy, candidate, exact-action, and continuity
+evidence. Apply uses the existing DB-only mutation reservation and active-policy
+CAS, requires the applying administrator, a reachable strict immutable-ID
+GitHub-human administrator, and the effective administrator quorum, and verifies
+the exact resulting record ID, revision, digest,
+policy, managed set, and bound GitHub ID before updating in-process policy.
+
+The apply idempotency scope is the immutable GitHub ID, not the mutable login or
+browser session. A completed same-key replay remains available after activation.
+Otherwise, once the exact managed set is active, both routes return `410` with
+`authz_policy_operation_activation_retired`; an occupied but non-exact set
+returns `409`. The routes are omitted from general OpenAPI generation and are
+not an operator-configured feature, total-lockout recovery path, recurring
+break-glass mechanism, or general policy editor.
 
 `POST /v1/authz-diagnostics/candidate-policy/preview` is a separate
 administrator-read contract protected by `authz_policy_candidate_preview.read`.
@@ -2147,13 +2184,32 @@ leaves the product unauthorized rather than silently broadening access.
 The authz planning route requires `generic_web_preview_authz.plan`, reads the
 active DB-backed policy, retains unrelated managed rules, and returns a complete
 dry-run reconcile envelope. It never writes policy. The existing
-`POST /v1/authz-policies/managed-rule-sets/reconcile` route remains the sole
-transitional workflow writer, accepts only GitHub Actions OIDC workload
-transport, and requires `authz_policy_grant.write` for apply. Browser-human,
-terminal-agent, and local bearer identities fail closed. Signed-in humans use
+`POST /v1/authz-policies/managed-rule-sets/reconcile` route remains the policy
+writer. Routine reconciliation remains GitHub Actions-only; administrator
+quorum changes require an authenticated GitHub-human browser mutation and exact
+active DB authority. Quorum-one apply additionally requires the
+`solo_administration_confirmation_id` envelope field and the dedicated one-time
+secret header. Confirmation issuance, reads, and revocation use the
+`/v1/authz-policies/solo-administration-confirmations` browser routes with
+strict same-origin/Fetch Metadata/CSRF validation and `Cache-Control:
+no-store`. The separate,
+self-retiring issue `#2277` browser-human activation bridge can install only the
+compiled privileged-policy operation set and cannot accept a general managed
+policy payload. All other browser-human, terminal-agent, and local bearer
+identities fail closed on the workflow route. Signed-in humans use
 the separate `managed-authz-policy-set` privileged-operation lifecycle for
 proposal review and approval; only the service-internal worker executes that
-approved path. The advanced
+approved path.
+
+The hidden issue `#2277` recovery companion routes use the same browser-only
+authentication, exact CSRF/origin checks, DB storage, idempotency, and policy
+CAS boundary. They take only closed candidate forms, require exact-digest solo
+confirmation where the compiled candidate quorum is one, and provide one
+bounded self-diagnostic. They do not create a general recovery writer, accept
+raw policy, expose policy selectors/rule bodies, admit workflow or bearer
+callers, or mutate a historical policy revision.
+
+The advanced
 `Product Onboarding Manifest (Advanced)` workflow preserves operator-supplied
 manifest support for non-conventional products. Manifests must use neutral
 `provider_targets`; obsolete `dokploy_targets` input is rejected. Product
@@ -3909,6 +3965,15 @@ authorize the surface. The first planner invokes managed-secret re-encryption
 with `apply=False`. Browser-human approval/revocation routes remain governed;
 there is no HTTP execute or apply endpoint. Approval can be claimed immediately
 by the supervised worker, so revocation is possible only before claim.
+
+`managed-merge-train-policy-import` uses those existing generic routes with the
+dedicated `merge_train_policy_operation.*` action family. Browser humans review
+the exact candidate policy record; terminal agents can only propose and read
+their own redacted summary when explicitly granted the dedicated summary action.
+Execution is service-worker-only: it re-plans, reauthorizes the immutable
+approver, performs descriptor-specific active merge-train policy CAS and
+idempotency, and verifies exactly one active candidate plus the expected
+superseded prior record before recording terminal success.
 
 Responses and stored records follow the redaction contract in
 `docs/privileged-operations.md`.

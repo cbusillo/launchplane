@@ -1513,6 +1513,17 @@
             "title": "Added Rule Count",
             "type": "integer"
           },
+          "administrator_quorum": {
+            "default": 2,
+            "minimum": 1.0,
+            "title": "Administrator Quorum",
+            "type": "integer"
+          },
+          "administrator_quorum_changed": {
+            "default": false,
+            "title": "Administrator Quorum Changed",
+            "type": "boolean"
+          },
           "adopted_rule_count": {
             "default": 0,
             "title": "Adopted Rule Count",
@@ -1582,6 +1593,12 @@
             "title": "Policy Safety Blockers",
             "type": "array"
           },
+          "previous_administrator_quorum": {
+            "default": 2,
+            "minimum": 1.0,
+            "title": "Previous Administrator Quorum",
+            "type": "integer"
+          },
           "previous_policy_sha256": {
             "title": "Previous Policy Sha256",
             "type": "string"
@@ -1593,6 +1610,11 @@
           "previous_revision": {
             "title": "Previous Revision",
             "type": "integer"
+          },
+          "quorum_satisfied": {
+            "default": false,
+            "title": "Quorum Satisfied",
+            "type": "boolean"
           },
           "removed_rule_count": {
             "default": 0,
@@ -1616,6 +1638,17 @@
             "default": false,
             "title": "Schema Migrated",
             "type": "boolean"
+          },
+          "solo_administration_active": {
+            "default": false,
+            "title": "Solo Administration Active",
+            "type": "boolean"
+          },
+          "strict_human_administrator_count": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Strict Human Administrator Count",
+            "type": "integer"
           },
           "unchanged_rule_count": {
             "default": 0,
@@ -1653,7 +1686,8 @@
             "enum": [
               "authz_policy_admin_unreachable",
               "authz_policy_applying_admin_removed",
-              "authz_policy_independent_admin_unreachable"
+              "authz_policy_strict_human_admin_unreachable",
+              "authz_policy_administrator_quorum_unsatisfied"
             ],
             "title": "Code",
             "type": "string"
@@ -2239,6 +2273,11 @@
       "AuthzPolicyHealthSummary": {
         "additionalProperties": false,
         "properties": {
+          "administrator_quorum": {
+            "minimum": 1.0,
+            "title": "Administrator Quorum",
+            "type": "integer"
+          },
           "github_actions_legacy_name_only_rule_count": {
             "minimum": 0.0,
             "title": "Github Actions Legacy Name Only Rule Count",
@@ -2254,11 +2293,22 @@
             "title": "Managed Rule Count",
             "type": "integer"
           },
+          "quorum_satisfied": {
+            "title": "Quorum Satisfied",
+            "type": "boolean"
+          },
+          "reachable_administrator_count": {
+            "minimum": 0.0,
+            "title": "Reachable Administrator Count",
+            "type": "integer"
+          },
           "reason_codes": {
             "items": {
               "enum": [
                 "authz_policy_admin_unreachable",
-                "authz_policy_independent_admin_unreachable",
+                "authz_policy_strict_human_admin_unreachable",
+                "authz_policy_administrator_quorum_unsatisfied",
+                "authz_policy_solo_administration_active",
                 "policy_schema_legacy",
                 "unmanaged_rules_present",
                 "github_actions_legacy_name_only_rules_present",
@@ -2268,6 +2318,10 @@
             },
             "title": "Reason Codes",
             "type": "array"
+          },
+          "solo_administration_active": {
+            "title": "Solo Administration Active",
+            "type": "boolean"
           },
           "state": {
             "enum": [
@@ -2287,6 +2341,10 @@
         "required": [
           "state",
           "reason_codes",
+          "administrator_quorum",
+          "reachable_administrator_count",
+          "quorum_satisfied",
+          "solo_administration_active",
           "managed_rule_count",
           "unmanaged_rule_count",
           "github_actions_legacy_name_only_rule_count",
@@ -2564,18 +2622,14 @@
       "AuthzReachableAdministratorSummary": {
         "additionalProperties": false,
         "properties": {
+          "administrator_quorum": {
+            "minimum": 1.0,
+            "title": "Administrator Quorum",
+            "type": "integer"
+          },
           "caller_has_policy_administration": {
             "title": "Caller Has Policy Administration",
             "type": "boolean"
-          },
-          "independent_from_caller_reachable": {
-            "title": "Independent From Caller Reachable",
-            "type": "boolean"
-          },
-          "independent_from_caller_rule_count": {
-            "minimum": 0.0,
-            "title": "Independent From Caller Rule Count",
-            "type": "integer"
           },
           "managed_rule_count": {
             "minimum": 0.0,
@@ -2589,9 +2643,27 @@
           "principal_rule_counts": {
             "$ref": "#/components/schemas/AuthzPrincipalRuleCounts"
           },
+          "quorum_satisfied": {
+            "title": "Quorum Satisfied",
+            "type": "boolean"
+          },
           "rule_count": {
             "minimum": 0.0,
             "title": "Rule Count",
+            "type": "integer"
+          },
+          "solo_administration_active": {
+            "title": "Solo Administration Active",
+            "type": "boolean"
+          },
+          "strict_github_human_id_count": {
+            "minimum": 0.0,
+            "title": "Strict Github Human Id Count",
+            "type": "integer"
+          },
+          "strict_github_human_rule_count": {
+            "minimum": 0.0,
+            "title": "Strict Github Human Rule Count",
             "type": "integer"
           },
           "unmanaged_rule_count": {
@@ -2607,8 +2679,11 @@
           "unmanaged_rule_count",
           "principal_rule_counts",
           "caller_has_policy_administration",
-          "independent_from_caller_reachable",
-          "independent_from_caller_rule_count"
+          "strict_github_human_rule_count",
+          "strict_github_human_id_count",
+          "administrator_quorum",
+          "quorum_satisfied",
+          "solo_administration_active"
         ],
         "title": "AuthzReachableAdministratorSummary",
         "type": "object"
@@ -11887,6 +11962,18 @@
       "LaunchplaneAuthzPolicy-Input": {
         "additionalProperties": false,
         "properties": {
+          "administrator_quorum": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Administrator Quorum"
+          },
           "github_actions": {
             "default": [],
             "items": {
@@ -12849,6 +12936,18 @@
       "ManagedAuthzPolicySetProposalInput-Input": {
         "additionalProperties": false,
         "properties": {
+          "administrator_quorum_change": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Administrator Quorum Change"
+          },
           "desired_policy": {
             "$ref": "#/components/schemas/LaunchplaneAuthzPolicy-Input"
           },
@@ -12888,6 +12987,18 @@
       "ManagedAuthzPolicySetProposalInput-Output": {
         "additionalProperties": false,
         "properties": {
+          "administrator_quorum_change": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Administrator Quorum Change"
+          },
           "desired_policy": {
             "$ref": "#/components/schemas/LaunchplaneAuthzPolicy-Output"
           },
@@ -12922,6 +13033,357 @@
           "reason"
         ],
         "title": "ManagedAuthzPolicySetProposalInput",
+        "type": "object"
+      },
+      "ManagedMergeTrainPolicyImportAgentSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "active_target_count": {
+            "minimum": 0.0,
+            "title": "Active Target Count",
+            "type": "integer"
+          },
+          "added_policy_keys": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Added Policy Keys",
+            "type": "array"
+          },
+          "candidate_target_count": {
+            "minimum": 0.0,
+            "title": "Candidate Target Count",
+            "type": "integer"
+          },
+          "changed_policy_keys": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Changed Policy Keys",
+            "type": "array"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "descriptor_id": {
+            "const": "managed-merge-train-policy-import",
+            "default": "managed-merge-train-policy-import",
+            "title": "Descriptor Id",
+            "type": "string"
+          },
+          "descriptor_version": {
+            "title": "Descriptor Version",
+            "type": "integer"
+          },
+          "expires_at": {
+            "title": "Expires At",
+            "type": "string"
+          },
+          "operation_id": {
+            "title": "Operation Id",
+            "type": "string"
+          },
+          "removed_policy_keys": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Removed Policy Keys",
+            "type": "array"
+          },
+          "result_status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Result Status",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "planned",
+              "approved",
+              "revoked",
+              "executing",
+              "executed",
+              "execution_failed",
+              "expired",
+              "cancelled"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "unchanged_policy_key_count": {
+            "minimum": 0.0,
+            "title": "Unchanged Policy Key Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "operation_id",
+          "descriptor_version",
+          "status",
+          "active_target_count",
+          "candidate_target_count",
+          "unchanged_policy_key_count",
+          "created_at",
+          "expires_at"
+        ],
+        "title": "ManagedMergeTrainPolicyImportAgentSummary",
+        "type": "object"
+      },
+      "ManagedMergeTrainPolicyImportExecutionEvidence": {
+        "additionalProperties": false,
+        "description": "Redacted merge-train policy transition evidence written by the worker.",
+        "properties": {
+          "active_policy_count": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Active Policy Count",
+            "type": "integer"
+          },
+          "changed": {
+            "title": "Changed",
+            "type": "boolean"
+          },
+          "failure_code": {
+            "default": "",
+            "maxLength": 160,
+            "title": "Failure Code",
+            "type": "string"
+          },
+          "previous_policy_sha256": {
+            "default": "",
+            "title": "Previous Policy Sha256",
+            "type": "string"
+          },
+          "previous_record_id": {
+            "default": "",
+            "title": "Previous Record Id",
+            "type": "string"
+          },
+          "reconciliation_required": {
+            "title": "Reconciliation Required",
+            "type": "boolean"
+          },
+          "result_digest": {
+            "title": "Result Digest",
+            "type": "string"
+          },
+          "result_status": {
+            "enum": [
+              "ok",
+              "error"
+            ],
+            "title": "Result Status",
+            "type": "string"
+          },
+          "resulting_policy_sha256": {
+            "default": "",
+            "title": "Resulting Policy Sha256",
+            "type": "string"
+          },
+          "resulting_record_id": {
+            "default": "",
+            "title": "Resulting Record Id",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "superseded_policy_sha256": {
+            "default": "",
+            "title": "Superseded Policy Sha256",
+            "type": "string"
+          },
+          "superseded_record_id": {
+            "default": "",
+            "title": "Superseded Record Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "result_status",
+          "result_digest",
+          "changed",
+          "reconciliation_required"
+        ],
+        "title": "ManagedMergeTrainPolicyImportExecutionEvidence",
+        "type": "object"
+      },
+      "ManagedMergeTrainPolicyImportHumanEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "active_policy_sha256": {
+            "title": "Active Policy Sha256",
+            "type": "string"
+          },
+          "active_record_id": {
+            "title": "Active Record Id",
+            "type": "string"
+          },
+          "active_status": {
+            "const": "active",
+            "default": "active",
+            "title": "Active Status",
+            "type": "string"
+          },
+          "active_target_count": {
+            "minimum": 0.0,
+            "title": "Active Target Count",
+            "type": "integer"
+          },
+          "active_updated_at": {
+            "title": "Active Updated At",
+            "type": "string"
+          },
+          "added_policy_keys": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Added Policy Keys",
+            "type": "array"
+          },
+          "candidate_policy_sha256": {
+            "title": "Candidate Policy Sha256",
+            "type": "string"
+          },
+          "candidate_record_id": {
+            "title": "Candidate Record Id",
+            "type": "string"
+          },
+          "candidate_target_count": {
+            "minimum": 0.0,
+            "title": "Candidate Target Count",
+            "type": "integer"
+          },
+          "changed_policy_keys": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Changed Policy Keys",
+            "type": "array"
+          },
+          "plan_digest": {
+            "title": "Plan Digest",
+            "type": "string"
+          },
+          "removed_policy_keys": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Removed Policy Keys",
+            "type": "array"
+          },
+          "result_status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Result Status",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "unchanged_policy_keys": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Unchanged Policy Keys",
+            "type": "array"
+          }
+        },
+        "required": [
+          "plan_digest",
+          "active_record_id",
+          "active_updated_at",
+          "active_policy_sha256",
+          "active_target_count",
+          "candidate_record_id",
+          "candidate_policy_sha256",
+          "candidate_target_count"
+        ],
+        "title": "ManagedMergeTrainPolicyImportHumanEvidence",
+        "type": "object"
+      },
+      "ManagedMergeTrainPolicyImportProposalInput-Input": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "maxLength": 240,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          },
+          "record": {
+            "$ref": "#/components/schemas/MergeTrainPolicyRecord-Input"
+          },
+          "related_issue": {
+            "default": "",
+            "maxLength": 128,
+            "title": "Related Issue",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "record",
+          "reason"
+        ],
+        "title": "ManagedMergeTrainPolicyImportProposalInput",
+        "type": "object"
+      },
+      "ManagedMergeTrainPolicyImportProposalInput-Output": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "maxLength": 240,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          },
+          "record": {
+            "$ref": "#/components/schemas/MergeTrainPolicyRecord-Output"
+          },
+          "related_issue": {
+            "default": "",
+            "maxLength": 128,
+            "title": "Related Issue",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "record",
+          "reason"
+        ],
+        "title": "ManagedMergeTrainPolicyImportProposalInput",
         "type": "object"
       },
       "ManagedSecretReencryptionHumanEvidence": {
@@ -15325,6 +15787,82 @@
         "title": "MergeTrainDryRunQueueEntrySummary",
         "type": "object"
       },
+      "MergeTrainEnqueuePolicy-Input": {
+        "additionalProperties": false,
+        "properties": {
+          "allowed_actor_roles": {
+            "default": [
+              "repo_owner",
+              "repo_admin"
+            ],
+            "items": {
+              "enum": [
+                "repo_owner",
+                "repo_admin"
+              ],
+              "type": "string"
+            },
+            "title": "Allowed Actor Roles",
+            "type": "array"
+          },
+          "label_required": {
+            "default": true,
+            "title": "Label Required",
+            "type": "boolean"
+          },
+          "trusted_automation_github_user_ids": {
+            "default": [],
+            "items": {
+              "exclusiveMinimum": 0.0,
+              "type": "integer"
+            },
+            "title": "Trusted Automation Github User Ids",
+            "type": "array"
+          }
+        },
+        "title": "MergeTrainEnqueuePolicy",
+        "type": "object"
+      },
+      "MergeTrainEnqueuePolicy-Output": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "MergeTrainGitHubTokenSource": {
+        "additionalProperties": false,
+        "properties": {
+          "env_var": {
+            "default": "",
+            "title": "Env Var",
+            "type": "string"
+          }
+        },
+        "title": "MergeTrainGitHubTokenSource",
+        "type": "object"
+      },
+      "MergeTrainIdentity": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "enum": [
+              "github_actions_oidc",
+              "github_app",
+              "github_token_secret"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "name"
+        ],
+        "title": "MergeTrainIdentity",
+        "type": "object"
+      },
       "MergeTrainLatestDryRunSummary": {
         "additionalProperties": false,
         "properties": {
@@ -15371,6 +15909,148 @@
           "eligible_count"
         ],
         "title": "MergeTrainLatestDryRunSummary",
+        "type": "object"
+      },
+      "MergeTrainPolicy-Input": {
+        "additionalProperties": false,
+        "properties": {
+          "policies": {
+            "items": {
+              "$ref": "#/components/schemas/MergeTrainRepositoryPolicy-Input"
+            },
+            "title": "Policies",
+            "type": "array"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "policies"
+        ],
+        "title": "MergeTrainPolicy",
+        "type": "object"
+      },
+      "MergeTrainPolicy-Output": {
+        "additionalProperties": false,
+        "properties": {
+          "policies": {
+            "items": {
+              "$ref": "#/components/schemas/MergeTrainRepositoryPolicy-Output"
+            },
+            "title": "Policies",
+            "type": "array"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "policies"
+        ],
+        "title": "MergeTrainPolicy",
+        "type": "object"
+      },
+      "MergeTrainPolicyRecord-Input": {
+        "additionalProperties": false,
+        "properties": {
+          "policy": {
+            "$ref": "#/components/schemas/MergeTrainPolicy-Input"
+          },
+          "policy_sha256": {
+            "default": "",
+            "title": "Policy Sha256",
+            "type": "string"
+          },
+          "record_id": {
+            "title": "Record Id",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "status": {
+            "default": "active",
+            "enum": [
+              "active",
+              "superseded"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "record_id",
+          "source",
+          "updated_at",
+          "policy"
+        ],
+        "title": "MergeTrainPolicyRecord",
+        "type": "object"
+      },
+      "MergeTrainPolicyRecord-Output": {
+        "additionalProperties": false,
+        "properties": {
+          "policy": {
+            "$ref": "#/components/schemas/MergeTrainPolicy-Output"
+          },
+          "policy_sha256": {
+            "default": "",
+            "title": "Policy Sha256",
+            "type": "string"
+          },
+          "record_id": {
+            "title": "Record Id",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "status": {
+            "default": "active",
+            "enum": [
+              "active",
+              "superseded"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "record_id",
+          "source",
+          "updated_at",
+          "policy"
+        ],
+        "title": "MergeTrainPolicyRecord",
         "type": "object"
       },
       "MergeTrainPolicySummary": {
@@ -15459,6 +16139,164 @@
           "targets"
         ],
         "title": "MergeTrainPolicyTargetsResponse",
+        "type": "object"
+      },
+      "MergeTrainRepositoryPolicy-Input": {
+        "additionalProperties": false,
+        "properties": {
+          "base_branch": {
+            "title": "Base Branch",
+            "type": "string"
+          },
+          "blocked_label": {
+            "title": "Blocked Label",
+            "type": "string"
+          },
+          "engineering_review_mode": {
+            "default": "advisory",
+            "enum": [
+              "advisory",
+              "required"
+            ],
+            "title": "Engineering Review Mode",
+            "type": "string"
+          },
+          "enqueue": {
+            "$ref": "#/components/schemas/MergeTrainEnqueuePolicy-Input"
+          },
+          "enqueue_label": {
+            "title": "Enqueue Label",
+            "type": "string"
+          },
+          "failure_policy": {
+            "enum": [
+              "pause_train",
+              "continue_after_blocking_pr"
+            ],
+            "title": "Failure Policy",
+            "type": "string"
+          },
+          "github_token": {
+            "$ref": "#/components/schemas/MergeTrainGitHubTokenSource"
+          },
+          "merge_identity": {
+            "$ref": "#/components/schemas/MergeTrainIdentity"
+          },
+          "merge_method": {
+            "enum": [
+              "merge",
+              "squash",
+              "rebase"
+            ],
+            "title": "Merge Method",
+            "type": "string"
+          },
+          "repository": {
+            "title": "Repository",
+            "type": "string"
+          },
+          "scheduler": {
+            "$ref": "#/components/schemas/MergeTrainSchedulerPolicy"
+          },
+          "service_authz": {
+            "$ref": "#/components/schemas/MergeTrainServiceAuthz"
+          },
+          "stack_child_disposition_label": {
+            "default": "",
+            "title": "Stack Child Disposition Label",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repository",
+          "base_branch",
+          "enqueue_label",
+          "blocked_label",
+          "merge_method",
+          "failure_policy",
+          "enqueue",
+          "merge_identity"
+        ],
+        "title": "MergeTrainRepositoryPolicy",
+        "type": "object"
+      },
+      "MergeTrainRepositoryPolicy-Output": {
+        "additionalProperties": false,
+        "properties": {
+          "base_branch": {
+            "title": "Base Branch",
+            "type": "string"
+          },
+          "blocked_label": {
+            "title": "Blocked Label",
+            "type": "string"
+          },
+          "engineering_review_mode": {
+            "default": "advisory",
+            "enum": [
+              "advisory",
+              "required"
+            ],
+            "title": "Engineering Review Mode",
+            "type": "string"
+          },
+          "enqueue": {
+            "$ref": "#/components/schemas/MergeTrainEnqueuePolicy-Output"
+          },
+          "enqueue_label": {
+            "title": "Enqueue Label",
+            "type": "string"
+          },
+          "failure_policy": {
+            "enum": [
+              "pause_train",
+              "continue_after_blocking_pr"
+            ],
+            "title": "Failure Policy",
+            "type": "string"
+          },
+          "github_token": {
+            "$ref": "#/components/schemas/MergeTrainGitHubTokenSource"
+          },
+          "merge_identity": {
+            "$ref": "#/components/schemas/MergeTrainIdentity"
+          },
+          "merge_method": {
+            "enum": [
+              "merge",
+              "squash",
+              "rebase"
+            ],
+            "title": "Merge Method",
+            "type": "string"
+          },
+          "repository": {
+            "title": "Repository",
+            "type": "string"
+          },
+          "scheduler": {
+            "$ref": "#/components/schemas/MergeTrainSchedulerPolicy"
+          },
+          "service_authz": {
+            "$ref": "#/components/schemas/MergeTrainServiceAuthz"
+          },
+          "stack_child_disposition_label": {
+            "default": "",
+            "title": "Stack Child Disposition Label",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repository",
+          "base_branch",
+          "enqueue_label",
+          "blocked_label",
+          "merge_method",
+          "failure_policy",
+          "enqueue",
+          "merge_identity"
+        ],
+        "title": "MergeTrainRepositoryPolicy",
         "type": "object"
       },
       "MergeTrainRunRecord": {
@@ -20351,7 +21189,8 @@
           "descriptor_id": {
             "enum": [
               "managed-secret-reencryption",
-              "managed-authz-policy-set"
+              "managed-authz-policy-set",
+              "managed-merge-train-policy-import"
             ],
             "title": "Descriptor Id",
             "type": "string"
@@ -20461,6 +21300,9 @@
               },
               {
                 "$ref": "#/components/schemas/ManagedAuthzPolicySetAgentSummary"
+              },
+              {
+                "$ref": "#/components/schemas/ManagedMergeTrainPolicyImportAgentSummary"
               }
             ],
             "title": "Summary"
@@ -20487,7 +21329,8 @@
           "descriptor_id": {
             "enum": [
               "managed-secret-reencryption",
-              "managed-authz-policy-set"
+              "managed-authz-policy-set",
+              "managed-merge-train-policy-import"
             ],
             "title": "Descriptor Id",
             "type": "string"
@@ -20882,7 +21725,8 @@
             "default": "managed-secret-reencryption",
             "enum": [
               "managed-secret-reencryption",
-              "managed-authz-policy-set"
+              "managed-authz-policy-set",
+              "managed-merge-train-policy-import"
             ],
             "title": "Descriptor Id",
             "type": "string"
@@ -20901,6 +21745,9 @@
               },
               {
                 "$ref": "#/components/schemas/ManagedAuthzPolicySetProposalInput-Input"
+              },
+              {
+                "$ref": "#/components/schemas/ManagedMergeTrainPolicyImportProposalInput-Input"
               }
             ],
             "title": "Request"
@@ -20945,7 +21792,8 @@
           "descriptor_id": {
             "enum": [
               "managed-secret-reencryption",
-              "managed-authz-policy-set"
+              "managed-authz-policy-set",
+              "managed-merge-train-policy-import"
             ],
             "title": "Descriptor Id",
             "type": "string"
@@ -20963,6 +21811,9 @@
               },
               {
                 "$ref": "#/components/schemas/ManagedAuthzPolicySetHumanEvidence"
+              },
+              {
+                "$ref": "#/components/schemas/ManagedMergeTrainPolicyImportHumanEvidence"
               }
             ],
             "title": "Evidence"
@@ -20978,6 +21829,9 @@
               },
               {
                 "$ref": "#/components/schemas/ManagedAuthzPolicySetExecutionEvidence"
+              },
+              {
+                "$ref": "#/components/schemas/ManagedMergeTrainPolicyImportExecutionEvidence"
               },
               {
                 "type": "null"
@@ -21000,6 +21854,9 @@
               },
               {
                 "$ref": "#/components/schemas/ManagedAuthzPolicySetProposalInput-Output"
+              },
+              {
+                "$ref": "#/components/schemas/ManagedMergeTrainPolicyImportProposalInput-Output"
               }
             ],
             "title": "Request"
@@ -21120,8 +21977,11 @@
         "additionalProperties": false,
         "properties": {
           "descriptor_id": {
-            "const": "managed-authz-policy-set",
             "default": "managed-authz-policy-set",
+            "enum": [
+              "managed-authz-policy-set",
+              "managed-merge-train-policy-import"
+            ],
             "title": "Descriptor Id",
             "type": "string"
           },
@@ -21133,7 +21993,15 @@
             "type": "integer"
           },
           "request": {
-            "$ref": "#/components/schemas/ManagedAuthzPolicySetProposalInput-Input"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ManagedAuthzPolicySetProposalInput-Input"
+              },
+              {
+                "$ref": "#/components/schemas/ManagedMergeTrainPolicyImportProposalInput-Input"
+              }
+            ],
+            "title": "Request"
           },
           "schema_version": {
             "default": 1,
@@ -21171,6 +22039,9 @@
               },
               {
                 "$ref": "#/components/schemas/ManagedAuthzPolicySetAgentSummary"
+              },
+              {
+                "$ref": "#/components/schemas/ManagedMergeTrainPolicyImportAgentSummary"
               }
             ],
             "title": "Summary"
@@ -33633,6 +34504,88 @@
         "title": "SecretStatusResponse",
         "type": "object"
       },
+      "SoloAdministrationConfirmationResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "active_policy_record_id": {
+            "title": "Active Policy Record Id",
+            "type": "string"
+          },
+          "active_policy_revision": {
+            "title": "Active Policy Revision",
+            "type": "integer"
+          },
+          "active_policy_sha256": {
+            "title": "Active Policy Sha256",
+            "type": "string"
+          },
+          "candidate_policy_sha256": {
+            "title": "Candidate Policy Sha256",
+            "type": "string"
+          },
+          "confirmation_id": {
+            "title": "Confirmation Id",
+            "type": "string"
+          },
+          "expires_at": {
+            "title": "Expires At",
+            "type": "string"
+          },
+          "github_id": {
+            "title": "Github Id",
+            "type": "integer"
+          },
+          "reviewed_plan_sha256": {
+            "title": "Reviewed Plan Sha256",
+            "type": "string"
+          },
+          "secret": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Secret"
+          },
+          "state": {
+            "enum": [
+              "issued",
+              "consumed",
+              "revoked",
+              "expired"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "issued",
+              "consumed",
+              "revoked",
+              "expired"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "state",
+          "confirmation_id",
+          "active_policy_record_id",
+          "active_policy_revision",
+          "active_policy_sha256",
+          "candidate_policy_sha256",
+          "reviewed_plan_sha256",
+          "github_id",
+          "expires_at"
+        ],
+        "title": "SoloAdministrationConfirmationResponse",
+        "type": "object"
+      },
       "StructuredHealthEvidence": {
         "additionalProperties": false,
         "properties": {
@@ -38125,6 +39078,16 @@
               "title": "Return To",
               "type": "string"
             }
+          },
+          {
+            "in": "query",
+            "name": "reauthenticate",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Reauthenticate",
+              "type": "boolean"
+            }
           }
         ],
         "responses": {
@@ -40084,11 +41047,31 @@
           },
           {
             "in": "header",
+            "name": "X-Solo-Administration-Confirmation-Secret",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "X-Solo-Administration-Confirmation-Secret",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
             "name": "Authorization",
             "required": false,
             "schema": {
               "default": "",
               "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
               "type": "string"
             }
           }
@@ -40324,6 +41307,18 @@
                   "LaunchplaneAuthzPolicy": {
                     "additionalProperties": false,
                     "properties": {
+                      "administrator_quorum": {
+                        "anyOf": [
+                          {
+                            "minimum": 1,
+                            "type": "integer"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "Administrator Quorum"
+                      },
                       "github_actions": {
                         "default": [],
                         "items": {
@@ -40611,6 +41606,18 @@
                 },
                 "additionalProperties": false,
                 "properties": {
+                  "administrator_quorum_change": {
+                    "anyOf": [
+                      {
+                        "minimum": 1,
+                        "type": "integer"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "title": "Administrator Quorum Change"
+                  },
                   "desired_policy": {
                     "$ref": "#/$defs/LaunchplaneAuthzPolicy"
                   },
@@ -40660,6 +41667,11 @@
                     "default": 2,
                     "title": "Schema Version",
                     "type": "integer"
+                  },
+                  "solo_administration_confirmation_id": {
+                    "default": "",
+                    "title": "Solo Administration Confirmation Id",
+                    "type": "string"
                   },
                   "unmanaged_adoption": {
                     "default": "reject",
@@ -40836,6 +41848,946 @@
           }
         },
         "summary": "Read redacted authorization policy revision history"
+      }
+    },
+    "/v1/authz-policies/solo-administration-confirmations": {
+      "post": {
+        "operationId": "issue_solo_administration_confirmation",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$defs": {
+                  "AuthzManagedPolicyReconcileEnvelope": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "administrator_quorum_change": {
+                        "anyOf": [
+                          {
+                            "minimum": 1,
+                            "type": "integer"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "Administrator Quorum Change"
+                      },
+                      "desired_policy": {
+                        "$ref": "#/$defs/LaunchplaneAuthzPolicy"
+                      },
+                      "managed_set_id": {
+                        "title": "Managed Set Id",
+                        "type": "string"
+                      },
+                      "mode": {
+                        "default": "dry_run",
+                        "enum": [
+                          "dry_run",
+                          "apply"
+                        ],
+                        "title": "Mode",
+                        "type": "string"
+                      },
+                      "product": {
+                        "title": "Product",
+                        "type": "string"
+                      },
+                      "reason": {
+                        "default": "",
+                        "title": "Reason",
+                        "type": "string"
+                      },
+                      "related_issue": {
+                        "default": "",
+                        "title": "Related Issue",
+                        "type": "string"
+                      },
+                      "reviewed_plan_sha256": {
+                        "default": "",
+                        "title": "Reviewed Plan Sha256",
+                        "type": "string"
+                      },
+                      "schema_migration": {
+                        "default": "reject",
+                        "enum": [
+                          "reject",
+                          "migrate_v1_to_v2"
+                        ],
+                        "title": "Schema Migration",
+                        "type": "string"
+                      },
+                      "schema_version": {
+                        "const": 2,
+                        "default": 2,
+                        "title": "Schema Version",
+                        "type": "integer"
+                      },
+                      "solo_administration_confirmation_id": {
+                        "default": "",
+                        "title": "Solo Administration Confirmation Id",
+                        "type": "string"
+                      },
+                      "unmanaged_adoption": {
+                        "default": "reject",
+                        "enum": [
+                          "reject",
+                          "adopt_matching"
+                        ],
+                        "title": "Unmanaged Adoption",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "product",
+                      "managed_set_id",
+                      "desired_policy"
+                    ],
+                    "title": "AuthzManagedPolicyReconcileEnvelope",
+                    "type": "object"
+                  },
+                  "GitHubActionsPolicyRule": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "actions": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Actions",
+                        "type": "array"
+                      },
+                      "contexts": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Contexts",
+                        "type": "array"
+                      },
+                      "environments": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Environments",
+                        "type": "array"
+                      },
+                      "event_names": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Event Names",
+                        "type": "array"
+                      },
+                      "instances": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Instances",
+                        "type": "array"
+                      },
+                      "job_workflow_refs": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Job Workflow Refs",
+                        "type": "array"
+                      },
+                      "managed_rule_id": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "Managed Rule Id"
+                      },
+                      "managed_set_id": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "Managed Set Id"
+                      },
+                      "products": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Products",
+                        "type": "array"
+                      },
+                      "refs": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Refs",
+                        "type": "array"
+                      },
+                      "repository": {
+                        "title": "Repository",
+                        "type": "string"
+                      },
+                      "repository_id": {
+                        "default": "",
+                        "title": "Repository Id",
+                        "type": "string"
+                      },
+                      "repository_owner_id": {
+                        "default": "",
+                        "title": "Repository Owner Id",
+                        "type": "string"
+                      },
+                      "workflow_refs": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Workflow Refs",
+                        "type": "array"
+                      }
+                    },
+                    "required": [
+                      "repository"
+                    ],
+                    "title": "GitHubActionsPolicyRule",
+                    "type": "object"
+                  },
+                  "GitHubHumanPolicyRule": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "actions": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Actions",
+                        "type": "array"
+                      },
+                      "contexts": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Contexts",
+                        "type": "array"
+                      },
+                      "github_ids": {
+                        "default": [],
+                        "items": {
+                          "type": "integer"
+                        },
+                        "title": "Github Ids",
+                        "type": "array"
+                      },
+                      "instances": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Instances",
+                        "type": "array"
+                      },
+                      "logins": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Logins",
+                        "type": "array"
+                      },
+                      "managed_rule_id": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "Managed Rule Id"
+                      },
+                      "managed_set_id": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "Managed Set Id"
+                      },
+                      "organizations": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Organizations",
+                        "type": "array"
+                      },
+                      "products": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Products",
+                        "type": "array"
+                      },
+                      "roles": {
+                        "default": [],
+                        "items": {
+                          "enum": [
+                            "read_only",
+                            "admin"
+                          ],
+                          "type": "string"
+                        },
+                        "title": "Roles",
+                        "type": "array"
+                      },
+                      "teams": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Teams",
+                        "type": "array"
+                      }
+                    },
+                    "title": "GitHubHumanPolicyRule",
+                    "type": "object"
+                  },
+                  "LaunchplaneAuthzPolicy": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "administrator_quorum": {
+                        "anyOf": [
+                          {
+                            "minimum": 1,
+                            "type": "integer"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "Administrator Quorum"
+                      },
+                      "github_actions": {
+                        "default": [],
+                        "items": {
+                          "$ref": "#/$defs/GitHubActionsPolicyRule"
+                        },
+                        "title": "Github Actions",
+                        "type": "array"
+                      },
+                      "github_humans": {
+                        "default": [],
+                        "items": {
+                          "$ref": "#/$defs/GitHubHumanPolicyRule"
+                        },
+                        "title": "Github Humans",
+                        "type": "array"
+                      },
+                      "local_admins": {
+                        "default": [],
+                        "items": {
+                          "$ref": "#/$defs/LocalAdminPolicyRule"
+                        },
+                        "title": "Local Admins",
+                        "type": "array"
+                      },
+                      "local_operators": {
+                        "default": [],
+                        "items": {
+                          "$ref": "#/$defs/LocalOperatorPolicyRule"
+                        },
+                        "title": "Local Operators",
+                        "type": "array"
+                      },
+                      "schema_version": {
+                        "default": 1,
+                        "enum": [
+                          1,
+                          2
+                        ],
+                        "title": "Schema Version",
+                        "type": "integer"
+                      },
+                      "terminal_agents": {
+                        "default": [],
+                        "items": {
+                          "$ref": "#/$defs/TerminalAgentPolicyRule"
+                        },
+                        "title": "Terminal Agents",
+                        "type": "array"
+                      }
+                    },
+                    "title": "LaunchplaneAuthzPolicy",
+                    "type": "object"
+                  },
+                  "LocalAdminPolicyRule": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "actions": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Actions",
+                        "type": "array"
+                      },
+                      "contexts": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Contexts",
+                        "type": "array"
+                      },
+                      "instances": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Instances",
+                        "type": "array"
+                      },
+                      "managed_rule_id": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "Managed Rule Id"
+                      },
+                      "managed_set_id": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "Managed Set Id"
+                      },
+                      "products": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Products",
+                        "type": "array"
+                      },
+                      "subjects": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Subjects",
+                        "type": "array"
+                      },
+                      "token_labels": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Token Labels",
+                        "type": "array"
+                      }
+                    },
+                    "title": "LocalAdminPolicyRule",
+                    "type": "object"
+                  },
+                  "LocalOperatorPolicyRule": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "actions": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Actions",
+                        "type": "array"
+                      },
+                      "contexts": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Contexts",
+                        "type": "array"
+                      },
+                      "instances": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Instances",
+                        "type": "array"
+                      },
+                      "managed_rule_id": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "Managed Rule Id"
+                      },
+                      "managed_set_id": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "Managed Set Id"
+                      },
+                      "products": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Products",
+                        "type": "array"
+                      },
+                      "subjects": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Subjects",
+                        "type": "array"
+                      },
+                      "token_labels": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Token Labels",
+                        "type": "array"
+                      }
+                    },
+                    "title": "LocalOperatorPolicyRule",
+                    "type": "object"
+                  },
+                  "TerminalAgentPolicyRule": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "actions": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Actions",
+                        "type": "array"
+                      },
+                      "contexts": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Contexts",
+                        "type": "array"
+                      },
+                      "instances": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Instances",
+                        "type": "array"
+                      },
+                      "managed_rule_id": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "Managed Rule Id"
+                      },
+                      "managed_set_id": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "Managed Set Id"
+                      },
+                      "products": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Products",
+                        "type": "array"
+                      },
+                      "subjects": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Subjects",
+                        "type": "array"
+                      },
+                      "token_labels": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Token Labels",
+                        "type": "array"
+                      }
+                    },
+                    "title": "TerminalAgentPolicyRule",
+                    "type": "object"
+                  }
+                },
+                "additionalProperties": false,
+                "properties": {
+                  "acknowledgement": {
+                    "title": "Acknowledgement",
+                    "type": "string"
+                  },
+                  "reconcile": {
+                    "$ref": "#/$defs/AuthzManagedPolicyReconcileEnvelope"
+                  },
+                  "reviewed_plan_sha256": {
+                    "title": "Reviewed Plan Sha256",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "reconcile",
+                  "reviewed_plan_sha256",
+                  "acknowledgement"
+                ],
+                "title": "SoloAdministrationConfirmationIssueRequest",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SoloAdministrationConfirmationResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Issue a one-time solo-administration confirmation"
+      }
+    },
+    "/v1/authz-policies/solo-administration-confirmations/{confirmation_id}": {
+      "get": {
+        "operationId": "read_solo_administration_confirmation",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "confirmation_id",
+            "required": true,
+            "schema": {
+              "title": "Confirmation Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SoloAdministrationConfirmationResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read one-time solo-administration confirmation evidence"
+      }
+    },
+    "/v1/authz-policies/solo-administration-confirmations/{confirmation_id}/revoke": {
+      "post": {
+        "operationId": "revoke_solo_administration_confirmation",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "confirmation_id",
+            "required": true,
+            "schema": {
+              "title": "Confirmation Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SoloAdministrationConfirmationResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Revoke one-time solo-administration confirmation evidence"
       }
     },
     "/v1/change-impact/evaluation": {
@@ -63534,7 +65486,8 @@
               "default": "managed-secret-reencryption",
               "enum": [
                 "managed-secret-reencryption",
-                "managed-authz-policy-set"
+                "managed-authz-policy-set",
+                "managed-merge-train-policy-import"
               ],
               "title": "Descriptor Id",
               "type": "string"

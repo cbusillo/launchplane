@@ -1283,6 +1283,7 @@ def _advance_active_candidate_record(
             "candidate": active_candidate_record.candidate.model_dump(mode="json"),
         }
 
+    candidate_build_error: MergeTrainGitHubStaleHeadError | None = None
     if active_candidate_record.candidate.status in {"planned", "building"}:
         controller_action = "build_candidate"
         if request.mutate:
@@ -1318,14 +1319,20 @@ def _advance_active_candidate_record(
                 },
             )
 
-        candidate = (
-            github_client.build_batch_candidate(
-                candidate=active_candidate_record.candidate,
-                checkpoint=checkpoint_candidate_progress,
-            )
-            if request.mutate
-            else active_candidate_record.candidate
-        )
+        if request.mutate:
+            try:
+                candidate = github_client.build_batch_candidate(
+                    candidate=active_candidate_record.candidate,
+                    checkpoint=checkpoint_candidate_progress,
+                )
+            except MergeTrainGitHubStaleHeadError as error:
+                controller_action = "candidate_failed"
+                candidate_build_error = error
+                candidate = active_candidate_record.candidate.model_copy(
+                    update={"status": "failed", "updated_at": recorded_at}
+                )
+        else:
+            candidate = active_candidate_record.candidate
     else:
         controller_action = "observe_candidate"
         if request.mutate:
@@ -1354,6 +1361,19 @@ def _advance_active_candidate_record(
         "controller_action": controller_action,
         "merge_train_batch_candidate_record_id": active_candidate_record.record_id,
     }
+    if candidate_build_error is not None:
+        message = (
+            str(candidate_build_error).strip()
+            or "Merge train candidate evidence no longer matches GitHub."
+        )
+        result["error"] = {
+            "code": "merge_train_github_stale_state",
+            "message": message,
+        }
+        result["details"] = {
+            "github_status_code": candidate_build_error.status_code,
+            "failed_pull_request_number": lease.record.active_pull_request_number,
+        }
     if request.mutate:
         updated_candidate_record = build_merge_train_batch_candidate_record(
             candidate=candidate,
@@ -1987,11 +2007,12 @@ def try_reflow_failed_merge_train_candidate(
     dry_run_result = build_merge_train_dry_run_result(policy=policy, snapshot=snapshot)
     if dry_run_result.intended_next_action != "merge":
         return None
-    if _merge_train_candidate_matches_dry_run_queue(
+    queue_unchanged = _merge_train_candidate_matches_dry_run_queue(
         candidate=active_candidate_record.candidate,
         dry_run_result=dry_run_result,
         base_sha=snapshot.base_sha,
-    ):
+    )
+    if queue_unchanged and active_candidate_record.candidate.candidate_sha:
         return None
     candidate = build_merge_train_batch_candidate(
         dry_run_result=dry_run_result,

@@ -779,6 +779,17 @@ validation rather than widening a rule. Use dry-run and exact reviewed-digest
 apply, then remove the
 temporary selection after the DB-native policy-operation path removes its own
 bootstrap set and read-back proves the exception is gone.
+
+For the already-deployed unconfirmed activation, do not approve the inert
+`privileged-operation-78a8a92942bfb2b442530a15ad7946e2` plan and do not use a
+workflow, direct database command, or raw managed-policy payload to repair it.
+Use the deployed service's hidden browser-human recovery flow in order: reset
+only the exact active activation set with no consumed confirmation backing;
+fresh dry-run, acknowledgement, confirmation, and activation; then bootstrap
+retirement. The recovery diagnostic is read-only and returns only confirmation
+backing plus per-action managed-rule match cardinalities, never rule selectors
+or bodies.
+
 `LAUNCHPLANE_AUTHZ_MANAGED_SET_JSON` currently carries the primary operator set;
 `LAUNCHPLANE_AUTHZ_POLICY_RECONCILE_MANAGED_SET_JSON` owns the exact immutable
 policy-admin worker rules for the standalone authz wrapper and must declare the
@@ -920,11 +931,19 @@ weaken that control.
 
 Managed-authz dry-runs also return `policy_safety_blockers` for candidates that
 would remove the last reachable policy administrator, remove the applying
-administrator, or leave no administrator independent from the applying
-identity. These blockers are review evidence rather than dry-run transport
-errors. Apply remains fail-closed with the corresponding bounded error code and
-does not persist the candidate while any applicable policy-safety blocker
-remains.
+administrator, leave no reachable strict immutable-ID GitHub-human
+administrator, or fail the effective administrator quorum. Existing schema-v2
+policies without `administrator_quorum` use quorum `2`; changing that value is
+only possible through the explicit `administrator_quorum_change` request field,
+never by embedding it in `desired_policy`. Quorum counts distinct immutable
+GitHub IDs from strict human administrator rules only; workflows, bots, agents,
+local identities, and mutable selectors do not count. These blockers are review
+evidence rather than dry-run transport errors. Apply remains fail-closed with
+the corresponding bounded error code and does not persist the candidate while
+any applicable policy-safety blocker remains. A satisfied quorum of `1` with
+exactly one reachable strict human is
+reported as `solo_administration_active` and remains an owner-visible attention
+state.
 
 `Tracked Target Logs` and `Odoo Website Bootstrap Override` follow this same
 two-change rollout. Their dispatch files are thin operator entrypoints pinned to
@@ -1618,6 +1637,13 @@ The manual Merge Train Policy Import workflow uses GitHub OIDC with
 `merge_train.policy_import` authority for product/context `launchplane`. It does
 not inherit Launchplane self-deploy authority; use that workflow for DB-backed
 merge-train policy imports instead of direct DB writes from a local checkout.
+While issue `#2058` keeps routine workflow/local authorization grants frozen,
+new reviewed merge-train policy imports must go through
+`managed-merge-train-policy-import` privileged operations. Do not add a workflow
+secret/grant, local-operator grant, raw route proxy, or direct database fallback
+to perform a policy import; activate only the exact
+`merge_train_policy_operation.*` managed rules through the existing DB-native
+managed-authz privileged-operation lifecycle.
 
 The Dokploy-hosted Launchplane target should consume `DOCKER_IMAGE_REFERENCE` from
 its env so deploy automation can switch the service by immutable digest and
@@ -2056,6 +2082,9 @@ return a typed blocked result rather than guessing a domain.
   artifacts.
 - TOML/env files are not runtime import surfaces; use DB-native
   runtime-environment records and managed secrets instead.
+- VeriReel production promotion runs Prisma migrations with the runtime image's
+  local `./node_modules/.bin/prisma` binary. The production image intentionally
+  omits global `npm` and `npx`, so promotion must not depend on either command.
 - Product repos and GitHub issues must not contain product secret values. Put
   the JSON bundle on an operator-controlled machine or inside the hosted
   Launchplane execution context, run `--dry-run` first, then run `--apply` only

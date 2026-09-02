@@ -322,7 +322,7 @@ def _build_result(
 
 
 def _default_migration_command() -> str:
-    return "npx prisma migrate deploy --config prisma.config.ts"
+    return "./node_modules/.bin/prisma migrate deploy --config prisma.config.ts"
 
 
 def _default_migration_schedule_name() -> str:

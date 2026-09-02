@@ -16,6 +16,14 @@ from pydantic import BaseModel
 
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.agent_write_intent import AgentWriteIntentRecord
+from control_plane.contracts.administrator_enrollment import (
+    AdministratorEnrollmentConflictError,
+    AdministratorEnrollmentRecord,
+    complete_administrator_enrollment,
+    expire_administrator_enrollment,
+    prove_administrator_enrollment_control,
+    withdraw_administrator_enrollment,
+)
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.change_impact import ChangeImpactPolicyRecord
@@ -74,7 +82,10 @@ from control_plane.contracts.merge_train_stack_collapse import (
     MergeTrainStackCollapsePlanRecord,
 )
 from control_plane.contracts.merge_train_run_record import MergeTrainRunRecord
-from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
+from control_plane.contracts.merge_train_policy import (
+    MergeTrainPolicyCompareWriteResult,
+    MergeTrainPolicyRecord,
+)
 from control_plane.contracts.merge_train_pr_feedback_record import (
     MergeTrainPrFeedbackRecord,
 )
@@ -1792,7 +1803,103 @@ class FilesystemRecordStore:
         return self._write_model("launchplane_merge_train_runs", record.run_id, record)
 
     def write_merge_train_policy_record(self, record: MergeTrainPolicyRecord) -> Path:
-        return self._write_model("launchplane_merge_train_policies", record.record_id, record)
+        record_type = "launchplane_merge_train_policies"
+        with self._exclusive_record_lock(record_type, "active"):
+            existing_records = self._list_models_locked(MergeTrainPolicyRecord, record_type)
+            existing_record = next(
+                (item for item in existing_records if item.record_id == record.record_id),
+                None,
+            )
+            if (
+                existing_record is not None
+                and existing_record.policy_sha256 != record.policy_sha256
+            ):
+                raise ValueError(
+                    "Merge-train policy record ID cannot be reused for different policy content."
+                )
+            if record.status == "active":
+                for active_record in existing_records:
+                    if (
+                        active_record.status != "active"
+                        or active_record.record_id == record.record_id
+                    ):
+                        continue
+                    superseded_record = active_record.model_copy(update={"status": "superseded"})
+                    self._write_model_locked(
+                        record_type,
+                        superseded_record.record_id,
+                        superseded_record,
+                    )
+            return self._write_model_locked(record_type, record.record_id, record)
+
+    def read_merge_train_policy_record(self, record_id: str) -> MergeTrainPolicyRecord:
+        return self._read_model(
+            MergeTrainPolicyRecord,
+            "launchplane_merge_train_policies",
+            record_id,
+        )
+
+    def compare_and_write_merge_train_policy_record(
+        self,
+        *,
+        expected_record: MergeTrainPolicyRecord,
+        replacement_record: MergeTrainPolicyRecord,
+        mutation: object | None = None,
+    ) -> MergeTrainPolicyCompareWriteResult:
+        if mutation is not None:
+            raise TypeError(
+                "Filesystem merge-train policy compare-and-write does not support mutation idempotency."
+            )
+        if expected_record.status != "active":
+            raise ValueError("Merge-train policy compare-and-write expected record must be active.")
+        if replacement_record.status != "active":
+            raise ValueError("Merge-train policy compare-and-write replacement must be active.")
+        record_type = "launchplane_merge_train_policies"
+        with self._exclusive_record_lock(record_type, "active"):
+            policy_records = self._list_models_locked(MergeTrainPolicyRecord, record_type)
+            active_records = [record for record in policy_records if record.status == "active"]
+            if not active_records:
+                return MergeTrainPolicyCompareWriteResult(status="missing")
+            if len(active_records) > 1:
+                return MergeTrainPolicyCompareWriteResult(status="ambiguous_active")
+            current_record = active_records[0]
+            if (
+                current_record.record_id != expected_record.record_id
+                or current_record.policy_sha256 != expected_record.policy_sha256
+                or current_record.updated_at != expected_record.updated_at
+            ):
+                return MergeTrainPolicyCompareWriteResult(
+                    status="stale", current_record=current_record
+                )
+            if (
+                current_record.record_id == replacement_record.record_id
+                and current_record.policy_sha256 != replacement_record.policy_sha256
+            ):
+                return MergeTrainPolicyCompareWriteResult(
+                    status="record_id_conflict", current_record=current_record
+                )
+            if replacement_record.record_id != current_record.record_id and any(
+                record.record_id == replacement_record.record_id for record in policy_records
+            ):
+                return MergeTrainPolicyCompareWriteResult(
+                    status="record_id_conflict", current_record=current_record
+                )
+            if current_record.policy_sha256 == replacement_record.policy_sha256:
+                return MergeTrainPolicyCompareWriteResult(
+                    status="unchanged", current_record=current_record
+                )
+            superseded_record = current_record.model_copy(update={"status": "superseded"})
+            self._write_model_locked(record_type, superseded_record.record_id, superseded_record)
+            try:
+                self._write_model_locked(
+                    record_type, replacement_record.record_id, replacement_record
+                )
+            except Exception:
+                self._write_model_locked(record_type, current_record.record_id, current_record)
+                raise
+            return MergeTrainPolicyCompareWriteResult(
+                status="written", current_record=replacement_record
+            )
 
     def write_merge_train_pr_feedback_record(self, record: MergeTrainPrFeedbackRecord) -> Path:
         return self._write_model("launchplane_merge_train_pr_feedback", record.feedback_id, record)
@@ -6703,6 +6810,113 @@ class FilesystemRecordStore:
         if limit is not None:
             records = records[:limit]
         return tuple(records)
+
+    def create_administrator_enrollment_if_absent(
+        self, record: AdministratorEnrollmentRecord
+    ) -> tuple[AdministratorEnrollmentRecord, bool]:
+        record_type = "launchplane_administrator_enrollments"
+        with self._exclusive_record_lock(
+            "launchplane_administrator_enrollment_challenge_digests", "global"
+        ):
+            record_path = self._record_path(record_type, record.enrollment_id)
+            if record_path.exists():
+                existing = self._read_model_locked(
+                    AdministratorEnrollmentRecord, record_type, record.enrollment_id
+                )
+                if existing != record:
+                    raise AdministratorEnrollmentConflictError(
+                        "administrator enrollment creation conflicts with persisted record"
+                    )
+                return existing, False
+            for existing in self._list_models_locked(AdministratorEnrollmentRecord, record_type):
+                if existing.challenge_sha256 == record.challenge_sha256:
+                    raise AdministratorEnrollmentConflictError(
+                        "administrator enrollment challenge digest is already reserved"
+                    )
+            self._write_model_locked(record_type, record.enrollment_id, record)
+            return record, True
+
+    def read_administrator_enrollment(self, enrollment_id: str) -> AdministratorEnrollmentRecord:
+        return self._read_model(
+            AdministratorEnrollmentRecord, "launchplane_administrator_enrollments", enrollment_id
+        )
+
+    def _transition_administrator_enrollment(
+        self,
+        enrollment_id: str,
+        transition: Callable[[AdministratorEnrollmentRecord], AdministratorEnrollmentRecord],
+    ) -> AdministratorEnrollmentRecord:
+        record_type = "launchplane_administrator_enrollments"
+        with self._exclusive_record_lock(record_type, enrollment_id):
+            current = self._read_model_locked(
+                AdministratorEnrollmentRecord, record_type, enrollment_id
+            )
+            updated = transition(current)
+            if updated != current:
+                self._write_model_locked(record_type, enrollment_id, updated)
+            return updated
+
+    def prove_administrator_enrollment_control(
+        self,
+        *,
+        enrollment_id: str,
+        challenge: str,
+        server_derived_candidate_github_id: int,
+        control_proven_at: str,
+    ) -> AdministratorEnrollmentRecord:
+        return self._transition_administrator_enrollment(
+            enrollment_id,
+            lambda record: prove_administrator_enrollment_control(
+                record,
+                challenge=challenge,
+                server_derived_candidate_github_id=server_derived_candidate_github_id,
+                control_proven_at=control_proven_at,
+            ),
+        )
+
+    def expire_administrator_enrollment(
+        self, *, enrollment_id: str, expired_at: str
+    ) -> AdministratorEnrollmentRecord:
+        return self._transition_administrator_enrollment(
+            enrollment_id,
+            lambda record: expire_administrator_enrollment(record, expired_at=expired_at),
+        )
+
+    def withdraw_administrator_enrollment(
+        self, *, enrollment_id: str, proposer_github_id: int, withdrawn_at: str
+    ) -> AdministratorEnrollmentRecord:
+        return self._transition_administrator_enrollment(
+            enrollment_id,
+            lambda record: withdraw_administrator_enrollment(
+                record, proposer_github_id=proposer_github_id, withdrawn_at=withdrawn_at
+            ),
+        )
+
+    def complete_administrator_enrollment(
+        self,
+        *,
+        enrollment_id: str,
+        server_derived_candidate_github_id: int,
+        enrolled_at: str,
+        enrolled_policy_record_id: str,
+        enrolled_policy_revision: int,
+        enrolled_policy_sha256: str,
+        reviewed_plan_sha256: str,
+        bridge_idempotency_key_sha256: str,
+    ) -> AdministratorEnrollmentRecord:
+        return self._transition_administrator_enrollment(
+            enrollment_id,
+            lambda record: complete_administrator_enrollment(
+                record,
+                server_derived_candidate_github_id=server_derived_candidate_github_id,
+                enrolled_at=enrolled_at,
+                enrolled_policy_record_id=enrolled_policy_record_id,
+                enrolled_policy_revision=enrolled_policy_revision,
+                enrolled_policy_sha256=enrolled_policy_sha256,
+                reviewed_plan_sha256=reviewed_plan_sha256,
+                bridge_idempotency_key_sha256=bridge_idempotency_key_sha256,
+            ),
+        )
 
 
 def _odoo_target_replacement_lane_reservation_id(

@@ -339,7 +339,9 @@ class AuthzDenialExplanationResponse(BaseModel):
 AuthzPolicyHealthState: TypeAlias = Literal["healthy", "attention_required", "blocked"]
 AuthzPolicyHealthReasonCode: TypeAlias = Literal[
     "authz_policy_admin_unreachable",
-    "authz_policy_independent_admin_unreachable",
+    "authz_policy_strict_human_admin_unreachable",
+    "authz_policy_administrator_quorum_unsatisfied",
+    "authz_policy_solo_administration_active",
     "policy_schema_legacy",
     "unmanaged_rules_present",
     "github_actions_legacy_name_only_rules_present",
@@ -372,6 +374,10 @@ class AuthzPolicyHealthSummary(BaseModel):
 
     state: AuthzPolicyHealthState
     reason_codes: tuple[AuthzPolicyHealthReasonCode, ...]
+    administrator_quorum: int = Field(ge=1)
+    reachable_administrator_count: int = Field(ge=0)
+    quorum_satisfied: bool
+    solo_administration_active: bool
     managed_rule_count: int = Field(ge=0)
     unmanaged_rule_count: int = Field(ge=0)
     github_actions_legacy_name_only_rule_count: int = Field(ge=0)
@@ -404,8 +410,11 @@ class AuthzReachableAdministratorSummary(BaseModel):
     unmanaged_rule_count: int = Field(ge=0)
     principal_rule_counts: AuthzPrincipalRuleCounts
     caller_has_policy_administration: bool
-    independent_from_caller_reachable: bool
-    independent_from_caller_rule_count: int = Field(ge=0)
+    strict_github_human_rule_count: int = Field(ge=0)
+    strict_github_human_id_count: int = Field(ge=0)
+    administrator_quorum: int = Field(ge=1)
+    quorum_satisfied: bool
+    solo_administration_active: bool
 
 
 class AuthzPolicyHealthSnapshot(BaseModel):

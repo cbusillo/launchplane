@@ -119,6 +119,18 @@ re-derives the role from the active policy; session role, name, email, session
 ID, and cookie values are not authorization authority. The read never rotates
 CSRF state, commits, or writes session or authorization evidence.
 
+Solo-administration confirmation records remain schema-version-1 inert evidence
+for the closed issue `#2277` recovery candidates. Legacy records remain readable
+unchanged. A consumed confirmation is looked up by candidate policy digest,
+immutable GitHub ID, and the deterministic recovery idempotency scope through
+the bounded
+`lp_solo_admin_confirmation_consumed_recovery_idx`
+index; this proves backing for the exact recovery activation without storing
+recovery policy bodies or inventing evidence for historical revisions. The
+recovery route adds only ordinary policy revision and idempotency records plus
+the existing confirmation lifecycle event; it introduces no direct database
+mutation record or mutable recovery configuration.
+
 The production schema proof runs against real PostgreSQL, not SQLite:
 
 ```bash
@@ -2664,13 +2676,26 @@ review plus bounded diff and CAS/read-back evidence. See
 `docs/privileged-operations.md` for the full evidence and authorization
 boundary.
 
-The checked schema-version-4 `contracts/owner-control-contract.json` artifact is
+Managed merge-train policy import records retain the exact candidate policy
+record for authorized human review, while human evidence and agent summaries
+store only active/candidate IDs and digests, active updated time, target counts,
+and stable policy-key change buckets. Record timestamps must be timezone-aware,
+and a privileged candidate record ID cannot reuse any active or superseded
+history ID. PostgreSQL enforces one active
+`launchplane_merge_train_policies` record with a partial unique active index;
+the privileged worker uses atomic expected-active-policy compare-and-write,
+operation-scoped idempotency, and exact active/superseded read-back before an
+operation reaches `executed`.
+
+The checked schema-version-5 `contracts/owner-control-contract.json` artifact is
 not a record or runtime authority. It supplies deterministic cross-host
 serialization, synthetic wire/signature vectors, complete shadow-verifier
-outcome vectors, one reactive expiry-lifecycle vector, and exhaustive inert
-enrollment-provenance vectors. Its compatibility declaration pins every
-version-3 top-level section digest so provenance cannot silently rewrite the
-existing wire, verification, or lifecycle contracts.
+outcome vectors, one reactive expiry-lifecycle vector, managed merge-train
+policy descriptor coverage, and exhaustive inert enrollment-provenance vectors.
+Its compatibility declaration pins every version-4 top-level section while
+retaining the exact version-2 section, descriptor-scoped vector, and filtered
+schema digests carried by version `4`, so provenance cannot silently rewrite
+existing wire, verification, lifecycle, or descriptor contracts.
 
 Owner-control shadow-verifier state is persisted only in PostgreSQL through
 `PostgresRecordStore`: `launchplane_owner_control_channel_sessions` stores one
@@ -2714,6 +2739,26 @@ The challenge `terminal_event_id` prefix identifies whether the terminal record
 came from the lifecycle ledger or the envelope-bound shadow-verification ledger.
 Issuance never updates the privileged operation current projection or its
 append-only event ledger.
+
+`AdministratorEnrollmentRecord` is a separate, versioned, inert preparation
+record for a future second control-proven GitHub-human policy administrator.
+PostgreSQL stores it in `launchplane_administrator_enrollments`; filesystem
+storage mirrors it only for local/test/rehearsal parity. It retains an immutable
+proposer GitHub ID, a server-derived candidate GitHub ID only after a successful
+control proof, reason/provenance SHA-256 digests, lifecycle timestamps, and only an
+opaque single-use challenge SHA-256 digest—never the plaintext challenge.
+Challenges last exactly 30 minutes. The typed lifecycle is
+`issued -> control_proven -> enrolled`, with proposer-only withdrawal before
+enrollment and expiry from either nonterminal state. Exact terminal replay is
+idempotent, while conflicting replay fails closed. Final enrollment requires the
+exact active policy record ID, revision, policy digest, reviewed-plan digest,
+and bridge idempotency-key digest produced by the separately reviewed policy
+apply and read-back flow.
+The record is constrained to `authority_state = 'inert'`,
+`authorizes_policy = false`, and a lifecycle-bound bridge state that is
+`not_applied` until exact enrollment evidence is recorded and `applied`
+afterward. It has no rule, action, selector, grant, managed set, or repository
+field and cannot itself be evaluated as authorization.
 
 **Preserved history:** references to Phase 1 planning records describe the
 pre-worker lifecycle and do not constrain the current Phase 2 statuses.

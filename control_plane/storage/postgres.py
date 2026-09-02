@@ -42,6 +42,24 @@ from sqlalchemy.pool import NullPool
 
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.agent_write_intent import AgentWriteIntentRecord
+from control_plane.contracts.administrator_enrollment import (
+    AdministratorEnrollmentConflictError,
+    AdministratorEnrollmentRecord,
+    complete_administrator_enrollment,
+    expire_administrator_enrollment,
+    prove_administrator_enrollment_control,
+    withdraw_administrator_enrollment,
+)
+from control_plane.contracts.solo_administration_confirmation import (
+    SoloAdministrationConfirmationConflictError,
+    SoloAdministrationConfirmationConsumptionBinding,
+    SoloAdministrationConfirmationLifecycleEventRecord,
+    SoloAdministrationConfirmationRecord,
+    build_solo_administration_confirmation_lifecycle_event,
+    consume_solo_administration_confirmation,
+    expire_solo_administration_confirmation,
+    revoke_solo_administration_confirmation,
+)
 from control_plane.contracts.authz_denial_record import AuthzDenialRecord
 from control_plane.contracts.authz_policy_record import (
     AuthzPolicyCompareWriteResult,
@@ -165,7 +183,10 @@ from control_plane.contracts.merge_train_stack_collapse import (
     MergeTrainStackCollapsePlanRecord,
 )
 from control_plane.contracts.merge_train_run_record import MergeTrainRunRecord
-from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
+from control_plane.contracts.merge_train_policy import (
+    MergeTrainPolicyCompareWriteResult,
+    MergeTrainPolicyRecord,
+)
 from control_plane.contracts.merge_train_pr_feedback_record import (
     MergeTrainPrFeedbackRecord,
 )
@@ -650,6 +671,7 @@ class DbOnlyMutationRequest:
     response_trace_id: str
     response_payload: dict[str, Any]
     replay_response_payload: dict[str, Any] | None = None
+    confirmation_consumption: SoloAdministrationConfirmationConsumptionBinding | None = None
     lease_seconds: int = 300
 
 
@@ -1176,6 +1198,283 @@ class LaunchplaneOwnerControlEnrollmentProvenanceRow(Base):
         nullable=False,
         server_default=false(),
     )
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneAdministratorEnrollmentRow(Base):
+    __tablename__ = "launchplane_administrator_enrollments"
+    __table_args__ = (
+        CheckConstraint(
+            "state IN ('issued', 'control_proven', 'withdrawn', 'expired', 'enrolled')",
+            name="launchplane_administrator_enrollment_state_ck",
+        ),
+        CheckConstraint(
+            "proposer_github_id > 0 AND (candidate_github_id IS NULL OR candidate_github_id > 0)",
+            name="launchplane_administrator_enrollment_github_id_ck",
+        ),
+        CheckConstraint(
+            "expires_at > created_at",
+            name="launchplane_administrator_enrollment_expiry_ck",
+        ),
+        CheckConstraint(
+            "strftime('%s', created_at) IS NOT NULL "
+            "AND strftime('%s', expires_at) IS NOT NULL "
+            "AND CAST(strftime('%s', expires_at) AS INTEGER) "
+            "- CAST(strftime('%s', created_at) AS INTEGER) = 1800",
+            name="lp_admin_enrollment_ttl_sqlite_ck",
+        ).ddl_if(dialect="sqlite"),
+        CheckConstraint(
+            "CAST(expires_at AS timestamptz) - CAST(created_at AS timestamptz) "
+            "= INTERVAL '30 minutes'",
+            name="lp_admin_enrollment_ttl_pg_ck",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "candidate_github_id IS NULL OR candidate_github_id <> proposer_github_id",
+            name="launchplane_administrator_enrollment_distinct_human_ck",
+        ),
+        CheckConstraint(
+            "authority_state = 'inert' AND authorizes_policy = false",
+            name="launchplane_administrator_enrollment_no_authority_ck",
+        ),
+        CheckConstraint(
+            "policy_bridge_state IN ('not_applied', 'applied')",
+            name="launchplane_administrator_enrollment_bridge_state_ck",
+        ),
+        CheckConstraint(
+            "(candidate_github_id IS NULL AND control_proven_at IS NULL) OR "
+            "(candidate_github_id IS NOT NULL AND control_proven_at IS NOT NULL)",
+            name="launchplane_administrator_enrollment_control_proof_ck",
+        ),
+        CheckConstraint(
+            "control_proven_at IS NULL OR "
+            "(control_proven_at >= created_at AND control_proven_at < expires_at)",
+            name="launchplane_administrator_enrollment_control_time_ck",
+        ),
+        CheckConstraint(
+            "withdrawn_at IS NULL OR "
+            "(withdrawn_at >= COALESCE(control_proven_at, created_at) "
+            "AND withdrawn_at < expires_at)",
+            name="launchplane_administrator_enrollment_withdrawal_time_ck",
+        ),
+        CheckConstraint(
+            "expired_at IS NULL OR expired_at >= expires_at",
+            name="launchplane_administrator_enrollment_expired_time_ck",
+        ),
+        CheckConstraint(
+            "enrolled_at IS NULL OR "
+            "(control_proven_at IS NOT NULL AND enrolled_at >= control_proven_at "
+            "AND enrolled_at < expires_at)",
+            name="launchplane_administrator_enrollment_enrolled_time_ck",
+        ),
+        CheckConstraint(
+            "(enrolled_policy_record_id IS NULL AND enrolled_policy_revision IS NULL "
+            "AND enrolled_policy_sha256 IS NULL AND reviewed_plan_sha256 IS NULL "
+            "AND bridge_idempotency_key_sha256 IS NULL) OR "
+            "(enrolled_policy_record_id IS NOT NULL AND enrolled_policy_record_id <> '' "
+            "AND enrolled_policy_revision > 0 AND enrolled_policy_sha256 IS NOT NULL "
+            "AND reviewed_plan_sha256 IS NOT NULL "
+            "AND bridge_idempotency_key_sha256 IS NOT NULL)",
+            name="launchplane_administrator_enrollment_policy_evidence_ck",
+        ),
+        CheckConstraint(
+            "state <> 'enrolled' OR enrolled_policy_record_id = "
+            "'launchplane-authz-policy-r' || printf('%020d', enrolled_policy_revision) "
+            "|| '-' || substr(enrolled_policy_sha256, 1, 12)",
+            name="lp_admin_enrollment_policy_record_sqlite_ck",
+        ).ddl_if(dialect="sqlite"),
+        CheckConstraint(
+            "state <> 'enrolled' OR enrolled_policy_record_id = "
+            "'launchplane-authz-policy-r' "
+            "|| lpad(CAST(enrolled_policy_revision AS text), 20, '0') "
+            "|| '-' || substr(enrolled_policy_sha256, 1, 12)",
+            name="lp_admin_enrollment_policy_record_pg_ck",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "(state = 'issued' AND candidate_github_id IS NULL AND control_proven_at IS NULL "
+            "AND withdrawn_at IS NULL AND expired_at IS NULL AND enrolled_at IS NULL "
+            "AND enrolled_policy_record_id IS NULL AND policy_bridge_state = 'not_applied') OR "
+            "(state = 'control_proven' AND candidate_github_id IS NOT NULL "
+            "AND control_proven_at IS NOT NULL AND withdrawn_at IS NULL "
+            "AND expired_at IS NULL AND enrolled_at IS NULL "
+            "AND enrolled_policy_record_id IS NULL AND policy_bridge_state = 'not_applied') OR "
+            "(state = 'withdrawn' AND withdrawn_at IS NOT NULL AND expired_at IS NULL "
+            "AND enrolled_at IS NULL AND enrolled_policy_record_id IS NULL "
+            "AND policy_bridge_state = 'not_applied') OR "
+            "(state = 'expired' AND expired_at IS NOT NULL AND withdrawn_at IS NULL "
+            "AND enrolled_at IS NULL AND enrolled_policy_record_id IS NULL "
+            "AND policy_bridge_state = 'not_applied') OR "
+            "(state = 'enrolled' AND candidate_github_id IS NOT NULL "
+            "AND control_proven_at IS NOT NULL AND enrolled_at IS NOT NULL "
+            "AND withdrawn_at IS NULL AND expired_at IS NULL "
+            "AND enrolled_policy_record_id IS NOT NULL AND policy_bridge_state = 'applied')",
+            name="launchplane_administrator_enrollment_terminal_ck",
+        ),
+        UniqueConstraint(
+            "challenge_sha256", name="launchplane_administrator_enrollment_challenge_uq"
+        ),
+        Index("launchplane_administrator_enrollment_state_expiry_idx", "state", "expires_at"),
+    )
+
+    enrollment_id: Mapped[str] = mapped_column(String, primary_key=True)
+    state: Mapped[str] = mapped_column(String, nullable=False)
+    proposer_github_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    candidate_github_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    challenge_sha256: Mapped[str] = mapped_column(String, nullable=False)
+    reason: Mapped[str] = mapped_column(String, nullable=False)
+    provenance_sha256: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[str] = mapped_column(String, nullable=False)
+    expires_at: Mapped[str] = mapped_column(String, nullable=False)
+    control_proven_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    withdrawn_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    expired_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    enrolled_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    enrolled_policy_record_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    enrolled_policy_revision: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    enrolled_policy_sha256: Mapped[str | None] = mapped_column(String, nullable=True)
+    reviewed_plan_sha256: Mapped[str | None] = mapped_column(String, nullable=True)
+    bridge_idempotency_key_sha256: Mapped[str | None] = mapped_column(String, nullable=True)
+    authority_state: Mapped[str] = mapped_column(String, nullable=False, server_default="inert")
+    authorizes_policy: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=false())
+    policy_bridge_state: Mapped[str] = mapped_column(
+        String, nullable=False, server_default="not_applied"
+    )
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneSoloAdministrationConfirmationRow(Base):
+    __tablename__ = "launchplane_solo_administration_confirmations"
+    __table_args__ = (
+        CheckConstraint(
+            "state IN ('issued', 'consumed', 'revoked', 'expired')",
+            name="launchplane_solo_admin_confirmation_state_ck",
+        ),
+        CheckConstraint(
+            "active_policy_revision > 0 AND github_id > 0",
+            name="launchplane_solo_admin_confirmation_positive_ids_ck",
+        ),
+        CheckConstraint(
+            "candidate_administrator_quorum = 1 AND "
+            "candidate_distinct_human_administrator_count = 1",
+            name="launchplane_solo_admin_confirmation_solo_quorum_ck",
+        ),
+        CheckConstraint(
+            "authority_state = 'inert' AND authorizes_policy = false",
+            name="launchplane_solo_admin_confirmation_no_authority_ck",
+        ),
+        CheckConstraint(
+            "expires_at > created_at",
+            name="launchplane_solo_admin_confirmation_expiry_ck",
+        ),
+        CheckConstraint(
+            "strftime('%s', expires_at) IS NOT NULL "
+            "AND strftime('%s', created_at) IS NOT NULL "
+            "AND CAST(strftime('%s', expires_at) AS INTEGER) "
+            "- CAST(strftime('%s', created_at) AS INTEGER) = 300",
+            name="lp_solo_admin_confirmation_ttl_sqlite_ck",
+        ).ddl_if(dialect="sqlite"),
+        CheckConstraint(
+            "CAST(expires_at AS timestamptz) - CAST(created_at AS timestamptz) "
+            "= INTERVAL '5 minutes'",
+            name="lp_solo_admin_confirmation_ttl_pg_ck",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "(state = 'issued' AND terminal_at IS NULL) OR "
+            "(state IN ('consumed', 'revoked') AND terminal_at >= created_at "
+            "AND terminal_at < expires_at) OR "
+            "(state = 'expired' AND terminal_at >= expires_at)",
+            name="launchplane_solo_admin_confirmation_terminal_ck",
+        ),
+        Index(
+            "launchplane_solo_administration_confirmation_state_expiry_idx",
+            "state",
+            "expires_at",
+        ),
+        Index(
+            "launchplane_solo_administration_confirmation_session_idx",
+            "human_session_id_sha256",
+            "created_at",
+        ),
+        Index(
+            "lp_solo_admin_confirmation_consumed_recovery_idx",
+            "candidate_policy_sha256",
+            "github_id",
+            "idempotency_scope_sha256",
+            "state",
+        ),
+        Index(
+            "launchplane_solo_administration_confirmation_issued_binding_uq",
+            "reviewed_plan_sha256",
+            "human_session_id_sha256",
+            "idempotency_scope_sha256",
+            "idempotency_key_sha256",
+            unique=True,
+            postgresql_where=text("state = 'issued'"),
+            sqlite_where=text("state = 'issued'"),
+        ),
+    )
+
+    confirmation_id: Mapped[str] = mapped_column(String, primary_key=True)
+    state: Mapped[str] = mapped_column(String, nullable=False)
+    active_policy_record_id: Mapped[str] = mapped_column(String, nullable=False)
+    active_policy_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    active_policy_sha256: Mapped[str] = mapped_column(String, nullable=False)
+    candidate_policy_sha256: Mapped[str] = mapped_column(String, nullable=False)
+    candidate_administrator_quorum: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    candidate_distinct_human_administrator_count: Mapped[int] = mapped_column(
+        BigInteger, nullable=False
+    )
+    reviewed_plan_sha256: Mapped[str] = mapped_column(String, nullable=False)
+    human_session_id_sha256: Mapped[str] = mapped_column(String, nullable=False)
+    github_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    idempotency_scope_sha256: Mapped[str] = mapped_column(String, nullable=False)
+    idempotency_key_sha256: Mapped[str] = mapped_column(String, nullable=False)
+    acknowledgement_sha256: Mapped[str] = mapped_column(String, nullable=False)
+    secret_sha256: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[str] = mapped_column(String, nullable=False)
+    expires_at: Mapped[str] = mapped_column(String, nullable=False)
+    terminal_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    authority_state: Mapped[str] = mapped_column(String, nullable=False, server_default="inert")
+    authorizes_policy: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=false())
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneSoloAdministrationConfirmationLifecycleEventRow(Base):
+    __tablename__ = "launchplane_solo_administration_confirmation_events"
+    __table_args__ = (
+        CheckConstraint(
+            "event_type IN ('issued', 'consumed', 'revoked', 'expired')",
+            name="launchplane_solo_admin_confirmation_event_type_ck",
+        ),
+        CheckConstraint(
+            "(event_type = 'issued' AND from_state = '' AND to_state = 'issued') OR "
+            "(event_type IN ('consumed', 'revoked', 'expired') AND from_state = 'issued' "
+            "AND to_state = event_type)",
+            name="launchplane_solo_admin_confirmation_event_transition_ck",
+        ),
+        CheckConstraint(
+            "authority_state = 'inert' AND authorizes_policy = false",
+            name="launchplane_solo_admin_confirmation_event_authority_ck",
+        ),
+        UniqueConstraint(
+            "confirmation_id",
+            "event_type",
+            name="lp_solo_admin_confirmation_event_transition_uq",
+        ),
+        Index(
+            "lp_solo_admin_confirmation_event_confirmation_idx",
+            "confirmation_id",
+            "occurred_at",
+        ),
+    )
+
+    event_id: Mapped[str] = mapped_column(String, primary_key=True)
+    confirmation_id: Mapped[str] = mapped_column(String, nullable=False)
+    event_type: Mapped[str] = mapped_column(String, nullable=False)
+    from_state: Mapped[str] = mapped_column(String, nullable=False)
+    to_state: Mapped[str] = mapped_column(String, nullable=False)
+    occurred_at: Mapped[str] = mapped_column(String, nullable=False)
+    authority_state: Mapped[str] = mapped_column(String, nullable=False, server_default="inert")
+    authorizes_policy: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=false())
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -3192,6 +3491,13 @@ class LaunchplaneMergeTrainPolicyRow(Base):
     __tablename__ = "launchplane_merge_train_policies"
     __table_args__ = (
         Index(
+            "launchplane_merge_train_policies_active_uidx",
+            "status",
+            unique=True,
+            sqlite_where=text("status = 'active'"),
+            postgresql_where=text("status = 'active'"),
+        ),
+        Index(
             "launchplane_merge_train_policies_status_updated_idx",
             "status",
             desc("updated_at"),
@@ -4865,6 +5171,14 @@ class PostgresRecordStore(HumanSessionStore):
         session.execute(
             text("select pg_advisory_xact_lock(hashtextextended(:lock_name, 0))"),
             {"lock_name": f"launchplane:route-binding:{binding_key}"},
+        )
+
+    def _lock_merge_train_policy_write(self, session: Any) -> None:
+        if self.database_url.startswith("sqlite"):
+            return
+        session.execute(
+            text("select pg_advisory_xact_lock(hashtextextended(:lock_name, 0))"),
+            {"lock_name": "launchplane:active-merge-train-policy"},
         )
 
     def _lock_public_ingress_incident_write(
@@ -9955,6 +10269,445 @@ class PostgresRecordStore(HumanSessionStore):
             filters=(LaunchplaneOwnerControlIssuedChallengeRow.challenge_nonce == challenge_nonce,),
         )
 
+    @staticmethod
+    def _administrator_enrollment_row(
+        record: AdministratorEnrollmentRecord,
+    ) -> LaunchplaneAdministratorEnrollmentRow:
+        return LaunchplaneAdministratorEnrollmentRow(
+            enrollment_id=record.enrollment_id,
+            state=record.state,
+            proposer_github_id=record.proposer_github_id,
+            candidate_github_id=record.candidate_github_id,
+            challenge_sha256=record.challenge_sha256,
+            reason=record.reason,
+            provenance_sha256=record.provenance_sha256,
+            created_at=record.created_at,
+            expires_at=record.expires_at,
+            control_proven_at=record.control_proven_at,
+            withdrawn_at=record.withdrawn_at,
+            expired_at=record.expired_at,
+            enrolled_at=record.enrolled_at,
+            enrolled_policy_record_id=record.enrolled_policy_record_id,
+            enrolled_policy_revision=record.enrolled_policy_revision,
+            enrolled_policy_sha256=record.enrolled_policy_sha256,
+            reviewed_plan_sha256=record.reviewed_plan_sha256,
+            bridge_idempotency_key_sha256=record.bridge_idempotency_key_sha256,
+            authority_state=record.authority_state,
+            authorizes_policy=record.authorizes_policy,
+            policy_bridge_state=record.policy_bridge_state,
+            payload=PostgresRecordStore._payload_dict(record),
+        )
+
+    @staticmethod
+    def _sync_administrator_enrollment_row(
+        row: LaunchplaneAdministratorEnrollmentRow, record: AdministratorEnrollmentRecord
+    ) -> None:
+        row.state = record.state
+        row.candidate_github_id = record.candidate_github_id
+        row.control_proven_at = record.control_proven_at
+        row.withdrawn_at = record.withdrawn_at
+        row.expired_at = record.expired_at
+        row.enrolled_at = record.enrolled_at
+        row.enrolled_policy_record_id = record.enrolled_policy_record_id
+        row.enrolled_policy_revision = record.enrolled_policy_revision
+        row.enrolled_policy_sha256 = record.enrolled_policy_sha256
+        row.reviewed_plan_sha256 = record.reviewed_plan_sha256
+        row.bridge_idempotency_key_sha256 = record.bridge_idempotency_key_sha256
+        row.policy_bridge_state = record.policy_bridge_state
+        row.payload = PostgresRecordStore._payload_dict(record)
+
+    def create_administrator_enrollment_if_absent(
+        self, record: AdministratorEnrollmentRecord
+    ) -> tuple[AdministratorEnrollmentRecord, bool]:
+        with self._session_factory() as session:
+            session.add(self._administrator_enrollment_row(record))
+            try:
+                session.commit()
+                return record, True
+            except IntegrityError as error:
+                session.rollback()
+                existing_row = session.get(
+                    LaunchplaneAdministratorEnrollmentRow, record.enrollment_id
+                )
+                if existing_row is None:
+                    raise AdministratorEnrollmentConflictError(
+                        "administrator enrollment challenge digest is already reserved"
+                    ) from error
+                existing = AdministratorEnrollmentRecord.model_validate(existing_row.payload)
+                if existing != record:
+                    raise AdministratorEnrollmentConflictError(
+                        "administrator enrollment creation conflicts with persisted record"
+                    ) from error
+                return existing, False
+
+    def read_administrator_enrollment(self, enrollment_id: str) -> AdministratorEnrollmentRecord:
+        return self._read_model(
+            model_type=AdministratorEnrollmentRecord,
+            orm_model=LaunchplaneAdministratorEnrollmentRow,
+            filters=(LaunchplaneAdministratorEnrollmentRow.enrollment_id == enrollment_id,),
+        )
+
+    def _transition_administrator_enrollment(
+        self,
+        enrollment_id: str,
+        transition: Callable[[AdministratorEnrollmentRecord], AdministratorEnrollmentRecord],
+    ) -> AdministratorEnrollmentRecord:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            statement = (
+                select(LaunchplaneAdministratorEnrollmentRow)
+                .where(LaunchplaneAdministratorEnrollmentRow.enrollment_id == enrollment_id)
+                .limit(1)
+            )
+            if not self.database_url.startswith("sqlite"):
+                statement = statement.with_for_update()
+            row = session.scalar(statement)
+            if row is None:
+                raise FileNotFoundError(enrollment_id)
+            current = AdministratorEnrollmentRecord.model_validate(row.payload)
+            updated = transition(current)
+            if updated != current:
+                self._sync_administrator_enrollment_row(row, updated)
+                session.commit()
+            return updated
+
+    def prove_administrator_enrollment_control(
+        self,
+        *,
+        enrollment_id: str,
+        challenge: str,
+        server_derived_candidate_github_id: int,
+        control_proven_at: str,
+    ) -> AdministratorEnrollmentRecord:
+        return self._transition_administrator_enrollment(
+            enrollment_id,
+            lambda record: prove_administrator_enrollment_control(
+                record,
+                challenge=challenge,
+                server_derived_candidate_github_id=server_derived_candidate_github_id,
+                control_proven_at=control_proven_at,
+            ),
+        )
+
+    def expire_administrator_enrollment(
+        self, *, enrollment_id: str, expired_at: str
+    ) -> AdministratorEnrollmentRecord:
+        return self._transition_administrator_enrollment(
+            enrollment_id,
+            lambda record: expire_administrator_enrollment(record, expired_at=expired_at),
+        )
+
+    def withdraw_administrator_enrollment(
+        self, *, enrollment_id: str, proposer_github_id: int, withdrawn_at: str
+    ) -> AdministratorEnrollmentRecord:
+        return self._transition_administrator_enrollment(
+            enrollment_id,
+            lambda record: withdraw_administrator_enrollment(
+                record, proposer_github_id=proposer_github_id, withdrawn_at=withdrawn_at
+            ),
+        )
+
+    def complete_administrator_enrollment(
+        self,
+        *,
+        enrollment_id: str,
+        server_derived_candidate_github_id: int,
+        enrolled_at: str,
+        enrolled_policy_record_id: str,
+        enrolled_policy_revision: int,
+        enrolled_policy_sha256: str,
+        reviewed_plan_sha256: str,
+        bridge_idempotency_key_sha256: str,
+    ) -> AdministratorEnrollmentRecord:
+        return self._transition_administrator_enrollment(
+            enrollment_id,
+            lambda record: complete_administrator_enrollment(
+                record,
+                server_derived_candidate_github_id=server_derived_candidate_github_id,
+                enrolled_at=enrolled_at,
+                enrolled_policy_record_id=enrolled_policy_record_id,
+                enrolled_policy_revision=enrolled_policy_revision,
+                enrolled_policy_sha256=enrolled_policy_sha256,
+                reviewed_plan_sha256=reviewed_plan_sha256,
+                bridge_idempotency_key_sha256=bridge_idempotency_key_sha256,
+            ),
+        )
+
+    @staticmethod
+    def _solo_administration_confirmation_row(
+        record: SoloAdministrationConfirmationRecord,
+    ) -> LaunchplaneSoloAdministrationConfirmationRow:
+        return LaunchplaneSoloAdministrationConfirmationRow(
+            confirmation_id=record.confirmation_id,
+            state=record.state,
+            active_policy_record_id=record.active_policy_record_id,
+            active_policy_revision=record.active_policy_revision,
+            active_policy_sha256=record.active_policy_sha256,
+            candidate_policy_sha256=record.candidate_policy_sha256,
+            candidate_administrator_quorum=record.candidate_administrator_quorum,
+            candidate_distinct_human_administrator_count=(
+                record.candidate_distinct_human_administrator_count
+            ),
+            reviewed_plan_sha256=record.reviewed_plan_sha256,
+            human_session_id_sha256=record.human_session_id_sha256,
+            github_id=record.github_id,
+            idempotency_scope_sha256=record.idempotency_scope_sha256,
+            idempotency_key_sha256=record.idempotency_key_sha256,
+            acknowledgement_sha256=record.acknowledgement_sha256,
+            secret_sha256=record.secret_sha256,
+            created_at=record.created_at,
+            expires_at=record.expires_at,
+            terminal_at=record.terminal_at,
+            authority_state=record.authority_state,
+            authorizes_policy=record.authorizes_policy,
+            payload=PostgresRecordStore._payload_dict(record),
+        )
+
+    @staticmethod
+    def _solo_administration_confirmation_event_row(
+        event: SoloAdministrationConfirmationLifecycleEventRecord,
+    ) -> LaunchplaneSoloAdministrationConfirmationLifecycleEventRow:
+        return LaunchplaneSoloAdministrationConfirmationLifecycleEventRow(
+            event_id=event.event_id,
+            confirmation_id=event.confirmation_id,
+            event_type=event.event_type,
+            from_state=event.from_state,
+            to_state=event.to_state,
+            occurred_at=event.occurred_at,
+            authority_state=event.authority_state,
+            authorizes_policy=event.authorizes_policy,
+            payload=PostgresRecordStore._payload_dict(event),
+        )
+
+    @staticmethod
+    def _sync_solo_administration_confirmation_row(
+        row: LaunchplaneSoloAdministrationConfirmationRow,
+        record: SoloAdministrationConfirmationRecord,
+    ) -> None:
+        row.state = record.state
+        row.terminal_at = record.terminal_at
+        row.payload = PostgresRecordStore._payload_dict(record)
+
+    def issue_solo_administration_confirmation(
+        self,
+        record: SoloAdministrationConfirmationRecord,
+    ) -> tuple[SoloAdministrationConfirmationRecord, bool]:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            session.add(self._solo_administration_confirmation_row(record))
+            session.add(
+                self._solo_administration_confirmation_event_row(
+                    build_solo_administration_confirmation_lifecycle_event(
+                        record=record,
+                        event_type="issued",
+                        occurred_at=record.created_at,
+                    )
+                )
+            )
+            try:
+                session.commit()
+                return record, True
+            except IntegrityError as error:
+                session.rollback()
+                existing_row = session.get(
+                    LaunchplaneSoloAdministrationConfirmationRow,
+                    record.confirmation_id,
+                )
+                if existing_row is None:
+                    existing_row = session.scalar(
+                        select(LaunchplaneSoloAdministrationConfirmationRow)
+                        .where(
+                            LaunchplaneSoloAdministrationConfirmationRow.state == "issued",
+                            LaunchplaneSoloAdministrationConfirmationRow.reviewed_plan_sha256
+                            == record.reviewed_plan_sha256,
+                            LaunchplaneSoloAdministrationConfirmationRow.human_session_id_sha256
+                            == record.human_session_id_sha256,
+                            LaunchplaneSoloAdministrationConfirmationRow.idempotency_scope_sha256
+                            == record.idempotency_scope_sha256,
+                            LaunchplaneSoloAdministrationConfirmationRow.idempotency_key_sha256
+                            == record.idempotency_key_sha256,
+                        )
+                        .limit(1)
+                    )
+                if existing_row is None:
+                    raise SoloAdministrationConfirmationConflictError(
+                        "solo-administration confirmation binding is already reserved"
+                    ) from error
+                existing = SoloAdministrationConfirmationRecord.model_validate(existing_row.payload)
+                if existing != record:
+                    raise SoloAdministrationConfirmationConflictError(
+                        "solo-administration confirmation creation conflicts with persisted evidence"
+                    ) from error
+                return existing, False
+
+    def read_solo_administration_confirmation(
+        self,
+        confirmation_id: str,
+    ) -> SoloAdministrationConfirmationRecord:
+        return self._read_model(
+            model_type=SoloAdministrationConfirmationRecord,
+            orm_model=LaunchplaneSoloAdministrationConfirmationRow,
+            filters=(
+                LaunchplaneSoloAdministrationConfirmationRow.confirmation_id == confirmation_id,
+            ),
+        )
+
+    def has_consumed_solo_administration_confirmation(
+        self,
+        *,
+        candidate_policy_sha256: str,
+        github_id: int,
+        idempotency_scope_sha256: str,
+    ) -> bool:
+        normalized_digest = candidate_policy_sha256.strip().lower()
+        if len(normalized_digest) != 64 or any(
+            character not in "0123456789abcdef" for character in normalized_digest
+        ):
+            raise ValueError("candidate_policy_sha256 must be a lowercase SHA-256 digest")
+        normalized_scope_digest = idempotency_scope_sha256.strip().lower()
+        if len(normalized_scope_digest) != 64 or any(
+            character not in "0123456789abcdef" for character in normalized_scope_digest
+        ):
+            raise ValueError("idempotency_scope_sha256 must be a lowercase SHA-256 digest")
+        if github_id < 1:
+            raise ValueError("github_id must be positive")
+        with self._session_factory() as session:
+            return (
+                session.scalar(
+                    select(LaunchplaneSoloAdministrationConfirmationRow.confirmation_id)
+                    .where(
+                        LaunchplaneSoloAdministrationConfirmationRow.state == "consumed",
+                        LaunchplaneSoloAdministrationConfirmationRow.candidate_policy_sha256
+                        == normalized_digest,
+                        LaunchplaneSoloAdministrationConfirmationRow.github_id == github_id,
+                        LaunchplaneSoloAdministrationConfirmationRow.idempotency_scope_sha256
+                        == normalized_scope_digest,
+                    )
+                    .limit(1)
+                )
+                is not None
+            )
+
+    def _transition_solo_administration_confirmation(
+        self,
+        confirmation_id: str,
+        transition: Callable[
+            [SoloAdministrationConfirmationRecord], SoloAdministrationConfirmationRecord
+        ],
+    ) -> SoloAdministrationConfirmationRecord:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            statement = (
+                select(LaunchplaneSoloAdministrationConfirmationRow)
+                .where(
+                    LaunchplaneSoloAdministrationConfirmationRow.confirmation_id == confirmation_id
+                )
+                .limit(1)
+            )
+            if not self.database_url.startswith("sqlite"):
+                statement = statement.with_for_update()
+            row = session.scalar(statement)
+            if row is None:
+                raise FileNotFoundError(confirmation_id)
+            current = SoloAdministrationConfirmationRecord.model_validate(row.payload)
+            updated = transition(current)
+            if updated != current:
+                self._sync_solo_administration_confirmation_row(row, updated)
+                if updated.state == "issued" or updated.terminal_at is None:
+                    raise RuntimeError("Confirmation transition did not produce terminal evidence.")
+                session.add(
+                    self._solo_administration_confirmation_event_row(
+                        build_solo_administration_confirmation_lifecycle_event(
+                            record=updated,
+                            event_type=updated.state,
+                            occurred_at=updated.terminal_at,
+                        )
+                    )
+                )
+                session.commit()
+            return updated
+
+    def revoke_solo_administration_confirmation(
+        self, *, confirmation_id: str, terminal_at: str
+    ) -> SoloAdministrationConfirmationRecord:
+        return self._transition_solo_administration_confirmation(
+            confirmation_id,
+            lambda record: revoke_solo_administration_confirmation(record, terminal_at=terminal_at),
+        )
+
+    def expire_solo_administration_confirmation(
+        self, *, confirmation_id: str, terminal_at: str
+    ) -> SoloAdministrationConfirmationRecord:
+        return self._transition_solo_administration_confirmation(
+            confirmation_id,
+            lambda record: expire_solo_administration_confirmation(record, terminal_at=terminal_at),
+        )
+
+    def consume_solo_administration_confirmation(
+        self,
+        *,
+        confirmation_id: str,
+        active_policy_record_id: str,
+        active_policy_revision: int,
+        active_policy_sha256: str,
+        candidate_policy_sha256: str,
+        candidate_administrator_quorum: int,
+        candidate_distinct_human_administrator_count: int,
+        reviewed_plan_sha256: str,
+        human_session_id_sha256: str,
+        github_id: int,
+        idempotency_scope_sha256: str,
+        idempotency_key_sha256: str,
+        acknowledgement_sha256: str,
+        secret_sha256: str,
+        terminal_at: str,
+    ) -> SoloAdministrationConfirmationRecord:
+        return self._transition_solo_administration_confirmation(
+            confirmation_id,
+            lambda record: consume_solo_administration_confirmation(
+                record,
+                active_policy_record_id=active_policy_record_id,
+                active_policy_revision=active_policy_revision,
+                active_policy_sha256=active_policy_sha256,
+                candidate_policy_sha256=candidate_policy_sha256,
+                candidate_administrator_quorum=candidate_administrator_quorum,
+                candidate_distinct_human_administrator_count=(
+                    candidate_distinct_human_administrator_count
+                ),
+                reviewed_plan_sha256=reviewed_plan_sha256,
+                human_session_id_sha256=human_session_id_sha256,
+                github_id=github_id,
+                idempotency_scope_sha256=idempotency_scope_sha256,
+                idempotency_key_sha256=idempotency_key_sha256,
+                acknowledgement_sha256=acknowledgement_sha256,
+                secret_sha256=secret_sha256,
+                terminal_at=terminal_at,
+            ),
+        )
+
+    def list_solo_administration_confirmation_lifecycle_events(
+        self,
+        *,
+        confirmation_id: str = "",
+        limit: int | None = None,
+    ) -> tuple[SoloAdministrationConfirmationLifecycleEventRecord, ...]:
+        filters: list[object] = []
+        if confirmation_id:
+            filters.append(
+                LaunchplaneSoloAdministrationConfirmationLifecycleEventRow.confirmation_id
+                == confirmation_id
+            )
+        return self._list_models(
+            model_type=SoloAdministrationConfirmationLifecycleEventRecord,
+            orm_model=LaunchplaneSoloAdministrationConfirmationLifecycleEventRow,
+            filters=filters,
+            order_by=(
+                LaunchplaneSoloAdministrationConfirmationLifecycleEventRow.occurred_at,
+                LaunchplaneSoloAdministrationConfirmationLifecycleEventRow.event_id,
+            ),
+            limit=limit,
+        )
+
     def list_owner_control_challenge_lifecycle_events(
         self,
         *,
@@ -14157,15 +14910,300 @@ class PostgresRecordStore(HumanSessionStore):
         )
 
     def write_merge_train_policy_record(self, record: MergeTrainPolicyRecord) -> None:
-        self._write_row(
-            LaunchplaneMergeTrainPolicyRow(
-                record_id=record.record_id,
-                status=record.status,
-                source=record.source,
-                updated_at=record.updated_at,
-                policy_sha256=record.policy_sha256,
-                payload=self._payload_dict(record),
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_merge_train_policy_write(session)
+            existing_row = session.get(LaunchplaneMergeTrainPolicyRow, record.record_id)
+            if existing_row is not None and existing_row.policy_sha256 != record.policy_sha256:
+                raise ValueError(
+                    "Merge-train policy record ID cannot be reused for different policy content."
+                )
+            if record.status == "active":
+                active_rows = tuple(
+                    session.scalars(
+                        select(LaunchplaneMergeTrainPolicyRow).where(
+                            LaunchplaneMergeTrainPolicyRow.status == "active",
+                            LaunchplaneMergeTrainPolicyRow.record_id != record.record_id,
+                        )
+                    ).all()
+                )
+                for active_row in active_rows:
+                    active_record = self._read_payload(
+                        model_type=MergeTrainPolicyRecord,
+                        payload=active_row.payload,
+                    )
+                    superseded_record = active_record.model_copy(update={"status": "superseded"})
+                    active_row.status = "superseded"
+                    active_row.payload = self._payload_dict(superseded_record)
+            session.merge(
+                LaunchplaneMergeTrainPolicyRow(
+                    record_id=record.record_id,
+                    status=record.status,
+                    source=record.source,
+                    updated_at=record.updated_at,
+                    policy_sha256=record.policy_sha256,
+                    payload=self._payload_dict(record),
+                )
             )
+            session.commit()
+
+    def read_merge_train_policy_record(self, record_id: str) -> MergeTrainPolicyRecord:
+        return self._read_model(
+            model_type=MergeTrainPolicyRecord,
+            orm_model=LaunchplaneMergeTrainPolicyRow,
+            filters=(LaunchplaneMergeTrainPolicyRow.record_id == record_id,),
+        )
+
+    def compare_and_write_merge_train_policy_record(
+        self,
+        *,
+        expected_record: MergeTrainPolicyRecord,
+        replacement_record: MergeTrainPolicyRecord,
+        mutation: DbOnlyMutationRequest | None = None,
+    ) -> MergeTrainPolicyCompareWriteResult:
+        if expected_record.status != "active":
+            raise ValueError("Merge-train policy compare-and-write expected record must be active.")
+        if replacement_record.status != "active":
+            raise ValueError("Merge-train policy compare-and-write replacement must be active.")
+        if mutation is not None:
+            if not 100 <= mutation.response_status_code <= 599:
+                raise ValueError("DB-only mutation response status must be between 100 and 599.")
+            if not mutation.response_trace_id.strip():
+                raise ValueError("DB-only mutation response trace id is required.")
+        statement = (
+            select(LaunchplaneMergeTrainPolicyRow)
+            .where(LaunchplaneMergeTrainPolicyRow.status == "active")
+            .order_by(desc(LaunchplaneMergeTrainPolicyRow.updated_at))
+        )
+        if not self.database_url.startswith("sqlite"):
+            statement = statement.with_for_update()
+        if mutation is None:
+            with self._session_factory() as session:
+                self._begin_serialized_write(session)
+                return self._compare_and_write_merge_train_policy_locked(
+                    session=session,
+                    statement=statement,
+                    expected_record=expected_record,
+                    replacement_record=replacement_record,
+                )
+
+        reservation_insert_error: IntegrityError | None = None
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            observed_at = self._database_mutation_timestamp(session)
+            stored_reservation = build_launchplane_mutation_reservation(
+                scope=mutation.scope,
+                route_path=mutation.route_path,
+                idempotency_key=mutation.idempotency_key,
+                request_fingerprint=mutation.request_fingerprint,
+                lease_owner=mutation.lease_owner,
+                lease_expires_at=self._mutation_lease_expiry(
+                    observed_at=observed_at,
+                    lease_seconds=mutation.lease_seconds,
+                ),
+                reserved_at=observed_at,
+            )
+            reservation_row = self._idempotency_row(stored_reservation)
+            session.add(reservation_row)
+            try:
+                session.flush()
+            except IntegrityError as error:
+                session.rollback()
+                reservation_insert_error = error
+            if reservation_insert_error is None:
+                return self._compare_and_write_merge_train_policy_locked(
+                    session=session,
+                    statement=statement,
+                    expected_record=expected_record,
+                    replacement_record=replacement_record,
+                    reservation_row=reservation_row,
+                    mutation_reservation=stored_reservation,
+                    mutation=mutation,
+                )
+
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            reservation_row = session.scalar(
+                self._idempotency_statement(
+                    scope=mutation.scope,
+                    route_path=mutation.route_path,
+                    idempotency_key=mutation.idempotency_key,
+                    for_update=True,
+                )
+            )
+            if reservation_row is None:
+                assert reservation_insert_error is not None
+                raise reservation_insert_error
+            current_reservation = self._read_payload(
+                model_type=LaunchplaneIdempotencyRecord,
+                payload=reservation_row.payload,
+            )
+            if current_reservation.request_fingerprint != mutation.request_fingerprint:
+                return MergeTrainPolicyCompareWriteResult(
+                    status="idempotency_conflict",
+                    idempotency_record=current_reservation,
+                )
+            if current_reservation.state == "completed":
+                active_records = self.list_merge_train_policy_records(status="active", limit=2)
+                return MergeTrainPolicyCompareWriteResult(
+                    status="replayed",
+                    current_record=active_records[0] if len(active_records) == 1 else None,
+                    idempotency_record=current_reservation,
+                )
+            if current_reservation.state == "reconcile_required":
+                return MergeTrainPolicyCompareWriteResult(
+                    status="reconciliation_required",
+                    idempotency_record=current_reservation,
+                )
+            observed_at = self._database_mutation_timestamp(session)
+            if parse_launchplane_mutation_timestamp(
+                current_reservation.lease_expires_at,
+                field_name="lease_expires_at",
+            ) > parse_launchplane_mutation_timestamp(
+                observed_at,
+                field_name="observed_at",
+            ):
+                return MergeTrainPolicyCompareWriteResult(
+                    status="reservation_in_progress",
+                    idempotency_record=current_reservation,
+                )
+            if current_reservation.reconciliation_key:
+                reconcile_record = self._updated_idempotency_record(
+                    current_reservation,
+                    state="reconcile_required",
+                    updated_at=observed_at,
+                )
+                self._sync_idempotency_row(reservation_row, reconcile_record)
+                session.commit()
+                return MergeTrainPolicyCompareWriteResult(
+                    status="reconciliation_required",
+                    idempotency_record=reconcile_record,
+                )
+            reclaimed_reservation = self._updated_idempotency_record(
+                current_reservation,
+                lease_owner=mutation.lease_owner,
+                lease_expires_at=self._mutation_lease_expiry(
+                    observed_at=observed_at,
+                    lease_seconds=mutation.lease_seconds,
+                ),
+                attempt=current_reservation.attempt + 1,
+                updated_at=observed_at,
+                response_status_code=None,
+                response_trace_id="",
+                recorded_at="",
+                response_payload={},
+            )
+            self._sync_idempotency_row(reservation_row, reclaimed_reservation)
+            return self._compare_and_write_merge_train_policy_locked(
+                session=session,
+                statement=statement,
+                expected_record=expected_record,
+                replacement_record=replacement_record,
+                reservation_row=reservation_row,
+                mutation_reservation=reclaimed_reservation,
+                mutation=mutation,
+            )
+
+    def _compare_and_write_merge_train_policy_locked(
+        self,
+        *,
+        session: Any,
+        statement: Any,
+        expected_record: MergeTrainPolicyRecord,
+        replacement_record: MergeTrainPolicyRecord,
+        reservation_row: LaunchplaneIdempotencyRow | None = None,
+        mutation_reservation: LaunchplaneIdempotencyRecord | None = None,
+        mutation: DbOnlyMutationRequest | None = None,
+    ) -> MergeTrainPolicyCompareWriteResult:
+        self._lock_merge_train_policy_write(session)
+        active_rows = tuple(session.scalars(statement).all())
+        if not active_rows:
+            if reservation_row is not None:
+                session.delete(reservation_row)
+                session.commit()
+            return MergeTrainPolicyCompareWriteResult(status="missing")
+        if len(active_rows) > 1:
+            if reservation_row is not None:
+                session.delete(reservation_row)
+                session.commit()
+            return MergeTrainPolicyCompareWriteResult(status="ambiguous_active")
+        active_row = active_rows[0]
+        current_record = self._read_payload(
+            model_type=MergeTrainPolicyRecord,
+            payload=active_row.payload,
+        )
+        if (
+            current_record.record_id != expected_record.record_id
+            or current_record.policy_sha256 != expected_record.policy_sha256
+            or current_record.updated_at != expected_record.updated_at
+        ):
+            if reservation_row is not None:
+                session.delete(reservation_row)
+                session.commit()
+            return MergeTrainPolicyCompareWriteResult(status="stale", current_record=current_record)
+        if (
+            current_record.record_id == replacement_record.record_id
+            and current_record.policy_sha256 != replacement_record.policy_sha256
+        ):
+            if reservation_row is not None:
+                session.delete(reservation_row)
+                session.commit()
+            return MergeTrainPolicyCompareWriteResult(
+                status="record_id_conflict", current_record=current_record
+            )
+        if (
+            replacement_record.record_id != current_record.record_id
+            and session.get(
+                LaunchplaneMergeTrainPolicyRow,
+                replacement_record.record_id,
+            )
+            is not None
+        ):
+            if reservation_row is not None:
+                session.delete(reservation_row)
+                session.commit()
+            return MergeTrainPolicyCompareWriteResult(
+                status="record_id_conflict", current_record=current_record
+            )
+
+        result_record = current_record
+        status: Literal["written", "unchanged"] = "unchanged"
+        if current_record.policy_sha256 != replacement_record.policy_sha256:
+            superseded_record = current_record.model_copy(update={"status": "superseded"})
+            active_row.status = "superseded"
+            active_row.payload = self._payload_dict(superseded_record)
+            session.flush()
+            session.add(
+                LaunchplaneMergeTrainPolicyRow(
+                    record_id=replacement_record.record_id,
+                    status=replacement_record.status,
+                    source=replacement_record.source,
+                    updated_at=replacement_record.updated_at,
+                    policy_sha256=replacement_record.policy_sha256,
+                    payload=self._payload_dict(replacement_record),
+                )
+            )
+            session.flush()
+            result_record = replacement_record
+            status = "written"
+
+        stored_completion: LaunchplaneIdempotencyRecord | None = None
+        if reservation_row is not None:
+            if mutation_reservation is None or mutation is None:
+                raise RuntimeError("Merge-train policy mutation completion evidence is incomplete.")
+            stored_completion = complete_launchplane_mutation_reservation(
+                mutation_reservation,
+                response_status_code=mutation.response_status_code,
+                response_trace_id=mutation.response_trace_id,
+                completed_at=self._database_mutation_timestamp(session),
+                response_payload=mutation.response_payload,
+            )
+            self._sync_idempotency_row(reservation_row, stored_completion)
+        session.commit()
+        return MergeTrainPolicyCompareWriteResult(
+            status=status,
+            current_record=result_record,
+            idempotency_record=stored_completion,
         )
 
     def write_merge_train_pr_feedback_record(self, record: MergeTrainPrFeedbackRecord) -> None:
@@ -15549,7 +16587,10 @@ class PostgresRecordStore(HumanSessionStore):
         expected_record: LaunchplaneAuthzPolicyRecord,
         replacement_record: LaunchplaneAuthzPolicyRecord | None,
         mutation: DbOnlyMutationRequest | None = None,
+        confirmation_consumption: SoloAdministrationConfirmationConsumptionBinding | None = None,
     ) -> AuthzPolicyCompareWriteResult:
+        if confirmation_consumption is None and mutation is not None:
+            confirmation_consumption = mutation.confirmation_consumption
         if expected_record.status != "active":
             raise ValueError("Authz policy compare-and-write expected record must be active.")
         if replacement_record is not None and replacement_record.status != "active":
@@ -15566,6 +16607,8 @@ class PostgresRecordStore(HumanSessionStore):
                 raise ValueError("DB-only mutation response status must be between 100 and 599.")
             if not mutation.response_trace_id.strip():
                 raise ValueError("DB-only mutation response trace id is required.")
+        if confirmation_consumption is not None and mutation is None:
+            raise ValueError("Confirmation consumption requires idempotency completion evidence.")
         statement = (
             select(LaunchplaneAuthzPolicyRow)
             .where(LaunchplaneAuthzPolicyRow.status == "active")
@@ -15581,6 +16624,7 @@ class PostgresRecordStore(HumanSessionStore):
                     statement=statement,
                     expected_record=expected_record,
                     replacement_record=replacement_record,
+                    confirmation_consumption=confirmation_consumption,
                 )
 
         reservation_insert_error: IntegrityError | None = None
@@ -15615,6 +16659,7 @@ class PostgresRecordStore(HumanSessionStore):
                     reservation_row=reservation_row,
                     mutation_reservation=stored_reservation,
                     mutation=mutation,
+                    confirmation_consumption=confirmation_consumption,
                 )
 
         with self._session_factory() as session:
@@ -15693,6 +16738,7 @@ class PostgresRecordStore(HumanSessionStore):
                 statement=statement,
                 expected_record=expected_record,
                 replacement_record=replacement_record,
+                confirmation_consumption=confirmation_consumption,
                 reservation_row=reservation_row,
                 mutation_reservation=reclaimed_reservation,
                 mutation=mutation,
@@ -15708,6 +16754,7 @@ class PostgresRecordStore(HumanSessionStore):
         reservation_row: LaunchplaneIdempotencyRow | None = None,
         mutation_reservation: LaunchplaneIdempotencyRecord | None = None,
         mutation: DbOnlyMutationRequest | None = None,
+        confirmation_consumption: SoloAdministrationConfirmationConsumptionBinding | None = None,
     ) -> AuthzPolicyCompareWriteResult:
         self._lock_active_authz_policy(session)
         active_rows = tuple(session.scalars(statement).all())
@@ -15732,6 +16779,61 @@ class PostgresRecordStore(HumanSessionStore):
                 session.delete(reservation_row)
                 session.commit()
             return AuthzPolicyCompareWriteResult(status="stale", current_record=current_record)
+
+        if confirmation_consumption is not None:
+            if replacement_record is None:
+                raise ValueError(
+                    "Confirmation consumption requires a replacement authz policy record."
+                )
+            confirmation_statement = (
+                select(LaunchplaneSoloAdministrationConfirmationRow)
+                .where(
+                    LaunchplaneSoloAdministrationConfirmationRow.confirmation_id
+                    == confirmation_consumption.confirmation_id
+                )
+                .limit(1)
+            )
+            if not self.database_url.startswith("sqlite"):
+                confirmation_statement = confirmation_statement.with_for_update()
+            confirmation_row = session.scalar(confirmation_statement)
+            if confirmation_row is None:
+                raise FileNotFoundError(confirmation_consumption.confirmation_id)
+            confirmation_record = SoloAdministrationConfirmationRecord.model_validate(
+                confirmation_row.payload
+            )
+            consumed_record = consume_solo_administration_confirmation(
+                confirmation_record,
+                active_policy_record_id=confirmation_consumption.active_policy_record_id,
+                active_policy_revision=confirmation_consumption.active_policy_revision,
+                active_policy_sha256=confirmation_consumption.active_policy_sha256,
+                candidate_policy_sha256=confirmation_consumption.candidate_policy_sha256,
+                candidate_administrator_quorum=confirmation_consumption.candidate_administrator_quorum,
+                candidate_distinct_human_administrator_count=(
+                    confirmation_consumption.candidate_distinct_human_administrator_count
+                ),
+                reviewed_plan_sha256=confirmation_consumption.reviewed_plan_sha256,
+                human_session_id_sha256=confirmation_consumption.human_session_id_sha256,
+                github_id=confirmation_consumption.github_id,
+                idempotency_scope_sha256=confirmation_consumption.idempotency_scope_sha256,
+                idempotency_key_sha256=confirmation_consumption.idempotency_key_sha256,
+                acknowledgement_sha256=confirmation_consumption.acknowledgement_sha256,
+                secret_sha256=confirmation_consumption.secret_sha256,
+                terminal_at=self._database_mutation_timestamp(session),
+            )
+            confirmation_row.state = consumed_record.state
+            confirmation_row.terminal_at = consumed_record.terminal_at
+            confirmation_row.payload = self._payload_dict(consumed_record)
+            if consumed_record.terminal_at is None:
+                raise RuntimeError("Consumed confirmation is missing terminal evidence.")
+            session.add(
+                self._solo_administration_confirmation_event_row(
+                    build_solo_administration_confirmation_lifecycle_event(
+                        record=consumed_record,
+                        event_type="consumed",
+                        occurred_at=consumed_record.terminal_at,
+                    )
+                )
+            )
 
         result_record = current_record
         status: Literal["written", "unchanged"] = "unchanged"

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Protocol, cast
 
@@ -131,6 +131,7 @@ class MergeAdmissionEvaluator(Protocol):
         observed_head_sha: str,
         observed_head_tree_sha: str,
         controller_state: MergeTrainControllerStateRecord,
+        expected_lease_owner: str,
         stack_collapse_record: MergeTrainStackCollapsePlanRecord | None,
         evaluated_at: str,
     ) -> MergeAdmissionEvaluation: ...
@@ -148,6 +149,10 @@ class GuardedMergeAdmission:
     controller_state_provider: Callable[[], MergeTrainControllerStateRecord] | None = None
     admission_time_provider: Callable[[], str] = _utc_now_timestamp
     stack_collapse_record: MergeTrainStackCollapsePlanRecord | None = None
+    expected_lease_owner: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.expected_lease_owner = self.controller_state.lease_owner.strip()
 
     def update_landing_plan_record(
         self, landing_plan_record: MergeTrainBatchLandingPlanRecord
@@ -168,6 +173,11 @@ class GuardedMergeAdmission:
         observed_head_sha: str,
         observed_head_tree_sha: str,
     ) -> MergeAdmissionRecord:
+        if not self.expected_lease_owner:
+            raise MergeAdmissionDeniedError(
+                "Merge admission requires an acquired controller lease.",
+                reason_code="controller_fence_rejected",
+            )
         if self.controller_state_provider is not None:
             self.controller_state = self.controller_state_provider()
         evaluation_started_at = self.admission_time_provider()
@@ -196,6 +206,7 @@ class GuardedMergeAdmission:
             observed_head_sha=observed_head_sha,
             observed_head_tree_sha=observed_head_tree_sha,
             controller_state=self.controller_state,
+            expected_lease_owner=self.expected_lease_owner,
             stack_collapse_record=self.stack_collapse_record,
             evaluated_at=evaluation_started_at,
         )

@@ -63,34 +63,47 @@ from control_plane.privileged_operation_registry import list_privileged_operatio
 from control_plane.privileged_operation_registry import read_privileged_operation_descriptor
 
 
-OWNER_CONTROL_CONTRACT_SCHEMA_VERSION = 4
-_OWNER_CONTROL_PREVIOUS_CONTRACT_SCHEMA_VERSION = 3
+OWNER_CONTROL_CONTRACT_SCHEMA_VERSION = 5
+_OWNER_CONTROL_PREVIOUS_CONTRACT_SCHEMA_VERSION = 4
+_OWNER_CONTROL_SIGNATURE_DECLARATION_SCHEMA_VERSION = 2
 _OWNER_CONTROL_VECTOR_SCHEMA_VERSION = 1
-_OWNER_CONTROL_SIGNATURE_CONTRACT_SCHEMA_VERSION = 2
 _ARTIFACT_SYNTHETIC_PRIVATE_KEY_SEED = bytes(range(32))
 _ARTIFACT_SYNTHETIC_WRONG_PRIVATE_KEY_SEED = bytes(range(31, -1, -1))
 _PROVENANCE_SYNTHETIC_PUBLIC_KEY = base64.urlsafe_b64encode(bytes(32)).decode().rstrip("=")
 _PRESERVED_V2_SECTION_SHA256 = {
     "canonical_json": "0c6b6454d737943d01d4621c217ff8412552a0bf0c69a0f50a761d38ac0e7d1f",
     "canonicalization_vectors": "ca481ff769bba537310c8568b56850f5d12ebc0c90ace9ea2dc39ff714daa6a8",
-    "confirmation_golden_vectors": "58391f364a79ab321596d30200b87c9d29be366eaa1386a9ff4c242c8b38d50a",
-    "golden_vectors": "6955c5c8bb228c21bc6a68a4ddb7cf22456cd51615ffe6e421b0fa04f15d9584",
     "negative_confirmation_vectors": "9d529ca0f5153c8c3eb3eb4862311efc6dc3c1dc7e5df55824ebde13194eb46d",
     "negative_vectors": "232d29bc542df455c9f54a3196a2a4d41cb0912155f92d060c850df99c835b29",
-    "schemas": "00a8524a65afd637c8cfc88ef44e780154addc759b813a831f3ddf2ce1490bd0",
     "signature_declaration": "7d9c62d55792931383d4a02ed99d31e21c67b5ce714c01d9144dc2a3bed34f72",
 }
-_PRESERVED_V3_SECTION_SHA256 = {
+_PRESERVED_V2_DESCRIPTOR_VECTOR_SECTION_SHA256 = {
+    "confirmation_golden_vectors": "58391f364a79ab321596d30200b87c9d29be366eaa1386a9ff4c242c8b38d50a",
+    "golden_vectors": "6955c5c8bb228c21bc6a68a4ddb7cf22456cd51615ffe6e421b0fa04f15d9584",
+}
+_PRESERVED_V2_SCHEMA_SHA256 = {
+    "approval_request": "6cc0379a8323715191aea8a605b594d6500a2937c6d46c45caa9cea313b3b8b4",
+    "challenge_response": "1fc009f4497b88caacf1c7273c0e7e932936cd23a24f5d3e1846f235da1082d0",
+    "channel_binding_record": "399e8f1ee814e60f6973290d5da0a542add174bb2926ab2cc2dff583c18c1a94",
+    "owner_control_confirmation_envelope": "b3e15f59f63efdeff5d95e621af981959c6d5ec2c71e1ae15351967722ee589f",
+    "owner_control_signature_payload": "002b5e22c57ac17b6f7915486e29f2d3d11aee7e0b44505050b1366c23ee8c00",
+    "server_review_payload": "b4b0d9e55212190615e9d4247ff459c15309ab1a10a715df92432585b9f34855",
+}
+_PRESERVED_V2_DESCRIPTOR_IDS = frozenset(
+    ("managed-authz-policy-set", "managed-secret-reencryption")
+)
+_ALL_DESCRIPTOR_IDS = frozenset(get_args(PrivilegedOperationDescriptorId))
+_PRESERVED_V4_SECTION_SHA256 = {
     "canonical_json": "0c6b6454d737943d01d4621c217ff8412552a0bf0c69a0f50a761d38ac0e7d1f",
     "canonicalization_vectors": "ca481ff769bba537310c8568b56850f5d12ebc0c90ace9ea2dc39ff714daa6a8",
     "challenge_lifecycle_vectors": "81a1d62ee2c9268366e052da78221ab13d8946b276c0a06c1009296357a89807",
-    "compatibility": "cb8720ac7b08fd92ade453489b127546a98908f858408e7ac56c2bbd05525982",
-    "confirmation_golden_vectors": "58391f364a79ab321596d30200b87c9d29be366eaa1386a9ff4c242c8b38d50a",
-    "golden_vectors": "6955c5c8bb228c21bc6a68a4ddb7cf22456cd51615ffe6e421b0fa04f15d9584",
+    "compatibility": "62115e1e9d322dad345d0a48e4523445285d05281a52a4d94a18e1fcb3d27937",
+    "confirmation_golden_vectors": "763f4795b9b25d725f394d4df13f8a713e253429aa31457a84cc88c7f9f71b7a",
+    "golden_vectors": "b8e51053225c281d68d6dff7d8a1e5963ac7a2396dc48a691a4da3a12fe8b303",
     "negative_confirmation_vectors": "9d529ca0f5153c8c3eb3eb4862311efc6dc3c1dc7e5df55824ebde13194eb46d",
     "negative_vectors": "232d29bc542df455c9f54a3196a2a4d41cb0912155f92d060c850df99c835b29",
-    "schema_version": "4e07408562bedb8b60ce05c1decfe3ad16b72230967de01f640b7e4729b49fce",
-    "schemas": "00a8524a65afd637c8cfc88ef44e780154addc759b813a831f3ddf2ce1490bd0",
+    "schema_version": "4b227777d4dd1fc61c6f884f48641d02b4d121d3fd328cb08b5531fcacdabf8a",
+    "schemas": "1fdb3187f24ee64f95a8f7753ec64b93d72d1f3b92ea118db00d43a798263f0c",
     "signature_declaration": "7d9c62d55792931383d4a02ed99d31e21c67b5ce714c01d9144dc2a3bed34f72",
     "verification_state_vectors": "4c199bf64618845f098ac12ef992a21111ab87a6e91e5325f962db3e8174c8df",
 }
@@ -922,7 +935,7 @@ def _signature_declaration() -> dict[str, Any]:
         "signature_bytes": 64,
         "signature_encoding": "base64url-unpadded",
         "legacy_golden_channel_binding": "synthetic-placeholder-not-channel-binding-record",
-        "contract_schema_version": _OWNER_CONTROL_SIGNATURE_CONTRACT_SCHEMA_VERSION,
+        "contract_schema_version": _OWNER_CONTROL_SIGNATURE_DECLARATION_SCHEMA_VERSION,
     }
 
 
@@ -1071,15 +1084,21 @@ def _provenance_declaration() -> dict[str, Any]:
     }
 
 
-def _v3_compatibility_declaration() -> dict[str, Any]:
+def _v4_compatibility_declaration() -> dict[str, Any]:
     return {
-        "container_schema_version": 3,
-        "previous_container_schema_version": 2,
-        "change_kind": "additive-server-state-vectors",
+        "container_schema_version": 4,
+        "previous_container_schema_version": 3,
+        "change_kind": "additive-descriptor-wire-schema-and-vectors",
         "unknown_container_versions": "reject",
         "wire_model_schema_versions": [1],
         "shadow_verifier_schema_versions": [OWNER_CONTROL_SHADOW_VERIFIER_SCHEMA_VERSION],
         "preserved_v2_section_sha256": dict(_PRESERVED_V2_SECTION_SHA256),
+        "preserved_v2_descriptor_ids": sorted(_PRESERVED_V2_DESCRIPTOR_IDS),
+        "preserved_v2_descriptor_vector_section_sha256": dict(
+            _PRESERVED_V2_DESCRIPTOR_VECTOR_SECTION_SHA256
+        ),
+        "preserved_v2_schema_sha256": dict(_PRESERVED_V2_SCHEMA_SHA256),
+        "schema_change": "descriptor literal expanded for managed-merge-train-policy-import",
     }
 
 
@@ -1095,7 +1114,12 @@ def _compatibility_declaration() -> dict[str, Any]:
             OWNER_CONTROL_ENROLLMENT_PROVENANCE_SCHEMA_VERSION
         ],
         "preserved_v2_section_sha256": dict(_PRESERVED_V2_SECTION_SHA256),
-        "preserved_v3_section_sha256": dict(_PRESERVED_V3_SECTION_SHA256),
+        "preserved_v2_descriptor_ids": sorted(_PRESERVED_V2_DESCRIPTOR_IDS),
+        "preserved_v2_descriptor_vector_section_sha256": dict(
+            _PRESERVED_V2_DESCRIPTOR_VECTOR_SECTION_SHA256
+        ),
+        "preserved_v2_schema_sha256": dict(_PRESERVED_V2_SCHEMA_SHA256),
+        "preserved_v4_section_sha256": dict(_PRESERVED_V4_SECTION_SHA256),
     }
 
 
@@ -1105,19 +1129,55 @@ def _validate_preserved_v2_sections(artifact: Mapping[str, Any]) -> None:
             raise OwnerControlContractError(
                 f"Owner-control v2 section {section!r} changed without a compatibility break"
             )
+    for section, expected_sha256 in _PRESERVED_V2_DESCRIPTOR_VECTOR_SECTION_SHA256.items():
+        section_value = [
+            vector
+            for vector in artifact[section]
+            if vector.get("descriptor_id") in _PRESERVED_V2_DESCRIPTOR_IDS
+        ]
+        if canonical_json_sha256(section_value) != expected_sha256:
+            raise OwnerControlContractError(
+                f"Owner-control v2 descriptor-scoped section {section!r} changed without a compatibility break"
+            )
+    for schema_name, expected_sha256 in _PRESERVED_V2_SCHEMA_SHA256.items():
+        preserved_schema = _preserve_v2_descriptor_enums(artifact["schemas"][schema_name])
+        if canonical_json_sha256(preserved_schema) != expected_sha256:
+            raise OwnerControlContractError(
+                f"Owner-control v2 schema {schema_name!r} changed without a compatibility break"
+            )
 
 
-def _validate_preserved_v3_sections(artifact: Mapping[str, Any]) -> None:
-    for section, expected_sha256 in _PRESERVED_V3_SECTION_SHA256.items():
+def _preserve_v2_descriptor_enums(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        normalized = {key: _preserve_v2_descriptor_enums(item) for key, item in value.items()}
+        enum_values = normalized.get("enum")
+        if (
+            isinstance(enum_values, list)
+            and len(enum_values) == len(_ALL_DESCRIPTOR_IDS)
+            and set(enum_values) == _ALL_DESCRIPTOR_IDS
+        ):
+            normalized["enum"] = [
+                descriptor_id
+                for descriptor_id in enum_values
+                if descriptor_id in _PRESERVED_V2_DESCRIPTOR_IDS
+            ]
+        return normalized
+    if isinstance(value, list):
+        return [_preserve_v2_descriptor_enums(item) for item in value]
+    return value
+
+
+def _validate_preserved_v4_sections(artifact: Mapping[str, Any]) -> None:
+    for section, expected_sha256 in _PRESERVED_V4_SECTION_SHA256.items():
         if section == "schema_version":
-            actual_sha256 = canonical_json_sha256(3)
+            actual_sha256 = canonical_json_sha256(4)
         elif section == "compatibility":
-            actual_sha256 = canonical_json_sha256(_v3_compatibility_declaration())
+            actual_sha256 = canonical_json_sha256(_v4_compatibility_declaration())
         else:
             actual_sha256 = canonical_json_sha256(artifact[section])
         if actual_sha256 != expected_sha256:
             raise OwnerControlContractError(
-                f"Owner-control v3 section {section!r} changed without a compatibility break"
+                f"Owner-control v4 section {section!r} changed without a compatibility break"
             )
 
 
@@ -1183,7 +1243,7 @@ def build_owner_control_contract() -> dict[str, Any]:
 
     artifact = _build_owner_control_contract()
     _validate_preserved_v2_sections(artifact)
-    _validate_preserved_v3_sections(artifact)
+    _validate_preserved_v4_sections(artifact)
     return artifact
 
 
@@ -1226,7 +1286,7 @@ def validate_owner_control_contract(artifact: Mapping[str, Any]) -> None:
     if artifact["compatibility"] != expected["compatibility"]:
         raise OwnerControlContractError("Owner-control compatibility declaration drifted")
     _validate_preserved_v2_sections(artifact)
-    _validate_preserved_v3_sections(artifact)
+    _validate_preserved_v4_sections(artifact)
     if artifact["canonical_json"] != expected["canonical_json"]:
         raise OwnerControlContractError("Owner-control canonical JSON declaration drifted")
     if artifact["signature_declaration"] != expected["signature_declaration"]:

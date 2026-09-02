@@ -25,6 +25,19 @@ route, execute action, static execution credential, or agent execution path.
   reconciliation planner with `mode="dry_run"` only. Its request contains one
   managed set, the exact desired schema-v2 policy fragment, reason, and optional
   related issue. Planning never writes the active authorization policy.
+  Historical requests created before the optional
+  `administrator_quorum_change` field remain readable when that value is absent
+  or `null`. Historical evidence created before the administrator-quorum summary
+  fields remains readable only when all six fields normalize to their original
+  defaults. Validation accepts only those exact canonical digest projections.
+  New records continue to write the current request and evidence digests, and
+  every other mismatch fails closed.
+- `managed-merge-train-policy-import` version 1 accepts one complete schema-
+  valid candidate merge-train policy record, a reason, and optional related
+  issue. Its planner reads exactly one active merge-train policy record and
+  produces bounded active/candidate record IDs, policy digests, target counts,
+  and stable target-key change buckets. Planning never writes the active
+  merge-train policy.
 - The Engineering UI lists redacted human evidence and may offer browser-human
   approve/revoke controls. Policy proposals include an explicit exact-policy
   review disclosure. The UI never offers an execute control.
@@ -64,20 +77,26 @@ The human routes use a named GitHub-human browser dependency that:
 
 The planning and approval actions are:
 
-| Action | Safety | Surface |
-| --- | --- | --- |
-| `privileged_secret_operation.plan` | `secret_backed` | GitHub-human plan creation |
-| `privileged_secret_operation.read` | `secret_backed` | GitHub-human plan reads |
-| `privileged_secret_operation.cancel` | `secret_backed` | GitHub-human cancellation |
-| `privileged_secret_operation.approve` | `secret_backed` | GitHub-human browser approval |
-| `privileged_secret_operation.revoke` | `secret_backed` | GitHub-human browser revocation |
-| `privileged_operation_summary.read` | `read` | Counts-only agent projection |
-| `authz_policy_operation.propose` | `policy_admin` | Inert GitHub-human or terminal-agent proposal |
-| `authz_policy_operation.read` | `policy_admin` | GitHub-human policy-plan reads |
-| `authz_policy_operation.cancel` | `policy_admin` | GitHub-human policy-plan cancellation |
-| `authz_policy_operation.approve` | `policy_admin` | GitHub-human browser approval |
-| `authz_policy_operation.revoke` | `policy_admin` | GitHub-human browser revocation |
-| `privileged_policy_operation_summary.read` | `read` | Proposal-owner agent projection |
+| Action                                     | Safety          | Surface                                         |
+| ------------------------------------------ | --------------- | ----------------------------------------------- |
+| `privileged_secret_operation.plan`         | `secret_backed` | GitHub-human plan creation                      |
+| `privileged_secret_operation.read`         | `secret_backed` | GitHub-human plan reads                         |
+| `privileged_secret_operation.cancel`       | `secret_backed` | GitHub-human cancellation                       |
+| `privileged_secret_operation.approve`      | `secret_backed` | GitHub-human browser approval                   |
+| `privileged_secret_operation.revoke`       | `secret_backed` | GitHub-human browser revocation                 |
+| `privileged_operation_summary.read`        | `read`          | Counts-only agent projection                    |
+| `authz_policy_operation.propose`           | `policy_admin`  | Inert GitHub-human or terminal-agent proposal   |
+| `authz_policy_operation.read`              | `policy_admin`  | GitHub-human policy-plan reads                  |
+| `authz_policy_operation.cancel`            | `policy_admin`  | GitHub-human policy-plan cancellation           |
+| `authz_policy_operation.approve`           | `policy_admin`  | GitHub-human browser approval                   |
+| `authz_policy_operation.revoke`            | `policy_admin`  | GitHub-human browser revocation                 |
+| `privileged_policy_operation_summary.read` | `read`          | Proposal-owner agent projection                 |
+| `merge_train_policy_operation.propose`     | `policy_admin`  | Inert GitHub-human or terminal-agent proposal   |
+| `merge_train_policy_operation.read`        | `policy_admin`  | GitHub-human policy-plan reads                  |
+| `merge_train_policy_operation.cancel`      | `policy_admin`  | GitHub-human policy-plan cancellation           |
+| `merge_train_policy_operation.approve`     | `policy_admin`  | GitHub-human browser approval                   |
+| `merge_train_policy_operation.revoke`      | `policy_admin`  | GitHub-human browser revocation                 |
+| `privileged_merge_train_policy_operation_summary.read` | `read` | Proposal-owner agent projection |
 
 Approval requires exactly one managed GitHub-human rule that is pinned to
 non-empty immutable `github_ids`. Login, organization, team, or role selectors
@@ -92,9 +111,54 @@ Policy-operation approval additionally requires that the signed-in approver is
 already authorized for `authz_policy_grant.write` by an active schema-v2 rule
 with the same immutable GitHub ID. Execution checks that immutable pre-existing
 administrator authority again, then requires the candidate policy to retain the
-applying administrator and at least one distinct reachable policy
-administrator. An approval-only rule cannot bootstrap its holder into policy
-administration.
+applying administrator, at least one reachable strict immutable-ID
+GitHub-human administrator, and the effective administrator quorum. An
+approval-only rule cannot bootstrap its holder into policy administration.
+
+Merge-train policy-operation approval uses the separate
+`merge_train_policy_operation.*` action family. Existing
+`authz_policy_operation.*` rules do not authorize proposal, read, approval,
+revocation, cancellation, or terminal-agent summary access for merge-train
+policy imports. The dedicated action family must be activated through the same
+DB-native managed-authz privileged-operation lifecycle with a fresh signed-in
+owner session, exact review, CAS, idempotency, and read-back; the `#2277`
+activation bridge is not a recurring grant path.
+
+The one-time issue `#2277` activation bridge exists only to make this ordinary
+policy-operation lifecycle reachable for an already-authorized immutable-ID
+GitHub-human policy administrator. Its compiled managed set grants that one
+human ID exactly the five `authz_policy_operation.*` propose, read, approve,
+revoke, and cancel actions. It grants no agent summary, workflow, terminal,
+operator, local-admin, provider, deployment, wildcard, or policy-write action.
+The caller supplies no rule, selector, principal, action, policy body, or
+managed ID.
+
+The bridge dry-run exposes bounded active-policy, candidate, exact-action, and
+continuity evidence. It is available only while the effective administrator
+quorum is greater than one; quorum-one activation must use the confirmed
+recovery candidate flow. Apply requires the reviewed digest, reason,
+immutable-ID-scoped idempotency, policy CAS, and exact read-back. If the active
+policy already contains the exact compiled set, the bridge is permanently
+retired by DB state and rejects new dry-runs or applies; a same-key replay can
+still return the original completed response. A conflicting use of the managed
+set fails closed. This is a temporary transport for existing DB authority, not
+an alternate policy editor, total-lockout recovery, or break-glass credential.
+
+The `#2277` recovery bridge is a separate, hidden browser-human surface for the
+deployed unconfirmed activation state. It only compiles three closed candidates:
+reset an exact unconfirmed activation, fresh activation, and temporary bootstrap
+retirement. A candidate that results in quorum one needs a fresh exact-digest
+confirmation; issuing it never accepts raw policy, selector, action, or rule
+input. The final retirement removes the temporary terminal-agent proposal rule
+because it grants only the overlapping proposal action and has no independent
+invariant after the managed human activation is confirmed. Any residual
+non-overlapping action on the closed temporary human rule is retained.
+
+Before approving a policy-admin privileged operation, the service re-plans the
+exact stored request against current active state. A changed active record
+identity, timestamp, digest, plan digest, blocker state, or bounded semantic
+change set returns `privileged_operation_plan_stale` and requires a new plan.
+Exactly one immutable-ID approval rule remains required.
 
 The dry-run planner does not know which human will approve, so its evidence
 cannot include the identity-dependent applying-administrator and independent-
@@ -190,14 +254,18 @@ The persisted human evidence may include:
 - managed-policy previous/candidate revisions and policy digests, bounded rule
   change counts, blocker codes, and exact desired policy input for authorized
   human review.
+- merge-train policy active and candidate record IDs/digests, active updated
+  time, target counts, and stable policy keys for added, removed, changed, and
+  unchanged targets.
 
 It never persists managed-secret IDs, secret-version IDs, ciphertext,
 plaintext, raw terminal-agent subjects/token labels, or raw planner error
 strings. A terminal-agent requester is persisted only as a domain-separated
 SHA-256 principal fingerprint. Agent projections are narrower: they contain
-counts, status, descriptor/version, and timestamps only; they exclude request
-data, desired policy bodies, key IDs, and human identity. A terminal agent may
-read only the policy proposal created by its own fingerprint.
+counts, bounded stable keys, status, descriptor/version, and timestamps only;
+they exclude request data, desired policy bodies, merge identities, token source
+labels, key IDs, and human identity. A terminal agent may read only the policy
+proposal created by its own fingerprint.
 
 ## HTTP, UI, And Worker
 
@@ -230,10 +298,17 @@ persistence.
 It claims approved records, re-plans with `apply=False`, rejects plan/pre-state
 drift, reads the fresh active policy, reauthorizes only the immutable approver
 GitHub ID against the exact approval rule, and invokes the descriptor's typed
-executor. Managed-policy execution also proves the approver's pre-existing
+executor. Managed authz policy execution also proves the approver's pre-existing
 immutable-ID policy-admin authority, constructs the exact reviewed apply
 envelope, and uses the existing atomic authorization-policy CAS plus
 idempotency completion before reading the active record back.
+Managed merge-train policy import execution uses a descriptor-specific
+service-internal write route. The worker re-plans immediately before execution,
+rejects drift in the active policy record or plan evidence, atomically compares
+the expected active merge-train policy ID/timestamp/digest, supersedes that
+record, writes the candidate active record, completes operation-scoped
+idempotency, and then reads back exactly one active candidate record plus the
+expected superseded previous record before recording `executed`.
 The operation-record ID derives the deterministic token passed to the existing
 managed-secret reservation/single-flight path. All managed-secret re-encryption
 operations share one global provider-target fence even when their operation IDs
@@ -245,8 +320,11 @@ reconciliation state.
 
 Managed-policy recovery does not recompute against the already-applied policy.
 It verifies the completed inner CAS reservation and exact active-policy
-revision/SHA read-back, then adopts the outer privileged-operation result. A
-stale or ambiguous read-back remains reconciliation-required.
+revision/SHA read-back, then adopts the outer privileged-operation result. The
+merge-train policy recovery path similarly verifies the completed inner
+descriptor-specific reservation, exactly one active candidate digest, and the
+expected superseded previous record when a change occurred. A stale or
+ambiguous read-back remains reconciliation-required.
 
 ## Legacy Re-encryption Route
 

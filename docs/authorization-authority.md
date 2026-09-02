@@ -44,6 +44,16 @@ or authorize approval or execution; rules that also depend on mutable login,
 organization, team, or role selectors are intentionally insufficient without a
 live authenticated human identity.
 
+Administrator-enrollment records are likewise inert evidence only. They may
+record an owner-created, 30-minute opaque challenge and a later server-derived
+candidate GitHub identity that proved control, but they do not create a policy
+administrator, grant a policy action, change a managed set, or make any route
+or workflow available. Every record is fixed to no authority. A future bridge
+may compile a final enrolled record into an owner-gated DB-native policy change
+only after separate design, review, apply, and read-back work under the active
+authorization-administration boundary. Landing enrollment storage does not
+approve or implement that bridge and does not relax `#2058`.
+
 Repository inventory follows the same authority boundary. Its
 `repository_inventory.read` and `repository_inventory.write` actions use the
 Launchplane service scope (`product=launchplane`, `context=launchplane`), but
@@ -92,13 +102,45 @@ through Launchplane's API and UI:
 - inspect active policy, managed sets, principals, and effective access;
 - explain denials without requiring policy-write permission;
 - propose, dry-run, review, apply, revoke, and roll back exact changes;
-- preserve the applying administrator and at least one distinct active policy
-  administrator without claiming total-lockout recovery;
+- preserve the applying administrator and at least one reachable strict
+  immutable-ID GitHub-human administrator without claiming total-lockout
+  recovery;
+- carry an explicit administrator quorum in schema-v2 policy state; records
+  without the field retain legacy quorum `2`, while quorum `1` is an explicit
+  reviewed policy change and is reported as solo administration;
 - prevent final-admin lockout and reject known readiness blockers;
 - retain immutable identity, least-privilege scope, revision, digest,
   idempotency, and audit evidence;
 - export and restore policy without making GitHub the durable desired-state
   store.
+
+Quorum-one recovery is a separate browser-human bridge. It requires a fresh
+GitHub session created within five minutes, exact current strict immutable-ID
+administrator authority from the active DB policy, a reviewed dry-run digest,
+the exact warning acknowledgement, a future apply idempotency key, and a
+candidate with exactly one strict human administrator and no safety or
+operational-readiness blockers. The service returns a random one-time secret
+only at issuance, stores only its SHA-256 digest, and records an immutable
+issued event followed by exactly one immutable consumed, revoked, or expired
+event. The apply route binds the confirmation to the active policy record,
+candidate, plan, session digest, GitHub ID, idempotency key, and secret inside
+the same serialized transaction as policy CAS and idempotency completion.
+
+Issue `#2277` recovery uses that inert evidence model through separate hidden,
+browser-human-only, code-defined candidate routes. They accept a closed
+candidate ID rather than a policy body, recompile the candidate against the
+single active record for dry-run, confirmation issuance, and apply, and reject
+the apply when that fresh plan no longer matches the observed generation/digest.
+Every candidate whose resulting quorum is one requires a fresh five-minute
+session, the recovery-specific exact acknowledgement, a future candidate-scoped
+idempotency key, and an exact-digest confirmation consumed atomically with CAS.
+The only recovery sequence is: remove an exact active activation set that has no
+consumed confirmation bound to its active digest; create and confirm a fresh
+activation; then retire overlapping temporary bootstrap actions. The service
+never backfills or forges evidence for an already-active historical revision.
+Run those policy writes as one uninterrupted recovery window: any intervening
+authorization-policy revision invalidates the active-digest confirmation
+backing and must stop the cutover for a new reviewed recovery change.
 
 The first DB-native read-only slice keeps those capabilities separate:
 
@@ -184,6 +226,57 @@ or action inventory. The route and all of its errors are
 `Cache-Control: no-store`; it performs no session renewal, CSRF rotation,
 denial, audit, idempotency, outbox, policy, operation, provider, runtime, or
 secret write. No additional diagnostic grant or credential is required.
+
+Issue `#2277` adds one narrow browser-human activation bridge for the compiled
+privileged-policy operation managed set. The bridge has separate dry-run and
+apply POST routes, accepts only a bounded reason, the reviewed dry-run digest on
+apply, and an `Idempotency-Key`, and derives the immutable GitHub ID exclusively
+from the authenticated Launchplane session. Both routes require strict
+same-origin fetch metadata and a single-use CSRF token. Bearer, workflow,
+terminal-agent, local-operator, and local-admin identities fail before policy
+evaluation.
+
+The bridge does not trust the session role or mutable login, organization, or
+team selectors. It reloads the single active DB policy and requires an exact
+immutable-ID human administrator rule with explicit `admin` role, literal
+`authz_policy_grant.write`, and exact `launchplane` product/context scope. Its
+code-compiled managed set contains one GitHub-human rule for that same immutable
+ID and exactly `authz_policy_operation.propose`,
+`authz_policy_operation.read`, `authz_policy_operation.approve`,
+`authz_policy_operation.revoke`, and `authz_policy_operation.cancel`. It cannot
+create workflow, terminal-agent, local-operator, local-admin, wildcard,
+provider, deployment, or unrelated authority.
+
+The companion recovery routes remain hidden from public OpenAPI like the
+activation bridge. They are not a policy editor: the closed candidates can only
+reset an unconfirmed exact activation, create a fresh exact activation, or
+retire the temporary bootstrap set after that fresh activation has consumed
+confirmation backing. Bootstrap retirement removes its terminal-agent proposal
+rule and removes all overlapping `authz_policy_operation.*` actions while
+preserving any non-overlapping action on the closed human bridge rule. It fails
+closed on any other bootstrap shape and verifies that each of the five actions
+then has exactly one match from `operator.privileged-policy-operation`.
+
+An immutable-ID administration denial remains ordinary redacted authorization
+evidence: the service records its trace, fixed action and scope, reason category,
+and active-policy provenance. The route response and every error remain
+`Cache-Control: no-store`; no principal selector or raw policy is persisted in
+the denial record.
+
+Dry-run binds the observed active record ID, revision, policy digest, candidate
+revision and digest, desired-set digest, exact action set, applying-admin
+continuity, effective administrator quorum, and strict human administrator evidence. Apply
+repeats that
+compiled request with the reviewed digest, non-empty reason, immutable-ID-scoped
+idempotency, active-policy compare-and-swap, and exact record/revision/digest and
+policy read-back. The written record uses the distinct
+`service:authz-policy-operation-activation` source. Once the exact managed set
+is active, both activation routes return the terminal
+`authz_policy_operation_activation_retired` result; an occupied but non-exact
+set fails as a conflict. This state-derived retirement is not total-lockout
+recovery, a recurring break-glass path, or operator-configured authority. The
+routes remain hidden from the general OpenAPI surface so the bridge can be
+deleted after production activation evidence is preserved.
 
 The next read-only administration slice adds
 `authz_policy_candidate_preview.read` for an authenticated GitHub administrator
@@ -289,14 +382,15 @@ and session revalidation. Legacy human rules retain their existing runtime
 matching semantics until a reviewed migration replaces wildcard or implicit
 selectors, while all newly reconciled managed human rules require explicit
 roles, explicit principals, exact selectors, and immutable IDs for sensitive
-access. Changed applies must also retain a policy administrator independent from
-the applying identity. Continuity recognizes only an immutable-ID-bound GitHub
+access. Changed applies must also retain the applying administrator, at least
+one strict human administrator, and enough distinct immutable GitHub IDs to
+satisfy the effective quorum. Continuity recognizes only an immutable-ID-bound GitHub
 ID-only human rule with the explicit `admin` role, literal
 `authz_policy_grant.write` action, and exact `launchplane` product/context
 selectors; roles-empty rules, mutable login, organization, team, or instance
 selectors, action-empty or wildcard actions, wildcard selectors, workflow,
-terminal, operator, and local-admin rules cannot satisfy that
-independent-administrator predicate. Any future break-glass design
+terminal, operator, and local-admin rules cannot satisfy the strict human
+administrator predicate. Any future break-glass design
 must be separately approved by the owner before implementation, use an
 independent credential and approval boundary, bind the expected active policy
 digest, make the smallest recoverable change, append audit evidence, and
@@ -313,6 +407,15 @@ The governed privileged-operation surface uses schema-v2 managed rules and
 requires exactly one match with both managed IDs. Legacy unmanaged action-empty
 rules cannot inherit any action. Code deployment introduces no policy rule or
 grant.
+
+Merge-train policy imports use a dedicated privileged-operation action family:
+`merge_train_policy_operation.propose`, `.read`, `.cancel`, `.approve`, and
+`.revoke`, plus the read-only terminal-agent projection action
+`privileged_merge_train_policy_operation_summary.read`. Existing
+`authz_policy_operation.*`, workflow, local-operator, local-admin, or raw
+`merge_train.policy_import` grants do not authorize this lifecycle. Activation
+of those exact actions remains a DB-native managed-authz privileged operation
+with fresh owner authentication, review, CAS, idempotency, and read-back.
 
 The browser-human identity dependency is separate from the existing browser
 mutation dependency that permits bearer identities to pass through. Bearer,

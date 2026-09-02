@@ -118,6 +118,13 @@ affected-product subjects, the adapter emits one canonical
 impact evidence is unavailable before subjects can be resolved, that same
 unscoped facet is `unknown` and fails closed.
 
+For that successful `not_required` path, there is intentionally no historical
+Owner or engineering binding from which to recover an expected impact-policy
+digest. The live adapter therefore binds the expected impact fingerprint to the
+same current policy evaluation that proved the change has no affected-product
+subjects. Missing or non-successful impact evidence never receives this
+fallback and continues to fail closed.
+
 ## Advisory Checks
 
 The `launchplane/owner-acceptance`, `launchplane/engineering-review`, and legacy
@@ -141,17 +148,20 @@ ruleset drift enforcement remains owned by #2031 rather than this L2 contract.
 ## Revalidation
 
 Callers must recompute L2 under the current controller lease immediately before
-each later L3 attempt. A lost, missing, expired, or wrong-owner lease; controller
-scope mismatch; expected-SHA mismatch; current-head drift; queue movement;
-policy drift; or evidence loss produces a non-ready result. A previous L2 result
-is never reusable authority.
+each later L3 attempt. The guarded caller binds the expected lease owner from
+its acquired controller authority before current state is re-read; the fresh
+controller record remains observed evidence only. A lost, missing, expired, or
+wrong-owner lease; controller scope mismatch; expected-SHA mismatch;
+current-head drift; queue movement; policy drift; or evidence loss produces a
+non-ready result. A previous L2 result is never reusable authority.
 
 The production guarded landing adapter follows this rule for every constituent
 PR and persists the complete result only inside the subsequent immutable L3
 admission. See [merge-admission.md](merge-admission.md).
 
 The read-only governance projection uses the same live admission evaluator only
-when an active landing-plan lineage exists. It never persists the recomputed L2
-view and reports current evidence as unavailable rather than reusing a prior
-admission snapshot as current readiness. The immutable admission snapshot
-remains independently inspectable.
+when an active landing-plan lineage and running controller lease exist. It never
+persists the recomputed L2 view and reports current evidence as unavailable
+rather than deriving expected authority from an idle controller record or
+reusing a prior admission snapshot as current readiness. The immutable
+admission snapshot remains independently inspectable.

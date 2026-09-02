@@ -24,6 +24,7 @@ from control_plane.contracts.privileged_operation import (
     privileged_operation_evidence_digest,
     privileged_operation_record_digest,
     privileged_operation_request_digest,
+    privileged_operation_request_digest_candidates,
 )
 from control_plane.privileged_operation_registry import (
     read_privileged_operation_descriptor,
@@ -161,7 +162,7 @@ def _replay_existing_plan(
         or record.safety_class != registration.descriptor.safety_class
         or record.source_event_id != source_event_id
         or record.requested_by != actor
-        or record.request_digest != privileged_operation_request_digest(request)
+        or record.request_digest not in privileged_operation_request_digest_candidates(request)
         or datetime.fromisoformat(record.expires_at) != expected_expiry
     ):
         raise PrivilegedOperationConflictError(
