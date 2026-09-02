@@ -168,6 +168,7 @@ from control_plane.trusted_maintenance import (
     TrustedMaintenancePolicySequenceError,
 )
 from control_plane.storage.postgres import PostgresRecordStore
+from tests.merge_train_policy_fixtures import build_test_merge_train_policy
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_with_codex_skills
 from tests.support.artifact_manifests import artifact_manifest_v2
 
@@ -2352,6 +2353,111 @@ class FilesystemRecordStoreTests(unittest.TestCase):
             .policy.find_repository_policy(repository="cbusillo/codex-skills", base_branch="main")
             .enqueue_label,
             "ready-to-merge",
+        )
+
+    def test_merge_train_policy_compare_write_replaces_single_active_record(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            active_record = MergeTrainPolicyRecord(
+                record_id="merge-train-policy-active",
+                status="active",
+                source="test",
+                updated_at="2026-05-13T21:00:00Z",
+                policy=build_test_merge_train_policy(repository="cbusillo/sellyouroutboard"),
+            )
+            replacement_record = MergeTrainPolicyRecord(
+                record_id="merge-train-policy-replacement",
+                status="active",
+                source="test",
+                updated_at="2026-05-13T22:00:00Z",
+                policy=build_test_merge_train_policy(repository="cbusillo/codex-skills"),
+            )
+
+            store.write_merge_train_policy_record(active_record)
+            result = store.compare_and_write_merge_train_policy_record(
+                expected_record=active_record,
+                replacement_record=replacement_record,
+            )
+            active_records = store.list_merge_train_policy_records(status="active")
+            superseded_records = store.list_merge_train_policy_records(status="superseded")
+
+        self.assertEqual(result.status, "written")
+        self.assertEqual(result.current_record, replacement_record)
+        self.assertEqual(
+            [record.record_id for record in active_records], [replacement_record.record_id]
+        )
+        self.assertEqual(
+            [record.record_id for record in superseded_records], [active_record.record_id]
+        )
+
+    def test_merge_train_policy_compare_write_rejects_record_id_from_history(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name))
+            historical_record = MergeTrainPolicyRecord(
+                record_id="merge-train-policy-historical",
+                status="superseded",
+                source="test",
+                updated_at="2026-05-13T20:00:00Z",
+                policy=build_test_merge_train_policy(repository="cbusillo/odoo-devkit"),
+            )
+            active_record = MergeTrainPolicyRecord(
+                record_id="merge-train-policy-active",
+                status="active",
+                source="test",
+                updated_at="2026-05-13T21:00:00Z",
+                policy=build_test_merge_train_policy(repository="cbusillo/sellyouroutboard"),
+            )
+            replacement_record = MergeTrainPolicyRecord(
+                record_id=historical_record.record_id,
+                status="active",
+                source="test",
+                updated_at="2026-05-13T22:00:00Z",
+                policy=build_test_merge_train_policy(repository="cbusillo/codex-skills"),
+            )
+
+            store.write_merge_train_policy_record(historical_record)
+            store.write_merge_train_policy_record(active_record)
+            result = store.compare_and_write_merge_train_policy_record(
+                expected_record=active_record,
+                replacement_record=replacement_record,
+            )
+            active_records = store.list_merge_train_policy_records(status="active")
+            stored_historical_record = store.read_merge_train_policy_record(
+                historical_record.record_id
+            )
+
+        self.assertEqual(result.status, "record_id_conflict")
+        self.assertEqual(active_records, (active_record,))
+        self.assertEqual(stored_historical_record, historical_record)
+
+    def test_merge_train_policy_plain_write_supersedes_previous_active_record(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name))
+            first_record = MergeTrainPolicyRecord(
+                record_id="merge-train-policy-first",
+                status="active",
+                source="test",
+                updated_at="2026-05-13T21:00:00Z",
+                policy=build_test_merge_train_policy(repository="cbusillo/sellyouroutboard"),
+            )
+            second_record = MergeTrainPolicyRecord(
+                record_id="merge-train-policy-second",
+                status="active",
+                source="test",
+                updated_at="2026-05-13T22:00:00Z",
+                policy=build_test_merge_train_policy(repository="cbusillo/codex-skills"),
+            )
+
+            store.write_merge_train_policy_record(first_record)
+            store.write_merge_train_policy_record(second_record)
+
+            active_records = store.list_merge_train_policy_records(status="active")
+            superseded_records = store.list_merge_train_policy_records(status="superseded")
+
+        self.assertEqual(active_records, (second_record,))
+        self.assertEqual(
+            [record.record_id for record in superseded_records], [first_record.record_id]
         )
 
     def test_write_and_list_merge_train_batch_candidate_records(self) -> None:

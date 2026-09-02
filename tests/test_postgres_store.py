@@ -258,6 +258,7 @@ from control_plane.trusted_maintenance import (
     TrustedMaintenancePolicySequenceError,
 )
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy
+from tests.merge_train_policy_fixtures import build_test_merge_train_policy_record
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_with_codex_skills
 from tests.support.artifact_manifests import artifact_manifest_v2
 
@@ -602,6 +603,24 @@ def _role_policy_db_only_mutation(
         response_status_code=202,
         response_trace_id=response_trace_id,
         response_payload={"status": "accepted", "trace_id": response_trace_id},
+    )
+
+
+def _merge_train_policy_db_only_mutation(
+    *,
+    idempotency_key: str = "merge-train-policy:test:apply:1",
+    request_fingerprint: str = "merge-train-policy-fingerprint",
+    response_trace_id: str = "trace-merge-train-policy",
+) -> DbOnlyMutationRequest:
+    return DbOnlyMutationRequest(
+        scope="privileged-operation-execution",
+        route_path="service-internal:privileged-operation-worker:managed-merge-train-policy-import",
+        idempotency_key=idempotency_key,
+        request_fingerprint=request_fingerprint,
+        lease_owner=response_trace_id,
+        response_status_code=200,
+        response_trace_id=response_trace_id,
+        response_payload={"status": "ok", "trace_id": response_trace_id},
     )
 
 
@@ -7966,6 +7985,142 @@ env_var = "GH_TOKEN"
             .policy.find_repository_policy(repository="cbusillo/codex-skills", base_branch="main")
             .blocked_label,
             "merge-blocked",
+        )
+
+    def test_merge_train_policy_compare_write_is_atomic_and_replays(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            try:
+                active_record = build_test_merge_train_policy_record(
+                    repository="cbusillo/sellyouroutboard",
+                    record_id="merge-train-policy-active",
+                    updated_at="2026-05-13T21:00:00Z",
+                )
+                replacement_record = build_test_merge_train_policy_record(
+                    repository="cbusillo/codex-skills",
+                    record_id="merge-train-policy-replacement",
+                    updated_at="2026-05-13T22:00:00Z",
+                )
+                store.write_merge_train_policy_record(active_record)
+                mutation = _merge_train_policy_db_only_mutation()
+
+                written = store.compare_and_write_merge_train_policy_record(
+                    expected_record=active_record,
+                    replacement_record=replacement_record,
+                    mutation=mutation,
+                )
+                replayed = store.compare_and_write_merge_train_policy_record(
+                    expected_record=active_record,
+                    replacement_record=replacement_record,
+                    mutation=mutation,
+                )
+                conflict = store.compare_and_write_merge_train_policy_record(
+                    expected_record=active_record,
+                    replacement_record=replacement_record,
+                    mutation=_merge_train_policy_db_only_mutation(
+                        request_fingerprint="different-fingerprint"
+                    ),
+                )
+                active_records = store.list_merge_train_policy_records(status="active", limit=2)
+                superseded_records = store.list_merge_train_policy_records(
+                    status="superseded",
+                    limit=10,
+                )
+            finally:
+                store.close()
+
+        self.assertEqual(written.status, "written")
+        self.assertEqual(
+            written.current_record.record_id if written.current_record else "",
+            replacement_record.record_id,
+        )
+        self.assertEqual(replayed.status, "replayed")
+        self.assertEqual(conflict.status, "idempotency_conflict")
+        self.assertEqual(
+            [record.record_id for record in active_records], [replacement_record.record_id]
+        )
+        self.assertEqual(
+            [record.record_id for record in superseded_records], [active_record.record_id]
+        )
+
+    def test_merge_train_policy_compare_write_rejects_record_id_from_history(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            try:
+                historical_record = build_test_merge_train_policy_record(
+                    repository="cbusillo/odoo-devkit",
+                    record_id="merge-train-policy-historical",
+                    updated_at="2026-05-13T20:00:00Z",
+                ).model_copy(update={"status": "superseded"})
+                active_record = build_test_merge_train_policy_record(
+                    repository="cbusillo/sellyouroutboard",
+                    record_id="merge-train-policy-active",
+                    updated_at="2026-05-13T21:00:00Z",
+                )
+                replacement_record = build_test_merge_train_policy_record(
+                    repository="cbusillo/codex-skills",
+                    record_id=historical_record.record_id,
+                    updated_at="2026-05-13T22:00:00Z",
+                )
+                store.write_merge_train_policy_record(historical_record)
+                store.write_merge_train_policy_record(active_record)
+
+                result = store.compare_and_write_merge_train_policy_record(
+                    expected_record=active_record,
+                    replacement_record=replacement_record,
+                )
+                active_records = store.list_merge_train_policy_records(status="active")
+                stored_historical_record = store.read_merge_train_policy_record(
+                    historical_record.record_id
+                )
+            finally:
+                store.close()
+
+        self.assertEqual(result.status, "record_id_conflict")
+        self.assertEqual(active_records, (active_record,))
+        self.assertEqual(stored_historical_record, historical_record)
+
+    def test_merge_train_policy_plain_write_supersedes_previous_active_record(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            try:
+                first_record = build_test_merge_train_policy_record(
+                    repository="cbusillo/sellyouroutboard",
+                    record_id="merge-train-policy-first",
+                    updated_at="2026-05-13T21:00:00Z",
+                )
+                second_record = build_test_merge_train_policy_record(
+                    repository="cbusillo/codex-skills",
+                    record_id="merge-train-policy-second",
+                    updated_at="2026-05-13T22:00:00Z",
+                )
+
+                store.write_merge_train_policy_record(first_record)
+                store.write_merge_train_policy_record(second_record)
+
+                active_records = store.list_merge_train_policy_records(status="active")
+                superseded_records = store.list_merge_train_policy_records(status="superseded")
+            finally:
+                store.close()
+
+        self.assertEqual(active_records, (second_record,))
+        self.assertEqual(
+            [record.record_id for record in superseded_records], [first_record.record_id]
         )
 
     def test_merge_train_batch_candidate_records_round_trip(self) -> None:

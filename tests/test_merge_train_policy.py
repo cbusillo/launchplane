@@ -182,6 +182,15 @@ class MergeTrainPolicyTests(unittest.TestCase):
         )
         self.assertFalse(record.policy.policies[0].scheduler.enabled)
 
+    def test_policy_record_rejects_timezone_naive_updated_at(self) -> None:
+        with self.assertRaisesRegex(ValidationError, "timestamp must include a timezone"):
+            MergeTrainPolicyRecord(
+                record_id="merge-train-policy-naive-time",
+                source="test",
+                updated_at="2026-09-02T00:00:00",
+                policy=build_test_merge_train_policy(),
+            )
+
     def test_enabled_scheduler_policy_changes_policy_digest(self) -> None:
         disabled_policy = build_test_merge_train_policy()
         enabled_policy = build_test_merge_train_policy(scheduler_enabled=True)

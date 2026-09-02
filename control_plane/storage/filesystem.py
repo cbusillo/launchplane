@@ -82,7 +82,10 @@ from control_plane.contracts.merge_train_stack_collapse import (
     MergeTrainStackCollapsePlanRecord,
 )
 from control_plane.contracts.merge_train_run_record import MergeTrainRunRecord
-from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
+from control_plane.contracts.merge_train_policy import (
+    MergeTrainPolicyCompareWriteResult,
+    MergeTrainPolicyRecord,
+)
 from control_plane.contracts.merge_train_pr_feedback_record import (
     MergeTrainPrFeedbackRecord,
 )
@@ -1800,7 +1803,103 @@ class FilesystemRecordStore:
         return self._write_model("launchplane_merge_train_runs", record.run_id, record)
 
     def write_merge_train_policy_record(self, record: MergeTrainPolicyRecord) -> Path:
-        return self._write_model("launchplane_merge_train_policies", record.record_id, record)
+        record_type = "launchplane_merge_train_policies"
+        with self._exclusive_record_lock(record_type, "active"):
+            existing_records = self._list_models_locked(MergeTrainPolicyRecord, record_type)
+            existing_record = next(
+                (item for item in existing_records if item.record_id == record.record_id),
+                None,
+            )
+            if (
+                existing_record is not None
+                and existing_record.policy_sha256 != record.policy_sha256
+            ):
+                raise ValueError(
+                    "Merge-train policy record ID cannot be reused for different policy content."
+                )
+            if record.status == "active":
+                for active_record in existing_records:
+                    if (
+                        active_record.status != "active"
+                        or active_record.record_id == record.record_id
+                    ):
+                        continue
+                    superseded_record = active_record.model_copy(update={"status": "superseded"})
+                    self._write_model_locked(
+                        record_type,
+                        superseded_record.record_id,
+                        superseded_record,
+                    )
+            return self._write_model_locked(record_type, record.record_id, record)
+
+    def read_merge_train_policy_record(self, record_id: str) -> MergeTrainPolicyRecord:
+        return self._read_model(
+            MergeTrainPolicyRecord,
+            "launchplane_merge_train_policies",
+            record_id,
+        )
+
+    def compare_and_write_merge_train_policy_record(
+        self,
+        *,
+        expected_record: MergeTrainPolicyRecord,
+        replacement_record: MergeTrainPolicyRecord,
+        mutation: object | None = None,
+    ) -> MergeTrainPolicyCompareWriteResult:
+        if mutation is not None:
+            raise TypeError(
+                "Filesystem merge-train policy compare-and-write does not support mutation idempotency."
+            )
+        if expected_record.status != "active":
+            raise ValueError("Merge-train policy compare-and-write expected record must be active.")
+        if replacement_record.status != "active":
+            raise ValueError("Merge-train policy compare-and-write replacement must be active.")
+        record_type = "launchplane_merge_train_policies"
+        with self._exclusive_record_lock(record_type, "active"):
+            policy_records = self._list_models_locked(MergeTrainPolicyRecord, record_type)
+            active_records = [record for record in policy_records if record.status == "active"]
+            if not active_records:
+                return MergeTrainPolicyCompareWriteResult(status="missing")
+            if len(active_records) > 1:
+                return MergeTrainPolicyCompareWriteResult(status="ambiguous_active")
+            current_record = active_records[0]
+            if (
+                current_record.record_id != expected_record.record_id
+                or current_record.policy_sha256 != expected_record.policy_sha256
+                or current_record.updated_at != expected_record.updated_at
+            ):
+                return MergeTrainPolicyCompareWriteResult(
+                    status="stale", current_record=current_record
+                )
+            if (
+                current_record.record_id == replacement_record.record_id
+                and current_record.policy_sha256 != replacement_record.policy_sha256
+            ):
+                return MergeTrainPolicyCompareWriteResult(
+                    status="record_id_conflict", current_record=current_record
+                )
+            if replacement_record.record_id != current_record.record_id and any(
+                record.record_id == replacement_record.record_id for record in policy_records
+            ):
+                return MergeTrainPolicyCompareWriteResult(
+                    status="record_id_conflict", current_record=current_record
+                )
+            if current_record.policy_sha256 == replacement_record.policy_sha256:
+                return MergeTrainPolicyCompareWriteResult(
+                    status="unchanged", current_record=current_record
+                )
+            superseded_record = current_record.model_copy(update={"status": "superseded"})
+            self._write_model_locked(record_type, superseded_record.record_id, superseded_record)
+            try:
+                self._write_model_locked(
+                    record_type, replacement_record.record_id, replacement_record
+                )
+            except Exception:
+                self._write_model_locked(record_type, current_record.record_id, current_record)
+                raise
+            return MergeTrainPolicyCompareWriteResult(
+                status="written", current_record=replacement_record
+            )
 
     def write_merge_train_pr_feedback_record(self, record: MergeTrainPrFeedbackRecord) -> Path:
         return self._write_model("launchplane_merge_train_pr_feedback", record.feedback_id, record)

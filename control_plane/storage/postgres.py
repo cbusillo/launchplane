@@ -175,7 +175,10 @@ from control_plane.contracts.merge_train_stack_collapse import (
     MergeTrainStackCollapsePlanRecord,
 )
 from control_plane.contracts.merge_train_run_record import MergeTrainRunRecord
-from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
+from control_plane.contracts.merge_train_policy import (
+    MergeTrainPolicyCompareWriteResult,
+    MergeTrainPolicyRecord,
+)
 from control_plane.contracts.merge_train_pr_feedback_record import (
     MergeTrainPrFeedbackRecord,
 )
@@ -3409,6 +3412,13 @@ class LaunchplaneMergeTrainPolicyRow(Base):
     __tablename__ = "launchplane_merge_train_policies"
     __table_args__ = (
         Index(
+            "launchplane_merge_train_policies_active_uidx",
+            "status",
+            unique=True,
+            sqlite_where=text("status = 'active'"),
+            postgresql_where=text("status = 'active'"),
+        ),
+        Index(
             "launchplane_merge_train_policies_status_updated_idx",
             "status",
             desc("updated_at"),
@@ -5082,6 +5092,14 @@ class PostgresRecordStore(HumanSessionStore):
         session.execute(
             text("select pg_advisory_xact_lock(hashtextextended(:lock_name, 0))"),
             {"lock_name": f"launchplane:route-binding:{binding_key}"},
+        )
+
+    def _lock_merge_train_policy_write(self, session: Any) -> None:
+        if self.database_url.startswith("sqlite"):
+            return
+        session.execute(
+            text("select pg_advisory_xact_lock(hashtextextended(:lock_name, 0))"),
+            {"lock_name": "launchplane:active-merge-train-policy"},
         )
 
     def _lock_public_ingress_incident_write(
@@ -14692,15 +14710,300 @@ class PostgresRecordStore(HumanSessionStore):
         )
 
     def write_merge_train_policy_record(self, record: MergeTrainPolicyRecord) -> None:
-        self._write_row(
-            LaunchplaneMergeTrainPolicyRow(
-                record_id=record.record_id,
-                status=record.status,
-                source=record.source,
-                updated_at=record.updated_at,
-                policy_sha256=record.policy_sha256,
-                payload=self._payload_dict(record),
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_merge_train_policy_write(session)
+            existing_row = session.get(LaunchplaneMergeTrainPolicyRow, record.record_id)
+            if existing_row is not None and existing_row.policy_sha256 != record.policy_sha256:
+                raise ValueError(
+                    "Merge-train policy record ID cannot be reused for different policy content."
+                )
+            if record.status == "active":
+                active_rows = tuple(
+                    session.scalars(
+                        select(LaunchplaneMergeTrainPolicyRow).where(
+                            LaunchplaneMergeTrainPolicyRow.status == "active",
+                            LaunchplaneMergeTrainPolicyRow.record_id != record.record_id,
+                        )
+                    ).all()
+                )
+                for active_row in active_rows:
+                    active_record = self._read_payload(
+                        model_type=MergeTrainPolicyRecord,
+                        payload=active_row.payload,
+                    )
+                    superseded_record = active_record.model_copy(update={"status": "superseded"})
+                    active_row.status = "superseded"
+                    active_row.payload = self._payload_dict(superseded_record)
+            session.merge(
+                LaunchplaneMergeTrainPolicyRow(
+                    record_id=record.record_id,
+                    status=record.status,
+                    source=record.source,
+                    updated_at=record.updated_at,
+                    policy_sha256=record.policy_sha256,
+                    payload=self._payload_dict(record),
+                )
             )
+            session.commit()
+
+    def read_merge_train_policy_record(self, record_id: str) -> MergeTrainPolicyRecord:
+        return self._read_model(
+            model_type=MergeTrainPolicyRecord,
+            orm_model=LaunchplaneMergeTrainPolicyRow,
+            filters=(LaunchplaneMergeTrainPolicyRow.record_id == record_id,),
+        )
+
+    def compare_and_write_merge_train_policy_record(
+        self,
+        *,
+        expected_record: MergeTrainPolicyRecord,
+        replacement_record: MergeTrainPolicyRecord,
+        mutation: DbOnlyMutationRequest | None = None,
+    ) -> MergeTrainPolicyCompareWriteResult:
+        if expected_record.status != "active":
+            raise ValueError("Merge-train policy compare-and-write expected record must be active.")
+        if replacement_record.status != "active":
+            raise ValueError("Merge-train policy compare-and-write replacement must be active.")
+        if mutation is not None:
+            if not 100 <= mutation.response_status_code <= 599:
+                raise ValueError("DB-only mutation response status must be between 100 and 599.")
+            if not mutation.response_trace_id.strip():
+                raise ValueError("DB-only mutation response trace id is required.")
+        statement = (
+            select(LaunchplaneMergeTrainPolicyRow)
+            .where(LaunchplaneMergeTrainPolicyRow.status == "active")
+            .order_by(desc(LaunchplaneMergeTrainPolicyRow.updated_at))
+        )
+        if not self.database_url.startswith("sqlite"):
+            statement = statement.with_for_update()
+        if mutation is None:
+            with self._session_factory() as session:
+                self._begin_serialized_write(session)
+                return self._compare_and_write_merge_train_policy_locked(
+                    session=session,
+                    statement=statement,
+                    expected_record=expected_record,
+                    replacement_record=replacement_record,
+                )
+
+        reservation_insert_error: IntegrityError | None = None
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            observed_at = self._database_mutation_timestamp(session)
+            stored_reservation = build_launchplane_mutation_reservation(
+                scope=mutation.scope,
+                route_path=mutation.route_path,
+                idempotency_key=mutation.idempotency_key,
+                request_fingerprint=mutation.request_fingerprint,
+                lease_owner=mutation.lease_owner,
+                lease_expires_at=self._mutation_lease_expiry(
+                    observed_at=observed_at,
+                    lease_seconds=mutation.lease_seconds,
+                ),
+                reserved_at=observed_at,
+            )
+            reservation_row = self._idempotency_row(stored_reservation)
+            session.add(reservation_row)
+            try:
+                session.flush()
+            except IntegrityError as error:
+                session.rollback()
+                reservation_insert_error = error
+            if reservation_insert_error is None:
+                return self._compare_and_write_merge_train_policy_locked(
+                    session=session,
+                    statement=statement,
+                    expected_record=expected_record,
+                    replacement_record=replacement_record,
+                    reservation_row=reservation_row,
+                    mutation_reservation=stored_reservation,
+                    mutation=mutation,
+                )
+
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            reservation_row = session.scalar(
+                self._idempotency_statement(
+                    scope=mutation.scope,
+                    route_path=mutation.route_path,
+                    idempotency_key=mutation.idempotency_key,
+                    for_update=True,
+                )
+            )
+            if reservation_row is None:
+                assert reservation_insert_error is not None
+                raise reservation_insert_error
+            current_reservation = self._read_payload(
+                model_type=LaunchplaneIdempotencyRecord,
+                payload=reservation_row.payload,
+            )
+            if current_reservation.request_fingerprint != mutation.request_fingerprint:
+                return MergeTrainPolicyCompareWriteResult(
+                    status="idempotency_conflict",
+                    idempotency_record=current_reservation,
+                )
+            if current_reservation.state == "completed":
+                active_records = self.list_merge_train_policy_records(status="active", limit=2)
+                return MergeTrainPolicyCompareWriteResult(
+                    status="replayed",
+                    current_record=active_records[0] if len(active_records) == 1 else None,
+                    idempotency_record=current_reservation,
+                )
+            if current_reservation.state == "reconcile_required":
+                return MergeTrainPolicyCompareWriteResult(
+                    status="reconciliation_required",
+                    idempotency_record=current_reservation,
+                )
+            observed_at = self._database_mutation_timestamp(session)
+            if parse_launchplane_mutation_timestamp(
+                current_reservation.lease_expires_at,
+                field_name="lease_expires_at",
+            ) > parse_launchplane_mutation_timestamp(
+                observed_at,
+                field_name="observed_at",
+            ):
+                return MergeTrainPolicyCompareWriteResult(
+                    status="reservation_in_progress",
+                    idempotency_record=current_reservation,
+                )
+            if current_reservation.reconciliation_key:
+                reconcile_record = self._updated_idempotency_record(
+                    current_reservation,
+                    state="reconcile_required",
+                    updated_at=observed_at,
+                )
+                self._sync_idempotency_row(reservation_row, reconcile_record)
+                session.commit()
+                return MergeTrainPolicyCompareWriteResult(
+                    status="reconciliation_required",
+                    idempotency_record=reconcile_record,
+                )
+            reclaimed_reservation = self._updated_idempotency_record(
+                current_reservation,
+                lease_owner=mutation.lease_owner,
+                lease_expires_at=self._mutation_lease_expiry(
+                    observed_at=observed_at,
+                    lease_seconds=mutation.lease_seconds,
+                ),
+                attempt=current_reservation.attempt + 1,
+                updated_at=observed_at,
+                response_status_code=None,
+                response_trace_id="",
+                recorded_at="",
+                response_payload={},
+            )
+            self._sync_idempotency_row(reservation_row, reclaimed_reservation)
+            return self._compare_and_write_merge_train_policy_locked(
+                session=session,
+                statement=statement,
+                expected_record=expected_record,
+                replacement_record=replacement_record,
+                reservation_row=reservation_row,
+                mutation_reservation=reclaimed_reservation,
+                mutation=mutation,
+            )
+
+    def _compare_and_write_merge_train_policy_locked(
+        self,
+        *,
+        session: Any,
+        statement: Any,
+        expected_record: MergeTrainPolicyRecord,
+        replacement_record: MergeTrainPolicyRecord,
+        reservation_row: LaunchplaneIdempotencyRow | None = None,
+        mutation_reservation: LaunchplaneIdempotencyRecord | None = None,
+        mutation: DbOnlyMutationRequest | None = None,
+    ) -> MergeTrainPolicyCompareWriteResult:
+        self._lock_merge_train_policy_write(session)
+        active_rows = tuple(session.scalars(statement).all())
+        if not active_rows:
+            if reservation_row is not None:
+                session.delete(reservation_row)
+                session.commit()
+            return MergeTrainPolicyCompareWriteResult(status="missing")
+        if len(active_rows) > 1:
+            if reservation_row is not None:
+                session.delete(reservation_row)
+                session.commit()
+            return MergeTrainPolicyCompareWriteResult(status="ambiguous_active")
+        active_row = active_rows[0]
+        current_record = self._read_payload(
+            model_type=MergeTrainPolicyRecord,
+            payload=active_row.payload,
+        )
+        if (
+            current_record.record_id != expected_record.record_id
+            or current_record.policy_sha256 != expected_record.policy_sha256
+            or current_record.updated_at != expected_record.updated_at
+        ):
+            if reservation_row is not None:
+                session.delete(reservation_row)
+                session.commit()
+            return MergeTrainPolicyCompareWriteResult(status="stale", current_record=current_record)
+        if (
+            current_record.record_id == replacement_record.record_id
+            and current_record.policy_sha256 != replacement_record.policy_sha256
+        ):
+            if reservation_row is not None:
+                session.delete(reservation_row)
+                session.commit()
+            return MergeTrainPolicyCompareWriteResult(
+                status="record_id_conflict", current_record=current_record
+            )
+        if (
+            replacement_record.record_id != current_record.record_id
+            and session.get(
+                LaunchplaneMergeTrainPolicyRow,
+                replacement_record.record_id,
+            )
+            is not None
+        ):
+            if reservation_row is not None:
+                session.delete(reservation_row)
+                session.commit()
+            return MergeTrainPolicyCompareWriteResult(
+                status="record_id_conflict", current_record=current_record
+            )
+
+        result_record = current_record
+        status: Literal["written", "unchanged"] = "unchanged"
+        if current_record.policy_sha256 != replacement_record.policy_sha256:
+            superseded_record = current_record.model_copy(update={"status": "superseded"})
+            active_row.status = "superseded"
+            active_row.payload = self._payload_dict(superseded_record)
+            session.flush()
+            session.add(
+                LaunchplaneMergeTrainPolicyRow(
+                    record_id=replacement_record.record_id,
+                    status=replacement_record.status,
+                    source=replacement_record.source,
+                    updated_at=replacement_record.updated_at,
+                    policy_sha256=replacement_record.policy_sha256,
+                    payload=self._payload_dict(replacement_record),
+                )
+            )
+            session.flush()
+            result_record = replacement_record
+            status = "written"
+
+        stored_completion: LaunchplaneIdempotencyRecord | None = None
+        if reservation_row is not None:
+            if mutation_reservation is None or mutation is None:
+                raise RuntimeError("Merge-train policy mutation completion evidence is incomplete.")
+            stored_completion = complete_launchplane_mutation_reservation(
+                mutation_reservation,
+                response_status_code=mutation.response_status_code,
+                response_trace_id=mutation.response_trace_id,
+                completed_at=self._database_mutation_timestamp(session),
+                response_payload=mutation.response_payload,
+            )
+            self._sync_idempotency_row(reservation_row, stored_completion)
+        session.commit()
+        return MergeTrainPolicyCompareWriteResult(
+            status=status,
+            current_record=result_record,
+            idempotency_record=stored_completion,
         )
 
     def write_merge_train_pr_feedback_record(self, record: MergeTrainPrFeedbackRecord) -> None:

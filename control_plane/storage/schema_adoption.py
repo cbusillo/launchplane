@@ -10,6 +10,8 @@ from sqlalchemy.engine import Engine
 
 from control_plane.storage.postgres import Base, _build_engine
 from control_plane.storage.schema_invariants import (
+    CRITICAL_SCHEMA_INDEXES,
+    CriticalIndex,
     critical_column_type_errors,
     critical_index_errors,
     critical_primary_key_errors,
@@ -139,6 +141,19 @@ class SchemaAdoptionError(RuntimeError):
     pass
 
 
+def _critical_indexes_for_expected_schema(
+    expected_schema: Mapping[str, frozenset[str]],
+) -> tuple[CriticalIndex, ...]:
+    selected_indexes: list[CriticalIndex] = []
+    for expected_index in CRITICAL_SCHEMA_INDEXES:
+        expected_columns = expected_schema.get(expected_index.table_name)
+        if expected_columns is None:
+            continue
+        if set(expected_index.column_names).issubset(expected_columns):
+            selected_indexes.append(expected_index)
+    return tuple(selected_indexes)
+
+
 class SchemaInspectorProtocol(Protocol):
     def get_table_names(self) -> Sequence[str]:
         raise NotImplementedError
@@ -195,6 +210,7 @@ def verify_existing_schema_for_stamp(
         critical_index_errors(
             inspector=inspector,
             table_names=existing_tables,
+            expected_indexes=_critical_indexes_for_expected_schema(expected_schema),
             index_definitions=index_definitions,
         )
     )

@@ -408,6 +408,15 @@ requires exactly one match with both managed IDs. Legacy unmanaged action-empty
 rules cannot inherit any action. Code deployment introduces no policy rule or
 grant.
 
+Merge-train policy imports use a dedicated privileged-operation action family:
+`merge_train_policy_operation.propose`, `.read`, `.cancel`, `.approve`, and
+`.revoke`, plus the read-only terminal-agent projection action
+`privileged_merge_train_policy_operation_summary.read`. Existing
+`authz_policy_operation.*`, workflow, local-operator, local-admin, or raw
+`merge_train.policy_import` grants do not authorize this lifecycle. Activation
+of those exact actions remains a DB-native managed-authz privileged operation
+with fresh owner authentication, review, CAS, idempotency, and read-back.
+
 The browser-human identity dependency is separate from the existing browser
 mutation dependency that permits bearer identities to pass through. Bearer,
 workflow, terminal-agent, local-operator, and local-admin identities are

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 from collections.abc import Callable
+import json
 import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -18,6 +19,12 @@ from control_plane.contracts.privileged_operation import (
     AUTHZ_POLICY_OPERATION_PROPOSE_ACTION,
     AUTHZ_POLICY_OPERATION_READ_ACTION,
     AUTHZ_POLICY_OPERATION_REVOKE_ACTION,
+    MERGE_TRAIN_POLICY_OPERATION_APPROVE_ACTION,
+    MERGE_TRAIN_POLICY_OPERATION_CANCEL_ACTION,
+    MERGE_TRAIN_POLICY_OPERATION_PROPOSE_ACTION,
+    MERGE_TRAIN_POLICY_OPERATION_READ_ACTION,
+    MERGE_TRAIN_POLICY_OPERATION_REVOKE_ACTION,
+    MERGE_TRAIN_POLICY_OPERATION_SUMMARY_READ_ACTION,
     PRIVILEGED_OPERATION_SUMMARY_READ_ACTION,
     PRIVILEGED_POLICY_OPERATION_SUMMARY_READ_ACTION,
     PRIVILEGED_SECRET_OPERATION_APPROVE_ACTION,
@@ -26,6 +33,7 @@ from control_plane.contracts.privileged_operation import (
     PRIVILEGED_SECRET_OPERATION_READ_ACTION,
     PRIVILEGED_SECRET_OPERATION_REVOKE_ACTION,
 )
+from tests.merge_train_policy_fixtures import build_test_merge_train_policy_record
 from control_plane.contracts.authz_policy_record import (
     LaunchplaneAuthzPolicyRecord,
     authz_policy_sha256,
@@ -72,6 +80,7 @@ def _policy(
     duplicate_human_rule: bool = False,
     unmanaged_only: bool = False,
     github_id_pinned: bool = True,
+    include_merge_train_policy_operation: bool = True,
 ) -> LaunchplaneAuthzPolicy:
     human_rule: dict[str, object] = {
         "managed_set_id": "privileged-operations.secret-planning",
@@ -131,42 +140,76 @@ def _policy(
             "actions": ["authz_policy_grant.write"],
         }
     )
+    if include_merge_train_policy_operation:
+        human_rules.append(
+            {
+                "managed_set_id": "privileged-operations.merge-train-policy-planning",
+                "managed_rule_id": "human-merge-train-policy-planner",
+                "github_ids": [123],
+                "roles": ["admin"],
+                "products": ["launchplane"],
+                "contexts": ["launchplane"],
+                "actions": [
+                    MERGE_TRAIN_POLICY_OPERATION_PROPOSE_ACTION,
+                    MERGE_TRAIN_POLICY_OPERATION_READ_ACTION,
+                    MERGE_TRAIN_POLICY_OPERATION_CANCEL_ACTION,
+                    MERGE_TRAIN_POLICY_OPERATION_APPROVE_ACTION,
+                    MERGE_TRAIN_POLICY_OPERATION_REVOKE_ACTION,
+                ],
+            }
+        )
+    terminal_rules: list[dict[str, object]] = [
+        {
+            "managed_set_id": "privileged-operations.agent-summary",
+            "managed_rule_id": "agent-summary-reader",
+            "subjects": ["agent:planner"],
+            "token_labels": ["planner"],
+            "products": ["launchplane"],
+            "contexts": ["launchplane"],
+            "actions": [PRIVILEGED_OPERATION_SUMMARY_READ_ACTION],
+        },
+        {
+            "managed_set_id": "privileged-operations.policy-agent",
+            "managed_rule_id": "agent-policy-proposer",
+            "subjects": ["agent:planner"],
+            "token_labels": ["planner"],
+            "products": ["launchplane"],
+            "contexts": ["launchplane"],
+            "actions": [
+                AUTHZ_POLICY_OPERATION_PROPOSE_ACTION,
+                PRIVILEGED_POLICY_OPERATION_SUMMARY_READ_ACTION,
+            ],
+        },
+        {
+            "managed_set_id": "privileged-operations.policy-agent-other",
+            "managed_rule_id": "agent-policy-proposer-other",
+            "subjects": ["agent:other"],
+            "token_labels": ["other"],
+            "products": ["launchplane"],
+            "contexts": ["launchplane"],
+            "actions": [PRIVILEGED_POLICY_OPERATION_SUMMARY_READ_ACTION],
+        },
+    ]
+    if include_merge_train_policy_operation:
+        terminal_rules.append(
+            {
+                "managed_set_id": "privileged-operations.merge-train-policy-agent",
+                "managed_rule_id": "agent-merge-train-policy-proposer",
+                "subjects": ["agent:planner"],
+                "token_labels": ["planner"],
+                "products": ["launchplane"],
+                "contexts": ["launchplane"],
+                "actions": [
+                    MERGE_TRAIN_POLICY_OPERATION_PROPOSE_ACTION,
+                    MERGE_TRAIN_POLICY_OPERATION_SUMMARY_READ_ACTION,
+                ],
+            }
+        )
     return LaunchplaneAuthzPolicy.model_validate(
         {
             "schema_version": 2,
             "github_humans": human_rules,
-            "terminal_agents": [
-                {
-                    "managed_set_id": "privileged-operations.agent-summary",
-                    "managed_rule_id": "agent-summary-reader",
-                    "subjects": ["agent:planner"],
-                    "token_labels": ["planner"],
-                    "products": ["launchplane"],
-                    "contexts": ["launchplane"],
-                    "actions": [PRIVILEGED_OPERATION_SUMMARY_READ_ACTION],
-                },
-                {
-                    "managed_set_id": "privileged-operations.policy-agent",
-                    "managed_rule_id": "agent-policy-proposer",
-                    "subjects": ["agent:planner"],
-                    "token_labels": ["planner"],
-                    "products": ["launchplane"],
-                    "contexts": ["launchplane"],
-                    "actions": [
-                        AUTHZ_POLICY_OPERATION_PROPOSE_ACTION,
-                        PRIVILEGED_POLICY_OPERATION_SUMMARY_READ_ACTION,
-                    ],
-                },
-                {
-                    "managed_set_id": "privileged-operations.policy-agent-other",
-                    "managed_rule_id": "agent-policy-proposer-other",
-                    "subjects": ["agent:other"],
-                    "token_labels": ["other"],
-                    "products": ["launchplane"],
-                    "contexts": ["launchplane"],
-                    "actions": [PRIVILEGED_POLICY_OPERATION_SUMMARY_READ_ACTION],
-                },
-            ],
+            "terminal_agents": terminal_rules,
         }
     )
 
@@ -209,6 +252,22 @@ def _managed_authz_plan_payload(source_event_id: str) -> dict[str, object]:
                     }
                 ],
             },
+        },
+    }
+
+
+def _merge_train_policy_plan_payload(source_event_id: str) -> dict[str, object]:
+    return {
+        "descriptor_id": "managed-merge-train-policy-import",
+        "source_event_id": source_event_id,
+        "request": {
+            "record": build_test_merge_train_policy_record(
+                repository="cbusillo/codex-skills",
+                record_id="merge-train-policy-candidate",
+                updated_at="2026-08-22T20:00:00+00:00",
+            ).model_dump(mode="json"),
+            "reason": "Review exact merge-train policy import.",
+            "related_issue": "cbusillo/launchplane#2296",
         },
     }
 
@@ -344,6 +403,129 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("policy-operation-reader", rendered)
         self.assertNotIn("Propose a bounded policy operation", rendered)
         self.assertEqual(other_response.status_code, 403)
+
+    async def test_browser_plans_merge_train_policy_import_with_dedicated_actions(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(Path(directory))
+            store.write_merge_train_policy_record(
+                build_test_merge_train_policy_record(
+                    repository="cbusillo/sellyouroutboard",
+                    record_id="merge-train-policy-active",
+                    updated_at="2026-08-22T19:00:00+00:00",
+                )
+            )
+            app = self._app(store=store, policy=_policy())
+
+            async with lifespan_client(app) as client:
+                response = await client.post(
+                    "/v1/privileged-operations/plans",
+                    json=_merge_train_policy_plan_payload("browser-merge-train-plan-1"),
+                )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["record"]["descriptor_id"], "managed-merge-train-policy-import")
+        self.assertEqual(
+            payload["record"]["evidence"]["added_policy_keys"], ["cbusillo/codex-skills:main"]
+        )
+        evidence_json = json.dumps(payload["record"]["evidence"], sort_keys=True)
+        self.assertNotIn("GH_TOKEN", evidence_json)
+        self.assertNotIn("launchplane-merge-train", evidence_json)
+
+    async def test_merge_train_policy_approval_reports_history_drift_as_stale(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            store = FilesystemRecordStore(Path(temporary_directory))
+            store.write_merge_train_policy_record(
+                build_test_merge_train_policy_record(
+                    repository="cbusillo/sellyouroutboard",
+                    record_id="merge-train-policy-active",
+                )
+            )
+            app = self._app(store=store, policy=_policy())
+            async with lifespan_client(app) as client:
+                planned = await client.post(
+                    "/v1/privileged-operations/plans",
+                    json=_merge_train_policy_plan_payload("browser-merge-train-stale-plan"),
+                )
+                self.assertEqual(planned.status_code, 200, planned.text)
+                operation_id = planned.json()["record"]["operation_id"]
+                store.write_merge_train_policy_record(
+                    build_test_merge_train_policy_record(
+                        repository="cbusillo/codex-skills",
+                        record_id="merge-train-policy-candidate",
+                    ).model_copy(update={"status": "superseded"})
+                )
+
+                approval = await client.post(
+                    f"/v1/privileged-operations/plans/{operation_id}/approve",
+                    json={
+                        "source_event_id": "browser-merge-train-stale-approval",
+                        "reason": "Approve the stale merge-train policy plan.",
+                    },
+                )
+
+        self.assertEqual(approval.status_code, 409, approval.text)
+        self.assertEqual(
+            approval.json()["detail"]["code"],
+            "privileged_operation_plan_stale",
+        )
+
+    async def test_authz_policy_operation_grant_does_not_authorize_merge_train_policy_operation(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(Path(directory))
+            store.write_merge_train_policy_record(build_test_merge_train_policy_record())
+            app = self._app(
+                store=store,
+                policy=_policy(include_merge_train_policy_operation=False),
+            )
+
+            async with lifespan_client(app) as client:
+                response = await client.post(
+                    "/v1/privileged-operations/plans",
+                    json=_merge_train_policy_plan_payload("browser-merge-train-denied"),
+                )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["detail"]["code"], "authorization_denied")
+
+    async def test_terminal_agent_proposes_merge_train_policy_import_through_generic_route(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(Path(directory))
+            store.write_merge_train_policy_record(
+                build_test_merge_train_policy_record(
+                    repository="cbusillo/sellyouroutboard",
+                    record_id="merge-train-policy-active",
+                    updated_at="2026-08-22T19:00:00+00:00",
+                )
+            )
+            policy = _policy()
+            app = self._app(store=store, policy=policy)
+
+            async with lifespan_client(app) as client:
+                proposed = await client.post(
+                    "/v1/agent/privileged-operations/plans",
+                    json=_merge_train_policy_plan_payload("agent-merge-train-plan-1"),
+                )
+                operation_id = proposed.json()["summary"]["operation_id"]
+                read_response = await client.get(
+                    f"/v1/agent/privileged-operations/plans/{operation_id}"
+                )
+
+        self.assertEqual(proposed.status_code, 200, proposed.text)
+        self.assertEqual(read_response.status_code, 200, read_response.text)
+        self.assertEqual(
+            proposed.json()["summary"]["descriptor_id"],
+            "managed-merge-train-policy-import",
+        )
+        self.assertEqual(
+            proposed.json()["summary"]["added_policy_keys"],
+            ["cbusillo/codex-skills:main"],
+        )
+        self.assertNotIn("GH_TOKEN", read_response.text)
 
     async def test_human_plan_list_and_agent_summary_are_redacted(self) -> None:
         with (

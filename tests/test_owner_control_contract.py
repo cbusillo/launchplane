@@ -37,6 +37,7 @@ from control_plane.contracts.privileged_operation import (
 )
 from control_plane.owner_control_contract import (
     OwnerControlContractError,
+    _preserve_v2_descriptor_enums,
     build_owner_control_contract,
     validate_owner_control_contract,
     write_owner_control_contract,
@@ -256,13 +257,16 @@ class OwnerControlArtifactTests(unittest.TestCase):
         if expected_message := vector.get("error_message_contains"):
             self.assertIn(expected_message, errors[0]["msg"])
 
-    def test_v3_contract_preserves_every_v2_section(self) -> None:
+    def test_v4_contract_preserves_existing_v2_sections_and_vectors(self) -> None:
         artifact = build_owner_control_contract()
         compatibility = artifact["compatibility"]
 
-        self.assertEqual(artifact["schema_version"], 3)
-        self.assertEqual(compatibility["container_schema_version"], 3)
-        self.assertEqual(compatibility["previous_container_schema_version"], 2)
+        self.assertEqual(artifact["schema_version"], 4)
+        self.assertEqual(compatibility["container_schema_version"], 4)
+        self.assertEqual(compatibility["previous_container_schema_version"], 3)
+        self.assertEqual(
+            compatibility["change_kind"], "additive-descriptor-wire-schema-and-vectors"
+        )
         self.assertEqual(compatibility["unknown_container_versions"], "reject")
         self.assertEqual(compatibility["wire_model_schema_versions"], [1])
         self.assertEqual(compatibility["shadow_verifier_schema_versions"], [1])
@@ -270,6 +274,25 @@ class OwnerControlArtifactTests(unittest.TestCase):
         for section, expected_sha256 in compatibility["preserved_v2_section_sha256"].items():
             with self.subTest(section=section):
                 self.assertEqual(canonical_json_sha256(artifact[section]), expected_sha256)
+        preserved_descriptors = set(compatibility["preserved_v2_descriptor_ids"])
+        for section, expected_sha256 in compatibility[
+            "preserved_v2_descriptor_vector_section_sha256"
+        ].items():
+            with self.subTest(section=section):
+                section_value = [
+                    vector
+                    for vector in artifact[section]
+                    if vector["descriptor_id"] in preserved_descriptors
+                ]
+                self.assertEqual(canonical_json_sha256(section_value), expected_sha256)
+        for schema_name, expected_sha256 in compatibility["preserved_v2_schema_sha256"].items():
+            with self.subTest(schema=schema_name):
+                self.assertEqual(
+                    canonical_json_sha256(
+                        _preserve_v2_descriptor_enums(artifact["schemas"][schema_name])
+                    ),
+                    expected_sha256,
+                )
 
     def test_existing_approval_and_challenge_vectors_remain_byte_compatible(self) -> None:
         vector = next(

@@ -1,8 +1,9 @@
 import hashlib
 import json
 import tomllib
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Literal, NamedTuple, cast
 
 from pydantic import (
     BaseModel,
@@ -23,6 +24,37 @@ MergeTrainEngineeringReviewMode = Literal["advisory", "required"]
 MergeTrainPolicyRecordStatus = Literal["active", "superseded"]
 MergeTrainSchedulerRunnerMode = Literal["level1", "controller"]
 MERGE_TRAIN_POLICY_TARGETS_READ_ACTION = "merge_train.policy_targets"
+
+
+MergeTrainPolicyCompareWriteStatus = Literal[
+    "written",
+    "unchanged",
+    "stale",
+    "missing",
+    "ambiguous_active",
+    "record_id_conflict",
+    "replayed",
+    "idempotency_conflict",
+    "reservation_in_progress",
+    "reconciliation_required",
+]
+
+
+class MergeTrainPolicyCompareWriteResult(NamedTuple):
+    status: MergeTrainPolicyCompareWriteStatus
+    current_record: "MergeTrainPolicyRecord | None" = None
+    idempotency_record: object | None = None
+
+
+def normalize_merge_train_policy_timestamp(value: str) -> str:
+    normalized_value = value.strip().replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized_value)
+    except ValueError as error:
+        raise ValueError("merge train policy timestamp must be ISO-8601") from error
+    if parsed.tzinfo is None:
+        raise ValueError("merge train policy timestamp must include a timezone")
+    return parsed.astimezone(timezone.utc).isoformat()
 
 
 class MergeTrainEnqueuePolicy(BaseModel):
@@ -217,6 +249,7 @@ class MergeTrainPolicyRecord(BaseModel):
         self.updated_at = _normalize_required_value(
             self.updated_at, "merge train policy record requires updated_at"
         )
+        normalize_merge_train_policy_timestamp(self.updated_at)
         computed_sha256 = self.policy.policy_sha256
         if not self.policy_sha256:
             self.policy_sha256 = computed_sha256

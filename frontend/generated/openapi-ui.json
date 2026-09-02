@@ -1308,7 +1308,8 @@
               "default": "managed-secret-reencryption",
               "enum": [
                 "managed-secret-reencryption",
-                "managed-authz-policy-set"
+                "managed-authz-policy-set",
+                "managed-merge-train-policy-import"
               ],
               "title": "Descriptor Id",
               "type": "string"
@@ -8872,6 +8873,239 @@
         "title": "ManagedAuthzPolicySetProposalInput",
         "type": "object"
       },
+      "ManagedMergeTrainPolicyImportExecutionEvidence": {
+        "additionalProperties": false,
+        "description": "Redacted merge-train policy transition evidence written by the worker.",
+        "properties": {
+          "active_policy_count": {
+            "default": 0,
+            "minimum": 0,
+            "title": "Active Policy Count",
+            "type": "integer"
+          },
+          "changed": {
+            "title": "Changed",
+            "type": "boolean"
+          },
+          "failure_code": {
+            "default": "",
+            "maxLength": 160,
+            "title": "Failure Code",
+            "type": "string"
+          },
+          "previous_policy_sha256": {
+            "default": "",
+            "title": "Previous Policy Sha256",
+            "type": "string"
+          },
+          "previous_record_id": {
+            "default": "",
+            "title": "Previous Record Id",
+            "type": "string"
+          },
+          "reconciliation_required": {
+            "title": "Reconciliation Required",
+            "type": "boolean"
+          },
+          "result_digest": {
+            "title": "Result Digest",
+            "type": "string"
+          },
+          "result_status": {
+            "enum": [
+              "ok",
+              "error"
+            ],
+            "title": "Result Status",
+            "type": "string"
+          },
+          "resulting_policy_sha256": {
+            "default": "",
+            "title": "Resulting Policy Sha256",
+            "type": "string"
+          },
+          "resulting_record_id": {
+            "default": "",
+            "title": "Resulting Record Id",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "superseded_policy_sha256": {
+            "default": "",
+            "title": "Superseded Policy Sha256",
+            "type": "string"
+          },
+          "superseded_record_id": {
+            "default": "",
+            "title": "Superseded Record Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "active_policy_count",
+          "changed",
+          "failure_code",
+          "previous_policy_sha256",
+          "previous_record_id",
+          "reconciliation_required",
+          "result_digest",
+          "result_status",
+          "resulting_policy_sha256",
+          "resulting_record_id",
+          "schema_version",
+          "superseded_policy_sha256",
+          "superseded_record_id"
+        ],
+        "title": "ManagedMergeTrainPolicyImportExecutionEvidence",
+        "type": "object"
+      },
+      "ManagedMergeTrainPolicyImportHumanEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "active_policy_sha256": {
+            "title": "Active Policy Sha256",
+            "type": "string"
+          },
+          "active_record_id": {
+            "title": "Active Record Id",
+            "type": "string"
+          },
+          "active_status": {
+            "const": "active",
+            "default": "active",
+            "title": "Active Status",
+            "type": "string"
+          },
+          "active_target_count": {
+            "minimum": 0,
+            "title": "Active Target Count",
+            "type": "integer"
+          },
+          "active_updated_at": {
+            "title": "Active Updated At",
+            "type": "string"
+          },
+          "added_policy_keys": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Added Policy Keys",
+            "type": "array"
+          },
+          "candidate_policy_sha256": {
+            "title": "Candidate Policy Sha256",
+            "type": "string"
+          },
+          "candidate_record_id": {
+            "title": "Candidate Record Id",
+            "type": "string"
+          },
+          "candidate_target_count": {
+            "minimum": 0,
+            "title": "Candidate Target Count",
+            "type": "integer"
+          },
+          "changed_policy_keys": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Changed Policy Keys",
+            "type": "array"
+          },
+          "plan_digest": {
+            "title": "Plan Digest",
+            "type": "string"
+          },
+          "removed_policy_keys": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Removed Policy Keys",
+            "type": "array"
+          },
+          "result_status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Result Status",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "unchanged_policy_keys": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Unchanged Policy Keys",
+            "type": "array"
+          }
+        },
+        "required": [
+          "active_policy_sha256",
+          "active_record_id",
+          "active_status",
+          "active_target_count",
+          "active_updated_at",
+          "added_policy_keys",
+          "candidate_policy_sha256",
+          "candidate_record_id",
+          "candidate_target_count",
+          "changed_policy_keys",
+          "plan_digest",
+          "removed_policy_keys",
+          "result_status",
+          "schema_version",
+          "unchanged_policy_keys"
+        ],
+        "title": "ManagedMergeTrainPolicyImportHumanEvidence",
+        "type": "object"
+      },
+      "ManagedMergeTrainPolicyImportProposalInput-Output": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "maxLength": 240,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          },
+          "record": {
+            "$ref": "#/components/schemas/MergeTrainPolicyRecord-Output"
+          },
+          "related_issue": {
+            "default": "",
+            "maxLength": 128,
+            "title": "Related Issue",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "reason",
+          "record",
+          "related_issue",
+          "schema_version"
+        ],
+        "title": "ManagedMergeTrainPolicyImportProposalInput",
+        "type": "object"
+      },
       "ManagedSecretReencryptionHumanEvidence": {
         "additionalProperties": false,
         "properties": {
@@ -11348,6 +11582,49 @@
         "title": "MergeTrainDryRunQueueEntrySummary",
         "type": "object"
       },
+      "MergeTrainEnqueuePolicy-Output": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "MergeTrainGitHubTokenSource": {
+        "additionalProperties": false,
+        "properties": {
+          "env_var": {
+            "default": "",
+            "title": "Env Var",
+            "type": "string"
+          }
+        },
+        "title": "MergeTrainGitHubTokenSource",
+        "type": "object",
+        "required": [
+          "env_var"
+        ]
+      },
+      "MergeTrainIdentity": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "enum": [
+              "github_actions_oidc",
+              "github_app",
+              "github_token_secret"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "name"
+        ],
+        "title": "MergeTrainIdentity",
+        "type": "object"
+      },
       "MergeTrainLatestDryRunSummary": {
         "additionalProperties": false,
         "properties": {
@@ -11396,6 +11673,81 @@
           "selected_pr_number"
         ],
         "title": "MergeTrainLatestDryRunSummary",
+        "type": "object"
+      },
+      "MergeTrainPolicy-Output": {
+        "additionalProperties": false,
+        "properties": {
+          "policies": {
+            "items": {
+              "$ref": "#/components/schemas/MergeTrainRepositoryPolicy-Output"
+            },
+            "title": "Policies",
+            "type": "array"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "policies",
+          "schema_version"
+        ],
+        "title": "MergeTrainPolicy",
+        "type": "object"
+      },
+      "MergeTrainPolicyRecord-Output": {
+        "additionalProperties": false,
+        "properties": {
+          "policy": {
+            "$ref": "#/components/schemas/MergeTrainPolicy-Output"
+          },
+          "policy_sha256": {
+            "default": "",
+            "title": "Policy Sha256",
+            "type": "string"
+          },
+          "record_id": {
+            "title": "Record Id",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "status": {
+            "default": "active",
+            "enum": [
+              "active",
+              "superseded"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "policy",
+          "policy_sha256",
+          "record_id",
+          "schema_version",
+          "source",
+          "status",
+          "updated_at"
+        ],
+        "title": "MergeTrainPolicyRecord",
         "type": "object"
       },
       "MergeTrainPolicySummary": {
@@ -11485,6 +11837,90 @@
           "trace_id"
         ],
         "title": "MergeTrainPolicyTargetsResponse",
+        "type": "object"
+      },
+      "MergeTrainRepositoryPolicy-Output": {
+        "additionalProperties": false,
+        "properties": {
+          "base_branch": {
+            "title": "Base Branch",
+            "type": "string"
+          },
+          "blocked_label": {
+            "title": "Blocked Label",
+            "type": "string"
+          },
+          "engineering_review_mode": {
+            "default": "advisory",
+            "enum": [
+              "advisory",
+              "required"
+            ],
+            "title": "Engineering Review Mode",
+            "type": "string"
+          },
+          "enqueue": {
+            "$ref": "#/components/schemas/MergeTrainEnqueuePolicy-Output"
+          },
+          "enqueue_label": {
+            "title": "Enqueue Label",
+            "type": "string"
+          },
+          "failure_policy": {
+            "enum": [
+              "pause_train",
+              "continue_after_blocking_pr"
+            ],
+            "title": "Failure Policy",
+            "type": "string"
+          },
+          "github_token": {
+            "$ref": "#/components/schemas/MergeTrainGitHubTokenSource"
+          },
+          "merge_identity": {
+            "$ref": "#/components/schemas/MergeTrainIdentity"
+          },
+          "merge_method": {
+            "enum": [
+              "merge",
+              "squash",
+              "rebase"
+            ],
+            "title": "Merge Method",
+            "type": "string"
+          },
+          "repository": {
+            "title": "Repository",
+            "type": "string"
+          },
+          "scheduler": {
+            "$ref": "#/components/schemas/MergeTrainSchedulerPolicy"
+          },
+          "service_authz": {
+            "$ref": "#/components/schemas/MergeTrainServiceAuthz"
+          },
+          "stack_child_disposition_label": {
+            "default": "",
+            "title": "Stack Child Disposition Label",
+            "type": "string"
+          }
+        },
+        "required": [
+          "base_branch",
+          "blocked_label",
+          "engineering_review_mode",
+          "enqueue",
+          "enqueue_label",
+          "failure_policy",
+          "github_token",
+          "merge_identity",
+          "merge_method",
+          "repository",
+          "scheduler",
+          "service_authz",
+          "stack_child_disposition_label"
+        ],
+        "title": "MergeTrainRepositoryPolicy",
         "type": "object"
       },
       "MergeTrainRunRecord": {
@@ -14335,7 +14771,8 @@
           "descriptor_id": {
             "enum": [
               "managed-secret-reencryption",
-              "managed-authz-policy-set"
+              "managed-authz-policy-set",
+              "managed-merge-train-policy-import"
             ],
             "title": "Descriptor Id",
             "type": "string"
@@ -14724,7 +15161,8 @@
           "descriptor_id": {
             "enum": [
               "managed-secret-reencryption",
-              "managed-authz-policy-set"
+              "managed-authz-policy-set",
+              "managed-merge-train-policy-import"
             ],
             "title": "Descriptor Id",
             "type": "string"
@@ -14742,6 +15180,9 @@
               },
               {
                 "$ref": "#/components/schemas/ManagedAuthzPolicySetHumanEvidence"
+              },
+              {
+                "$ref": "#/components/schemas/ManagedMergeTrainPolicyImportHumanEvidence"
               }
             ],
             "title": "Evidence"
@@ -14757,6 +15198,9 @@
               },
               {
                 "$ref": "#/components/schemas/ManagedAuthzPolicySetExecutionEvidence"
+              },
+              {
+                "$ref": "#/components/schemas/ManagedMergeTrainPolicyImportExecutionEvidence"
               },
               {
                 "type": "null"
@@ -14779,6 +15223,9 @@
               },
               {
                 "$ref": "#/components/schemas/ManagedAuthzPolicySetProposalInput-Output"
+              },
+              {
+                "$ref": "#/components/schemas/ManagedMergeTrainPolicyImportProposalInput-Output"
               }
             ],
             "title": "Request"

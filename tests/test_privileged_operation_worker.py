@@ -24,8 +24,12 @@ from control_plane.contracts.authz_policy_record import (
 from control_plane.contracts.privileged_operation import (
     AUTHZ_POLICY_OPERATION_APPROVE_ACTION,
     AUTHZ_POLICY_OPERATION_REVOKE_ACTION,
+    MERGE_TRAIN_POLICY_OPERATION_APPROVE_ACTION,
+    MERGE_TRAIN_POLICY_OPERATION_REVOKE_ACTION,
     ManagedAuthzPolicySetExecutionEvidence,
     ManagedAuthzPolicySetProposalInput,
+    ManagedMergeTrainPolicyImportExecutionEvidence,
+    ManagedMergeTrainPolicyImportProposalInput,
     ManagedSecretReencryptionPlanInput,
     PRIVILEGED_SECRET_OPERATION_APPROVE_ACTION,
     PRIVILEGED_SECRET_OPERATION_REVOKE_ACTION,
@@ -36,6 +40,7 @@ from control_plane.contracts.privileged_operation import (
     PrivilegedOperationRecord,
     privileged_operation_pre_state_digest,
 )
+from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
 from control_plane.contracts.privileged_operation_worker_heartbeat import (
     PrivilegedOperationWorkerHeartbeatRecord,
 )
@@ -62,6 +67,7 @@ from control_plane.service_auth import LaunchplaneAuthzPolicy
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import DbOnlyMutationRequest, PostgresRecordStore
 from tests.support.stores import _sqlite_database_url
+from tests.merge_train_policy_fixtures import build_test_merge_train_policy_record
 
 
 FIXED_NOW = datetime(2026, 8, 22, 20, 10, tzinfo=timezone.utc)
@@ -279,6 +285,40 @@ def _policy_admin_record(
     )
 
 
+def _merge_train_policy_admin_record(*, revision: int = 1) -> LaunchplaneAuthzPolicyRecord:
+    policy = LaunchplaneAuthzPolicy.model_validate(
+        {
+            "schema_version": 2,
+            "github_humans": [
+                {
+                    "managed_set_id": "privileged-operations.merge-train-policy-execution",
+                    "managed_rule_id": "human-merge-train-policy-approver",
+                    "github_ids": [123],
+                    "roles": ["admin"],
+                    "products": ["launchplane"],
+                    "contexts": ["launchplane"],
+                    "actions": [
+                        MERGE_TRAIN_POLICY_OPERATION_APPROVE_ACTION,
+                        MERGE_TRAIN_POLICY_OPERATION_REVOKE_ACTION,
+                    ],
+                }
+            ],
+        }
+    )
+    policy_sha256 = authz_policy_sha256(policy)
+    return LaunchplaneAuthzPolicyRecord(
+        record_id=build_authz_policy_record_id(
+            revision=revision,
+            policy_sha256=policy_sha256,
+        ),
+        revision=revision,
+        source=f"test-merge-train-policy-admin-r{revision}",
+        updated_at=f"2026-08-22T19:{revision:02d}:00+00:00",
+        policy_sha256=policy_sha256,
+        policy=policy,
+    )
+
+
 def _prepare_approved_policy_operation(
     store: PostgresRecordStore,
     *,
@@ -343,6 +383,69 @@ def _prepare_approved_policy_operation(
         operation_id=planned.operation_id,
         approval=approval,
         source_event_id="worker-policy-approval",
+        now=lambda: datetime(2026, 8, 22, 20, 5, tzinfo=timezone.utc),
+    ).record.operation_id
+
+
+def _prepare_approved_merge_train_policy_import(
+    store: PostgresRecordStore,
+    *,
+    approval_policy: LaunchplaneAuthzPolicyRecord,
+    active_record: MergeTrainPolicyRecord | None = None,
+    candidate_record: MergeTrainPolicyRecord | None = None,
+) -> str:
+    resolved_active = active_record or build_test_merge_train_policy_record(
+        repository="cbusillo/sellyouroutboard",
+        record_id="merge-train-policy-active",
+        updated_at="2026-08-22T19:00:00Z",
+    )
+    resolved_candidate = candidate_record or build_test_merge_train_policy_record(
+        repository="cbusillo/codex-skills",
+        record_id="merge-train-policy-candidate",
+        updated_at="2026-08-22T20:00:00Z",
+    )
+    store.write_merge_train_policy_record(resolved_active)
+    actor = PrivilegedOperationActor(
+        identity_type="github_human",
+        github_id=123,
+        login="operator-at-approval",
+    )
+    planned = create_typed_privileged_operation_plan(
+        record_store=store,
+        descriptor_id="managed-merge-train-policy-import",
+        actor=actor,
+        source_kind="browser_api",
+        source_event_id="worker-merge-train-policy-plan",
+        request=ManagedMergeTrainPolicyImportProposalInput(
+            record=resolved_candidate,
+            reason="Review exact merge-train policy import.",
+            related_issue="cbusillo/launchplane#2296",
+        ),
+        now=lambda: datetime(2026, 8, 22, 20, 0, tzinfo=timezone.utc),
+    ).record
+    approval = PrivilegedOperationApproval(
+        approver=actor,
+        descriptor_id=planned.descriptor_id,
+        descriptor_version=planned.descriptor_version,
+        request_digest=planned.request_digest,
+        evidence_digest=planned.evidence_digest,
+        plan_digest=planned.evidence.plan_digest,
+        pre_state_digest=privileged_operation_pre_state_digest(planned.evidence),
+        policy_record_id=approval_policy.record_id,
+        policy_revision=approval_policy.revision,
+        policy_sha256=approval_policy.policy_sha256,
+        policy_source=approval_policy.source,
+        managed_set_id="privileged-operations.merge-train-policy-execution",
+        managed_rule_id="human-merge-train-policy-approver",
+        expires_at=planned.expires_at,
+        reason="Reviewed exact merge-train policy import evidence.",
+        rollback_class="policy_cas",
+    )
+    return approve_privileged_operation(
+        record_store=store,
+        operation_id=planned.operation_id,
+        approval=approval,
+        source_event_id="worker-merge-train-policy-approval",
         now=lambda: datetime(2026, 8, 22, 20, 5, tzinfo=timezone.utc),
     ).record.operation_id
 
@@ -439,6 +542,167 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
         self.assertFalse(record.execution.reconciliation_required)
         self.assertEqual(len(active_records), 1)
         self.assertEqual(active_records[0].revision, 1)
+
+    def test_worker_executes_approved_merge_train_policy_import_with_cas_readback(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = self._store(directory)
+            try:
+                approval_policy = store.seed_authz_policy_if_absent(
+                    _merge_train_policy_admin_record()
+                )
+                operation_id = _prepare_approved_merge_train_policy_import(
+                    store,
+                    approval_policy=approval_policy,
+                )
+
+                completed = execute_approved_privileged_operations_once(
+                    record_store=store,
+                    now=lambda: FIXED_NOW,
+                )
+
+                record = store.read_privileged_operation_record(operation_id)
+                active_records = store.list_merge_train_policy_records(status="active", limit=2)
+                superseded_records = store.list_merge_train_policy_records(
+                    status="superseded",
+                    limit=10,
+                )
+            finally:
+                store.close()
+
+        self.assertEqual([item.operation_id for item in completed], [operation_id])
+        self.assertEqual(record.status, "executed")
+        self.assertIsInstance(record.execution, ManagedMergeTrainPolicyImportExecutionEvidence)
+        assert isinstance(record.execution, ManagedMergeTrainPolicyImportExecutionEvidence)
+        self.assertTrue(record.execution.changed)
+        self.assertEqual(record.execution.previous_record_id, "merge-train-policy-active")
+        self.assertEqual(record.execution.resulting_record_id, "merge-train-policy-candidate")
+        self.assertEqual(record.execution.superseded_record_id, "merge-train-policy-active")
+        self.assertEqual(len(active_records), 1)
+        self.assertEqual(active_records[0].record_id, "merge-train-policy-candidate")
+        self.assertEqual(
+            [item.record_id for item in superseded_records], ["merge-train-policy-active"]
+        )
+
+    def test_worker_treats_same_policy_with_new_record_id_as_unchanged(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = self._store(directory)
+            try:
+                approval_policy = store.seed_authz_policy_if_absent(
+                    _merge_train_policy_admin_record()
+                )
+                active_record = build_test_merge_train_policy_record(
+                    repository="cbusillo/sellyouroutboard",
+                    record_id="merge-train-policy-active",
+                    updated_at="2026-09-02T00:00:00Z",
+                )
+                candidate_record = build_test_merge_train_policy_record(
+                    repository="cbusillo/sellyouroutboard",
+                    record_id="merge-train-policy-candidate",
+                    updated_at="2026-09-02T00:01:00Z",
+                )
+                operation_id = _prepare_approved_merge_train_policy_import(
+                    store,
+                    approval_policy=approval_policy,
+                    active_record=active_record,
+                    candidate_record=candidate_record,
+                )
+
+                completed = execute_approved_privileged_operations_once(
+                    record_store=store,
+                    now=lambda: FIXED_NOW,
+                )
+
+                record = store.read_privileged_operation_record(operation_id)
+                active_records = store.list_merge_train_policy_records(status="active", limit=2)
+                superseded_records = store.list_merge_train_policy_records(
+                    status="superseded",
+                    limit=10,
+                )
+            finally:
+                store.close()
+
+        self.assertEqual([item.operation_id for item in completed], [operation_id])
+        self.assertEqual(record.status, "executed")
+        self.assertIsInstance(record.execution, ManagedMergeTrainPolicyImportExecutionEvidence)
+        assert isinstance(record.execution, ManagedMergeTrainPolicyImportExecutionEvidence)
+        self.assertFalse(record.execution.changed)
+        self.assertEqual(record.execution.resulting_record_id, active_record.record_id)
+        self.assertEqual(active_records, (active_record,))
+        self.assertEqual(superseded_records, ())
+
+    def test_worker_rejects_merge_train_policy_import_when_active_policy_drifts(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = self._store(directory)
+            try:
+                approval_policy = store.seed_authz_policy_if_absent(
+                    _merge_train_policy_admin_record()
+                )
+                operation_id = _prepare_approved_merge_train_policy_import(
+                    store,
+                    approval_policy=approval_policy,
+                )
+                active_record = store.list_merge_train_policy_records(status="active", limit=1)[0]
+                drift_record = build_test_merge_train_policy_record(
+                    repository="cbusillo/odoo-devkit",
+                    record_id="merge-train-policy-drift",
+                    updated_at="2026-08-22T20:06:00+00:00",
+                )
+                store.compare_and_write_merge_train_policy_record(
+                    expected_record=active_record,
+                    replacement_record=drift_record,
+                )
+
+                execute_approved_privileged_operations_once(
+                    record_store=store,
+                    now=lambda: FIXED_NOW,
+                )
+
+                record = store.read_privileged_operation_record(operation_id)
+                active_records = store.list_merge_train_policy_records(status="active", limit=2)
+            finally:
+                store.close()
+
+        self.assertEqual(record.status, "execution_failed")
+        self.assertIsInstance(record.execution, ManagedMergeTrainPolicyImportExecutionEvidence)
+        assert isinstance(record.execution, ManagedMergeTrainPolicyImportExecutionEvidence)
+        self.assertEqual(record.execution.failure_code, "approved_plan_drift")
+        self.assertFalse(record.execution.reconciliation_required)
+        self.assertEqual(active_records[0].record_id, "merge-train-policy-drift")
+
+    def test_worker_reads_exact_superseded_policy_beyond_history_window(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = self._store(directory)
+            try:
+                approval_policy = store.seed_authz_policy_if_absent(
+                    _merge_train_policy_admin_record()
+                )
+                operation_id = _prepare_approved_merge_train_policy_import(
+                    store,
+                    approval_policy=approval_policy,
+                )
+                for index in range(101):
+                    store.write_merge_train_policy_record(
+                        build_test_merge_train_policy_record(
+                            repository=f"cbusillo/history-{index}",
+                            record_id=f"merge-train-policy-history-{index:03d}",
+                            updated_at=f"2026-09-02T01:{index // 60:02d}:{index % 60:02d}Z",
+                        ).model_copy(update={"status": "superseded"})
+                    )
+
+                completed = execute_approved_privileged_operations_once(
+                    record_store=store,
+                    now=lambda: FIXED_NOW,
+                )
+
+                record = store.read_privileged_operation_record(operation_id)
+            finally:
+                store.close()
+
+        self.assertEqual([item.operation_id for item in completed], [operation_id])
+        self.assertEqual(record.status, "executed")
+        self.assertIsInstance(record.execution, ManagedMergeTrainPolicyImportExecutionEvidence)
+        assert isinstance(record.execution, ManagedMergeTrainPolicyImportExecutionEvidence)
+        self.assertEqual(record.execution.superseded_record_id, "merge-train-policy-active")
 
     def test_policy_readback_failure_after_cas_requires_reconciliation(self) -> None:
         with TemporaryDirectory() as directory:
@@ -1300,6 +1564,85 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
         self.assertFalse(current.execution.reconciliation_required)
         self.assertEqual(len(active_records), 1)
         self.assertEqual(active_records[0].revision, 2)
+
+    def test_stale_merge_train_policy_execution_recovers_from_inner_cas_readback(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as directory:
+            store = self._store(directory)
+            try:
+                approval_policy = store.seed_authz_policy_if_absent(
+                    _merge_train_policy_admin_record()
+                )
+                operation_id = _prepare_approved_merge_train_policy_import(
+                    store,
+                    approval_policy=approval_policy,
+                )
+                original_transition = store.transition_privileged_operation
+
+                def crash_after_policy_effect(
+                    record: PrivilegedOperationRecord,
+                    event: PrivilegedOperationEventRecord,
+                ) -> PrivilegedOperationEventWriteStatus:
+                    if record.status == "executed":
+                        raise KeyboardInterrupt("simulated merge-train policy worker crash")
+                    return original_transition(record, event)
+
+                with (
+                    patch.object(
+                        store,
+                        "transition_privileged_operation",
+                        side_effect=crash_after_policy_effect,
+                    ),
+                    self.assertRaises(KeyboardInterrupt),
+                ):
+                    execute_approved_privileged_operations_once(
+                        record_store=store,
+                        now=lambda: FIXED_NOW,
+                    )
+
+                executing = store.read_privileged_operation_record(operation_id)
+                outer_lookup = store.lookup_existing_mutation_reservation(
+                    route_path=PRIVILEGED_OPERATION_EXECUTION_ROUTE,
+                    idempotency_key=operation_id,
+                    request_fingerprint=privileged_operation_execution_fingerprint(executing),
+                )
+                self.assertIsNotNone(outer_lookup.record)
+                outer_reservation = outer_lookup.record
+                assert outer_reservation is not None
+                store.mark_mutation_reconcile_required(
+                    reservation=outer_reservation,
+                    reconciliation_key=operation_id,
+                )
+
+                recovered = execute_approved_privileged_operations_once(
+                    record_store=store,
+                    now=lambda: FIXED_NOW,
+                )
+
+                current = store.read_privileged_operation_record(operation_id)
+                active_records = store.list_merge_train_policy_records(status="active", limit=2)
+                superseded_records = store.list_merge_train_policy_records(
+                    status="superseded",
+                    limit=10,
+                )
+            finally:
+                store.close()
+
+        self.assertEqual(executing.status, "executing")
+        self.assertEqual([record.operation_id for record in recovered], [operation_id])
+        self.assertEqual(current.status, "executed")
+        self.assertIsInstance(current.execution, ManagedMergeTrainPolicyImportExecutionEvidence)
+        assert isinstance(current.execution, ManagedMergeTrainPolicyImportExecutionEvidence)
+        self.assertFalse(current.execution.reconciliation_required)
+        self.assertEqual(
+            [record.record_id for record in active_records],
+            ["merge-train-policy-candidate"],
+        )
+        self.assertEqual(
+            [record.record_id for record in superseded_records],
+            ["merge-train-policy-active"],
+        )
 
     def test_removed_github_id_rule_fails_before_effect_without_reconciliation(self) -> None:
         approval_policy = _policy_record(revision=3)

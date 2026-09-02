@@ -10,11 +10,14 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
 AUTHZ_COMPATIBILITY_FLOOR_REVISION = "f3b5d7e9a1c2"
-EXPECTED_ALEMBIC_HEAD_REVISION = "fb7d9e1a3c5f"
+EXPECTED_ALEMBIC_HEAD_REVISION = "fbc9d1e3a5b7"
 RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS = (EXPECTED_ALEMBIC_HEAD_REVISION,)
 _AUTHZ_POLICY_TABLE = "launchplane_authz_policies"
 _AUTHZ_POLICY_WRITE_FENCE_TRIGGER = "launchplane_authz_policy_write_fence"
 _AUTHZ_POLICY_WRITE_FENCE_FUNCTION = "launchplane_fence_authz_policy_write"
+_MERGE_TRAIN_POLICY_TABLE = "launchplane_merge_train_policies"
+_MERGE_TRAIN_POLICY_WRITE_FENCE_TRIGGER = "launchplane_merge_train_policy_write_fence"
+_MERGE_TRAIN_POLICY_WRITE_FENCE_FUNCTION = "launchplane_fence_merge_train_policy_write"
 
 
 class SchemaInspectorProtocol(Protocol):
@@ -56,6 +59,11 @@ class CriticalPrimaryKey:
 
 
 CRITICAL_POSTGRES_COLUMN_TYPES: tuple[CriticalColumnType, ...] = (
+    CriticalColumnType(
+        "launchplane_merge_train_policies",
+        "payload",
+        ("jsonb",),
+    ),
     CriticalColumnType(
         "launchplane_merge_admissions",
         "payload",
@@ -636,6 +644,13 @@ CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
     CriticalIndex(
         "launchplane_authz_policies",
         "launchplane_authz_policies_active_uidx",
+        ("status",),
+        unique=True,
+        predicate_expression="status='active'",
+    ),
+    CriticalIndex(
+        "launchplane_merge_train_policies",
+        "launchplane_merge_train_policies_active_uidx",
         ("status",),
         unique=True,
         predicate_expression="status='active'",
@@ -1278,6 +1293,7 @@ def verify_postgres_schema_invariants(engine: Engine) -> None:
             table_names=set(inspector.get_table_names()),
         ),
         *authz_policy_write_fence_errors(engine),
+        *merge_train_policy_write_fence_errors(engine),
     ]
     if errors:
         joined_errors = "; ".join(errors)
@@ -1438,6 +1454,47 @@ def _verify_alembic_head(engine: Engine) -> str:
 
 
 def authz_policy_write_fence_errors(engine: Engine) -> list[str]:
+    return _postgres_write_fence_errors(
+        engine=engine,
+        table_name=_AUTHZ_POLICY_TABLE,
+        trigger_name=_AUTHZ_POLICY_WRITE_FENCE_TRIGGER,
+        function_name=_AUTHZ_POLICY_WRITE_FENCE_FUNCTION,
+        trigger_fragments=("before insert or update of status",),
+        function_fragments=(
+            "pg_advisory_xact_lock",
+            "new.revision is null",
+            "new.status = 'active'",
+            "jsonb_set",
+        ),
+    )
+
+
+def merge_train_policy_write_fence_errors(engine: Engine) -> list[str]:
+    return _postgres_write_fence_errors(
+        engine=engine,
+        table_name=_MERGE_TRAIN_POLICY_TABLE,
+        trigger_name=_MERGE_TRAIN_POLICY_WRITE_FENCE_TRIGGER,
+        function_name=_MERGE_TRAIN_POLICY_WRITE_FENCE_FUNCTION,
+        trigger_fragments=("before insert or update of status",),
+        function_fragments=(
+            "pg_advisory_xact_lock",
+            "launchplane:active-merge-train-policy",
+            "new.status = 'active'",
+            "record_id <> new.record_id",
+            "jsonb_set",
+        ),
+    )
+
+
+def _postgres_write_fence_errors(
+    *,
+    engine: Engine,
+    table_name: str,
+    trigger_name: str,
+    function_name: str,
+    trigger_fragments: tuple[str, ...],
+    function_fragments: tuple[str, ...],
+) -> list[str]:
     with engine.connect() as connection:
         trigger_row = (
             connection.execute(
@@ -1454,8 +1511,8 @@ def authz_policy_write_fence_errors(engine: Engine) -> list[str]:
                     "and not t.tgisinternal"
                 ),
                 {
-                    "table_name": _AUTHZ_POLICY_TABLE,
-                    "trigger_name": _AUTHZ_POLICY_WRITE_FENCE_TRIGGER,
+                    "table_name": table_name,
+                    "trigger_name": trigger_name,
                 },
             )
             .mappings()
@@ -1471,48 +1528,32 @@ def authz_policy_write_fence_errors(engine: Engine) -> list[str]:
                     "and p.proname = :function_name "
                     "and pg_get_function_identity_arguments(p.oid) = ''"
                 ),
-                {"function_name": _AUTHZ_POLICY_WRITE_FENCE_FUNCTION},
+                {"function_name": function_name},
             )
             .mappings()
             .one_or_none()
         )
     errors: list[str] = []
     if trigger_row is None:
-        errors.append(
-            f"{_AUTHZ_POLICY_TABLE} missing required trigger {_AUTHZ_POLICY_WRITE_FENCE_TRIGGER}"
-        )
+        errors.append(f"{table_name} missing required trigger {trigger_name}")
     else:
-        if str(trigger_row["function_name"]) != _AUTHZ_POLICY_WRITE_FENCE_FUNCTION:
+        if str(trigger_row["function_name"]) != function_name:
             errors.append(
-                f"{_AUTHZ_POLICY_WRITE_FENCE_TRIGGER} invokes "
-                f"{trigger_row['function_name']}; expected {_AUTHZ_POLICY_WRITE_FENCE_FUNCTION}"
+                f"{trigger_name} invokes {trigger_row['function_name']}; expected {function_name}"
             )
         if str(trigger_row["enabled"]) not in {"O", "A"}:
-            errors.append(f"{_AUTHZ_POLICY_WRITE_FENCE_TRIGGER} is disabled")
+            errors.append(f"{trigger_name} is disabled")
         trigger_definition = " ".join(str(trigger_row["definition"]).lower().split())
-        for expected_fragment in (
-            "before insert or update of status",
-            f"execute function {_AUTHZ_POLICY_WRITE_FENCE_FUNCTION}()",
-        ):
+        for expected_fragment in (*trigger_fragments, f"execute function {function_name}()"):
             if expected_fragment not in trigger_definition:
-                errors.append(
-                    f"{_AUTHZ_POLICY_WRITE_FENCE_TRIGGER} definition is missing "
-                    f"{expected_fragment!r}"
-                )
+                errors.append(f"{trigger_name} definition is missing {expected_fragment!r}")
     if function_row is None:
-        errors.append(f"missing required function {_AUTHZ_POLICY_WRITE_FENCE_FUNCTION}()")
+        errors.append(f"missing required function {function_name}()")
     else:
         function_definition = " ".join(str(function_row["definition"]).lower().split())
-        for expected_fragment in (
-            "pg_advisory_xact_lock",
-            "new.revision is null",
-            "new.status = 'active'",
-            "jsonb_set",
-        ):
+        for expected_fragment in function_fragments:
             if expected_fragment not in function_definition:
-                errors.append(
-                    f"{_AUTHZ_POLICY_WRITE_FENCE_FUNCTION}() is missing {expected_fragment!r}"
-                )
+                errors.append(f"{function_name}() is missing {expected_fragment!r}")
     return errors
 
 

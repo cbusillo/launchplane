@@ -60,6 +60,33 @@ test("privileged-operation UI scopes policy plan reads by descriptor", async () 
   assert.equal(calls[0].init.method, "GET");
 });
 
+test("privileged-operation UI scopes merge-train policy reads by descriptor", async () => {
+  const calls = [];
+  globalThis.fetch = async (input, init = {}) => {
+    calls.push({ input: String(input), init });
+    return new Response(
+      JSON.stringify({
+        status: "ok",
+        trace_id: "trace-merge-train-policy-operations",
+        total: 0,
+        records: [],
+      }),
+      { headers: { "Content-Type": "application/json" }, status: 200 },
+    );
+  };
+
+  await readPrivilegedOperationPlans(
+    undefined,
+    "managed-merge-train-policy-import",
+  );
+
+  assert.equal(
+    calls[0].input,
+    "/v1/privileged-operations/plans?descriptor_id=managed-merge-train-policy-import",
+  );
+  assert.equal(calls[0].init.method, "GET");
+});
+
 test("privileged-operation UI sends approve and revoke mutations without execute", async () => {
   const calls = [];
   globalThis.fetch = async (input, init = {}) => {

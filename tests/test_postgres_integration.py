@@ -201,6 +201,7 @@ from control_plane.trusted_maintenance import (
     TrustedMaintenanceGitHubEventFacts,
 )
 from tests.support.artifact_manifests import artifact_manifest_v2
+from tests.merge_train_policy_fixtures import build_test_merge_train_policy_record
 from tests.test_odoo_prod_retained_volume_backup_import_storage import (
     _retained_operation_for_restore_lane,
 )
@@ -1076,6 +1077,169 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
 
         self.assertEqual(records, (record,))
         self.assertIn("launchplane_privop_worker_heartbeats_freshness_idx", index_names)
+
+    def test_merge_train_policy_compare_write_uses_active_cas_and_idempotency(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            active_record = build_test_merge_train_policy_record(
+                repository="cbusillo/sellyouroutboard",
+                record_id="merge-train-policy-active",
+                updated_at="2026-08-22T19:00:00+00:00",
+            )
+            replacement_record = build_test_merge_train_policy_record(
+                repository="cbusillo/codex-skills",
+                record_id="merge-train-policy-candidate",
+                updated_at="2026-08-22T20:00:00+00:00",
+            )
+            store.write_merge_train_policy_record(active_record)
+            mutation = DbOnlyMutationRequest(
+                scope="privileged-operation-execution",
+                route_path="service-internal:privileged-operation-worker:managed-merge-train-policy-import",
+                idempotency_key="privileged-operation-postgres-merge-train-policy",
+                request_fingerprint="merge-train-policy-import-fingerprint",
+                lease_owner="postgres-integration-worker",
+                response_status_code=200,
+                response_trace_id="trace-postgres-merge-train-policy",
+                response_payload={"status": "ok"},
+            )
+
+            written = store.compare_and_write_merge_train_policy_record(
+                expected_record=active_record,
+                replacement_record=replacement_record,
+                mutation=mutation,
+            )
+            replayed = store.compare_and_write_merge_train_policy_record(
+                expected_record=active_record,
+                replacement_record=replacement_record,
+                mutation=mutation,
+            )
+            conflict = store.compare_and_write_merge_train_policy_record(
+                expected_record=active_record,
+                replacement_record=replacement_record,
+                mutation=replace(mutation, request_fingerprint="different-fingerprint"),
+            )
+            active_records = store.list_merge_train_policy_records(status="active", limit=2)
+            superseded_records = store.list_merge_train_policy_records(
+                status="superseded",
+                limit=10,
+            )
+
+        self.assertEqual(written.status, "written")
+        self.assertEqual(replayed.status, "replayed")
+        self.assertEqual(conflict.status, "idempotency_conflict")
+        self.assertEqual(
+            [record.record_id for record in active_records], [replacement_record.record_id]
+        )
+        self.assertEqual(
+            [record.record_id for record in superseded_records], [active_record.record_id]
+        )
+
+    def test_merge_train_policy_database_trigger_fences_direct_active_writes(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            first_record = build_test_merge_train_policy_record(
+                repository="cbusillo/sellyouroutboard",
+                record_id="merge-train-policy-direct-first",
+                updated_at="2026-09-02T00:00:00+00:00",
+            )
+            second_record = build_test_merge_train_policy_record(
+                repository="cbusillo/codex-skills",
+                record_id="merge-train-policy-direct-second",
+                updated_at="2026-09-02T00:01:00+00:00",
+            )
+            engine = create_engine(store.database_url)
+            try:
+                with engine.begin() as connection:
+                    for record in (first_record, second_record):
+                        connection.execute(
+                            text(
+                                "INSERT INTO launchplane_merge_train_policies "
+                                "(record_id, status, source, updated_at, policy_sha256, payload) "
+                                "VALUES (:record_id, :status, :source, :updated_at, "
+                                ":policy_sha256, CAST(:payload AS JSONB))"
+                            ),
+                            {
+                                "record_id": record.record_id,
+                                "status": record.status,
+                                "source": record.source,
+                                "updated_at": record.updated_at,
+                                "policy_sha256": record.policy_sha256,
+                                "payload": json.dumps(record.model_dump(mode="json")),
+                            },
+                        )
+                    inserted_rows = tuple(
+                        connection.execute(
+                            text(
+                                "SELECT record_id, status, payload ->> 'status' "
+                                "FROM launchplane_merge_train_policies ORDER BY record_id"
+                            )
+                        )
+                    )
+                    connection.execute(
+                        text(
+                            "UPDATE launchplane_merge_train_policies "
+                            "SET status = 'active', "
+                            "payload = jsonb_set(payload, '{status}', '\"active\"'::jsonb, true) "
+                            "WHERE record_id = :record_id"
+                        ),
+                        {"record_id": first_record.record_id},
+                    )
+                    reactivated_rows = tuple(
+                        connection.execute(
+                            text(
+                                "SELECT record_id, status, payload ->> 'status' "
+                                "FROM launchplane_merge_train_policies ORDER BY record_id"
+                            )
+                        )
+                    )
+            finally:
+                engine.dispose()
+
+        self.assertEqual(
+            inserted_rows,
+            (
+                (first_record.record_id, "superseded", "superseded"),
+                (second_record.record_id, "active", "active"),
+            ),
+        )
+        self.assertEqual(
+            reactivated_rows,
+            (
+                (first_record.record_id, "active", "active"),
+                (second_record.record_id, "superseded", "superseded"),
+            ),
+        )
+
+    def test_merge_train_policy_compare_write_rejects_record_id_from_history(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            historical_record = build_test_merge_train_policy_record(
+                repository="cbusillo/odoo-devkit",
+                record_id="merge-train-policy-historical",
+                updated_at="2026-08-22T18:00:00+00:00",
+            ).model_copy(update={"status": "superseded"})
+            active_record = build_test_merge_train_policy_record(
+                repository="cbusillo/sellyouroutboard",
+                record_id="merge-train-policy-active",
+                updated_at="2026-08-22T19:00:00+00:00",
+            )
+            replacement_record = build_test_merge_train_policy_record(
+                repository="cbusillo/codex-skills",
+                record_id=historical_record.record_id,
+                updated_at="2026-08-22T20:00:00+00:00",
+            )
+            store.write_merge_train_policy_record(historical_record)
+            store.write_merge_train_policy_record(active_record)
+
+            result = store.compare_and_write_merge_train_policy_record(
+                expected_record=active_record,
+                replacement_record=replacement_record,
+            )
+            active_records = store.list_merge_train_policy_records(status="active")
+            stored_historical_record = store.read_merge_train_policy_record(
+                historical_record.record_id
+            )
+
+        self.assertEqual(result.status, "record_id_conflict")
+        self.assertEqual(active_records, (active_record,))
+        self.assertEqual(stored_historical_record, historical_record)
 
     def test_runtime_schema_compatibility_reports_missing_relation(self) -> None:
         with _store_for_fresh_head_database() as store:
@@ -2016,6 +2180,26 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                         )
                     )
                 with self.assertRaisesRegex(RuntimeError, "authz_policy_write_fence is disabled"):
+                    verify_postgres_schema_invariants(engine)
+            finally:
+                engine.dispose()
+
+    def test_schema_verification_rejects_disabled_merge_train_policy_write_fence(self) -> None:
+        with _isolated_postgres_database() as database_url:
+            _upgrade_empty_database_to_head(database_url)
+            engine = create_engine(database_url)
+            try:
+                with engine.begin() as connection:
+                    connection.execute(
+                        text(
+                            "ALTER TABLE launchplane_merge_train_policies DISABLE TRIGGER "
+                            "launchplane_merge_train_policy_write_fence"
+                        )
+                    )
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "merge_train_policy_write_fence is disabled",
+                ):
                     verify_postgres_schema_invariants(engine)
             finally:
                 engine.dispose()

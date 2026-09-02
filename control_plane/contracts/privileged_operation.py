@@ -7,6 +7,10 @@ from typing import Literal, TypeAlias
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
+from control_plane.contracts.merge_train_policy import (
+    MergeTrainPolicyRecord,
+    normalize_merge_train_policy_timestamp,
+)
 from control_plane.authz_grant_service import (
     AuthzManagedPolicyDiff,
     AuthzManagedPolicyReconcileEnvelope,
@@ -26,10 +30,19 @@ AUTHZ_POLICY_OPERATION_CANCEL_ACTION = "authz_policy_operation.cancel"
 AUTHZ_POLICY_OPERATION_APPROVE_ACTION = "authz_policy_operation.approve"
 AUTHZ_POLICY_OPERATION_REVOKE_ACTION = "authz_policy_operation.revoke"
 PRIVILEGED_POLICY_OPERATION_SUMMARY_READ_ACTION = "privileged_policy_operation_summary.read"
+MERGE_TRAIN_POLICY_OPERATION_PROPOSE_ACTION = "merge_train_policy_operation.propose"
+MERGE_TRAIN_POLICY_OPERATION_READ_ACTION = "merge_train_policy_operation.read"
+MERGE_TRAIN_POLICY_OPERATION_CANCEL_ACTION = "merge_train_policy_operation.cancel"
+MERGE_TRAIN_POLICY_OPERATION_APPROVE_ACTION = "merge_train_policy_operation.approve"
+MERGE_TRAIN_POLICY_OPERATION_REVOKE_ACTION = "merge_train_policy_operation.revoke"
+MERGE_TRAIN_POLICY_OPERATION_SUMMARY_READ_ACTION = (
+    "privileged_merge_train_policy_operation_summary.read"
+)
 
 PrivilegedOperationDescriptorId = Literal[
     "managed-secret-reencryption",
     "managed-authz-policy-set",
+    "managed-merge-train-policy-import",
 ]
 PrivilegedOperationSafetyClass = Literal["secret_backed", "policy_admin"]
 PrivilegedOperationStatus = Literal[
@@ -289,6 +302,98 @@ class ManagedAuthzPolicySetHumanEvidence(BaseModel):
         return self
 
 
+class ManagedMergeTrainPolicyImportProposalInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: int = Field(default=1, ge=1)
+    record: MergeTrainPolicyRecord
+    reason: str = Field(min_length=1, max_length=240)
+    related_issue: str = Field(default="", max_length=128)
+
+    @model_validator(mode="after")
+    def _validate_input(self) -> "ManagedMergeTrainPolicyImportProposalInput":
+        if self.schema_version != 1:
+            raise ValueError("Unsupported merge-train policy import schema version.")
+        if self.record.status != "active":
+            raise ValueError("Merge-train policy import candidate record must be active.")
+        normalize_merge_train_policy_timestamp(self.record.updated_at)
+        object.__setattr__(self, "reason", _required_token(self.reason, "reason"))
+        object.__setattr__(self, "related_issue", self.related_issue.strip())
+        return self
+
+
+class ManagedMergeTrainPolicyImportHumanEvidence(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: int = Field(default=1, ge=1)
+    result_status: Literal["ok"] = "ok"
+    plan_digest: str
+    active_record_id: str
+    active_status: Literal["active"] = "active"
+    active_updated_at: str
+    active_policy_sha256: str
+    active_target_count: int = Field(ge=0)
+    candidate_record_id: str
+    candidate_policy_sha256: str
+    candidate_target_count: int = Field(ge=0)
+    added_policy_keys: tuple[str, ...] = ()
+    removed_policy_keys: tuple[str, ...] = ()
+    changed_policy_keys: tuple[str, ...] = ()
+    unchanged_policy_keys: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def _validate_evidence(self) -> "ManagedMergeTrainPolicyImportHumanEvidence":
+        if self.schema_version != 1:
+            raise ValueError("Unsupported merge-train policy import evidence schema version.")
+        for field_name in ("plan_digest", "active_policy_sha256", "candidate_policy_sha256"):
+            object.__setattr__(
+                self, field_name, _sha256(str(getattr(self, field_name)), field_name)
+            )
+        for field_name in ("active_record_id", "candidate_record_id"):
+            object.__setattr__(
+                self,
+                field_name,
+                _required_token(str(getattr(self, field_name)), field_name),
+            )
+        object.__setattr__(
+            self, "active_updated_at", _timestamp(self.active_updated_at, "active_updated_at")
+        )
+        for field_name in (
+            "added_policy_keys",
+            "removed_policy_keys",
+            "changed_policy_keys",
+            "unchanged_policy_keys",
+        ):
+            policy_keys = tuple(
+                sorted(
+                    _required_token(policy_key, field_name)
+                    for policy_key in getattr(self, field_name)
+                )
+            )
+            if len(set(policy_keys)) != len(policy_keys):
+                raise ValueError("Merge-train policy evidence keys must be unique")
+            object.__setattr__(self, field_name, policy_keys)
+        changed_sets = (
+            set(self.added_policy_keys),
+            set(self.removed_policy_keys),
+            set(self.changed_policy_keys),
+            set(self.unchanged_policy_keys),
+        )
+        if sum(len(policy_keys) for policy_keys in changed_sets) != len(set().union(*changed_sets)):
+            raise ValueError("Merge-train policy evidence change buckets must not overlap")
+        if self.active_target_count != len(self.removed_policy_keys) + len(
+            self.changed_policy_keys
+        ) + len(self.unchanged_policy_keys):
+            raise ValueError("Active merge-train policy target count does not match change buckets")
+        if self.candidate_target_count != len(self.added_policy_keys) + len(
+            self.changed_policy_keys
+        ) + len(self.unchanged_policy_keys):
+            raise ValueError(
+                "Candidate merge-train policy target count does not match change buckets"
+            )
+        return self
+
+
 class PrivilegedOperationApproval(BaseModel):
     """Immutable browser-human authorization for a single planned operation."""
 
@@ -425,14 +530,92 @@ class ManagedAuthzPolicySetExecutionEvidence(BaseModel):
         return self
 
 
+class ManagedMergeTrainPolicyImportExecutionEvidence(BaseModel):
+    """Redacted merge-train policy transition evidence written by the worker."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: int = Field(default=1, ge=1)
+    result_status: Literal["ok", "error"]
+    result_digest: str
+    changed: bool
+    previous_record_id: str = ""
+    previous_policy_sha256: str = ""
+    resulting_record_id: str = ""
+    resulting_policy_sha256: str = ""
+    superseded_record_id: str = ""
+    superseded_policy_sha256: str = ""
+    active_policy_count: int = Field(default=0, ge=0)
+    reconciliation_required: bool
+    failure_code: str = Field(default="", max_length=160)
+
+    @model_validator(mode="after")
+    def _validate_execution_evidence(self) -> "ManagedMergeTrainPolicyImportExecutionEvidence":
+        if self.schema_version != 1:
+            raise ValueError("Unsupported merge-train policy execution evidence schema version.")
+        object.__setattr__(self, "result_digest", _sha256(self.result_digest, "result_digest"))
+        failure_code = self.failure_code.strip()
+        object.__setattr__(self, "failure_code", failure_code)
+        if self.result_status == "ok":
+            if failure_code or self.reconciliation_required:
+                raise ValueError(
+                    "Successful merge-train policy execution cannot require reconciliation"
+                )
+            if self.active_policy_count != 1:
+                raise ValueError(
+                    "Successful merge-train policy execution requires one active policy"
+                )
+            for field_name in (
+                "previous_record_id",
+                "resulting_record_id",
+            ):
+                object.__setattr__(
+                    self,
+                    field_name,
+                    _required_token(str(getattr(self, field_name)), field_name),
+                )
+            for field_name in (
+                "previous_policy_sha256",
+                "resulting_policy_sha256",
+            ):
+                object.__setattr__(
+                    self, field_name, _sha256(str(getattr(self, field_name)), field_name)
+                )
+            if self.changed:
+                object.__setattr__(
+                    self,
+                    "superseded_record_id",
+                    _required_token(self.superseded_record_id, "superseded_record_id"),
+                )
+                object.__setattr__(
+                    self,
+                    "superseded_policy_sha256",
+                    _sha256(self.superseded_policy_sha256, "superseded_policy_sha256"),
+                )
+            else:
+                if self.superseded_record_id or self.superseded_policy_sha256:
+                    raise ValueError(
+                        "Unchanged merge-train policy execution cannot supersede a record"
+                    )
+        elif not failure_code:
+            raise ValueError("Failed merge-train policy execution requires a bounded failure code")
+        return self
+
+
 PrivilegedOperationRequest: TypeAlias = (
-    ManagedSecretReencryptionPlanInput | ManagedAuthzPolicySetProposalInput
+    ManagedSecretReencryptionPlanInput
+    | ManagedAuthzPolicySetProposalInput
+    | ManagedMergeTrainPolicyImportProposalInput
 )
 PrivilegedOperationHumanEvidence: TypeAlias = (
-    ManagedSecretReencryptionHumanEvidence | ManagedAuthzPolicySetHumanEvidence
+    ManagedSecretReencryptionHumanEvidence
+    | ManagedAuthzPolicySetHumanEvidence
+    | ManagedMergeTrainPolicyImportHumanEvidence
 )
 PrivilegedOperationTerminalEvidence: TypeAlias = (
-    PrivilegedOperationExecutionEvidence | ManagedAuthzPolicySetExecutionEvidence
+    PrivilegedOperationExecutionEvidence
+    | ManagedAuthzPolicySetExecutionEvidence
+    | ManagedMergeTrainPolicyImportExecutionEvidence
 )
 
 
@@ -486,7 +669,7 @@ class PrivilegedOperationRecord(BaseModel):
                 raise ValueError("Managed-secret execution evidence does not match descriptor")
             if self.approval is not None and self.approval.rollback_class != "key_retained":
                 raise ValueError("Managed-secret approvals require key-retained rollback")
-        else:
+        elif self.descriptor_id == "managed-authz-policy-set":
             if self.safety_class != "policy_admin":
                 raise ValueError("Managed-policy operations require policy-admin safety")
             if self.requested_by.identity_type not in {"github_human", "terminal_agent"}:
@@ -501,6 +684,25 @@ class PrivilegedOperationRecord(BaseModel):
                 raise ValueError("Managed-policy execution evidence does not match descriptor")
             if self.approval is not None and self.approval.rollback_class != "policy_cas":
                 raise ValueError("Managed-policy approvals require policy-CAS rollback")
+        elif self.descriptor_id == "managed-merge-train-policy-import":
+            if self.safety_class != "policy_admin":
+                raise ValueError("Merge-train policy operations require policy-admin safety")
+            if self.requested_by.identity_type not in {"github_human", "terminal_agent"}:
+                raise ValueError("Merge-train policy operations require a human or agent requester")
+            if not isinstance(
+                self.request, ManagedMergeTrainPolicyImportProposalInput
+            ) or not isinstance(self.evidence, ManagedMergeTrainPolicyImportHumanEvidence):
+                raise ValueError(
+                    "Merge-train policy operation payload types do not match descriptor"
+                )
+            if self.execution is not None and not isinstance(
+                self.execution, ManagedMergeTrainPolicyImportExecutionEvidence
+            ):
+                raise ValueError("Merge-train policy execution evidence does not match descriptor")
+            if self.approval is not None and self.approval.rollback_class != "policy_cas":
+                raise ValueError("Merge-train policy approvals require policy-CAS rollback")
+        else:
+            raise ValueError("Unknown privileged-operation descriptor")
         object.__setattr__(self, "request_digest", _sha256(self.request_digest, "request_digest"))
         object.__setattr__(
             self,
@@ -712,8 +914,31 @@ class ManagedAuthzPolicySetAgentSummary(BaseModel):
     expires_at: str
 
 
+class ManagedMergeTrainPolicyImportAgentSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: int = Field(default=1, ge=1)
+    operation_id: str
+    descriptor_id: Literal["managed-merge-train-policy-import"] = (
+        "managed-merge-train-policy-import"
+    )
+    descriptor_version: int
+    status: PrivilegedOperationStatus
+    result_status: Literal["ok"] = "ok"
+    active_target_count: int = Field(ge=0)
+    candidate_target_count: int = Field(ge=0)
+    added_policy_keys: tuple[str, ...] = ()
+    removed_policy_keys: tuple[str, ...] = ()
+    changed_policy_keys: tuple[str, ...] = ()
+    unchanged_policy_key_count: int = Field(ge=0)
+    created_at: str
+    expires_at: str
+
+
 PrivilegedOperationSummary: TypeAlias = (
-    PrivilegedOperationAgentSummary | ManagedAuthzPolicySetAgentSummary
+    PrivilegedOperationAgentSummary
+    | ManagedAuthzPolicySetAgentSummary
+    | ManagedMergeTrainPolicyImportAgentSummary
 )
 
 
@@ -734,6 +959,16 @@ def privileged_operation_pre_state_digest(
         payload = evidence.model_dump(mode="json")
         payload.pop("plan_digest")
         return _digest_payload(payload)
+    if isinstance(evidence, ManagedMergeTrainPolicyImportHumanEvidence):
+        return _digest_payload(
+            {
+                "active_record_id": evidence.active_record_id,
+                "active_status": evidence.active_status,
+                "active_updated_at": evidence.active_updated_at,
+                "active_policy_sha256": evidence.active_policy_sha256,
+                "active_target_count": evidence.active_target_count,
+            }
+        )
     return _digest_payload(
         {
             "previous_record_id": evidence.diff.previous_record_id,
@@ -799,9 +1034,7 @@ def build_privileged_operation_id_for_actor(
         principal = f"github:{actor.github_id}"
     else:
         raise ValueError("Managed-policy operation IDs require a human or agent actor")
-    digest = _digest_payload(["managed-authz-policy-set", principal, normalized_source_event_id])[
-        :32
-    ]
+    digest = _digest_payload([descriptor_id, principal, normalized_source_event_id])[:32]
     return f"privileged-operation-{digest}"
 
 
@@ -902,6 +1135,20 @@ def privileged_operation_agent_summary(
     record: PrivilegedOperationRecord,
 ) -> PrivilegedOperationSummary:
     evidence = record.evidence
+    if isinstance(evidence, ManagedMergeTrainPolicyImportHumanEvidence):
+        return ManagedMergeTrainPolicyImportAgentSummary(
+            operation_id=record.operation_id,
+            descriptor_version=record.descriptor_version,
+            status=record.status,
+            active_target_count=evidence.active_target_count,
+            candidate_target_count=evidence.candidate_target_count,
+            added_policy_keys=evidence.added_policy_keys,
+            removed_policy_keys=evidence.removed_policy_keys,
+            changed_policy_keys=evidence.changed_policy_keys,
+            unchanged_policy_key_count=len(evidence.unchanged_policy_keys),
+            created_at=record.created_at,
+            expires_at=record.expires_at,
+        )
     if isinstance(evidence, ManagedAuthzPolicySetHumanEvidence):
         return ManagedAuthzPolicySetAgentSummary(
             operation_id=record.operation_id,
