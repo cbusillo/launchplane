@@ -1948,13 +1948,14 @@ def _required_check_evidence_status(
     raw_check_runs = check_runs_payload.get("check_runs")
     if not isinstance(raw_check_runs, list):
         raise MergeTrainGitHubError("GitHub check runs response must include check_runs.")
-    commit_statuses: dict[str, list[MergeTrainCheckStatus]] = {}
+    commit_statuses: dict[str, MergeTrainCheckStatus] = {}
     for item in raw_statuses:
         status = _json_object(item, "GitHub commit status")
         context = _required_text(status.get("context"), "GitHub commit status requires context.")
-        if is_launchplane_projected_check(context):
+        normalized_context = context.casefold()
+        if is_launchplane_projected_check(context) or normalized_context in commit_statuses:
             continue
-        commit_statuses.setdefault(context.casefold(), []).append(_commit_status_state(status))
+        commit_statuses[normalized_context] = _commit_status_state(status)
     check_runs: list[tuple[str, int | None, MergeTrainCheckStatus]] = []
     for item in raw_check_runs:
         check_run = _json_object(item, "GitHub check run")
@@ -1978,7 +1979,9 @@ def _required_check_evidence_status(
             if name == normalized_context and (required_app_id is None or app_id == required_app_id)
         ]
         if required_app_id is None:
-            matching_statuses.extend(commit_statuses.get(normalized_context, ()))
+            commit_status = commit_statuses.get(normalized_context)
+            if commit_status is not None:
+                matching_statuses.append(commit_status)
         if not matching_statuses:
             required_statuses.append("pending")
             missing_required_checks.append(

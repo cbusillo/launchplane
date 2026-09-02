@@ -53,6 +53,29 @@ class WorkflowInvariantCheckerTests(unittest.TestCase):
                 self.assertIn("github.event.created", cancel_in_progress)
                 self.assertIn("github.event.forced", cancel_in_progress)
 
+    def test_candidate_concurrency_does_not_cancel_base_pushes(self) -> None:
+        for workflow_path in (
+            ".github/workflows/ci.yml",
+            ".github/workflows/security.yml",
+            ".github/workflows/codeql.yml",
+        ):
+            with self.subTest(workflow=workflow_path):
+                concurrency = load_workflow(workflow_path).data.get("concurrency")
+                self.assertIsInstance(concurrency, dict)
+                assert isinstance(concurrency, dict)
+                group = concurrency.get("group")
+                cancel_in_progress = concurrency.get("cancel-in-progress")
+                self.assertIsInstance(group, str)
+                self.assertIsInstance(cancel_in_progress, str)
+                assert isinstance(group, str)
+                assert isinstance(cancel_in_progress, str)
+                candidate_ref_guard = "refs/heads/launchplane/train/"
+                self.assertIn(candidate_ref_guard, group)
+                self.assertIn(candidate_ref_guard, cancel_in_progress)
+                self.assertIn("!github.event.created", group)
+                self.assertIn("!github.event.forced", group)
+                self.assertIn("&& github.sha ||", group)
+
     def test_container_scans_refresh_runtime_security_packages(self) -> None:
         workflow = load_workflow(".github/workflows/ci.yml")
         dockerfile = Path("Dockerfile").read_text(encoding="utf-8")

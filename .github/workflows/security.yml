@@ -12,11 +12,10 @@ name: Security
 concurrency:
   group: >-
     ${{ github.workflow }}-${{ github.event_name == 'push' &&
-    (github.event.created || github.event.forced) && github.sha ||
+    !(startsWith(github.ref, 'refs/heads/launchplane/train/') &&
+    !github.event.created && !github.event.forced) && github.sha ||
     (github.event.pull_request.number || github.ref) }}
-  cancel-in-progress: >-
-    ${{ github.event_name != 'push' ||
-    (!github.event.created && !github.event.forced) }}
+  cancel-in-progress: ${{ github.event_name != 'push' || (startsWith(github.ref, 'refs/heads/launchplane/train/') && !github.event.created && !github.event.forced) }}
 
 jobs:
   workflow_lint:

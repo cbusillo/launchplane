@@ -196,7 +196,8 @@ Candidate-ref workflow concurrency must keep create/force-reset pushes separate
 from normal construction pushes. Normal intermediate pushes cancel each other
 for the same ref, while the reset run retains its own SHA-keyed group so a
 cancelled duplicate does not replace the protected base commit's successful
-required-check evidence.
+required-check evidence. Candidate-specific cancellation must not broaden a
+workflow's cancellation policy for ordinary base-branch pushes.
 
 ### PR-Native Landing
 

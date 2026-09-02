@@ -969,6 +969,54 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
         self.assertEqual(observed_candidate.status, "passed")
         self.assertEqual(observed_candidate.required_checks_status, "pass")
 
+    def test_observe_batch_candidate_checks_uses_latest_duplicate_commit_status(self) -> None:
+        candidate = _batch_candidate().model_copy(
+            update={"candidate_sha": "candidate-sha", "status": "ready_for_checks"}
+        )
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                _required_status_checks("ci-status", app_id=None),
+                _combined_status(
+                    statuses=(
+                        {"context": "ci-status", "state": "success"},
+                        {"context": "ci-status", "state": "failure"},
+                    )
+                ),
+                {"check_runs": []},
+            )
+        )
+
+        observed_candidate = GitHubMergeTrainClient(
+            transport=transport
+        ).observe_batch_candidate_checks(candidate=candidate)
+
+        self.assertEqual(observed_candidate.status, "passed")
+        self.assertEqual(observed_candidate.required_checks_status, "pass")
+
+    def test_observe_batch_candidate_checks_keeps_latest_duplicate_pending(self) -> None:
+        candidate = _batch_candidate().model_copy(
+            update={"candidate_sha": "candidate-sha", "status": "ready_for_checks"}
+        )
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                _required_status_checks("ci-status", app_id=None),
+                _combined_status(
+                    statuses=(
+                        {"context": "ci-status", "state": "pending"},
+                        {"context": "ci-status", "state": "success"},
+                    )
+                ),
+                {"check_runs": []},
+            )
+        )
+
+        observed_candidate = GitHubMergeTrainClient(
+            transport=transport
+        ).observe_batch_candidate_checks(candidate=candidate)
+
+        self.assertEqual(observed_candidate.status, "ready_for_checks")
+        self.assertEqual(observed_candidate.required_checks_status, "pending")
+
     def test_observe_batch_candidate_checks_accepts_any_app_policy(self) -> None:
         candidate = _batch_candidate().model_copy(
             update={"candidate_sha": "candidate-sha", "status": "ready_for_checks"}
