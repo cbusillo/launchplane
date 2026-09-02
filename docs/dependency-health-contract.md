@@ -183,6 +183,11 @@ artifact retention and fails the job when the comparison policy fails.
 
 Dependabot remains the update and advisory signal. This contract intentionally
 does not merge, close, replace, or manually modify Dependabot pull requests.
+Product workflows may omit advisory targeting for an npm update only when both
+the trusted baseline and candidate lockfiles mark every updated package as
+strictly development-only. Mixed, missing, malformed, or non-npm metadata must
+remain production-scoped and fail closed when a security update has no target
+advisory evidence.
 After downstream adoption, an ordinary Dependabot refresh should make a
 non-regressing update green automatically. A genuinely introduced or worsened
 high/critical finding remains red until the bot offers a safe update.
