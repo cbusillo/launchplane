@@ -2692,8 +2692,9 @@ serialization, synthetic wire/signature vectors, complete shadow-verifier
 outcome vectors, and one reactive expiry-lifecycle vector only. Its
 compatibility declaration pins exact version-2 section digests,
 descriptor-scoped vector digests for the descriptors present in version `2`,
-and unchanged version-2 schema digests, so additive descriptor and server-state
-evidence cannot rewrite existing wire coverage silently.
+and version-2 schema digests after filtering only additive descriptor enum
+values, so additive descriptor and server-state evidence cannot rewrite
+existing wire coverage silently.
 
 Owner-control shadow-verifier state is persisted only in PostgreSQL through
 `PostgresRecordStore`: `launchplane_owner_control_channel_sessions` stores one

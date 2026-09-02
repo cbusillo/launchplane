@@ -14257,7 +14257,15 @@ def create_launchplane_fastapi_app(
             )
             if replay_response is not None:
                 return replay_response
-            database_store.write_merge_train_policy_record(policy_import_request.record)
+            try:
+                database_store.write_merge_train_policy_record(policy_import_request.record)
+            except ValueError as error:
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="merge_train_policy_record_conflict",
+                    message="Merge-train policy record identity conflicts with stored history.",
+                ) from error
         result: dict[str, object] = {
             "mode": policy_import_request.mode,
             "record": {

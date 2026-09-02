@@ -37,6 +37,7 @@ from control_plane.contracts.privileged_operation import (
 )
 from control_plane.owner_control_contract import (
     OwnerControlContractError,
+    _preserve_v2_descriptor_enums,
     build_owner_control_contract,
     validate_owner_control_contract,
     write_owner_control_contract,
@@ -284,12 +285,12 @@ class OwnerControlArtifactTests(unittest.TestCase):
                     if vector["descriptor_id"] in preserved_descriptors
                 ]
                 self.assertEqual(canonical_json_sha256(section_value), expected_sha256)
-        for schema_name, expected_sha256 in compatibility[
-            "preserved_v2_unchanged_schema_sha256"
-        ].items():
+        for schema_name, expected_sha256 in compatibility["preserved_v2_schema_sha256"].items():
             with self.subTest(schema=schema_name):
                 self.assertEqual(
-                    canonical_json_sha256(artifact["schemas"][schema_name]),
+                    canonical_json_sha256(
+                        _preserve_v2_descriptor_enums(artifact["schemas"][schema_name])
+                    ),
                     expected_sha256,
                 )
 

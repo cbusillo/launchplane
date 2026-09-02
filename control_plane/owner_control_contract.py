@@ -65,13 +65,18 @@ _PRESERVED_V2_DESCRIPTOR_VECTOR_SECTION_SHA256 = {
     "confirmation_golden_vectors": "58391f364a79ab321596d30200b87c9d29be366eaa1386a9ff4c242c8b38d50a",
     "golden_vectors": "6955c5c8bb228c21bc6a68a4ddb7cf22456cd51615ffe6e421b0fa04f15d9584",
 }
-_PRESERVED_V2_UNCHANGED_SCHEMA_SHA256 = {
+_PRESERVED_V2_SCHEMA_SHA256 = {
+    "approval_request": "6cc0379a8323715191aea8a605b594d6500a2937c6d46c45caa9cea313b3b8b4",
+    "challenge_response": "1fc009f4497b88caacf1c7273c0e7e932936cd23a24f5d3e1846f235da1082d0",
     "channel_binding_record": "399e8f1ee814e60f6973290d5da0a542add174bb2926ab2cc2dff583c18c1a94",
+    "owner_control_confirmation_envelope": "b3e15f59f63efdeff5d95e621af981959c6d5ec2c71e1ae15351967722ee589f",
+    "owner_control_signature_payload": "002b5e22c57ac17b6f7915486e29f2d3d11aee7e0b44505050b1366c23ee8c00",
     "server_review_payload": "b4b0d9e55212190615e9d4247ff459c15309ab1a10a715df92432585b9f34855",
 }
 _PRESERVED_V2_DESCRIPTOR_IDS = frozenset(
     ("managed-authz-policy-set", "managed-secret-reencryption")
 )
+_ALL_DESCRIPTOR_IDS = frozenset(get_args(PrivilegedOperationDescriptorId))
 
 
 class OwnerControlContractError(ValueError):
@@ -917,7 +922,7 @@ def _compatibility_declaration() -> dict[str, Any]:
         "preserved_v2_descriptor_vector_section_sha256": dict(
             _PRESERVED_V2_DESCRIPTOR_VECTOR_SECTION_SHA256
         ),
-        "preserved_v2_unchanged_schema_sha256": dict(_PRESERVED_V2_UNCHANGED_SCHEMA_SHA256),
+        "preserved_v2_schema_sha256": dict(_PRESERVED_V2_SCHEMA_SHA256),
         "schema_change": "descriptor literal expanded for managed-merge-train-policy-import",
     }
 
@@ -938,11 +943,32 @@ def _validate_preserved_v2_sections(artifact: Mapping[str, Any]) -> None:
             raise OwnerControlContractError(
                 f"Owner-control v2 descriptor-scoped section {section!r} changed without a compatibility break"
             )
-    for schema_name, expected_sha256 in _PRESERVED_V2_UNCHANGED_SCHEMA_SHA256.items():
-        if canonical_json_sha256(artifact["schemas"][schema_name]) != expected_sha256:
+    for schema_name, expected_sha256 in _PRESERVED_V2_SCHEMA_SHA256.items():
+        preserved_schema = _preserve_v2_descriptor_enums(artifact["schemas"][schema_name])
+        if canonical_json_sha256(preserved_schema) != expected_sha256:
             raise OwnerControlContractError(
                 f"Owner-control v2 schema {schema_name!r} changed without a compatibility break"
             )
+
+
+def _preserve_v2_descriptor_enums(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        normalized = {key: _preserve_v2_descriptor_enums(item) for key, item in value.items()}
+        enum_values = normalized.get("enum")
+        if (
+            isinstance(enum_values, list)
+            and len(enum_values) == len(_ALL_DESCRIPTOR_IDS)
+            and set(enum_values) == _ALL_DESCRIPTOR_IDS
+        ):
+            normalized["enum"] = [
+                descriptor_id
+                for descriptor_id in enum_values
+                if descriptor_id in _PRESERVED_V2_DESCRIPTOR_IDS
+            ]
+        return normalized
+    if isinstance(value, list):
+        return [_preserve_v2_descriptor_enums(item) for item in value]
+    return value
 
 
 def _build_owner_control_contract() -> dict[str, Any]:

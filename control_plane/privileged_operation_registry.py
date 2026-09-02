@@ -333,9 +333,9 @@ def plan_managed_merge_train_policy_import(
     if candidate_record.record_id != active_record.record_id:
         try:
             read_record(candidate_record.record_id)
-        except (KeyError, LookupError, OSError):
+        except (FileNotFoundError, KeyError):
             pass
-        except (TypeError, ValueError) as error:
+        except (OSError, TypeError, ValueError) as error:
             raise PrivilegedOperationPlannerError(
                 "Merge-train policy import planning could not verify candidate record history."
             ) from error

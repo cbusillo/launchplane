@@ -270,6 +270,35 @@ class PrivilegedOperationContractTests(unittest.TestCase):
             ):
                 plan_managed_merge_train_policy_import(store, request)
 
+    def test_merge_train_policy_import_planner_fails_closed_on_history_read_error(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            store = FilesystemRecordStore(Path(temporary_directory))
+            active_record = build_test_merge_train_policy_record(
+                repository="cbusillo/sellyouroutboard",
+                record_id="merge-train-policy-active",
+            )
+            store.write_merge_train_policy_record(active_record)
+            request = ManagedMergeTrainPolicyImportProposalInput(
+                record=build_test_merge_train_policy_record(
+                    repository="cbusillo/codex-skills",
+                    record_id="merge-train-policy-candidate",
+                ),
+                reason="Review exact merge-train policy enrollment.",
+            )
+
+            with (
+                patch.object(
+                    store,
+                    "read_merge_train_policy_record",
+                    side_effect=OSError("storage unavailable"),
+                ),
+                self.assertRaisesRegex(
+                    PrivilegedOperationPlannerError,
+                    "could not verify candidate record history",
+                ),
+            ):
+                plan_managed_merge_train_policy_import(store, request)
+
     def test_merge_train_policy_import_record_rejects_authz_policy_evidence(self) -> None:
         request = ManagedMergeTrainPolicyImportProposalInput(
             record=build_test_merge_train_policy_record(),
