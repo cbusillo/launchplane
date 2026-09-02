@@ -2066,6 +2066,9 @@ return a typed blocked result rather than guessing a domain.
   artifacts.
 - TOML/env files are not runtime import surfaces; use DB-native
   runtime-environment records and managed secrets instead.
+- VeriReel production promotion runs Prisma migrations with the runtime image's
+  local `./node_modules/.bin/prisma` binary. The production image intentionally
+  omits global `npm` and `npx`, so promotion must not depend on either command.
 - Product repos and GitHub issues must not contain product secret values. Put
   the JSON bundle on an operator-controlled machine or inside the hosted
   Launchplane execution context, run `--dry-run` first, then run `--apply` only
