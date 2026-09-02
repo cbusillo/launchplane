@@ -631,6 +631,8 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             "    runs-on: ubuntu-latest\n"
             "    env:\n"
             "      TRIVY_IMAGE: ghcr.io/aquasecurity/trivy:0.70.0@sha256:" + "b" * 64 + "\n"
+            "      BASELINE_LOCKFILE: dependency-health-baseline/package-lock.json\n"
+            "      CANDIDATE_LOCKFILE: dependency-health-candidate/package-lock.json\n"
             "    steps:\n"
             "      - id: compare\n"
             "        uses: >-\n"
@@ -815,6 +817,12 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             "steps.dependabot.outputs.dependency-type != 'direct:development' && "
             "github.event.pull_request.body || '' }}"
         )
+        production_scope_expression = (
+            "${{ github.event_name == 'pull_request' && "
+            "github.event.pull_request.user.login == 'dependabot[bot]' && "
+            "steps.dependency_targets.outputs.production-scope == 'true' && "
+            "github.event.pull_request.body || '' }}"
+        )
         unsafe_expression = (
             "${{ github.event.pull_request.user.login != 'dependabot[bot]' && "
             "github.event.pull_request.body || 'dependabot' }}"
@@ -823,6 +831,7 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
 
         for expression, expected_status in (
             (safe_expression, "pass"),
+            (production_scope_expression, "pass"),
             (unsafe_expression, "fail"),
             (job_output_expression, "fail"),
         ):
@@ -850,6 +859,40 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
 
                     payload = build_config_authority_audit(control_plane_root=root)
                     gate = evaluate_config_authority_gate(payload, profile="product-repo")
+
+                self.assertEqual(gate["status"], expected_status)
+
+    def test_dependency_health_lockfile_paths_must_be_repository_relative(self) -> None:
+        for lockfile_path, expected_status in (
+            ("dependency-health-baseline/package-lock.json", "pass"),
+            ("dependency-health-image-candidate/package-lock.json", "pass"),
+            ("../package-lock.json", "fail"),
+            ("/tmp/package-lock.json", "fail"),
+            ("dependency-health-baseline/other-lock.json", "fail"),
+        ):
+            with self.subTest(lockfile_path=lockfile_path):
+                with TemporaryDirectory() as temp_dir:
+                    root = Path(temp_dir)
+                    _init_repo(root)
+                    workflow = root / ".github" / "workflows" / "ci.yml"
+                    workflow.parent.mkdir(parents=True)
+                    workflow.write_text(
+                        "name: Dependency health\n"
+                        '"on": pull_request\n'
+                        "jobs:\n"
+                        "  compare:\n"
+                        "    runs-on: ubuntu-latest\n"
+                        "    env:\n"
+                        f"      BASELINE_LOCKFILE: {lockfile_path}\n",
+                        encoding="utf-8",
+                    )
+                    _commit_all(root)
+
+                    payload = build_config_authority_audit(control_plane_root=root)
+                    gate = evaluate_config_authority_gate(
+                        payload,
+                        profile="product-repo",
+                    )
 
                 self.assertEqual(gate["status"], expected_status)
 
