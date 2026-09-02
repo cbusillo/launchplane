@@ -317,8 +317,14 @@ def register_privileged_operation_routes(
                 record_store,
                 record.request,
             )
+        except PrivilegedOperationPlannerError as error:
+            raise dependencies.common.http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="privileged_operation_plan_stale",
+                message="The privileged-operation policy plan is stale and must be replanned.",
+            ) from error
         except (
-            PrivilegedOperationPlannerError,
             PrivilegedOperationPlanningStoreError,
             TypeError,
             ValueError,

@@ -432,6 +432,44 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("GH_TOKEN", evidence_json)
         self.assertNotIn("launchplane-merge-train", evidence_json)
 
+    async def test_merge_train_policy_approval_reports_history_drift_as_stale(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            store = FilesystemRecordStore(Path(temporary_directory))
+            store.write_merge_train_policy_record(
+                build_test_merge_train_policy_record(
+                    repository="cbusillo/sellyouroutboard",
+                    record_id="merge-train-policy-active",
+                )
+            )
+            app = self._app(store=store, policy=_policy())
+            async with lifespan_client(app) as client:
+                planned = await client.post(
+                    "/v1/privileged-operations/plans",
+                    json=_merge_train_policy_plan_payload("browser-merge-train-stale-plan"),
+                )
+                self.assertEqual(planned.status_code, 200, planned.text)
+                operation_id = planned.json()["record"]["operation_id"]
+                store.write_merge_train_policy_record(
+                    build_test_merge_train_policy_record(
+                        repository="cbusillo/codex-skills",
+                        record_id="merge-train-policy-candidate",
+                    ).model_copy(update={"status": "superseded"})
+                )
+
+                approval = await client.post(
+                    f"/v1/privileged-operations/plans/{operation_id}/approve",
+                    json={
+                        "source_event_id": "browser-merge-train-stale-approval",
+                        "reason": "Approve the stale merge-train policy plan.",
+                    },
+                )
+
+        self.assertEqual(approval.status_code, 409, approval.text)
+        self.assertEqual(
+            approval.json()["detail"]["code"],
+            "privileged_operation_plan_stale",
+        )
+
     async def test_authz_policy_operation_grant_does_not_authorize_merge_train_policy_operation(
         self,
     ) -> None:

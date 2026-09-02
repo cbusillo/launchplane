@@ -2675,6 +2675,7 @@ Managed-policy records retain the exact desired policy for authorized human
 review plus bounded diff and CAS/read-back evidence. See
 `docs/privileged-operations.md` for the full evidence and authorization
 boundary.
+
 Managed merge-train policy import records retain the exact candidate policy
 record for authorized human review, while human evidence and agent summaries
 store only active/candidate IDs and digests, active updated time, target counts,
