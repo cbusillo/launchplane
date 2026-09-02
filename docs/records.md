@@ -2687,19 +2687,24 @@ the privileged worker uses atomic expected-active-policy compare-and-write,
 operation-scoped idempotency, and exact active/superseded read-back before an
 operation reaches `executed`.
 
-The checked schema-version-4 `contracts/owner-control-contract.json` artifact is
+The checked schema-version-5 `contracts/owner-control-contract.json` artifact is
 not a record or runtime authority. It supplies deterministic cross-host
 serialization, synthetic wire/signature vectors, complete shadow-verifier
-outcome vectors, and one reactive expiry-lifecycle vector only. Its
-compatibility declaration pins exact version-2 section digests,
-descriptor-scoped vector digests for the descriptors present in version `2`,
-and version-2 schema digests after filtering only additive descriptor enum
-values, so additive descriptor and server-state evidence cannot rewrite
-existing wire coverage silently.
+outcome vectors, one reactive expiry-lifecycle vector, managed merge-train
+policy descriptor coverage, and exhaustive inert enrollment-provenance vectors.
+Its compatibility declaration pins every version-4 top-level section while
+retaining the exact version-2 section, descriptor-scoped vector, and filtered
+schema digests carried by version `4`, so provenance cannot silently rewrite
+existing wire, verification, lifecycle, or descriptor contracts.
 
 Owner-control shadow-verifier state is persisted only in PostgreSQL through
 `PostgresRecordStore`: `launchplane_owner_control_channel_sessions` stores one
 enrolled canonical binding, inert authority marker, and revocation state;
+`launchplane_owner_control_enrollment_provenance` stores one immutable row keyed
+by the session ID with the exact canonical binding and caller-declared
+host-principal claim bytes and digests, the shared database enrollment time,
+`server_observed_corroboration = 'none'`, `provenance_tier = 'self_asserted'`,
+`authority_state = 'inert'`, and `authorizes_execution = false`;
 `launchplane_owner_control_issued_challenges` stores one canonical approval
 request and binding plus their SHA-256 digests, issued/terminal state, and a
 bounded verification-attempt count;
@@ -2715,6 +2720,14 @@ and `authorizes_execution = false`. The stored canonical binding and
 approval-request bytes, rather than an envelope's self-asserted values, govern
 only the shadow verification comparison; they grant no execution authority.
 Unknown challenge nonces create no record or event.
+
+Session and provenance inserts are one transaction and the storage API returns
+them as one strict enrollment pair. Exact replay returns the pair; binding or
+claim drift conflicts. Challenge issuance fails closed when the provenance row
+is absent, and shadow verification refuses missing provenance before recording
+an attempt. The migration refuses to upgrade while any legacy session lacks
+provenance instead of synthesizing or silently backfilling trust, and downgrade
+refuses while provenance rows exist.
 
 Challenge issuance is service-only and provenance-bound: the store derives the
 canonical approval request from one locked planned operation, exactly one active
