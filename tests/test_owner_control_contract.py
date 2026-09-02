@@ -31,6 +31,10 @@ from control_plane.contracts.owner_control_shadow_verifier import (
     evaluate_owner_control_shadow_verification,
     terminalize_expired_owner_control_challenge_record,
 )
+from control_plane.contracts.owner_control_enrollment_provenance import (
+    OwnerControlEnrollmentProvenanceRecord,
+    OwnerControlHostPrincipalClaim,
+)
 from control_plane.contracts.privileged_operation import (
     ManagedSecretReencryptionPlanInput,
     privileged_operation_request_digest,
@@ -257,19 +261,18 @@ class OwnerControlArtifactTests(unittest.TestCase):
         if expected_message := vector.get("error_message_contains"):
             self.assertIn(expected_message, errors[0]["msg"])
 
-    def test_v4_contract_preserves_existing_v2_sections_and_vectors(self) -> None:
+    def test_v5_contract_pins_v4_and_preserves_existing_v2_payloads(self) -> None:
         artifact = build_owner_control_contract()
         compatibility = artifact["compatibility"]
 
-        self.assertEqual(artifact["schema_version"], 4)
-        self.assertEqual(compatibility["container_schema_version"], 4)
-        self.assertEqual(compatibility["previous_container_schema_version"], 3)
-        self.assertEqual(
-            compatibility["change_kind"], "additive-descriptor-wire-schema-and-vectors"
-        )
+        self.assertEqual(artifact["schema_version"], 5)
+        self.assertEqual(compatibility["container_schema_version"], 5)
+        self.assertEqual(compatibility["previous_container_schema_version"], 4)
+        self.assertEqual(compatibility["change_kind"], "additive-enrollment-provenance")
         self.assertEqual(compatibility["unknown_container_versions"], "reject")
         self.assertEqual(compatibility["wire_model_schema_versions"], [1])
         self.assertEqual(compatibility["shadow_verifier_schema_versions"], [1])
+        self.assertEqual(compatibility["enrollment_provenance_schema_versions"], [1])
         self.assertEqual(artifact["signature_declaration"]["contract_schema_version"], 2)
         for section, expected_sha256 in compatibility["preserved_v2_section_sha256"].items():
             with self.subTest(section=section):
@@ -293,6 +296,81 @@ class OwnerControlArtifactTests(unittest.TestCase):
                     ),
                     expected_sha256,
                 )
+        preserved_v4 = compatibility["preserved_v4_section_sha256"]
+        self.assertEqual(
+            set(preserved_v4),
+            {
+                "canonical_json",
+                "canonicalization_vectors",
+                "challenge_lifecycle_vectors",
+                "compatibility",
+                "confirmation_golden_vectors",
+                "golden_vectors",
+                "negative_confirmation_vectors",
+                "negative_vectors",
+                "schema_version",
+                "schemas",
+                "signature_declaration",
+                "verification_state_vectors",
+            },
+        )
+        self.assertEqual(preserved_v4["schema_version"], canonical_json_sha256(4))
+        self.assertEqual(
+            preserved_v4["compatibility"],
+            "62115e1e9d322dad345d0a48e4523445285d05281a52a4d94a18e1fcb3d27937",
+        )
+        for section, expected_sha256 in preserved_v4.items():
+            if section in {"schema_version", "compatibility"}:
+                continue
+            with self.subTest(v4_section=section):
+                self.assertEqual(canonical_json_sha256(artifact[section]), expected_sha256)
+
+    def test_provenance_vectors_are_exhaustive_inert_and_canonical(self) -> None:
+        artifact = build_owner_control_contract()
+        vectors = artifact["provenance_vectors"]
+
+        self.assertEqual(len(vectors), 18)
+        combinations: set[tuple[str, str, str]] = set()
+        for vector in vectors:
+            claim = OwnerControlHostPrincipalClaim.model_validate(vector["claim"]["payload"])
+            provenance = OwnerControlEnrollmentProvenanceRecord.model_validate(
+                vector["enrollment_provenance"]["payload"]
+            )
+            combinations.add((claim.principal_separation, claim.key_custody, claim.gesture_source))
+            self.assertEqual(
+                vector["claim"]["canonical_json"],
+                canonical_json_bytes(claim.model_dump(mode="json")).decode(),
+            )
+            self.assertEqual(
+                vector["enrollment_provenance"]["canonical_json"],
+                canonical_json_bytes(provenance.model_dump(mode="json")).decode(),
+            )
+            self.assertEqual(vector["result"]["provenance_tier"], "self_asserted")
+            self.assertEqual(vector["result"]["server_observed_corroboration"], "none")
+            self.assertEqual(vector["result"]["authority_state"], "inert")
+            self.assertFalse(vector["result"]["authorizes_execution"])
+        self.assertEqual(len(combinations), 18)
+
+    def test_negative_provenance_vectors_fail_closed(self) -> None:
+        artifact = build_owner_control_contract()
+        models: dict[str, type[BaseModel]] = {
+            "owner_control_host_principal_claim": OwnerControlHostPrincipalClaim,
+            "owner_control_enrollment_provenance": OwnerControlEnrollmentProvenanceRecord,
+        }
+        synthetic_key_vectors = []
+        for vector in artifact["negative_provenance_vectors"]:
+            if vector.get("model"):
+                with self.subTest(rule=vector["rule"]):
+                    with self.assertRaises(ValidationError):
+                        models[vector["model"]].model_validate(vector["payload"])
+            elif vector["rule"] == "published-synthetic-conformance-key-is-rejected":
+                synthetic_key_vectors.append(vector)
+                self.assertTrue(vector["runtime_guard_matches"])
+                self.assertEqual(vector["result"], "reject")
+            else:
+                self.assertEqual(vector["rule"], "missing-enrollment-provenance-is-rejected")
+                self.assertEqual(vector["result"], "reject")
+        self.assertEqual(len(synthetic_key_vectors), 3)
 
     def test_existing_approval_and_challenge_vectors_remain_byte_compatible(self) -> None:
         vector = next(

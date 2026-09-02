@@ -5,10 +5,20 @@ name: CI
   push:
     branches:
       - main
+      - "launchplane/train/**"
   pull_request:
 
 permissions:
   contents: read
+
+concurrency:
+  group: >-
+    ${{ github.workflow }}-${{ github.event_name == 'push' &&
+    (github.event.created || github.event.forced) && github.sha ||
+    (github.event.pull_request.number || github.ref) }}
+  cancel-in-progress: >-
+    ${{ github.event_name != 'push' ||
+    (!github.event.created && !github.event.forced) }}
 
 jobs:
   static_checks:
@@ -607,14 +617,17 @@ jobs:
       - test
       - test_fork
       - postgres_integration
-    if: always() && github.event_name == 'pull_request'
+    if: >-
+      always() &&
+      (github.event_name == 'pull_request' || github.event_name == 'push')
     permissions:
       contents: read
     steps:
       - name: Require successful CI path
         env:
           BASE_REPOSITORY: ${{ github.repository }}
-          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          HEAD_REPOSITORY: >-
+            ${{ github.event.pull_request.head.repo.full_name || github.repository }}
           STATIC_CHECKS_RESULT: ${{ needs.static_checks.result }}
           STATIC_CHECKS_FORK_RESULT: ${{ needs.static_checks_fork.result }}
           CONTAINER_SCAN_RESULT: ${{ needs.container_scan.result }}

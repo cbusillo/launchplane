@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from pydantic import ValidationError
+from sqlalchemy import text
 
 from control_plane.authz_grant_service import AuthzManagedPolicyDiff
 from control_plane.contracts.owner_control import (
@@ -29,6 +30,10 @@ from control_plane.contracts.owner_control_shadow_verifier import (
     evaluate_owner_control_shadow_verification,
     owner_control_challenge_lifecycle_event_id,
     terminalize_expired_owner_control_challenge_record,
+)
+from control_plane.contracts.owner_control_enrollment_provenance import (
+    OwnerControlEnrollmentProvenanceConflictError,
+    OwnerControlHostPrincipalClaim,
 )
 from control_plane.contracts.authz_policy_record import (
     LaunchplaneAuthzPolicyRecord,
@@ -78,6 +83,16 @@ def _binding(
         ),
         session_issued_at="2025-01-01T00:00:00+00:00",
         session_expires_at="2035-01-01T00:00:00+00:00",
+    )
+
+
+def _host_principal_claim() -> OwnerControlHostPrincipalClaim:
+    return OwnerControlHostPrincipalClaim(
+        host_instance_id="owner-control-test-host",
+        principal_id="owner-control-test-principal",
+        principal_separation="not_claimed",
+        key_custody="not_claimed",
+        gesture_source="not_claimed",
     )
 
 
@@ -280,10 +295,128 @@ class OwnerControlShadowVerifierStorageTests(unittest.TestCase):
         self.store.close()
         self.temporary_directory.cleanup()
 
+    def test_enrollment_is_atomic_idempotent_and_provenance_immutable(self) -> None:
+        binding = _binding(Ed25519PrivateKey.generate())
+        claim = _host_principal_claim()
+
+        created = self.store.enroll_owner_control_channel_session(
+            binding,
+            host_principal_claim=claim,
+        )
+        replayed = self.store.enroll_owner_control_channel_session(
+            binding,
+            host_principal_claim=claim,
+        )
+        stored = self.store.read_owner_control_enrollment_provenance(
+            channel_session_id=binding.channel_session_id
+        )
+
+        self.assertEqual(replayed, created)
+        self.assertEqual(stored, created.provenance)
+        self.assertEqual(created.session.enrolled_at, created.provenance.enrolled_at)
+        changed_claim = claim.model_copy(update={"key_custody": "hardware_backed"})
+        with self.assertRaisesRegex(
+            OwnerControlEnrollmentProvenanceConflictError,
+            "changed immutable provenance",
+        ):
+            self.store.enroll_owner_control_channel_session(
+                binding,
+                host_principal_claim=changed_claim,
+            )
+
+    def test_enrollment_rejects_synthetic_key_without_persisting_session(self) -> None:
+        binding = _binding(Ed25519PrivateKey.from_private_bytes(bytes(range(32))))
+
+        with self.assertRaisesRegex(
+            OwnerControlEnrollmentProvenanceConflictError,
+            "conformance keys cannot be enrolled",
+        ):
+            self.store.enroll_owner_control_channel_session(
+                binding,
+                host_principal_claim=_host_principal_claim(),
+            )
+
+        with self.assertRaises(FileNotFoundError):
+            self.store.read_owner_control_channel_session(
+                channel_session_id=binding.channel_session_id
+            )
+
+    def test_challenge_issuance_fails_closed_when_provenance_is_missing(self) -> None:
+        binding = _binding(Ed25519PrivateKey.generate())
+        self.store.enroll_owner_control_channel_session(
+            binding,
+            host_principal_claim=_host_principal_claim(),
+        )
+        operation = _seed_issue_provenance(self.store)
+        with self.store._engine.begin() as connection:
+            connection.execute(
+                text(
+                    "delete from launchplane_owner_control_enrollment_provenance "
+                    "where channel_session_id = :channel_session_id"
+                ),
+                {"channel_session_id": binding.channel_session_id},
+            )
+
+        with self.assertRaisesRegex(
+            OwnerControlEnrollmentProvenanceConflictError,
+            "requires enrollment provenance",
+        ):
+            self.store.issue_owner_control_challenge(
+                OwnerControlChallengeIssueRequest(
+                    channel_session_id=binding.channel_session_id,
+                    operation_id=operation.operation_id,
+                    expires_in_seconds=300,
+                )
+            )
+
+    def test_shadow_verification_fails_closed_when_provenance_is_missing(self) -> None:
+        private_key = Ed25519PrivateKey.generate()
+        binding = _binding(private_key)
+        self.store.enroll_owner_control_channel_session(
+            binding,
+            host_principal_claim=_host_principal_claim(),
+        )
+        operation = _seed_issue_provenance(self.store)
+        issued = self.store.issue_owner_control_challenge(
+            OwnerControlChallengeIssueRequest(
+                channel_session_id=binding.channel_session_id,
+                operation_id=operation.operation_id,
+                expires_in_seconds=300,
+            )
+        )
+        envelope = _envelope(
+            private_key,
+            binding=binding,
+            request=issued.approval_request(),
+        )
+        with self.store._engine.begin() as connection:
+            connection.execute(
+                text(
+                    "delete from launchplane_owner_control_enrollment_provenance "
+                    "where channel_session_id = :channel_session_id"
+                ),
+                {"channel_session_id": binding.channel_session_id},
+            )
+
+        with self.assertRaisesRegex(
+            OwnerControlEnrollmentProvenanceConflictError,
+            "verification requires enrollment provenance",
+        ):
+            self.store.verify_owner_control_confirmation_shadow(envelope)
+        self.assertEqual(
+            self.store.list_owner_control_shadow_verification_events(
+                challenge_nonce=issued.challenge_nonce
+            ),
+            (),
+        )
+
     def test_verifies_once_with_exact_server_state_and_persists_shadow_events(self) -> None:
         private_key = Ed25519PrivateKey.generate()
         binding = _binding(private_key)
-        enrolled = self.store.enroll_owner_control_channel_session(binding)
+        enrolled = self.store.enroll_owner_control_channel_session(
+            binding,
+            host_principal_claim=_host_principal_claim(),
+        )
         operation = _seed_issue_provenance(self.store)
         issued = self.store.issue_owner_control_challenge(
             OwnerControlChallengeIssueRequest(
@@ -310,8 +443,9 @@ class OwnerControlShadowVerifierStorageTests(unittest.TestCase):
             challenge_nonce=issued.challenge_nonce
         )
 
-        self.assertEqual(enrolled.status, "enrolled")
-        self.assertEqual(enrolled.authority_state, "inert")
+        self.assertEqual(enrolled.session.status, "enrolled")
+        self.assertEqual(enrolled.session.authority_state, "inert")
+        self.assertEqual(enrolled.provenance.provenance_tier, "self_asserted")
         self.assertNotEqual(issued.challenge_nonce, _request().nonce)
         self.assertEqual(issued.state, "issued")
         self.assertEqual(issued.authority_state, "inert")
@@ -351,7 +485,10 @@ class OwnerControlShadowVerifierStorageTests(unittest.TestCase):
     def test_issuance_is_idempotent_only_for_current_bound_provenance(self) -> None:
         private_key = Ed25519PrivateKey.generate()
         binding = _binding(private_key)
-        self.store.enroll_owner_control_channel_session(binding)
+        self.store.enroll_owner_control_channel_session(
+            binding,
+            host_principal_claim=_host_principal_claim(),
+        )
         operation = _seed_issue_provenance(self.store)
         issue_request = OwnerControlChallengeIssueRequest(
             channel_session_id=binding.channel_session_id,
@@ -383,7 +520,10 @@ class OwnerControlShadowVerifierStorageTests(unittest.TestCase):
             "_owner_control_shadow_timestamp",
             return_value="2026-08-28T12:00:00+00:00",
         ):
-            self.store.enroll_owner_control_channel_session(binding)
+            self.store.enroll_owner_control_channel_session(
+                binding,
+                host_principal_claim=_host_principal_claim(),
+            )
             operation = _seed_issue_provenance(self.store)
             issued = self.store.issue_owner_control_challenge(
                 OwnerControlChallengeIssueRequest(
@@ -399,7 +539,10 @@ class OwnerControlShadowVerifierStorageTests(unittest.TestCase):
         )
         try:
             second_store.ensure_schema()
-            second_store.enroll_owner_control_channel_session(_binding(private_key))
+            second_store.enroll_owner_control_channel_session(
+                _binding(private_key),
+                host_principal_claim=_host_principal_claim(),
+            )
             denied_operation = _seed_issue_provenance(second_store, owner_ids=(999,))
             with self.assertRaisesRegex(ValueError, "immutable GitHub-ID-only approval rule"):
                 second_store.issue_owner_control_challenge(
@@ -415,7 +558,10 @@ class OwnerControlShadowVerifierStorageTests(unittest.TestCase):
     def test_issuance_floors_operation_expiry(self) -> None:
         private_key = Ed25519PrivateKey.generate()
         binding = _binding(private_key, session_id="owner-control-expiry-session")
-        self.store.enroll_owner_control_channel_session(binding)
+        self.store.enroll_owner_control_channel_session(
+            binding,
+            host_principal_claim=_host_principal_claim(),
+        )
         operation = _seed_issue_provenance(
             self.store,
             expires_at="2026-08-28T12:01:30.900000+00:00",
@@ -436,7 +582,10 @@ class OwnerControlShadowVerifierStorageTests(unittest.TestCase):
     def test_issuance_terminalizes_expired_active_challenge_before_reissue(self) -> None:
         private_key = Ed25519PrivateKey.generate()
         binding = _binding(private_key, session_id="owner-control-stale-session")
-        self.store.enroll_owner_control_channel_session(binding)
+        self.store.enroll_owner_control_channel_session(
+            binding,
+            host_principal_claim=_host_principal_claim(),
+        )
         operation = _seed_issue_provenance(
             self.store,
             expires_at="2026-08-28T12:10:00+00:00",
@@ -503,7 +652,10 @@ class OwnerControlShadowVerifierStorageTests(unittest.TestCase):
     def test_expiry_terminalization_uses_exact_boundary_and_deterministic_event(self) -> None:
         private_key = Ed25519PrivateKey.generate()
         binding = _binding(private_key, session_id="owner-control-boundary-session")
-        self.store.enroll_owner_control_channel_session(binding)
+        self.store.enroll_owner_control_channel_session(
+            binding,
+            host_principal_claim=_host_principal_claim(),
+        )
         operation = _seed_issue_provenance(
             self.store,
             expires_at="2026-08-28T12:10:00+00:00",
@@ -546,7 +698,10 @@ class OwnerControlShadowVerifierStorageTests(unittest.TestCase):
     def test_reissuance_rolls_back_terminalization_when_replacement_insert_fails(self) -> None:
         private_key = Ed25519PrivateKey.generate()
         binding = _binding(private_key, session_id="owner-control-rollback-session")
-        self.store.enroll_owner_control_channel_session(binding)
+        self.store.enroll_owner_control_channel_session(
+            binding,
+            host_principal_claim=_host_principal_claim(),
+        )
         operation = _seed_issue_provenance(
             self.store,
             expires_at="2026-08-28T12:10:00+00:00",
@@ -593,7 +748,10 @@ class OwnerControlShadowVerifierStorageTests(unittest.TestCase):
     def test_reissuance_rolls_back_when_replacement_expires_before_commit(self) -> None:
         private_key = Ed25519PrivateKey.generate()
         binding = _binding(private_key, session_id="owner-control-stale-commit-session")
-        self.store.enroll_owner_control_channel_session(binding)
+        self.store.enroll_owner_control_channel_session(
+            binding,
+            host_principal_claim=_host_principal_claim(),
+        )
         operation = _seed_issue_provenance(
             self.store,
             expires_at="2026-08-28T12:10:00+00:00",
@@ -642,7 +800,10 @@ class OwnerControlShadowVerifierStorageTests(unittest.TestCase):
         )
         try:
             denied_store.ensure_schema()
-            denied_store.enroll_owner_control_channel_session(_binding(private_key))
+            denied_store.enroll_owner_control_channel_session(
+                _binding(private_key),
+                host_principal_claim=_host_principal_claim(),
+            )
             operation = _seed_issue_provenance(denied_store, roles=("read_only",))
             with self.assertRaisesRegex(ValueError, "immutable GitHub-ID-only approval rule"):
                 denied_store.issue_owner_control_challenge(
@@ -658,7 +819,10 @@ class OwnerControlShadowVerifierStorageTests(unittest.TestCase):
     def test_issuance_requires_planned_operation_and_exactly_one_active_policy(self) -> None:
         private_key = Ed25519PrivateKey.generate()
         binding = _binding(private_key, session_id="owner-control-status-session")
-        self.store.enroll_owner_control_channel_session(binding)
+        self.store.enroll_owner_control_channel_session(
+            binding,
+            host_principal_claim=_host_principal_claim(),
+        )
         operation = _seed_issue_provenance(self.store)
         cancel_privileged_operation(
             record_store=self.store,
@@ -684,7 +848,8 @@ class OwnerControlShadowVerifierStorageTests(unittest.TestCase):
         try:
             missing_policy_store.ensure_schema()
             missing_policy_store.enroll_owner_control_channel_session(
-                _binding(private_key, session_id="owner-control-missing-policy-session")
+                _binding(private_key, session_id="owner-control-missing-policy-session"),
+                host_principal_claim=_host_principal_claim(),
             )
             missing_policy_operation = _seed_issue_provenance(
                 missing_policy_store,
@@ -704,7 +869,10 @@ class OwnerControlShadowVerifierStorageTests(unittest.TestCase):
     def test_valid_signature_with_changed_request_never_verifies(self) -> None:
         private_key = Ed25519PrivateKey.generate()
         binding = _binding(private_key)
-        self.store.enroll_owner_control_channel_session(binding)
+        self.store.enroll_owner_control_channel_session(
+            binding,
+            host_principal_claim=_host_principal_claim(),
+        )
         operation = _seed_issue_provenance(self.store)
         issued = self.store.issue_owner_control_challenge(
             OwnerControlChallengeIssueRequest(
@@ -805,7 +973,10 @@ class OwnerControlShadowVerifierStorageTests(unittest.TestCase):
     def test_rejection_audit_is_bounded_and_terminal(self) -> None:
         private_key = Ed25519PrivateKey.generate()
         binding = _binding(private_key)
-        self.store.enroll_owner_control_channel_session(binding)
+        self.store.enroll_owner_control_channel_session(
+            binding,
+            host_principal_claim=_host_principal_claim(),
+        )
         operation = _seed_issue_provenance(self.store)
         issued = self.store.issue_owner_control_challenge(
             OwnerControlChallengeIssueRequest(
@@ -862,7 +1033,10 @@ class OwnerControlShadowVerifierStorageTests(unittest.TestCase):
     def test_pure_evaluation_rejects_stored_state_and_signature_mismatches(self) -> None:
         private_key = Ed25519PrivateKey.generate()
         binding = _binding(private_key)
-        enrolled = self.store.enroll_owner_control_channel_session(binding)
+        enrolled = self.store.enroll_owner_control_channel_session(
+            binding,
+            host_principal_claim=_host_principal_claim(),
+        )
         operation = _seed_issue_provenance(self.store)
         issued = self.store.issue_owner_control_challenge(
             OwnerControlChallengeIssueRequest(
@@ -889,8 +1063,8 @@ class OwnerControlShadowVerifierStorageTests(unittest.TestCase):
             binding=cross_session_binding,
             request=issued.approval_request(),
         )
-        revoked = enrolled.model_copy(
-            update={"status": "revoked", "revoked_at": enrolled.enrolled_at}
+        revoked = enrolled.session.model_copy(
+            update={"status": "revoked", "revoked_at": enrolled.session.enrolled_at}
         )
 
         cases = (
@@ -904,28 +1078,28 @@ class OwnerControlShadowVerifierStorageTests(unittest.TestCase):
             (
                 "session-expired",
                 valid_envelope,
-                enrolled,
+                enrolled.session,
                 "2035-01-02T00:00:00+00:00",
                 "channel_session_expired",
             ),
             (
                 "challenge-expired",
                 valid_envelope,
-                enrolled,
+                enrolled.session,
                 "2027-01-01T00:00:00+00:00",
                 "challenge_expired",
             ),
             (
                 "cross-session",
                 cross_session_envelope,
-                enrolled,
+                enrolled.session,
                 issued.issued_at,
                 "challenge_channel_session_mismatch",
             ),
             (
                 "wrong-signature",
                 wrong_signature_envelope,
-                enrolled,
+                enrolled.session,
                 issued.issued_at,
                 "signature_invalid",
             ),
