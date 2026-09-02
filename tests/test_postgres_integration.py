@@ -2151,6 +2151,26 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
             finally:
                 engine.dispose()
 
+    def test_schema_verification_rejects_disabled_merge_train_policy_write_fence(self) -> None:
+        with _isolated_postgres_database() as database_url:
+            _upgrade_empty_database_to_head(database_url)
+            engine = create_engine(database_url)
+            try:
+                with engine.begin() as connection:
+                    connection.execute(
+                        text(
+                            "ALTER TABLE launchplane_merge_train_policies DISABLE TRIGGER "
+                            "launchplane_merge_train_policy_write_fence"
+                        )
+                    )
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "merge_train_policy_write_fence is disabled",
+                ):
+                    verify_postgres_schema_invariants(engine)
+            finally:
+                engine.dispose()
+
     def test_alembic_from_empty_database_reaches_exact_head_and_required_invariants(
         self,
     ) -> None:

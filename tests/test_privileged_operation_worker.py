@@ -583,6 +583,53 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
             [item.record_id for item in superseded_records], ["merge-train-policy-active"]
         )
 
+    def test_worker_treats_same_policy_with_new_record_id_as_unchanged(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = self._store(directory)
+            try:
+                approval_policy = store.seed_authz_policy_if_absent(
+                    _merge_train_policy_admin_record()
+                )
+                active_record = build_test_merge_train_policy_record(
+                    repository="cbusillo/sellyouroutboard",
+                    record_id="merge-train-policy-active",
+                    updated_at="2026-09-02T00:00:00Z",
+                )
+                candidate_record = build_test_merge_train_policy_record(
+                    repository="cbusillo/sellyouroutboard",
+                    record_id="merge-train-policy-candidate",
+                    updated_at="2026-09-02T00:01:00Z",
+                )
+                operation_id = _prepare_approved_merge_train_policy_import(
+                    store,
+                    approval_policy=approval_policy,
+                    active_record=active_record,
+                    candidate_record=candidate_record,
+                )
+
+                completed = execute_approved_privileged_operations_once(
+                    record_store=store,
+                    now=lambda: FIXED_NOW,
+                )
+
+                record = store.read_privileged_operation_record(operation_id)
+                active_records = store.list_merge_train_policy_records(status="active", limit=2)
+                superseded_records = store.list_merge_train_policy_records(
+                    status="superseded",
+                    limit=10,
+                )
+            finally:
+                store.close()
+
+        self.assertEqual([item.operation_id for item in completed], [operation_id])
+        self.assertEqual(record.status, "executed")
+        self.assertIsInstance(record.execution, ManagedMergeTrainPolicyImportExecutionEvidence)
+        assert isinstance(record.execution, ManagedMergeTrainPolicyImportExecutionEvidence)
+        self.assertFalse(record.execution.changed)
+        self.assertEqual(record.execution.resulting_record_id, active_record.record_id)
+        self.assertEqual(active_records, (active_record,))
+        self.assertEqual(superseded_records, ())
+
     def test_worker_rejects_merge_train_policy_import_when_active_policy_drifts(self) -> None:
         with TemporaryDirectory() as directory:
             store = self._store(directory)

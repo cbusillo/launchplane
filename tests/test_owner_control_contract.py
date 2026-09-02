@@ -284,6 +284,14 @@ class OwnerControlArtifactTests(unittest.TestCase):
                     if vector["descriptor_id"] in preserved_descriptors
                 ]
                 self.assertEqual(canonical_json_sha256(section_value), expected_sha256)
+        for schema_name, expected_sha256 in compatibility[
+            "preserved_v2_unchanged_schema_sha256"
+        ].items():
+            with self.subTest(schema=schema_name):
+                self.assertEqual(
+                    canonical_json_sha256(artifact["schemas"][schema_name]),
+                    expected_sha256,
+                )
 
     def test_existing_approval_and_challenge_vectors_remain_byte_compatible(self) -> None:
         vector = next(

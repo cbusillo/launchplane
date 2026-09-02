@@ -145,6 +145,10 @@
       "negative_vectors": "232d29bc542df455c9f54a3196a2a4d41cb0912155f92d060c850df99c835b29",
       "signature_declaration": "7d9c62d55792931383d4a02ed99d31e21c67b5ce714c01d9144dc2a3bed34f72"
     },
+    "preserved_v2_unchanged_schema_sha256": {
+      "channel_binding_record": "399e8f1ee814e60f6973290d5da0a542add174bb2926ab2cc2dff583c18c1a94",
+      "server_review_payload": "b4b0d9e55212190615e9d4247ff459c15309ab1a10a715df92432585b9f34855"
+    },
     "previous_container_schema_version": 3,
     "schema_change": "descriptor literal expanded for managed-merge-train-policy-import",
     "shadow_verifier_schema_versions": [

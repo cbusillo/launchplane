@@ -1579,6 +1579,10 @@ class SchemaMigrationTests(unittest.TestCase):
             ("jsonb",),
         )
         self.assertEqual(
+            column_types[("launchplane_merge_train_policies", "payload")],
+            ("jsonb",),
+        )
+        self.assertEqual(
             column_types[("launchplane_owner_control_channel_sessions", "payload")],
             ("jsonb",),
         )

@@ -65,6 +65,10 @@ _PRESERVED_V2_DESCRIPTOR_VECTOR_SECTION_SHA256 = {
     "confirmation_golden_vectors": "58391f364a79ab321596d30200b87c9d29be366eaa1386a9ff4c242c8b38d50a",
     "golden_vectors": "6955c5c8bb228c21bc6a68a4ddb7cf22456cd51615ffe6e421b0fa04f15d9584",
 }
+_PRESERVED_V2_UNCHANGED_SCHEMA_SHA256 = {
+    "channel_binding_record": "399e8f1ee814e60f6973290d5da0a542add174bb2926ab2cc2dff583c18c1a94",
+    "server_review_payload": "b4b0d9e55212190615e9d4247ff459c15309ab1a10a715df92432585b9f34855",
+}
 _PRESERVED_V2_DESCRIPTOR_IDS = frozenset(
     ("managed-authz-policy-set", "managed-secret-reencryption")
 )
@@ -913,6 +917,7 @@ def _compatibility_declaration() -> dict[str, Any]:
         "preserved_v2_descriptor_vector_section_sha256": dict(
             _PRESERVED_V2_DESCRIPTOR_VECTOR_SECTION_SHA256
         ),
+        "preserved_v2_unchanged_schema_sha256": dict(_PRESERVED_V2_UNCHANGED_SCHEMA_SHA256),
         "schema_change": "descriptor literal expanded for managed-merge-train-policy-import",
     }
 
@@ -932,6 +937,11 @@ def _validate_preserved_v2_sections(artifact: Mapping[str, Any]) -> None:
         if canonical_json_sha256(section_value) != expected_sha256:
             raise OwnerControlContractError(
                 f"Owner-control v2 descriptor-scoped section {section!r} changed without a compatibility break"
+            )
+    for schema_name, expected_sha256 in _PRESERVED_V2_UNCHANGED_SCHEMA_SHA256.items():
+        if canonical_json_sha256(artifact["schemas"][schema_name]) != expected_sha256:
+            raise OwnerControlContractError(
+                f"Owner-control v2 schema {schema_name!r} changed without a compatibility break"
             )
 
 
