@@ -709,11 +709,11 @@ class PrivilegedOperationRecord(BaseModel):
             "evidence_digest",
             _sha256(self.evidence_digest, "evidence_digest"),
         )
-        expected_request_digest = privileged_operation_request_digest(self.request)
-        if self.request_digest != expected_request_digest:
+        if self.request_digest not in privileged_operation_request_digest_candidates(self.request):
             raise ValueError("Privileged-operation request_digest does not match request")
-        expected_evidence_digest = privileged_operation_evidence_digest(self.evidence)
-        if self.evidence_digest != expected_evidence_digest:
+        if self.evidence_digest not in privileged_operation_evidence_digest_candidates(
+            self.evidence
+        ):
             raise ValueError("Privileged-operation evidence_digest does not match evidence")
         object.__setattr__(self, "created_at", _timestamp(self.created_at, "created_at"))
         object.__setattr__(self, "updated_at", _timestamp(self.updated_at, "updated_at"))
@@ -946,10 +946,51 @@ def privileged_operation_request_digest(request: PrivilegedOperationRequest) -> 
     return _digest_payload(request.model_dump(mode="json"))
 
 
+def privileged_operation_request_digest_candidates(
+    request: PrivilegedOperationRequest,
+) -> frozenset[str]:
+    payload = request.model_dump(mode="json")
+    candidates = {_digest_payload(payload)}
+    if (
+        isinstance(request, ManagedAuthzPolicySetProposalInput)
+        and request.administrator_quorum_change is None
+    ):
+        legacy_payload = dict(payload)
+        legacy_payload.pop("administrator_quorum_change", None)
+        candidates.add(_digest_payload(legacy_payload))
+    return frozenset(candidates)
+
+
 def privileged_operation_evidence_digest(
     evidence: PrivilegedOperationHumanEvidence,
 ) -> str:
     return _digest_payload(evidence.model_dump(mode="json"))
+
+
+def privileged_operation_evidence_digest_candidates(
+    evidence: PrivilegedOperationHumanEvidence,
+) -> frozenset[str]:
+    payload = evidence.model_dump(mode="json")
+    candidates = {_digest_payload(payload)}
+    if isinstance(evidence, ManagedAuthzPolicySetHumanEvidence):
+        diff = payload["diff"]
+        assert isinstance(diff, dict)
+        legacy_defaults = {
+            "previous_administrator_quorum": 2,
+            "administrator_quorum": 2,
+            "administrator_quorum_changed": False,
+            "strict_human_administrator_count": 0,
+            "quorum_satisfied": False,
+            "solo_administration_active": False,
+        }
+        if all(diff.get(field_name) == value for field_name, value in legacy_defaults.items()):
+            legacy_payload = dict(payload)
+            legacy_diff = dict(diff)
+            for field_name in legacy_defaults:
+                legacy_diff.pop(field_name, None)
+            legacy_payload["diff"] = legacy_diff
+            candidates.add(_digest_payload(legacy_payload))
+    return frozenset(candidates)
 
 
 def privileged_operation_pre_state_digest(
