@@ -34,6 +34,7 @@ from control_plane.contracts.privileged_operation import (
     build_privileged_operation_id,
     build_privileged_operation_id_for_actor,
     privileged_operation_agent_summary,
+    privileged_operation_evidence_digest_candidates,
     privileged_operation_evidence_digest,
     privileged_operation_pre_state_digest,
     privileged_operation_record_digest,
@@ -53,6 +54,7 @@ from control_plane.privileged_operation_registry import (
 from control_plane.privileged_operation_service import (
     cancel_privileged_operation,
     create_privileged_operation_plan,
+    create_typed_privileged_operation_plan,
     expire_privileged_operation_if_due,
     list_privileged_operations,
 )
@@ -158,8 +160,6 @@ def _failed_authz_policy_record() -> PrivilegedOperationRecord:
             desired_policy_sha256="b" * 64,
             desired_set_sha256="c" * 64,
             plan_sha256="d" * 64,
-            strict_human_administrator_count=2,
-            quorum_satisfied=True,
         ),
     )
     actor = PrivilegedOperationActor(
@@ -220,14 +220,51 @@ def _failed_authz_policy_record() -> PrivilegedOperationRecord:
 
 
 def _legacy_authz_policy_payload() -> dict[str, object]:
-    payload = _failed_authz_policy_record().model_dump(mode="json", exclude_none=True)
+    record = _failed_authz_policy_record()
+    full_payload = record.model_dump(mode="json")
+    full_request = full_payload["request"]
+    full_evidence = full_payload["evidence"]
+    assert isinstance(full_request, dict)
+    assert isinstance(full_evidence, dict)
+    legacy_request = dict(full_request)
+    legacy_request.pop("administrator_quorum_change")
+    legacy_evidence = json.loads(json.dumps(full_evidence))
+    legacy_diff = legacy_evidence["diff"]
+    assert isinstance(legacy_diff, dict)
+    for field_name in (
+        "previous_administrator_quorum",
+        "administrator_quorum",
+        "administrator_quorum_changed",
+        "strict_human_administrator_count",
+        "quorum_satisfied",
+        "solo_administration_active",
+    ):
+        legacy_diff.pop(field_name)
+
+    payload = record.model_dump(mode="json", exclude_none=True)
     request = payload["request"]
+    evidence = payload["evidence"]
     assert isinstance(request, dict)
-    legacy_digest = canonical_json_sha256(request)
-    payload["request_digest"] = legacy_digest
+    assert isinstance(evidence, dict)
+    stored_diff = evidence["diff"]
+    assert isinstance(stored_diff, dict)
+    for field_name in (
+        "previous_administrator_quorum",
+        "administrator_quorum",
+        "administrator_quorum_changed",
+        "strict_human_administrator_count",
+        "quorum_satisfied",
+        "solo_administration_active",
+    ):
+        stored_diff.pop(field_name)
+    request_digest = canonical_json_sha256(legacy_request)
+    evidence_digest = canonical_json_sha256(legacy_evidence)
+    payload["request_digest"] = request_digest
+    payload["evidence_digest"] = evidence_digest
     approval = payload["approval"]
     assert isinstance(approval, dict)
-    approval["request_digest"] = legacy_digest
+    approval["request_digest"] = request_digest
+    approval["evidence_digest"] = evidence_digest
     return payload
 
 
@@ -246,10 +283,29 @@ class PrivilegedOperationContractTests(unittest.TestCase):
             legacy_loaded.request_digest,
             privileged_operation_request_digest_candidates(legacy_loaded.request),
         )
+        self.assertIn(
+            legacy_loaded.evidence_digest,
+            privileged_operation_evidence_digest_candidates(legacy_loaded.evidence),
+        )
         tampered_payload = json.loads(json.dumps(legacy_payload))
         tampered_payload["request_digest"] = "0" * 64
         with self.assertRaisesRegex(ValueError, "request_digest does not match"):
             PrivilegedOperationRecord.model_validate(tampered_payload)
+        tampered_payload = json.loads(json.dumps(legacy_payload))
+        tampered_payload["evidence_digest"] = "0" * 64
+        with self.assertRaisesRegex(ValueError, "evidence_digest does not match"):
+            PrivilegedOperationRecord.model_validate(tampered_payload)
+
+    def test_historical_digest_candidates_require_exact_optional_defaults(self) -> None:
+        record = _failed_authz_policy_record()
+        assert isinstance(record.evidence, ManagedAuthzPolicySetHumanEvidence)
+        quorum_request = record.request.model_copy(update={"administrator_quorum_change": 1})
+        quorum_evidence = record.evidence.model_copy(
+            update={"diff": record.evidence.diff.model_copy(update={"quorum_satisfied": True})}
+        )
+
+        self.assertEqual(len(privileged_operation_request_digest_candidates(quorum_request)), 1)
+        self.assertEqual(len(privileged_operation_evidence_digest_candidates(quorum_evidence)), 1)
 
     def test_action_safety_is_intentional(self) -> None:
         self.assertEqual(action_safety(PRIVILEGED_SECRET_OPERATION_PLAN_ACTION), "secret_backed")
@@ -600,6 +656,55 @@ class PrivilegedOperationStorageTests(unittest.TestCase):
                     )
             finally:
                 stores[1].close()
+
+    def test_service_replays_historical_authz_request_digest(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            state_dir = Path(temporary_directory)
+            store = FilesystemRecordStore(state_dir)
+            payload = _legacy_authz_policy_payload()
+            record = PrivilegedOperationRecord.model_validate(payload)
+            record_path = (
+                state_dir / "launchplane_privileged_operations" / f"{record.operation_id}.json"
+            )
+            record_path.parent.mkdir(parents=True, exist_ok=True)
+            record_path.write_text(
+                json.dumps(payload, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+            planned_record = record.model_copy(
+                update={
+                    "status": "planned",
+                    "updated_at": record.created_at,
+                    "approval": None,
+                    "execution": None,
+                    "terminal_at": "",
+                    "terminal_reason": "",
+                }
+            )
+            event = _planned_event(planned_record)
+            event_path = (
+                state_dir / "launchplane_privileged_operation_events" / f"{event.event_id}.json"
+            )
+            event_path.parent.mkdir(parents=True, exist_ok=True)
+            event_path.write_text(
+                json.dumps(
+                    event.model_dump(mode="json", exclude_none=True), indent=2, sort_keys=True
+                ),
+                encoding="utf-8",
+            )
+
+            replay = create_typed_privileged_operation_plan(
+                record_store=store,
+                descriptor_id="managed-authz-policy-set",
+                actor=record.requested_by,
+                source_kind="browser_api",
+                source_event_id=record.source_event_id,
+                request=record.request,
+                expires_in_seconds=30 * 60,
+            )
+
+            self.assertEqual(replay.write_status, "replayed")
+            self.assertEqual(replay.record.request_digest, record.request_digest)
 
     def test_plan_replay_rejects_changed_payload(self) -> None:
         with TemporaryDirectory() as temporary_directory:

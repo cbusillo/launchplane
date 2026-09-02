@@ -26,6 +26,7 @@ from control_plane.contracts.privileged_operation import (
     MERGE_TRAIN_POLICY_OPERATION_READ_ACTION,
     MERGE_TRAIN_POLICY_OPERATION_REVOKE_ACTION,
     MERGE_TRAIN_POLICY_OPERATION_SUMMARY_READ_ACTION,
+    ManagedAuthzPolicySetHumanEvidence,
     PRIVILEGED_OPERATION_SUMMARY_READ_ACTION,
     PRIVILEGED_POLICY_OPERATION_SUMMARY_READ_ACTION,
     PRIVILEGED_SECRET_OPERATION_APPROVE_ACTION,
@@ -600,6 +601,34 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
                         assert row is not None
                         payload = dict(row.payload)
                         payload["request_digest"] = canonical_json_sha256(payload["request"])
+                        evidence = ManagedAuthzPolicySetHumanEvidence.model_validate(
+                            payload["evidence"]
+                        ).model_dump(mode="json")
+                        evidence_diff = evidence["diff"]
+                        assert isinstance(evidence_diff, dict)
+                        for field_name in (
+                            "previous_administrator_quorum",
+                            "administrator_quorum",
+                            "administrator_quorum_changed",
+                            "strict_human_administrator_count",
+                            "quorum_satisfied",
+                            "solo_administration_active",
+                        ):
+                            evidence_diff.pop(field_name)
+                        payload["evidence_digest"] = canonical_json_sha256(evidence)
+                        stored_evidence = json.loads(json.dumps(payload["evidence"]))
+                        stored_diff = stored_evidence["diff"]
+                        assert isinstance(stored_diff, dict)
+                        for field_name in (
+                            "previous_administrator_quorum",
+                            "administrator_quorum",
+                            "administrator_quorum_changed",
+                            "strict_human_administrator_count",
+                            "quorum_satisfied",
+                            "solo_administration_active",
+                        ):
+                            stored_diff.pop(field_name)
+                        payload["evidence"] = stored_evidence
                         row.payload = payload
                         session.commit()
 
