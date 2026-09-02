@@ -176,6 +176,12 @@ screening evidence, but they do not prove the combined tree is safe to land.
 Launchplane must fail closed when candidate check evidence is missing, pending,
 failed, stale, or attached to a different commit SHA.
 
+Repositories using batch candidates must run their required workflows for
+pushes to `launchplane/train/**`. Aggregate required-check jobs must also run on
+those push events and treat the candidate as same-repository work when no pull
+request payload exists. Otherwise the candidate has no exact-SHA check evidence
+and remains fail-closed in `ready_for_checks`.
+
 ### PR-Native Landing
 
 After a batch candidate passes, Launchplane lands the original pull requests in

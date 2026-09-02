@@ -535,9 +535,11 @@ def check_ci_aggregate_gate(workflow: Workflow) -> tuple[WorkflowInvariantViolat
     )
     checker.require(
         _normalize_expression(_string_value(gate.get("if")))
-        == _normalize_expression("always() && github.event_name == 'pull_request'"),
+        == _normalize_expression(
+            "always() && (github.event_name == 'pull_request' || github.event_name == 'push')"
+        ),
         invariant,
-        "ci_gate must always evaluate pull-request aggregate results",
+        "ci_gate must always evaluate pull-request and merge-train push results",
     )
     checker.require(
         _string_set(gate.get("needs")) == expected_needs, invariant, "ci_gate needs drifted"
@@ -613,9 +615,11 @@ def check_security_aggregate_gate(workflow: Workflow) -> tuple[WorkflowInvariant
     )
     checker.require(
         _normalize_expression(_string_value(gate.get("if")))
-        == _normalize_expression("always() && github.event_name == 'pull_request'"),
+        == _normalize_expression(
+            "always() && (github.event_name == 'pull_request' || github.event_name == 'push')"
+        ),
         invariant,
-        "security_gate must always evaluate pull-request aggregate results",
+        "security_gate must always evaluate pull-request and merge-train push results",
     )
     checker.require(
         _string_set(gate.get("needs")) == expected_needs,

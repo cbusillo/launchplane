@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - main
+      - "launchplane/train/**"
   schedule:
     - cron: "23 6 * * 2"
   workflow_dispatch:

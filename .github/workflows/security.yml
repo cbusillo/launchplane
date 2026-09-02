@@ -6,6 +6,7 @@ name: Security
   push:
     branches:
       - main
+      - "launchplane/train/**"
   workflow_dispatch:
 
 concurrency:
@@ -149,14 +150,17 @@ jobs:
       - workflow_lint_fork
       - secret_scan
       - secret_scan_fork
-    if: always() && github.event_name == 'pull_request'
+    if: >-
+      always() &&
+      (github.event_name == 'pull_request' || github.event_name == 'push')
     permissions:
       contents: read
     steps:
       - name: Require successful security path
         env:
           BASE_REPOSITORY: ${{ github.repository }}
-          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          HEAD_REPOSITORY: >-
+            ${{ github.event.pull_request.head.repo.full_name || github.repository }}
           WORKFLOW_LINT_RESULT: ${{ needs.workflow_lint.result }}
           WORKFLOW_LINT_FORK_RESULT: ${{ needs.workflow_lint_fork.result }}
           SECRET_SCAN_RESULT: ${{ needs.secret_scan.result }}
