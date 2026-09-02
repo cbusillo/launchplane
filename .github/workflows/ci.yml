@@ -11,6 +11,15 @@ name: CI
 permissions:
   contents: read
 
+concurrency:
+  group: >-
+    ${{ github.workflow }}-${{ github.event_name == 'push' &&
+    (github.event.created || github.event.forced) && github.sha ||
+    (github.event.pull_request.number || github.ref) }}
+  cancel-in-progress: >-
+    ${{ github.event_name != 'push' ||
+    (!github.event.created && !github.event.forced) }}
+
 jobs:
   static_checks:
     if: >-

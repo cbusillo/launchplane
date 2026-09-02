@@ -182,6 +182,22 @@ those push events and treat the candidate as same-repository work when no pull
 request payload exists. Otherwise the candidate has no exact-SHA check evidence
 and remains fail-closed in `ready_for_checks`.
 
+Candidate observation reads the target branch's live required-status-check
+policy and requires every named check, including any pinned GitHub App id, to be
+present and successful on the candidate SHA. Partial workflow evidence cannot
+promote a candidate. Reading that live policy requires the merge-train GitHub
+identity to have `administration: read` for the repository. A pinned app id must
+be proven by check-run evidence; commit statuses can satisfy only unpinned or
+GitHub `app_id = -1` any-app requirements. Once unrelated evidence is terminal,
+missing pinned or named evidence is surfaced explicitly instead of remaining an
+unexplained pending candidate.
+
+Candidate-ref workflow concurrency must keep create/force-reset pushes separate
+from normal construction pushes. Normal intermediate pushes cancel each other
+for the same ref, while the reset run retains its own SHA-keyed group so a
+cancelled duplicate does not replace the protected base commit's successful
+required-check evidence.
+
 ### PR-Native Landing
 
 After a batch candidate passes, Launchplane lands the original pull requests in

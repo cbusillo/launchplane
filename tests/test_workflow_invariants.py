@@ -28,6 +28,31 @@ class WorkflowInvariantCheckerTests(unittest.TestCase):
                 assert isinstance(branches, list)
                 self.assertIn("launchplane/train/**", branches)
 
+        for workflow_path in (
+            ".github/workflows/ci.yml",
+            ".github/workflows/security.yml",
+            ".github/workflows/codeql.yml",
+        ):
+            with self.subTest(concurrency=workflow_path):
+                concurrency = load_workflow(workflow_path).data.get("concurrency")
+                self.assertIsInstance(concurrency, dict)
+                assert isinstance(concurrency, dict)
+                group = concurrency.get("group")
+                cancel_in_progress = concurrency.get("cancel-in-progress")
+                self.assertIsInstance(group, str)
+                self.assertIsInstance(cancel_in_progress, str)
+                assert isinstance(group, str)
+                assert isinstance(cancel_in_progress, str)
+                for required in (
+                    "github.event.created",
+                    "github.event.forced",
+                    "github.sha",
+                    "github.ref",
+                ):
+                    self.assertIn(required, group)
+                self.assertIn("github.event.created", cancel_in_progress)
+                self.assertIn("github.event.forced", cancel_in_progress)
+
     def test_container_scans_refresh_runtime_security_packages(self) -> None:
         workflow = load_workflow(".github/workflows/ci.yml")
         dockerfile = Path("Dockerfile").read_text(encoding="utf-8")
