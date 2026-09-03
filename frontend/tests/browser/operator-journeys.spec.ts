@@ -168,7 +168,9 @@ test.describe("operator journeys", () => {
     await expect(
       incidentRegion.getByRole("heading", { name: "1 open incident" }),
     ).toBeVisible();
-    await expect(incidentRegion.getByText("Atlas Commerce", { exact: true })).toBeVisible();
+    await expect(
+      incidentRegion.getByText("Atlas Commerce", { exact: true }),
+    ).toBeVisible();
     await expect(
       incidentRegion.getByRole("link", { name: "Inspect incident" }),
     ).toBeVisible();
@@ -186,7 +188,9 @@ test.describe("operator journeys", () => {
       "/ui/products/atlas-commerce/environments/prod?fixture=products",
     );
 
-    const incidentRegion = page.getByRole("region", { name: "Public ingress incidents" });
+    const incidentRegion = page.getByRole("region", {
+      name: "Public ingress incidents",
+    });
     await expect(incidentRegion).toBeVisible();
     await expect(
       incidentRegion.getByRole("heading", { name: "Public ingress incidents" }),
@@ -197,7 +201,9 @@ test.describe("operator journeys", () => {
     await expect(
       incidentRegion.getByText("Notifications active", { exact: true }).first(),
     ).toBeVisible();
-    await expect(incidentRegion.getByText("Next reminder", { exact: true })).toBeVisible();
+    await expect(
+      incidentRegion.getByText("Next reminder", { exact: true }),
+    ).toBeVisible();
     await expect(
       incidentRegion.getByRole("heading", { name: "Material timeline" }),
     ).toBeVisible();
@@ -210,17 +216,22 @@ test.describe("operator journeys", () => {
     await expect(
       incidentRegion.getByRole("heading", { name: "Reminder state" }),
     ).toBeVisible();
-    await expect(incidentRegion.locator(".incident-history-trust .evidence-badge")).toHaveAttribute(
-      "data-state",
-      "recorded",
-    );
+    await expect(
+      incidentRegion.locator(".incident-history-trust .evidence-badge"),
+    ).toHaveAttribute("data-state", "recorded");
     await expect(
       incidentRegion.getByRole("link", { name: "Open delivery sink" }),
     ).toBeVisible();
 
-    await incidentRegion.locator('.incident-list-item[data-status="resolved"]').click();
-    await expect(incidentRegion.getByText("Resolved", { exact: true }).last()).toBeVisible();
-    await expect(incidentRegion.getByText("Resolution", { exact: true })).toBeVisible();
+    await incidentRegion
+      .locator('.incident-list-item[data-status="resolved"]')
+      .click();
+    await expect(
+      incidentRegion.getByText("Resolved", { exact: true }).last(),
+    ).toBeVisible();
+    await expect(
+      incidentRegion.getByText("Resolution", { exact: true }),
+    ).toBeVisible();
     await assertDocumentBasics(page);
     await captureScreenshot(page, testInfo, "environment-incident-detail");
     diagnostics.assertClean();
@@ -235,11 +246,21 @@ test.describe("operator journeys", () => {
       "/ui/products/atlas-commerce/environments/prod?fixture=products&incident=acknowledged",
     );
 
-    const incidentRegion = page.getByRole("region", { name: "Public ingress incidents" });
-    await expect(incidentRegion.getByText("Acknowledged", { exact: true }).first()).toBeVisible();
-    await expect(incidentRegion.getByText("Next reminder", { exact: true })).toHaveCount(0);
+    const incidentRegion = page.getByRole("region", {
+      name: "Public ingress incidents",
+    });
+    await expect(
+      incidentRegion.getByText("Acknowledged", { exact: true }).first(),
+    ).toBeVisible();
+    await expect(
+      incidentRegion.getByText("Next reminder", { exact: true }),
+    ).toHaveCount(0);
     await assertDocumentBasics(page);
-    await captureScreenshot(page, testInfo, "environment-incident-acknowledged");
+    await captureScreenshot(
+      page,
+      testInfo,
+      "environment-incident-acknowledged",
+    );
     diagnostics.assertClean();
   });
 
@@ -253,63 +274,96 @@ test.describe("operator journeys", () => {
       "/ui/products/atlas-commerce/environments/prod?fixture=products&incident=silenced",
     );
 
-    const incidentRegion = page.getByRole("region", { name: "Public ingress incidents" });
-    await expect(incidentRegion.getByText("Silenced", { exact: true }).first()).toBeVisible();
-    await expect(incidentRegion.getByText("Next reminder", { exact: true })).toHaveCount(0);
+    const incidentRegion = page.getByRole("region", {
+      name: "Public ingress incidents",
+    });
+    await expect(
+      incidentRegion.getByText("Silenced", { exact: true }).first(),
+    ).toBeVisible();
+    await expect(
+      incidentRegion.getByText("Next reminder", { exact: true }),
+    ).toHaveCount(0);
     const horizontalOverflow = await page.evaluate(
-      () => document.documentElement.scrollWidth > document.documentElement.clientWidth,
+      () =>
+        document.documentElement.scrollWidth >
+        document.documentElement.clientWidth,
     );
     expect(horizontalOverflow).toBe(false);
     await assertDocumentBasics(page);
-    await captureScreenshot(page, testInfo, "environment-incident-silenced-narrow");
+    await captureScreenshot(
+      page,
+      testInfo,
+      "environment-incident-silenced-narrow",
+    );
     diagnostics.assertClean();
   });
 
-  test("operator sees a clean empty incident history", async ({ page }, testInfo) => {
+  test("operator sees a clean empty incident history", async ({
+    page,
+  }, testInfo) => {
     const diagnostics = monitorBrowser(page);
 
     await page.goto(
       "/ui/products/atlas-commerce/environments/prod?fixture=products&incident=empty",
     );
 
-    const incidentRegion = page.getByRole("region", { name: "Public ingress incidents" });
-    await expect(incidentRegion.getByText("No incidents recorded", { exact: true })).toBeVisible();
-    await expect(incidentRegion.getByText("Incident evidence is incomplete", { exact: true })).toHaveCount(0);
+    const incidentRegion = page.getByRole("region", {
+      name: "Public ingress incidents",
+    });
+    await expect(
+      incidentRegion.getByText("No incidents recorded", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      incidentRegion.getByText("Incident evidence is incomplete", {
+        exact: true,
+      }),
+    ).toHaveCount(0);
     await assertDocumentBasics(page);
     await captureScreenshot(page, testInfo, "environment-incidents-empty");
     diagnostics.assertClean();
   });
 
-  test("operator sees stale incident history as incomplete", async ({ page }, testInfo) => {
+  test("operator sees stale incident history as incomplete", async ({
+    page,
+  }, testInfo) => {
     const diagnostics = monitorBrowser(page);
 
     await page.goto(
       "/ui/products/atlas-commerce/environments/prod?fixture=products&incident=stale",
     );
 
-    const incidentRegion = page.getByRole("region", { name: "Public ingress incidents" });
+    const incidentRegion = page.getByRole("region", {
+      name: "Public ingress incidents",
+    });
     await expect(
-      incidentRegion.getByText("Incident evidence is incomplete", { exact: true }),
+      incidentRegion.getByText("Incident evidence is incomplete", {
+        exact: true,
+      }),
     ).toBeVisible();
-    await expect(incidentRegion.locator(".incident-history-trust .evidence-badge")).toHaveAttribute(
-      "data-state",
-      "stale",
-    );
+    await expect(
+      incidentRegion.locator(".incident-history-trust .evidence-badge"),
+    ).toHaveAttribute("data-state", "stale");
     await assertDocumentBasics(page);
     await captureScreenshot(page, testInfo, "environment-incidents-stale");
     diagnostics.assertClean();
   });
 
-  test("operator can retry unavailable incident history", async ({ page }, testInfo) => {
+  test("operator can retry unavailable incident history", async ({
+    page,
+  }, testInfo) => {
     const diagnostics = monitorBrowser(page);
 
     await page.goto(
       "/ui/products/atlas-commerce/environments/prod?fixture=products&incident=error",
     );
 
-    const incidentRegion = page.getByRole("region", { name: "Public ingress incidents" });
+    const incidentRegion = page.getByRole("region", {
+      name: "Public ingress incidents",
+    });
     await expect(
-      incidentRegion.getByText("Incident history is intentionally unavailable."),
+      incidentRegion.getByText(
+        "Incident history is intentionally unavailable.",
+      ),
     ).toBeVisible();
     await expect(
       incidentRegion.getByRole("button", { name: "Retry incident history" }),
@@ -393,7 +447,9 @@ test.describe("operator journeys", () => {
       }),
     ).toBeVisible();
     await expect(
-      promotionControl.getByRole("button", { name: "Dispatch workflow dry-run" }),
+      promotionControl.getByRole("button", {
+        name: "Dispatch workflow dry-run",
+      }),
     ).toBeDisabled();
     await expect(
       promotionControl.getByRole("button", { name: "Dispatch live promotion" }),
@@ -439,24 +495,36 @@ test.describe("operator journeys", () => {
     const authorization = page.getByRole("listitem").filter({
       has: page.getByRole("heading", { name: "Authorization" }),
     });
-    await expect(authorization.getByText("Blocked", { exact: true })).toBeVisible();
     await expect(
-      authorization.getByText("Supported remediation metadata", { exact: true }),
+      authorization.getByText("Blocked", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      authorization.getByText("Supported remediation metadata", {
+        exact: true,
+      }),
     ).toBeVisible();
 
     const deployment = page.getByRole("listitem").filter({
       has: page.getByRole("heading", { name: "Deployment" }),
     });
-    await expect(deployment.getByText("Blocked", { exact: true })).toBeVisible();
-    await expect(deployment.getByText("runtime_identity_status:unchecked")).toBeVisible();
     await expect(
-      deployment.getByText("No typed no-effect remediation is available in this browser."),
+      deployment.getByText("Blocked", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      deployment.getByText("runtime_identity_status:unchecked"),
+    ).toBeVisible();
+    await expect(
+      deployment.getByText(
+        "No typed no-effect remediation is available in this browser.",
+      ),
     ).toBeVisible();
 
     const routeBinding = page.getByRole("listitem").filter({
       has: page.getByRole("heading", { name: "Route binding" }),
     });
-    await expect(routeBinding.getByText("Ready", { exact: true })).toBeVisible();
+    await expect(
+      routeBinding.getByText("Ready", { exact: true }),
+    ).toBeVisible();
     await expect(
       routeBinding.getByText("Advisory — does not block", { exact: true }),
     ).toBeVisible();
@@ -467,7 +535,9 @@ test.describe("operator journeys", () => {
     await page
       .getByLabel("Inspect exact action")
       .selectOption({ label: "Deploy prod lane · Mutation" });
-    await expect(page.getByText("fixture.stable_deploy", { exact: true })).toBeVisible();
+    await expect(
+      page.getByText("fixture.stable_deploy", { exact: true }),
+    ).toBeVisible();
     if (testInfo.project.name === "narrow") {
       const hasHorizontalOverflow = await page.evaluate(
         () =>
@@ -519,7 +589,9 @@ test.describe("operator journeys", () => {
       "/ui/products/atlas-commerce/environments/prod/actions?fixture=products&readiness=unsupported",
     );
 
-    await expect(page.locator(".readiness-result[data-state='unsupported']")).toBeVisible();
+    await expect(
+      page.locator(".readiness-result[data-state='unsupported']"),
+    ).toBeVisible();
     await expect(
       page.getByText(
         "The requested action has no instance-scoped operational readiness contract.",
@@ -533,7 +605,9 @@ test.describe("operator journeys", () => {
     const actionSupported = page
       .locator(".readiness-summary-strip > div")
       .filter({ hasText: "action supported" });
-    await expect(actionSupported.getByText("No", { exact: true })).toBeVisible();
+    await expect(
+      actionSupported.getByText("No", { exact: true }),
+    ).toBeVisible();
     await assertDocumentBasics(page);
     await captureScreenshot(page, testInfo, "action-readiness-unsupported");
     diagnostics.assertClean();
@@ -553,7 +627,9 @@ test.describe("operator journeys", () => {
         "This browser session cannot read operational readiness evidence.",
       ),
     ).toBeVisible();
-    await expect(page.getByText("fixture-readiness-denied", { exact: true })).toBeVisible();
+    await expect(
+      page.getByText("fixture-readiness-denied", { exact: true }),
+    ).toBeVisible();
     await expect(
       page.getByText(
         "No prior action result is shown because readiness evidence is scoped to the exact caller, action, and lane.",
@@ -616,17 +692,27 @@ test.describe("operator journeys", () => {
       "/ui/products/atlas-commerce/environments/prod/actions?fixture=products&readiness=slow",
     );
 
-    await expect(page.getByText("Evaluating exact readiness", { exact: true })).toBeVisible();
+    await expect(
+      page.getByText("Evaluating exact readiness", { exact: true }),
+    ).toBeVisible();
     await expect(
       page.getByRole("heading", { name: "2 dimensions need attention" }),
     ).toBeVisible();
-    await expect(page.getByText("fixture.prod_promotion", { exact: true })).toBeVisible();
+    await expect(
+      page.getByText("fixture.prod_promotion", { exact: true }),
+    ).toBeVisible();
     await page
       .getByLabel("Inspect exact action")
       .selectOption({ label: "Deploy prod lane · Mutation" });
-    await expect(page.getByText("Evaluating exact readiness", { exact: true })).toBeVisible();
-    await expect(page.getByText("fixture.prod_promotion", { exact: true })).toHaveCount(0);
-    await expect(page.getByText("fixture.stable_deploy", { exact: true })).toBeVisible();
+    await expect(
+      page.getByText("Evaluating exact readiness", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByText("fixture.prod_promotion", { exact: true }),
+    ).toHaveCount(0);
+    await expect(
+      page.getByText("fixture.stable_deploy", { exact: true }),
+    ).toBeVisible();
     await assertDocumentBasics(page);
     await captureScreenshot(page, testInfo, "action-readiness-loading-settled");
     diagnostics.assertClean();
@@ -691,16 +777,22 @@ test.describe("operator journeys", () => {
       page.getByRole("heading", { level: 1, name: "Tenant admission" }),
     ).toBeFocused();
     await expect(
-      page.getByRole("heading", { name: "Waiting for one current admission path" }),
+      page.getByRole("heading", {
+        name: "Waiting for one current admission path",
+      }),
     ).toBeVisible();
-    await expect(page.getByText("Agent authoring disabled", { exact: true })).toBeVisible();
+    await expect(
+      page.getByText("Agent authoring disabled", { exact: true }),
+    ).toBeVisible();
     await expect(
       page.getByText("Manager preview approval", { exact: true }),
     ).toBeVisible();
     await expect(
       page.getByText("Repository-owner technical waiver", { exact: true }),
     ).toBeVisible();
-    await expect(page.getByRole("heading", { name: "Required checks" })).toBeVisible();
+    await expect(
+      page.getByRole("heading", { name: "Required checks" }),
+    ).toBeVisible();
     await assertDocumentBasics(page);
     await captureScreenshot(page, testInfo, "tenant-admission-exact-head");
     diagnostics.assertClean();
@@ -734,7 +826,9 @@ test.describe("operator journeys", () => {
     await expect(
       page.getByText("Classification evidence unavailable", { exact: true }),
     ).toBeVisible();
-    await expect(page.getByText("No manager gate for engineering")).toHaveCount(0);
+    await expect(page.getByText("No manager gate for engineering")).toHaveCount(
+      0,
+    );
     await expect(page.getByText("Engineering normal flow")).toHaveCount(0);
   });
 
@@ -743,25 +837,51 @@ test.describe("operator journeys", () => {
   }, testInfo) => {
     const diagnostics = monitorBrowser(page);
 
-    await page.goto("/ui/engineering/governance-projection?fixture=products&scenario=25");
+    await page.goto(
+      "/ui/engineering/governance-projection?fixture=products&scenario=25",
+    );
 
     await expect(
       page.getByRole("heading", { level: 1, name: "Governance evidence" }),
     ).toBeFocused();
-    await expect(page.getByRole("region", { name: "Level 1 authoritative Owner acceptance" })).toBeVisible();
-    await expect(page.getByRole("region", { name: "Level 2 current merge readiness" })).toBeVisible();
-    await expect(page.getByRole("region", { name: "Level 3 immutable merge admission" })).toBeVisible();
-    await expect(page.getByRole("region", { name: "Separate landing outcome" })).toBeVisible();
-    await expect(page.getByRole("region", { name: "GitHub status observations" })).toBeVisible();
-    const owner = page.getByRole("region", { name: "Level 1 authoritative Owner acceptance" });
+    await expect(
+      page.getByRole("region", {
+        name: "Level 1 authoritative Owner acceptance",
+      }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("region", { name: "Level 2 current merge readiness" }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("region", { name: "Level 3 immutable merge admission" }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("region", { name: "Separate landing outcome" }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("region", { name: "GitHub status observations" }),
+    ).toBeVisible();
+    const owner = page.getByRole("region", {
+      name: "Level 1 authoritative Owner acceptance",
+    });
     await expect(owner).toContainText("Owner acceptance");
     await expect(owner).toContainText("authoritative product decision");
     await expect(owner).toContainText("product_review_accepted");
-    await expect(page.getByText("No admission recorded", { exact: true })).toBeVisible();
-    await expect(page.getByText("Not Observed · None target", { exact: true })).toBeVisible();
-    await expect(page.getByText("Non-authoritative", { exact: true })).toBeVisible();
+    await expect(
+      page.getByText("No admission recorded", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByText("Not Observed · None target", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByText("Non-authoritative", { exact: true }),
+    ).toBeVisible();
     await assertDocumentBasics(page);
-    await captureScreenshot(page, testInfo, "governance-evidence-independent-facets");
+    await captureScreenshot(
+      page,
+      testInfo,
+      "governance-evidence-independent-facets",
+    );
     diagnostics.assertClean();
   });
 
@@ -770,46 +890,88 @@ test.describe("operator journeys", () => {
   }, testInfo) => {
     const diagnostics = monitorBrowser(page);
 
-    await page.goto("/ui/engineering/governance-projection?fixture=products&scenario=15");
+    await page.goto(
+      "/ui/engineering/governance-projection?fixture=products&scenario=15",
+    );
 
-    const owner = page.getByRole("region", { name: "Level 1 authoritative Owner acceptance" });
-    await expect(owner.getByText("Revoked", { exact: true }).first()).toBeVisible();
-    await expect(page.getByRole("region", { name: "Level 3 immutable merge admission" })).toContainText("Recorded for current target");
-    await expect(page.getByRole("region", { name: "Separate landing outcome" })).toContainText("Landed · Current target");
+    const owner = page.getByRole("region", {
+      name: "Level 1 authoritative Owner acceptance",
+    });
+    await expect(
+      owner.getByText("Revoked", { exact: true }).first(),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("region", { name: "Level 3 immutable merge admission" }),
+    ).toContainText("Recorded for current target");
+    await expect(
+      page.getByRole("region", { name: "Separate landing outcome" }),
+    ).toContainText("Landed · Current target");
     await assertDocumentBasics(page);
-    await captureScreenshot(page, testInfo, "governance-evidence-revoked-after-landing");
+    await captureScreenshot(
+      page,
+      testInfo,
+      "governance-evidence-revoked-after-landing",
+    );
     diagnostics.assertClean();
   });
 
-  test("governance mixed products and unknown checks retain every reason", async ({ page }) => {
+  test("governance mixed products and unknown checks retain every reason", async ({
+    page,
+  }) => {
     const diagnostics = monitorBrowser(page);
 
-    await page.goto("/ui/engineering/governance-projection?fixture=products&scenario=24");
+    await page.goto(
+      "/ui/engineering/governance-projection?fixture=products&scenario=24",
+    );
 
-    await expect(page.getByText("example-secondary", { exact: true })).toBeVisible();
-    await expect(page.getByText("owner_changes_requested", { exact: true }).first()).toBeVisible();
-    await expect(page.getByText("Blocked Owner Evidence", { exact: true }).first()).toBeVisible();
-    await page.goto("/ui/engineering/governance-projection?fixture=products&scenario=3");
-    await expect(page.getByText("checks_unknown", { exact: true })).toBeVisible();
+    await expect(
+      page.getByText("example-secondary", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByText("owner_changes_requested", { exact: true }).first(),
+    ).toBeVisible();
+    await expect(
+      page.getByText("Blocked Owner Evidence", { exact: true }).first(),
+    ).toBeVisible();
+    await page.goto(
+      "/ui/engineering/governance-projection?fixture=products&scenario=3",
+    );
+    await expect(
+      page.getByText("checks_unknown", { exact: true }),
+    ).toBeVisible();
     await assertDocumentBasics(page);
     diagnostics.assertClean();
   });
 
-  test("governance evidence preserves stale data and honest access failures", async ({ page }) => {
+  test("governance evidence preserves stale data and honest access failures", async ({
+    page,
+  }) => {
     const diagnostics = monitorBrowser(page);
 
     await page.goto(
       "/ui/engineering/governance-projection?fixture=products&scenario=20&refresh=error",
     );
-    await expect(page.getByText("preview_isolation_insufficient", { exact: true }).first()).toBeVisible();
+    await expect(
+      page.getByText("preview_isolation_insufficient", { exact: true }).first(),
+    ).toBeVisible();
     await page.getByRole("button", { name: "Refresh governance" }).click();
-    await expect(page.getByText("Cached evidence", { exact: true })).toBeVisible();
-    await expect(page.getByRole("region", { name: "Level 1 authoritative Owner acceptance" })).toBeVisible();
+    await expect(
+      page.getByText("Cached evidence", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("region", {
+        name: "Level 1 authoritative Owner acceptance",
+      }),
+    ).toBeVisible();
 
     await page.goto("/ui/engineering/governance-projection?fixture=denied");
-    await expect(page.getByText("Access denied", { exact: true })).toBeVisible();
+    await expect(
+      page.getByText("Access denied", { exact: true }),
+    ).toBeVisible();
     await page.goto("/ui/engineering/governance-projection?fixture=error");
-    await expect(page.getByText("Governance evidence unavailable", { exact: true })).toBeVisible();
+    await expect(
+      page.getByText("Governance evidence unavailable", { exact: true }),
+    ).toBeVisible();
     await assertDocumentBasics(page);
     diagnostics.assertClean();
   });
@@ -830,39 +992,63 @@ test.describe("operator journeys", () => {
     await expect(
       page.getByText("Launchplane is the Owner-review authority"),
     ).toBeVisible();
-    const recordedHistory = page.getByLabel("Recorded Owner acceptance history");
+    const recordedHistory = page.getByLabel(
+      "Recorded Owner acceptance history",
+    );
     await expect(recordedHistory.getByText(/Recorded/).first()).toBeVisible();
-    await expect(recordedHistory.getByText("No Owner mutation controls exposed").first()).toBeVisible();
     await expect(
-      recordedHistory.getByRole("button", { name: /^(accept|request changes|revoke)$/i }),
+      recordedHistory.getByText("No Owner mutation controls exposed").first(),
+    ).toBeVisible();
+    await expect(
+      recordedHistory.getByRole("button", {
+        name: /^(accept|request changes|revoke)$/i,
+      }),
     ).toHaveCount(0);
-    await expect(recordedHistory.getByText(/verification required/i).first()).toBeVisible();
+    await expect(
+      recordedHistory.getByText(/verification required/i).first(),
+    ).toBeVisible();
     await assertDocumentBasics(page);
     await captureScreenshot(page, testInfo, "owner-acceptance-read-only");
     diagnostics.assertClean();
   });
 
-  test("Owner acceptance empty state distinguishes no recorded candidates", async ({ page }) => {
+  test("Owner acceptance empty state distinguishes no recorded candidates", async ({
+    page,
+  }) => {
     const diagnostics = monitorBrowser(page);
 
     await page.goto("/ui/engineering/owner-acceptance?fixture=empty");
 
-    await expect(page.getByText("No recorded entries", { exact: true })).toBeVisible();
-    await expect(page.getByText("No entries match the current filters")).toHaveCount(0);
+    await expect(
+      page.getByText("No recorded entries", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByText("No entries match the current filters"),
+    ).toHaveCount(0);
     await assertDocumentBasics(page);
     diagnostics.assertClean();
   });
 
-  test("Owner acceptance current items load without lookup", async ({ page }) => {
+  test("Owner acceptance current items load without lookup", async ({
+    page,
+  }) => {
     const diagnostics = monitorBrowser(page);
 
     await page.goto("/ui/engineering/owner-acceptance?fixture=products");
 
-    await expect(page.getByLabel("Current Owner product review items")).toBeVisible();
-    await expect(page.getByText("Fixture pull request requiring current Owner review")).toBeVisible();
-    await expect(page.getByRole("region", { name: /Owner product review for/ })).toBeVisible();
-    const currentItemVisuals = await page.locator(".engineering-owner-current-item").first().evaluate(
-      (element) => {
+    await expect(
+      page.getByLabel("Current Owner product review items"),
+    ).toBeVisible();
+    await expect(
+      page.getByText("Fixture pull request requiring current Owner review"),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("region", { name: /Owner product review for/ }),
+    ).toBeVisible();
+    const currentItemVisuals = await page
+      .locator(".engineering-owner-current-item")
+      .first()
+      .evaluate((element) => {
         const itemStyle = getComputedStyle(element);
         const listStyle = getComputedStyle(element.parentElement!);
         return {
@@ -871,26 +1057,31 @@ test.describe("operator journeys", () => {
           boxShadow: itemStyle.boxShadow,
           rowGap: listStyle.rowGap,
         };
-      },
-    );
+      });
     expect(currentItemVisuals).toEqual({
       borderStyle: "solid",
       borderWidth: "1px",
       boxShadow: "none",
       rowGap: "16px",
     });
-    await expect(page.getByRole("textbox", { name: "Repository (owner/repo)" })).toHaveCount(0);
+    await expect(
+      page.getByRole("textbox", { name: "Repository (owner/repo)" }),
+    ).toHaveCount(0);
     await assertDocumentBasics(page);
     diagnostics.assertClean();
   });
 
-  test("Owner acceptance exact lookup remains a collapsed fallback", async ({ page }) => {
+  test("Owner acceptance exact lookup remains a collapsed fallback", async ({
+    page,
+  }) => {
     const diagnostics = monitorBrowser(page);
 
     await page.goto("/ui/engineering/owner-acceptance?fixture=products");
 
     await page.getByText("Exact lookup fallback", { exact: true }).click();
-    await expect(page.getByText("Exact lookup — Current evaluation")).toBeVisible();
+    await expect(
+      page.getByText("Exact lookup — Current evaluation"),
+    ).toBeVisible();
     await expect(page.getByRole("button", { name: "Look up" })).toBeVisible();
     await expect(
       page.getByRole("textbox", { name: "Repository (owner/repo)" }),
@@ -902,14 +1093,18 @@ test.describe("operator journeys", () => {
     diagnostics.assertClean();
   });
 
-  test("Owner acceptance deep link opens and evaluates the exact target", async ({ page }) => {
+  test("Owner acceptance deep link opens and evaluates the exact target", async ({
+    page,
+  }) => {
     const diagnostics = monitorBrowser(page);
 
     await page.goto(
       "/ui/engineering/owner-acceptance?fixture=products&repository=example%2Fcontrol-plane&pull_request=308",
     );
 
-    await expect(page.getByText("Exact lookup — Current evaluation")).toBeVisible();
+    await expect(
+      page.getByText("Exact lookup — Current evaluation"),
+    ).toBeVisible();
     await expect(
       page.getByRole("textbox", { name: "Repository (owner/repo)" }),
     ).toHaveValue("example/control-plane");
@@ -918,9 +1113,13 @@ test.describe("operator journeys", () => {
     ).toHaveValue("308");
     await expect(page.getByLabel("Current evaluation result")).toBeVisible();
     await expect(
-      page.getByLabel("Exact PR lookup").getByText("Owner product review: pending"),
+      page
+        .getByLabel("Exact PR lookup")
+        .getByText("Owner product review: pending"),
     ).toBeVisible();
-    const repositoryInput = page.getByRole("textbox", { name: "Repository (owner/repo)" });
+    const repositoryInput = page.getByRole("textbox", {
+      name: "Repository (owner/repo)",
+    });
     await repositoryInput.fill("example/another-repo");
     await expect(repositoryInput).toHaveValue("example/another-repo");
     await assertDocumentBasics(page);
@@ -934,32 +1133,60 @@ test.describe("operator journeys", () => {
 
     await page.goto("/ui/engineering/owner-acceptance?fixture=empty");
     await page.getByText("Exact lookup fallback", { exact: true }).click();
-    await page.getByRole("textbox", { name: "Repository (owner/repo)" }).fill("example/site");
-    await page.getByRole("spinbutton", { name: "Pull request number" }).fill("308");
+    await page
+      .getByRole("textbox", { name: "Repository (owner/repo)" })
+      .fill("example/site");
+    await page
+      .getByRole("spinbutton", { name: "Pull request number" })
+      .fill("308");
     await page.getByRole("button", { name: "Look up" }).click();
 
     await expect(page.getByLabel("Current evaluation result")).toBeVisible();
-    await expect(page.getByText("Read-only product review visibility")).toBeVisible();
-    await expect(page.getByRole("region", { name: /Owner product review for/ })).toHaveCount(0);
+    await expect(
+      page.getByText("Read-only product review visibility"),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("region", { name: /Owner product review for/ }),
+    ).toHaveCount(0);
     await assertDocumentBasics(page);
-    await captureScreenshot(page, testInfo, "owner-acceptance-current-read-only");
+    await captureScreenshot(
+      page,
+      testInfo,
+      "owner-acceptance-current-read-only",
+    );
     diagnostics.assertClean();
   });
 
-  test("current Owner acceptance item records an authoritative exact action", async ({ page }) => {
+  test("current Owner acceptance item records an authoritative exact action", async ({
+    page,
+  }) => {
     const diagnostics = monitorBrowser(page);
 
     await page.goto("/ui/engineering/owner-acceptance?fixture=products");
 
-    const panel = page.getByRole("region", { name: /Owner product review for/ });
+    const panel = page.getByRole("region", {
+      name: /Owner product review for/,
+    });
     await expect(panel).toBeVisible();
-    await expect(panel.getByText("Authoritative Owner decision.", { exact: true })).toBeVisible();
-    await expect(panel.getByText(/technical checks, engineering review, merge admission/i)).toBeVisible();
-    await expect(panel.getByText(/production authorization remain separate/i)).toBeVisible();
+    await expect(
+      panel.getByText("Authoritative Owner decision.", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      panel.getByText(/technical checks, engineering review, merge admission/i),
+    ).toBeVisible();
+    await expect(
+      panel.getByText(/production authorization remain separate/i),
+    ).toBeVisible();
     await panel.getByRole("button", { name: "Record product review" }).click();
-    await expect(page.getByText("Owner product review: accepted", { exact: true }).first()).toBeVisible();
-    await expect(panel.getByText(/authoritative Owner decision recorded/i)).toBeVisible();
-    await expect(panel.getByText(/recompute exact-head merge readiness/i)).toBeVisible();
+    await expect(
+      page.getByText("Owner product review: accepted", { exact: true }).first(),
+    ).toBeVisible();
+    await expect(
+      panel.getByText(/authoritative Owner decision recorded/i),
+    ).toBeVisible();
+    await expect(
+      panel.getByText(/recompute exact-head merge readiness/i),
+    ).toBeVisible();
     diagnostics.assertClean();
   });
 
@@ -970,7 +1197,9 @@ test.describe("operator journeys", () => {
 
     await page.goto("/ui/engineering/owner-acceptance?fixture=products");
 
-    const panel = page.getByRole("region", { name: /Owner product review for/ });
+    const panel = page.getByRole("region", {
+      name: /Owner product review for/,
+    });
     const submit = panel.getByRole("button", { name: "Record product review" });
     await panel.getByRole("combobox").selectOption("changes_requested");
     await panel
@@ -979,22 +1208,36 @@ test.describe("operator journeys", () => {
     await submit.click();
 
     await expect(
-      page.getByText("Owner product review: changes requested", { exact: true }).first(),
+      page
+        .getByText("Owner product review: changes requested", { exact: true })
+        .first(),
     ).toBeVisible();
-    await expect(panel.getByText("Resolution evidence required.", { exact: true })).toBeVisible();
+    await expect(
+      panel.getByText("Resolution evidence required.", { exact: true }),
+    ).toBeVisible();
     await expect(submit).toBeDisabled();
     await panel
       .getByRole("textbox", { name: "Resolution summary" })
-      .fill("The requested behavior is now explicit and covered by the owner flow test.");
+      .fill(
+        "The requested behavior is now explicit and covered by the owner flow test.",
+      );
     await panel
       .getByRole("textbox", { name: "Resolved evidence references" })
       .fill("test:owner-flow\nrecord:product-spec-17");
     await expect(submit).toBeEnabled();
-    await captureScreenshot(page, testInfo, "owner-product-review-resolution-evidence");
+    await captureScreenshot(
+      page,
+      testInfo,
+      "owner-product-review-resolution-evidence",
+    );
     await submit.click();
 
-    await expect(panel.getByText("Resolution evidence required.", { exact: true })).toHaveCount(0);
-    await expect(panel.getByText(/authoritative Owner decision recorded/i)).toBeVisible();
+    await expect(
+      panel.getByText("Resolution evidence required.", { exact: true }),
+    ).toHaveCount(0);
+    await expect(
+      panel.getByText(/authoritative Owner decision recorded/i),
+    ).toBeVisible();
     diagnostics.assertClean();
   });
 
@@ -1007,31 +1250,43 @@ test.describe("operator journeys", () => {
       "/ui/engineering/owner-acceptance?fixture=products&viewer=non-owner",
     );
 
-    await expect(page.getByText("Not a current product Owner", { exact: true })).toBeVisible();
-    await expect(page.getByText(/only a current product Owner can record/i)).toBeVisible();
+    await expect(
+      page.getByText("Not a current product Owner", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByText(/only a current product Owner can record/i),
+    ).toBeVisible();
     await expect(
       page.getByRole("button", { name: "Record product review" }),
     ).toHaveCount(0);
     await expect(
-      page.getByRole("region", { name: /Owner product review unavailable for/ }),
+      page.getByRole("region", {
+        name: /Owner product review unavailable for/,
+      }),
     ).toBeVisible();
     await assertDocumentBasics(page);
     await captureScreenshot(page, testInfo, "owner-product-review-non-owner");
     diagnostics.assertClean();
   });
 
-  test("contributing Owner resets to an allowed action after submission", async ({ page }) => {
+  test("contributing Owner resets to an allowed action after submission", async ({
+    page,
+  }) => {
     const diagnostics = monitorBrowser(page);
 
     await page.goto(
       "/ui/engineering/owner-acceptance?fixture=products&viewer=contributor",
     );
 
-    const panel = page.getByRole("region", { name: /Owner product review for/ });
+    const panel = page.getByRole("region", {
+      name: /Owner product review for/,
+    });
     const action = panel.getByRole("combobox");
     const reason = panel.getByRole("textbox", { name: "Reason" });
     const submit = panel.getByRole("button", { name: "Record product review" });
-    await expect(panel.getByText(/policy prevents you from accepting/i)).toBeVisible();
+    await expect(
+      panel.getByText(/policy prevents you from accepting/i),
+    ).toBeVisible();
     await expect(action).toHaveValue("changes_requested");
     await expect(action.locator('option[value="accepted"]')).toHaveCount(0);
     await reason.fill("The product flow still needs correction.");
@@ -1045,16 +1300,22 @@ test.describe("operator journeys", () => {
     diagnostics.assertClean();
   });
 
-  test("request changes and revoke require explicit human input", async ({ page }) => {
+  test("request changes and revoke require explicit human input", async ({
+    page,
+  }) => {
     const diagnostics = monitorBrowser(page);
 
     await page.goto("/ui/engineering/owner-acceptance?fixture=products");
 
-    const panel = page.getByRole("region", { name: /Owner product review for/ });
+    const panel = page.getByRole("region", {
+      name: /Owner product review for/,
+    });
     const submit = panel.getByRole("button", { name: "Record product review" });
     await panel.getByRole("combobox").selectOption("changes_requested");
     await expect(submit).toBeDisabled();
-    await panel.getByRole("textbox", { name: "Reason" }).fill("Please correct the product flow.");
+    await panel
+      .getByRole("textbox", { name: "Reason" })
+      .fill("Please correct the product flow.");
     await expect(submit).toBeEnabled();
     await panel.getByRole("combobox").selectOption("revoked");
     await expect(submit).toBeDisabled();
@@ -1063,27 +1324,41 @@ test.describe("operator journeys", () => {
     diagnostics.assertClean();
   });
 
-  test("binding drift refreshes Current evidence without auto-resubmitting", async ({ page }) => {
+  test("binding drift refreshes Current evidence without auto-resubmitting", async ({
+    page,
+  }) => {
     const diagnostics = monitorBrowser(page);
 
     await page.goto("/ui/engineering/owner-acceptance?fixture=missing");
-    const panel = page.getByRole("region", { name: /Owner product review for/ });
+    const panel = page.getByRole("region", {
+      name: /Owner product review for/,
+    });
     await panel.getByRole("combobox").selectOption("revoked");
-    await panel.getByRole("textbox", { name: "Reason" }).fill("Revoke the reviewed binding.");
+    await panel
+      .getByRole("textbox", { name: "Reason" })
+      .fill("Revoke the reviewed binding.");
     await panel.getByRole("checkbox").check();
     await panel.getByRole("button", { name: "Record product review" }).click();
 
     await expect(page.getByText(/reviewed binding changed/i)).toBeVisible();
     await expect(page.getByText(/explicitly submit again/i)).toBeVisible();
-    const refreshedPanel = page.getByRole("region", { name: /Owner product review for/ });
-    await expect(refreshedPanel.getByText("bbbbbbbbbbbb", { exact: true })).toBeVisible();
+    const refreshedPanel = page.getByRole("region", {
+      name: /Owner product review for/,
+    });
+    await expect(
+      refreshedPanel.getByText("bbbbbbbbbbbb", { exact: true }),
+    ).toBeVisible();
     await expect(refreshedPanel.getByRole("combobox")).toHaveValue("accepted");
     await expect(refreshedPanel.getByRole("checkbox")).toHaveCount(0);
-    await expect(refreshedPanel.getByRole("button", { name: "Record product review" })).toBeEnabled();
+    await expect(
+      refreshedPanel.getByRole("button", { name: "Record product review" }),
+    ).toBeEnabled();
     diagnostics.assertClean();
   });
 
-  test("Owner acceptance repository filter is labeled as substring", async ({ page }) => {
+  test("Owner acceptance repository filter is labeled as substring", async ({
+    page,
+  }) => {
     const diagnostics = monitorBrowser(page);
 
     await page.goto("/ui/engineering/owner-acceptance?fixture=products");
@@ -1095,7 +1370,9 @@ test.describe("operator journeys", () => {
     diagnostics.assertClean();
   });
 
-  test("Owner acceptance repository filter retains focus until submitted", async ({ page }) => {
+  test("Owner acceptance repository filter retains focus until submitted", async ({
+    page,
+  }) => {
     const diagnostics = monitorBrowser(page);
 
     await page.goto("/ui/engineering/owner-acceptance?fixture=products");
@@ -1109,15 +1386,22 @@ test.describe("operator journeys", () => {
     await expect(repositoryFilter).toHaveValue("unrelated/repository");
     await repositoryFilter.press("Enter");
 
-    await expect(page.getByText("No recorded entries", { exact: true })).toBeVisible();
     await expect(
-      page.getByText("Matching filters").locator("..").getByText("0", { exact: true }),
+      page.getByText("No recorded entries", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      page
+        .getByText("Matching filters")
+        .locator("..")
+        .getByText("0", { exact: true }),
     ).toBeVisible();
 
     diagnostics.assertClean();
   });
 
-  test("Owner acceptance filter by status reduces displayed entries", async ({ page }) => {
+  test("Owner acceptance filter by status reduces displayed entries", async ({
+    page,
+  }) => {
     const diagnostics = monitorBrowser(page);
 
     await page.goto("/ui/engineering/owner-acceptance?fixture=products");
@@ -1129,12 +1413,19 @@ test.describe("operator journeys", () => {
     const statusSelect = page.getByRole("combobox", { name: "Status" });
     await statusSelect.selectOption("revoked");
 
-    await expect(page.getByText("Re-acceptance required after changes")).toBeVisible();
     await expect(
-      page.getByText("Matching filters").locator("..").getByText("1", { exact: true }),
+      page.getByText("Re-acceptance required after changes"),
+    ).toBeVisible();
+    await expect(
+      page
+        .getByText("Matching filters")
+        .locator("..")
+        .getByText("1", { exact: true }),
     ).toBeVisible();
     // Clear filters button appears
-    await expect(page.getByRole("button", { name: "Clear filters" })).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Clear filters" }),
+    ).toBeVisible();
 
     diagnostics.assertClean();
   });
@@ -1151,20 +1442,30 @@ test.describe("operator journeys", () => {
     });
     await expect(activeLink).toBeVisible();
     await expect(activeLink).toHaveAttribute("aria-current", "page");
-    await expect(page.getByText("Owner product review: pending", { exact: true }).first()).toBeVisible();
-    await expect(page.getByRole("region", { name: /Owner product review for/ })).toBeVisible();
+    await expect(
+      page.getByText("Owner product review: pending", { exact: true }).first(),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("region", { name: /Owner product review for/ }),
+    ).toBeVisible();
     await assertDocumentBasics(page);
 
     diagnostics.assertClean();
   });
 
-  test("Owner acceptance denied state exposes no action surface", async ({ page }) => {
+  test("Owner acceptance denied state exposes no action surface", async ({
+    page,
+  }) => {
     const diagnostics = monitorBrowser(page);
 
     await page.goto("/ui/engineering/owner-acceptance?fixture=denied");
 
-    await expect(page.getByText("Access denied", { exact: true }).first()).toBeVisible();
-    await expect(page.getByRole("button", { name: "Record product review" })).toHaveCount(0);
+    await expect(
+      page.getByText("Access denied", { exact: true }).first(),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Record product review" }),
+    ).toHaveCount(0);
     await assertDocumentBasics(page);
     diagnostics.assertClean();
   });
@@ -1176,8 +1477,12 @@ test.describe("operator journeys", () => {
 
     await page.goto("/ui/engineering/owner-acceptance?fixture=products");
 
-    await expect(page.getByText("Re-evaluation required; binding has changed")).toBeVisible();
-    await expect(page.getByText("Evidence unavailable; retry after prerequisites are met")).toBeVisible();
+    await expect(
+      page.getByText("Re-evaluation required; binding has changed"),
+    ).toBeVisible();
+    await expect(
+      page.getByText("Evidence unavailable; retry after prerequisites are met"),
+    ).toBeVisible();
 
     diagnostics.assertClean();
   });
@@ -1190,26 +1495,42 @@ test.describe("operator journeys", () => {
     await page.goto("/ui/engineering/privileged-operations?fixture=products");
 
     await expect(
-      page.getByRole("heading", { level: 1, name: "Privileged operation plans" }),
+      page.getByRole("heading", {
+        level: 1,
+        name: "Privileged operation plans",
+      }),
     ).toBeVisible();
     await expect(
-      page.getByRole("link", { name: "Privileged operation plans", exact: true }),
+      page.getByRole("link", {
+        name: "Privileged operation plans",
+        exact: true,
+      }),
     ).toHaveAttribute("aria-current", "page");
     await expect(
       page.getByText("Human-governed approval — internal execution only"),
     ).toBeVisible();
     await expect(page.getByText("Would rotate")).toBeVisible();
     await expect(page.getByText("18", { exact: true }).first()).toBeVisible();
-    await expect(page.getByRole("button", { name: "Approve plan" })).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Approve plan" }),
+    ).toBeVisible();
     await expect(page.getByRole("button", { name: /execute/i })).toHaveCount(0);
     await expect(page.getByText(/secret-version/i)).toHaveCount(0);
     await page.getByRole("button", { name: "Merge-train policy" }).click();
     await expect(page.getByText("Managed merge-train policy")).toBeVisible();
-    await expect(page.getByText("cbusillo/launchplane:main")).toBeVisible();
+    await expect(page.getByText("Candidate targets")).toBeVisible();
+    await expect(page.getByText("2", { exact: true }).first()).toBeVisible();
+    await expect(
+      page.getByText("Bounded to merge-train policy target counts"),
+    ).toBeVisible();
+    await expect(page.getByText("cbusillo/launchplane:main")).toHaveCount(0);
     await expect(
       page.getByText("Review exact candidate merge-train policy"),
+    ).toHaveCount(0);
+    await expect(page.getByText("Authorized detail response")).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Approve plan" }),
     ).toBeVisible();
-    await expect(page.getByRole("button", { name: "Approve plan" })).toBeVisible();
     await expect(page.getByRole("button", { name: /execute/i })).toHaveCount(0);
     await assertDocumentBasics(page);
     await captureScreenshot(

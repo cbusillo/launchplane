@@ -194,6 +194,9 @@ UI_OPENAPI_READ_OPERATIONS: dict[str, str] = {
     "/v1/owner-acceptance/queue": "list_owner_acceptance_queue",
     "/v1/privileged-operations/plans": "list_human_privileged_operations",
     "/v1/privileged-operations/plans/{operation_id}": ("read_human_privileged_operation"),
+    "/v1/privileged-operations/plans/{operation_id}/review": (
+        "read_human_privileged_operation_review"
+    ),
 }
 
 

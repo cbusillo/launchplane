@@ -1814,7 +1814,7 @@ export type PrivilegedOperationHumanResponse = {
 };
 
 export type PrivilegedOperationListResponse = {
-    records: Array<PrivilegedOperationRecord>;
+    reviews: Array<PrivilegedOperationSemanticReview>;
     status: 'ok';
     total: number;
     trace_id: string;
@@ -1846,6 +1846,99 @@ export type PrivilegedOperationRevocationEnvelope = {
     reason: string;
     schema_version?: number;
     source_event_id: string;
+};
+
+export type PrivilegedOperationSemanticReview = {
+    activity: Array<PrivilegedOperationSemanticReviewActivityEntry>;
+    authorizes_execution: false;
+    blast_radius: PrivilegedOperationSemanticReviewBlastRadius;
+    blockers: PrivilegedOperationSemanticReviewBlocker;
+    can_approve: boolean;
+    can_revoke: boolean;
+    change: PrivilegedOperationSemanticReviewChange;
+    descriptor_id: 'managed-secret-reencryption' | 'managed-authz-policy-set' | 'managed-merge-train-policy-import';
+    descriptor_version: number;
+    evidence: PrivilegedOperationSemanticReviewEvidence;
+    lifecycle: PrivilegedOperationSemanticReviewLifecycle;
+    operation_class: 'managed_secret_reencryption' | 'managed_authz_policy_set' | 'managed_merge_train_policy_import';
+    operation_id: string;
+    requested_by_kind: 'github_human' | 'terminal_agent';
+    rollback: PrivilegedOperationSemanticReviewRollback;
+    safety_class: 'secret_backed' | 'policy_admin';
+    schema_version: number;
+    title: string;
+};
+
+export type PrivilegedOperationSemanticReviewActivityEntry = {
+    action: 'planned' | 'approved' | 'revoked' | 'executing' | 'executed' | 'execution_failed' | 'expired' | 'cancelled';
+    actor_type: 'github_human' | 'terminal_agent' | 'system';
+    event_id: string;
+    occurred_at: string;
+    reason_available: boolean;
+    resulting_record_digest: string;
+    sequence: number;
+    source_kind: 'agent_api' | 'browser_api' | 'system';
+};
+
+export type PrivilegedOperationSemanticReviewBlastRadius = {
+    affected_count: number;
+    scope: 'managed_secret_store' | 'authorization_policy' | 'merge_train_policy';
+    summary: string;
+};
+
+export type PrivilegedOperationSemanticReviewBlocker = {
+    codes: Array<string>;
+    operational_readiness_blocker_count: number;
+    policy_safety_blocker_count: number;
+    state: 'clear' | 'blocked' | 'error';
+    unreadable_secret_count: number;
+};
+
+export type PrivilegedOperationSemanticReviewChange = {
+    changed: boolean;
+    metrics: Array<PrivilegedOperationSemanticReviewMetric>;
+    summary: string;
+};
+
+export type PrivilegedOperationSemanticReviewDigest = {
+    kind: 'request' | 'human_evidence' | 'plan' | 'pre_state' | 'previous_policy' | 'candidate_policy' | 'candidate_managed_set' | 'active_merge_train_policy' | 'candidate_merge_train_policy' | 'execution_result';
+    label: string;
+    sha256: string;
+};
+
+export type PrivilegedOperationSemanticReviewEvidence = {
+    digests: Array<PrivilegedOperationSemanticReviewDigest>;
+    raw_detail_available: boolean;
+    redaction: 'semantic_only';
+    result_status: 'ok' | 'blocked' | 'error';
+};
+
+export type PrivilegedOperationSemanticReviewLifecycle = {
+    approval_recorded: boolean;
+    created_at: string;
+    execution_recorded: boolean;
+    expires_at: string;
+    status: 'planned' | 'approved' | 'revoked' | 'executing' | 'executed' | 'execution_failed' | 'expired' | 'cancelled';
+    terminal_at: string;
+    terminal_reason_available: boolean;
+    updated_at: string;
+};
+
+export type PrivilegedOperationSemanticReviewMetric = {
+    kind: 'configured_secrets' | 'rotation_candidates' | 'unchanged_secrets' | 'unreadable_secrets' | 'policy_rules_added' | 'policy_rules_adopted' | 'policy_rules_updated' | 'policy_rules_removed' | 'policy_rules_unchanged' | 'policy_safety_blockers' | 'operational_readiness_blockers' | 'active_policy_targets' | 'candidate_policy_targets' | 'policy_targets_added' | 'policy_targets_changed' | 'policy_targets_removed' | 'policy_targets_unchanged';
+    label: string;
+    value: number;
+};
+
+export type PrivilegedOperationSemanticReviewResponse = {
+    review: PrivilegedOperationSemanticReview;
+    status: 'ok';
+    trace_id: string;
+};
+
+export type PrivilegedOperationSemanticReviewRollback = {
+    rollback_class: 'key_retained' | 'policy_cas';
+    summary: string;
 };
 
 export type ProductActionAvailability = {
@@ -3733,6 +3826,34 @@ export type ReadHumanPrivilegedOperationResponses = {
 };
 
 export type ReadHumanPrivilegedOperationResponse = ReadHumanPrivilegedOperationResponses[keyof ReadHumanPrivilegedOperationResponses];
+
+export type ReadHumanPrivilegedOperationReviewData = {
+    body?: never;
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path: {
+        operation_id: string;
+    };
+    query?: never;
+    url: '/v1/privileged-operations/plans/{operation_id}/review';
+};
+
+export type ReadHumanPrivilegedOperationReviewErrors = {
+    403: LaunchplaneErrorResponse;
+    404: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type ReadHumanPrivilegedOperationReviewError = ReadHumanPrivilegedOperationReviewErrors[keyof ReadHumanPrivilegedOperationReviewErrors];
+
+export type ReadHumanPrivilegedOperationReviewResponses = {
+    200: PrivilegedOperationSemanticReviewResponse;
+};
+
+export type ReadHumanPrivilegedOperationReviewResponse = ReadHumanPrivilegedOperationReviewResponses[keyof ReadHumanPrivilegedOperationReviewResponses];
 
 export type ListProductProfilesData = {
     body?: never;

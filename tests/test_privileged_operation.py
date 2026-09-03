@@ -48,15 +48,18 @@ from control_plane.privileged_operation_registry import (
     MANAGED_SECRET_REENCRYPTION_DESCRIPTOR,
     PrivilegedOperationPlannerError,
     RegisteredPrivilegedOperationDescriptor,
+    list_privileged_operation_descriptors,
     plan_managed_merge_train_policy_import,
     plan_managed_secret_reencryption,
 )
 from control_plane.privileged_operation_service import (
+    PrivilegedOperationSemanticReviewError,
     cancel_privileged_operation,
     create_privileged_operation_plan,
     create_typed_privileged_operation_plan,
     expire_privileged_operation_if_due,
     list_privileged_operations,
+    privileged_operation_semantic_review,
 )
 from control_plane.service_auth import LaunchplaneAuthzPolicy, action_safety
 from control_plane.storage.filesystem import FilesystemRecordStore
@@ -349,6 +352,134 @@ class PrivilegedOperationContractTests(unittest.TestCase):
         self.assertNotIn("legacy-root", rendered)
         self.assertNotIn("request", rendered)
         self.assertIn('"rotation_candidate_count":2', rendered)
+
+    def test_semantic_review_covers_all_registered_descriptors_without_authority(self) -> None:
+        descriptors = {descriptor.descriptor_id for descriptor in list_privileged_operation_descriptors()}
+        records = (
+            _record(),
+            _failed_authz_policy_record(),
+            self._merge_train_policy_import_record(),
+        )
+        reviews = tuple(privileged_operation_semantic_review(record=record) for record in records)
+
+        self.assertEqual({review.descriptor_id for review in reviews}, descriptors)
+        self.assertEqual(
+            {review.operation_class for review in reviews},
+            {
+                "managed_secret_reencryption",
+                "managed_authz_policy_set",
+                "managed_merge_train_policy_import",
+            },
+        )
+        self.assertFalse(any(review.authorizes_execution for review in reviews))
+        self.assertTrue(all(review.schema_version == 1 for review in reviews))
+
+    def test_semantic_review_redacts_raw_sensitive_payloads(self) -> None:
+        records = (
+            _record(),
+            _failed_authz_policy_record(),
+            self._merge_train_policy_import_record(),
+        )
+        rendered = json.dumps(
+            [
+                privileged_operation_semantic_review(record=record).model_dump(mode="json")
+                for record in records
+            ],
+            sort_keys=True,
+        )
+
+        for secret in (
+            "root-2026",
+            "legacy-root",
+            "desired_policy",
+            "github_ids",
+            "operator",
+            "principal_sha256",
+            "cbusillo/codex-skills",
+            "merge-train-policy-candidate",
+            "LAUNCHPLANE_GITHUB_TOKEN",
+            "source_event_id",
+        ):
+            self.assertNotIn(secret, rendered)
+        self.assertIn("desired_policy", _failed_authz_policy_record().model_dump_json())
+
+    def test_semantic_review_activity_is_chronological_and_redacted(self) -> None:
+        record = _record()
+        later = _planned_event(record).model_copy(
+            update={"sequence": 2, "occurred_at": "2026-08-22T20:05:00+00:00"}
+        )
+        earlier = _planned_event(record)
+        review = privileged_operation_semantic_review(record=record, events=(later, earlier))
+
+        self.assertEqual(
+            tuple(entry.occurred_at for entry in review.activity),
+            (
+                "2026-08-22T20:00:00+00:00",
+                "2026-08-22T20:05:00+00:00",
+            ),
+        )
+        self.assertEqual(tuple(entry.actor_type for entry in review.activity), ("github_human",) * 2)
+        self.assertNotIn("operator", review.model_dump_json())
+
+    def test_semantic_review_fails_closed_on_descriptor_drift(self) -> None:
+        record = _record().model_copy(update={"descriptor_version": 2})
+
+        with self.assertRaisesRegex(PrivilegedOperationSemanticReviewError, "drifted"):
+            privileged_operation_semantic_review(record=record)
+
+    def test_semantic_review_fails_closed_on_unknown_registered_descriptor_drift(self) -> None:
+        with patch(
+            "control_plane.privileged_operation_service.read_privileged_operation_descriptor",
+            side_effect=LookupError("unknown descriptor"),
+        ):
+            with self.assertRaisesRegex(
+                PrivilegedOperationSemanticReviewError,
+                "not registered",
+            ):
+                privileged_operation_semantic_review(record=_record())
+
+    def _merge_train_policy_import_record(self) -> PrivilegedOperationRecord:
+        request = ManagedMergeTrainPolicyImportProposalInput(
+            record=build_test_merge_train_policy_record(
+                repository="cbusillo/codex-skills",
+                record_id="merge-train-policy-candidate",
+                updated_at="2026-08-22T20:00:00+00:00",
+            ),
+            reason="Review exact merge-train policy import.",
+            related_issue="cbusillo/launchplane#2296",
+        )
+        evidence = ManagedMergeTrainPolicyImportHumanEvidence(
+            plan_digest="8" * 64,
+            active_record_id="merge-train-policy-active",
+            active_updated_at="2026-08-22T19:00:00+00:00",
+            active_policy_sha256="9" * 64,
+            active_target_count=1,
+            candidate_record_id="merge-train-policy-candidate",
+            candidate_policy_sha256="6" * 64,
+            candidate_target_count=1,
+            changed_policy_keys=("redacted/repository:main",),
+        )
+        actor = PrivilegedOperationAgentActor(principal_sha256="d" * 64)
+        return PrivilegedOperationRecord(
+            operation_id=build_privileged_operation_id_for_actor(
+                descriptor_id="managed-merge-train-policy-import",
+                actor=actor,
+                source_event_id="merge-train-policy-request-1",
+            ),
+            descriptor_id="managed-merge-train-policy-import",
+            descriptor_version=1,
+            safety_class="policy_admin",
+            status="planned",
+            source_event_id="merge-train-policy-request-1",
+            requested_by=actor,
+            request=request,
+            request_digest=privileged_operation_request_digest(request),
+            evidence=evidence,
+            evidence_digest=privileged_operation_evidence_digest(evidence),
+            created_at="2026-08-22T20:00:00+00:00",
+            updated_at="2026-08-22T20:00:00+00:00",
+            expires_at="2026-08-22T20:30:00+00:00",
+        )
 
     def test_secret_planner_calls_only_dry_run_and_discards_raw_errors(self) -> None:
         raw_result = {
