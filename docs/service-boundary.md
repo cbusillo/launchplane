@@ -3957,6 +3957,19 @@ proxy. Human create/read/cancel routes are under
 `/v1/privileged-operations/plans`; the counts-only agent read is under
 `/v1/agent/privileged-operations/plans/{operation_id}`.
 
+The human list route returns a strict versioned semantic review projection, and
+`GET /v1/privileged-operations/plans/{operation_id}/review` returns the same
+projection for one operation. Both use the existing descriptor-specific human
+read action and direct storage reads, perform no lifecycle reconciliation or
+database write, and explicitly authorize no approval or execution. The
+projection contains closed server-authored operation meaning, blocker/change/
+blast-radius/rollback facets, digest identities, expiry posture, and a
+deterministically ordered activity stream. It excludes request bodies,
+operator-authored reasons, principals, selectors, target keys, challenge
+material, tokens, secrets, and private topology. The existing authorized plan
+detail route remains the one-level-deeper raw evidence response and retains its
+existing lifecycle behavior.
+
 Human routes reject every non-GitHub-human identity before policy evaluation
 and use the browser origin/fetch-metadata/CSRF boundary for writes. Every route
 requires schema-v2 policy and exactly one matching managed rule carrying both

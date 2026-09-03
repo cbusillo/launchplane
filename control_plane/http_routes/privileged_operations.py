@@ -1,5 +1,6 @@
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Annotated, Literal
 
 from fastapi import Depends, Path, Query
@@ -17,6 +18,7 @@ from control_plane.contracts.privileged_operation import (
     PrivilegedOperationEventRecord,
     PrivilegedOperationRecord,
     PrivilegedOperationRequest,
+    PrivilegedOperationSemanticReview,
     PrivilegedOperationStatus,
     PrivilegedOperationSummary,
     normalize_privileged_operation_source_event_id,
@@ -46,9 +48,10 @@ from control_plane.privileged_operation_service import (
     PrivilegedOperationNotRevocableError,
     approve_privileged_operation,
     PrivilegedOperationStoreUnavailableError,
+    PrivilegedOperationSemanticReviewError,
     cancel_privileged_operation,
     create_typed_privileged_operation_plan,
-    list_privileged_operations,
+    privileged_operation_semantic_review,
     read_privileged_operation,
     revoke_privileged_operation,
     require_privileged_operation_store,
@@ -64,6 +67,7 @@ from control_plane.service_auth import (
 
 PRIVILEGED_OPERATION_PLANS_ROUTE = "/v1/privileged-operations/plans"
 PRIVILEGED_OPERATION_PLAN_ROUTE = "/v1/privileged-operations/plans/{operation_id}"
+PRIVILEGED_OPERATION_REVIEW_ROUTE = "/v1/privileged-operations/plans/{operation_id}/review"
 PRIVILEGED_OPERATION_CANCEL_ROUTE = "/v1/privileged-operations/plans/{operation_id}/cancel"
 PRIVILEGED_OPERATION_APPROVE_ROUTE = "/v1/privileged-operations/plans/{operation_id}/approve"
 PRIVILEGED_OPERATION_REVOKE_ROUTE = "/v1/privileged-operations/plans/{operation_id}/revoke"
@@ -204,7 +208,15 @@ class PrivilegedOperationListResponse(BaseModel):
     status: Literal["ok"] = "ok"
     trace_id: str
     total: int = Field(ge=0)
-    records: tuple[PrivilegedOperationRecord, ...]
+    reviews: tuple[PrivilegedOperationSemanticReview, ...]
+
+
+class PrivilegedOperationSemanticReviewResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    review: PrivilegedOperationSemanticReview
 
 
 class PrivilegedOperationAgentSummaryResponse(BaseModel):
@@ -304,6 +316,27 @@ def register_privileged_operation_routes(
             limit=10,
         )
 
+    def semantic_review_or_error(
+        *,
+        record: PrivilegedOperationRecord,
+        events: tuple[PrivilegedOperationEventRecord, ...],
+        generated_at: datetime,
+        trace_id: str,
+    ) -> PrivilegedOperationSemanticReview:
+        try:
+            return privileged_operation_semantic_review(
+                record=record,
+                events=events,
+                generated_at=generated_at,
+            )
+        except PrivilegedOperationSemanticReviewError as error:
+            raise dependencies.common.http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="privileged_operation_semantic_review_unsupported",
+                message="Privileged-operation semantic review is unavailable for this stored descriptor state.",
+            ) from error
+
     def require_current_policy_plan(
         *,
         record: PrivilegedOperationRecord,
@@ -354,6 +387,31 @@ def register_privileged_operation_routes(
                 record_store=record_store,
                 operation_id=operation_id,
             )
+        except FileNotFoundError as error:
+            raise dependencies.common.http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="privileged_operation_not_found",
+                message="Privileged-operation plan was not found.",
+            ) from error
+        except PrivilegedOperationStoreUnavailableError as error:
+            raise dependencies.common.http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="privileged_operation_storage_unavailable",
+                message="Privileged-operation planning storage is unavailable.",
+            ) from error
+
+    def read_operation_projection_or_error(
+        *,
+        record_store: object,
+        operation_id: str,
+        trace_id: str,
+    ) -> PrivilegedOperationRecord:
+        try:
+            return require_privileged_operation_store(
+                record_store
+            ).read_privileged_operation_record(operation_id)
         except FileNotFoundError as error:
             raise dependencies.common.http_error(
                 status_code=404,
@@ -448,17 +506,30 @@ def register_privileged_operation_routes(
         limit: Annotated[int, Query(ge=1, le=100)] = 50,
     ) -> PrivilegedOperationListResponse:
         trace_id = dependencies.common.next_trace_id()
+        generated_at = datetime.now(timezone.utc)
         require_managed_rule(
             identity=identity,
             action=descriptor_action(descriptor_id, "human_read_action"),
             trace_id=trace_id,
         )
         try:
-            records = list_privileged_operations(
-                record_store=record_store,
+            store = require_privileged_operation_store(record_store)
+            records = store.list_privileged_operation_records(
                 status=status or "",
                 descriptor_id=descriptor_id,
                 limit=limit,
+            )
+            reviews = tuple(
+                semantic_review_or_error(
+                    record=record,
+                    events=store.list_privileged_operation_event_records(
+                        operation_id=record.operation_id,
+                        limit=10,
+                    ),
+                    generated_at=generated_at,
+                    trace_id=trace_id,
+                )
+                for record in records
             )
         except PrivilegedOperationStoreUnavailableError as error:
             raise dependencies.common.http_error(
@@ -469,8 +540,8 @@ def register_privileged_operation_routes(
             ) from error
         return PrivilegedOperationListResponse(
             trace_id=trace_id,
-            total=len(records),
-            records=records,
+            total=len(reviews),
+            reviews=reviews,
         )
 
     def read_human_privileged_operation(
@@ -505,6 +576,44 @@ def register_privileged_operation_routes(
             trace_id=trace_id,
             record=record,
             events=events,
+        )
+
+    def read_human_privileged_operation_review(
+        identity: Annotated[
+            GitHubHumanIdentity,
+            Depends(dependencies.read_github_human_identity),
+        ],
+        record_store: Annotated[object, Depends(dependencies.common.get_record_store)],
+        operation_id: Annotated[str, Path(min_length=1, max_length=96)],
+    ) -> PrivilegedOperationSemanticReviewResponse:
+        trace_id = dependencies.common.next_trace_id()
+        record = read_operation_projection_or_error(
+            record_store=record_store,
+            operation_id=operation_id,
+            trace_id=trace_id,
+        )
+        require_managed_rule(
+            identity=identity,
+            action=descriptor_action(record.descriptor_id, "human_read_action"),
+            trace_id=trace_id,
+        )
+        try:
+            events = operation_events(record_store, record.operation_id)
+        except PrivilegedOperationStoreUnavailableError as error:
+            raise dependencies.common.http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="privileged_operation_storage_unavailable",
+                message="Privileged-operation planning storage is unavailable.",
+            ) from error
+        return PrivilegedOperationSemanticReviewResponse(
+            trace_id=trace_id,
+            review=semantic_review_or_error(
+                record=record,
+                events=events,
+                generated_at=datetime.now(timezone.utc),
+                trace_id=trace_id,
+            ),
         )
 
     def approve_human_privileged_operation(
@@ -882,6 +991,21 @@ def register_privileged_operation_routes(
         },
         summary="Read a privileged-operation plan",
         operation_id="read_human_privileged_operation",
+        tags=["privileged-operations"],
+    )
+    app.add_api_route(
+        PRIVILEGED_OPERATION_REVIEW_ROUTE,
+        read_human_privileged_operation_review,
+        methods=["GET"],
+        response_model=PrivilegedOperationSemanticReviewResponse,
+        responses={
+            403: {"model": dependencies.common.error_response_model},
+            404: {"model": dependencies.common.error_response_model},
+            409: {"model": dependencies.common.error_response_model},
+            503: {"model": dependencies.common.error_response_model},
+        },
+        summary="Read a semantic privileged-operation review",
+        operation_id="read_human_privileged_operation_review",
         tags=["privileged-operations"],
     )
     app.add_api_route(

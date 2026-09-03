@@ -3,14 +3,31 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Protocol, cast
+from typing import Literal, Protocol, cast, get_args
+
+from pydantic import ValidationError
 
 from control_plane.contracts.privileged_operation import (
     ManagedAuthzPolicySetHumanEvidence,
+    ManagedAuthzPolicySetProposalInput,
+    ManagedMergeTrainPolicyImportHumanEvidence,
+    ManagedMergeTrainPolicyImportProposalInput,
     ManagedSecretReencryptionPlanInput,
+    ManagedSecretReencryptionHumanEvidence,
     PrivilegedOperationActor,
     PrivilegedOperationApproval,
     PrivilegedOperationConflictError,
+    PrivilegedOperationSemanticReview,
+    PrivilegedOperationSemanticReviewActivityEntry,
+    PrivilegedOperationSemanticReviewBlastRadius,
+    PrivilegedOperationSemanticReviewBlocker,
+    PrivilegedOperationSemanticReviewBlockerCode,
+    PrivilegedOperationSemanticReviewChange,
+    PrivilegedOperationSemanticReviewDigest,
+    PrivilegedOperationSemanticReviewEvidence,
+    PrivilegedOperationSemanticReviewLifecycle,
+    PrivilegedOperationSemanticReviewMetric,
+    PrivilegedOperationSemanticReviewRollback,
     PrivilegedOperationEventRecord,
     PrivilegedOperationEventWriteStatus,
     PrivilegedOperationDescriptorId,
@@ -23,10 +40,12 @@ from control_plane.contracts.privileged_operation import (
     build_privileged_operation_id_for_actor,
     privileged_operation_evidence_digest,
     privileged_operation_record_digest,
+    privileged_operation_pre_state_digest,
     privileged_operation_request_digest,
     privileged_operation_request_digest_candidates,
 )
 from control_plane.privileged_operation_registry import (
+    list_privileged_operation_descriptors,
     read_privileged_operation_descriptor,
 )
 
@@ -93,6 +112,32 @@ class PrivilegedOperationWriteResult:
     event: PrivilegedOperationEventRecord
 
 
+class PrivilegedOperationSemanticReviewError(ValueError):
+    pass
+
+
+_SEMANTIC_REVIEW_DESCRIPTOR_IDS = frozenset(
+    {
+        "managed-secret-reencryption",
+        "managed-authz-policy-set",
+        "managed-merge-train-policy-import",
+    }
+)
+_SEMANTIC_REVIEW_BLOCKER_CODES = frozenset(
+    cast(tuple[str, ...], get_args(PrivilegedOperationSemanticReviewBlockerCode))
+)
+
+
+def validate_privileged_operation_semantic_review_coverage() -> None:
+    registered_ids = frozenset(
+        descriptor.descriptor_id for descriptor in list_privileged_operation_descriptors()
+    )
+    if registered_ids != _SEMANTIC_REVIEW_DESCRIPTOR_IDS:
+        raise RuntimeError(
+            "Privileged-operation semantic review coverage must exactly match the descriptor registry."
+        )
+
+
 def require_privileged_operation_store(record_store: object) -> PrivilegedOperationStore:
     required_methods = (
         "write_privileged_operation_plan",
@@ -108,6 +153,510 @@ def require_privileged_operation_store(record_store: object) -> PrivilegedOperat
             "Privileged-operation planning requires operation record and event storage."
         )
     return cast(PrivilegedOperationStore, record_store)
+
+
+def _semantic_review_activity(
+    operation_id: str,
+    events: tuple[PrivilegedOperationEventRecord, ...],
+) -> tuple[PrivilegedOperationSemanticReviewActivityEntry, ...]:
+    try:
+        validated_events = tuple(
+            PrivilegedOperationEventRecord.model_validate(event.model_dump(mode="json"))
+            for event in events
+        )
+    except ValueError as error:
+        raise PrivilegedOperationSemanticReviewError(
+            "Privileged-operation semantic review activity contains an invalid event."
+        ) from error
+    if any(event.operation_id != operation_id for event in validated_events):
+        raise PrivilegedOperationSemanticReviewError(
+            "Privileged-operation semantic review activity crossed operation boundaries."
+        )
+    if len({event.event_id for event in validated_events}) != len(validated_events) or len(
+        {event.sequence for event in validated_events}
+    ) != len(validated_events):
+        raise PrivilegedOperationSemanticReviewError(
+            "Privileged-operation semantic review activity is not append-only unique."
+        )
+    ordered_events = sorted(
+        validated_events,
+        key=lambda event: (event.sequence, event.occurred_at, event.event_id),
+    )
+    return tuple(
+        PrivilegedOperationSemanticReviewActivityEntry(
+            sequence=event.sequence,
+            action=event.action,
+            occurred_at=event.occurred_at,
+            source_kind=event.source_kind,
+            actor_type=event.actor.identity_type,
+            reason_available=bool(event.reason),
+            event_id=event.event_id,
+            resulting_record_digest=event.resulting_record_digest,
+        )
+        for event in ordered_events
+    )
+
+
+def _semantic_review_requester_kind(
+    record: PrivilegedOperationRecord,
+) -> Literal["github_human", "terminal_agent"]:
+    if record.requested_by.identity_type in {"github_human", "terminal_agent"}:
+        return record.requested_by.identity_type
+    raise PrivilegedOperationSemanticReviewError(
+        "Privileged-operation semantic review requester variant drifted."
+    )
+
+
+def _semantic_review_lifecycle(
+    record: PrivilegedOperationRecord,
+    *,
+    generated_at: datetime,
+) -> PrivilegedOperationSemanticReviewLifecycle:
+    expires_at = datetime.fromisoformat(record.expires_at)
+    if record.status == "expired":
+        expiry_state: Literal["active", "past_expiry_unreconciled", "expired"] = "expired"
+    elif record.status in {"planned", "approved"} and generated_at >= expires_at:
+        expiry_state = "past_expiry_unreconciled"
+    else:
+        expiry_state = "active"
+    return PrivilegedOperationSemanticReviewLifecycle(
+        status=record.status,
+        generated_at=_timestamp(generated_at),
+        expiry_state=expiry_state,
+        created_at=record.created_at,
+        updated_at=record.updated_at,
+        expires_at=record.expires_at,
+        terminal_at=record.terminal_at,
+        terminal_reason_available=bool(record.terminal_reason),
+        approval_recorded=record.approval is not None,
+        execution_recorded=record.execution is not None,
+    )
+
+
+def _semantic_review_digests(
+    record: PrivilegedOperationRecord,
+    extra: tuple[PrivilegedOperationSemanticReviewDigest, ...] = (),
+) -> tuple[PrivilegedOperationSemanticReviewDigest, ...]:
+    digests: tuple[PrivilegedOperationSemanticReviewDigest, ...] = (
+        PrivilegedOperationSemanticReviewDigest(
+            kind="request",
+            label="Request digest",
+            sha256=record.request_digest,
+        ),
+        PrivilegedOperationSemanticReviewDigest(
+            kind="human_evidence",
+            label="Human evidence digest",
+            sha256=record.evidence_digest,
+        ),
+        PrivilegedOperationSemanticReviewDigest(
+            kind="plan",
+            label="Plan digest",
+            sha256=record.evidence.plan_digest,
+        ),
+        PrivilegedOperationSemanticReviewDigest(
+            kind="pre_state",
+            label="Pre-state digest",
+            sha256=privileged_operation_pre_state_digest(record.evidence),
+        ),
+    )
+    execution = record.execution
+    if execution is not None:
+        digests += (
+            PrivilegedOperationSemanticReviewDigest(
+                kind="execution_result",
+                label="Execution result digest",
+                sha256=execution.result_digest,
+            ),
+        )
+    return digests + extra
+
+
+def _semantic_review_result_status(
+    record: PrivilegedOperationRecord,
+) -> Literal["ok", "blocked", "error"]:
+    if record.execution is not None and record.execution.result_status == "error":
+        return "error"
+    return record.evidence.result_status
+
+
+def _semantic_review_lifecycle_blocker_codes(
+    record: PrivilegedOperationRecord,
+    *,
+    expiry_state: Literal["active", "past_expiry_unreconciled", "expired"],
+) -> tuple[PrivilegedOperationSemanticReviewBlockerCode, ...]:
+    codes: list[PrivilegedOperationSemanticReviewBlockerCode] = []
+    if expiry_state == "past_expiry_unreconciled":
+        codes.append("operation_past_expiry")
+    elif expiry_state == "expired":
+        codes.append("operation_expired")
+    if record.status == "execution_failed":
+        codes.append("execution_failed")
+    if record.execution is not None and record.execution.reconciliation_required:
+        codes.append("reconciliation_required")
+    return tuple(codes)
+
+
+def _semantic_review_blocker_code(value: str) -> PrivilegedOperationSemanticReviewBlockerCode:
+    if value not in _SEMANTIC_REVIEW_BLOCKER_CODES:
+        raise PrivilegedOperationSemanticReviewError(
+            "Privileged-operation semantic review blocker code is unsupported."
+        )
+    return cast(PrivilegedOperationSemanticReviewBlockerCode, value)
+
+
+def _build_privileged_operation_semantic_review(
+    *,
+    record: PrivilegedOperationRecord,
+    events: tuple[PrivilegedOperationEventRecord, ...] = (),
+    generated_at: datetime | None = None,
+) -> PrivilegedOperationSemanticReview:
+    observed_at = (generated_at or _utc_now()).astimezone(timezone.utc)
+    try:
+        descriptor = read_privileged_operation_descriptor(record.descriptor_id).descriptor
+    except LookupError as error:
+        raise PrivilegedOperationSemanticReviewError(
+            "Privileged-operation semantic review descriptor is not registered."
+        ) from error
+    if (
+        descriptor.descriptor_version != record.descriptor_version
+        or descriptor.safety_class != record.safety_class
+    ):
+        raise PrivilegedOperationSemanticReviewError(
+            "Privileged-operation semantic review descriptor metadata drifted."
+        )
+    if record.descriptor_id == "managed-secret-reencryption":
+        if not isinstance(record.request, ManagedSecretReencryptionPlanInput) or not isinstance(
+            record.evidence,
+            ManagedSecretReencryptionHumanEvidence,
+        ):
+            raise PrivilegedOperationSemanticReviewError(
+                "Managed-secret semantic review payload variant drifted."
+            )
+        secret_metrics: tuple[PrivilegedOperationSemanticReviewMetric, ...] = (
+            PrivilegedOperationSemanticReviewMetric(
+                kind="configured_secrets",
+                label="Configured secrets",
+                value=record.evidence.configured_secret_count,
+            ),
+            PrivilegedOperationSemanticReviewMetric(
+                kind="rotation_candidates",
+                label="Would rotate",
+                value=record.evidence.rotation_candidate_count,
+            ),
+            PrivilegedOperationSemanticReviewMetric(
+                kind="unchanged_secrets",
+                label="Unchanged",
+                value=record.evidence.unchanged_count,
+            ),
+            PrivilegedOperationSemanticReviewMetric(
+                kind="unreadable_secrets",
+                label="Unreadable",
+                value=record.evidence.unreadable_secret_count,
+            ),
+        )
+        lifecycle = _semantic_review_lifecycle(record, generated_at=observed_at)
+        secret_blocker_codes = _semantic_review_lifecycle_blocker_codes(
+            record,
+            expiry_state=lifecycle.expiry_state,
+        )
+        if record.evidence.unreadable_secret_count:
+            secret_blocker_codes += ("secret_unreadable",)
+        blocker_state: Literal["clear", "blocked", "error"] = "clear"
+        if (
+            "execution_failed" in secret_blocker_codes
+            or "reconciliation_required" in secret_blocker_codes
+        ):
+            blocker_state = "error"
+        elif secret_blocker_codes:
+            blocker_state = "blocked"
+        return PrivilegedOperationSemanticReview(
+            operation_id=record.operation_id,
+            descriptor_id=record.descriptor_id,
+            descriptor_version=record.descriptor_version,
+            operation_class="managed_secret_reencryption",
+            safety_class=record.safety_class,
+            title="Managed-secret re-encryption review",
+            requested_by_kind=_semantic_review_requester_kind(record),
+            lifecycle=lifecycle,
+            blockers=PrivilegedOperationSemanticReviewBlocker(
+                state=blocker_state,
+                unreadable_secret_count=record.evidence.unreadable_secret_count,
+                codes=secret_blocker_codes,
+            ),
+            change=PrivilegedOperationSemanticReviewChange(
+                summary="Managed secrets will be re-encrypted with the active key.",
+                changed=record.evidence.rotation_candidate_count > 0,
+                metrics=secret_metrics,
+            ),
+            blast_radius=PrivilegedOperationSemanticReviewBlastRadius(
+                scope="managed_secret_store",
+                summary="Bounded to configured managed-secret records.",
+                affected_count=record.evidence.configured_secret_count,
+            ),
+            rollback=PrivilegedOperationSemanticReviewRollback(
+                rollback_class="key_retained",
+                summary="Rollback depends on retained managed-secret key material.",
+            ),
+            evidence=PrivilegedOperationSemanticReviewEvidence(
+                result_status=_semantic_review_result_status(record),
+                digests=_semantic_review_digests(record),
+            ),
+            activity=_semantic_review_activity(record.operation_id, events),
+            can_approve=record.status == "planned" and not secret_blocker_codes,
+            can_revoke=record.status == "approved" and lifecycle.expiry_state == "active",
+        )
+    if record.descriptor_id == "managed-authz-policy-set":
+        if not isinstance(record.request, ManagedAuthzPolicySetProposalInput) or not isinstance(
+            record.evidence,
+            ManagedAuthzPolicySetHumanEvidence,
+        ):
+            raise PrivilegedOperationSemanticReviewError(
+                "Managed-policy semantic review payload variant drifted."
+            )
+        diff = record.evidence.diff
+        lifecycle = _semantic_review_lifecycle(record, generated_at=observed_at)
+        authz_blocker_codes = tuple(
+            _semantic_review_blocker_code(code)
+            for code in sorted(
+                {
+                    *(blocker.code for blocker in diff.policy_safety_blockers),
+                    *(
+                        reason_code
+                        for blocker in diff.operational_readiness_blockers
+                        for reason_code in blocker.reason_codes
+                    ),
+                }
+            )
+        )
+        authz_blocker_codes += _semantic_review_lifecycle_blocker_codes(
+            record,
+            expiry_state=lifecycle.expiry_state,
+        )
+        authz_policy_metrics: tuple[PrivilegedOperationSemanticReviewMetric, ...] = (
+            PrivilegedOperationSemanticReviewMetric(
+                kind="policy_rules_added", label="Added", value=diff.added_rule_count
+            ),
+            PrivilegedOperationSemanticReviewMetric(
+                kind="policy_rules_adopted", label="Adopted", value=diff.adopted_rule_count
+            ),
+            PrivilegedOperationSemanticReviewMetric(
+                kind="policy_rules_updated", label="Updated", value=diff.updated_rule_count
+            ),
+            PrivilegedOperationSemanticReviewMetric(
+                kind="policy_rules_removed", label="Removed", value=diff.removed_rule_count
+            ),
+            PrivilegedOperationSemanticReviewMetric(
+                kind="policy_rules_unchanged", label="Unchanged", value=diff.unchanged_rule_count
+            ),
+            PrivilegedOperationSemanticReviewMetric(
+                kind="policy_safety_blockers",
+                label="Safety blockers",
+                value=diff.policy_safety_blocker_count,
+            ),
+            PrivilegedOperationSemanticReviewMetric(
+                kind="operational_readiness_blockers",
+                label="Readiness blockers",
+                value=diff.operational_readiness_blocked_rule_count,
+            ),
+        )
+        return PrivilegedOperationSemanticReview(
+            operation_id=record.operation_id,
+            descriptor_id=record.descriptor_id,
+            descriptor_version=record.descriptor_version,
+            operation_class="managed_authz_policy_set",
+            safety_class=record.safety_class,
+            title="Managed authorization policy review",
+            requested_by_kind=_semantic_review_requester_kind(record),
+            lifecycle=lifecycle,
+            blockers=PrivilegedOperationSemanticReviewBlocker(
+                state=(
+                    "error"
+                    if "execution_failed" in authz_blocker_codes
+                    or "reconciliation_required" in authz_blocker_codes
+                    else "blocked"
+                    if authz_blocker_codes
+                    else "clear"
+                ),
+                policy_safety_blocker_count=diff.policy_safety_blocker_count,
+                operational_readiness_blocker_count=(diff.operational_readiness_blocked_rule_count),
+                codes=authz_blocker_codes,
+            ),
+            change=PrivilegedOperationSemanticReviewChange(
+                summary="Managed authorization rules would be reconciled by exact policy CAS.",
+                changed=diff.changed,
+                metrics=authz_policy_metrics,
+            ),
+            blast_radius=PrivilegedOperationSemanticReviewBlastRadius(
+                scope="authorization_policy",
+                summary="Bounded to one managed authorization rule set.",
+                affected_count=(
+                    diff.added_rule_count
+                    + diff.adopted_rule_count
+                    + diff.updated_rule_count
+                    + diff.removed_rule_count
+                    + diff.unchanged_rule_count
+                ),
+            ),
+            rollback=PrivilegedOperationSemanticReviewRollback(
+                rollback_class="policy_cas",
+                summary="Rollback is bounded by authorization policy CAS and record digest evidence.",
+            ),
+            evidence=PrivilegedOperationSemanticReviewEvidence(
+                result_status=_semantic_review_result_status(record),
+                digests=_semantic_review_digests(
+                    record,
+                    (
+                        PrivilegedOperationSemanticReviewDigest(
+                            kind="previous_policy",
+                            label="Previous policy digest",
+                            sha256=diff.previous_policy_sha256,
+                        ),
+                        PrivilegedOperationSemanticReviewDigest(
+                            kind="candidate_policy",
+                            label="Candidate policy digest",
+                            sha256=diff.desired_policy_sha256,
+                        ),
+                        PrivilegedOperationSemanticReviewDigest(
+                            kind="candidate_managed_set",
+                            label="Candidate managed-set digest",
+                            sha256=diff.desired_set_sha256,
+                        ),
+                    ),
+                ),
+            ),
+            activity=_semantic_review_activity(record.operation_id, events),
+            can_approve=record.status == "planned" and not authz_blocker_codes,
+            can_revoke=record.status == "approved" and lifecycle.expiry_state == "active",
+        )
+    if record.descriptor_id == "managed-merge-train-policy-import":
+        if not isinstance(
+            record.request,
+            ManagedMergeTrainPolicyImportProposalInput,
+        ) or not isinstance(record.evidence, ManagedMergeTrainPolicyImportHumanEvidence):
+            raise PrivilegedOperationSemanticReviewError(
+                "Merge-train policy semantic review payload variant drifted."
+            )
+        merge_train_policy_metrics: tuple[PrivilegedOperationSemanticReviewMetric, ...] = (
+            PrivilegedOperationSemanticReviewMetric(
+                kind="active_policy_targets",
+                label="Active targets",
+                value=record.evidence.active_target_count,
+            ),
+            PrivilegedOperationSemanticReviewMetric(
+                kind="candidate_policy_targets",
+                label="Candidate targets",
+                value=record.evidence.candidate_target_count,
+            ),
+            PrivilegedOperationSemanticReviewMetric(
+                kind="policy_targets_added",
+                label="Added",
+                value=len(record.evidence.added_policy_keys),
+            ),
+            PrivilegedOperationSemanticReviewMetric(
+                kind="policy_targets_changed",
+                label="Changed",
+                value=len(record.evidence.changed_policy_keys),
+            ),
+            PrivilegedOperationSemanticReviewMetric(
+                kind="policy_targets_removed",
+                label="Removed",
+                value=len(record.evidence.removed_policy_keys),
+            ),
+            PrivilegedOperationSemanticReviewMetric(
+                kind="policy_targets_unchanged",
+                label="Unchanged",
+                value=len(record.evidence.unchanged_policy_keys),
+            ),
+        )
+        lifecycle = _semantic_review_lifecycle(record, generated_at=observed_at)
+        merge_train_blocker_codes = _semantic_review_lifecycle_blocker_codes(
+            record,
+            expiry_state=lifecycle.expiry_state,
+        )
+        return PrivilegedOperationSemanticReview(
+            operation_id=record.operation_id,
+            descriptor_id=record.descriptor_id,
+            descriptor_version=record.descriptor_version,
+            operation_class="managed_merge_train_policy_import",
+            safety_class=record.safety_class,
+            title="Managed merge-train policy review",
+            requested_by_kind=_semantic_review_requester_kind(record),
+            lifecycle=lifecycle,
+            blockers=PrivilegedOperationSemanticReviewBlocker(
+                state=(
+                    "error"
+                    if "execution_failed" in merge_train_blocker_codes
+                    or "reconciliation_required" in merge_train_blocker_codes
+                    else "blocked"
+                    if merge_train_blocker_codes
+                    else "clear"
+                ),
+                codes=merge_train_blocker_codes,
+            ),
+            change=PrivilegedOperationSemanticReviewChange(
+                summary="Merge-train policy targets would be imported by exact policy CAS.",
+                changed=bool(
+                    record.evidence.added_policy_keys
+                    or record.evidence.removed_policy_keys
+                    or record.evidence.changed_policy_keys
+                ),
+                metrics=merge_train_policy_metrics,
+            ),
+            blast_radius=PrivilegedOperationSemanticReviewBlastRadius(
+                scope="merge_train_policy",
+                summary="Bounded to merge-train policy target counts; target identities are redacted.",
+                affected_count=record.evidence.candidate_target_count,
+            ),
+            rollback=PrivilegedOperationSemanticReviewRollback(
+                rollback_class="policy_cas",
+                summary="Rollback is bounded by merge-train policy CAS and record digest evidence.",
+            ),
+            evidence=PrivilegedOperationSemanticReviewEvidence(
+                result_status=_semantic_review_result_status(record),
+                digests=_semantic_review_digests(
+                    record,
+                    (
+                        PrivilegedOperationSemanticReviewDigest(
+                            kind="active_merge_train_policy",
+                            label="Active merge-train policy digest",
+                            sha256=record.evidence.active_policy_sha256,
+                        ),
+                        PrivilegedOperationSemanticReviewDigest(
+                            kind="candidate_merge_train_policy",
+                            label="Candidate merge-train policy digest",
+                            sha256=record.evidence.candidate_policy_sha256,
+                        ),
+                    ),
+                ),
+            ),
+            activity=_semantic_review_activity(record.operation_id, events),
+            can_approve=record.status == "planned" and not merge_train_blocker_codes,
+            can_revoke=record.status == "approved" and lifecycle.expiry_state == "active",
+        )
+    raise PrivilegedOperationSemanticReviewError(
+        "Privileged-operation semantic review descriptor is unsupported."
+    )
+
+
+def privileged_operation_semantic_review(
+    *,
+    record: PrivilegedOperationRecord,
+    events: tuple[PrivilegedOperationEventRecord, ...] = (),
+    generated_at: datetime | None = None,
+) -> PrivilegedOperationSemanticReview:
+    try:
+        return _build_privileged_operation_semantic_review(
+            record=record,
+            events=events,
+            generated_at=generated_at,
+        )
+    except ValidationError as error:
+        raise PrivilegedOperationSemanticReviewError(
+            "Privileged-operation semantic review contract validation failed."
+        ) from error
+
+
+validate_privileged_operation_semantic_review_coverage()
 
 
 def _utc_now() -> datetime:

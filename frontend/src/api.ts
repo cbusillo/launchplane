@@ -39,6 +39,12 @@ import type {
   PrivilegedOperationHumanResponse,
   PrivilegedOperationListResponse,
   PrivilegedOperationRecord,
+  PrivilegedOperationSemanticReview,
+  PrivilegedOperationSemanticReviewResponse,
+  ReadHumanPrivilegedOperationData,
+  ReadHumanPrivilegedOperationResponse,
+  ReadHumanPrivilegedOperationReviewData,
+  ReadHumanPrivilegedOperationReviewResponse,
   RankWorkGraphSnapshotData,
   RankWorkGraphSnapshotResponse,
   ReadProductOperationalReadinessData,
@@ -605,7 +611,12 @@ export function writeOwnerAcceptanceEvent(
   }));
 }
 
-export type { PrivilegedOperationListResponse, PrivilegedOperationRecord };
+export type {
+  PrivilegedOperationListResponse,
+  PrivilegedOperationRecord,
+  PrivilegedOperationSemanticReview,
+  PrivilegedOperationSemanticReviewResponse,
+};
 
 export type PrivilegedOperationDescriptorId = NonNullable<
   ListHumanPrivilegedOperationsData["query"]
@@ -621,6 +632,38 @@ export function readPrivilegedOperationPlans(
       : `?descriptor_id=${encodeURIComponent(descriptorId)}`;
   return requestJson<ListHumanPrivilegedOperationsResponse>(
     `/v1/privileged-operations/plans${query}`,
+    "GET",
+    undefined,
+    signal,
+  );
+}
+
+export function readPrivilegedOperationReview(
+  operationId: string,
+  signal?: AbortSignal,
+): Promise<PrivilegedOperationSemanticReviewResponse> {
+  const request: ReadHumanPrivilegedOperationReviewData = {
+    path: { operation_id: operationId },
+    url: "/v1/privileged-operations/plans/{operation_id}/review",
+  };
+  return requestJson<ReadHumanPrivilegedOperationReviewResponse>(
+    `/v1/privileged-operations/plans/${encodeURIComponent(request.path.operation_id)}/review`,
+    "GET",
+    undefined,
+    signal,
+  );
+}
+
+export function readPrivilegedOperationRawDetail(
+  operationId: string,
+  signal?: AbortSignal,
+): Promise<PrivilegedOperationHumanResponse> {
+  const request: ReadHumanPrivilegedOperationData = {
+    path: { operation_id: operationId },
+    url: "/v1/privileged-operations/plans/{operation_id}",
+  };
+  return requestJson<ReadHumanPrivilegedOperationResponse>(
+    `/v1/privileged-operations/plans/${encodeURIComponent(request.path.operation_id)}`,
     "GET",
     undefined,
     signal,

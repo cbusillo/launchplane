@@ -970,10 +970,9 @@
 
 .engineering-controller-record {
   display: grid;
-  grid-template-columns: auto minmax(150px, 0.45fr) minmax(230px, 1fr) minmax(
-      180px,
-      0.8fr
-    ) auto;
+  grid-template-columns:
+    auto minmax(150px, 0.45fr) minmax(230px, 1fr) minmax(180px, 0.8fr)
+    auto;
   align-items: center;
   gap: 12px;
   border-bottom: 1px solid var(--border-soft);
@@ -1538,10 +1537,9 @@
 
 .governance-lookup {
   display: grid;
-  grid-template-columns: minmax(220px, 1.5fr) minmax(120px, 0.6fr) minmax(
-      150px,
-      0.8fr
-    ) auto;
+  grid-template-columns:
+    minmax(220px, 1.5fr) minmax(120px, 0.6fr) minmax(150px, 0.8fr)
+    auto;
   align-items: end;
   gap: 12px;
   border: 1px solid var(--border-soft);
@@ -1803,7 +1801,10 @@
 }
 
 .privileged-operation-digest {
+  min-width: 0;
   font-size: 0.76rem;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .privileged-operation-policy-review {
@@ -1828,6 +1829,46 @@
   color: #d8e9f7;
   font-size: 0.76rem;
   line-height: 1.5;
+}
+
+.privileged-operation-policy-review p {
+  margin: 0;
+  padding: 0.85rem 0.9rem;
+  border-top: 1px solid var(--border);
+  color: var(--muted-strong);
+}
+
+.privileged-operation-activity {
+  display: grid;
+  gap: 0.55rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.privileged-operation-activity li {
+  display: grid;
+  grid-template-columns: minmax(8rem, auto) minmax(6rem, auto) minmax(
+      9rem,
+      auto
+    ) minmax(0, 1fr);
+  gap: 0.65rem;
+  align-items: center;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid rgb(255 255 255 / 7%);
+  border-radius: 0.75rem;
+  background: rgb(255 255 255 / 2.5%);
+}
+
+.privileged-operation-activity span {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.privileged-operation-activity strong {
+  color: var(--muted-strong);
+  font-size: 0.82rem;
+  text-transform: uppercase;
 }
 
 .privileged-operation-terminal-reason {
@@ -1863,6 +1904,10 @@
   .privileged-operation-metrics,
   .privileged-operation-details {
     grid-template-columns: 1fr 1fr;
+  }
+
+  .privileged-operation-activity li {
+    grid-template-columns: 1fr;
   }
 }
 

@@ -3,7 +3,9 @@ import { afterEach, test } from "node:test";
 
 import {
   approvePrivilegedOperation,
+  readPrivilegedOperationRawDetail,
   readPrivilegedOperationPlans,
+  readPrivilegedOperationReview,
   revokePrivilegedOperation,
 } from "../src/api.ts";
 
@@ -22,7 +24,7 @@ test("privileged-operation UI performs one read-only list request", async () => 
         status: "ok",
         trace_id: "trace-privileged-operations",
         total: 0,
-        records: [],
+        reviews: [],
       }),
       { headers: { "Content-Type": "application/json" }, status: 200 },
     );
@@ -45,7 +47,7 @@ test("privileged-operation UI scopes policy plan reads by descriptor", async () 
         status: "ok",
         trace_id: "trace-policy-operations",
         total: 0,
-        records: [],
+        reviews: [],
       }),
       { headers: { "Content-Type": "application/json" }, status: 200 },
     );
@@ -69,7 +71,7 @@ test("privileged-operation UI scopes merge-train policy reads by descriptor", as
         status: "ok",
         trace_id: "trace-merge-train-policy-operations",
         total: 0,
-        records: [],
+        reviews: [],
       }),
       { headers: { "Content-Type": "application/json" }, status: 200 },
     );
@@ -85,6 +87,37 @@ test("privileged-operation UI scopes merge-train policy reads by descriptor", as
     "/v1/privileged-operations/plans?descriptor_id=managed-merge-train-policy-import",
   );
   assert.equal(calls[0].init.method, "GET");
+});
+
+test("privileged-operation UI keeps semantic review and raw detail reads distinct", async () => {
+  const calls = [];
+  globalThis.fetch = async (input, init = {}) => {
+    calls.push({ input: String(input), init });
+    return new Response(
+      JSON.stringify({
+        status: "ok",
+        trace_id: "trace-privileged-operation-detail",
+        review: { operation_id: "operation-1" },
+        record: {
+          operation_id: "operation-1",
+          evidence: { active_key_id: "raw" },
+        },
+        events: [],
+      }),
+      { headers: { "Content-Type": "application/json" }, status: 200 },
+    );
+  };
+
+  await readPrivilegedOperationReview("operation-1");
+  await readPrivilegedOperationRawDetail("operation-1");
+
+  assert.equal(
+    calls[0].input,
+    "/v1/privileged-operations/plans/operation-1/review",
+  );
+  assert.equal(calls[0].init.method, "GET");
+  assert.equal(calls[1].input, "/v1/privileged-operations/plans/operation-1");
+  assert.equal(calls[1].init.method, "GET");
 });
 
 test("privileged-operation UI sends approve and revoke mutations without execute", async () => {

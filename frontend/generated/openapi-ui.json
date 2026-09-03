@@ -1490,6 +1490,100 @@
         ]
       }
     },
+    "/v1/privileged-operations/plans/{operation_id}/review": {
+      "get": {
+        "operationId": "read_human_privileged_operation_review",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "operation_id",
+            "required": true,
+            "schema": {
+              "maxLength": 96,
+              "minLength": 1,
+              "title": "Operation Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PrivilegedOperationSemanticReviewResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read a semantic privileged-operation review",
+        "tags": [
+          "privileged-operations"
+        ]
+      }
+    },
     "/v1/product-profiles": {
       "get": {
         "operationId": "list_product_profiles",
@@ -15109,11 +15203,11 @@
       "PrivilegedOperationListResponse": {
         "additionalProperties": false,
         "properties": {
-          "records": {
+          "reviews": {
             "items": {
-              "$ref": "#/components/schemas/PrivilegedOperationRecord"
+              "$ref": "#/components/schemas/PrivilegedOperationSemanticReview"
             },
-            "title": "Records",
+            "title": "Reviews",
             "type": "array"
           },
           "status": {
@@ -15133,7 +15227,7 @@
           }
         },
         "required": [
-          "records",
+          "reviews",
           "status",
           "total",
           "trace_id"
@@ -15346,6 +15440,594 @@
           "reason"
         ],
         "title": "PrivilegedOperationRevocationEnvelope",
+        "type": "object"
+      },
+      "PrivilegedOperationSemanticReview": {
+        "additionalProperties": false,
+        "description": "Redacted read-only human review projection for a persisted operation.",
+        "properties": {
+          "activity": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/PrivilegedOperationSemanticReviewActivityEntry"
+            },
+            "title": "Activity",
+            "type": "array"
+          },
+          "authorizes_approval": {
+            "const": false,
+            "default": false,
+            "title": "Authorizes Approval",
+            "type": "boolean"
+          },
+          "authorizes_execution": {
+            "const": false,
+            "default": false,
+            "title": "Authorizes Execution",
+            "type": "boolean"
+          },
+          "blast_radius": {
+            "$ref": "#/components/schemas/PrivilegedOperationSemanticReviewBlastRadius"
+          },
+          "blockers": {
+            "$ref": "#/components/schemas/PrivilegedOperationSemanticReviewBlocker"
+          },
+          "can_approve": {
+            "title": "Can Approve",
+            "type": "boolean"
+          },
+          "can_revoke": {
+            "title": "Can Revoke",
+            "type": "boolean"
+          },
+          "change": {
+            "$ref": "#/components/schemas/PrivilegedOperationSemanticReviewChange"
+          },
+          "descriptor_id": {
+            "enum": [
+              "managed-secret-reencryption",
+              "managed-authz-policy-set",
+              "managed-merge-train-policy-import"
+            ],
+            "title": "Descriptor Id",
+            "type": "string"
+          },
+          "descriptor_version": {
+            "title": "Descriptor Version",
+            "type": "integer"
+          },
+          "evidence": {
+            "$ref": "#/components/schemas/PrivilegedOperationSemanticReviewEvidence"
+          },
+          "lifecycle": {
+            "$ref": "#/components/schemas/PrivilegedOperationSemanticReviewLifecycle"
+          },
+          "operation_class": {
+            "enum": [
+              "managed_secret_reencryption",
+              "managed_authz_policy_set",
+              "managed_merge_train_policy_import"
+            ],
+            "title": "Operation Class",
+            "type": "string"
+          },
+          "operation_id": {
+            "title": "Operation Id",
+            "type": "string"
+          },
+          "persists_state": {
+            "const": false,
+            "default": false,
+            "title": "Persists State",
+            "type": "boolean"
+          },
+          "requested_by_kind": {
+            "enum": [
+              "github_human",
+              "terminal_agent"
+            ],
+            "title": "Requested By Kind",
+            "type": "string"
+          },
+          "rollback": {
+            "$ref": "#/components/schemas/PrivilegedOperationSemanticReviewRollback"
+          },
+          "safety_class": {
+            "enum": [
+              "secret_backed",
+              "policy_admin"
+            ],
+            "title": "Safety Class",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "title": {
+            "enum": [
+              "Managed-secret re-encryption review",
+              "Managed authorization policy review",
+              "Managed merge-train policy review"
+            ],
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "activity",
+          "authorizes_approval",
+          "authorizes_execution",
+          "blast_radius",
+          "blockers",
+          "can_approve",
+          "can_revoke",
+          "change",
+          "descriptor_id",
+          "descriptor_version",
+          "evidence",
+          "lifecycle",
+          "operation_class",
+          "operation_id",
+          "persists_state",
+          "requested_by_kind",
+          "rollback",
+          "safety_class",
+          "schema_version",
+          "title"
+        ],
+        "title": "PrivilegedOperationSemanticReview",
+        "type": "object"
+      },
+      "PrivilegedOperationSemanticReviewActivityEntry": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "planned",
+              "approved",
+              "revoked",
+              "executing",
+              "executed",
+              "execution_failed",
+              "expired",
+              "cancelled"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "actor_type": {
+            "enum": [
+              "github_human",
+              "terminal_agent",
+              "system"
+            ],
+            "title": "Actor Type",
+            "type": "string"
+          },
+          "event_id": {
+            "title": "Event Id",
+            "type": "string"
+          },
+          "occurred_at": {
+            "title": "Occurred At",
+            "type": "string"
+          },
+          "reason_available": {
+            "default": false,
+            "title": "Reason Available",
+            "type": "boolean"
+          },
+          "resulting_record_digest": {
+            "title": "Resulting Record Digest",
+            "type": "string"
+          },
+          "sequence": {
+            "maximum": 4,
+            "minimum": 1,
+            "title": "Sequence",
+            "type": "integer"
+          },
+          "source_kind": {
+            "enum": [
+              "agent_api",
+              "browser_api",
+              "system"
+            ],
+            "title": "Source Kind",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action",
+          "actor_type",
+          "event_id",
+          "occurred_at",
+          "reason_available",
+          "resulting_record_digest",
+          "sequence",
+          "source_kind"
+        ],
+        "title": "PrivilegedOperationSemanticReviewActivityEntry",
+        "type": "object"
+      },
+      "PrivilegedOperationSemanticReviewBlastRadius": {
+        "additionalProperties": false,
+        "properties": {
+          "affected_count": {
+            "minimum": 0,
+            "title": "Affected Count",
+            "type": "integer"
+          },
+          "scope": {
+            "enum": [
+              "managed_secret_store",
+              "authorization_policy",
+              "merge_train_policy"
+            ],
+            "title": "Scope",
+            "type": "string"
+          },
+          "summary": {
+            "title": "Summary",
+            "type": "string"
+          }
+        },
+        "required": [
+          "affected_count",
+          "scope",
+          "summary"
+        ],
+        "title": "PrivilegedOperationSemanticReviewBlastRadius",
+        "type": "object"
+      },
+      "PrivilegedOperationSemanticReviewBlocker": {
+        "additionalProperties": false,
+        "properties": {
+          "codes": {
+            "default": [],
+            "items": {
+              "enum": [
+                "authz_policy_admin_unreachable",
+                "authz_policy_applying_admin_removed",
+                "authz_policy_strict_human_admin_unreachable",
+                "authz_policy_administrator_quorum_unsatisfied",
+                "repository_not_exact",
+                "workflow_refs_not_singleton",
+                "workflow_ref_not_exact",
+                "job_workflow_refs_not_singleton",
+                "job_workflow_ref_not_immutable",
+                "actions_not_singleton",
+                "action_not_exact",
+                "products_not_singleton",
+                "product_not_exact",
+                "contexts_not_singleton",
+                "context_not_exact",
+                "instances_not_singleton",
+                "instance_not_exact",
+                "secret_unreadable",
+                "operation_past_expiry",
+                "operation_expired",
+                "execution_failed",
+                "reconciliation_required"
+              ],
+              "type": "string"
+            },
+            "title": "Codes",
+            "type": "array"
+          },
+          "operational_readiness_blocker_count": {
+            "default": 0,
+            "minimum": 0,
+            "title": "Operational Readiness Blocker Count",
+            "type": "integer"
+          },
+          "policy_safety_blocker_count": {
+            "default": 0,
+            "minimum": 0,
+            "title": "Policy Safety Blocker Count",
+            "type": "integer"
+          },
+          "state": {
+            "enum": [
+              "clear",
+              "blocked",
+              "error"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "unreadable_secret_count": {
+            "default": 0,
+            "minimum": 0,
+            "title": "Unreadable Secret Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "codes",
+          "operational_readiness_blocker_count",
+          "policy_safety_blocker_count",
+          "state",
+          "unreadable_secret_count"
+        ],
+        "title": "PrivilegedOperationSemanticReviewBlocker",
+        "type": "object"
+      },
+      "PrivilegedOperationSemanticReviewChange": {
+        "additionalProperties": false,
+        "properties": {
+          "changed": {
+            "title": "Changed",
+            "type": "boolean"
+          },
+          "metrics": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/PrivilegedOperationSemanticReviewMetric"
+            },
+            "title": "Metrics",
+            "type": "array"
+          },
+          "summary": {
+            "title": "Summary",
+            "type": "string"
+          }
+        },
+        "required": [
+          "changed",
+          "metrics",
+          "summary"
+        ],
+        "title": "PrivilegedOperationSemanticReviewChange",
+        "type": "object"
+      },
+      "PrivilegedOperationSemanticReviewDigest": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "enum": [
+              "request",
+              "human_evidence",
+              "plan",
+              "pre_state",
+              "previous_policy",
+              "candidate_policy",
+              "candidate_managed_set",
+              "active_merge_train_policy",
+              "candidate_merge_train_policy",
+              "execution_result"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "sha256": {
+            "title": "Sha256",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "label",
+          "sha256"
+        ],
+        "title": "PrivilegedOperationSemanticReviewDigest",
+        "type": "object"
+      },
+      "PrivilegedOperationSemanticReviewEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "digests": {
+            "items": {
+              "$ref": "#/components/schemas/PrivilegedOperationSemanticReviewDigest"
+            },
+            "title": "Digests",
+            "type": "array"
+          },
+          "raw_detail_available": {
+            "default": true,
+            "title": "Raw Detail Available",
+            "type": "boolean"
+          },
+          "redaction": {
+            "const": "semantic_only",
+            "default": "semantic_only",
+            "title": "Redaction",
+            "type": "string"
+          },
+          "result_status": {
+            "enum": [
+              "ok",
+              "blocked",
+              "error"
+            ],
+            "title": "Result Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "digests",
+          "raw_detail_available",
+          "redaction",
+          "result_status"
+        ],
+        "title": "PrivilegedOperationSemanticReviewEvidence",
+        "type": "object"
+      },
+      "PrivilegedOperationSemanticReviewLifecycle": {
+        "additionalProperties": false,
+        "properties": {
+          "approval_recorded": {
+            "default": false,
+            "title": "Approval Recorded",
+            "type": "boolean"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "execution_recorded": {
+            "default": false,
+            "title": "Execution Recorded",
+            "type": "boolean"
+          },
+          "expires_at": {
+            "title": "Expires At",
+            "type": "string"
+          },
+          "expiry_state": {
+            "enum": [
+              "active",
+              "past_expiry_unreconciled",
+              "expired"
+            ],
+            "title": "Expiry State",
+            "type": "string"
+          },
+          "generated_at": {
+            "title": "Generated At",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "planned",
+              "approved",
+              "revoked",
+              "executing",
+              "executed",
+              "execution_failed",
+              "expired",
+              "cancelled"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "terminal_at": {
+            "default": "",
+            "title": "Terminal At",
+            "type": "string"
+          },
+          "terminal_reason_available": {
+            "default": false,
+            "title": "Terminal Reason Available",
+            "type": "boolean"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "approval_recorded",
+          "created_at",
+          "execution_recorded",
+          "expires_at",
+          "expiry_state",
+          "generated_at",
+          "status",
+          "terminal_at",
+          "terminal_reason_available",
+          "updated_at"
+        ],
+        "title": "PrivilegedOperationSemanticReviewLifecycle",
+        "type": "object"
+      },
+      "PrivilegedOperationSemanticReviewMetric": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "enum": [
+              "configured_secrets",
+              "rotation_candidates",
+              "unchanged_secrets",
+              "unreadable_secrets",
+              "policy_rules_added",
+              "policy_rules_adopted",
+              "policy_rules_updated",
+              "policy_rules_removed",
+              "policy_rules_unchanged",
+              "policy_safety_blockers",
+              "operational_readiness_blockers",
+              "active_policy_targets",
+              "candidate_policy_targets",
+              "policy_targets_added",
+              "policy_targets_changed",
+              "policy_targets_removed",
+              "policy_targets_unchanged"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "value": {
+            "minimum": 0,
+            "title": "Value",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "kind",
+          "label",
+          "value"
+        ],
+        "title": "PrivilegedOperationSemanticReviewMetric",
+        "type": "object"
+      },
+      "PrivilegedOperationSemanticReviewResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "review": {
+            "$ref": "#/components/schemas/PrivilegedOperationSemanticReview"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "review",
+          "status",
+          "trace_id"
+        ],
+        "title": "PrivilegedOperationSemanticReviewResponse",
+        "type": "object"
+      },
+      "PrivilegedOperationSemanticReviewRollback": {
+        "additionalProperties": false,
+        "properties": {
+          "rollback_class": {
+            "enum": [
+              "key_retained",
+              "policy_cas"
+            ],
+            "title": "Rollback Class",
+            "type": "string"
+          },
+          "summary": {
+            "title": "Summary",
+            "type": "string"
+          }
+        },
+        "required": [
+          "rollback_class",
+          "summary"
+        ],
+        "title": "PrivilegedOperationSemanticReviewRollback",
         "type": "object"
       },
       "ProductActionAvailability": {

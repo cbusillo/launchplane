@@ -941,6 +941,351 @@ PrivilegedOperationSummary: TypeAlias = (
     | ManagedMergeTrainPolicyImportAgentSummary
 )
 
+PrivilegedOperationSemanticReviewClass = Literal[
+    "managed_secret_reencryption",
+    "managed_authz_policy_set",
+    "managed_merge_train_policy_import",
+]
+PrivilegedOperationSemanticReviewBlockerState = Literal["clear", "blocked", "error"]
+PrivilegedOperationSemanticReviewBlockerCode = Literal[
+    "authz_policy_admin_unreachable",
+    "authz_policy_applying_admin_removed",
+    "authz_policy_strict_human_admin_unreachable",
+    "authz_policy_administrator_quorum_unsatisfied",
+    "repository_not_exact",
+    "workflow_refs_not_singleton",
+    "workflow_ref_not_exact",
+    "job_workflow_refs_not_singleton",
+    "job_workflow_ref_not_immutable",
+    "actions_not_singleton",
+    "action_not_exact",
+    "products_not_singleton",
+    "product_not_exact",
+    "contexts_not_singleton",
+    "context_not_exact",
+    "instances_not_singleton",
+    "instance_not_exact",
+    "secret_unreadable",
+    "operation_past_expiry",
+    "operation_expired",
+    "execution_failed",
+    "reconciliation_required",
+]
+PrivilegedOperationSemanticReviewExpiryState = Literal[
+    "active",
+    "past_expiry_unreconciled",
+    "expired",
+]
+PrivilegedOperationSemanticReviewRollbackClass = Literal["key_retained", "policy_cas"]
+PrivilegedOperationSemanticReviewTitle = Literal[
+    "Managed-secret re-encryption review",
+    "Managed authorization policy review",
+    "Managed merge-train policy review",
+]
+PrivilegedOperationSemanticReviewMetricKind = Literal[
+    "configured_secrets",
+    "rotation_candidates",
+    "unchanged_secrets",
+    "unreadable_secrets",
+    "policy_rules_added",
+    "policy_rules_adopted",
+    "policy_rules_updated",
+    "policy_rules_removed",
+    "policy_rules_unchanged",
+    "policy_safety_blockers",
+    "operational_readiness_blockers",
+    "active_policy_targets",
+    "candidate_policy_targets",
+    "policy_targets_added",
+    "policy_targets_changed",
+    "policy_targets_removed",
+    "policy_targets_unchanged",
+]
+PrivilegedOperationSemanticReviewDigestKind = Literal[
+    "request",
+    "human_evidence",
+    "plan",
+    "pre_state",
+    "previous_policy",
+    "candidate_policy",
+    "candidate_managed_set",
+    "active_merge_train_policy",
+    "candidate_merge_train_policy",
+    "execution_result",
+]
+
+
+class PrivilegedOperationSemanticReviewMetric(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: PrivilegedOperationSemanticReviewMetricKind
+    label: str
+    value: int = Field(ge=0)
+
+
+class PrivilegedOperationSemanticReviewDigest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: PrivilegedOperationSemanticReviewDigestKind
+    label: str
+    sha256: str
+
+    @model_validator(mode="after")
+    def _validate_digest(self) -> "PrivilegedOperationSemanticReviewDigest":
+        object.__setattr__(self, "sha256", _sha256(self.sha256, "sha256"))
+        return self
+
+
+class PrivilegedOperationSemanticReviewBlocker(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    state: PrivilegedOperationSemanticReviewBlockerState
+    policy_safety_blocker_count: int = Field(default=0, ge=0)
+    operational_readiness_blocker_count: int = Field(default=0, ge=0)
+    unreadable_secret_count: int = Field(default=0, ge=0)
+    codes: tuple[PrivilegedOperationSemanticReviewBlockerCode, ...] = ()
+
+    @model_validator(mode="after")
+    def _validate_blocker(self) -> "PrivilegedOperationSemanticReviewBlocker":
+        codes = tuple(sorted(self.codes))
+        if len(set(codes)) != len(codes):
+            raise ValueError("Privileged-operation semantic blocker codes must be unique")
+        object.__setattr__(self, "codes", codes)
+        blocked = bool(
+            self.policy_safety_blocker_count
+            or self.operational_readiness_blocker_count
+            or self.unreadable_secret_count
+            or codes
+        )
+        if blocked != (self.state in {"blocked", "error"}):
+            raise ValueError("Privileged-operation semantic blocker state does not match counts")
+        return self
+
+
+class PrivilegedOperationSemanticReviewLifecycle(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    status: PrivilegedOperationStatus
+    generated_at: str
+    expiry_state: PrivilegedOperationSemanticReviewExpiryState
+    created_at: str
+    updated_at: str
+    expires_at: str
+    terminal_at: str = ""
+    terminal_reason_available: bool = False
+    approval_recorded: bool = False
+    execution_recorded: bool = False
+
+    @model_validator(mode="after")
+    def _validate_lifecycle(self) -> "PrivilegedOperationSemanticReviewLifecycle":
+        object.__setattr__(self, "generated_at", _timestamp(self.generated_at, "generated_at"))
+        object.__setattr__(self, "created_at", _timestamp(self.created_at, "created_at"))
+        object.__setattr__(self, "updated_at", _timestamp(self.updated_at, "updated_at"))
+        object.__setattr__(self, "expires_at", _timestamp(self.expires_at, "expires_at"))
+        if self.terminal_at:
+            object.__setattr__(
+                self,
+                "terminal_at",
+                _timestamp(self.terminal_at, "terminal_at"),
+            )
+        if self.status == "expired" and self.expiry_state != "expired":
+            raise ValueError("Expired privileged-operation reviews require expired expiry state")
+        if self.expiry_state == "past_expiry_unreconciled" and self.status not in {
+            "planned",
+            "approved",
+        }:
+            raise ValueError(
+                "Only planned or approved reviews can be past expiry without reconciliation"
+            )
+        return self
+
+
+class PrivilegedOperationSemanticReviewChange(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    summary: str
+    changed: bool
+    metrics: tuple[PrivilegedOperationSemanticReviewMetric, ...] = ()
+
+    @model_validator(mode="after")
+    def _validate_change(self) -> "PrivilegedOperationSemanticReviewChange":
+        object.__setattr__(self, "summary", _required_token(self.summary, "summary"))
+        metric_kinds = tuple(metric.kind for metric in self.metrics)
+        if len(set(metric_kinds)) != len(metric_kinds):
+            raise ValueError("Privileged-operation semantic review metric kinds must be unique")
+        return self
+
+
+class PrivilegedOperationSemanticReviewBlastRadius(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    scope: Literal["managed_secret_store", "authorization_policy", "merge_train_policy"]
+    summary: str
+    affected_count: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def _validate_blast_radius(self) -> "PrivilegedOperationSemanticReviewBlastRadius":
+        object.__setattr__(self, "summary", _required_token(self.summary, "summary"))
+        return self
+
+
+class PrivilegedOperationSemanticReviewRollback(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    rollback_class: PrivilegedOperationSemanticReviewRollbackClass
+    summary: str
+
+    @model_validator(mode="after")
+    def _validate_rollback(self) -> "PrivilegedOperationSemanticReviewRollback":
+        object.__setattr__(self, "summary", _required_token(self.summary, "summary"))
+        return self
+
+
+class PrivilegedOperationSemanticReviewEvidence(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    result_status: Literal["ok", "blocked", "error"]
+    digests: tuple[PrivilegedOperationSemanticReviewDigest, ...]
+    raw_detail_available: bool = True
+    redaction: Literal["semantic_only"] = "semantic_only"
+
+    @model_validator(mode="after")
+    def _validate_evidence(self) -> "PrivilegedOperationSemanticReviewEvidence":
+        digest_kinds = tuple(digest.kind for digest in self.digests)
+        if len(set(digest_kinds)) != len(digest_kinds):
+            raise ValueError("Privileged-operation semantic review digest kinds must be unique")
+        required_kinds = {"request", "human_evidence", "plan", "pre_state"}
+        if not required_kinds.issubset(digest_kinds):
+            raise ValueError(
+                "Privileged-operation semantic review evidence is missing a required digest"
+            )
+        return self
+
+
+class PrivilegedOperationSemanticReviewActivityEntry(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    sequence: int = Field(ge=1, le=4)
+    action: PrivilegedOperationEventAction
+    occurred_at: str
+    source_kind: PrivilegedOperationSourceKind
+    actor_type: Literal["github_human", "terminal_agent", "system"]
+    reason_available: bool = False
+    event_id: str
+    resulting_record_digest: str
+
+    @model_validator(mode="after")
+    def _validate_activity(self) -> "PrivilegedOperationSemanticReviewActivityEntry":
+        object.__setattr__(self, "occurred_at", _timestamp(self.occurred_at, "occurred_at"))
+        object.__setattr__(
+            self,
+            "event_id",
+            _required_token(self.event_id, "event_id"),
+        )
+        object.__setattr__(
+            self,
+            "resulting_record_digest",
+            _sha256(self.resulting_record_digest, "resulting_record_digest"),
+        )
+        return self
+
+
+class PrivilegedOperationSemanticReview(BaseModel):
+    """Redacted read-only human review projection for a persisted operation."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: int = Field(default=1, ge=1)
+    operation_id: str
+    descriptor_id: PrivilegedOperationDescriptorId
+    descriptor_version: int
+    operation_class: PrivilegedOperationSemanticReviewClass
+    safety_class: PrivilegedOperationSafetyClass
+    title: PrivilegedOperationSemanticReviewTitle
+    requested_by_kind: Literal["github_human", "terminal_agent"]
+    lifecycle: PrivilegedOperationSemanticReviewLifecycle
+    blockers: PrivilegedOperationSemanticReviewBlocker
+    change: PrivilegedOperationSemanticReviewChange
+    blast_radius: PrivilegedOperationSemanticReviewBlastRadius
+    rollback: PrivilegedOperationSemanticReviewRollback
+    evidence: PrivilegedOperationSemanticReviewEvidence
+    activity: tuple[PrivilegedOperationSemanticReviewActivityEntry, ...] = ()
+    can_approve: bool
+    can_revoke: bool
+    authorizes_approval: Literal[False] = False
+    authorizes_execution: Literal[False] = False
+    persists_state: Literal[False] = False
+
+    @model_validator(mode="after")
+    def _validate_review(self) -> "PrivilegedOperationSemanticReview":
+        if self.schema_version != 1:
+            raise ValueError("Unsupported privileged-operation semantic review version.")
+        operation_id = _required_token(self.operation_id, "operation_id")
+        if _OPERATION_ID_PATTERN.fullmatch(operation_id) is None:
+            raise ValueError("Privileged-operation semantic review operation_id is not canonical")
+        object.__setattr__(self, "operation_id", operation_id)
+        if self.descriptor_version != 1:
+            raise ValueError("Unsupported privileged-operation semantic descriptor version.")
+        expected_descriptor_fields = {
+            "managed-secret-reencryption": (
+                "managed_secret_reencryption",
+                "secret_backed",
+                "Managed-secret re-encryption review",
+                "managed_secret_store",
+                "key_retained",
+            ),
+            "managed-authz-policy-set": (
+                "managed_authz_policy_set",
+                "policy_admin",
+                "Managed authorization policy review",
+                "authorization_policy",
+                "policy_cas",
+            ),
+            "managed-merge-train-policy-import": (
+                "managed_merge_train_policy_import",
+                "policy_admin",
+                "Managed merge-train policy review",
+                "merge_train_policy",
+                "policy_cas",
+            ),
+        }
+        actual_descriptor_fields = (
+            self.operation_class,
+            self.safety_class,
+            self.title,
+            self.blast_radius.scope,
+            self.rollback.rollback_class,
+        )
+        if actual_descriptor_fields != expected_descriptor_fields[self.descriptor_id]:
+            raise ValueError(
+                "Privileged-operation semantic review fields do not match the descriptor"
+            )
+        activity_order = tuple(
+            sorted(
+                self.activity,
+                key=lambda entry: (entry.sequence, entry.occurred_at, entry.event_id),
+            )
+        )
+        if self.activity != activity_order:
+            raise ValueError("Privileged-operation semantic review activity must be ordered")
+        if len({entry.sequence for entry in self.activity}) != len(self.activity) or len(
+            {entry.event_id for entry in self.activity}
+        ) != len(self.activity):
+            raise ValueError("Privileged-operation semantic review activity must be unique")
+        if self.can_approve and self.can_revoke:
+            raise ValueError("A privileged-operation review cannot be approvable and revocable")
+        if self.can_approve and self.lifecycle.status != "planned":
+            raise ValueError("Only planned privileged-operation reviews can be approvable")
+        if self.can_approve and self.blockers.state != "clear":
+            raise ValueError("Blocked privileged-operation reviews cannot be approvable")
+        if self.can_approve and self.lifecycle.expiry_state != "active":
+            raise ValueError("Past-expiry privileged-operation reviews cannot be approvable")
+        if self.can_revoke and self.lifecycle.status != "approved":
+            raise ValueError("Only approved privileged-operation reviews can be revocable")
+        if self.can_revoke and self.lifecycle.expiry_state != "active":
+            raise ValueError("Past-expiry privileged-operation reviews cannot be revocable")
+        return self
+
 
 def privileged_operation_request_digest(request: PrivilegedOperationRequest) -> str:
     return _digest_payload(request.model_dump(mode="json"))
