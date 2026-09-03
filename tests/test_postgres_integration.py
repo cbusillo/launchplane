@@ -209,6 +209,7 @@ from tests.test_odoo_prod_retained_volume_backup_import_storage import (
     _retained_operation_for_restore_lane,
 )
 from tests.test_odoo_stable_operation_worker import _restore_operation
+from tests.test_production_backup_authority import _dry_run_envelope, _source_target
 from tests.test_trusted_maintenance import (
     _candidate as _trusted_maintenance_candidate,
     _classification as _trusted_maintenance_classification,
@@ -1038,6 +1039,66 @@ def _owner_acceptance_system_event(
 
 
 class RealPostgresSchemaIntegrationTests(unittest.TestCase):
+    def test_production_backup_authority_schema_and_revision_fences(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            dry_run = _dry_run_envelope()
+            dry_result = store.apply_production_backup_authority(dry_run)
+            apply_envelope = dry_run.model_copy(
+                update={
+                    "mode": "apply",
+                    "reviewed_authority_digest": dry_result.authority_digest,
+                }
+            )
+            applied = store.apply_production_backup_authority(apply_envelope)
+            self.assertEqual(applied.status, "applied")
+
+            source = store.list_production_backup_target_records(target_id="example-prod-guest")[0]
+            revision_two = _source_target(
+                revision=2,
+                supersedes_record_id=source.record_id,
+            )
+            with self.assertRaises(IntegrityError):
+                with store._session_factory() as session:
+                    session.add(store._production_backup_target_row(revision_two))
+                    session.commit()
+
+            store.write_production_backup_target_record(revision_two)
+            retired = _source_target(
+                revision=3,
+                status="retired",
+                supersedes_record_id=revision_two.record_id,
+            )
+            store.write_production_backup_target_record(retired)
+            self.assertEqual(
+                store.list_production_backup_target_records(target_id="example-prod-guest")[
+                    0
+                ].status,
+                "retired",
+            )
+
+            engine = create_engine(store.database_url)
+            try:
+                inspector = inspect(engine)
+                target_indexes = {
+                    index["name"]
+                    for index in inspector.get_indexes("launchplane_production_backup_targets")
+                }
+                policy_indexes = {
+                    index["name"]
+                    for index in inspector.get_indexes("launchplane_production_backup_policies")
+                }
+            finally:
+                engine.dispose()
+
+        self.assertIn(
+            "launchplane_production_backup_target_active_uidx",
+            target_indexes,
+        )
+        self.assertIn(
+            "launchplane_production_backup_policy_active_uidx",
+            policy_indexes,
+        )
+
     def test_privileged_operation_worker_store_probes_schema_and_empty_poll(self) -> None:
         with _isolated_postgres_database() as database_url:
             _upgrade_empty_database_to_head(database_url)

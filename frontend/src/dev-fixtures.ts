@@ -487,6 +487,7 @@ export function operationalReadinessForFixture(
       method: action.method,
       route_path: action.route_path,
       supported: !unsupported,
+      requires_production_backup_policy: false,
       readiness_requirements: unsupported
         ? []
         : [
@@ -764,6 +765,7 @@ export function configStatusForFixture(
         trust_state: "missing",
       },
     ],
+    production_backup_authorities: [],
   };
 }
 

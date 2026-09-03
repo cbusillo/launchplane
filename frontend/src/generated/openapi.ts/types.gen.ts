@@ -384,6 +384,7 @@ export type DriverActionDescriptor = {
         [key: string]: unknown;
     };
     readiness_requirements: Array<'provider_target' | 'route_binding' | 'runtime_environment' | 'managed_secrets' | 'artifact' | 'deployment' | 'topology'>;
+    requires_production_backup_policy: boolean;
     route_path: string;
     safety: 'read' | 'safe_write' | 'mutation' | 'destructive';
     scope: 'global' | 'context' | 'instance' | 'preview';
@@ -447,6 +448,7 @@ export type DriverView = {
     lane_summary: LaunchplaneLaneSummary | null;
     preview_inventory_provenance: DataProvenance | null;
     preview_summaries: Array<LaunchplanePreviewSummary>;
+    production_backup_authorities: Array<ProductionBackupAuthorityStatus>;
 };
 
 export type EnvironmentInventory = {
@@ -2137,6 +2139,7 @@ export type ProductEnvironmentConfigStatus = {
     environment: string;
     managed_secrets: Array<ProductManagedSecretConfigStatusItem>;
     product: string;
+    production_backup_authorities: Array<ProductionBackupAuthorityStatus>;
     provenance: DataProvenance;
     repository: string;
     runtime_settings: Array<ProductRuntimeConfigStatusItem>;
@@ -2585,7 +2588,7 @@ export type ProductOperationalReadiness = {
     driver_id: string;
     generated_at: string;
     instance: string;
-    non_ready_dimensions: Array<'product_lane' | 'action' | 'authorization' | 'provider_target' | 'route_binding' | 'runtime_environment' | 'managed_secrets' | 'artifact' | 'deployment' | 'topology'>;
+    non_ready_dimensions: Array<'product_lane' | 'action' | 'authorization' | 'provider_target' | 'route_binding' | 'runtime_environment' | 'managed_secrets' | 'artifact' | 'deployment' | 'topology' | 'production_backup_policy'>;
     product: string;
     ready: boolean;
     repository: string;
@@ -2599,6 +2602,7 @@ export type ProductOperationalReadinessAction = {
     method: string;
     readiness_requirements: Array<'provider_target' | 'route_binding' | 'runtime_environment' | 'managed_secrets' | 'artifact' | 'deployment' | 'topology'>;
     requested_action: string;
+    requires_production_backup_policy: boolean;
     route_path: string;
     safety: string;
     scope: string;
@@ -2616,7 +2620,7 @@ export type ProductOperationalReadinessCaller = {
 
 export type ProductOperationalReadinessDimension = {
     details: Array<string>;
-    dimension: 'product_lane' | 'action' | 'authorization' | 'provider_target' | 'route_binding' | 'runtime_environment' | 'managed_secrets' | 'artifact' | 'deployment' | 'topology';
+    dimension: 'product_lane' | 'action' | 'authorization' | 'provider_target' | 'route_binding' | 'runtime_environment' | 'managed_secrets' | 'artifact' | 'deployment' | 'topology' | 'production_backup_policy';
     evidence: Array<ProductOperationalReadinessEvidence>;
     owner_record_type: string;
     remediation: ProductOperationalReadinessRemediation | null;
@@ -3021,6 +3025,16 @@ export type ProductTopologyWarning = {
     domain_name: string;
     scope: 'authority' | 'placement' | 'domains' | 'ingress' | 'tls' | 'observation';
     severity: 'warning' | 'error';
+};
+
+export type ProductionBackupAuthorityStatus = {
+    generated_at: string;
+    promotion_action: string;
+    ready: boolean;
+    reason_codes: Array<string>;
+    schema_version: number;
+    state: 'ready' | 'missing' | 'invalid' | 'stale' | 'retired';
+    summary: string;
 };
 
 export type PromotionRecordOutput = {

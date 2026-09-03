@@ -5097,6 +5097,11 @@
             "title": "Readiness Requirements",
             "type": "array"
           },
+          "requires_production_backup_policy": {
+            "default": false,
+            "title": "Requires Production Backup Policy",
+            "type": "boolean"
+          },
           "route_path": {
             "title": "Route Path",
             "type": "string"
@@ -5475,6 +5480,14 @@
               "$ref": "#/components/schemas/LaunchplanePreviewSummary"
             },
             "title": "Preview Summaries",
+            "type": "array"
+          },
+          "production_backup_authorities": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ProductionBackupAuthorityStatus"
+            },
+            "title": "Production Backup Authorities",
             "type": "array"
           }
         },
@@ -12504,6 +12517,104 @@
           "storage_backend"
         ],
         "title": "LaunchplaneRuntimeStatus",
+        "type": "object"
+      },
+      "LegacyProductionBackupMigrationRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "destination_target_id": {
+            "title": "Destination Target Id",
+            "type": "string"
+          },
+          "effective_at": {
+            "title": "Effective At",
+            "type": "string"
+          },
+          "independent_backup_max_evidence_age_seconds": {
+            "maximum": 604800.0,
+            "minimum": 1.0,
+            "title": "Independent Backup Max Evidence Age Seconds",
+            "type": "integer"
+          },
+          "instance": {
+            "title": "Instance",
+            "type": "string"
+          },
+          "mode": {
+            "enum": [
+              "dry_run",
+              "apply"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "promotion_action": {
+            "title": "Promotion Action",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "review_after": {
+            "title": "Review After",
+            "type": "string"
+          },
+          "reviewed_authority_digest": {
+            "default": "",
+            "title": "Reviewed Authority Digest",
+            "type": "string"
+          },
+          "runtime_environment_updated_at": {
+            "title": "Runtime Environment Updated At",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "snapshot_max_evidence_age_seconds": {
+            "maximum": 86400.0,
+            "minimum": 1.0,
+            "title": "Snapshot Max Evidence Age Seconds",
+            "type": "integer"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "source_target_id": {
+            "title": "Source Target Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "mode",
+          "product",
+          "context",
+          "instance",
+          "promotion_action",
+          "source_target_id",
+          "destination_target_id",
+          "runtime_environment_updated_at",
+          "effective_at",
+          "review_after",
+          "snapshot_max_evidence_age_seconds",
+          "independent_backup_max_evidence_age_seconds",
+          "source",
+          "reason"
+        ],
+        "title": "LegacyProductionBackupMigrationRequest",
         "type": "object"
       },
       "LocalAdminAccessPrincipal": {
@@ -23615,6 +23726,14 @@
             "title": "Product",
             "type": "string"
           },
+          "production_backup_authorities": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ProductionBackupAuthorityStatus"
+            },
+            "title": "Production Backup Authorities",
+            "type": "array"
+          },
           "provenance": {
             "$ref": "#/components/schemas/DataProvenance"
           },
@@ -26274,7 +26393,8 @@
                 "managed_secrets",
                 "artifact",
                 "deployment",
-                "topology"
+                "topology",
+                "production_backup_policy"
               ],
               "type": "string"
             },
@@ -26366,6 +26486,11 @@
           "requested_action": {
             "title": "Requested Action",
             "type": "string"
+          },
+          "requires_production_backup_policy": {
+            "default": false,
+            "title": "Requires Production Backup Policy",
+            "type": "boolean"
           },
           "route_path": {
             "default": "",
@@ -26462,7 +26587,8 @@
               "managed_secrets",
               "artifact",
               "deployment",
-              "topology"
+              "topology",
+              "production_backup_policy"
             ],
             "title": "Dimension",
             "type": "string"
@@ -29904,6 +30030,717 @@
         "title": "ProductTopologyWarning",
         "type": "object"
       },
+      "ProductionBackupAuthorityReadModel": {
+        "additionalProperties": false,
+        "properties": {
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "generated_at": {
+            "title": "Generated At",
+            "type": "string"
+          },
+          "instance": {
+            "title": "Instance",
+            "type": "string"
+          },
+          "policy": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProductionBackupPolicySummary"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "promotion_action": {
+            "title": "Promotion Action",
+            "type": "string"
+          },
+          "ready": {
+            "title": "Ready",
+            "type": "boolean"
+          },
+          "reason_codes": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Reason Codes",
+            "type": "array"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "state": {
+            "enum": [
+              "ready",
+              "missing",
+              "invalid",
+              "stale",
+              "retired"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "summary": {
+            "title": "Summary",
+            "type": "string"
+          },
+          "targets": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ProductionBackupTargetSummary"
+            },
+            "title": "Targets",
+            "type": "array"
+          }
+        },
+        "required": [
+          "product",
+          "context",
+          "instance",
+          "promotion_action",
+          "state",
+          "ready",
+          "summary",
+          "generated_at"
+        ],
+        "title": "ProductionBackupAuthorityReadModel",
+        "type": "object"
+      },
+      "ProductionBackupAuthorityReadResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "authority": {
+            "$ref": "#/components/schemas/ProductionBackupAuthorityReadModel"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "authority"
+        ],
+        "title": "ProductionBackupAuthorityReadResponse",
+        "type": "object"
+      },
+      "ProductionBackupAuthorityStatus": {
+        "additionalProperties": false,
+        "properties": {
+          "generated_at": {
+            "title": "Generated At",
+            "type": "string"
+          },
+          "promotion_action": {
+            "title": "Promotion Action",
+            "type": "string"
+          },
+          "ready": {
+            "title": "Ready",
+            "type": "boolean"
+          },
+          "reason_codes": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Reason Codes",
+            "type": "array"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "state": {
+            "enum": [
+              "ready",
+              "missing",
+              "invalid",
+              "stale",
+              "retired"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "summary": {
+            "title": "Summary",
+            "type": "string"
+          }
+        },
+        "required": [
+          "promotion_action",
+          "state",
+          "ready",
+          "summary",
+          "generated_at"
+        ],
+        "title": "ProductionBackupAuthorityStatus",
+        "type": "object"
+      },
+      "ProductionBackupAuthorityWriteEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "expected_current_policy_record_id": {
+            "default": "",
+            "title": "Expected Current Policy Record Id",
+            "type": "string"
+          },
+          "expected_current_target_record_ids": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Expected Current Target Record Ids",
+            "type": "object"
+          },
+          "mode": {
+            "enum": [
+              "dry_run",
+              "apply"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "policy": {
+            "$ref": "#/components/schemas/ProductionBackupPolicyRecord"
+          },
+          "reviewed_authority_digest": {
+            "default": "",
+            "title": "Reviewed Authority Digest",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "targets": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ProductionBackupTargetRecord"
+            },
+            "title": "Targets",
+            "type": "array"
+          }
+        },
+        "required": [
+          "mode",
+          "policy"
+        ],
+        "title": "ProductionBackupAuthorityWriteEnvelope",
+        "type": "object"
+      },
+      "ProductionBackupAuthorityWriteResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "original_trace_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Original Trace Id",
+            "x-launchplane-optional-response": true
+          },
+          "replayed": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Replayed",
+            "x-launchplane-optional-response": true
+          },
+          "result": {
+            "$ref": "#/components/schemas/ProductionBackupAuthorityWriteResult"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "result"
+        ],
+        "title": "ProductionBackupAuthorityWriteResponse",
+        "type": "object"
+      },
+      "ProductionBackupAuthorityWriteResult": {
+        "additionalProperties": false,
+        "properties": {
+          "authority_digest": {
+            "title": "Authority Digest",
+            "type": "string"
+          },
+          "mode": {
+            "enum": [
+              "dry_run",
+              "apply"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "policy": {
+            "$ref": "#/components/schemas/ProductionBackupPolicySummary"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "would_apply",
+              "applied",
+              "replayed"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "targets": {
+            "items": {
+              "$ref": "#/components/schemas/ProductionBackupTargetSummary"
+            },
+            "title": "Targets",
+            "type": "array"
+          }
+        },
+        "required": [
+          "mode",
+          "status",
+          "authority_digest",
+          "policy",
+          "targets"
+        ],
+        "title": "ProductionBackupAuthorityWriteResult",
+        "type": "object"
+      },
+      "ProductionBackupPolicyRecord": {
+        "additionalProperties": false,
+        "properties": {
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "effective_at": {
+            "title": "Effective At",
+            "type": "string"
+          },
+          "fast_snapshot": {
+            "$ref": "#/components/schemas/ProductionFastSnapshotPolicy"
+          },
+          "independent_backup": {
+            "$ref": "#/components/schemas/ProductionIndependentBackupPolicy"
+          },
+          "instance": {
+            "title": "Instance",
+            "type": "string"
+          },
+          "policy_digest": {
+            "default": "",
+            "title": "Policy Digest",
+            "type": "string"
+          },
+          "policy_id": {
+            "default": "",
+            "title": "Policy Id",
+            "type": "string"
+          },
+          "policy_revision": {
+            "minimum": 1.0,
+            "title": "Policy Revision",
+            "type": "integer"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "promotion_action": {
+            "title": "Promotion Action",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "record_id": {
+            "default": "",
+            "title": "Record Id",
+            "type": "string"
+          },
+          "review_after": {
+            "title": "Review After",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "status": {
+            "default": "active",
+            "enum": [
+              "active",
+              "superseded",
+              "retired"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "supersedes_record_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supersedes Record Id"
+          }
+        },
+        "required": [
+          "product",
+          "context",
+          "instance",
+          "promotion_action",
+          "policy_revision",
+          "fast_snapshot",
+          "independent_backup",
+          "effective_at",
+          "review_after",
+          "source",
+          "reason"
+        ],
+        "title": "ProductionBackupPolicyRecord",
+        "type": "object"
+      },
+      "ProductionBackupPolicySummary": {
+        "additionalProperties": false,
+        "properties": {
+          "destination_target_id": {
+            "title": "Destination Target Id",
+            "type": "string"
+          },
+          "effective_at": {
+            "title": "Effective At",
+            "type": "string"
+          },
+          "policy_id": {
+            "title": "Policy Id",
+            "type": "string"
+          },
+          "policy_revision": {
+            "minimum": 1.0,
+            "title": "Policy Revision",
+            "type": "integer"
+          },
+          "promotion_action": {
+            "title": "Promotion Action",
+            "type": "string"
+          },
+          "record_id": {
+            "title": "Record Id",
+            "type": "string"
+          },
+          "review_after": {
+            "title": "Review After",
+            "type": "string"
+          },
+          "source_target_id": {
+            "title": "Source Target Id",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "active",
+              "superseded",
+              "retired"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "policy_id",
+          "record_id",
+          "policy_revision",
+          "status",
+          "promotion_action",
+          "source_target_id",
+          "destination_target_id",
+          "effective_at",
+          "review_after"
+        ],
+        "title": "ProductionBackupPolicySummary",
+        "type": "object"
+      },
+      "ProductionBackupTargetRecord": {
+        "additionalProperties": false,
+        "properties": {
+          "destination": {
+            "discriminator": {
+              "mapping": {
+                "proxmox_guest": "#/components/schemas/ProxmoxGuestBackupDestinationReference",
+                "proxmox_storage": "#/components/schemas/ProxmoxStorageBackupDestinationReference"
+              },
+              "propertyName": "destination_kind"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ProxmoxGuestBackupDestinationReference"
+              },
+              {
+                "$ref": "#/components/schemas/ProxmoxStorageBackupDestinationReference"
+              }
+            ],
+            "title": "Destination"
+          },
+          "effective_at": {
+            "title": "Effective At",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "record_id": {
+            "default": "",
+            "title": "Record Id",
+            "type": "string"
+          },
+          "review_after": {
+            "title": "Review After",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "status": {
+            "default": "active",
+            "enum": [
+              "active",
+              "superseded",
+              "retired"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "supersedes_record_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supersedes Record Id"
+          },
+          "target_digest": {
+            "default": "",
+            "title": "Target Digest",
+            "type": "string"
+          },
+          "target_id": {
+            "title": "Target Id",
+            "type": "string"
+          },
+          "target_revision": {
+            "minimum": 1.0,
+            "title": "Target Revision",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "target_id",
+          "target_revision",
+          "destination",
+          "effective_at",
+          "review_after",
+          "source",
+          "reason"
+        ],
+        "title": "ProductionBackupTargetRecord",
+        "type": "object"
+      },
+      "ProductionBackupTargetSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "destination_kind": {
+            "enum": [
+              "proxmox_guest",
+              "proxmox_storage"
+            ],
+            "title": "Destination Kind",
+            "type": "string"
+          },
+          "effective_at": {
+            "title": "Effective At",
+            "type": "string"
+          },
+          "provider_type": {
+            "const": "proxmox",
+            "title": "Provider Type",
+            "type": "string"
+          },
+          "record_id": {
+            "title": "Record Id",
+            "type": "string"
+          },
+          "review_after": {
+            "title": "Review After",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "active",
+              "superseded",
+              "retired"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "target_id": {
+            "title": "Target Id",
+            "type": "string"
+          },
+          "target_revision": {
+            "minimum": 1.0,
+            "title": "Target Revision",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "target_id",
+          "record_id",
+          "target_revision",
+          "status",
+          "provider_type",
+          "destination_kind",
+          "effective_at",
+          "review_after"
+        ],
+        "title": "ProductionBackupTargetSummary",
+        "type": "object"
+      },
+      "ProductionFastSnapshotPolicy": {
+        "additionalProperties": false,
+        "properties": {
+          "max_evidence_age_seconds": {
+            "maximum": 86400.0,
+            "minimum": 1.0,
+            "title": "Max Evidence Age Seconds",
+            "type": "integer"
+          },
+          "operation": {
+            "const": "fast_snapshot",
+            "default": "fast_snapshot",
+            "title": "Operation",
+            "type": "string"
+          },
+          "retention_count": {
+            "maximum": 100.0,
+            "minimum": 0.0,
+            "title": "Retention Count",
+            "type": "integer"
+          },
+          "snapshot_prefix": {
+            "title": "Snapshot Prefix",
+            "type": "string"
+          },
+          "source_target_id": {
+            "title": "Source Target Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_target_id",
+          "snapshot_prefix",
+          "retention_count",
+          "max_evidence_age_seconds"
+        ],
+        "title": "ProductionFastSnapshotPolicy",
+        "type": "object"
+      },
+      "ProductionIndependentBackupPolicy": {
+        "additionalProperties": false,
+        "properties": {
+          "destination_target_id": {
+            "title": "Destination Target Id",
+            "type": "string"
+          },
+          "max_evidence_age_seconds": {
+            "maximum": 604800.0,
+            "minimum": 1.0,
+            "title": "Max Evidence Age Seconds",
+            "type": "integer"
+          },
+          "operation": {
+            "const": "independent_backup",
+            "default": "independent_backup",
+            "title": "Operation",
+            "type": "string"
+          },
+          "source_target_id": {
+            "title": "Source Target Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_target_id",
+          "destination_target_id",
+          "max_evidence_age_seconds"
+        ],
+        "title": "ProductionIndependentBackupPolicy",
+        "type": "object"
+      },
       "PromotionEvidenceRequest": {
         "additionalProperties": false,
         "properties": {
@@ -30362,6 +31199,87 @@
           "updated_at"
         ],
         "title": "ProviderTargetRecord",
+        "type": "object"
+      },
+      "ProxmoxGuestBackupDestinationReference": {
+        "additionalProperties": false,
+        "properties": {
+          "destination_kind": {
+            "const": "proxmox_guest",
+            "default": "proxmox_guest",
+            "title": "Destination Kind",
+            "type": "string"
+          },
+          "guest_id": {
+            "title": "Guest Id",
+            "type": "string"
+          },
+          "guest_kind": {
+            "enum": [
+              "lxc",
+              "qemu"
+            ],
+            "title": "Guest Kind",
+            "type": "string"
+          },
+          "host": {
+            "title": "Host",
+            "type": "string"
+          },
+          "provider_type": {
+            "const": "proxmox",
+            "default": "proxmox",
+            "title": "Provider Type",
+            "type": "string"
+          },
+          "username": {
+            "title": "Username",
+            "type": "string"
+          }
+        },
+        "required": [
+          "host",
+          "username",
+          "guest_kind",
+          "guest_id"
+        ],
+        "title": "ProxmoxGuestBackupDestinationReference",
+        "type": "object"
+      },
+      "ProxmoxStorageBackupDestinationReference": {
+        "additionalProperties": false,
+        "properties": {
+          "destination_kind": {
+            "const": "proxmox_storage",
+            "default": "proxmox_storage",
+            "title": "Destination Kind",
+            "type": "string"
+          },
+          "host": {
+            "title": "Host",
+            "type": "string"
+          },
+          "provider_type": {
+            "const": "proxmox",
+            "default": "proxmox",
+            "title": "Provider Type",
+            "type": "string"
+          },
+          "storage_id": {
+            "title": "Storage Id",
+            "type": "string"
+          },
+          "username": {
+            "title": "Username",
+            "type": "string"
+          }
+        },
+        "required": [
+          "host",
+          "username",
+          "storage_id"
+        ],
+        "title": "ProxmoxStorageBackupDestinationReference",
         "type": "object"
       },
       "PublicIngressMonitorRunOnceRequest": {
@@ -70378,6 +71296,332 @@
           }
         },
         "summary": "Plan or apply audited generic-web product retirement"
+      }
+    },
+    "/v1/production-backup-authority": {
+      "get": {
+        "operationId": "read_production_backup_authority",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "context",
+            "required": true,
+            "schema": {
+              "title": "Context",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "instance",
+            "required": true,
+            "schema": {
+              "title": "Instance",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "promotion_action",
+            "required": true,
+            "schema": {
+              "title": "Promotion Action",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductionBackupAuthorityReadResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read exact production backup target and policy readiness"
+      }
+    },
+    "/v1/production-backup-authority/apply": {
+      "post": {
+        "operationId": "apply_production_backup_authority",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProductionBackupAuthorityWriteEnvelope"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductionBackupAuthorityWriteResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Dry-run or apply typed production backup authority"
+      }
+    },
+    "/v1/production-backup-authority/legacy-runtime-migration": {
+      "post": {
+        "operationId": "migrate_legacy_production_backup_authority",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LegacyProductionBackupMigrationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductionBackupAuthorityWriteResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Dry-run or apply an exact legacy runtime backup migration"
       }
     },
     "/v1/products": {

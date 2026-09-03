@@ -198,6 +198,17 @@ live authority across DB, files, and process env:
   `VERIREEL_PROD_SNAPSHOT_PREFIX`, `VERIREEL_PROD_SNAPSHOT_KEEP`, and
   `VERIREEL_PROD_GATE_HEALTH_TIMEOUT_MS` from DB-backed runtime-environment
   records before it captures the backup gate
+- typed production backup target records now own non-secret Proxmox guest and
+  storage destination authority, while typed production backup policy records
+  own the exact promotion action's required snapshot and independent-backup
+  shape; neither record may contain credentials or secret material
+- product config, driver views, and operational readiness read those typed
+  records and report missing, invalid, stale, retired, or ready state without
+  exposing provider destination values
+- the explicit legacy runtime migration can copy the current VeriReel backup
+  topology into typed records only from one exact DB-backed instance runtime
+  record and a reviewed digest; it leaves the live legacy worker contract in
+  place until the provider-neutral execution and enforcement slices land
 - VeriReel app maintenance, preview refresh, preview destroy, and preview
   inventory routes resolve Dokploy host, token, preview URL shape, app identity,
   and target identity from Launchplane-managed secrets plus DB-backed runtime

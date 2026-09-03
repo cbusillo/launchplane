@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from fnmatch import fnmatchcase
 from typing import Literal, Protocol
 
@@ -31,6 +32,10 @@ from control_plane.contracts.product_profile_record import (
     product_lane_monitoring_probe_effective,
     product_config_requirement_applies_to_lane,
 )
+from control_plane.contracts.production_backup_authority import (
+    ProductionBackupAuthorityStatus,
+    production_backup_authority_status,
+)
 from control_plane.contracts.product_topology_read_model import (
     ProductEnvironmentTopology,
     build_product_environment_topology,
@@ -53,6 +58,10 @@ from control_plane.drivers.registry import (
     effective_driver_actions,
     list_driver_descriptors,
     read_driver_descriptor,
+)
+from control_plane.production_backup_authority import (
+    require_production_backup_authority_store,
+    resolve_production_backup_authority,
 )
 
 
@@ -520,6 +529,7 @@ class ProductEnvironmentConfigStatus(BaseModel):
     context: str
     runtime_settings: tuple[ProductRuntimeConfigStatusItem, ...] = ()
     managed_secrets: tuple[ProductManagedSecretConfigStatusItem, ...] = ()
+    production_backup_authorities: tuple[ProductionBackupAuthorityStatus, ...] = ()
     write_availability: ProductConfigWriteAvailability
     warnings: tuple[str, ...] = ()
     trust_state: FreshnessStatus
@@ -731,11 +741,22 @@ def build_product_environment_config_status(
         lane=lane,
         lane_summary=lane_summary,
     )
+    production_backup_authorities = _production_backup_authority_read_models(
+        record_store=record_store,
+        profile=profile,
+        lane=lane,
+        descriptor=descriptor,
+        action_allowed=action_allowed or _deny_action,
+    )
     warnings = tuple(warning for warning in (descriptor_warning,) if warning)
     trust_state = _combine_trust_states(
         (
             *(_config_item_freshness(item.status) for item in runtime_settings),
             *(_config_item_freshness(item.status) for item in managed_secrets),
+            *(
+                _production_backup_authority_freshness(authority)
+                for authority in production_backup_authorities
+            ),
         ),
         fallback=provenance.freshness_status,
     )
@@ -749,6 +770,7 @@ def build_product_environment_config_status(
         context=lane.context,
         runtime_settings=runtime_settings,
         managed_secrets=managed_secrets,
+        production_backup_authorities=production_backup_authorities,
         write_availability=_product_config_write_availability(
             profile=profile,
             lane=lane,
@@ -761,6 +783,72 @@ def build_product_environment_config_status(
         trust_state=trust_state,
         provenance=provenance,
     )
+
+
+def _production_backup_authority_read_models(
+    *,
+    record_store: object,
+    profile: LaunchplaneProductProfileRecord,
+    lane: ProductLaneProfile,
+    descriptor: DriverDescriptor | None,
+    action_allowed: ActionAllowed,
+) -> tuple[ProductionBackupAuthorityStatus, ...]:
+    if descriptor is None:
+        return ()
+    promotion_actions = tuple(
+        action
+        for action in effective_driver_actions(descriptor)
+        if action.requires_production_backup_policy
+        and action.authz_action
+        and action_allowed(
+            "production_backup_authority.read",
+            profile.product,
+            lane.context,
+            (lane.instance,),
+        )
+    )
+    if not promotion_actions:
+        return ()
+    generated_at = (
+        datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    )
+    try:
+        authority_store = require_production_backup_authority_store(record_store)
+    except TypeError:
+        return tuple(
+            ProductionBackupAuthorityStatus(
+                promotion_action=action.authz_action,
+                state="invalid",
+                ready=False,
+                summary="Production backup authority storage is unavailable.",
+                reason_codes=("production_backup_authority_store_unavailable",),
+                generated_at=generated_at,
+            )
+            for action in promotion_actions
+        )
+    return tuple(
+        production_backup_authority_status(
+            resolve_production_backup_authority(
+                record_store=authority_store,
+                product=profile.product,
+                context=lane.context,
+                instance=lane.instance,
+                promotion_action=action.authz_action,
+                generated_at=generated_at,
+            )
+        )
+        for action in promotion_actions
+    )
+
+
+def _production_backup_authority_freshness(
+    authority: ProductionBackupAuthorityStatus,
+) -> FreshnessStatus:
+    if authority.state == "ready":
+        return "recorded"
+    if authority.state == "stale":
+        return "stale"
+    return "missing"
 
 
 def _deny_action(

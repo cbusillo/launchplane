@@ -284,6 +284,10 @@ from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     product_profile_record_sha256,
 )
+from control_plane.contracts.production_backup_authority import (
+    ProductionBackupPolicyRecord,
+    ProductionBackupTargetRecord,
+)
 from control_plane.contracts.product_retirement import ProductRetirementRecord
 from control_plane.contracts.detached_application_retirement import (
     DetachedApplicationRetirementRecord,
@@ -360,6 +364,17 @@ from control_plane.repository_inventory import (
     RepositoryInventorySequenceError,
     plan_repository_inventory_append,
 )
+from control_plane.production_backup_authority import (
+    ProductionBackupAuthorityWritePlan,
+    ProductionBackupAuthorityWriteEnvelope,
+    ProductionBackupAuthorityWriteResult,
+    ProductionBackupPolicyAppendPlan,
+    ProductionBackupTargetAppendPlan,
+    plan_production_backup_policy_append,
+    plan_production_backup_authority_write_from_records,
+    plan_production_backup_target_append,
+    validate_production_backup_policy_binding,
+)
 from control_plane.trusted_maintenance import (
     TrustedMaintenanceAuthorityError,
     TrustedMaintenanceExpectedAuthority,
@@ -427,6 +442,13 @@ TenantRepositoryClassificationCompareWriteStatus = Literal[
     "reconciliation_required",
 ]
 RepositoryInventoryCompareWriteStatus = Literal[
+    "written",
+    "replayed",
+    "idempotency_conflict",
+    "reservation_in_progress",
+    "reconciliation_required",
+]
+ProductionBackupAuthorityCompareWriteStatus = Literal[
     "written",
     "replayed",
     "idempotency_conflict",
@@ -564,6 +586,12 @@ class TenantRepositoryClassificationCompareWriteResult(NamedTuple):
 
 class RepositoryInventoryCompareWriteResult(NamedTuple):
     status: RepositoryInventoryCompareWriteStatus
+    idempotency_record: LaunchplaneIdempotencyRecord | None = None
+
+
+class ProductionBackupAuthorityCompareWriteResult(NamedTuple):
+    status: ProductionBackupAuthorityCompareWriteStatus
+    result: ProductionBackupAuthorityWriteResult | None = None
     idempotency_record: LaunchplaneIdempotencyRecord | None = None
 
 
@@ -827,6 +855,116 @@ class LaunchplaneBackupGateRow(Base):
     instance: Mapped[str] = mapped_column(String, nullable=False)
     created_at: Mapped[str] = mapped_column(String, nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneProductionBackupTargetRow(Base):
+    __tablename__ = "launchplane_production_backup_targets"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('active', 'superseded', 'retired')",
+            name="launchplane_production_backup_target_status_ck",
+        ),
+        CheckConstraint(
+            "target_revision >= 1",
+            name="launchplane_production_backup_target_revision_ck",
+        ),
+        CheckConstraint(
+            "(target_revision = 1 AND supersedes_record_id IS NULL) OR "
+            "(target_revision > 1 AND supersedes_record_id IS NOT NULL)",
+            name="launchplane_production_backup_target_supersedes_ck",
+        ),
+        Index(
+            "launchplane_production_backup_target_revision_uidx",
+            "target_id",
+            "target_revision",
+            unique=True,
+        ),
+        Index(
+            "launchplane_production_backup_target_active_uidx",
+            "target_id",
+            unique=True,
+            sqlite_where=text("status = 'active'"),
+            postgresql_where=text("status = 'active'"),
+        ),
+        Index(
+            "launchplane_production_backup_target_current_idx",
+            "target_id",
+            "status",
+            desc("target_revision"),
+        ),
+    )
+
+    record_id: Mapped[str] = mapped_column(String, primary_key=True)
+    target_id: Mapped[str] = mapped_column(String, nullable=False)
+    target_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    provider_type: Mapped[str] = mapped_column(String, nullable=False)
+    destination_kind: Mapped[str] = mapped_column(String, nullable=False)
+    effective_at: Mapped[str] = mapped_column(String, nullable=False)
+    review_after: Mapped[str] = mapped_column(String, nullable=False)
+    supersedes_record_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    target_digest: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneProductionBackupPolicyRow(Base):
+    __tablename__ = "launchplane_production_backup_policies"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('active', 'superseded', 'retired')",
+            name="launchplane_production_backup_policy_status_ck",
+        ),
+        CheckConstraint(
+            "policy_revision >= 1",
+            name="launchplane_production_backup_policy_revision_ck",
+        ),
+        CheckConstraint(
+            "(policy_revision = 1 AND supersedes_record_id IS NULL) OR "
+            "(policy_revision > 1 AND supersedes_record_id IS NOT NULL)",
+            name="launchplane_production_backup_policy_supersedes_ck",
+        ),
+        Index(
+            "launchplane_production_backup_policy_revision_uidx",
+            "policy_id",
+            "policy_revision",
+            unique=True,
+        ),
+        Index(
+            "launchplane_production_backup_policy_active_uidx",
+            "product",
+            "context",
+            "instance",
+            "promotion_action",
+            unique=True,
+            sqlite_where=text("status = 'active'"),
+            postgresql_where=text("status = 'active'"),
+        ),
+        Index(
+            "launchplane_production_backup_policy_current_idx",
+            "product",
+            "context",
+            "instance",
+            "promotion_action",
+            "status",
+            desc("policy_revision"),
+        ),
+    )
+
+    record_id: Mapped[str] = mapped_column(String, primary_key=True)
+    policy_id: Mapped[str] = mapped_column(String, nullable=False)
+    product: Mapped[str] = mapped_column(String, nullable=False)
+    context: Mapped[str] = mapped_column(String, nullable=False)
+    instance: Mapped[str] = mapped_column(String, nullable=False)
+    promotion_action: Mapped[str] = mapped_column(String, nullable=False)
+    policy_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    source_target_id: Mapped[str] = mapped_column(String, nullable=False)
+    destination_target_id: Mapped[str] = mapped_column(String, nullable=False)
+    effective_at: Mapped[str] = mapped_column(String, nullable=False)
+    review_after: Mapped[str] = mapped_column(String, nullable=False)
+    supersedes_record_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    policy_digest: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -5024,6 +5162,326 @@ class PostgresRecordStore(HumanSessionStore):
             ),
             limit=limit,
         )
+
+    def _production_backup_target_row(
+        self, record: ProductionBackupTargetRecord
+    ) -> LaunchplaneProductionBackupTargetRow:
+        return LaunchplaneProductionBackupTargetRow(
+            record_id=record.record_id,
+            target_id=record.target_id,
+            target_revision=record.target_revision,
+            status=record.status,
+            provider_type=record.provider_type,
+            destination_kind=record.destination_kind,
+            effective_at=record.effective_at,
+            review_after=record.review_after,
+            supersedes_record_id=record.supersedes_record_id,
+            target_digest=record.target_digest,
+            payload=self._payload_dict(record),
+        )
+
+    def write_production_backup_target_record(
+        self, record: ProductionBackupTargetRecord
+    ) -> Literal["written", "replayed"]:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_product_authority_bundle_write(session)
+            rows = session.scalars(
+                select(LaunchplaneProductionBackupTargetRow)
+                .where(LaunchplaneProductionBackupTargetRow.target_id == record.target_id)
+                .order_by(LaunchplaneProductionBackupTargetRow.target_revision.asc())
+                .with_for_update()
+            ).all()
+            records = tuple(
+                self._read_payload(
+                    model_type=ProductionBackupTargetRecord,
+                    payload=row.payload,
+                )
+                for row in rows
+            )
+            plan = plan_production_backup_target_append(records=records, record=record)
+            if plan.status == "replayed":
+                return "replayed"
+            if plan.superseded_current_record is not None:
+                session.merge(self._production_backup_target_row(plan.superseded_current_record))
+                session.flush()
+            session.add(self._production_backup_target_row(record))
+            session.commit()
+        return "written"
+
+    def read_production_backup_target_record(self, record_id: str) -> ProductionBackupTargetRecord:
+        return self._read_model(
+            model_type=ProductionBackupTargetRecord,
+            orm_model=LaunchplaneProductionBackupTargetRow,
+            filters=(LaunchplaneProductionBackupTargetRow.record_id == record_id,),
+        )
+
+    def list_production_backup_target_records(
+        self,
+        *,
+        target_id: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[ProductionBackupTargetRecord, ...]:
+        filters: list[object] = []
+        if target_id:
+            filters.append(LaunchplaneProductionBackupTargetRow.target_id == target_id)
+        if status:
+            filters.append(LaunchplaneProductionBackupTargetRow.status == status)
+        return self._list_models(
+            model_type=ProductionBackupTargetRecord,
+            orm_model=LaunchplaneProductionBackupTargetRow,
+            filters=filters,
+            order_by=(
+                LaunchplaneProductionBackupTargetRow.target_revision.desc(),
+                LaunchplaneProductionBackupTargetRow.target_id.asc(),
+                LaunchplaneProductionBackupTargetRow.record_id.asc(),
+            ),
+            limit=limit,
+        )
+
+    def _production_backup_policy_row(
+        self, record: ProductionBackupPolicyRecord
+    ) -> LaunchplaneProductionBackupPolicyRow:
+        return LaunchplaneProductionBackupPolicyRow(
+            record_id=record.record_id,
+            policy_id=record.policy_id,
+            product=record.product,
+            context=record.context,
+            instance=record.instance,
+            promotion_action=record.promotion_action,
+            policy_revision=record.policy_revision,
+            status=record.status,
+            source_target_id=record.fast_snapshot.source_target_id,
+            destination_target_id=record.independent_backup.destination_target_id,
+            effective_at=record.effective_at,
+            review_after=record.review_after,
+            supersedes_record_id=record.supersedes_record_id,
+            policy_digest=record.policy_digest,
+            payload=self._payload_dict(record),
+        )
+
+    def write_production_backup_policy_record(
+        self, record: ProductionBackupPolicyRecord
+    ) -> Literal["written", "replayed"]:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_product_authority_bundle_write(session)
+            policy_rows = session.scalars(
+                select(LaunchplaneProductionBackupPolicyRow)
+                .where(LaunchplaneProductionBackupPolicyRow.policy_id == record.policy_id)
+                .order_by(LaunchplaneProductionBackupPolicyRow.policy_revision.asc())
+                .with_for_update()
+            ).all()
+            records = tuple(
+                self._read_payload(
+                    model_type=ProductionBackupPolicyRecord,
+                    payload=row.payload,
+                )
+                for row in policy_rows
+            )
+            if record.status == "active":
+                target_rows = session.scalars(
+                    select(LaunchplaneProductionBackupTargetRow).with_for_update()
+                ).all()
+                validate_production_backup_policy_binding(
+                    policy=record,
+                    target_records=tuple(
+                        self._read_payload(
+                            model_type=ProductionBackupTargetRecord,
+                            payload=row.payload,
+                        )
+                        for row in target_rows
+                    ),
+                )
+            plan = plan_production_backup_policy_append(records=records, record=record)
+            if plan.status == "replayed":
+                return "replayed"
+            if plan.superseded_current_record is not None:
+                session.merge(self._production_backup_policy_row(plan.superseded_current_record))
+                session.flush()
+            session.add(self._production_backup_policy_row(record))
+            session.commit()
+        return "written"
+
+    def read_production_backup_policy_record(self, record_id: str) -> ProductionBackupPolicyRecord:
+        return self._read_model(
+            model_type=ProductionBackupPolicyRecord,
+            orm_model=LaunchplaneProductionBackupPolicyRow,
+            filters=(LaunchplaneProductionBackupPolicyRow.record_id == record_id,),
+        )
+
+    def list_production_backup_policy_records(
+        self,
+        *,
+        product: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        promotion_action: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[ProductionBackupPolicyRecord, ...]:
+        filters: list[object] = []
+        if product:
+            filters.append(LaunchplaneProductionBackupPolicyRow.product == product)
+        if context_name:
+            filters.append(LaunchplaneProductionBackupPolicyRow.context == context_name)
+        if instance_name:
+            filters.append(LaunchplaneProductionBackupPolicyRow.instance == instance_name)
+        if promotion_action:
+            filters.append(
+                LaunchplaneProductionBackupPolicyRow.promotion_action == promotion_action
+            )
+        if status:
+            filters.append(LaunchplaneProductionBackupPolicyRow.status == status)
+        return self._list_models(
+            model_type=ProductionBackupPolicyRecord,
+            orm_model=LaunchplaneProductionBackupPolicyRow,
+            filters=filters,
+            order_by=(
+                LaunchplaneProductionBackupPolicyRow.policy_revision.desc(),
+                LaunchplaneProductionBackupPolicyRow.product.asc(),
+                LaunchplaneProductionBackupPolicyRow.context.asc(),
+                LaunchplaneProductionBackupPolicyRow.instance.asc(),
+                LaunchplaneProductionBackupPolicyRow.promotion_action.asc(),
+                LaunchplaneProductionBackupPolicyRow.record_id.asc(),
+            ),
+            limit=limit,
+        )
+
+    def apply_production_backup_authority(
+        self, envelope: ProductionBackupAuthorityWriteEnvelope
+    ) -> ProductionBackupAuthorityWriteResult:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_product_authority_bundle_write(session)
+            plan = self._plan_production_backup_authority_in_session(
+                session=session,
+                envelope=envelope,
+            )
+            if envelope.mode == "dry_run" or plan.result.status == "replayed":
+                return plan.result
+            self._write_production_backup_authority_plan(
+                session=session,
+                envelope=envelope,
+                target_plans=plan.target_plans,
+                policy_plan=plan.policy_plan,
+            )
+            session.commit()
+            return plan.result.model_copy(update={"status": "applied"})
+
+    def compare_and_apply_production_backup_authority(
+        self,
+        *,
+        envelope: ProductionBackupAuthorityWriteEnvelope,
+        mutation: DbOnlyMutationRequest,
+        response_payload_builder: Callable[[ProductionBackupAuthorityWriteResult], dict[str, Any]],
+    ) -> ProductionBackupAuthorityCompareWriteResult:
+        if envelope.mode != "apply":
+            raise ValueError("Production backup authority compare-write requires apply mode.")
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            reservation_status, reservation_row, reservation = (
+                self._reserve_db_only_mutation_in_session(
+                    session=session,
+                    mutation=mutation,
+                )
+            )
+            if reservation_status != "acquired":
+                return ProductionBackupAuthorityCompareWriteResult(
+                    status=cast(ProductionBackupAuthorityCompareWriteStatus, reservation_status),
+                    idempotency_record=reservation,
+                )
+            assert reservation_row is not None
+            self._lock_product_authority_bundle_write(session)
+            try:
+                plan = self._plan_production_backup_authority_in_session(
+                    session=session,
+                    envelope=envelope,
+                )
+            except Exception:
+                session.delete(reservation_row)
+                session.commit()
+                raise
+            self._write_production_backup_authority_plan(
+                session=session,
+                envelope=envelope,
+                target_plans=plan.target_plans,
+                policy_plan=plan.policy_plan,
+            )
+            applied_result = plan.result.model_copy(update={"status": "applied"})
+            completed_at = self._database_mutation_timestamp(session)
+            completion = complete_launchplane_mutation_reservation(
+                reservation,
+                response_status_code=mutation.response_status_code,
+                response_trace_id=mutation.response_trace_id,
+                completed_at=completed_at,
+                response_payload=response_payload_builder(applied_result),
+            )
+            self._sync_idempotency_row(reservation_row, completion)
+            session.commit()
+            return ProductionBackupAuthorityCompareWriteResult(
+                status="written",
+                result=applied_result,
+                idempotency_record=completion,
+            )
+
+    def _plan_production_backup_authority_in_session(
+        self,
+        *,
+        session: Any,
+        envelope: ProductionBackupAuthorityWriteEnvelope,
+    ) -> ProductionBackupAuthorityWritePlan:
+        target_statement = select(LaunchplaneProductionBackupTargetRow)
+        policy_statement = select(LaunchplaneProductionBackupPolicyRow)
+        if not self.database_url.startswith("sqlite"):
+            target_statement = target_statement.with_for_update()
+            policy_statement = policy_statement.with_for_update()
+        target_records = tuple(
+            self._read_payload(
+                model_type=ProductionBackupTargetRecord,
+                payload=row.payload,
+            )
+            for row in session.scalars(target_statement).all()
+        )
+        policy_records = tuple(
+            self._read_payload(
+                model_type=ProductionBackupPolicyRecord,
+                payload=row.payload,
+            )
+            for row in session.scalars(policy_statement).all()
+        )
+        return plan_production_backup_authority_write_from_records(
+            target_records=target_records,
+            policy_records=policy_records,
+            envelope=envelope,
+        )
+
+    def _write_production_backup_authority_plan(
+        self,
+        *,
+        session: Any,
+        envelope: ProductionBackupAuthorityWriteEnvelope,
+        target_plans: tuple[ProductionBackupTargetAppendPlan, ...],
+        policy_plan: ProductionBackupPolicyAppendPlan,
+    ) -> None:
+        for target, target_plan in zip(envelope.targets, target_plans, strict=True):
+            if target_plan.status == "replayed":
+                continue
+            if target_plan.superseded_current_record is not None:
+                session.merge(
+                    self._production_backup_target_row(target_plan.superseded_current_record)
+                )
+                session.flush()
+            session.add(self._production_backup_target_row(target))
+        if policy_plan.status != "replayed":
+            if policy_plan.superseded_current_record is not None:
+                session.merge(
+                    self._production_backup_policy_row(policy_plan.superseded_current_record)
+                )
+                session.flush()
+            session.add(self._production_backup_policy_row(envelope.policy))
+        session.flush()
 
     def _idempotency_row(self, record: LaunchplaneIdempotencyRecord) -> LaunchplaneIdempotencyRow:
         return LaunchplaneIdempotencyRow(

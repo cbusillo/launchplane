@@ -42,6 +42,9 @@ The descriptor contracts live in
   environment, managed-secret bindings, artifact, deployment, and topology.
   An empty readiness requirement set means the action does not yet support the
   operational-readiness endpoint; it must not be treated as implicitly ready.
+  Production promotion actions may separately set
+  `requires_production_backup_policy`; this adds the exact typed backup-policy
+  dimension without embedding provider topology in the descriptor.
 - `DriverSettingGroupDescriptor`: setting/status groups the UI can render later
   without knowing product-specific storage internals.
 - `DriverContextView`: context or context/instance read model composed from
@@ -83,6 +86,17 @@ storage repository methods:
 
 - `LaunchplaneLaneSummary` for stable lane state.
 - `LaunchplanePreviewSummary` for preview lifecycle state.
+- bounded production backup authority summaries for promotion actions marked as
+  backup-policy governed.
+
+Driver context views report each governed action independently because policy
+identity includes the exact authorization action. Parent driver projections
+expose only action, lifecycle/readiness state, reason codes, and generated time,
+and omit the projection unless the caller can also read backup authority for
+the exact instance. Policy and target record IDs remain available only through
+the dedicated exact-instance authority read. Provider hosts, usernames, guest
+IDs, storage IDs, credentials, and raw runtime-environment values remain
+internal authority.
 
 The registry is deliberately not a database table yet. Driver descriptor shape
 should stabilize before Launchplane adds writable driver metadata. Product and

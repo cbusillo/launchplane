@@ -26,6 +26,10 @@ from control_plane.drivers.registry import (
     effective_driver_actions,
     read_driver_descriptor,
 )
+from control_plane.production_backup_authority import (
+    require_production_backup_authority_store,
+    resolve_production_backup_authority,
+)
 from control_plane.service_auth import LaunchplaneIdentity
 
 
@@ -118,6 +122,19 @@ def build_product_operational_readiness_service_result(
         artifact_id=requested_artifact_id,
     )
     current_inventory_artifact_id = _read_current_inventory_artifact_id(lane_summary)
+    production_backup_authority = None
+    if action is not None and action.requires_production_backup_policy:
+        try:
+            production_backup_authority = resolve_production_backup_authority(
+                record_store=require_production_backup_authority_store(record_store),
+                product=profile.product,
+                context=lane.context,
+                instance=lane.instance,
+                promotion_action=action.authz_action,
+                generated_at=generated_at,
+            )
+        except TypeError:
+            production_backup_authority = None
     return build_product_operational_readiness(
         ProductOperationalReadinessInputs(
             profile=profile,
@@ -135,6 +152,7 @@ def build_product_operational_readiness_service_result(
             current_inventory_artifact_id=current_inventory_artifact_id,
             artifact_manifest=artifact_manifest,
             generated_at=generated_at,
+            production_backup_authority=production_backup_authority,
         )
     )
 

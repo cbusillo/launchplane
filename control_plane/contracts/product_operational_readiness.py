@@ -30,6 +30,9 @@ from control_plane.contracts.product_profile_record import (
     ProductLaneProfile,
     product_config_requirement_applies_to_lane,
 )
+from control_plane.contracts.production_backup_authority import (
+    ProductionBackupAuthorityReadModel,
+)
 from control_plane.contracts.product_topology_read_model import ProductEnvironmentTopology
 from control_plane.durable_operation_authorization import (
     DurableOperationAuthorizationCaptureError,
@@ -64,6 +67,7 @@ ProductOperationalReadinessDimensionName = Literal[
     "artifact",
     "deployment",
     "topology",
+    "production_backup_policy",
 ]
 ProductOperationalReadinessIdentityType = Literal[
     "github_actions",
@@ -97,6 +101,7 @@ class ProductOperationalReadinessAction(BaseModel):
     route_path: str = ""
     supported: bool = False
     readiness_requirements: tuple[DriverActionReadinessRequirement, ...] = ()
+    requires_production_backup_policy: bool = False
 
 
 class ProductOperationalReadinessEvidence(BaseModel):
@@ -167,6 +172,7 @@ class ProductOperationalReadinessInputs:
     current_inventory_artifact_id: str | None
     artifact_manifest: ArtifactIdentityManifest | None
     generated_at: str
+    production_backup_authority: ProductionBackupAuthorityReadModel | None = None
 
 
 def build_product_operational_readiness(
@@ -178,6 +184,8 @@ def build_product_operational_readiness(
         action_dimension,
         _authorization_dimension(inputs, action_dimension=action_dimension),
     ]
+    if inputs.action is not None and inputs.action.requires_production_backup_policy:
+        dimensions.append(_production_backup_policy_dimension(inputs))
     if action_dimension.state == "ready" and inputs.action is not None:
         dimension_builders = {
             "provider_target": _provider_target_dimension,
@@ -251,7 +259,7 @@ def _action_projection(
         action is not None
         and action.scope == "instance"
         and inputs.requested_action in (action.authz_action, *action.alternate_authz_actions)
-        and action.readiness_requirements
+        and (action.readiness_requirements or action.requires_production_backup_policy)
     )
     projection = ProductOperationalReadinessAction(
         requested_action=inputs.requested_action,
@@ -263,6 +271,9 @@ def _action_projection(
         route_path=action.route_path if action is not None else "",
         supported=supported,
         readiness_requirements=(action.readiness_requirements if supported and action else ()),
+        requires_production_backup_policy=(
+            action.requires_production_backup_policy if action is not None else False
+        ),
     )
     if supported:
         assert action is not None
@@ -420,6 +431,64 @@ def _authorization_not_ready(
             route_path="/v1/authz-policies/managed-rule-sets/reconcile",
             summary="Reconcile one exact managed workflow grant through the service API.",
         ),
+    )
+
+
+def _production_backup_policy_dimension(
+    inputs: ProductOperationalReadinessInputs,
+) -> ProductOperationalReadinessDimension:
+    authority = inputs.production_backup_authority
+    if authority is None:
+        return _missing_dimension(
+            dimension="production_backup_policy",
+            summary="Launchplane cannot resolve typed production backup authority for this action.",
+            owner_record_type="production_backup_policy_record",
+        )
+    state: ProductOperationalReadinessState
+    if authority.state == "ready":
+        state = "ready"
+    elif authority.state == "missing":
+        state = "missing"
+    elif authority.state == "stale":
+        state = "stale"
+    else:
+        state = "blocked"
+    evidence: list[ProductOperationalReadinessEvidence] = []
+    if authority.policy is not None:
+        evidence.append(
+            ProductOperationalReadinessEvidence(
+                record_type="production_backup_policy_record",
+                record_id=authority.policy.record_id,
+                revision=authority.policy.policy_revision,
+                recorded_at=authority.policy.effective_at,
+                freshness_status="stale" if authority.state == "stale" else "recorded",
+            )
+        )
+    evidence.extend(
+        ProductOperationalReadinessEvidence(
+            record_type="production_backup_target_record",
+            record_id=target.record_id,
+            revision=target.target_revision,
+            recorded_at=target.effective_at,
+            freshness_status="stale" if authority.state == "stale" else "recorded",
+        )
+        for target in authority.targets
+    )
+    return ProductOperationalReadinessDimension(
+        dimension="production_backup_policy",
+        state=state,
+        summary=authority.summary,
+        owner_record_type="production_backup_policy_record",
+        evidence=tuple(evidence),
+        details=authority.reason_codes,
+        remediation=ProductOperationalReadinessRemediation(
+            action="production_backup_authority.write",
+            method="POST",
+            route_path="/v1/production-backup-authority/apply",
+            summary="Plan and apply exact typed production backup authority.",
+        )
+        if state != "ready"
+        else None,
     )
 
 
