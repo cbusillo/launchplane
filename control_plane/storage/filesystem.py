@@ -177,6 +177,10 @@ from control_plane.contracts.product_profile_lifecycle_migration import (
     migrate_product_profile_lifecycle_payload,
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.production_backup_authority import (
+    ProductionBackupPolicyRecord,
+    ProductionBackupTargetRecord,
+)
 from control_plane.contracts.detached_application_retirement import (
     DetachedApplicationRetirementRecord,
 )
@@ -228,6 +232,16 @@ from control_plane.tenant_repository_classification import (
     plan_tenant_repository_classification_append,
 )
 from control_plane.repository_inventory import plan_repository_inventory_append
+from control_plane.production_backup_authority import (
+    ProductionBackupPolicyAppendPlan,
+    ProductionBackupTargetAppendPlan,
+    ProductionBackupAuthorityWriteEnvelope,
+    ProductionBackupAuthorityWriteResult,
+    plan_production_backup_policy_append,
+    plan_production_backup_authority_write_from_records,
+    plan_production_backup_target_append,
+    validate_production_backup_policy_binding,
+)
 from control_plane.storage.product_authority_bundle import (
     ProductAuthorityBundle,
     ProviderTargetWrite,
@@ -1014,6 +1028,152 @@ class FilesystemRecordStore:
         )
         return tuple(records if limit is None else records[:limit])
 
+    def write_production_backup_target_record(
+        self, record: ProductionBackupTargetRecord
+    ) -> Literal["written", "replayed"]:
+        record_type = "launchplane_production_backup_targets"
+        with self._product_authority_bundle_lock():
+            records = self._list_models_locked(ProductionBackupTargetRecord, record_type)
+            plan = plan_production_backup_target_append(records=records, record=record)
+            if plan.status == "replayed":
+                return "replayed"
+            if plan.superseded_current_record is None:
+                self._write_model_locked(record_type, record.record_id, record)
+                return "written"
+            self._write_production_backup_revision_replacement_locked(
+                record_type=record_type,
+                superseded_current_record=plan.superseded_current_record,
+                current_record=record,
+                step_prefix="production_backup_target",
+            )
+            return "written"
+
+    def read_production_backup_target_record(self, record_id: str) -> ProductionBackupTargetRecord:
+        return self._read_model(
+            ProductionBackupTargetRecord,
+            "launchplane_production_backup_targets",
+            record_id,
+        )
+
+    def list_production_backup_target_records(
+        self,
+        *,
+        target_id: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[ProductionBackupTargetRecord, ...]:
+        records = [
+            record
+            for record in self._list_models(
+                ProductionBackupTargetRecord,
+                "launchplane_production_backup_targets",
+            )
+            if (not target_id or record.target_id == target_id)
+            and (not status or record.status == status)
+        ]
+        records.sort(
+            key=lambda record: (record.target_revision, record.target_id, record.record_id),
+            reverse=True,
+        )
+        return tuple(records if limit is None else records[:limit])
+
+    def write_production_backup_policy_record(
+        self, record: ProductionBackupPolicyRecord
+    ) -> Literal["written", "replayed"]:
+        record_type = "launchplane_production_backup_policies"
+        with self._product_authority_bundle_lock():
+            target_records = self._list_models_locked(
+                ProductionBackupTargetRecord,
+                "launchplane_production_backup_targets",
+            )
+            if record.status == "active":
+                validate_production_backup_policy_binding(
+                    policy=record,
+                    target_records=target_records,
+                )
+            records = self._list_models_locked(ProductionBackupPolicyRecord, record_type)
+            plan = plan_production_backup_policy_append(records=records, record=record)
+            if plan.status == "replayed":
+                return "replayed"
+            if plan.superseded_current_record is None:
+                self._write_model_locked(record_type, record.record_id, record)
+                return "written"
+            self._write_production_backup_revision_replacement_locked(
+                record_type=record_type,
+                superseded_current_record=plan.superseded_current_record,
+                current_record=record,
+                step_prefix="production_backup_policy",
+            )
+            return "written"
+
+    def read_production_backup_policy_record(self, record_id: str) -> ProductionBackupPolicyRecord:
+        return self._read_model(
+            ProductionBackupPolicyRecord,
+            "launchplane_production_backup_policies",
+            record_id,
+        )
+
+    def list_production_backup_policy_records(
+        self,
+        *,
+        product: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        promotion_action: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[ProductionBackupPolicyRecord, ...]:
+        records = [
+            record
+            for record in self._list_models(
+                ProductionBackupPolicyRecord,
+                "launchplane_production_backup_policies",
+            )
+            if (not product or record.product == product)
+            and (not context_name or record.context == context_name)
+            and (not instance_name or record.instance == instance_name)
+            and (not promotion_action or record.promotion_action == promotion_action)
+            and (not status or record.status == status)
+        ]
+        records.sort(
+            key=lambda record: (
+                record.policy_revision,
+                record.product,
+                record.context,
+                record.instance,
+                record.promotion_action,
+                record.record_id,
+            ),
+            reverse=True,
+        )
+        return tuple(records if limit is None else records[:limit])
+
+    def apply_production_backup_authority(
+        self, envelope: ProductionBackupAuthorityWriteEnvelope
+    ) -> ProductionBackupAuthorityWriteResult:
+        with self._product_authority_bundle_lock():
+            target_records = self._list_models_locked(
+                ProductionBackupTargetRecord,
+                "launchplane_production_backup_targets",
+            )
+            policy_records = self._list_models_locked(
+                ProductionBackupPolicyRecord,
+                "launchplane_production_backup_policies",
+            )
+            plan = plan_production_backup_authority_write_from_records(
+                target_records=target_records,
+                policy_records=policy_records,
+                envelope=envelope,
+            )
+            if envelope.mode == "dry_run" or plan.result.status == "replayed":
+                return plan.result
+            self._write_production_backup_authority_bundle_locked(
+                envelope=envelope,
+                target_plans=plan.target_plans,
+                policy_plan=plan.policy_plan,
+            )
+            return plan.result.model_copy(update={"status": "applied"})
+
     def write_repository_human_role_policy_record(
         self,
         record: RepositoryHumanRolePolicyRecord,
@@ -1082,6 +1242,137 @@ class FilesystemRecordStore:
             )
             self._after_product_authority_bundle_step(
                 "publish_repository_human_role_policy_replacement"
+            )
+            self._publish_product_authority_bundle_stage(
+                manifest=publishing_manifest,
+                stage_dir=stage_dir,
+                recovering=False,
+            )
+        except Exception:
+            if not (stage_dir / "manifest.json").exists():
+                shutil.rmtree(stage_dir, ignore_errors=True)
+            raise
+
+    def _write_production_backup_revision_replacement_locked(
+        self,
+        *,
+        record_type: str,
+        superseded_current_record: BaseModel,
+        current_record: BaseModel,
+        step_prefix: str,
+    ) -> None:
+        stage_id = f"{_utc_now_timestamp().replace(':', '').replace('-', '')}-{time.time_ns()}"
+        stage_dir = self._product_authority_bundle_stage_root() / stage_id
+        records_dir = stage_dir / "records"
+        records_dir.mkdir(parents=True, exist_ok=False)
+        entries: list[_AuthorityBundleStageEntry] = []
+        try:
+            self._stage_product_authority_bundle_write(
+                stage_dir=stage_dir,
+                entries=entries,
+                record_type=record_type,
+                record_id=str(getattr(superseded_current_record, "record_id")),
+                model=superseded_current_record,
+                step_name=f"supersede_{step_prefix}",
+            )
+            self._stage_product_authority_bundle_write(
+                stage_dir=stage_dir,
+                entries=entries,
+                record_type=record_type,
+                record_id=str(getattr(current_record, "record_id")),
+                model=current_record,
+                step_name=f"write_{step_prefix}",
+            )
+            manifest = _AuthorityBundleStageManifest(
+                stage_id=stage_id,
+                state="ready",
+                entries=tuple(entries),
+            )
+            self._write_product_authority_bundle_stage_manifest(
+                stage_dir=stage_dir,
+                manifest=manifest,
+            )
+            publishing_manifest = manifest.model_copy(update={"state": "publishing"})
+            self._write_product_authority_bundle_stage_manifest(
+                stage_dir=stage_dir,
+                manifest=publishing_manifest,
+            )
+            self._publish_product_authority_bundle_stage(
+                manifest=publishing_manifest,
+                stage_dir=stage_dir,
+                recovering=False,
+            )
+        except Exception:
+            if not (stage_dir / "manifest.json").exists():
+                shutil.rmtree(stage_dir, ignore_errors=True)
+            raise
+
+    def _write_production_backup_authority_bundle_locked(
+        self,
+        *,
+        envelope: ProductionBackupAuthorityWriteEnvelope,
+        target_plans: tuple[ProductionBackupTargetAppendPlan, ...],
+        policy_plan: ProductionBackupPolicyAppendPlan,
+    ) -> None:
+        stage_id = f"{_utc_now_timestamp().replace(':', '').replace('-', '')}-{time.time_ns()}"
+        stage_dir = self._product_authority_bundle_stage_root() / stage_id
+        records_dir = stage_dir / "records"
+        records_dir.mkdir(parents=True, exist_ok=False)
+        entries: list[_AuthorityBundleStageEntry] = []
+        try:
+            for target, target_plan in zip(envelope.targets, target_plans, strict=True):
+                if target_plan.status == "replayed":
+                    continue
+                if target_plan.superseded_current_record is not None:
+                    superseded = target_plan.superseded_current_record
+                    self._stage_product_authority_bundle_write(
+                        stage_dir=stage_dir,
+                        entries=entries,
+                        record_type="launchplane_production_backup_targets",
+                        record_id=superseded.record_id,
+                        model=superseded,
+                        step_name="supersede_production_backup_target",
+                    )
+                self._stage_product_authority_bundle_write(
+                    stage_dir=stage_dir,
+                    entries=entries,
+                    record_type="launchplane_production_backup_targets",
+                    record_id=target.record_id,
+                    model=target,
+                    step_name="write_production_backup_target",
+                )
+            if policy_plan.status != "replayed":
+                if policy_plan.superseded_current_record is not None:
+                    superseded_policy = policy_plan.superseded_current_record
+                    self._stage_product_authority_bundle_write(
+                        stage_dir=stage_dir,
+                        entries=entries,
+                        record_type="launchplane_production_backup_policies",
+                        record_id=superseded_policy.record_id,
+                        model=superseded_policy,
+                        step_name="supersede_production_backup_policy",
+                    )
+                self._stage_product_authority_bundle_write(
+                    stage_dir=stage_dir,
+                    entries=entries,
+                    record_type="launchplane_production_backup_policies",
+                    record_id=envelope.policy.record_id,
+                    model=envelope.policy,
+                    step_name="write_production_backup_policy",
+                )
+            manifest = _AuthorityBundleStageManifest(
+                stage_id=stage_id,
+                state="ready",
+                entries=tuple(entries),
+            )
+            self._write_product_authority_bundle_stage_manifest(
+                stage_dir=stage_dir,
+                manifest=manifest,
+            )
+            publishing_manifest = manifest.model_copy(update={"state": "publishing"})
+            self._write_product_authority_bundle_stage_manifest(
+                stage_dir=stage_dir,
+                manifest=publishing_manifest,
             )
             self._publish_product_authority_bundle_stage(
                 manifest=publishing_manifest,

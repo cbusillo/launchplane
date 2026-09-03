@@ -5,6 +5,9 @@ from pydantic import BaseModel, ConfigDict, Field
 from control_plane.contracts.data_provenance import DataProvenance
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
 from control_plane.contracts.preview_summary import LaunchplanePreviewSummary
+from control_plane.contracts.production_backup_authority import (
+    ProductionBackupAuthorityStatus,
+)
 
 
 DriverActionSafety = Literal["read", "safe_write", "mutation", "destructive"]
@@ -49,6 +52,7 @@ class DriverActionDescriptor(BaseModel):
     output_schema: dict[str, object] = Field(default_factory=dict)
     writes_records: tuple[str, ...] = ()
     readiness_requirements: tuple[DriverActionReadinessRequirement, ...] = ()
+    requires_production_backup_policy: bool = False
 
 
 class DriverCapabilityDescriptor(BaseModel):
@@ -95,6 +99,7 @@ class DriverView(BaseModel):
     descriptor: DriverDescriptor
     available_actions: tuple[DriverActionDescriptor, ...] = ()
     lane_summary: LaunchplaneLaneSummary | None = None
+    production_backup_authorities: tuple[ProductionBackupAuthorityStatus, ...] = ()
     preview_summaries: tuple[LaunchplanePreviewSummary, ...] = ()
     preview_inventory_provenance: DataProvenance | None = None
 

@@ -714,6 +714,15 @@ def register_driver_descriptor_read_routes(
         view = build_driver_context_view(
             record_store=record_store,
             context_name=context,
+            action_allowed=lambda action, product, context_name, instances: (
+                dependencies.authorization_allows(
+                    identity=identity,
+                    action=action,
+                    product=product,
+                    context=context_name,
+                    target=AuthorizationTarget(scope="instance", instances=instances),
+                )
+            ),
         )
         return DriverContextViewResponse(trace_id=trace_id, view=view)
 
@@ -735,6 +744,15 @@ def register_driver_descriptor_read_routes(
             record_store=record_store,
             context_name=context,
             instance_name=instance,
+            action_allowed=lambda action, product, context_name, instances: (
+                dependencies.authorization_allows(
+                    identity=identity,
+                    action=action,
+                    product=product,
+                    context=context_name,
+                    target=AuthorizationTarget(scope="instance", instances=instances),
+                )
+            ),
         )
         return DriverContextViewResponse(trace_id=trace_id, view=view)
 

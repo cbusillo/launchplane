@@ -6602,6 +6602,11 @@
             "title": "Readiness Requirements",
             "type": "array"
           },
+          "requires_production_backup_policy": {
+            "default": false,
+            "title": "Requires Production Backup Policy",
+            "type": "boolean"
+          },
           "route_path": {
             "title": "Route Path",
             "type": "string"
@@ -6646,6 +6651,7 @@
           "operator_visible",
           "output_schema",
           "readiness_requirements",
+          "requires_production_backup_policy",
           "route_path",
           "safety",
           "scope",
@@ -6979,6 +6985,14 @@
             },
             "title": "Preview Summaries",
             "type": "array"
+          },
+          "production_backup_authorities": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ProductionBackupAuthorityStatus"
+            },
+            "title": "Production Backup Authorities",
+            "type": "array"
           }
         },
         "required": [
@@ -6987,7 +7001,8 @@
           "driver_id",
           "lane_summary",
           "preview_inventory_provenance",
-          "preview_summaries"
+          "preview_summaries",
+          "production_backup_authorities"
         ],
         "title": "DriverView",
         "type": "object"
@@ -17046,6 +17061,14 @@
             "title": "Product",
             "type": "string"
           },
+          "production_backup_authorities": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ProductionBackupAuthorityStatus"
+            },
+            "title": "Production Backup Authorities",
+            "type": "array"
+          },
           "provenance": {
             "$ref": "#/components/schemas/DataProvenance"
           },
@@ -17098,6 +17121,7 @@
           "environment",
           "managed_secrets",
           "product",
+          "production_backup_authorities",
           "provenance",
           "repository",
           "runtime_settings",
@@ -19966,7 +19990,8 @@
                 "managed_secrets",
                 "artifact",
                 "deployment",
-                "topology"
+                "topology",
+                "production_backup_policy"
               ],
               "type": "string"
             },
@@ -20061,6 +20086,11 @@
             "title": "Requested Action",
             "type": "string"
           },
+          "requires_production_backup_policy": {
+            "default": false,
+            "title": "Requires Production Backup Policy",
+            "type": "boolean"
+          },
           "route_path": {
             "default": "",
             "title": "Route Path",
@@ -20088,6 +20118,7 @@
           "method",
           "readiness_requirements",
           "requested_action",
+          "requires_production_backup_policy",
           "route_path",
           "safety",
           "scope",
@@ -20169,7 +20200,8 @@
               "managed_secrets",
               "artifact",
               "deployment",
-              "topology"
+              "topology",
+              "production_backup_policy"
             ],
             "title": "Dimension",
             "type": "string"
@@ -22678,6 +22710,63 @@
           "severity"
         ],
         "title": "ProductTopologyWarning",
+        "type": "object"
+      },
+      "ProductionBackupAuthorityStatus": {
+        "additionalProperties": false,
+        "properties": {
+          "generated_at": {
+            "title": "Generated At",
+            "type": "string"
+          },
+          "promotion_action": {
+            "title": "Promotion Action",
+            "type": "string"
+          },
+          "ready": {
+            "title": "Ready",
+            "type": "boolean"
+          },
+          "reason_codes": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Reason Codes",
+            "type": "array"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "state": {
+            "enum": [
+              "ready",
+              "missing",
+              "invalid",
+              "stale",
+              "retired"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "summary": {
+            "title": "Summary",
+            "type": "string"
+          }
+        },
+        "required": [
+          "generated_at",
+          "promotion_action",
+          "ready",
+          "reason_codes",
+          "schema_version",
+          "state",
+          "summary"
+        ],
+        "title": "ProductionBackupAuthorityStatus",
         "type": "object"
       },
       "PromotionRecord-Output": {

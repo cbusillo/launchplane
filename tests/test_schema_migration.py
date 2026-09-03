@@ -1673,7 +1673,7 @@ class SchemaMigrationTests(unittest.TestCase):
             for primary_key in CRITICAL_PRIMARY_KEYS
         }
 
-        self.assertEqual(EXPECTED_ALEMBIC_HEAD_REVISION, "b8d0f2a4c6e8")
+        self.assertEqual(EXPECTED_ALEMBIC_HEAD_REVISION, "c0e2f4a6b8d1")
         self.assertFalse(
             [index.index_name for index in CRITICAL_SCHEMA_INDEXES if len(index.index_name) > 63]
         )
@@ -1694,12 +1694,44 @@ class SchemaMigrationTests(unittest.TestCase):
             ("jsonb",),
         )
         self.assertEqual(
+            column_types[("launchplane_production_backup_targets", "payload")],
+            ("jsonb",),
+        )
+        self.assertEqual(
+            column_types[("launchplane_production_backup_policies", "payload")],
+            ("jsonb",),
+        )
+        self.assertEqual(
             column_types[("launchplane_owner_control_channel_sessions", "payload")],
             ("jsonb",),
         )
         self.assertEqual(
             primary_keys["launchplane_owner_control_issued_challenges"],
             ("challenge_id",),
+        )
+        self.assertEqual(
+            primary_keys["launchplane_production_backup_targets"],
+            ("record_id",),
+        )
+        self.assertEqual(
+            primary_keys["launchplane_production_backup_policies"],
+            ("record_id",),
+        )
+        self.assertTrue(
+            indexes[
+                (
+                    "launchplane_production_backup_targets",
+                    "launchplane_production_backup_target_active_uidx",
+                )
+            ].unique
+        )
+        self.assertTrue(
+            indexes[
+                (
+                    "launchplane_production_backup_policies",
+                    "launchplane_production_backup_policy_active_uidx",
+                )
+            ].unique
         )
         self.assertIn(
             (

@@ -68,6 +68,8 @@ class FastApiBrowserMutationBoundaryTests(unittest.IsolatedAsyncioTestCase):
             "/v1/authz-diagnostics/github-actions/evaluate",
             "/v1/change-impact/evaluation",
             "/v1/agent/privileged-operations/plans",
+            "/v1/production-backup-authority/apply",
+            "/v1/production-backup-authority/legacy-runtime-migration",
             "/v1/secrets/reencrypt",
             "/v1/repository-inventory/apply",
             "/v1/tenant-admission/repository-classifications/apply",

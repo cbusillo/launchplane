@@ -235,6 +235,16 @@ The first concrete HTTP/OIDC/API shape for that boundary is defined in
   target summary, ingress termination, and TLS ownership while keeping
   provider-specific host ids, certificate ids, target ids, edge addresses, and
   provider payloads as evidence rather than neutral authority.
+- Launchplane owns typed production backup target and policy records separately
+  from runtime-environment maps and backup-gate evidence. Stable target IDs bind
+  typed provider destinations; exact product/context/instance promotion actions
+  bind required fast-snapshot and independent-backup operations through
+  revisioned, DB-backed policy.
+- Backup authority resolution fails closed for missing, ambiguous, invalid,
+  stale, or retired records. Read models expose only bounded record identity,
+  revision, lifecycle, provider type, and destination kind. Provider execution
+  remains in drivers and delegated workers, and per-attempt results remain
+  backup-gate evidence.
 - Ship execution prefers immutable artifact image references at runtime by
   syncing `DOCKER_IMAGE_REFERENCE=<repo>@<digest>` to Dokploy whenever a stored
   artifact manifest is available.
@@ -251,6 +261,10 @@ The first concrete HTTP/OIDC/API shape for that boundary is defined in
 - Upstream handoffs fail closed when this repo cannot accept control.
 - Immutable promotion ownership includes validating a stored backup-gate
   record for the destination environment before ship execution begins.
+- Typed production backup policy is the durable configuration prerequisite for
+  later promotion enforcement. This model slice does not execute providers or
+  replace the existing promotion gate before downstream execution and
+  enforcement work lands.
 - Operator-facing status/history reads should also terminate here by composing
   inventory, deployment, promotion, and backup-gate records into a control-
   plane-owned read model.

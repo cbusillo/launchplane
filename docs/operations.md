@@ -196,6 +196,51 @@ the historical route. The generic-web onboarding workflow is new-product-only;
 existing product changes use the bounded profile or advanced manifest apply
 surface.
 
+## Production Backup Authority
+
+Read one exact policy and its bounded target summaries through:
+
+```text
+GET /v1/production-backup-authority
+  ?product=<product>
+  &context=<context>
+  &instance=<instance>
+  &promotion_action=<authorization-action>
+```
+
+The response reports `missing`, `invalid`, `stale`, `retired`, or `ready` and
+returns only record IDs, revisions, lifecycle status, provider type, and
+destination kind. It never returns provider hosts, usernames, guest IDs,
+storage IDs, credentials, managed-secret values, or runtime-environment values.
+
+Operators submit exact revisioned target and policy records to
+`POST /v1/production-backup-authority/apply`. Run `mode=dry_run`, review the
+canonical `authority_digest`, then submit the same payload with `mode=apply`,
+the reviewed digest, expected-current record IDs, and an `Idempotency-Key`.
+Apply is PostgreSQL-only and commits all target supersessions, target revisions,
+policy supersession, policy revision, and idempotency evidence atomically.
+Conflicting revisions, changed expected-current records, invalid target kinds,
+different provider endpoints, and stale reviewed digests fail closed. The
+reviewed digest also binds the exact active source and destination target
+record IDs and digests resolved during dry-run, including policy-only updates
+that do not write new target revisions.
+
+The legacy migration route is
+`POST /v1/production-backup-authority/legacy-runtime-migration`. It requires an
+exact product/context/instance/action, operator-chosen stable target IDs, the
+source runtime record's exact `updated_at`, review timestamps, evidence-age
+limits, source, and reason. Dry-run reads only the exact DB-backed instance
+runtime record and requires both snapshot and `vzdump` modes. Apply requires the
+reviewed digest and idempotency key. The migration copies only non-secret host,
+user, guest, storage, prefix, and retention facts into typed records; SSH key
+and known-host material are never copied or returned.
+
+Do not remove the legacy VeriReel runtime keys after this migration. The current
+worker continues to use them until the provider-neutral execution slice and
+promotion-enforcement slice are merged and verified. This migration establishes
+typed authority without weakening the live backup gate or claiming provider
+execution has moved.
+
 ## Mutation Reservation Recovery
 
 Reservation-backed service mutations use the PostgreSQL

@@ -118,6 +118,14 @@ from control_plane.http_routes.repository_inventory import (
     register_repository_inventory_read_routes,
     register_repository_inventory_write_routes,
 )
+from control_plane.http_routes.production_backup_authority import (
+    PRODUCTION_BACKUP_AUTHORITY_APPLY_ROUTE,
+    PRODUCTION_BACKUP_AUTHORITY_LEGACY_MIGRATION_ROUTE,
+    PRODUCTION_BACKUP_AUTHORITY_READ_ROUTE,
+    ProductionBackupAuthorityWriteRouteDependencies,
+    register_production_backup_authority_read_routes,
+    register_production_backup_authority_write_routes,
+)
 from control_plane.http_routes.tenant_admission import (
     REPOSITORY_HUMAN_ROLE_POLICY_APPLY_ROUTE,
     TENANT_ADMISSION_CONTROLLER_RUN_ONCE_ROUTE,
@@ -174,6 +182,9 @@ __all__ = (
     "PRODUCT_OWNER_ROUTING_APPLY_ROUTE",
     "PRODUCT_OWNER_ROUTING_READ_ROUTE",
     "PRODUCT_OWNER_AUTHORITY_EVALUATION_ROUTE",
+    "PRODUCTION_BACKUP_AUTHORITY_APPLY_ROUTE",
+    "PRODUCTION_BACKUP_AUTHORITY_LEGACY_MIGRATION_ROUTE",
+    "PRODUCTION_BACKUP_AUTHORITY_READ_ROUTE",
     "REPOSITORY_HUMAN_ROLE_POLICY_APPLY_ROUTE",
     "TENANT_ADMISSION_CONTROLLER_RUN_ONCE_ROUTE",
     "TENANT_ADMISSION_STATUS_RECONCILE_ROUTE",
@@ -181,6 +192,7 @@ __all__ = (
     "TRUSTED_MAINTENANCE_POLICY_APPLY_ROUTE",
     "ReadRouteDependencies",
     "RepositoryInventoryWriteRouteDependencies",
+    "ProductionBackupAuthorityWriteRouteDependencies",
     "TenantAdmissionReadRouteDependencies",
     "TenantAdmissionWriteRouteDependencies",
     "WorkGraphReadRouteDependencies",
@@ -225,6 +237,8 @@ __all__ = (
     "register_product_promotion_status_read_routes",
     "register_product_profile_read_routes",
     "register_protected_artifact_read_routes",
+    "register_production_backup_authority_read_routes",
+    "register_production_backup_authority_write_routes",
     "register_runner_host_hygiene_read_routes",
     "register_repository_inventory_read_routes",
     "register_repository_inventory_write_routes",

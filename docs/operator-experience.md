@@ -319,6 +319,14 @@ The response includes key names, binding metadata, status, source, and freshness
 only. It never includes runtime values, managed secret IDs, secret plaintext, or
 ciphertext.
 
+Production backup authority appears beside runtime and secret config as its own
+typed projection. Each exact promotion action reports one of `missing`,
+`invalid`, `stale`, `retired`, or `ready`, plus bounded policy/target record
+identity and revision. The browser must not render provider hosts, usernames,
+guest IDs, storage IDs, credentials, or raw runtime values. A rename or review
+updates the shared target stream rather than asking operators to edit
+product-prefixed environment keys.
+
 Operational enrollment readiness is a separate exact-lane, exact-action read.
 It requires `product_environment.read` for the requested product, context, and
 instance, then evaluates the authenticated GitHub Actions caller against the
@@ -335,6 +343,12 @@ required. Overall and per-dimension results use `ready`, `blocked`, `stale`,
 record class or supported service remediation. Runtime values, managed-secret
 IDs, secret material, provider credentials, provider evidence maps, and raw
 OIDC claims are never returned.
+
+Promotion actions marked as backup-policy governed add a
+`production_backup_policy` readiness dimension. Missing authority remains
+`missing`, review-expired authority remains `stale`, and invalid or retired
+bindings remain `blocked`. This is a read contract for downstream provider and
+enforcement work; it does not let the UI bypass or synthesize a backup gate.
 
 Readiness treats error-severity topology findings as blockers. Advisory warnings
 such as the intentionally limited visibility into externally managed ingress

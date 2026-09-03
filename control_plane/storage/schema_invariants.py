@@ -10,7 +10,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
 AUTHZ_COMPATIBILITY_FLOOR_REVISION = "f3b5d7e9a1c2"
-EXPECTED_ALEMBIC_HEAD_REVISION = "b8d0f2a4c6e8"
+EXPECTED_ALEMBIC_HEAD_REVISION = "c0e2f4a6b8d1"
 RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS = (EXPECTED_ALEMBIC_HEAD_REVISION,)
 _AUTHZ_POLICY_TABLE = "launchplane_authz_policies"
 _AUTHZ_POLICY_WRITE_FENCE_TRIGGER = "launchplane_authz_policy_write_fence"
@@ -153,6 +153,26 @@ CRITICAL_POSTGRES_COLUMN_TYPES: tuple[CriticalColumnType, ...] = (
         "launchplane_repository_inventory_records",
         "payload",
         ("jsonb",),
+    ),
+    CriticalColumnType(
+        "launchplane_production_backup_targets",
+        "payload",
+        ("jsonb",),
+    ),
+    CriticalColumnType(
+        "launchplane_production_backup_targets",
+        "target_revision",
+        ("bigint", "int8"),
+    ),
+    CriticalColumnType(
+        "launchplane_production_backup_policies",
+        "payload",
+        ("jsonb",),
+    ),
+    CriticalColumnType(
+        "launchplane_production_backup_policies",
+        "policy_revision",
+        ("bigint", "int8"),
     ),
     CriticalColumnType(
         "launchplane_odoo_stable_bootstrap_operations",
@@ -962,6 +982,49 @@ CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
         ("repository_id", "inventory_revision"),
     ),
     CriticalIndex(
+        "launchplane_production_backup_targets",
+        "launchplane_production_backup_target_revision_uidx",
+        ("target_id", "target_revision"),
+        unique=True,
+    ),
+    CriticalIndex(
+        "launchplane_production_backup_targets",
+        "launchplane_production_backup_target_active_uidx",
+        ("target_id",),
+        unique=True,
+        predicate_expression="status='active'",
+    ),
+    CriticalIndex(
+        "launchplane_production_backup_targets",
+        "launchplane_production_backup_target_current_idx",
+        ("target_id", "status", "target_revision"),
+    ),
+    CriticalIndex(
+        "launchplane_production_backup_policies",
+        "launchplane_production_backup_policy_revision_uidx",
+        ("policy_id", "policy_revision"),
+        unique=True,
+    ),
+    CriticalIndex(
+        "launchplane_production_backup_policies",
+        "launchplane_production_backup_policy_active_uidx",
+        ("product", "context", "instance", "promotion_action"),
+        unique=True,
+        predicate_expression="status='active'",
+    ),
+    CriticalIndex(
+        "launchplane_production_backup_policies",
+        "launchplane_production_backup_policy_current_idx",
+        (
+            "product",
+            "context",
+            "instance",
+            "promotion_action",
+            "status",
+            "policy_revision",
+        ),
+    ),
+    CriticalIndex(
         "launchplane_repository_human_role_policies",
         "launchplane_repo_human_role_revision_uidx",
         ("repository_id", "product", "context", "role_policy_revision"),
@@ -1204,6 +1267,14 @@ CRITICAL_PRIMARY_KEYS: tuple[CriticalPrimaryKey, ...] = (
     ),
     CriticalPrimaryKey(
         "launchplane_repository_inventory_records",
+        ("record_id",),
+    ),
+    CriticalPrimaryKey(
+        "launchplane_production_backup_targets",
+        ("record_id",),
+    ),
+    CriticalPrimaryKey(
+        "launchplane_production_backup_policies",
         ("record_id",),
     ),
     CriticalPrimaryKey(

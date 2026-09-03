@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from collections.abc import Callable
 from typing import Literal, Protocol, cast
 
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
@@ -20,6 +21,10 @@ from control_plane.contracts.driver_descriptor import (
 )
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.production_backup_authority import (
+    ProductionBackupAuthorityStatus,
+    production_backup_authority_status,
+)
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
 from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
@@ -29,6 +34,10 @@ from control_plane.contracts.preview_summary import LaunchplanePreviewSummary
 from control_plane.contracts.promotion_record import PromotionRecord
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.drivers.route_paths import INGRESS_ROUTE_APPLY_ROUTE
+from control_plane.production_backup_authority import (
+    require_production_backup_authority_store,
+    resolve_production_backup_authority,
+)
 
 
 PROVIDER_BOUNDARY_NOTE = (
@@ -268,6 +277,7 @@ def _action(
     writes_records: tuple[str, ...] = (),
     alternate_authz_actions: tuple[str, ...] = (),
     readiness_requirements: tuple[DriverActionReadinessRequirement, ...] = (),
+    requires_production_backup_policy: bool = False,
 ) -> DriverActionDescriptor:
     return DriverActionDescriptor(
         action_id=action_id,
@@ -282,6 +292,7 @@ def _action(
         operator_visible=operator_visible,
         writes_records=writes_records,
         readiness_requirements=readiness_requirements,
+        requires_production_backup_policy=requires_production_backup_policy,
     )
 
 
@@ -355,6 +366,7 @@ GENERIC_WEB_DRIVER = DriverDescriptor(
             route_path="/v1/drivers/generic-web/prod-promotion",
             authz_action="generic_web_prod_promotion.execute",
             writes_records=("deployment", "promotion", "inventory"),
+            requires_production_backup_policy=True,
         ),
         _action(
             "prod_promotion_workflow",
@@ -365,6 +377,7 @@ GENERIC_WEB_DRIVER = DriverDescriptor(
             route_path="/v1/drivers/generic-web/prod-promotion-workflow",
             authz_action="generic_web_prod_promotion.dispatch",
             writes_records=(),
+            requires_production_backup_policy=True,
         ),
         _action(
             "prod_rollback_plan",
@@ -652,6 +665,7 @@ ODOO_DRIVER = DriverDescriptor(
             route_path="/v1/drivers/odoo/prod-promotion-run",
             authz_action="odoo_prod_promotion_run.execute",
             writes_records=("backup_gate", "deployment", "promotion", "inventory", "release_tuple"),
+            requires_production_backup_policy=True,
         ),
         _action(
             "prod_backup_gate",
@@ -757,6 +771,7 @@ ODOO_DRIVER = DriverDescriptor(
             route_path="/v1/drivers/odoo/prod-promotion",
             authz_action="odoo_prod_promotion.execute",
             writes_records=("deployment", "promotion", "inventory", "release_tuple"),
+            requires_production_backup_policy=True,
         ),
         _action(
             "prod_rollback",
@@ -944,6 +959,7 @@ VERIREEL_DRIVER = DriverDescriptor(
             route_path="/v1/drivers/verireel/prod-promotion",
             authz_action="verireel_prod_promotion.execute",
             writes_records=("deployment", "promotion", "inventory", "release_tuple"),
+            requires_production_backup_policy=True,
         ),
         _action(
             "prod_rollback",
@@ -1537,11 +1553,70 @@ def _driver_exposes_preview_inventory(descriptor: DriverDescriptor) -> bool:
     return any("preview_inventory" in capability.panels for capability in descriptor.capabilities)
 
 
+def _production_backup_authorities(
+    *,
+    record_store: object,
+    profile: LaunchplaneProductProfileRecord,
+    descriptor: DriverDescriptor,
+    context_name: str,
+    instance_name: str,
+    action_allowed: Callable[[str, str, str, tuple[str, ...]], bool] | None,
+) -> tuple[ProductionBackupAuthorityStatus, ...]:
+    if not instance_name:
+        return ()
+    promotion_actions = tuple(
+        action
+        for action in effective_driver_actions(descriptor)
+        if action.requires_production_backup_policy
+        and action.authz_action
+        and action_allowed is not None
+        and action_allowed(
+            "production_backup_authority.read",
+            profile.product,
+            context_name,
+            (instance_name,),
+        )
+    )
+    if not promotion_actions:
+        return ()
+    generated_at = (
+        datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    )
+    try:
+        authority_store = require_production_backup_authority_store(record_store)
+    except TypeError:
+        return tuple(
+            ProductionBackupAuthorityStatus(
+                promotion_action=action.authz_action,
+                state="invalid",
+                ready=False,
+                summary="Production backup authority storage is unavailable.",
+                reason_codes=("production_backup_authority_store_unavailable",),
+                generated_at=generated_at,
+            )
+            for action in promotion_actions
+        )
+    return tuple(
+        production_backup_authority_status(
+            resolve_production_backup_authority(
+                record_store=authority_store,
+                product=profile.product,
+                context=context_name,
+                instance=instance_name,
+                promotion_action=action.authz_action,
+                generated_at=generated_at,
+            )
+        )
+        for action in promotion_actions
+    )
+
+
 def build_driver_context_view(
     *,
     record_store: object,
     context_name: str,
     instance_name: str = "",
+    action_allowed: Callable[[str, str, str, tuple[str, ...]], bool] | None = None,
 ) -> DriverContextView:
     drivers: list[DriverView] = []
     owners = _product_profile_target_owners(
@@ -1587,6 +1662,14 @@ def build_driver_context_view(
                     descriptor=matched_descriptor,
                     available_actions=effective_driver_actions(matched_descriptor),
                     lane_summary=lane_summary,
+                    production_backup_authorities=_production_backup_authorities(
+                        record_store=record_store,
+                        profile=owners[0],
+                        descriptor=matched_descriptor,
+                        context_name=context_name,
+                        instance_name=instance_name,
+                        action_allowed=action_allowed,
+                    ),
                     preview_summaries=preview_summaries,
                     preview_inventory_provenance=preview_inventory_provenance,
                 )

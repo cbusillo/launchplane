@@ -603,6 +603,23 @@ an ORM column/table or remains only in the evidence payload.
   Dokploy target and target-id records still provide audit/backfill comparison
   material and provider execution configuration, but they no longer synthesize
   steady-state provider-target authority when an explicit row is missing.
+- Production backup target records are a separate revisioned authority stream
+  for backup-capable provider destinations. A stable `target_id` survives
+  provider destination renames; each revision records an exact typed Proxmox
+  guest or storage reference, `effective_at`, `review_after`, source, reason,
+  predecessor, and deterministic digest. Credentials, private keys, known-host
+  material, tokens, and managed-secret values are forbidden from the record.
+  PostgreSQL uses `launchplane_production_backup_targets`; filesystem records
+  under the matching state directory are local/test rehearsal parity only.
+- Production backup policy records bind one exact
+  product/context/instance/promotion-action tuple to both a fast snapshot and
+  an independent backup. The operation policy names stable source and
+  destination target IDs, snapshot retention/name policy, and maximum evidence
+  ages without carrying provider credentials. PostgreSQL uses
+  `launchplane_production_backup_policies`. Both record families enforce
+  contiguous revisions, deterministic IDs and digests, explicit supersession
+  or retirement, unique revisions, and at most one active record per authority
+  stream.
 - Product onboarding, Dokploy target adoption/creation, and tracked Dokploy
   target metadata commands now dual-write explicit
   provider-target rows when a complete Dokploy target and target-id pair exists.
@@ -1091,7 +1108,8 @@ artifact ID. The projection composes:
 - provider-target and provider-neutral route-binding records;
 - expected runtime-environment keys and managed-secret binding metadata;
 - the requested artifact manifest, current deployment/health/runtime identity,
-  and the existing product topology projection.
+  the existing product topology projection, and typed production backup policy
+  authority when the driver marks the exact action as backup-policy governed.
 
 Overall and per-dimension states are `ready`, `blocked`, `stale`, `missing`, or
 `unsupported`, with non-ready states winning over ready evidence. Missing or
@@ -1102,6 +1120,12 @@ Warning-severity topology findings remain visible as bounded dimension details
 without turning an otherwise current lane into a blocked result. Driver actions
 without declared readiness requirements return `unsupported` rather than
 borrowing requirements from another action.
+
+Backup-policy readiness preserves the authority record's `ready`, `missing`,
+or `stale` state and maps invalid or retired bindings to `blocked`. Evidence
+contains only record IDs, revisions, timestamps, provider type, and destination
+kind. Provider hosts, usernames, guest IDs, storage IDs, credentials, and
+secret material remain outside the projection.
 
 Provider-target authority is classified from the exact mutable provider-target
 record rather than deployment or inventory freshness. Deployment readiness uses
@@ -1394,6 +1418,32 @@ state/
   production-promotion workflow is the smallest proof point that this record
   shape works beyond Odoo.
 
+## Production Backup Authority Records
+
+- `ProductionBackupTargetRecord` and `ProductionBackupPolicyRecord` are durable
+  configuration authority, not backup execution evidence.
+- Target identity is stable while destination changes append a new revision.
+  The provider type and destination kind remain immutable within one target
+  stream; changing a guest target into a storage target requires a new target
+  ID.
+- Policy identity is deterministic from the exact
+  product/context/instance/promotion action. An active policy must resolve one
+  active Proxmox guest source and one active Proxmox storage destination on the
+  same provider endpoint. Missing, ambiguous, stale, retired, mismatched, or
+  invalid history fails closed.
+- `review_after` makes stale authority explicit and queryable. It is an
+  operator review boundary, not a service-host environment fallback.
+- `POST /v1/production-backup-authority/apply` supports reviewed dry-run/apply
+  with exact expected-current records, one canonical authority digest,
+  PostgreSQL idempotency, and atomic target/policy revision writes. The bounded
+  response omits provider destination values.
+- The legacy runtime migration route reads one exact DB-backed instance runtime
+  record, requires both snapshot and independent-backup modes, copies only
+  non-secret Proxmox target facts into revision-one typed records, and binds the
+  runtime record's exact `updated_at`. It does not remove or alter the legacy
+  gate; provider execution and final runtime-key retirement remain downstream
+  work.
+
 ## Backup Gate Record
 
 - One file per backup gate run that can authorize a promotion.
@@ -1442,6 +1492,9 @@ state/
 - Promotion execution should fail closed unless the referenced backup-gate
   record exists, targets the same destination environment, and has `status`
   `pass`.
+- Backup-gate records remain per-attempt execution evidence. They do not become
+  target or policy authority and cannot repair missing typed production backup
+  records by themselves.
 
 ## Deployment Record
 
