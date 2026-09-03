@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import get_args
 import unittest
 from unittest.mock import patch
 
@@ -31,6 +32,7 @@ from control_plane.contracts.privileged_operation import (
     PrivilegedOperationConflictError,
     PrivilegedOperationEventRecord,
     PrivilegedOperationRecord,
+    PrivilegedOperationSemanticReviewBlockerCode,
     build_privileged_operation_id,
     build_privileged_operation_id_for_actor,
     privileged_operation_agent_summary,
@@ -41,7 +43,11 @@ from control_plane.contracts.privileged_operation import (
     privileged_operation_request_digest,
     privileged_operation_request_digest_candidates,
 )
-from control_plane.authz_grant_service import AuthzManagedPolicyDiff
+from control_plane.authz_grant_service import (
+    AuthzManagedPolicyDiff,
+    AuthzManagedPolicySafetyBlockerCode,
+    AuthzOperationalReadinessBlockerCode,
+)
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.privileged_operation_registry import (
     MANAGED_MERGE_TRAIN_POLICY_IMPORT_DESCRIPTOR,
@@ -390,6 +396,44 @@ class PrivilegedOperationContractTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(RuntimeError, "exactly match"):
                 validate_privileged_operation_semantic_review_coverage()
+
+    def test_semantic_review_blocker_codes_cover_authoritative_authz_codes(self) -> None:
+        review_codes = set(get_args(PrivilegedOperationSemanticReviewBlockerCode))
+        self.assertTrue(set(get_args(AuthzManagedPolicySafetyBlockerCode)).issubset(review_codes))
+        self.assertTrue(set(get_args(AuthzOperationalReadinessBlockerCode)).issubset(review_codes))
+
+    def test_semantic_review_wraps_persistable_blocker_count_drift(self) -> None:
+        record = _failed_authz_policy_record()
+        assert isinstance(record.evidence, ManagedAuthzPolicySetHumanEvidence)
+        drifted_diff = record.evidence.diff.model_copy(
+            update={
+                "policy_safety_blocker_count": 1,
+                "policy_safety_blockers": (),
+                "operational_readiness_blocked_rule_count": 0,
+                "operational_readiness_blockers": (),
+            }
+        )
+        drifted_record = record.model_copy(
+            update={
+                "status": "planned",
+                "evidence": record.evidence.model_copy(
+                    update={"result_status": "blocked", "diff": drifted_diff}
+                ),
+                "approval": None,
+                "execution": None,
+                "terminal_at": "",
+                "terminal_reason": "",
+            }
+        )
+
+        with self.assertRaisesRegex(
+            PrivilegedOperationSemanticReviewError,
+            "contract validation failed",
+        ):
+            privileged_operation_semantic_review(
+                record=drifted_record,
+                generated_at=datetime(2026, 8, 22, 20, 10, tzinfo=timezone.utc),
+            )
 
     def test_semantic_review_redacts_raw_sensitive_payloads(self) -> None:
         records = (

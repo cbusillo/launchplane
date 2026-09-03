@@ -3,7 +3,9 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Literal, Protocol, cast
+from typing import Literal, Protocol, cast, get_args
+
+from pydantic import ValidationError
 
 from control_plane.contracts.privileged_operation import (
     ManagedAuthzPolicySetHumanEvidence,
@@ -120,6 +122,9 @@ _SEMANTIC_REVIEW_DESCRIPTOR_IDS = frozenset(
         "managed-authz-policy-set",
         "managed-merge-train-policy-import",
     }
+)
+_SEMANTIC_REVIEW_BLOCKER_CODES = frozenset(
+    cast(tuple[str, ...], get_args(PrivilegedOperationSemanticReviewBlockerCode))
 )
 
 
@@ -291,7 +296,15 @@ def _semantic_review_lifecycle_blocker_codes(
     return tuple(codes)
 
 
-def privileged_operation_semantic_review(
+def _semantic_review_blocker_code(value: str) -> PrivilegedOperationSemanticReviewBlockerCode:
+    if value not in _SEMANTIC_REVIEW_BLOCKER_CODES:
+        raise PrivilegedOperationSemanticReviewError(
+            "Privileged-operation semantic review blocker code is unsupported."
+        )
+    return cast(PrivilegedOperationSemanticReviewBlockerCode, value)
+
+
+def _build_privileged_operation_semantic_review(
     *,
     record: PrivilegedOperationRecord,
     events: tuple[PrivilegedOperationEventRecord, ...] = (),
@@ -402,20 +415,18 @@ def privileged_operation_semantic_review(
             )
         diff = record.evidence.diff
         lifecycle = _semantic_review_lifecycle(record, generated_at=observed_at)
-        authz_blocker_codes = cast(
-            tuple[PrivilegedOperationSemanticReviewBlockerCode, ...],
-            tuple(
-                sorted(
-                    {
-                        *(blocker.code for blocker in diff.policy_safety_blockers),
-                        *(
-                            reason_code
-                            for blocker in diff.operational_readiness_blockers
-                            for reason_code in blocker.reason_codes
-                        ),
-                    }
-                )
-            ),
+        authz_blocker_codes = tuple(
+            _semantic_review_blocker_code(code)
+            for code in sorted(
+                {
+                    *(blocker.code for blocker in diff.policy_safety_blockers),
+                    *(
+                        reason_code
+                        for blocker in diff.operational_readiness_blockers
+                        for reason_code in blocker.reason_codes
+                    ),
+                }
+            )
         )
         authz_blocker_codes += _semantic_review_lifecycle_blocker_codes(
             record,
@@ -625,6 +636,24 @@ def privileged_operation_semantic_review(
     raise PrivilegedOperationSemanticReviewError(
         "Privileged-operation semantic review descriptor is unsupported."
     )
+
+
+def privileged_operation_semantic_review(
+    *,
+    record: PrivilegedOperationRecord,
+    events: tuple[PrivilegedOperationEventRecord, ...] = (),
+    generated_at: datetime | None = None,
+) -> PrivilegedOperationSemanticReview:
+    try:
+        return _build_privileged_operation_semantic_review(
+            record=record,
+            events=events,
+            generated_at=generated_at,
+        )
+    except ValidationError as error:
+        raise PrivilegedOperationSemanticReviewError(
+            "Privileged-operation semantic review contract validation failed."
+        ) from error
 
 
 validate_privileged_operation_semantic_review_coverage()

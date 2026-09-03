@@ -327,7 +327,7 @@ function PrivilegedOperationPlanCard({
         <details
           className="privileged-operation-policy-review"
           onToggle={(event) => {
-            if (event.currentTarget.open && !rawDetail && !detailMessage) {
+            if (event.currentTarget.open && !rawDetail) {
               void loadRawDetail();
             }
           }}
