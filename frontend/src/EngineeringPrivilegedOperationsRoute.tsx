@@ -5,10 +5,11 @@ import {
   LaunchplaneApiError,
   approvePrivilegedOperation,
   readPrivilegedOperationPlans,
+  readPrivilegedOperationRawDetail,
   revokePrivilegedOperation,
   type PrivilegedOperationDescriptorId,
   type PrivilegedOperationListResponse,
-  type PrivilegedOperationRecord,
+  type PrivilegedOperationSemanticReview,
 } from "./api";
 import type { DevFixtureMode } from "./dev-fixture-loader";
 import {
@@ -124,7 +125,7 @@ function PrivilegedOperationPlanList({
   data: PrivilegedOperationListResponse;
   refresh: () => void;
 }) {
-  if (!data.records.length) {
+  if (!data.reviews.length) {
     return (
       <EngineeringEmpty
         detail="No typed privileged-operation plan has been recorded. Planning routes remain unavailable until an explicit managed rule is activated through the separate authorization process."
@@ -138,10 +139,10 @@ function PrivilegedOperationPlanList({
       className="privileged-operation-list"
       aria-label="Privileged-operation plans"
     >
-      {data.records.map((record) => (
+      {data.reviews.map((review) => (
         <PrivilegedOperationPlanCard
-          key={record.operation_id}
-          record={record}
+          key={review.operation_id}
+          review={review}
           refresh={refresh}
         />
       ))}
@@ -150,26 +151,15 @@ function PrivilegedOperationPlanList({
 }
 
 function PrivilegedOperationPlanCard({
-  record,
+  review,
   refresh,
 }: {
-  record: PrivilegedOperationRecord;
+  review: PrivilegedOperationSemanticReview;
   refresh: () => void;
 }) {
-  const evidence = record.evidence;
-  const policyEvidence = "diff" in evidence ? evidence : null;
-  const mergeTrainEvidence =
-    "candidate_record_id" in evidence ? evidence : null;
-  const secretEvidence =
-    "configured_secret_count" in evidence ? evidence : null;
-  const policyRequest =
-    "desired_policy" in record.request ? record.request : null;
-  const mergeTrainRequest = "record" in record.request ? record.request : null;
   const [mutationMessage, setMutationMessage] = useState("");
-  const canApprove =
-    record.status === "planned" &&
-    (!policyEvidence || policyEvidence.result_status === "ok");
-  const canRevoke = record.status === "approved";
+  const [detailMessage, setDetailMessage] = useState("");
+  const [rawDetail, setRawDetail] = useState("");
 
   async function mutate(action: "approve" | "revoke") {
     const reason = window
@@ -179,9 +169,9 @@ function PrivilegedOperationPlanCard({
     setMutationMessage("");
     try {
       if (action === "approve") {
-        await approvePrivilegedOperation(record.operation_id, reason);
+        await approvePrivilegedOperation(review.operation_id, reason);
       } else {
-        await revokePrivilegedOperation(record.operation_id, reason);
+        await revokePrivilegedOperation(review.operation_id, reason);
       }
       setMutationMessage(
         action === "approve"
@@ -197,274 +187,163 @@ function PrivilegedOperationPlanCard({
       );
     }
   }
+
+  async function loadRawDetail() {
+    setDetailMessage("");
+    setRawDetail("");
+    try {
+      const detail = await readPrivilegedOperationRawDetail(
+        review.operation_id,
+      );
+      setRawDetail(JSON.stringify(detail, null, 2));
+    } catch (error) {
+      setDetailMessage(
+        error instanceof LaunchplaneApiError
+          ? error.message
+          : "The operation detail could not be loaded.",
+      );
+    }
+  }
+
+  const operationLabel = {
+    managed_secret_reencryption: "Managed-secret re-encryption",
+    managed_authz_policy_set: "Managed authorization policy",
+    managed_merge_train_policy_import: "Managed merge-train policy",
+  }[review.operation_class];
+
   return (
     <article className="privileged-operation-card">
       <header>
         <div>
-          <span className="engineering-kicker">
-            {policyEvidence
-              ? "Managed authorization policy"
-              : mergeTrainEvidence
-                ? "Managed merge-train policy"
-              : "Managed-secret re-encryption"}
-          </span>
-          <h2>{record.request.reason}</h2>
+          <span className="engineering-kicker">{operationLabel}</span>
+          <h2>{review.title}</h2>
           <p>
-            Requested by <strong>{record.requested_by.login}</strong> · created{" "}
-            {formatTime(record.created_at)}
+            Requested by {review.requested_by_kind.replace("_", " ")} · created{" "}
+            {formatTime(review.lifecycle.created_at)}
           </p>
         </div>
-        <span className={`privileged-operation-status ${record.status}`}>
-          {record.status}
+        <span
+          className={`privileged-operation-status ${review.lifecycle.status}`}
+        >
+          {review.lifecycle.status}
         </span>
       </header>
 
-      {secretEvidence?.unreadable_secret_count ? (
+      {review.blockers.state !== "clear" ? (
         <div className="privileged-operation-warning" role="status">
           <ShieldAlert size={18} aria-hidden="true" />
           <span>
-            {secretEvidence.unreadable_secret_count} configured secret
-            {secretEvidence.unreadable_secret_count === 1
-              ? " is"
-              : "s are"}{" "}
-            unreadable. Raw errors and identifiers are intentionally excluded.
-          </span>
-        </div>
-      ) : null}
-
-      {policyEvidence?.result_status === "blocked" ? (
-        <div className="privileged-operation-warning" role="status">
-          <ShieldAlert size={18} aria-hidden="true" />
-          <span>
-            This policy proposal has safety or operational-readiness blockers
-            and cannot be approved.
+            {review.blockers.state === "error"
+              ? "The persisted evidence reports an error state."
+              : "The persisted evidence reports blocker state."}
           </span>
         </div>
       ) : null}
 
       <dl className="privileged-operation-metrics">
-        {secretEvidence ? (
-          <>
-            <div>
-              <dt>Configured</dt>
-              <dd>{secretEvidence.configured_secret_count}</dd>
-            </div>
-            <div>
-              <dt>Would rotate</dt>
-              <dd>{secretEvidence.rotation_candidate_count}</dd>
-            </div>
-            <div>
-              <dt>Unchanged</dt>
-              <dd>{secretEvidence.unchanged_count}</dd>
-            </div>
-            <div>
-              <dt>Unreadable</dt>
-              <dd>{secretEvidence.unreadable_secret_count}</dd>
-            </div>
-          </>
-        ) : null}
-        {policyEvidence ? (
-          <>
-            <div>
-              <dt>Added</dt>
-              <dd>{policyEvidence.diff.added_rule_count}</dd>
-            </div>
-            <div>
-              <dt>Updated</dt>
-              <dd>{policyEvidence.diff.updated_rule_count}</dd>
-            </div>
-            <div>
-              <dt>Removed</dt>
-              <dd>{policyEvidence.diff.removed_rule_count}</dd>
-            </div>
-            <div>
-              <dt>Blockers</dt>
-              <dd>
-                {policyEvidence.diff.policy_safety_blocker_count +
-                  policyEvidence.diff.operational_readiness_blocked_rule_count}
-              </dd>
-            </div>
-          </>
-        ) : null}
-        {mergeTrainEvidence ? (
-          <>
-            <div>
-              <dt>Active targets</dt>
-              <dd>{mergeTrainEvidence.active_target_count}</dd>
-            </div>
-            <div>
-              <dt>Candidate targets</dt>
-              <dd>{mergeTrainEvidence.candidate_target_count}</dd>
-            </div>
-            <div>
-              <dt>Added</dt>
-              <dd>{mergeTrainEvidence.added_policy_keys.length}</dd>
-            </div>
-            <div>
-              <dt>Changed / removed</dt>
-              <dd>
-                {mergeTrainEvidence.changed_policy_keys.length +
-                  mergeTrainEvidence.removed_policy_keys.length}
-              </dd>
-            </div>
-          </>
-        ) : null}
+        {review.change.metrics.slice(0, 8).map((metric) => (
+          <div key={metric.kind}>
+            <dt>{metric.label}</dt>
+            <dd>{metric.value}</dd>
+          </div>
+        ))}
       </dl>
 
       <dl className="privileged-operation-details">
-        {secretEvidence ? (
-          <>
-            <div>
-              <dt>Active key</dt>
-              <dd>
-                <code>{secretEvidence.active_key_id}</code>
-              </dd>
-            </div>
-            <div>
-              <dt>Legacy compatibility</dt>
-              <dd>
-                {secretEvidence.legacy_compatibility_key_loaded
-                  ? "Loaded"
-                  : "Not loaded"}
-              </dd>
-            </div>
-            <div>
-              <dt>Retirement blocked</dt>
-              <dd>{keyList(secretEvidence.retirement_blocked_key_ids)}</dd>
-            </div>
-            <div>
-              <dt>Retirement ready</dt>
-              <dd>{keyList(secretEvidence.retirement_ready_key_ids)}</dd>
-            </div>
-          </>
-        ) : null}
-        {policyEvidence && policyRequest ? (
-          <>
-            <div>
-              <dt>Managed set</dt>
-              <dd>
-                <code>{policyRequest.managed_set_id}</code>
-              </dd>
-            </div>
-            <div>
-              <dt>Policy revision</dt>
-              <dd>
-                {policyEvidence.diff.previous_revision} →{" "}
-                {policyEvidence.diff.candidate_revision}
-              </dd>
-            </div>
-            <div>
-              <dt>Desired policy SHA</dt>
-              <dd>
-                <code className="privileged-operation-digest">
-                  {policyEvidence.diff.desired_policy_sha256}
-                </code>
-              </dd>
-            </div>
-            <div>
-              <dt>Related issue</dt>
-              <dd>{policyRequest.related_issue || "Not supplied"}</dd>
-            </div>
-          </>
-        ) : null}
-        {mergeTrainEvidence && mergeTrainRequest ? (
-          <>
-            <div>
-              <dt>Active record</dt>
-              <dd>
-                <code>{mergeTrainEvidence.active_record_id}</code>
-              </dd>
-            </div>
-            <div>
-              <dt>Candidate record</dt>
-              <dd>
-                <code>{mergeTrainEvidence.candidate_record_id}</code>
-              </dd>
-            </div>
-            <div>
-              <dt>Candidate policy SHA</dt>
-              <dd>
-                <code className="privileged-operation-digest">
-                  {mergeTrainEvidence.candidate_policy_sha256}
-                </code>
-              </dd>
-            </div>
-            <div>
-              <dt>Added targets</dt>
-              <dd>{keyList(mergeTrainEvidence.added_policy_keys)}</dd>
-            </div>
-            <div>
-              <dt>Changed targets</dt>
-              <dd>{keyList(mergeTrainEvidence.changed_policy_keys)}</dd>
-            </div>
-            <div>
-              <dt>Removed targets</dt>
-              <dd>{keyList(mergeTrainEvidence.removed_policy_keys)}</dd>
-            </div>
-            <div>
-              <dt>Related issue</dt>
-              <dd>{mergeTrainRequest.related_issue || "Not supplied"}</dd>
-            </div>
-          </>
-        ) : null}
         <div>
           <dt>Plan expires</dt>
-          <dd>{formatTime(record.expires_at)}</dd>
+          <dd>{formatTime(review.lifecycle.expires_at)}</dd>
         </div>
         <div>
-          <dt>Plan digest</dt>
-          <dd>
-            <code className="privileged-operation-digest">
-              {evidence.plan_digest}
-            </code>
-          </dd>
+          <dt>Blast radius</dt>
+          <dd>{review.blast_radius.summary}</dd>
+        </div>
+        <div>
+          <dt>Rollback</dt>
+          <dd>{review.rollback.summary}</dd>
+        </div>
+        <div>
+          <dt>Result</dt>
+          <dd>{review.evidence.result_status}</dd>
         </div>
       </dl>
 
-      {policyRequest ? (
-        <details className="privileged-operation-policy-review">
-          <summary>Review exact desired policy</summary>
-          <pre>{JSON.stringify(policyRequest.desired_policy, null, 2)}</pre>
-        </details>
-      ) : null}
-      {mergeTrainRequest ? (
-        <details className="privileged-operation-policy-review">
-          <summary>Review exact candidate merge-train policy</summary>
-          <pre>{JSON.stringify(mergeTrainRequest.record, null, 2)}</pre>
-        </details>
+      <details className="privileged-operation-policy-review">
+        <summary>Digest evidence</summary>
+        <dl className="privileged-operation-details">
+          {review.evidence.digests.map((digest) => (
+            <div key={`${digest.kind}:${digest.sha256}`}>
+              <dt>{digest.label}</dt>
+              <dd>
+                <code className="privileged-operation-digest">
+                  {digest.sha256}
+                </code>
+              </dd>
+            </div>
+          ))}
+        </dl>
+      </details>
+
+      {review.activity.length ? (
+        <ol className="privileged-operation-activity">
+          {review.activity.map((entry) => (
+            <li key={entry.event_id}>
+              <span>{formatTime(entry.occurred_at)}</span>
+              <strong>{entry.action}</strong>
+              <code className="privileged-operation-digest">
+                {entry.resulting_record_digest}
+              </code>
+            </li>
+          ))}
+        </ol>
       ) : null}
 
-      {canApprove || canRevoke ? (
+      {review.can_approve || review.can_revoke ? (
         <div className="privileged-operation-actions">
-          {canApprove ? (
+          {review.can_approve ? (
             <button type="button" onClick={() => void mutate("approve")}>
               Approve plan
             </button>
           ) : null}
-          {canRevoke ? (
+          {review.can_revoke ? (
             <button type="button" onClick={() => void mutate("revoke")}>
               Revoke approval
             </button>
           ) : null}
         </div>
       ) : null}
+
+      {review.evidence.raw_detail_available ? (
+        <details
+          className="privileged-operation-policy-review"
+          onToggle={(event) => {
+            if (event.currentTarget.open && !rawDetail && !detailMessage) {
+              void loadRawDetail();
+            }
+          }}
+        >
+          <summary>Authorized detail response</summary>
+          {rawDetail ? (
+            <pre>{rawDetail}</pre>
+          ) : (
+            <p>{detailMessage || "Loading"}</p>
+          )}
+        </details>
+      ) : null}
+
       {mutationMessage ? (
         <p className="privileged-operation-terminal-reason">
           {mutationMessage}
         </p>
       ) : null}
 
-      {record.terminal_reason ? (
+      {review.lifecycle.terminal_reason_available ? (
         <p className="privileged-operation-terminal-reason">
-          {record.terminal_reason}
+          Terminal reason is available in the authorized detail response.
         </p>
       ) : null}
     </article>
   );
-}
-
-function keyList(values: string[]): string {
-  return values.length ? values.join(", ") : "None";
 }
 
 async function fixtureDelay(signal: AbortSignal): Promise<void> {
@@ -504,244 +383,196 @@ function privilegedOperationFixture(
       status: "ok",
       trace_id: `fixture-privileged-operation-${fixtureMode}`,
       total: 0,
-      records: [],
+      reviews: [],
     };
   }
   return {
     status: "ok",
     trace_id: "fixture-privileged-operation-products",
     total: 1,
-    records:
+    reviews:
       descriptorId === "managed-authz-policy-set"
-        ? [policyFixtureRecord()]
+        ? [policyFixtureReview()]
         : descriptorId === "managed-merge-train-policy-import"
-          ? [mergeTrainPolicyFixtureRecord()]
-        : [
-            {
-              schema_version: 1,
-              operation_id:
-                "privileged-operation-0123456789abcdef0123456789abcdef",
-              descriptor_id: "managed-secret-reencryption",
-              descriptor_version: 1,
-              safety_class: "secret_backed",
-              status: "planned",
-              source_event_id: "fixture-request-1",
-              requested_by: {
-                identity_type: "github_human",
-                github_id: 123,
-                login: "operator",
-              },
-              request: {
-                schema_version: 1,
-                reason: "Review canonical managed-secret root migration",
-                source_label: "privileged-operation-plan",
-              },
-              request_digest: "b".repeat(64),
-              evidence: {
-                schema_version: 1,
-                result_status: "ok",
-                plan_digest: "a".repeat(64),
-                configured_secret_count: 18,
-                rotation_candidate_count: 18,
-                unchanged_count: 0,
-                unreadable_secret_count: 0,
-                active_key_id: "canonical-root-2026",
-                retirement_blocked_key_ids: ["legacy-root"],
-                retirement_ready_key_ids: [],
-                legacy_compatibility_key_loaded: true,
-              },
-              evidence_digest: "c".repeat(64),
-              created_at: "2026-08-22T20:00:00+00:00",
-              updated_at: "2026-08-22T20:00:00+00:00",
-              expires_at: "2026-08-22T20:30:00+00:00",
-              approval: null,
-              execution: null,
-              terminal_at: "",
-              terminal_reason: "",
-            },
-          ],
+          ? [mergeTrainPolicyFixtureReview()]
+          : [secretFixtureReview()],
   };
 }
 
-function mergeTrainPolicyFixtureRecord(): PrivilegedOperationRecord {
+function secretFixtureReview(): PrivilegedOperationSemanticReview {
+  return semanticReviewFixture({
+    operationClass: "managed_secret_reencryption",
+    descriptorId: "managed-secret-reencryption",
+    safetyClass: "secret_backed",
+    title: "Review canonical managed-secret root migration",
+    requestedByKind: "github_human",
+    createdAt: "2026-08-22T20:00:00+00:00",
+    expiresAt: "2026-08-22T20:30:00+00:00",
+    scope: "managed_secret_store",
+    blastRadius: "Bounded to configured managed-secret records.",
+    rollbackClass: "key_retained",
+    rollback: "Rollback depends on retained managed-secret key material.",
+    metrics: [
+      { kind: "configured_secrets", label: "Configured secrets", value: 18 },
+      { kind: "rotation_candidates", label: "Would rotate", value: 18 },
+      { kind: "unchanged_secrets", label: "Unchanged", value: 0 },
+      { kind: "unreadable_secrets", label: "Unreadable", value: 0 },
+    ],
+  });
+}
+
+function policyFixtureReview(): PrivilegedOperationSemanticReview {
+  return semanticReviewFixture({
+    operationClass: "managed_authz_policy_set",
+    descriptorId: "managed-authz-policy-set",
+    safetyClass: "policy_admin",
+    title: "Review a DB-native policy canary proposal",
+    requestedByKind: "terminal_agent",
+    createdAt: "2026-08-25T20:00:00+00:00",
+    expiresAt: "2026-08-25T20:30:00+00:00",
+    scope: "authorization_policy",
+    blastRadius: "Bounded to one managed authorization rule set.",
+    rollbackClass: "policy_cas",
+    rollback:
+      "Rollback is bounded by authorization policy CAS and record digest evidence.",
+    metrics: [
+      { kind: "policy_rules_added", label: "Added", value: 1 },
+      { kind: "policy_rules_updated", label: "Updated", value: 0 },
+      { kind: "policy_rules_removed", label: "Removed", value: 0 },
+      { kind: "policy_safety_blockers", label: "Safety blockers", value: 0 },
+    ],
+  });
+}
+
+function mergeTrainPolicyFixtureReview(): PrivilegedOperationSemanticReview {
+  return semanticReviewFixture({
+    operationClass: "managed_merge_train_policy_import",
+    descriptorId: "managed-merge-train-policy-import",
+    safetyClass: "policy_admin",
+    title: "Add a repository to the guarded merge train",
+    requestedByKind: "terminal_agent",
+    createdAt: "2026-09-02T00:02:00+00:00",
+    expiresAt: "2026-09-02T00:32:00+00:00",
+    scope: "merge_train_policy",
+    blastRadius:
+      "Bounded to merge-train policy target counts; target identities are redacted.",
+    rollbackClass: "policy_cas",
+    rollback:
+      "Rollback is bounded by merge-train policy CAS and record digest evidence.",
+    metrics: [
+      { kind: "active_policy_targets", label: "Active targets", value: 1 },
+      {
+        kind: "candidate_policy_targets",
+        label: "Candidate targets",
+        value: 2,
+      },
+      { kind: "policy_targets_added", label: "Added", value: 1 },
+      { kind: "policy_targets_changed", label: "Changed", value: 0 },
+    ],
+  });
+}
+
+function semanticReviewFixture({
+  operationClass,
+  descriptorId,
+  safetyClass,
+  title,
+  requestedByKind,
+  createdAt,
+  expiresAt,
+  scope,
+  blastRadius,
+  rollbackClass,
+  rollback,
+  metrics,
+}: {
+  operationClass: PrivilegedOperationSemanticReview["operation_class"];
+  descriptorId: PrivilegedOperationSemanticReview["descriptor_id"];
+  safetyClass: PrivilegedOperationSemanticReview["safety_class"];
+  title: string;
+  requestedByKind: PrivilegedOperationSemanticReview["requested_by_kind"];
+  createdAt: string;
+  expiresAt: string;
+  scope: PrivilegedOperationSemanticReview["blast_radius"]["scope"];
+  blastRadius: string;
+  rollbackClass: PrivilegedOperationSemanticReview["rollback"]["rollback_class"];
+  rollback: string;
+  metrics: PrivilegedOperationSemanticReview["change"]["metrics"];
+}): PrivilegedOperationSemanticReview {
   return {
     schema_version: 1,
-    operation_id: "privileged-operation-abcdef0123456789abcdef0123456789",
-    descriptor_id: "managed-merge-train-policy-import",
+    operation_id: "privileged-operation-0123456789abcdef0123456789abcdef",
+    descriptor_id: descriptorId,
     descriptor_version: 1,
-    safety_class: "policy_admin",
-    status: "planned",
-    source_event_id: "fixture-merge-train-policy-request-1",
-    requested_by: {
-      identity_type: "terminal_agent",
-      login: "terminal-agent",
-      principal_sha256: "4".repeat(64),
+    operation_class: operationClass,
+    safety_class: safetyClass,
+    title,
+    requested_by_kind: requestedByKind,
+    lifecycle: {
+      status: "planned",
+      created_at: createdAt,
+      updated_at: createdAt,
+      expires_at: expiresAt,
+      terminal_at: "",
+      terminal_reason_available: false,
+      approval_recorded: false,
+      execution_recorded: false,
     },
-    request: {
-      schema_version: 1,
-      reason: "Add the Launchplane repository to the guarded merge train",
-      related_issue: "cbusillo/launchplane#2296",
-      record: {
-        schema_version: 1,
-        record_id: "merge-train-policy-20260902T000100Z-candidate",
-        status: "active",
-        source: "privileged-operation",
-        updated_at: "2026-09-02T00:01:00+00:00",
-        policy_sha256: "6".repeat(64),
-        policy: {
-          schema_version: 1,
-          policies: [
-            mergeTrainRepositoryFixture("cbusillo/codex-skills"),
-            mergeTrainRepositoryFixture("cbusillo/launchplane"),
-          ],
+    blockers: {
+      state: "clear",
+      policy_safety_blocker_count: 0,
+      operational_readiness_blocker_count: 0,
+      unreadable_secret_count: 0,
+      codes: [],
+    },
+    change: {
+      summary: "Server-computed semantic review fixture.",
+      changed: true,
+      metrics,
+    },
+    blast_radius: {
+      scope,
+      summary: blastRadius,
+      affected_count: Math.max(...metrics.map((metric) => metric.value), 0),
+    },
+    rollback: {
+      rollback_class: rollbackClass,
+      summary: rollback,
+    },
+    evidence: {
+      result_status: "ok",
+      raw_detail_available: true,
+      redaction: "semantic_only",
+      digests: [
+        { kind: "request", label: "Request digest", sha256: "1".repeat(64) },
+        {
+          kind: "human_evidence",
+          label: "Human evidence digest",
+          sha256: "2".repeat(64),
         },
+        { kind: "plan", label: "Plan digest", sha256: "3".repeat(64) },
+        {
+          kind: "pre_state",
+          label: "Pre-state digest",
+          sha256: "4".repeat(64),
+        },
+      ],
+    },
+    activity: [
+      {
+        sequence: 1,
+        action: "planned",
+        occurred_at: createdAt,
+        source_kind:
+          requestedByKind === "terminal_agent" ? "agent_api" : "browser_api",
+        actor_type: requestedByKind,
+        reason_available: false,
+        event_id: "privileged-operation-event-0123456789abcdef0123456789abcdef",
+        resulting_record_digest: "5".repeat(64),
       },
-    },
-    request_digest: "7".repeat(64),
-    evidence: {
-      schema_version: 1,
-      result_status: "ok",
-      plan_digest: "8".repeat(64),
-      active_record_id: "merge-train-policy-20260901T230000Z-active",
-      active_status: "active",
-      active_updated_at: "2026-09-01T23:00:00+00:00",
-      active_policy_sha256: "9".repeat(64),
-      active_target_count: 1,
-      candidate_record_id: "merge-train-policy-20260902T000100Z-candidate",
-      candidate_policy_sha256: "6".repeat(64),
-      candidate_target_count: 2,
-      added_policy_keys: ["cbusillo/launchplane:main"],
-      removed_policy_keys: [],
-      changed_policy_keys: [],
-      unchanged_policy_keys: ["cbusillo/codex-skills:main"],
-    },
-    evidence_digest: "a".repeat(64),
-    created_at: "2026-09-02T00:02:00+00:00",
-    updated_at: "2026-09-02T00:02:00+00:00",
-    expires_at: "2026-09-02T00:32:00+00:00",
-    approval: null,
-    execution: null,
-    terminal_at: "",
-    terminal_reason: "",
-  };
-}
-
-function mergeTrainRepositoryFixture(repository: string) {
-  return {
-    repository,
-    base_branch: "main",
-    enqueue_label: "ready-to-merge",
-    blocked_label: "merge-blocked",
-    stack_child_disposition_label: "",
-    merge_method: "merge" as const,
-    failure_policy: "pause_train" as const,
-    engineering_review_mode: "required" as const,
-    enqueue: {},
-    merge_identity: {
-      kind: "github_app" as const,
-      name: "launchplane-merge-train",
-    },
-    github_token: { env_var: "LAUNCHPLANE_GITHUB_TOKEN" },
-    scheduler: {
-      enabled: false,
-      runner_mode: "controller" as const,
-      mutate: false,
-    },
-    service_authz: {
-      action: "merge_train.run_once",
-      product: "launchplane",
-      context: "launchplane",
-    },
-  };
-}
-
-function policyFixtureRecord(): PrivilegedOperationRecord {
-  return {
-    schema_version: 1,
-    operation_id: "privileged-operation-fedcba9876543210fedcba9876543210",
-    descriptor_id: "managed-authz-policy-set",
-    descriptor_version: 1,
-    safety_class: "policy_admin",
-    status: "planned",
-    source_event_id: "fixture-policy-request-1",
-    requested_by: {
-      identity_type: "terminal_agent",
-      login: "terminal-agent",
-      principal_sha256: "d".repeat(64),
-    },
-    request: {
-      schema_version: 1,
-      managed_set_id: "authorization.canary",
-      administrator_quorum_change: null,
-      reason: "Review a DB-native policy canary proposal",
-      related_issue: "cbusillo/launchplane#2238",
-      desired_policy: {
-        schema_version: 2,
-        github_actions: [],
-        github_humans: [
-          {
-            actions: ["authz_policy_operation.read"],
-            contexts: ["launchplane"],
-            github_ids: [789],
-            logins: [],
-            managed_rule_id: "policy-canary-reader",
-            managed_set_id: "authorization.canary",
-            organizations: [],
-            products: ["launchplane"],
-            roles: ["admin"],
-            teams: [],
-          },
-        ],
-        local_admins: [],
-        local_operators: [],
-        terminal_agents: [],
-      },
-    },
-    request_digest: "e".repeat(64),
-    evidence: {
-      schema_version: 1,
-      result_status: "ok",
-      plan_digest: "f".repeat(64),
-      diff: {
-        managed_set_id: "authorization.canary",
-        administrator_quorum: 2,
-        administrator_quorum_changed: false,
-        previous_record_id: "launchplane-authz-policy-r1",
-        previous_revision: 1,
-        candidate_revision: 2,
-        previous_policy_sha256: "1".repeat(64),
-        previous_administrator_quorum: 2,
-        desired_policy_sha256: "2".repeat(64),
-        desired_set_sha256: "3".repeat(64),
-        plan_sha256: "f".repeat(64),
-        schema_migrated: false,
-        changed: true,
-        quorum_satisfied: true,
-        solo_administration_active: false,
-        strict_human_administrator_count: 1,
-        authorization_changed: true,
-        added_rule_count: 1,
-        adopted_rule_count: 0,
-        updated_rule_count: 0,
-        removed_rule_count: 0,
-        unchanged_rule_count: 0,
-        unmanaged_compatibility_candidate_count: 0,
-        retired_unmanaged_compatibility_rule_count: 0,
-        retired_unmanaged_compatibility_rules: [],
-        policy_safety_blocker_count: 0,
-        policy_safety_blockers: [],
-        operational_readiness_blocked_rule_count: 0,
-        operational_readiness_blockers: [],
-        changes: [],
-      },
-    },
-    evidence_digest: "4".repeat(64),
-    created_at: "2026-08-25T20:00:00+00:00",
-    updated_at: "2026-08-25T20:00:00+00:00",
-    expires_at: "2026-08-25T20:30:00+00:00",
-    approval: null,
-    execution: null,
-    terminal_at: "",
-    terminal_reason: "",
+    ],
+    can_approve: true,
+    can_revoke: false,
+    authorizes_execution: false,
   };
 }

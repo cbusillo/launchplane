@@ -267,6 +267,47 @@ they exclude request data, desired policy bodies, merge identities, token source
 labels, key IDs, and human identity. A terminal agent may read only the policy
 proposal created by its own fingerprint.
 
+## Semantic Human Review Projection
+
+Human list reads return `PrivilegedOperationSemanticReview` records instead of
+raw persisted operation records. The projection is response-only and versioned;
+it is derived on demand from the persisted `PrivilegedOperationRecord`, the
+registered descriptor metadata, authoritative human evidence, optional terminal
+evidence, and append-only operation events. It is not stored, signed,
+challenged, or used as approval authority, and every response explicitly carries
+`authorizes_execution: false`.
+
+The projection covers every registered descriptor:
+
+- `managed-secret-reencryption` reports configured, rotation-candidate,
+  unchanged, and unreadable counts; its blast radius is the managed-secret
+  store and rollback class is retained key material.
+- `managed-authz-policy-set` reports managed-rule change counts, bounded
+  blocker counts/codes, policy digests, managed-set digest, policy-CAS rollback,
+  and authorization-policy blast radius. It does not include the desired policy
+  body, selectors, principals, or rule payloads.
+- `managed-merge-train-policy-import` reports active/candidate target counts,
+  change bucket counts, policy digests, policy-CAS rollback, and merge-train
+  policy blast radius. It does not include repository names, branches,
+  provider topology, merge identity, token source labels, or target keys.
+
+The projection fails closed when the persisted descriptor ID/version, safety
+class, request/evidence variant, requester variant, or registered descriptor
+metadata no longer matches the compiled registry. Unknown or drifted data
+returns an unsupported semantic-review error instead of generic approval text.
+Projection list and detail reads call the direct store
+`read_privileged_operation_record`, `list_privileged_operation_records`, and
+`list_privileged_operation_event_records` methods. They do not call the
+expiry-reconciling `read_privileged_operation` or `list_privileged_operations`
+helpers and therefore perform no read-time writes.
+
+The existing authorized raw detail response remains available at the plan detail
+GET route for exact human evidence review. The semantic projection is available
+in list responses and at the plan review GET route; browser clients must render
+semantic review fields first and fetch raw detail only as an explicit one-level-
+deeper authorized disclosure. Mutation, challenge, worker, agent-summary,
+approval, revoke, cancel, and execution behavior is unchanged.
+
 ## HTTP, UI, And Worker
 
 Human routes:
@@ -274,6 +315,7 @@ Human routes:
 - `POST /v1/privileged-operations/plans`
 - `GET /v1/privileged-operations/plans`
 - `GET /v1/privileged-operations/plans/{operation_id}`
+- `GET /v1/privileged-operations/plans/{operation_id}/review`
 - `POST /v1/privileged-operations/plans/{operation_id}/approve`
 - `POST /v1/privileged-operations/plans/{operation_id}/revoke`
 - `POST /v1/privileged-operations/plans/{operation_id}/cancel`
