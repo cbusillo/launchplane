@@ -203,13 +203,20 @@ workflow's cancellation policy for ordinary base-branch pushes.
 
 After a batch candidate passes, Launchplane lands the original pull requests in
 queue order using GitHub's pull request merge API and the configured
-`merge_method`. Before each PR merge, Launchplane must verify that the PR still
-matches the candidate evidence it is about to rely on. At minimum, the PR head
-SHA, exact target base ref and current base SHA, queue position, policy digest,
-and candidate batch identity
-must match the recorded landing plan. If GitHub state changes, Launchplane must
-stop, re-read, and rebuild or requeue rather than continuing from stale batch
-evidence.
+`merge_method`. Before creating a landing plan, the controller revalidates that
+the passed candidate still matches the live eligible queue, PR head SHAs, and
+base SHA. Drift supersedes the active passed-candidate record and resumes normal
+planning from a fresh snapshot instead of creating a stale landing plan.
+Transient mergeability or check-readiness changes do not invalidate an
+identity-stable candidate. A collapsed-stack candidate is compared against its
+admitted root entry, and proven drift resumes the existing stack-collapse state
+rather than creating a duplicate collapse plan.
+Before each PR merge, Launchplane must also verify that the PR still matches the
+candidate evidence it is about to rely on. At minimum, the PR head SHA, exact
+target base ref and current base SHA, queue position, policy digest, and
+candidate batch identity must match the recorded landing plan. If GitHub state
+changes, Launchplane must stop, re-read, and rebuild or requeue rather than
+continuing from stale batch evidence.
 
 Stack-collapse records participate in landing only when their repository, base
 branch, policy digest, root PR, and expected root head match the landing plan.
@@ -622,7 +629,8 @@ Controller actions have these retry/stop semantics:
   supersede and replan it against the unchanged queue after a transient build
   failure is repaired. Failed candidates with a recorded candidate SHA remain
   terminal until the queue or base changes.
-- `plan_landing`: A passed candidate is ready for PR-native landing-plan
+- `plan_landing`: A passed candidate still matches the live eligible queue,
+  recorded PR head SHAs, and base SHA and is ready for PR-native landing-plan
   creation. Mutate once, then call again.
 - `land_batch`: A landing plan with planned or in-progress merge entries is
   ready to merge or resume the original PRs in order. Mutate once only after
