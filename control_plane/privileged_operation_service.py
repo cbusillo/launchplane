@@ -19,6 +19,7 @@ from control_plane.contracts.privileged_operation import (
     PrivilegedOperationSemanticReviewActivityEntry,
     PrivilegedOperationSemanticReviewBlastRadius,
     PrivilegedOperationSemanticReviewBlocker,
+    PrivilegedOperationSemanticReviewBlockerCode,
     PrivilegedOperationSemanticReviewChange,
     PrivilegedOperationSemanticReviewDigest,
     PrivilegedOperationSemanticReviewEvidence,
@@ -42,6 +43,7 @@ from control_plane.contracts.privileged_operation import (
     privileged_operation_request_digest_candidates,
 )
 from control_plane.privileged_operation_registry import (
+    list_privileged_operation_descriptors,
     read_privileged_operation_descriptor,
 )
 
@@ -112,6 +114,25 @@ class PrivilegedOperationSemanticReviewError(ValueError):
     pass
 
 
+_SEMANTIC_REVIEW_DESCRIPTOR_IDS = frozenset(
+    {
+        "managed-secret-reencryption",
+        "managed-authz-policy-set",
+        "managed-merge-train-policy-import",
+    }
+)
+
+
+def validate_privileged_operation_semantic_review_coverage() -> None:
+    registered_ids = frozenset(
+        descriptor.descriptor_id for descriptor in list_privileged_operation_descriptors()
+    )
+    if registered_ids != _SEMANTIC_REVIEW_DESCRIPTOR_IDS:
+        raise RuntimeError(
+            "Privileged-operation semantic review coverage must exactly match the descriptor registry."
+        )
+
+
 def require_privileged_operation_store(record_store: object) -> PrivilegedOperationStore:
     required_methods = (
         "write_privileged_operation_plan",
@@ -130,11 +151,31 @@ def require_privileged_operation_store(record_store: object) -> PrivilegedOperat
 
 
 def _semantic_review_activity(
+    operation_id: str,
     events: tuple[PrivilegedOperationEventRecord, ...],
 ) -> tuple[PrivilegedOperationSemanticReviewActivityEntry, ...]:
+    try:
+        validated_events = tuple(
+            PrivilegedOperationEventRecord.model_validate(event.model_dump(mode="json"))
+            for event in events
+        )
+    except ValueError as error:
+        raise PrivilegedOperationSemanticReviewError(
+            "Privileged-operation semantic review activity contains an invalid event."
+        ) from error
+    if any(event.operation_id != operation_id for event in validated_events):
+        raise PrivilegedOperationSemanticReviewError(
+            "Privileged-operation semantic review activity crossed operation boundaries."
+        )
+    if len({event.event_id for event in validated_events}) != len(validated_events) or len(
+        {event.sequence for event in validated_events}
+    ) != len(validated_events):
+        raise PrivilegedOperationSemanticReviewError(
+            "Privileged-operation semantic review activity is not append-only unique."
+        )
     ordered_events = sorted(
-        events,
-        key=lambda event: (event.occurred_at, event.sequence, event.event_id),
+        validated_events,
+        key=lambda event: (event.sequence, event.occurred_at, event.event_id),
     )
     return tuple(
         PrivilegedOperationSemanticReviewActivityEntry(
@@ -163,9 +204,20 @@ def _semantic_review_requester_kind(
 
 def _semantic_review_lifecycle(
     record: PrivilegedOperationRecord,
+    *,
+    generated_at: datetime,
 ) -> PrivilegedOperationSemanticReviewLifecycle:
+    expires_at = datetime.fromisoformat(record.expires_at)
+    if record.status == "expired":
+        expiry_state: Literal["active", "past_expiry_unreconciled", "expired"] = "expired"
+    elif record.status in {"planned", "approved"} and generated_at >= expires_at:
+        expiry_state = "past_expiry_unreconciled"
+    else:
+        expiry_state = "active"
     return PrivilegedOperationSemanticReviewLifecycle(
         status=record.status,
+        generated_at=_timestamp(generated_at),
+        expiry_state=expiry_state,
         created_at=record.created_at,
         updated_at=record.updated_at,
         expires_at=record.expires_at,
@@ -222,11 +274,30 @@ def _semantic_review_result_status(
     return record.evidence.result_status
 
 
+def _semantic_review_lifecycle_blocker_codes(
+    record: PrivilegedOperationRecord,
+    *,
+    expiry_state: Literal["active", "past_expiry_unreconciled", "expired"],
+) -> tuple[PrivilegedOperationSemanticReviewBlockerCode, ...]:
+    codes: list[PrivilegedOperationSemanticReviewBlockerCode] = []
+    if expiry_state == "past_expiry_unreconciled":
+        codes.append("operation_past_expiry")
+    elif expiry_state == "expired":
+        codes.append("operation_expired")
+    if record.status == "execution_failed":
+        codes.append("execution_failed")
+    if record.execution is not None and record.execution.reconciliation_required:
+        codes.append("reconciliation_required")
+    return tuple(codes)
+
+
 def privileged_operation_semantic_review(
     *,
     record: PrivilegedOperationRecord,
     events: tuple[PrivilegedOperationEventRecord, ...] = (),
+    generated_at: datetime | None = None,
 ) -> PrivilegedOperationSemanticReview:
+    observed_at = (generated_at or _utc_now()).astimezone(timezone.utc)
     try:
         descriptor = read_privileged_operation_descriptor(record.descriptor_id).descriptor
     except LookupError as error:
@@ -270,22 +341,34 @@ def privileged_operation_semantic_review(
                 value=record.evidence.unreadable_secret_count,
             ),
         )
-        blocker_state: Literal["clear", "blocked", "error"] = (
-            "error" if record.evidence.unreadable_secret_count else "clear"
+        lifecycle = _semantic_review_lifecycle(record, generated_at=observed_at)
+        secret_blocker_codes = _semantic_review_lifecycle_blocker_codes(
+            record,
+            expiry_state=lifecycle.expiry_state,
         )
+        if record.evidence.unreadable_secret_count:
+            secret_blocker_codes += ("secret_unreadable",)
+        blocker_state: Literal["clear", "blocked", "error"] = "clear"
+        if (
+            "execution_failed" in secret_blocker_codes
+            or "reconciliation_required" in secret_blocker_codes
+        ):
+            blocker_state = "error"
+        elif secret_blocker_codes:
+            blocker_state = "blocked"
         return PrivilegedOperationSemanticReview(
             operation_id=record.operation_id,
             descriptor_id=record.descriptor_id,
             descriptor_version=record.descriptor_version,
             operation_class="managed_secret_reencryption",
             safety_class=record.safety_class,
-            title=record.request.reason,
+            title="Managed-secret re-encryption review",
             requested_by_kind=_semantic_review_requester_kind(record),
-            lifecycle=_semantic_review_lifecycle(record),
+            lifecycle=lifecycle,
             blockers=PrivilegedOperationSemanticReviewBlocker(
                 state=blocker_state,
                 unreadable_secret_count=record.evidence.unreadable_secret_count,
-                codes=("secret_unreadable",) if record.evidence.unreadable_secret_count else (),
+                codes=secret_blocker_codes,
             ),
             change=PrivilegedOperationSemanticReviewChange(
                 summary="Managed secrets will be re-encrypted with the active key.",
@@ -305,9 +388,9 @@ def privileged_operation_semantic_review(
                 result_status=_semantic_review_result_status(record),
                 digests=_semantic_review_digests(record),
             ),
-            activity=_semantic_review_activity(events),
-            can_approve=record.status == "planned" and record.evidence.unreadable_secret_count == 0,
-            can_revoke=record.status == "approved",
+            activity=_semantic_review_activity(record.operation_id, events),
+            can_approve=record.status == "planned" and not secret_blocker_codes,
+            can_revoke=record.status == "approved" and lifecycle.expiry_state == "active",
         )
     if record.descriptor_id == "managed-authz-policy-set":
         if not isinstance(record.request, ManagedAuthzPolicySetProposalInput) or not isinstance(
@@ -318,13 +401,25 @@ def privileged_operation_semantic_review(
                 "Managed-policy semantic review payload variant drifted."
             )
         diff = record.evidence.diff
-        blocker_codes = tuple(blocker.code for blocker in diff.policy_safety_blockers) + tuple(
-            reason_code
-            for blocker in diff.operational_readiness_blockers
-            for reason_code in blocker.reason_codes
+        lifecycle = _semantic_review_lifecycle(record, generated_at=observed_at)
+        authz_blocker_codes = cast(
+            tuple[PrivilegedOperationSemanticReviewBlockerCode, ...],
+            tuple(
+                sorted(
+                    {
+                        *(blocker.code for blocker in diff.policy_safety_blockers),
+                        *(
+                            reason_code
+                            for blocker in diff.operational_readiness_blockers
+                            for reason_code in blocker.reason_codes
+                        ),
+                    }
+                )
+            ),
         )
-        blocker_count = (
-            diff.policy_safety_blocker_count + diff.operational_readiness_blocked_rule_count
+        authz_blocker_codes += _semantic_review_lifecycle_blocker_codes(
+            record,
+            expiry_state=lifecycle.expiry_state,
         )
         authz_policy_metrics: tuple[PrivilegedOperationSemanticReviewMetric, ...] = (
             PrivilegedOperationSemanticReviewMetric(
@@ -359,16 +454,21 @@ def privileged_operation_semantic_review(
             descriptor_version=record.descriptor_version,
             operation_class="managed_authz_policy_set",
             safety_class=record.safety_class,
-            title=record.request.reason,
+            title="Managed authorization policy review",
             requested_by_kind=_semantic_review_requester_kind(record),
-            lifecycle=_semantic_review_lifecycle(record),
+            lifecycle=lifecycle,
             blockers=PrivilegedOperationSemanticReviewBlocker(
-                state="blocked" if blocker_count else "clear",
-                policy_safety_blocker_count=diff.policy_safety_blocker_count,
-                operational_readiness_blocker_count=(
-                    diff.operational_readiness_blocked_rule_count
+                state=(
+                    "error"
+                    if "execution_failed" in authz_blocker_codes
+                    or "reconciliation_required" in authz_blocker_codes
+                    else "blocked"
+                    if authz_blocker_codes
+                    else "clear"
                 ),
-                codes=blocker_codes,
+                policy_safety_blocker_count=diff.policy_safety_blocker_count,
+                operational_readiness_blocker_count=(diff.operational_readiness_blocked_rule_count),
+                codes=authz_blocker_codes,
             ),
             change=PrivilegedOperationSemanticReviewChange(
                 summary="Managed authorization rules would be reconciled by exact policy CAS.",
@@ -413,9 +513,9 @@ def privileged_operation_semantic_review(
                     ),
                 ),
             ),
-            activity=_semantic_review_activity(events),
-            can_approve=record.status == "planned" and blocker_count == 0,
-            can_revoke=record.status == "approved",
+            activity=_semantic_review_activity(record.operation_id, events),
+            can_approve=record.status == "planned" and not authz_blocker_codes,
+            can_revoke=record.status == "approved" and lifecycle.expiry_state == "active",
         )
     if record.descriptor_id == "managed-merge-train-policy-import":
         if not isinstance(
@@ -457,16 +557,31 @@ def privileged_operation_semantic_review(
                 value=len(record.evidence.unchanged_policy_keys),
             ),
         )
+        lifecycle = _semantic_review_lifecycle(record, generated_at=observed_at)
+        merge_train_blocker_codes = _semantic_review_lifecycle_blocker_codes(
+            record,
+            expiry_state=lifecycle.expiry_state,
+        )
         return PrivilegedOperationSemanticReview(
             operation_id=record.operation_id,
             descriptor_id=record.descriptor_id,
             descriptor_version=record.descriptor_version,
             operation_class="managed_merge_train_policy_import",
             safety_class=record.safety_class,
-            title=record.request.reason,
+            title="Managed merge-train policy review",
             requested_by_kind=_semantic_review_requester_kind(record),
-            lifecycle=_semantic_review_lifecycle(record),
-            blockers=PrivilegedOperationSemanticReviewBlocker(state="clear"),
+            lifecycle=lifecycle,
+            blockers=PrivilegedOperationSemanticReviewBlocker(
+                state=(
+                    "error"
+                    if "execution_failed" in merge_train_blocker_codes
+                    or "reconciliation_required" in merge_train_blocker_codes
+                    else "blocked"
+                    if merge_train_blocker_codes
+                    else "clear"
+                ),
+                codes=merge_train_blocker_codes,
+            ),
             change=PrivilegedOperationSemanticReviewChange(
                 summary="Merge-train policy targets would be imported by exact policy CAS.",
                 changed=bool(
@@ -503,13 +618,16 @@ def privileged_operation_semantic_review(
                     ),
                 ),
             ),
-            activity=_semantic_review_activity(events),
-            can_approve=record.status == "planned",
-            can_revoke=record.status == "approved",
+            activity=_semantic_review_activity(record.operation_id, events),
+            can_approve=record.status == "planned" and not merge_train_blocker_codes,
+            can_revoke=record.status == "approved" and lifecycle.expiry_state == "active",
         )
     raise PrivilegedOperationSemanticReviewError(
         "Privileged-operation semantic review descriptor is unsupported."
     )
+
+
+validate_privileged_operation_semantic_review_coverage()
 
 
 def _utc_now() -> datetime:

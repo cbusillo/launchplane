@@ -15454,6 +15454,12 @@
             "title": "Activity",
             "type": "array"
           },
+          "authorizes_approval": {
+            "const": false,
+            "default": false,
+            "title": "Authorizes Approval",
+            "type": "boolean"
+          },
           "authorizes_execution": {
             "const": false,
             "default": false,
@@ -15509,6 +15515,12 @@
             "title": "Operation Id",
             "type": "string"
           },
+          "persists_state": {
+            "const": false,
+            "default": false,
+            "title": "Persists State",
+            "type": "boolean"
+          },
           "requested_by_kind": {
             "enum": [
               "github_human",
@@ -15535,12 +15547,18 @@
             "type": "integer"
           },
           "title": {
+            "enum": [
+              "Managed-secret re-encryption review",
+              "Managed authorization policy review",
+              "Managed merge-train policy review"
+            ],
             "title": "Title",
             "type": "string"
           }
         },
         "required": [
           "activity",
+          "authorizes_approval",
           "authorizes_execution",
           "blast_radius",
           "blockers",
@@ -15553,6 +15571,7 @@
           "lifecycle",
           "operation_class",
           "operation_id",
+          "persists_state",
           "requested_by_kind",
           "rollback",
           "safety_class",
@@ -15670,6 +15689,30 @@
           "codes": {
             "default": [],
             "items": {
+              "enum": [
+                "authz_policy_admin_unreachable",
+                "authz_policy_applying_admin_removed",
+                "authz_policy_strict_human_admin_unreachable",
+                "authz_policy_administrator_quorum_unsatisfied",
+                "repository_not_exact",
+                "workflow_refs_not_singleton",
+                "workflow_ref_not_exact",
+                "job_workflow_refs_not_singleton",
+                "job_workflow_ref_not_immutable",
+                "actions_not_singleton",
+                "action_not_exact",
+                "products_not_singleton",
+                "product_not_exact",
+                "contexts_not_singleton",
+                "context_not_exact",
+                "instances_not_singleton",
+                "instance_not_exact",
+                "secret_unreadable",
+                "operation_past_expiry",
+                "operation_expired",
+                "execution_failed",
+                "reconciliation_required"
+              ],
               "type": "string"
             },
             "title": "Codes",
@@ -15838,6 +15881,19 @@
             "title": "Expires At",
             "type": "string"
           },
+          "expiry_state": {
+            "enum": [
+              "active",
+              "past_expiry_unreconciled",
+              "expired"
+            ],
+            "title": "Expiry State",
+            "type": "string"
+          },
+          "generated_at": {
+            "title": "Generated At",
+            "type": "string"
+          },
           "status": {
             "enum": [
               "planned",
@@ -15872,6 +15928,8 @@
           "created_at",
           "execution_recorded",
           "expires_at",
+          "expiry_state",
+          "generated_at",
           "status",
           "terminal_at",
           "terminal_reason_available",

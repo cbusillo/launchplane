@@ -701,18 +701,92 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
                 review_response = await client.get(
                     f"/v1/privileged-operations/plans/{operation_id}/review"
                 )
+                after_events = store.list_privileged_operation_event_records(
+                    operation_id=operation_id
+                )
+
                 detail_response = await client.get(
                     f"/v1/privileged-operations/plans/{operation_id}"
                 )
-                after_events = store.list_privileged_operation_event_records(
+                after_detail_events = store.list_privileged_operation_event_records(
                     operation_id=operation_id
                 )
 
         self.assertEqual(list_response.status_code, 200, list_response.text)
         self.assertEqual(review_response.status_code, 200, review_response.text)
         self.assertEqual(detail_response.status_code, 200, detail_response.text)
-        self.assertEqual(tuple(event.event_id for event in after_events), tuple(event.event_id for event in before_events))
+        self.assertEqual(
+            tuple(event.event_id for event in after_events),
+            tuple(event.event_id for event in before_events),
+        )
         self.assertNotIn("expired", {event.action for event in after_events})
+        self.assertEqual(
+            list_response.json()["reviews"][0]["lifecycle"]["expiry_state"],
+            "past_expiry_unreconciled",
+        )
+        self.assertFalse(list_response.json()["reviews"][0]["can_approve"])
+        self.assertFalse(review_response.json()["review"]["persists_state"])
+        self.assertIn("expired", {event.action for event in after_detail_events})
+
+    async def test_postgres_projection_reads_leave_operation_and_event_rows_unchanged(
+        self,
+    ) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory,
+            patch.dict(
+                os.environ,
+                {"LAUNCHPLANE_MASTER_ENCRYPTION_KEY": base64.urlsafe_b64encode(b"x" * 32).decode()},
+                clear=False,
+            ),
+        ):
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(temporary_directory) / "projection.sqlite3")
+            )
+            store.ensure_schema()
+            app = self._app(store=store, policy=_policy())
+            try:
+                async with lifespan_client(app) as client:
+                    create_response = await client.post(
+                        "/v1/privileged-operations/plans",
+                        json={
+                            "descriptor_id": "managed-secret-reencryption",
+                            "source_event_id": "postgres-expired-projection",
+                            "expires_in_seconds": 300,
+                            "request": {"reason": "Verify projection reads are non-mutating"},
+                        },
+                    )
+                    self.assertEqual(create_response.status_code, 200, create_response.text)
+                    operation_id = create_response.json()["record"]["operation_id"]
+                    with store._session_factory() as session:  # noqa: SLF001
+                        row = session.get(LaunchplanePrivilegedOperationRow, operation_id)
+                        assert row is not None
+                        payload = dict(row.payload)
+                        payload["created_at"] = "2026-01-01T00:00:00+00:00"
+                        payload["updated_at"] = "2026-01-01T00:00:00+00:00"
+                        payload["expires_at"] = "2026-01-01T00:05:00+00:00"
+                        row.payload = payload
+                        session.commit()
+                    before_record = store.read_privileged_operation_record(operation_id)
+                    before_events = store.list_privileged_operation_event_records(
+                        operation_id=operation_id
+                    )
+
+                    list_response = await client.get("/v1/privileged-operations/plans")
+                    review_response = await client.get(
+                        f"/v1/privileged-operations/plans/{operation_id}/review"
+                    )
+
+                    after_record = store.read_privileged_operation_record(operation_id)
+                    after_events = store.list_privileged_operation_event_records(
+                        operation_id=operation_id
+                    )
+            finally:
+                store.close()
+
+        self.assertEqual(list_response.status_code, 200, list_response.text)
+        self.assertEqual(review_response.status_code, 200, review_response.text)
+        self.assertEqual(after_record, before_record)
+        self.assertEqual(after_events, before_events)
 
     async def test_human_approval_and_revocation_are_replay_safe(self) -> None:
         with (

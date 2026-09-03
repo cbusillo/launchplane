@@ -1850,6 +1850,7 @@ export type PrivilegedOperationRevocationEnvelope = {
 
 export type PrivilegedOperationSemanticReview = {
     activity: Array<PrivilegedOperationSemanticReviewActivityEntry>;
+    authorizes_approval: false;
     authorizes_execution: false;
     blast_radius: PrivilegedOperationSemanticReviewBlastRadius;
     blockers: PrivilegedOperationSemanticReviewBlocker;
@@ -1862,11 +1863,12 @@ export type PrivilegedOperationSemanticReview = {
     lifecycle: PrivilegedOperationSemanticReviewLifecycle;
     operation_class: 'managed_secret_reencryption' | 'managed_authz_policy_set' | 'managed_merge_train_policy_import';
     operation_id: string;
+    persists_state: false;
     requested_by_kind: 'github_human' | 'terminal_agent';
     rollback: PrivilegedOperationSemanticReviewRollback;
     safety_class: 'secret_backed' | 'policy_admin';
     schema_version: number;
-    title: string;
+    title: 'Managed-secret re-encryption review' | 'Managed authorization policy review' | 'Managed merge-train policy review';
 };
 
 export type PrivilegedOperationSemanticReviewActivityEntry = {
@@ -1887,7 +1889,7 @@ export type PrivilegedOperationSemanticReviewBlastRadius = {
 };
 
 export type PrivilegedOperationSemanticReviewBlocker = {
-    codes: Array<string>;
+    codes: Array<'authz_policy_admin_unreachable' | 'authz_policy_applying_admin_removed' | 'authz_policy_strict_human_admin_unreachable' | 'authz_policy_administrator_quorum_unsatisfied' | 'repository_not_exact' | 'workflow_refs_not_singleton' | 'workflow_ref_not_exact' | 'job_workflow_refs_not_singleton' | 'job_workflow_ref_not_immutable' | 'actions_not_singleton' | 'action_not_exact' | 'products_not_singleton' | 'product_not_exact' | 'contexts_not_singleton' | 'context_not_exact' | 'instances_not_singleton' | 'instance_not_exact' | 'secret_unreadable' | 'operation_past_expiry' | 'operation_expired' | 'execution_failed' | 'reconciliation_required'>;
     operational_readiness_blocker_count: number;
     policy_safety_blocker_count: number;
     state: 'clear' | 'blocked' | 'error';
@@ -1918,6 +1920,8 @@ export type PrivilegedOperationSemanticReviewLifecycle = {
     created_at: string;
     execution_recorded: boolean;
     expires_at: string;
+    expiry_state: 'active' | 'past_expiry_unreconciled' | 'expired';
+    generated_at: string;
     status: 'planned' | 'approved' | 'revoked' | 'executing' | 'executed' | 'execution_failed' | 'expired' | 'cancelled';
     terminal_at: string;
     terminal_reason_available: boolean;

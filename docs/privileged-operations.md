@@ -295,6 +295,11 @@ The projection fails closed when the persisted descriptor ID/version, safety
 class, request/evidence variant, requester variant, or registered descriptor
 metadata no longer matches the compiled registry. Unknown or drifted data
 returns an unsupported semantic-review error instead of generic approval text.
+Operator-authored request reasons and principal names remain in the authorized
+raw detail only; list cards use closed server-authored operation titles. A
+planned or approved record whose stored expiry has passed is projected as
+`past_expiry_unreconciled`, blocked from approval/revocation in the UI, and left
+unchanged until an existing authoritative lifecycle path reconciles it.
 Projection list and detail reads call the direct store
 `read_privileged_operation_record`, `list_privileged_operation_records`, and
 `list_privileged_operation_event_records` methods. They do not call the
@@ -307,6 +312,10 @@ in list responses and at the plan review GET route; browser clients must render
 semantic review fields first and fetch raw detail only as an explicit one-level-
 deeper authorized disclosure. Mutation, challenge, worker, agent-summary,
 approval, revoke, cancel, and execution behavior is unchanged.
+The projection explicitly records that it authorizes neither approval nor
+execution and persists no state; its `can_approve` and `can_revoke` values are
+non-authoritative UI affordances derived from persisted lifecycle and blocker
+state.
 
 ## HTTP, UI, And Worker
 

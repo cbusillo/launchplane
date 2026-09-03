@@ -1517,7 +1517,9 @@ test.describe("operator journeys", () => {
     await expect(page.getByRole("button", { name: /execute/i })).toHaveCount(0);
     await expect(page.getByText(/secret-version/i)).toHaveCount(0);
     await page.getByRole("button", { name: "Merge-train policy" }).click();
-    await expect(page.getByText("Managed merge-train policy")).toBeVisible();
+    await expect(
+      page.getByText("Managed merge-train policy", { exact: true }),
+    ).toBeVisible();
     await expect(page.getByText("Candidate targets")).toBeVisible();
     await expect(page.getByText("2", { exact: true }).first()).toBeVisible();
     await expect(

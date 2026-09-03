@@ -1,5 +1,6 @@
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Annotated, Literal
 
 from fastapi import Depends, Path, Query
@@ -319,10 +320,15 @@ def register_privileged_operation_routes(
         *,
         record: PrivilegedOperationRecord,
         events: tuple[PrivilegedOperationEventRecord, ...],
+        generated_at: datetime,
         trace_id: str,
     ) -> PrivilegedOperationSemanticReview:
         try:
-            return privileged_operation_semantic_review(record=record, events=events)
+            return privileged_operation_semantic_review(
+                record=record,
+                events=events,
+                generated_at=generated_at,
+            )
         except PrivilegedOperationSemanticReviewError as error:
             raise dependencies.common.http_error(
                 status_code=409,
@@ -403,9 +409,9 @@ def register_privileged_operation_routes(
         trace_id: str,
     ) -> PrivilegedOperationRecord:
         try:
-            return require_privileged_operation_store(record_store).read_privileged_operation_record(
-                operation_id
-            )
+            return require_privileged_operation_store(
+                record_store
+            ).read_privileged_operation_record(operation_id)
         except FileNotFoundError as error:
             raise dependencies.common.http_error(
                 status_code=404,
@@ -500,6 +506,7 @@ def register_privileged_operation_routes(
         limit: Annotated[int, Query(ge=1, le=100)] = 50,
     ) -> PrivilegedOperationListResponse:
         trace_id = dependencies.common.next_trace_id()
+        generated_at = datetime.now(timezone.utc)
         require_managed_rule(
             identity=identity,
             action=descriptor_action(descriptor_id, "human_read_action"),
@@ -519,6 +526,7 @@ def register_privileged_operation_routes(
                         operation_id=record.operation_id,
                         limit=10,
                     ),
+                    generated_at=generated_at,
                     trace_id=trace_id,
                 )
                 for record in records
@@ -545,7 +553,7 @@ def register_privileged_operation_routes(
         operation_id: Annotated[str, Path(min_length=1, max_length=96)],
     ) -> PrivilegedOperationHumanResponse:
         trace_id = dependencies.common.next_trace_id()
-        record = read_operation_projection_or_error(
+        record = read_operation_or_error(
             record_store=record_store,
             operation_id=operation_id,
             trace_id=trace_id,
@@ -603,6 +611,7 @@ def register_privileged_operation_routes(
             review=semantic_review_or_error(
                 record=record,
                 events=events,
+                generated_at=datetime.now(timezone.utc),
                 trace_id=trace_id,
             ),
         )

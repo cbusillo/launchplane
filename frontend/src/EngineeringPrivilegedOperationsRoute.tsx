@@ -235,7 +235,9 @@ function PrivilegedOperationPlanCard({
           <span>
             {review.blockers.state === "error"
               ? "The persisted evidence reports an error state."
-              : "The persisted evidence reports blocker state."}
+              : review.lifecycle.expiry_state === "past_expiry_unreconciled"
+                ? "The persisted plan is past expiry. This read remains non-mutating, so approval is unavailable until the lifecycle is reconciled."
+                : "The persisted evidence reports blocker state."}
           </span>
         </div>
       ) : null}
@@ -253,6 +255,10 @@ function PrivilegedOperationPlanCard({
         <div>
           <dt>Plan expires</dt>
           <dd>{formatTime(review.lifecycle.expires_at)}</dd>
+        </div>
+        <div>
+          <dt>Expiry state</dt>
+          <dd>{review.lifecycle.expiry_state.replaceAll("_", " ")}</dd>
         </div>
         <div>
           <dt>Blast radius</dt>
@@ -290,6 +296,10 @@ function PrivilegedOperationPlanCard({
             <li key={entry.event_id}>
               <span>{formatTime(entry.occurred_at)}</span>
               <strong>{entry.action}</strong>
+              <span>
+                {entry.actor_type.replace("_", " ")} via{" "}
+                {entry.source_kind.replace("_", " ")}
+              </span>
               <code className="privileged-operation-digest">
                 {entry.resulting_record_digest}
               </code>
@@ -404,10 +414,10 @@ function secretFixtureReview(): PrivilegedOperationSemanticReview {
     operationClass: "managed_secret_reencryption",
     descriptorId: "managed-secret-reencryption",
     safetyClass: "secret_backed",
-    title: "Review canonical managed-secret root migration",
+    title: "Managed-secret re-encryption review",
     requestedByKind: "github_human",
-    createdAt: "2026-08-22T20:00:00+00:00",
-    expiresAt: "2026-08-22T20:30:00+00:00",
+    createdAt: "2026-09-03T10:00:00+00:00",
+    expiresAt: "2026-09-03T23:00:00+00:00",
     scope: "managed_secret_store",
     blastRadius: "Bounded to configured managed-secret records.",
     rollbackClass: "key_retained",
@@ -426,10 +436,10 @@ function policyFixtureReview(): PrivilegedOperationSemanticReview {
     operationClass: "managed_authz_policy_set",
     descriptorId: "managed-authz-policy-set",
     safetyClass: "policy_admin",
-    title: "Review a DB-native policy canary proposal",
+    title: "Managed authorization policy review",
     requestedByKind: "terminal_agent",
-    createdAt: "2026-08-25T20:00:00+00:00",
-    expiresAt: "2026-08-25T20:30:00+00:00",
+    createdAt: "2026-09-03T10:01:00+00:00",
+    expiresAt: "2026-09-03T23:01:00+00:00",
     scope: "authorization_policy",
     blastRadius: "Bounded to one managed authorization rule set.",
     rollbackClass: "policy_cas",
@@ -449,10 +459,10 @@ function mergeTrainPolicyFixtureReview(): PrivilegedOperationSemanticReview {
     operationClass: "managed_merge_train_policy_import",
     descriptorId: "managed-merge-train-policy-import",
     safetyClass: "policy_admin",
-    title: "Add a repository to the guarded merge train",
+    title: "Managed merge-train policy review",
     requestedByKind: "terminal_agent",
-    createdAt: "2026-09-02T00:02:00+00:00",
-    expiresAt: "2026-09-02T00:32:00+00:00",
+    createdAt: "2026-09-03T10:02:00+00:00",
+    expiresAt: "2026-09-03T23:02:00+00:00",
     scope: "merge_train_policy",
     blastRadius:
       "Bounded to merge-train policy target counts; target identities are redacted.",
@@ -489,7 +499,7 @@ function semanticReviewFixture({
   operationClass: PrivilegedOperationSemanticReview["operation_class"];
   descriptorId: PrivilegedOperationSemanticReview["descriptor_id"];
   safetyClass: PrivilegedOperationSemanticReview["safety_class"];
-  title: string;
+  title: PrivilegedOperationSemanticReview["title"];
   requestedByKind: PrivilegedOperationSemanticReview["requested_by_kind"];
   createdAt: string;
   expiresAt: string;
@@ -510,6 +520,8 @@ function semanticReviewFixture({
     requested_by_kind: requestedByKind,
     lifecycle: {
       status: "planned",
+      generated_at: createdAt,
+      expiry_state: "active",
       created_at: createdAt,
       updated_at: createdAt,
       expires_at: expiresAt,
@@ -573,6 +585,8 @@ function semanticReviewFixture({
     ],
     can_approve: true,
     can_revoke: false,
+    authorizes_approval: false,
     authorizes_execution: false,
+    persists_state: false,
   };
 }

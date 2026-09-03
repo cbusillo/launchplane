@@ -1848,7 +1848,10 @@
 
 .privileged-operation-activity li {
   display: grid;
-  grid-template-columns: minmax(8rem, auto) minmax(6rem, auto) minmax(0, 1fr);
+  grid-template-columns: minmax(8rem, auto) minmax(6rem, auto) minmax(
+      9rem,
+      auto
+    ) minmax(0, 1fr);
   gap: 0.65rem;
   align-items: center;
   padding: 0.65rem 0.75rem;

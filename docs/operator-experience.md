@@ -281,6 +281,16 @@ admission, landing outcome, and GitHub observations in separately named
 regions. The route name is transitional; the evidence contract is forge-neutral.
 It is read-only and does not add a browser mutation contract.
 
+The transitional Engineering privileged-operation route consumes the
+server-computed semantic review projection for its list cards and activity
+stream. Browser code does not classify raw request/evidence unions or repeat
+descriptor-specific blast-radius and rollback rules. Exact raw evidence remains
+available only through an explicit one-level-deeper authorized detail fetch.
+Past-expiry unreconciled plans remain visible but non-actionable, and the
+projection itself grants no approval, execution, persistence, challenge,
+notification, or trusted-host capability. Existing browser-human approve and
+revoke controls remain the unchanged fallback boundary.
+
 These endpoints are profile and driver driven. A standard `generic-web` site
 should appear in the read model from Launchplane records alone: product profile,
 lane profiles, target records, runtime-environment records, managed secret

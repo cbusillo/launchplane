@@ -60,6 +60,7 @@ from control_plane.privileged_operation_service import (
     expire_privileged_operation_if_due,
     list_privileged_operations,
     privileged_operation_semantic_review,
+    validate_privileged_operation_semantic_review_coverage,
 )
 from control_plane.service_auth import LaunchplaneAuthzPolicy, action_safety
 from control_plane.storage.filesystem import FilesystemRecordStore
@@ -354,13 +355,19 @@ class PrivilegedOperationContractTests(unittest.TestCase):
         self.assertIn('"rotation_candidate_count":2', rendered)
 
     def test_semantic_review_covers_all_registered_descriptors_without_authority(self) -> None:
-        descriptors = {descriptor.descriptor_id for descriptor in list_privileged_operation_descriptors()}
+        descriptors = {
+            descriptor.descriptor_id for descriptor in list_privileged_operation_descriptors()
+        }
         records = (
             _record(),
             _failed_authz_policy_record(),
             self._merge_train_policy_import_record(),
         )
-        reviews = tuple(privileged_operation_semantic_review(record=record) for record in records)
+        generated_at = datetime(2026, 8, 22, 20, 10, tzinfo=timezone.utc)
+        reviews = tuple(
+            privileged_operation_semantic_review(record=record, generated_at=generated_at)
+            for record in records
+        )
 
         self.assertEqual({review.descriptor_id for review in reviews}, descriptors)
         self.assertEqual(
@@ -372,7 +379,17 @@ class PrivilegedOperationContractTests(unittest.TestCase):
             },
         )
         self.assertFalse(any(review.authorizes_execution for review in reviews))
+        self.assertFalse(any(review.authorizes_approval for review in reviews))
+        self.assertFalse(any(review.persists_state for review in reviews))
         self.assertTrue(all(review.schema_version == 1 for review in reviews))
+
+    def test_semantic_review_registry_coverage_fails_closed_on_descriptor_drift(self) -> None:
+        with patch(
+            "control_plane.privileged_operation_service.list_privileged_operation_descriptors",
+            return_value=(MANAGED_SECRET_REENCRYPTION_DESCRIPTOR,),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "exactly match"):
+                validate_privileged_operation_semantic_review_coverage()
 
     def test_semantic_review_redacts_raw_sensitive_payloads(self) -> None:
         records = (
@@ -382,7 +399,10 @@ class PrivilegedOperationContractTests(unittest.TestCase):
         )
         rendered = json.dumps(
             [
-                privileged_operation_semantic_review(record=record).model_dump(mode="json")
+                privileged_operation_semantic_review(
+                    record=record,
+                    generated_at=datetime(2026, 8, 22, 20, 10, tzinfo=timezone.utc),
+                ).model_dump(mode="json")
                 for record in records
             ],
             sort_keys=True,
@@ -391,6 +411,7 @@ class PrivilegedOperationContractTests(unittest.TestCase):
         for secret in (
             "root-2026",
             "legacy-root",
+            "Review canonical root migration",
             "desired_policy",
             "github_ids",
             "operator",
@@ -405,11 +426,23 @@ class PrivilegedOperationContractTests(unittest.TestCase):
 
     def test_semantic_review_activity_is_chronological_and_redacted(self) -> None:
         record = _record()
-        later = _planned_event(record).model_copy(
-            update={"sequence": 2, "occurred_at": "2026-08-22T20:05:00+00:00"}
+        later = PrivilegedOperationEventRecord(
+            operation_id=record.operation_id,
+            sequence=2,
+            action="approved",
+            occurred_at="2026-08-22T20:05:00+00:00",
+            source_kind="browser_api",
+            source_event_id="approve-review-activity",
+            actor=record.requested_by,
+            reason="Approved after review.",
+            resulting_record_digest="f" * 64,
         )
         earlier = _planned_event(record)
-        review = privileged_operation_semantic_review(record=record, events=(later, earlier))
+        review = privileged_operation_semantic_review(
+            record=record,
+            events=(later, earlier),
+            generated_at=datetime(2026, 8, 22, 20, 10, tzinfo=timezone.utc),
+        )
 
         self.assertEqual(
             tuple(entry.occurred_at for entry in review.activity),
@@ -418,8 +451,41 @@ class PrivilegedOperationContractTests(unittest.TestCase):
                 "2026-08-22T20:05:00+00:00",
             ),
         )
-        self.assertEqual(tuple(entry.actor_type for entry in review.activity), ("github_human",) * 2)
+        self.assertEqual(
+            tuple(entry.actor_type for entry in review.activity), ("github_human",) * 2
+        )
         self.assertNotIn("operator", review.model_dump_json())
+        self.assertEqual(
+            review,
+            privileged_operation_semantic_review(
+                record=record,
+                events=(earlier, later),
+                generated_at=datetime(2026, 8, 22, 20, 10, tzinfo=timezone.utc),
+            ),
+        )
+
+    def test_semantic_review_activity_fails_closed_on_duplicate_sequence(self) -> None:
+        record = _record()
+        duplicate = _planned_event(record).model_copy(
+            update={"source_event_id": "duplicate-planned-event", "event_id": ""}
+        )
+
+        with self.assertRaisesRegex(PrivilegedOperationSemanticReviewError, "append-only unique"):
+            privileged_operation_semantic_review(
+                record=record,
+                events=(_planned_event(record), duplicate),
+                generated_at=datetime(2026, 8, 22, 20, 10, tzinfo=timezone.utc),
+            )
+
+    def test_semantic_review_marks_past_expiry_without_reconciling(self) -> None:
+        review = privileged_operation_semantic_review(
+            record=_record(),
+            generated_at=datetime(2026, 8, 22, 21, 0, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(review.lifecycle.expiry_state, "past_expiry_unreconciled")
+        self.assertIn("operation_past_expiry", review.blockers.codes)
+        self.assertFalse(review.can_approve)
 
     def test_semantic_review_fails_closed_on_descriptor_drift(self) -> None:
         record = _record().model_copy(update={"descriptor_version": 2})
