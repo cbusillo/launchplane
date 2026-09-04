@@ -19,7 +19,7 @@ to `engineering_review_mode = "required"`.
 
 Policy administrators write revisioned DB-backed authority selecting the
 repository, contiguous model slots, controlled worker runtime and host, absolute
-Every Code executable, expected binary SHA-256, and lease. Compare-and-swap
+agent executable, expected binary SHA-256, and lease. Compare-and-swap
 writes retain retired history. Repository and runtime identities never come from
 checked-in defaults.
 
@@ -43,7 +43,7 @@ after the claim verifies that server-bound identity; retrying the same claim
 returns the same scoped credential without exposing its hash or envelope.
 
 Before launch, the worker verifies the configured absolute executable SHA-256
-and requires the existing Every Code PR worktree to be at the exact GitHub head.
+and requires the existing agent PR worktree to be at the exact GitHub head.
 It invokes the executable with an explicit model and read-only review mode. The
 reviewer environment excludes broad worker and GitHub tokens and receives only
 the run-scoped completion URL and credential.
@@ -56,3 +56,5 @@ is idempotent; conflicting replay and expired leases fail atomically.
 Credential hashes, ciphertext, key identifiers, worker host names, and resolved
 executable paths remain internal persistence fields and are excluded from
 ordinary review-run reads and OpenAPI response schemas.
+
+For the Codex Lab executable and authority cutover, see [worker runtime](codex-lab-workers.md).
