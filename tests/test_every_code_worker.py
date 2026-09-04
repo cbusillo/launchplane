@@ -1217,7 +1217,7 @@ class EveryCodeWorkerTests(unittest.TestCase):
         self.assertIn("--worker-token-env LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN", command)
         self.assertIn("--request-id every-code-cbusillo-code-123-test", command)
         self.assertIn("--fencing-token 1", command)
-        self.assertIn("--exit-code $status", command)
+        self.assertIn("--exit-code $launchplane_session_exit_code", command)
         self.assertIn("AGENT_SESSION_ORIGIN=launchplane", command)
         self.assertIn("AGENT_SESSION_SOURCE=agent-session", command)
         self.assertNotIn(" EVERY_CODE_", command)

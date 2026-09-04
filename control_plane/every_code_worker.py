@@ -1227,7 +1227,7 @@ def build_every_code_session_command(
         "--fencing-token",
         str(record.fencing_token),
         "--exit-code",
-        "$status",
+        "$launchplane_session_exit_code",
     ]
     if database_url.strip():
         finish_command.extend(("--database-url", database_url.strip()))
@@ -1235,7 +1235,10 @@ def build_every_code_session_command(
         finish_command.extend(("--service-url", service_url.strip()))
         finish_command.extend(("--worker-token-env", worker_token_env.strip()))
     finish_shell = " ".join(
-        "$status" if part == "$status" else shlex.quote(part) for part in finish_command
+        "$launchplane_session_exit_code"
+        if part == "$launchplane_session_exit_code"
+        else shlex.quote(part)
+        for part in finish_command
     )
     session_env = {
         "AGENT_SESSION_ORIGIN": "launchplane",
@@ -1249,7 +1252,7 @@ def build_every_code_session_command(
         f"{key}={shlex.quote(value)}" for key, value in session_env.items() if value
     )
     session_command = f"{env_shell} {command}" if env_shell else command
-    return f"{session_command}\nstatus=$?\n{finish_shell}\nexit $status"
+    return f"{session_command}\nlaunchplane_session_exit_code=$?\n{finish_shell}\nexit $launchplane_session_exit_code"
 
 
 def build_every_code_feedback_session_command(

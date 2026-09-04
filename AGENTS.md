@@ -1,6 +1,6 @@
-# AGENTS.md — Every Code Operating Guide (Read Me First)
+# AGENTS.md — Coding Agent Operating Guide (Read Me First)
 
-Treat this file as the launch checklist for each Every Code session in
+Treat this file as the launch checklist for each coding agent session in
 `launchplane`.
 
 ## Start Here
