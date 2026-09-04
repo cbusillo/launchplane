@@ -57,7 +57,7 @@ def register_every_code_commands(main: click.Group, *, store_factory: StoreFacto
 
 @click.group("every-code")
 def every_code() -> None:
-    """Every Code local worker commands."""
+    """Agent work-request commands. New interactive sessions run Codex Lab."""
 
 
 def _store(*, state_dir: Path, database_url: str | None = None) -> object:
@@ -216,7 +216,7 @@ def _gh_current_user_login() -> str:
 @click.option(
     "--command-template",
     default="",
-    help="Optional shell command template for tmux. Fields include {issue_url} and {request_id}.",
+    help="Optional explicit shell override for tmux; otherwise runs codex-lab. Fields include {issue_url} and {request_id}.",
 )
 @click.option("--tmux-binary", default="tmux", show_default=True)
 @click.option(
@@ -351,7 +351,7 @@ def every_code_run_once(
 @click.option(
     "--command-template",
     default="",
-    help="Optional shell command template for tmux. Fields include {issue_url} and {request_id}.",
+    help="Optional explicit shell override for tmux; otherwise runs codex-lab. Fields include {issue_url} and {request_id}.",
 )
 @click.option("--tmux-binary", default="tmux", show_default=True)
 @click.option(
@@ -480,7 +480,7 @@ def every_code_run(
 @click.option(
     "--command-template",
     default="",
-    help="Optional shell command template for tmux. Fields include {issue_url} and {request_id}.",
+    help="Optional explicit shell override for tmux; otherwise runs codex-lab. Fields include {issue_url} and {request_id}.",
 )
 @click.option("--tmux-binary", default="tmux", show_default=True)
 @click.option(
