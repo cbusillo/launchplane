@@ -10,6 +10,7 @@ from control_plane.contracts.change_impact import (
     ChangeImpactAffectedProduct,
     ChangeImpactChangedFileEvidence,
     ChangeImpactComponentRule,
+    ChangeImpactCoverage,
     ChangeImpactEvaluation,
     ChangeImpactMatchedEvidence,
     ChangeImpactPolicyRecord,
@@ -210,12 +211,13 @@ def evaluate_change_impact(
     production_affecting_products: set[ChangeImpactProductScope] = set()
     sensitive = False
     unknown: list[str] = []
+    unmatched_paths: set[str] = set()
 
     rules_by_component = {rule.component: rule for rule in policy.component_rules}
     for changed_file in repository_evidence.changed_files:
         path_matches = _matching_rules(changed_file=changed_file, rules=policy.component_rules)
         if not path_matches:
-            unknown.append(f"no policy rule matched changed path {changed_file.path}")
+            unmatched_paths.add(changed_file.path)
             continue
         for rule in path_matches:
             matched.append(_file_match(changed_file=changed_file, rule=rule))
@@ -263,15 +265,33 @@ def evaluate_change_impact(
         if rule.review_tier == "sensitive":
             sensitive = True
 
-    if unknown:
+    sorted_unmatched_paths = sorted(unmatched_paths)
+    coverage = ChangeImpactCoverage(
+        state="incomplete" if unmatched_paths else "complete",
+        unmatched_path_count=len(unmatched_paths),
+        unmatched_path_samples=tuple(path[:256] for path in sorted_unmatched_paths[:20]),
+        truncated=len(unmatched_paths) > 20
+        or any(len(path) > 256 for path in sorted_unmatched_paths[:20]),
+    )
+    if unknown or unmatched_paths:
+        reason_code = "ambiguous_or_missing_evidence" if unknown else "policy_coverage_incomplete"
+        unknown.extend(
+            f"no policy rule matched changed path {path}"
+            for path in coverage.unmatched_path_samples
+        )
+        if coverage.truncated:
+            unknown.append(
+                f"unmatched path diagnostics truncated; {coverage.unmatched_path_count} total paths"
+            )
         return _unknown_evaluation(
             target=target,
             status="unknown",
-            reason_code="ambiguous_or_missing_evidence",
+            reason_code=reason_code,
             policy=policy,
             matched_evidence=tuple(matched),
             affected_products=_affected_products(affected_products),
             unknown_evidence=tuple(dict.fromkeys(unknown)),
+            coverage=coverage,
         )
 
     affected = _affected_products(affected_products)
@@ -290,6 +310,7 @@ def evaluate_change_impact(
         production_affecting_products=tuple(sorted(production_affecting_products, key=_scope_key)),
         matched_evidence=tuple(matched),
         unknown_evidence=(),
+        coverage=coverage,
     )
 
 
@@ -534,6 +555,7 @@ def _unknown_evaluation(
     matched_evidence: tuple[ChangeImpactMatchedEvidence, ...] = (),
     affected_products: tuple[ChangeImpactAffectedProduct, ...] = (),
     unknown_evidence: tuple[str, ...],
+    coverage: ChangeImpactCoverage | None = None,
 ) -> ChangeImpactEvaluation:
     return ChangeImpactEvaluation(
         status=status,
@@ -548,6 +570,7 @@ def _unknown_evaluation(
         affected_products=affected_products,
         matched_evidence=matched_evidence,
         unknown_evidence=unknown_evidence,
+        coverage=coverage,
     )
 
 

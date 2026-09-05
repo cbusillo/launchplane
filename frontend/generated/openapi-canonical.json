@@ -3279,6 +3279,46 @@
         "title": "ChangeImpactComponentRule",
         "type": "object"
       },
+      "ChangeImpactCoverage": {
+        "additionalProperties": false,
+        "description": "Bounded path-coverage diagnostics, independent of classification authority.",
+        "properties": {
+          "state": {
+            "enum": [
+              "complete",
+              "incomplete"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "truncated": {
+            "default": false,
+            "title": "Truncated",
+            "type": "boolean"
+          },
+          "unmatched_path_count": {
+            "minimum": 0.0,
+            "title": "Unmatched Path Count",
+            "type": "integer"
+          },
+          "unmatched_path_samples": {
+            "default": [],
+            "items": {
+              "maxLength": 256,
+              "type": "string"
+            },
+            "maxItems": 20,
+            "title": "Unmatched Path Samples",
+            "type": "array"
+          }
+        },
+        "required": [
+          "state",
+          "unmatched_path_count"
+        ],
+        "title": "ChangeImpactCoverage",
+        "type": "object"
+      },
       "ChangeImpactEvaluation": {
         "additionalProperties": false,
         "properties": {
@@ -3289,6 +3329,16 @@
             },
             "title": "Affected Products",
             "type": "array"
+          },
+          "coverage": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ChangeImpactCoverage"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "engineering_review_tier": {
             "default": "sensitive",

@@ -180,6 +180,17 @@ class ChangeImpactEvaluationTests(unittest.TestCase):
         self.assertEqual(engineering_only.status, "success")
         self.assertEqual(engineering_only.engineering_review_tier, "routine")
         self.assertEqual(engineering_only.owner_impact, "not_required")
+        self.assertIsNotNone(engineering_only.coverage)
+        assert engineering_only.coverage is not None
+        self.assertEqual(
+            engineering_only.coverage.model_dump(),
+            {
+                "state": "complete",
+                "unmatched_path_count": 0,
+                "unmatched_path_samples": (),
+                "truncated": False,
+            },
+        )
 
     def test_sensitive_path_cannot_be_downgraded_by_stored_evidence(self) -> None:
         policy = _policy()
@@ -256,6 +267,7 @@ class ChangeImpactEvaluationTests(unittest.TestCase):
         )
         self.assertEqual(stale_head.status, "stale_head")
         self.assertEqual(stale_head.required_engineering_review_count, 2)
+        self.assertIsNone(stale_head.coverage)
 
         merge_ref = evaluate_change_impact(
             repository_evidence=_repository_evidence(".github/workflows/ci.yml"),
