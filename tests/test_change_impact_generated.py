@@ -10,7 +10,8 @@ from control_plane.contracts.change_impact import (
     ChangeImpactComponentRule,
     ChangeImpactPolicyRecord,
 )
-from tests.test_change_impact import _policy, _product, _repository_evidence, _stored_evidence
+from tests.test_change_impact import _policy, _product, _stored_evidence
+from tests.test_change_impact_v2 import _repository_evidence
 from tests.test_change_impact_v2 import _rule, _v2_policy
 
 

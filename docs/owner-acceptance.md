@@ -73,8 +73,10 @@ used to prove the serving artifact remains bound.
 
 Bindings support optional `binding_hash_version` and
 `change_impact_decision_digest` fields. Both remain absent on the current v1
-evaluator path. This compatibility support does not enable v2 classification or
-activate a policy.
+evaluator path. Successful v2 evaluations produce the pair from the
+[scoped authority projection](change-impact-policy.md#scoped-decision-identity-and-total-fallback).
+Unknown and stale evaluations produce neither field; v2 policy activation
+remains unavailable pending rollout qualification.
 
 An omitted version preserves the exact legacy binding, acceptance, event, and
 replay digests. Version `2` requires an explicit SHA-256 scoped decision digest

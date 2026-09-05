@@ -141,7 +141,7 @@ class ChangeImpactBindingVersionTests(unittest.TestCase):
             _v2_engineering(revision=2).decision_binding_sha256,
         )
 
-    def test_current_evaluator_never_produces_v2_identity(self) -> None:
+    def test_legacy_evaluator_never_produces_v2_identity(self) -> None:
         with TemporaryDirectory() as directory:
             store = _store(Path(directory))
             evidence = _repository_evidence()

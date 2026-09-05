@@ -64,11 +64,36 @@ extensions; only selected components can do that. Complete path coverage still
 does not establish the validity of stored dependency or reviewer evidence.
 
 V2 policy dry-runs validate these rules. V2 apply is currently unavailable and
-returns a policy conflict without writing records, pending scoped binding/replay
-integration and fail-closed rename-origin handling. Deploying this code does
+returns a policy conflict without writing records while rollout qualification
+continues. Deploying this code does
 not activate v2, migrate policy, add a grant, or reuse historical Owner
 acceptance under different semantics. Policy activation remains a separately
 reviewed CAS operation through existing policy-administrator authority.
+
+### Scoped Decision Identity and Total Fallback
+
+Successful v2 evaluations produce `binding_hash_version: 2` and a canonical
+`change_impact_decision_digest`. The digest binds target/base identity, sorted
+paths and change kinds, explicit rename pairs, selected prefixes and component
+authority, complete product subject tuples, all effective ancestor floors,
+generator contributions, and trusted stored-evidence semantics. It also binds
+the resulting product, review, governance, production, and coverage decision.
+
+Full policy IDs, revisions, and digests remain provenance. Unused policy
+mappings, reasons, and evidence record IDs do not invalidate an otherwise
+identical decision. Evidence identity is excluded because every authority
+predicate is covered by kind, confidence, component, and full product scopes.
+Matched-evidence prose, ordering, and multiplicity remain visible diagnostic
+provenance rather than approval authority. Existing v1 hashes are unchanged;
+no historical records are backfilled or upgraded to v2.
+
+Unknown or stale evaluations emit no scoped binding pair. V2 requires known
+change kinds and explicit rename origins represented among the changed paths,
+including real recreated or swapped origins. The existing sensitive-only
+`default_unknown_review_tier` is the total typed fallback for incomplete
+coverage: two engineering reviews, unknown classification, and no invented
+product subjects. Any known affected products remain visible. Root-prefix
+rules cannot replace that fail-closed default.
 
 ## Evidence Authority
 
