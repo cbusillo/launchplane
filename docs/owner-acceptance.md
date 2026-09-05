@@ -475,6 +475,19 @@ binding. The check is excluded from Launchplane technical-check inputs and canno
 replace the Launchplane decision. The projection response is schema version 2 and
 reports both the exact GitHub check-run status and its nullable conclusion.
 
+Owner evaluation responses also carry nullable `change_impact_coverage` from
+the existing change-impact evaluation. The check summary distinguishes unavailable,
+complete, and incomplete coverage, including the exact unmatched-path count and
+bounded escaped path samples. Sample truncation is explicit; it does not reduce
+the reported total. Coverage can be available before Owner admission prerequisites
+are met. It remains diagnostic and does not change the Owner decision, check
+conclusion, binding, or immutable human event. A coverage-only change refreshes
+the projection identity. Existing responses that omit coverage remain readable.
+
+This diagnostic uses existing evaluation and projection entrypoints. Automatic
+pull-request lifecycle projection remains tracked separately in #2162 and subject
+to the Owner milestone pause in #2164.
+
 ## Combined Governance Read Model
 
 `GET /v1/governance/projection` and the Governance evidence workbench preserve

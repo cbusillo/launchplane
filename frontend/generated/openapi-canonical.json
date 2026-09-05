@@ -18434,6 +18434,16 @@
               }
             ]
           },
+          "change_impact_coverage": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ChangeImpactCoverage"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "current_event": {
             "anyOf": [
               {

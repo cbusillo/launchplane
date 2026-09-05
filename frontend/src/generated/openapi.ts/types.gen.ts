@@ -248,6 +248,13 @@ export type BootstrapEvidence = {
     run_status: 'pending' | 'pass' | 'fail' | 'skipped';
 };
 
+export type ChangeImpactCoverage = {
+    state: 'complete' | 'incomplete';
+    truncated: boolean;
+    unmatched_path_count: number;
+    unmatched_path_samples: Array<string>;
+};
+
 export type ChangeImpactTarget = {
     head_sha: string;
     pull_request_number: number;
@@ -1452,6 +1459,7 @@ export type OwnerAcceptanceCurrentItemsResponse = {
 export type OwnerAcceptanceDecision = {
     admissible: boolean;
     binding: OwnerAcceptanceBinding | null;
+    change_impact_coverage: ChangeImpactCoverage | null;
     current_event: OwnerAcceptanceEventRecord | null;
     evaluated_at: string;
     human_action_semantics: 'none' | 'product_review_accepted' | 'product_review_changes_requested' | 'product_review_revoked' | 'product_review_superseded' | 'product_review_invalidated';
