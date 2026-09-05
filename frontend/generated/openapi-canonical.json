@@ -3228,12 +3228,35 @@
             "title": "Component",
             "type": "string"
           },
+          "governance_impact": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Governance Impact"
+          },
           "path_prefixes": {
             "items": {
               "type": "string"
             },
             "title": "Path Prefixes",
             "type": "array"
+          },
+          "product_impact": {
+            "anyOf": [
+              {
+                "const": "declared_none",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Product Impact"
           },
           "production_affecting": {
             "anyOf": [
@@ -3330,6 +3353,41 @@
             "title": "Affected Products",
             "type": "array"
           },
+          "binding_hash_version": {
+            "anyOf": [
+              {
+                "const": 2,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Binding Hash Version"
+          },
+          "change_impact_decision_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Change Impact Decision Digest"
+          },
+          "classification_model": {
+            "anyOf": [
+              {
+                "const": "v2",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Classification Model"
+          },
           "coverage": {
             "anyOf": [
               {
@@ -3348,6 +3406,17 @@
             ],
             "title": "Engineering Review Tier",
             "type": "string"
+          },
+          "governance_impact": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Governance Impact"
           },
           "matched_evidence": {
             "default": [],
@@ -3533,6 +3602,17 @@
             "title": "Component",
             "type": "string"
           },
+          "governance_impact": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Governance Impact"
+          },
           "path": {
             "default": "",
             "title": "Path",
@@ -3552,6 +3632,11 @@
           "reason": {
             "title": "Reason",
             "type": "string"
+          },
+          "review_floor_only": {
+            "default": false,
+            "title": "Review Floor Only",
+            "type": "boolean"
           },
           "review_tier": {
             "anyOf": [
@@ -3861,6 +3946,18 @@
       "ChangeImpactPolicyRecord": {
         "additionalProperties": false,
         "properties": {
+          "classification_model": {
+            "anyOf": [
+              {
+                "const": "v2",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Classification Model"
+          },
           "component_rules": {
             "items": {
               "$ref": "#/components/schemas/ChangeImpactComponentRule"
@@ -6558,6 +6655,29 @@
               }
             ],
             "title": "Authority Policy Revision"
+          },
+          "binding_hash_version": {
+            "anyOf": [
+              {
+                "const": 2,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Binding Hash Version"
+          },
+          "change_impact_decision_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Change Impact Decision Digest"
           },
           "change_impact_policy_digest": {
             "default": "",
@@ -18094,10 +18214,33 @@
             "title": "Action",
             "type": "string"
           },
+          "binding_hash_version": {
+            "anyOf": [
+              {
+                "const": 2,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Binding Hash Version"
+          },
           "binding_sha256": {
             "default": "",
             "title": "Binding Sha256",
             "type": "string"
+          },
+          "change_impact_decision_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Change Impact Decision Digest"
           },
           "change_impact_policy_digest": {
             "title": "Change Impact Policy Digest",

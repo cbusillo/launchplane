@@ -36,6 +36,40 @@ their Owner review class to `production_affecting` regardless of review tier. Th
 flag is normalized so that only an explicit `true` is stored, keeping existing
 rule IDs and policy digests byte-identical.
 
+### Explicit V2 Classification
+
+Policies without `classification_model` retain the original cumulative rule
+matching and policy-declared engineering-only behavior. Their rule IDs and
+policy digests are unchanged. `classification_model: "v2"` opts into explicit
+product authority: every rule must name affected products or
+`product_impact: "declared_none"`, never both. A missing match is still unknown;
+it cannot imply engineering-only impact.
+
+For each path, v2 selects the longest matching prefix as the product authority.
+Equal-specificity rules from different components and noncanonical/root
+prefixes are rejected. An explicit narrower rule may define an engineering-only
+carveout or a different product scope. Those declarations belong to a reviewed
+DB policy revision, not the changed repository content.
+
+Sensitive review, `governance_impact: true`, and `production_affecting` remain
+floors across every matching ancestor and the selected rule. Governance impact
+requires the existing sensitive two-review requirement without manufacturing a
+product Owner subject. An inherited production floor applies to the selected
+products and their trusted storage extensions. Both provider-supplied sides of
+a rename classify independently and their impact is combined.
+
+Ancestor matches use `review_floor_only: true` with empty products in matched
+evidence. They explain inherited requirements but cannot license stored product
+extensions; only selected components can do that. Complete path coverage still
+does not establish the validity of stored dependency or reviewer evidence.
+
+V2 policy dry-runs validate these rules. V2 apply is currently unavailable and
+returns a policy conflict without writing records, pending scoped binding/replay
+integration and fail-closed rename-origin handling. Deploying this code does
+not activate v2, migrate policy, add a grant, or reuse historical Owner
+acceptance under different semantics. Policy activation remains a separately
+reviewed CAS operation through existing policy-administrator authority.
+
 ## Evidence Authority
 
 Launchplane resolves evaluation evidence through two server-owned boundaries:

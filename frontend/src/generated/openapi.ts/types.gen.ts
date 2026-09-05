@@ -1383,7 +1383,9 @@ export type OwnerAcceptanceAuthorization = {
 
 export type OwnerAcceptanceBinding = {
     action: string;
+    binding_hash_version: 2 | null;
     binding_sha256: string;
+    change_impact_decision_digest: string | null;
     change_impact_policy_digest: string;
     change_impact_policy_record_id: string;
     change_impact_policy_revision: number;

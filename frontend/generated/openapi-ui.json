@@ -12742,10 +12742,33 @@
             "title": "Action",
             "type": "string"
           },
+          "binding_hash_version": {
+            "anyOf": [
+              {
+                "const": 2,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Binding Hash Version"
+          },
           "binding_sha256": {
             "default": "",
             "title": "Binding Sha256",
             "type": "string"
+          },
+          "change_impact_decision_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Change Impact Decision Digest"
           },
           "change_impact_policy_digest": {
             "title": "Change Impact Policy Digest",
@@ -12852,7 +12875,9 @@
         },
         "required": [
           "action",
+          "binding_hash_version",
           "binding_sha256",
+          "change_impact_decision_digest",
           "change_impact_policy_digest",
           "change_impact_policy_record_id",
           "change_impact_policy_revision",

@@ -137,7 +137,7 @@ from control_plane.contracts.merge_admission_record import (
 from control_plane.contracts.owner_acceptance import (
     OwnerAcceptanceEventRecord,
     OwnerAcceptanceEventWriteStatus,
-    owner_acceptance_event_replay_digest,
+    owner_acceptance_event_replay_matches,
     owner_acceptance_subject_key,
     validate_owner_acceptance_event_transition,
 )
@@ -11526,9 +11526,7 @@ class PostgresRecordStore(HumanSessionStore):
             existing_row = session.get(LaunchplaneOwnerAcceptanceEventRow, record.event_id)
             if existing_row is not None:
                 existing = self._owner_acceptance_record_from_row(existing_row)
-                if owner_acceptance_event_replay_digest(
-                    existing
-                ) != owner_acceptance_event_replay_digest(record):
+                if not owner_acceptance_event_replay_matches(existing, record):
                     raise OwnerAcceptanceEventConflictError(
                         "Owner acceptance event replay changed the persisted payload."
                     )
@@ -11542,9 +11540,7 @@ class PostgresRecordStore(HumanSessionStore):
             if existing_row is not None:
                 session.rollback()
                 existing = self._owner_acceptance_record_from_row(existing_row)
-                if owner_acceptance_event_replay_digest(
-                    existing
-                ) != owner_acceptance_event_replay_digest(record):
+                if not owner_acceptance_event_replay_matches(existing, record):
                     raise OwnerAcceptanceEventConflictError(
                         "Owner acceptance event replay changed the persisted payload."
                     )
@@ -11584,9 +11580,7 @@ class PostgresRecordStore(HumanSessionStore):
                 if existing_row is None:
                     raise
                 existing = self._owner_acceptance_record_from_row(existing_row)
-                if owner_acceptance_event_replay_digest(
-                    existing
-                ) != owner_acceptance_event_replay_digest(record):
+                if not owner_acceptance_event_replay_matches(existing, record):
                     raise OwnerAcceptanceEventConflictError(
                         "Owner acceptance event replay changed the persisted payload."
                     )
@@ -15273,7 +15267,10 @@ class PostgresRecordStore(HumanSessionStore):
                     model_type=EngineeringReviewDecisionRecord,
                     payload=existing_row.payload,
                 )
-                if existing.decision_binding_sha256 != record.decision_binding_sha256:
+                if (existing.binding_hash_version, existing.decision_binding_sha256) != (
+                    record.binding_hash_version,
+                    record.decision_binding_sha256,
+                ):
                     raise EngineeringReviewConflictError(
                         "Engineering review decision id conflicts with stored evidence."
                     )

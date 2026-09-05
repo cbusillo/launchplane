@@ -6,6 +6,10 @@ from typing import Literal, Protocol, TypeVar, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from control_plane.change_impact_matching import (
+    select_change_impact_path_rule,
+    validate_change_impact_v2_policy,
+)
 from control_plane.contracts.change_impact import (
     ChangeImpactAffectedProduct,
     ChangeImpactChangedFileEvidence,
@@ -116,6 +120,20 @@ class ChangeImpactTrustedCallerBinding:
     ref: str = ""
 
 
+def validate_change_impact_policy_apply_request(
+    *, record: ChangeImpactPolicyRecord, mode: ChangeImpactApplyMode
+) -> None:
+    """Share policy validation and the staged activation gate across apply services."""
+    try:
+        validate_change_impact_v2_policy(record)
+    except ValueError as error:
+        raise ChangeImpactPolicySequenceError(str(error)) from error
+    if mode != "dry_run" and record.classification_model == "v2":
+        raise ChangeImpactPolicySequenceError(
+            "v2 classification apply is unavailable pending scoped binding and rename support"
+        )
+
+
 def apply_change_impact_policy(
     *,
     store: ChangeImpactPolicyStore,
@@ -124,6 +142,7 @@ def apply_change_impact_policy(
     expected_current_policy_digest: str = "",
     mode: ChangeImpactApplyMode = "apply",
 ) -> ChangeImpactPolicyApplyResult:
+    validate_change_impact_policy_apply_request(record=record, mode=mode)
     replay = _validate_policy_append(
         records=store.list_change_impact_policy_records(repository_id=record.repository_id),
         record=record,
@@ -234,6 +253,16 @@ def evaluate_change_impact(
             policy=policy,
             unknown_evidence=("active change-impact policy does not match repository identity",),
         )
+    try:
+        validate_change_impact_v2_policy(policy)
+    except ValueError:
+        return _unknown_evaluation(
+            target=target,
+            status="unknown",
+            reason_code="policy_rules_invalid",
+            policy=policy,
+            unknown_evidence=("v2 policy rules have ambiguous or implicit authority",),
+        )
 
     matched: list[ChangeImpactMatchedEvidence] = []
     affected_products: set[ChangeImpactProductScope] = set()
@@ -241,27 +270,50 @@ def evaluate_change_impact(
     sensitive = False
     unknown: list[str] = []
     unmatched_paths: set[str] = set()
+    production_components: set[str] = set()
+    governance_impact = False
 
     rules_by_component = {rule.component: rule for rule in policy.component_rules}
     for changed_file in repository_evidence.changed_files:
         path_matches = _matching_rules(changed_file=changed_file, rules=policy.component_rules)
+        floor_rules: tuple[ChangeImpactComponentRule, ...] = ()
+        if policy.classification_model == "v2":
+            selection = select_change_impact_path_rule(
+                path=changed_file.path, rules=policy.component_rules
+            )
+            path_matches = (selection.winner.rule,) if selection else ()
+            floor_rules = tuple(match.rule for match in selection.ancestors) if selection else ()
         if not path_matches:
             unmatched_paths.add(changed_file.path)
             continue
+        for rule in floor_rules:
+            matched.append(
+                _file_match(changed_file=changed_file, rule=rule, review_floor_only=True)
+            )
+            if rule.review_tier == "sensitive" or rule.governance_impact:
+                sensitive = True
+            governance_impact = governance_impact or bool(rule.governance_impact)
+        production_floor = any(rule.production_affecting for rule in floor_rules)
         for rule in path_matches:
             matched.append(_file_match(changed_file=changed_file, rule=rule))
             affected_products.update(rule.affected_products)
-            if rule.production_affecting:
+            if rule.production_affecting or production_floor:
                 production_affecting_products.update(rule.affected_products)
-            if rule.review_tier == "sensitive":
+                production_components.add(rule.component)
+            if rule.review_tier == "sensitive" or rule.governance_impact:
                 sensitive = True
+            governance_impact = governance_impact or bool(rule.governance_impact)
 
     dependency_components = {
         evidence.component
         for evidence in stored_evidence
         if evidence.kind == "dependency" and evidence.confidence == "known"
     }
-    matched_components = {evidence.component for evidence in matched if evidence.component}
+    matched_components = {
+        evidence.component
+        for evidence in matched
+        if evidence.component and not evidence.review_floor_only
+    }
 
     for evidence in stored_evidence:
         if evidence.confidence != "known":
@@ -287,7 +339,7 @@ def evaluate_change_impact(
             continue
         affected_products.update(evidence.affected_products)
         affected_products.update(rule.affected_products)
-        if rule.production_affecting:
+        if rule.production_affecting or evidence.component in production_components:
             production_affecting_products.update(evidence.affected_products)
             production_affecting_products.update(rule.affected_products)
         matched.append(_stored_evidence_match(evidence=evidence, rule=rule))
@@ -321,6 +373,7 @@ def evaluate_change_impact(
             affected_products=_affected_products(affected_products),
             unknown_evidence=tuple(dict.fromkeys(unknown)),
             coverage=coverage,
+            governance_impact=governance_impact if policy.classification_model == "v2" else None,
         )
 
     affected = _affected_products(affected_products)
@@ -340,6 +393,8 @@ def evaluate_change_impact(
         matched_evidence=tuple(matched),
         unknown_evidence=(),
         coverage=coverage,
+        classification_model=policy.classification_model,
+        governance_impact=governance_impact if policy.classification_model == "v2" else None,
     )
 
 
@@ -515,6 +570,7 @@ def _file_match(
     *,
     changed_file: ChangeImpactChangedFileEvidence,
     rule: ChangeImpactComponentRule,
+    review_floor_only: bool = False,
 ) -> ChangeImpactMatchedEvidence:
     return ChangeImpactMatchedEvidence(
         source="server_diff",
@@ -523,7 +579,9 @@ def _file_match(
         rule_id=rule.rule_id,
         review_tier=rule.review_tier,
         production_affecting=rule.production_affecting,
-        affected_products=rule.affected_products,
+        affected_products=() if review_floor_only else rule.affected_products,
+        review_floor_only=review_floor_only,
+        governance_impact=rule.governance_impact,
         reason=rule.reason,
     )
 
@@ -540,6 +598,7 @@ def _stored_evidence_match(
         component=evidence.component,
         rule_id=rule.rule_id,
         review_tier=rule.review_tier,
+        governance_impact=rule.governance_impact,
         production_affecting=rule.production_affecting,
         affected_products=tuple(
             sorted(set(rule.affected_products) | set(evidence.affected_products), key=_scope_key)
@@ -585,6 +644,7 @@ def _unknown_evaluation(
     affected_products: tuple[ChangeImpactAffectedProduct, ...] = (),
     unknown_evidence: tuple[str, ...],
     coverage: ChangeImpactCoverage | None = None,
+    governance_impact: bool | None = None,
 ) -> ChangeImpactEvaluation:
     return ChangeImpactEvaluation(
         status=status,
@@ -600,6 +660,8 @@ def _unknown_evaluation(
         matched_evidence=matched_evidence,
         unknown_evidence=unknown_evidence,
         coverage=coverage,
+        classification_model=policy.classification_model if policy is not None else None,
+        governance_impact=governance_impact,
     )
 
 

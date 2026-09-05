@@ -8,6 +8,7 @@ from control_plane.change_impact_service import (
     ChangeImpactPolicyApplyResult,
     ChangeImpactPolicyReadStore,
     _validate_policy_append,
+    validate_change_impact_policy_apply_request,
 )
 from control_plane.contracts.change_impact import ChangeImpactPolicyRecord
 from control_plane.contracts.change_impact_audit import (
@@ -97,6 +98,7 @@ def apply_change_impact_policy_with_audit(
     expected_current_policy_digest: str = "",
     mode: ChangeImpactApplyMode = "apply",
 ) -> ChangeImpactPolicyApplyResult:
+    validate_change_impact_policy_apply_request(record=record, mode=mode)
     replay = _validate_policy_append(
         records=store.list_change_impact_policy_records(repository_id=record.repository_id),
         record=record,
