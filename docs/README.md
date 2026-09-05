@@ -84,3 +84,5 @@ Use these docs as the source of truth for `launchplane`.
 - [style/testing.md](style/testing.md) — testing conventions.
 - [policies/coding-standards.md](policies/coding-standards.md) — naming and
   code-quality guardrails.
+- [codex-lab-workers.md](codex-lab-workers.md) — executable selection, session
+  provenance, and retirement verification.

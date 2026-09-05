@@ -959,7 +959,7 @@ def every_code_claim_comment_body(
 ) -> str:
     return (
         "<!-- every-code-claim -->\n"
-        "Every Code is working on this issue from "
+        "Codex Lab is working on this issue from "
         f"`{host.strip() or 'this host'}`.\n\n"
         f"Session: `{session_name}`\n"
         f"Launchplane request: `{record.request_id}`"
@@ -1141,7 +1141,7 @@ def default_every_code_command(record: EveryCodeWorkRequestRecord) -> str:
         "Before changing files, read the issue body and every issue comment. "
         "Treat newer comments as potentially more current than the original body. "
         "Inspect linked references and any available images or attachments before deciding what to change. "
-        "You are already running inside the isolated Every Code worktree and branch for this request. "
+        "You are already running inside the isolated agent worktree and branch for this request. "
         "Open a pull request for the change. If the PR fully resolves the issue, "
         f"include `Closes #{record.issue_number}` or `Fixes #{record.issue_number}` "
         "in the PR body so GitHub closes the issue when the PR merges. Use "
@@ -1152,14 +1152,14 @@ def default_every_code_command(record: EveryCodeWorkRequestRecord) -> str:
         "checks are complete, let the session exit so Launchplane can mark this "
         "request finished."
     )
-    return "code " + shlex.quote(prompt)
+    return "codex-lab " + shlex.quote(prompt)
 
 
 def every_code_pr_feedback_prompt(feedback: EveryCodePrFeedbackRecord) -> str:
     source = feedback.html_url.strip() or feedback.pr_url.strip()
     submitted = feedback.submitted_at.strip() or feedback.received_at.strip()
     lines = [
-        "Every Code received new PR feedback for this request.",
+        "Codex Lab received new PR feedback for this request.",
         f"Feedback kind: {feedback.feedback_kind}",
         f"Actor: {feedback.actor}",
     ]
@@ -1227,7 +1227,7 @@ def build_every_code_session_command(
         "--fencing-token",
         str(record.fencing_token),
         "--exit-code",
-        "$status",
+        "$launchplane_session_exit_code",
     ]
     if database_url.strip():
         finish_command.extend(("--database-url", database_url.strip()))
@@ -1235,15 +1235,14 @@ def build_every_code_session_command(
         finish_command.extend(("--service-url", service_url.strip()))
         finish_command.extend(("--worker-token-env", worker_token_env.strip()))
     finish_shell = " ".join(
-        "$status" if part == "$status" else shlex.quote(part) for part in finish_command
+        "$launchplane_session_exit_code"
+        if part == "$launchplane_session_exit_code"
+        else shlex.quote(part)
+        for part in finish_command
     )
     session_env = {
-        "EVERY_CODE_SESSION_ORIGIN": "every_code",
-        "EVERY_CODE_REQUEST_ID": record.request_id,
-        "EVERY_CODE_REPOSITORY": record.repository,
-        "EVERY_CODE_ISSUE_NUMBER": str(record.issue_number),
-        "EVERY_CODE_ISSUE_URL": record.issue_url,
-        "AGENT_SESSION_ORIGIN": "every_code",
+        "AGENT_SESSION_ORIGIN": "launchplane",
+        "AGENT_SESSION_SOURCE": "agent-session",
         "AGENT_SESSION_REQUEST_ID": record.request_id,
         "AGENT_SESSION_REPOSITORY": record.repository,
         "AGENT_SESSION_ISSUE_NUMBER": str(record.issue_number),
@@ -1253,7 +1252,7 @@ def build_every_code_session_command(
         f"{key}={shlex.quote(value)}" for key, value in session_env.items() if value
     )
     session_command = f"{env_shell} {command}" if env_shell else command
-    return f"{session_command}\nstatus=$?\n{finish_shell}\nexit $status"
+    return f"{session_command}\nlaunchplane_session_exit_code=$?\n{finish_shell}\nexit $launchplane_session_exit_code"
 
 
 def build_every_code_feedback_session_command(
@@ -1266,7 +1265,7 @@ def build_every_code_feedback_session_command(
     service_url: str = "",
     worker_token_env: str = "LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN",
 ) -> str:
-    command = "code " + shlex.quote(every_code_pr_feedback_prompt(feedback))
+    command = "codex-lab " + shlex.quote(every_code_pr_feedback_prompt(feedback))
     return build_every_code_session_command(
         record=record,
         command=command,

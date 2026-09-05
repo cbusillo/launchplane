@@ -1,3 +1,4 @@
+import shlex
 import os
 import subprocess
 import unittest
@@ -1156,12 +1157,14 @@ class EveryCodeWorkerTests(unittest.TestCase):
     def test_default_command_includes_issue_and_request(self) -> None:
         command = default_every_code_command(_queued_record())
 
+        self.assertEqual(shlex.split(command)[0], "codex-lab")
+
         self.assertIn("https://github.com/cbusillo/code/issues/123", command)
         self.assertIn("every-code-cbusillo-code-123-test", command)
         self.assertIn("read the issue body and every issue comment", command)
         self.assertIn("newer comments", command)
         self.assertIn("images or attachments", command)
-        self.assertIn("isolated Every Code worktree", command)
+        self.assertIn("isolated agent worktree", command)
         self.assertIn("Closes #123", command)
         self.assertIn("Use `Refs` only", command)
         self.assertIn("run closeout hygiene", command)
@@ -1176,7 +1179,7 @@ class EveryCodeWorkerTests(unittest.TestCase):
         )
 
         self.assertIn("<!-- every-code-claim -->", body)
-        self.assertIn("Every Code is working on this issue", body)
+        self.assertIn("Codex Lab is working on this issue", body)
         self.assertIn("`Chris-Studio`", body)
         self.assertIn("`every-code-test`", body)
         self.assertIn("`every-code-cbusillo-code-123-test`", body)
@@ -1202,25 +1205,23 @@ class EveryCodeWorkerTests(unittest.TestCase):
     def test_session_command_reports_terminal_status(self) -> None:
         command = build_every_code_session_command(
             record=_claimed_record(),
-            command="code issue",
+            command="codex-lab issue",
             state_dir=Path("state"),
             host="Chris-Studio",
             service_url="https://launchplane.example",
         )
 
-        self.assertIn("code issue", command)
+        self.assertIn("codex-lab issue", command)
         self.assertIn("every-code finish", command)
         self.assertIn("--service-url https://launchplane.example", command)
         self.assertIn("--worker-token-env LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN", command)
         self.assertIn("--request-id every-code-cbusillo-code-123-test", command)
         self.assertIn("--fencing-token 1", command)
-        self.assertIn("--exit-code $status", command)
-        self.assertIn("EVERY_CODE_SESSION_ORIGIN=every_code", command)
-        self.assertIn("EVERY_CODE_REQUEST_ID=every-code-cbusillo-code-123-test", command)
-        self.assertIn("EVERY_CODE_REPOSITORY=cbusillo/code", command)
-        self.assertIn("EVERY_CODE_ISSUE_NUMBER=123", command)
-        self.assertIn("EVERY_CODE_ISSUE_URL=https://github.com/cbusillo/code/issues/123", command)
-        self.assertIn("AGENT_SESSION_ORIGIN=every_code", command)
+        self.assertIn("--exit-code $launchplane_session_exit_code", command)
+        self.assertIn("AGENT_SESSION_ORIGIN=launchplane", command)
+        self.assertIn("AGENT_SESSION_SOURCE=agent-session", command)
+        self.assertNotIn(" EVERY_CODE_", command)
+        self.assertFalse(command.startswith("EVERY_CODE_"))
         self.assertIn("AGENT_SESSION_REQUEST_ID=every-code-cbusillo-code-123-test", command)
         self.assertIn("AGENT_SESSION_REPOSITORY=cbusillo/code", command)
         self.assertIn("AGENT_SESSION_ISSUE_NUMBER=123", command)
@@ -2304,7 +2305,8 @@ class EveryCodeWorkerTests(unittest.TestCase):
             launch_call[6],
             str(every_code_worktree_root(_queued_record(), state_dir=temporary_root / "state")),
         )
-        self.assertIn("Every Code received new PR feedback", launch_call[-1])
+        self.assertIn("codex-lab ", launch_call[-1])
+        self.assertIn("Codex Lab received new PR feedback", launch_call[-1])
 
     def test_apply_feedback_persists_redacted_relaunch_failure(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
