@@ -74,6 +74,15 @@ Audited apply requires database storage. `attribution_unavailable` means a read
 cannot supply audit evidence; it is distinct from a database-backed historical
 record known to be `legacy_unattributed`.
 
+The shared Codex Launchplane helper exposes only the audit's record ID, digest,
+actor kind and timestamp. It omits writer subjects, workflow identity and the
+audit trace ID; its displayed timestamp is normalized to whole-second UTC without
+altering the stored original. See the maintained
+[helper response contract](https://github.com/cbusillo/codex-skills/blob/main/launchplane/references/write-action-helper-contract.md).
+When these API responses change, update the helper's explicit projection and
+response fixtures in the same workstream. Unknown response fields fail closed,
+including newly added optional fields; they are not silently passed through.
+
 `policy_coverage_incomplete` identifies pure unmatched-path gaps. Contradictory
 evidence retains `ambiguous_or_missing_evidence` even when coverage gaps also
 exist; the separate coverage data still reports those gaps. Samples are bounded
