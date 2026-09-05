@@ -2427,7 +2427,11 @@ class EveryCodeWorkerTests(unittest.TestCase):
                     "state": "done",
                     "finished_at": "2026-05-06T00:02:00Z",
                     "updated_at": "2026-05-06T00:02:00Z",
-                    "result_summary": "Linked pull request merged.",
+                    "result_pr_url": "https://github.com/cbusillo/code/pull/26",
+                    "result_summary": (
+                        "Linked pull request merged: "
+                        "https://github.com/cbusillo/code/pull/26\nOpened PR."
+                    ),
                 }
             )
             store.write_every_code_work_request_record(record)
@@ -2623,6 +2627,58 @@ class EveryCodeWorkerTests(unittest.TestCase):
         self.assertFalse(state_exists)
         self.assertTrue(any(call[3:5] == ("worktree", "remove") for call in runner.calls))
         self.assertTrue(any(call[3:5] == ("branch", "-d") for call in runner.calls))
+
+    def test_cleanup_reconciliation_retains_terminal_open_pr_state_in_both_modes(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_root = Path(temporary_directory_name)
+            state_dir = temporary_root / "state"
+            checkout_root = temporary_root / "Developer" / "code"
+            worktree_root = every_code_worktree_root(_queued_record(), state_dir=state_dir)
+            checkout_root.mkdir(parents=True)
+            worktree_root.mkdir(parents=True)
+            (checkout_root / ".git").mkdir()
+            (worktree_root / ".git").mkdir()
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_every_code_work_request_record(
+                _done_record(
+                    repository="cbusillo/code",
+                    result_pr_url="https://github.com/cbusillo/code/pull/26",
+                ).model_copy(update={"result_summary": "Opened PR."})
+            )
+            state_path = _write_cleanup_session_state(
+                state_dir=state_dir,
+                source_checkout_root=checkout_root,
+                launch_root=worktree_root,
+            )
+            runner = _CleanupReconciliationRunner(worktree_root=worktree_root)
+
+            dry_run = reconcile_every_code_worker_cleanup_state(
+                record_store=store,
+                host="Chris-Studio",
+                state_dir=state_dir,
+                runner=runner,
+            )
+            applied = reconcile_every_code_worker_cleanup_state(
+                record_store=store,
+                host="Chris-Studio",
+                state_dir=state_dir,
+                apply=True,
+                runner=runner,
+            )
+            state_exists = state_path.exists()
+            worktree_exists = worktree_root.exists()
+
+        for result in (dry_run, applied):
+            self.assertEqual(result.skipped, 1)
+            self.assertEqual(result.would_remove, 0)
+            self.assertEqual(result.removed, 0)
+            self.assertEqual(result.items[0].status, "skipped")
+            self.assertEqual(result.items[0].reason, "awaiting_pull_request_feedback")
+        self.assertTrue(state_exists)
+        self.assertTrue(worktree_exists)
+        self.assertFalse(any(call[3:5] == ("worktree", "remove") for call in runner.calls))
 
     def test_cleanup_reconciliation_skips_missing_worktree_path_but_deletes_branch(
         self,
@@ -3665,6 +3721,136 @@ class EveryCodeWorkerTests(unittest.TestCase):
         self.assertEqual(result.blocked, 0)
         self.assertEqual(result.stopped_reason, "max_iterations")
         self.assertEqual(sleeps, [2.5])
+
+    def test_run_loop_retains_open_pr_worktree_for_delayed_feedback_relaunch(self) -> None:
+        class _RealGitGoneSessionRunner(_GoneSessionRunner):
+            def __call__(
+                self, args: Sequence[str], env: Mapping[str, str] | None = None
+            ) -> subprocess.CompletedProcess[str]:
+                if args[0] == "git":
+                    self.calls.append(tuple(args))
+                    return subprocess.run(
+                        args, capture_output=True, check=False, text=True, env=env
+                    )
+                return super().__call__(args, env)
+
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_root = Path(temporary_directory_name)
+            checkout_root = temporary_root / "Developer" / "code"
+            checkout_root.mkdir(parents=True)
+            subprocess.run(
+                ("git", "init", "--initial-branch", "main", str(checkout_root)),
+                capture_output=True,
+                check=True,
+                text=True,
+            )
+            subprocess.run(
+                ("git", "-C", str(checkout_root), "config", "user.name", "Test User"),
+                capture_output=True,
+                check=True,
+                text=True,
+            )
+            subprocess.run(
+                ("git", "-C", str(checkout_root), "config", "user.email", "test@example.com"),
+                capture_output=True,
+                check=True,
+                text=True,
+            )
+            (checkout_root / "README.md").write_text("# Test repository\n", encoding="utf-8")
+            subprocess.run(
+                ("git", "-C", str(checkout_root), "add", "README.md"),
+                capture_output=True,
+                check=True,
+                text=True,
+            )
+            subprocess.run(
+                ("git", "-C", str(checkout_root), "commit", "-m", "Initial commit"),
+                capture_output=True,
+                check=True,
+                text=True,
+            )
+
+            state_dir = temporary_root / "state"
+            worktree_root = every_code_worktree_root(_queued_record(), state_dir=state_dir)
+            worktree_branch = every_code_worktree_branch(_queued_record())
+            subprocess.run(
+                (
+                    "git",
+                    "-C",
+                    str(checkout_root),
+                    "worktree",
+                    "add",
+                    "-b",
+                    worktree_branch,
+                    str(worktree_root),
+                ),
+                capture_output=True,
+                check=True,
+                text=True,
+            )
+
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_every_code_work_request_record(
+                _done_record(
+                    repository="cbusillo/code",
+                    result_pr_url="https://github.com/cbusillo/code/pull/26",
+                ).model_copy(update={"result_summary": "Opened PR."})
+            )
+            state_path = _write_cleanup_session_state(
+                state_dir=state_dir,
+                source_checkout_root=checkout_root,
+                launch_root=worktree_root,
+                worktree_branch=worktree_branch,
+            )
+            runner = _RealGitGoneSessionRunner(
+                pr_view_payload={
+                    "state": "OPEN",
+                    "headRefOid": "abcdef1234567890",
+                    "labels": [],
+                    "statusCheckRollup": [],
+                }
+            )
+
+            run_every_code_worker_loop(
+                record_store=store,
+                host="Chris-Studio",
+                workspace_root=temporary_root / "Developer",
+                state_dir=state_dir,
+                interval_seconds=0,
+                max_iterations=1,
+                runner=runner,
+                sleeper=lambda _seconds: None,
+            )
+
+            self.assertTrue(
+                worktree_root.is_dir(),
+                "normal polling removed the clean worktree while its result PR was open",
+            )
+            self.assertTrue(
+                state_path.is_file(),
+                "normal polling removed session state needed for delayed PR feedback",
+            )
+
+            store.write_every_code_pr_feedback_record(_feedback_record())
+            run_every_code_worker_loop(
+                record_store=store,
+                host="Chris-Studio",
+                workspace_root=temporary_root / "Developer",
+                state_dir=state_dir,
+                interval_seconds=0,
+                max_iterations=1,
+                runner=runner,
+                sleeper=lambda _seconds: None,
+            )
+            feedback = store.list_every_code_pr_feedback_records(limit=1)[0]
+            resumed_record = store.read_every_code_work_request_record(
+                "every-code-cbusillo-code-123-test"
+            )
+
+        self.assertEqual(feedback.status, "applied")
+        self.assertEqual(resumed_record.state, "running")
+        launch_call = next(call for call in runner.calls if call[1] == "new-session")
+        self.assertIn("codex-lab ", launch_call[-1])
 
     def test_run_loop_claims_request_when_pr_feedback_maintenance_fails(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

@@ -42,6 +42,7 @@ from control_plane.contracts.every_code_work_request import (
     EveryCodeWorkRequestStatusUpdate,
     apply_every_code_work_request_status,
     claim_every_code_work_request,
+    close_every_code_work_request_for_pull_request,
     heartbeat_every_code_work_request,
     recover_stale_every_code_work_request,
 )
@@ -2911,6 +2912,31 @@ class FilesystemRecordStore:
         if limit is not None:
             records = records[:limit]
         return tuple(records)
+
+    def close_every_code_work_request_for_pull_request_record(
+        self,
+        *,
+        request_id: str,
+        expected_lifecycle_id: str,
+        pr_url: str,
+        merged: bool,
+        closed_at: str,
+    ) -> EveryCodeWorkRequestRecord | None:
+        record_type = "launchplane_every_code_work_requests"
+        with self._exclusive_record_lock(record_type, request_id):
+            record = self.read_every_code_work_request_record(request_id)
+            if record.lifecycle_id != expected_lifecycle_id:
+                return None
+            closed_record = close_every_code_work_request_for_pull_request(
+                record,
+                pr_url=pr_url,
+                merged=merged,
+                closed_at=closed_at,
+            )
+            if closed_record is None:
+                return None
+            self._write_model(record_type, request_id, closed_record)
+            return closed_record
 
     def claim_every_code_work_request_record(
         self,
