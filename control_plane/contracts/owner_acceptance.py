@@ -9,6 +9,12 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from control_plane.contracts.change_impact_binding import (
+    ChangeImpactBindingHashVersion,
+    change_impact_bound_payload,
+    validate_change_impact_binding,
+)
+
 from control_plane.contracts.artifact_dependency_provenance import (
     normalize_artifact_sha256_digest,
 )
@@ -473,6 +479,8 @@ class OwnerAcceptanceBinding(BaseModel):
     change_impact_policy_record_id: str
     change_impact_policy_revision: int = Field(ge=1)
     change_impact_policy_digest: str
+    binding_hash_version: ChangeImpactBindingHashVersion | None = None
+    change_impact_decision_digest: str | None = None
     product: str
     system: str
     action: str
@@ -544,6 +552,9 @@ class OwnerAcceptanceBinding(BaseModel):
                 )
             if self.review_context.base_sha == self.head_sha:
                 raise ValueError("Owner acceptance reviewed base cannot equal the reviewed head")
+        validate_change_impact_binding(
+            self.binding_hash_version, self.change_impact_decision_digest
+        )
         computed_binding = owner_acceptance_binding_sha256(self)
         if self.binding_sha256:
             normalized_binding = _normalize_sha256(self.binding_sha256, "binding_sha256")
@@ -906,12 +917,20 @@ class OwnerAcceptanceDecision(BaseModel):
 
 
 def owner_acceptance_binding_sha256(binding: OwnerAcceptanceBinding) -> str:
+    payload = binding.model_dump(mode="json", exclude={"binding_sha256"}, exclude_none=True)
     return _canonical_sha256(
-        binding.model_dump(
-            mode="json",
-            exclude={"binding_sha256"},
-            exclude_none=True,
+        change_impact_bound_payload(
+            payload, version=binding.binding_hash_version, domain="owner-acceptance-v2"
         )
+    )
+
+
+def owner_acceptance_bindings_match(
+    left: OwnerAcceptanceBinding, right: OwnerAcceptanceBinding
+) -> bool:
+    return (left.binding_hash_version, left.binding_sha256) == (
+        right.binding_hash_version,
+        right.binding_sha256,
     )
 
 
@@ -984,6 +1003,29 @@ def owner_acceptance_event_replay_digest(record: OwnerAcceptanceEventRecord) -> 
     return _canonical_sha256(payload)
 
 
+def owner_acceptance_event_replay_matches(
+    existing: OwnerAcceptanceEventRecord, proposed: OwnerAcceptanceEventRecord
+) -> bool:
+    """Reuse an immutable event without changing its provenance, state, or review age."""
+    if not owner_acceptance_bindings_match(existing.binding, proposed.binding):
+        return False
+    if existing.binding.binding_hash_version == 2:
+        historical_provenance = {
+            field: getattr(existing.binding, field)
+            for field in (
+                "change_impact_policy_record_id",
+                "change_impact_policy_revision",
+                "change_impact_policy_digest",
+            )
+        }
+        proposed = proposed.model_copy(
+            update={"binding": proposed.binding.model_copy(update=historical_provenance)}
+        )
+    return owner_acceptance_event_replay_digest(existing) == owner_acceptance_event_replay_digest(
+        proposed
+    )
+
+
 def owner_acceptance_subject_key(
     record: OwnerAcceptanceEventRecord,
 ) -> tuple[str, int, str, str, str, str]:
@@ -1012,8 +1054,8 @@ def validate_owner_acceptance_event_transition(
     if proposed.action in _SYSTEM_ACTIONS:
         return
 
-    same_binding = (
-        previous is not None and previous.binding.binding_sha256 == proposed.binding.binding_sha256
+    same_binding = previous is not None and owner_acceptance_bindings_match(
+        previous.binding, proposed.binding
     )
     if not same_binding:
         if proposed.action == "revoked":

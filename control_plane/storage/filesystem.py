@@ -66,7 +66,7 @@ from control_plane.contracts.merge_admission_record import (
 from control_plane.contracts.owner_acceptance import (
     OwnerAcceptanceEventRecord,
     OwnerAcceptanceEventWriteStatus,
-    owner_acceptance_event_replay_digest,
+    owner_acceptance_event_replay_matches,
     owner_acceptance_subject_key,
     validate_owner_acceptance_event_transition,
 )
@@ -3244,9 +3244,7 @@ class FilesystemRecordStore:
                     for existing_record in records
                     if existing_record.event_id == record.event_id
                 )
-                if owner_acceptance_event_replay_digest(
-                    existing
-                ) != owner_acceptance_event_replay_digest(record):
+                if not owner_acceptance_event_replay_matches(existing, record):
                     raise OwnerAcceptanceEventConflictError(
                         "Owner acceptance event replay changed the persisted payload."
                     )

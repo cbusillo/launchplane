@@ -69,6 +69,31 @@ The runtime projection deliberately excludes deployment time, so redeploying
 the same verified identity does not stale acceptance, while any identity field
 used to prove the serving artifact remains bound.
 
+## Versioned Change-Impact Bindings
+
+Bindings support optional `binding_hash_version` and
+`change_impact_decision_digest` fields. Both remain absent on the current v1
+evaluator path. This compatibility support does not enable v2 classification or
+activate a policy.
+
+An omitted version preserves the exact legacy binding, acceptance, event, and
+replay digests. Version `2` requires an explicit SHA-256 scoped decision digest
+and uses a distinct hash domain. Its semantic hash replaces only the
+change-impact policy record ID, revision, and full digest with that scoped
+identity; the original full-policy provenance remains in the immutable record.
+Head, tree, product subject, Owner authority, requirement, preview, and reviewed
+context remain bound. A v1 human event cannot satisfy a v2 binding: each required
+product needs fresh human review when v2 is explicitly activated.
+
+Replaying the same v2 event key after an unrelated policy revision may differ
+only in those three policy-provenance fields. The service and atomic storage
+paths return the original persisted event, including its original timestamp,
+sequence, authorization, and provenance. They never append a synthetic human
+event or extend review age. Changed actor, reason, resolution, or bound semantics
+remain replay conflicts; a new key cannot reaffirm an identical human state.
+HTTP write-outcome reconciliation uses the same equivalence rule. Current
+evaluation provenance and the historical event are reported independently.
+
 ## Evaluation
 
 `GET /v1/owner-acceptance/evaluation` accepts only `repository` and
