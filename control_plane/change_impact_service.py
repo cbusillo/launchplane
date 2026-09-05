@@ -6,6 +6,13 @@ from typing import Literal, Protocol, TypeVar, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from control_plane.change_impact_generated import (
+    ChangeImpactFloors,
+    GeneratedBoundary,
+    join_floors,
+    resolve_generated_boundaries,
+    rule_floors,
+)
 from control_plane.change_impact_matching import (
     select_change_impact_path_rule,
     validate_change_impact_v2_policy,
@@ -219,6 +226,7 @@ def evaluate_change_impact(
         )
     try:
         validate_change_impact_v2_policy(policy)
+        generated_boundaries = resolve_generated_boundaries(policy)
     except ValueError:
         return _unknown_evaluation(
             target=target,
@@ -254,19 +262,22 @@ def evaluate_change_impact(
             matched.append(
                 _file_match(changed_file=changed_file, rule=rule, review_floor_only=True)
             )
-            if rule.review_tier == "sensitive" or rule.governance_impact:
-                sensitive = True
-            governance_impact = governance_impact or bool(rule.governance_impact)
-        production_floor = any(rule.production_affecting for rule in floor_rules)
+        ancestor_floors = join_floors(*(rule_floors(rule) for rule in floor_rules))
         for rule in path_matches:
-            matched.append(_file_match(changed_file=changed_file, rule=rule))
-            affected_products.update(rule.affected_products)
-            if rule.production_affecting or production_floor:
-                production_affecting_products.update(rule.affected_products)
+            boundary = generated_boundaries.get(rule.component)
+            scopes = boundary.affected_products if boundary else rule.affected_products
+            floors = join_floors(
+                rule_floors(rule),
+                ancestor_floors,
+                boundary.floors if boundary else ChangeImpactFloors(),
+            )
+            matched.append(_file_match(changed_file=changed_file, rule=rule, boundary=boundary))
+            affected_products.update(scopes)
+            if floors.production:
+                production_affecting_products.update(scopes)
                 production_components.add(rule.component)
-            if rule.review_tier == "sensitive" or rule.governance_impact:
-                sensitive = True
-            governance_impact = governance_impact or bool(rule.governance_impact)
+            sensitive = sensitive or floors.sensitive
+            governance_impact = governance_impact or floors.governance
 
     dependency_components = {
         evidence.component
@@ -306,7 +317,11 @@ def evaluate_change_impact(
         if rule.production_affecting or evidence.component in production_components:
             production_affecting_products.update(evidence.affected_products)
             production_affecting_products.update(rule.affected_products)
-        matched.append(_stored_evidence_match(evidence=evidence, rule=rule))
+        matched.append(
+            _stored_evidence_match(
+                evidence=evidence, rule=rule, boundary=generated_boundaries.get(rule.component)
+            )
+        )
         if rule.review_tier == "sensitive":
             sensitive = True
 
@@ -535,17 +550,25 @@ def _file_match(
     changed_file: ChangeImpactChangedFileEvidence,
     rule: ChangeImpactComponentRule,
     review_floor_only: bool = False,
+    boundary: GeneratedBoundary | None = None,
 ) -> ChangeImpactMatchedEvidence:
+    floors = join_floors(rule_floors(rule), boundary.floors if boundary else ChangeImpactFloors())
     return ChangeImpactMatchedEvidence(
         source="server_diff",
         path=changed_file.path,
         component=rule.component,
         rule_id=rule.rule_id,
-        review_tier=rule.review_tier,
-        production_affecting=rule.production_affecting,
-        affected_products=() if review_floor_only else rule.affected_products,
+        review_tier="sensitive" if floors.sensitive else "routine",
+        production_affecting=True if floors.production else None,
+        affected_products=(
+            ()
+            if review_floor_only
+            else boundary.affected_products
+            if boundary
+            else rule.affected_products
+        ),
         review_floor_only=review_floor_only,
-        governance_impact=rule.governance_impact,
+        governance_impact=True if floors.governance else None,
         reason=rule.reason,
     )
 
@@ -554,18 +577,24 @@ def _stored_evidence_match(
     *,
     evidence: ChangeImpactStoredEvidence,
     rule: ChangeImpactComponentRule,
+    boundary: GeneratedBoundary | None = None,
 ) -> ChangeImpactMatchedEvidence:
+    floors = join_floors(rule_floors(rule), boundary.floors if boundary else ChangeImpactFloors())
     return ChangeImpactMatchedEvidence(
         source=(
             "launchplane_dependency" if evidence.kind == "dependency" else "launchplane_reviewer"
         ),
         component=evidence.component,
         rule_id=rule.rule_id,
-        review_tier=rule.review_tier,
-        governance_impact=rule.governance_impact,
-        production_affecting=rule.production_affecting,
+        review_tier="sensitive" if floors.sensitive else "routine",
+        governance_impact=True if floors.governance else None,
+        production_affecting=True if floors.production else None,
         affected_products=tuple(
-            sorted(set(rule.affected_products) | set(evidence.affected_products), key=_scope_key)
+            sorted(
+                set(boundary.affected_products if boundary else rule.affected_products)
+                | set(evidence.affected_products),
+                key=_scope_key,
+            )
         ),
         reason=evidence.reason,
     )
