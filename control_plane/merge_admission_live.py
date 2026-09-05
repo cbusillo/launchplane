@@ -52,6 +52,10 @@ from control_plane.merge_admission import (
     MergeAdmissionDeniedError,
     MergeAdmissionEvaluation,
 )
+from control_plane.merge_admission_impact_binding import (
+    impact_binding_fingerprints,
+    select_current_engineering_decision,
+)
 from control_plane.merge_readiness import evaluate_merge_readiness_from_live_evidence
 from control_plane.merge_train import (
     MergeTrainSnapshotReader,
@@ -207,7 +211,9 @@ class LiveMergeAdmissionEvaluator:
             head_sha=observed_head_sha,
             limit=25,
         )
-        engineering_decision = decisions[0] if decisions else None
+        engineering_decision = select_current_engineering_decision(
+            impact=target_evidence.impact, decisions=decisions
+        )
         engineering_runs = (
             engineering_store.list_engineering_review_run_records(
                 repository=landing_plan.repository,
@@ -427,27 +433,11 @@ class LiveMergeAdmissionEvaluator:
                 "excluded_contexts": list(technical_checks.excluded_contexts),
             }
         )
-        expected_impact_digests = {
-            product.binding.change_impact_policy_digest
-            for product in owner_decision.products
-            if product.binding is not None
-        }
-        decision_impact_digest = str(
-            getattr(engineering_decision, "change_impact_policy_digest", "")
-        ).strip()
-        if decision_impact_digest:
-            expected_impact_digests.add(decision_impact_digest)
-        if len(expected_impact_digests) == 1:
-            expected_impact = next(iter(expected_impact_digests))
-        elif (
-            not expected_impact_digests
-            and owner_decision.status == "not_required"
-            and impact.status == "success"
-            and impact.policy_digest
-        ):
-            expected_impact = impact.policy_digest
-        else:
-            expected_impact = _MISSING_POLICY_SHA256
+        expected_impact, current_impact = impact_binding_fingerprints(
+            impact=impact,
+            owner_decision=owner_decision,
+            engineering_decision=engineering_decision,
+        )
         expected_engineering = (
             str(getattr(engineering_decision, "authority_digest", "")).strip()
             or _MISSING_POLICY_SHA256
@@ -458,7 +448,7 @@ class LiveMergeAdmissionEvaluator:
             authorization_sha256 = None
 
         values: dict[str, tuple[str, str | None]] = {
-            "impact": (expected_impact, impact.policy_digest or None),
+            "impact": (expected_impact, current_impact),
             "technical_checks": (technical_policy_sha256, technical_policy_sha256),
             "engineering_review": (expected_engineering, engineering_authority_digest),
             "ruleset": (technical_policy_sha256, technical_policy_sha256),

@@ -38,7 +38,8 @@ from control_plane.contracts.owner_acceptance import (
     OwnerAcceptanceSourceEventKind,
     OwnerAcceptanceViewerBindingEligibility,
     OwnerAcceptanceViewerEligibilityReason,
-    owner_acceptance_event_replay_digest,
+    owner_acceptance_event_replay_matches,
+    owner_acceptance_bindings_match,
     owner_acceptance_human_action_semantics,
     owner_acceptance_runtime_identity_binding,
     validate_owner_acceptance_event_transition,
@@ -502,9 +503,7 @@ def record_owner_acceptance_event(
         None,
     )
     if existing is not None:
-        if owner_acceptance_event_replay_digest(existing) != owner_acceptance_event_replay_digest(
-            record
-        ):
+        if not owner_acceptance_event_replay_matches(existing, record):
             raise OwnerAcceptanceEventConflictError(
                 "Owner acceptance event replay changed the persisted payload."
             )
@@ -582,7 +581,7 @@ def evaluate_owner_acceptance_for_binding(
 ) -> OwnerAcceptanceDecision:
     normalized_evaluated_at = _evaluation_timestamp(evaluated_at)
     matching = tuple(
-        event for event in events if event.binding.binding_sha256 == binding.binding_sha256
+        event for event in events if owner_acceptance_bindings_match(event.binding, binding)
     )
     if not matching:
         stale_events = events
@@ -988,6 +987,8 @@ def _binding_from_impact(
         change_impact_policy_record_id=impact.policy_record_id,
         change_impact_policy_revision=impact.policy_revision,
         change_impact_policy_digest=impact.policy_digest,
+        binding_hash_version=impact.binding_hash_version,
+        change_impact_decision_digest=impact.change_impact_decision_digest,
         product=context.product,
         system=context.system,
         action=context.action,
