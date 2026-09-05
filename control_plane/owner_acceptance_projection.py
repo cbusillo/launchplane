@@ -671,6 +671,33 @@ def _summary(decision: OwnerAcceptanceDecision) -> str:
                 "authoritative evidence.",
             )
         )
+    coverage = decision.change_impact_coverage
+    lines.append("")
+    if coverage is None:
+        lines.append("Change-impact path coverage is unavailable.")
+    elif coverage.state == "complete":
+        lines.append("Change-impact path coverage is complete: no unmatched paths.")
+    else:
+        lines.append(
+            f"Change-impact path coverage is incomplete: {coverage.unmatched_path_count} "
+            "unmatched paths."
+        )
+        if coverage.unmatched_path_samples:
+            lines.extend(("", "Unmatched path samples:", ""))
+        rendered_size = 0
+        shown_samples = 0
+        for path in coverage.unmatched_path_samples:
+            # ASCII JSON escapes controls/surrogates; indented code cannot linkify
+            # or interpret branch-controlled Markdown/HTML. Bound escaping growth.
+            sample = f"    {json.dumps(path, ensure_ascii=True)}"
+            if rendered_size + len(sample) + 1 > 8192:
+                break
+            lines.append(sample)
+            rendered_size += len(sample) + 1
+            shown_samples += 1
+        if coverage.truncated or shown_samples < len(coverage.unmatched_path_samples):
+            lines.extend(("", "Path samples are truncated; the unmatched count is complete."))
+    lines.extend(("", "Coverage is diagnostic; it does not change this check's conclusion."))
     return "\n".join(lines)
 
 
