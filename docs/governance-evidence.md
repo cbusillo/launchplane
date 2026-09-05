@@ -52,6 +52,24 @@ age, self-review, preview isolation, or binding changes make it inadmissible.
 Level 3 and landing records remain immutable after later Owner revocation or
 changes requested.
 
+Change-impact policy provenance and review identity remain separate. Legacy
+reviews retain their original full-policy binding. V2 reviews use the scoped
+decision digest for semantic comparison and keep the original full-policy
+provenance in the immutable event. Replaying an unchanged v2 review under an
+unrelated policy revision returns that original event, without refreshing its
+timestamp or appending another human action. A current evaluation can therefore
+show newer policy provenance alongside the unchanged historical review; it
+does not imply a second review. See
+[versioned bindings](owner-acceptance.md#versioned-change-impact-bindings).
+
+An engineering-only result reports Owner `not_required` with no invented
+product subject or acceptance event. Governance-sensitive engineering floors
+remain independent of product Owner requirements. Where an existing Owner
+evaluation includes `change_impact_coverage`, bounded unmatched-path diagnostics
+describe that evaluation only. Absent coverage does not mean complete coverage,
+and neither coverage samples nor advisory GitHub observations grant authority.
+The projection does not add a pull-request lifecycle trigger.
+
 ## Current Readiness
 
 The endpoint recomputes Level 2 only when an active landing-plan lineage exists
