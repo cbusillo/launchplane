@@ -229,6 +229,33 @@ def _app(
 
 
 class ChangeImpactHttpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_evaluation_exposes_server_derived_coverage_gaps(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _ChangeImpactStore(Path(directory))
+            store.write_change_impact_policy_record(_policy())
+            provider = _EvidenceProvider(_repository_evidence("unmapped/file.py"))
+            app = _app(store=store, provider=provider)
+
+            async with lifespan_client(app) as client:
+                response = await client.post(
+                    CHANGE_IMPACT_EVALUATION_ROUTE,
+                    json={"target": {"repository": REPOSITORY, "pull_request_number": 2000}},
+                )
+            self.assertEqual(response.status_code, 200, response.text)
+            evaluation = response.json()["evaluation"]
+            self.assertEqual(evaluation["reason_code"], "policy_coverage_incomplete")
+            self.assertEqual(evaluation["status"], "unknown")
+            self.assertEqual(evaluation["owner_impact"], "unknown")
+            self.assertEqual(
+                evaluation["coverage"],
+                {
+                    "state": "incomplete",
+                    "unmatched_path_count": 1,
+                    "unmatched_path_samples": ["unmapped/file.py"],
+                    "truncated": False,
+                },
+            )
+
     async def test_apply_read_and_server_derived_evaluate_are_authoritative(self) -> None:
         with TemporaryDirectory() as directory:
             store = _ChangeImpactStore(Path(directory), (_stored_dependency(),))

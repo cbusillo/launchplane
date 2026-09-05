@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import re
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -505,6 +505,19 @@ class ChangeImpactAffectedProduct(BaseModel):
     owner_acceptance_required: Literal[True] = True
 
 
+class ChangeImpactCoverage(BaseModel):
+    """Bounded path-coverage diagnostics, independent of classification authority."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    state: Literal["complete", "incomplete"]
+    unmatched_path_count: int = Field(ge=0)
+    unmatched_path_samples: tuple[Annotated[str, Field(max_length=256)], ...] = Field(
+        default=(), max_length=20
+    )
+    truncated: bool = False
+
+
 class ChangeImpactEvaluation(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -522,6 +535,7 @@ class ChangeImpactEvaluation(BaseModel):
     production_affecting_products: tuple[ChangeImpactProductScope, ...] = ()
     matched_evidence: tuple[ChangeImpactMatchedEvidence, ...] = ()
     unknown_evidence: tuple[str, ...] = ()
+    coverage: ChangeImpactCoverage | None = None
 
 
 def build_change_impact_component_rule_id(rule: ChangeImpactComponentRule) -> str:

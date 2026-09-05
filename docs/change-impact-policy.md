@@ -78,6 +78,27 @@ Every evaluation returns:
 - exact repository/PR/head/tree and policy provenance;
 - explicit unknown evidence when classification fails closed.
 
+After policy and target validation, `coverage` independently reports whether
+every provider-supplied changed path matched a policy rule. It contains the
+total distinct unmatched-path count, at most 20 lexicographically sorted path
+samples, and `truncated`. Each sample is capped at 256 characters; truncation
+means either samples were omitted or a displayed path was shortened. The
+unmatched-path entries in `unknown_evidence` use the same bounded samples and
+include a truncation summary when needed. Renames retain the provider's old
+and new paths, so either side can contribute an uncovered path.
+
+Pure coverage gaps return `policy_coverage_incomplete` with unknown status,
+sensitive engineering review, and the existing fail-closed Owner result.
+Contradictory or missing stored evidence retains
+`ambiguous_or_missing_evidence`, even when coverage gaps also exist; `coverage`
+still reports those gaps separately. Complete path coverage does not validate
+stored evidence or authorize admission. `coverage` is null when evaluation
+stops before path matching, such as missing policy or a stale caller target.
+
+These diagnostics do not change rule accumulation, product scope, review
+requirements, policy selection, or acceptance-binding identities. Full policy
+provenance remains authoritative; coverage is not a replacement for it.
+
 The evaluation is the authoritative source for which product Owner decisions are
 required by Launchplane merge readiness. GitHub checks only project the resulting
 state and are never accepted as substitute evidence.
