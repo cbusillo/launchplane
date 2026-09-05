@@ -1911,8 +1911,11 @@ def close_terminal_every_code_sessions(
             )
             > 0
         )
+        retain_worker_state = _terminal_every_code_request_awaiting_pull_request_feedback(record)
         if existing_session is False:
-            if _cleanup_every_code_worktree(session_state=session_state, runner=run):
+            if not retain_worker_state and _cleanup_every_code_worktree(
+                session_state=session_state, runner=run
+            ):
                 path.unlink(missing_ok=True)
             closed += 1 if worktree_processes_closed else 0
             continue
@@ -1924,7 +1927,9 @@ def close_terminal_every_code_sessions(
             session_name=session_name,
             runner=run,
         ):
-            if _cleanup_every_code_worktree(session_state=session_state, runner=run):
+            if not retain_worker_state and _cleanup_every_code_worktree(
+                session_state=session_state, runner=run
+            ):
                 path.unlink(missing_ok=True)
             closed += 1
             continue
@@ -2037,6 +2042,12 @@ def _reconcile_every_code_cleanup_session_state(
             base_item,
             status="skipped",
             reason="request_claimed_by_different_host",
+        )
+    if _terminal_every_code_request_awaiting_pull_request_feedback(record):
+        return _replace_every_code_cleanup_item(
+            base_item,
+            status="skipped",
+            reason="awaiting_pull_request_feedback",
         )
     session_name = session_state.get("session_name", "").strip()
     if session_name:
@@ -4197,6 +4208,16 @@ def _terminal_every_code_request_closed_by_linked_pr(record: EveryCodeWorkReques
     summary = record.result_summary.strip()
     return summary.startswith("Linked pull request merged:") or summary.startswith(
         "Linked pull request closed without merge:"
+    )
+
+
+def _terminal_every_code_request_awaiting_pull_request_feedback(
+    record: EveryCodeWorkRequestRecord,
+) -> bool:
+    return (
+        record.state in TERMINAL_EVERY_CODE_STATES
+        and bool(record.result_pr_url.strip())
+        and not _terminal_every_code_request_closed_by_linked_pr(record)
     )
 
 

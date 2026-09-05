@@ -86,6 +86,7 @@ from control_plane.contracts.every_code_work_request import (
     EveryCodeWorkRequestStatusUpdate,
     apply_every_code_work_request_status,
     claim_every_code_work_request,
+    close_every_code_work_request_for_pull_request,
     heartbeat_every_code_work_request,
     recover_stale_every_code_work_request,
 )
@@ -14415,6 +14416,41 @@ class PostgresRecordStore(HumanSessionStore):
             limit=limit,
             offset=offset,
         )
+
+    def close_every_code_work_request_for_pull_request_record(
+        self,
+        *,
+        request_id: str,
+        expected_lifecycle_id: str,
+        pr_url: str,
+        merged: bool,
+        closed_at: str,
+    ) -> EveryCodeWorkRequestRecord | None:
+        with self._session_factory() as session:
+            statement = (
+                select(LaunchplaneEveryCodeWorkRequestRow)
+                .where(LaunchplaneEveryCodeWorkRequestRow.request_id == request_id)
+                .limit(1)
+            )
+            if not self.database_url.startswith("sqlite"):
+                statement = statement.with_for_update()
+            row = session.scalar(statement)
+            if row is None:
+                raise FileNotFoundError(request_id)
+            record = self._read_payload(model_type=EveryCodeWorkRequestRecord, payload=row.payload)
+            if record.lifecycle_id != expected_lifecycle_id:
+                return None
+            closed_record = close_every_code_work_request_for_pull_request(
+                record,
+                pr_url=pr_url,
+                merged=merged,
+                closed_at=closed_at,
+            )
+            if closed_record is None:
+                return None
+            self._sync_every_code_work_request_row(row, closed_record)
+            session.commit()
+            return closed_record
 
     def claim_every_code_work_request_record(
         self,
