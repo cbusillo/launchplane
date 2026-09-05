@@ -21,6 +21,7 @@ from control_plane.contracts.change_impact import (
 
 
 CHANGE_IMPACT_DECISION_FIELDS = {
+    "schema_version",
     "status",
     "reason_code",
     "classification_model",
@@ -121,6 +122,7 @@ def build_change_impact_decision_digest(
         )
     payload = {
         "domain": "launchplane.change-impact-decision.v2",
+        "policy_schema_version": policy.schema_version,
         "target": repository_evidence.target.model_dump(mode="json"),
         "base": repository_evidence.base.model_dump(mode="json")
         if repository_evidence.base is not None

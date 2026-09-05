@@ -2,7 +2,10 @@ import unittest
 
 from pydantic import ValidationError
 
-from control_plane.change_impact_decision_digest import CHANGE_IMPACT_DECISION_FIELDS
+from control_plane.change_impact_decision_digest import (
+    CHANGE_IMPACT_DECISION_FIELDS,
+    build_change_impact_decision_digest,
+)
 from control_plane.change_impact_service import evaluate_change_impact
 from control_plane.contracts.change_impact import (
     ChangeImpactChangedFileEvidence,
@@ -47,9 +50,8 @@ class ChangeImpactDecisionDigestTests(unittest.TestCase):
     def test_contract_growth_requires_explicit_hash_or_provenance_disposition(self) -> None:
         # A new contract field must be reviewed against the frozen v2 projection.
         # Target is bound separately; IDs and evidence decorations are provenance;
-        # the binding pair is the output, and schema_version is validated as 1.
+        # the binding pair is the output. Schema versions are bound explicitly.
         excluded = {
-            "schema_version",
             "target",
             "policy_record_id",
             "policy_revision",
@@ -91,6 +93,22 @@ class ChangeImpactDecisionDigestTests(unittest.TestCase):
                 _v2_policy(_rule("source", "src")).model_dump(exclude={"policy_digest"})
                 | {"default_unknown_review_tier": "routine"}
             )
+
+    def test_evaluation_schema_version_is_part_of_the_scoped_protocol(self) -> None:
+        policy = _v2_policy(_rule("source", "src", products=(_product("a"),)))
+        evidence = _repository_evidence("src/api/file.py")
+        baseline = evaluate_change_impact(repository_evidence=evidence, policies=(policy,))
+        future = ChangeImpactEvaluation.model_validate(
+            baseline.model_dump() | {"schema_version": 2}
+        )
+        digest = build_change_impact_decision_digest(
+            repository_evidence=evidence,
+            policy=policy,
+            stored_evidence=(),
+            generated_boundaries={},
+            evaluation=future,
+        )
+        self.assertNotEqual(digest, baseline.change_impact_decision_digest)
 
     def test_head_tree_and_base_identity_each_require_a_new_digest(self) -> None:
         policy = _v2_policy(_rule("source", "src", products=(_product("a"),)))
