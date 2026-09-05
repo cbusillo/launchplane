@@ -3228,12 +3228,35 @@
             "title": "Component",
             "type": "string"
           },
+          "governance_impact": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Governance Impact"
+          },
           "path_prefixes": {
             "items": {
               "type": "string"
             },
             "title": "Path Prefixes",
             "type": "array"
+          },
+          "product_impact": {
+            "anyOf": [
+              {
+                "const": "declared_none",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Product Impact"
           },
           "production_affecting": {
             "anyOf": [
@@ -3353,6 +3376,18 @@
             ],
             "title": "Change Impact Decision Digest"
           },
+          "classification_model": {
+            "anyOf": [
+              {
+                "const": "v2",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Classification Model"
+          },
           "coverage": {
             "anyOf": [
               {
@@ -3371,6 +3406,17 @@
             ],
             "title": "Engineering Review Tier",
             "type": "string"
+          },
+          "governance_impact": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Governance Impact"
           },
           "matched_evidence": {
             "default": [],
@@ -3556,6 +3602,17 @@
             "title": "Component",
             "type": "string"
           },
+          "governance_impact": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Governance Impact"
+          },
           "path": {
             "default": "",
             "title": "Path",
@@ -3575,6 +3632,11 @@
           "reason": {
             "title": "Reason",
             "type": "string"
+          },
+          "review_floor_only": {
+            "default": false,
+            "title": "Review Floor Only",
+            "type": "boolean"
           },
           "review_tier": {
             "anyOf": [
@@ -3774,6 +3836,18 @@
       "ChangeImpactPolicyRecord": {
         "additionalProperties": false,
         "properties": {
+          "classification_model": {
+            "anyOf": [
+              {
+                "const": "v2",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Classification Model"
+          },
           "component_rules": {
             "items": {
               "$ref": "#/components/schemas/ChangeImpactComponentRule"
