@@ -7,7 +7,6 @@
   },
   "docs": {
     "index": "docs/README.md",
-    "agentWorkerRuntime": "docs/codex-lab-workers.md",
     "architecture": "docs/architecture.md",
     "configBoundary": "docs/config-boundary.md",
     "authorizationAuthority": "docs/authorization-authority.md",
