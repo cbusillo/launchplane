@@ -145,6 +145,7 @@ class ChangeImpactComponentRule(BaseModel):
     production_affecting: bool | None = None
     product_impact: Literal["declared_none"] | None = None
     governance_impact: bool | None = None
+    generated_by: tuple[str, ...] | None = None
     reason: str
 
     @model_validator(mode="after")
@@ -158,6 +159,17 @@ class ChangeImpactComponentRule(BaseModel):
             object.__setattr__(self, "governance_impact", None)
         if self.product_impact is not None and self.affected_products:
             raise ValueError("declared_none cannot accompany affected products")
+        if self.generated_by is not None:
+            if not self.generated_by or len(self.generated_by) > 20:
+                raise ValueError("generated_by requires between 1 and 20 component identities")
+            if self.affected_products or self.product_impact is not None:
+                raise ValueError("generated_by cannot accompany direct product authority")
+            generators = tuple(
+                _required_token(value, "generated_by") for value in self.generated_by
+            )
+            if len(generators) != len(set(generators)):
+                raise ValueError("generated_by cannot repeat component identities")
+            object.__setattr__(self, "generated_by", tuple(sorted(generators)))
         object.__setattr__(
             self,
             "path_prefixes",
@@ -221,7 +233,9 @@ class ChangeImpactPolicyRecord(BaseModel):
         if not self.component_rules:
             raise ValueError("change-impact policy requires component_rules")
         if self.classification_model is None and any(
-            rule.product_impact is not None or rule.governance_impact is not None
+            rule.product_impact is not None
+            or rule.governance_impact is not None
+            or rule.generated_by is not None
             for rule in self.component_rules
         ):
             raise ValueError("v2 rule fields require classification_model v2")
