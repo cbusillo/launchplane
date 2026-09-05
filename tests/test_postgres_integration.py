@@ -175,6 +175,7 @@ from control_plane.service_auth import (
 )
 from control_plane.storage.postgres import (
     DbOnlyMutationRequest,
+    LaunchplaneEveryCodeWorkRequestRow,
     LaunchplaneOwnerControlIssuedChallengeRow,
     MutationReservationResult,
     OutboxWithIdempotencyRequest,
@@ -682,6 +683,30 @@ def _every_code_work_request() -> EveryCodeWorkRequestRecord:
         queued_at="2026-07-13T09:00:00Z",
         updated_at="2026-07-13T09:00:00Z",
     )
+
+
+class _BlockingEveryCodeFinishStore(PostgresRecordStore):
+    def __init__(
+        self,
+        *,
+        database_url: str,
+        finish_row_synced: threading.Event,
+        release_finish: threading.Event,
+    ) -> None:
+        super().__init__(database_url=database_url)
+        self._finish_row_synced = finish_row_synced
+        self._release_finish = release_finish
+
+    def _sync_every_code_work_request_row(
+        self,
+        row: LaunchplaneEveryCodeWorkRequestRow,
+        record: EveryCodeWorkRequestRecord,
+    ) -> None:
+        super()._sync_every_code_work_request_row(row, record)
+        if record.state == "done":
+            self._finish_row_synced.set()
+            if not self._release_finish.wait(timeout=10):
+                raise TimeoutError("timed out waiting to release Every Code finish transaction")
 
 
 def _mutation_reservation(
@@ -4514,6 +4539,102 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                 second_store.close()
 
         self.assertEqual(completed.state, "done")
+
+    def test_every_code_pr_close_waits_for_fresh_finish_and_preserves_higher_fence(
+        self,
+    ) -> None:
+        with _store_for_fresh_head_database() as store:
+            record = _every_code_work_request()
+            store.write_every_code_work_request_record(record)
+            stale_claim = store.claim_every_code_work_request_record(
+                request_id=record.request_id,
+                host="worker-old",
+                claimed_at="2026-07-13T09:01:00Z",
+                lease_seconds=60,
+            )
+            assert stale_claim is not None
+            recovered = store.recover_stale_every_code_work_request_record(
+                expected_record=stale_claim,
+                recovered_at="2026-07-13T09:03:00Z",
+            )
+            assert recovered is not None
+            fresh_claim = store.claim_every_code_work_request_record(
+                request_id=record.request_id,
+                host="worker-new",
+                claimed_at="2026-07-13T09:04:00Z",
+            )
+            assert fresh_claim is not None
+
+            finish_row_synced = threading.Event()
+            release_finish = threading.Event()
+            close_started = threading.Event()
+            close_finished = threading.Event()
+            finish_store = _BlockingEveryCodeFinishStore(
+                database_url=store.database_url,
+                finish_row_synced=finish_row_synced,
+                release_finish=release_finish,
+            )
+            close_store = PostgresRecordStore(database_url=store.database_url)
+
+            def finish_fresh_claim() -> EveryCodeWorkRequestRecord:
+                return finish_store.update_every_code_work_request_status_record(
+                    request_id=record.request_id,
+                    update=EveryCodeWorkRequestStatusUpdate(
+                        state="done",
+                        host="worker-new",
+                        fencing_token=fresh_claim.fencing_token,
+                        updated_at="2026-07-13T09:05:00Z",
+                        result_pr_url="https://github.com/cbusillo/code/pull/1700",
+                        result_summary="Worker completed from the newer claim.",
+                    ),
+                )
+
+            def close_pull_request() -> EveryCodeWorkRequestRecord | None:
+                close_started.set()
+                try:
+                    return close_store.close_every_code_work_request_for_pull_request_record(
+                        request_id=stale_claim.request_id,
+                        expected_lifecycle_id=fresh_claim.lifecycle_id,
+                        pr_url="https://github.com/cbusillo/code/pull/1700",
+                        merged=True,
+                        closed_at="2026-07-13T09:06:00Z",
+                    )
+                finally:
+                    close_finished.set()
+
+            executor = ThreadPoolExecutor(max_workers=2)
+            try:
+                finish_future = executor.submit(finish_fresh_claim)
+                self.assertTrue(finish_row_synced.wait(timeout=5))
+                close_future = executor.submit(close_pull_request)
+                self.assertTrue(close_started.wait(timeout=5))
+                self.assertFalse(close_finished.wait(timeout=0.1))
+                release_finish.set()
+                finished = finish_future.result(timeout=10)
+                closed = close_future.result(timeout=10)
+            finally:
+                release_finish.set()
+                executor.shutdown(wait=True)
+                finish_store.close()
+                close_store.close()
+
+            loaded = store.read_every_code_work_request_record(record.request_id)
+
+        self.assertEqual(stale_claim.fencing_token, 1)
+        self.assertNotEqual(stale_claim.lifecycle_id, fresh_claim.lifecycle_id)
+        self.assertEqual(finished.fencing_token, 2)
+        self.assertIsNotNone(closed)
+        assert closed is not None
+        self.assertEqual(closed.state, "done")
+        self.assertEqual(closed.lifecycle_id, fresh_claim.lifecycle_id)
+        self.assertEqual(closed.fencing_token, 2)
+        self.assertEqual(closed.claimed_by_host, "worker-new")
+        self.assertEqual(
+            closed.result_summary,
+            "Linked pull request merged: https://github.com/cbusillo/code/pull/1700\n"
+            "Worker completed from the newer claim.",
+        )
+        self.assertEqual(loaded, closed)
 
     def test_every_code_claim_commits_replay_evidence_atomically(self) -> None:
         with _store_for_fresh_head_database() as store:

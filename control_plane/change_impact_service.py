@@ -303,7 +303,7 @@ def evaluate_change_impact(
             continue
         affected_products.update(evidence.affected_products)
         affected_products.update(rule.affected_products)
-        if evidence.component in production_components:
+        if rule.production_affecting or evidence.component in production_components:
             production_affecting_products.update(evidence.affected_products)
             production_affecting_products.update(rule.affected_products)
         matched.append(_stored_evidence_match(evidence=evidence, rule=rule))

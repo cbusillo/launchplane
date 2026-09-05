@@ -105,6 +105,29 @@ class ChangeImpactV2Tests(unittest.TestCase):
         assert selection is not None
         self.assertEqual((selection.winner.rule, selection.winner.prefix), (child, "src/docs"))
 
+    def test_legacy_production_extensions_require_a_changed_file_match(self) -> None:
+        policy = _v2_policy(
+            _rule("runtime", "src", products=(_product("a"),), production=True),
+            _rule("docs", "docs", products=(_product("b"),)),
+        )
+        legacy = ChangeImpactPolicyRecord.model_validate(
+            policy.model_dump(exclude={"policy_digest", "classification_model"})
+        )
+        for path, status, products in (
+            ("src/code.py", "success", ("a", "c")),
+            ("docs/guide.md", "unknown", ()),
+        ):
+            with self.subTest(path=path):
+                result = evaluate_change_impact(
+                    repository_evidence=_repository_evidence(path),
+                    policies=(legacy,),
+                    stored_evidence=(_stored_evidence("runtime", products=(_product("c"),)),),
+                )
+                self.assertEqual(
+                    (result.status, tuple(p.product for p in result.production_affecting_products)),
+                    (status, products),
+                )
+
     def test_inherited_production_floor_applies_to_winner_and_trusted_extensions(self) -> None:
         result = evaluate_change_impact(
             repository_evidence=_repository_evidence("src/child/code.py"),

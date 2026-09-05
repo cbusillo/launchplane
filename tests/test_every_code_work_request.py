@@ -261,6 +261,136 @@ class EveryCodeWorkRequestRecordTests(unittest.TestCase):
             )
         )
 
+    def test_pr_close_enriches_matching_terminal_request_without_changing_execution_outcome(
+        self,
+    ) -> None:
+        claimed_record = claim_every_code_work_request(
+            _queued_record(),
+            host="Chris-Studio",
+            claimed_at="2026-05-05T22:01:00Z",
+        )
+        assert claimed_record is not None
+        pr_url = "https://github.com/cbusillo/code/pull/99"
+        for state, merged in (
+            ("done", True),
+            ("done", False),
+            ("blocked", True),
+            ("blocked", False),
+        ):
+            with self.subTest(state=state, merged=merged):
+                error_message = "Worker stopped." if state == "blocked" else ""
+                terminal_record = apply_every_code_work_request_status(
+                    claimed_record,
+                    EveryCodeWorkRequestStatusUpdate(
+                        state=state,  # type: ignore[arg-type]
+                        host="Chris-Studio",
+                        fencing_token=claimed_record.fencing_token,
+                        updated_at="2026-05-05T22:03:00Z",
+                        result_pr_url=pr_url,
+                        result_summary="Opened PR.",
+                        error_message=error_message,
+                    ),
+                )
+
+                closed_record = close_every_code_work_request_for_pull_request(
+                    terminal_record,
+                    pr_url=pr_url,
+                    merged=merged,
+                    closed_at="2026-05-05T22:05:00Z",
+                )
+
+                self.assertIsNotNone(closed_record)
+                assert closed_record is not None
+                self.assertEqual(closed_record.state, state)
+                self.assertEqual(closed_record.finished_at, terminal_record.finished_at)
+                self.assertEqual(closed_record.error_message, terminal_record.error_message)
+                self.assertEqual(closed_record.fencing_token, terminal_record.fencing_token)
+                self.assertEqual(closed_record.attempt, terminal_record.attempt)
+                self.assertEqual(closed_record.updated_at, "2026-05-05T22:05:00Z")
+                expected_disposition = "merged" if merged else "closed without merge"
+                self.assertEqual(
+                    closed_record.result_summary,
+                    f"Linked pull request {expected_disposition}: {pr_url}\nOpened PR.",
+                )
+
+    def test_pr_close_terminal_enrichment_keeps_newer_updated_at(self) -> None:
+        terminal_record = _queued_record().model_copy(
+            update={
+                "state": "done",
+                "claimed_at": "2026-05-05T22:01:00Z",
+                "claimed_by_host": "Chris-Studio",
+                "fencing_token": 4,
+                "attempt": 4,
+                "started_at": "2026-05-05T22:02:00Z",
+                "finished_at": "2026-05-05T22:03:00Z",
+                "updated_at": "2026-05-05T22:07:00Z",
+                "result_pr_url": "https://github.com/cbusillo/code/pull/99",
+                "result_summary": "Opened PR.",
+            }
+        )
+
+        closed_record = close_every_code_work_request_for_pull_request(
+            terminal_record,
+            pr_url="https://github.com/cbusillo/code/pull/99",
+            merged=True,
+            closed_at="2026-05-05T22:02:30Z",
+        )
+
+        self.assertIsNotNone(closed_record)
+        assert closed_record is not None
+        self.assertEqual(closed_record.updated_at, "2026-05-05T22:07:00Z")
+        self.assertEqual(
+            closed_record.result_summary,
+            "Linked pull request merged: https://github.com/cbusillo/code/pull/99\nOpened PR.",
+        )
+
+    def test_pr_close_does_not_enrich_terminal_request_without_exact_stored_pr(self) -> None:
+        terminal_record = _queued_record().model_copy(
+            update={
+                "state": "done",
+                "claimed_at": "2026-05-05T22:01:00Z",
+                "claimed_by_host": "Chris-Studio",
+                "started_at": "2026-05-05T22:02:00Z",
+                "finished_at": "2026-05-05T22:03:00Z",
+            }
+        )
+        for stored_pr_url in ("", "https://github.com/cbusillo/code/pull/88"):
+            with self.subTest(stored_pr_url=stored_pr_url):
+                self.assertIsNone(
+                    close_every_code_work_request_for_pull_request(
+                        terminal_record.model_copy(update={"result_pr_url": stored_pr_url}),
+                        pr_url="https://github.com/cbusillo/code/pull/99",
+                        merged=True,
+                        closed_at="2026-05-05T22:05:00Z",
+                    )
+                )
+
+    def test_pr_close_duplicate_terminal_closure_is_noop_for_both_dispositions(self) -> None:
+        pr_url = "https://github.com/cbusillo/code/pull/99"
+        terminal_record = _queued_record().model_copy(
+            update={
+                "state": "done",
+                "claimed_at": "2026-05-05T22:01:00Z",
+                "claimed_by_host": "Chris-Studio",
+                "started_at": "2026-05-05T22:02:00Z",
+                "finished_at": "2026-05-05T22:03:00Z",
+                "result_pr_url": pr_url,
+            }
+        )
+        for summary in (
+            f"Linked pull request merged: {pr_url}",
+            f"Linked pull request closed without merge: {pr_url}",
+        ):
+            with self.subTest(summary=summary):
+                self.assertIsNone(
+                    close_every_code_work_request_for_pull_request(
+                        terminal_record.model_copy(update={"result_summary": summary}),
+                        pr_url=pr_url,
+                        merged=True,
+                        closed_at="2026-05-05T22:05:00Z",
+                    )
+                )
+
     def test_blocked_requires_error_message(self) -> None:
         with self.assertRaises(ValueError):
             EveryCodeWorkRequestRecord(
