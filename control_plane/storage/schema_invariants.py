@@ -10,7 +10,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
 AUTHZ_COMPATIBILITY_FLOOR_REVISION = "f3b5d7e9a1c2"
-EXPECTED_ALEMBIC_HEAD_REVISION = "c0e2f4a6b8d1"
+EXPECTED_ALEMBIC_HEAD_REVISION = "d1f3a5b7c9e2"
 RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS = (EXPECTED_ALEMBIC_HEAD_REVISION,)
 _AUTHZ_POLICY_TABLE = "launchplane_authz_policies"
 _AUTHZ_POLICY_WRITE_FENCE_TRIGGER = "launchplane_authz_policy_write_fence"
@@ -472,6 +472,11 @@ CRITICAL_POSTGRES_COLUMN_TYPES: tuple[CriticalColumnType, ...] = (
     CriticalColumnType(
         "launchplane_change_impact_policies",
         "payload",
+        ("jsonb",),
+    ),
+    CriticalColumnType(
+        "launchplane_change_impact_policies",
+        "audit_payload",
         ("jsonb",),
     ),
     CriticalColumnType(

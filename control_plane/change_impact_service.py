@@ -35,6 +35,10 @@ from control_plane.contracts.change_impact import (
     ChangeImpactTarget,
     ChangeImpactTargetReference,
 )
+from control_plane.contracts.change_impact_audit import (
+    ChangeImpactAttributionStatus,
+    ChangeImpactPolicyAuditRecord,
+)
 
 
 class ChangeImpactPolicyConflictError(ValueError):
@@ -94,6 +98,8 @@ class ChangeImpactPolicyApplyResult(BaseModel):
     schema_version: int = Field(default=1, ge=1)
     status: ChangeImpactApplyStatus
     record: ChangeImpactPolicyRecord
+    audit: ChangeImpactPolicyAuditRecord | None = None
+    attribution_status: ChangeImpactAttributionStatus = "attribution_unavailable"
 
 
 class ChangeImpactPolicyReadModel(BaseModel):
@@ -103,6 +109,14 @@ class ChangeImpactPolicyReadModel(BaseModel):
     repository_id: str
     current_policy: ChangeImpactPolicyRecord | None = None
     policy_history_count: int = Field(default=0, ge=0)
+    audit: ChangeImpactPolicyAuditRecord | None = None
+    attribution_status: ChangeImpactAttributionStatus = "attribution_unavailable"
+
+
+class ChangeImpactPolicyAuditReadStore(Protocol):
+    def read_change_impact_policy_audit(
+        self, record_id: str
+    ) -> ChangeImpactPolicyAuditRecord | None: ...
 
 
 RecordT = TypeVar("RecordT", bound=ChangeImpactPolicyRecord)
@@ -117,6 +131,20 @@ class ChangeImpactTrustedCallerBinding:
     ref: str = ""
 
 
+def validate_change_impact_policy_apply_request(
+    *, record: ChangeImpactPolicyRecord, mode: ChangeImpactApplyMode
+) -> None:
+    """Share policy validation and the staged activation gate across apply services."""
+    try:
+        validate_change_impact_v2_policy(record)
+    except ValueError as error:
+        raise ChangeImpactPolicySequenceError(str(error)) from error
+    if mode != "dry_run" and record.classification_model == "v2":
+        raise ChangeImpactPolicySequenceError(
+            "v2 classification apply is unavailable pending rollout qualification"
+        )
+
+
 def apply_change_impact_policy(
     *,
     store: ChangeImpactPolicyStore,
@@ -125,10 +153,7 @@ def apply_change_impact_policy(
     expected_current_policy_digest: str = "",
     mode: ChangeImpactApplyMode = "apply",
 ) -> ChangeImpactPolicyApplyResult:
-    try:
-        validate_change_impact_v2_policy(record)
-    except ValueError as error:
-        raise ChangeImpactPolicySequenceError(str(error)) from error
+    validate_change_impact_policy_apply_request(record=record, mode=mode)
     replay = _validate_policy_append(
         records=store.list_change_impact_policy_records(repository_id=record.repository_id),
         record=record,
@@ -139,10 +164,6 @@ def apply_change_impact_policy(
         return ChangeImpactPolicyApplyResult(
             status="would_replay" if replay else "would_apply",
             record=record,
-        )
-    if record.classification_model == "v2":
-        raise ChangeImpactPolicySequenceError(
-            "v2 classification apply is unavailable pending rollout qualification"
         )
     write_status = store.compare_and_write_change_impact_policy_record(
         record,
@@ -159,12 +180,27 @@ def get_change_impact_policy_read_model(
     *,
     store: ChangeImpactPolicyReadStore,
     repository_id: str,
+    audit_store: ChangeImpactPolicyAuditReadStore | None = None,
 ) -> ChangeImpactPolicyReadModel:
     records = store.list_change_impact_policy_records(repository_id=repository_id)
+    current = _safe_current_policy(records)
+    audit = (
+        audit_store.read_change_impact_policy_audit(current.record_id)
+        if audit_store is not None and current is not None
+        else None
+    )
     return ChangeImpactPolicyReadModel(
         repository_id=repository_id.strip(),
-        current_policy=_safe_current_policy(records),
+        current_policy=current,
         policy_history_count=len(records),
+        audit=audit,
+        attribution_status=(
+            "attributed"
+            if audit is not None
+            else "legacy_unattributed"
+            if audit_store is not None and current is not None
+            else "attribution_unavailable"
+        ),
     )
 
 
