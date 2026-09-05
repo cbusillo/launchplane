@@ -318,32 +318,35 @@ def evaluate_owner_acceptance(
     )
     impact = evidence.impact
     if impact.status == "stale_head":
-        return _decision(
+        decision = _decision(
             status="stale", reason_code="change_impact_stale", evaluated_at=normalized_evaluated_at
         )
-    if impact.status != "success":
-        return _decision(
+    elif impact.status != "success":
+        decision = _decision(
             status="unavailable",
             reason_code="change_impact_unavailable",
             evaluated_at=normalized_evaluated_at,
         )
-    if impact.owner_impact != "required":
-        return _decision(
+    elif impact.owner_impact != "required":
+        decision = _decision(
             status="not_required",
             reason_code="engineering_only",
             evaluated_at=normalized_evaluated_at,
         )
-    if not impact.affected_products:
-        return _decision(
+    elif not impact.affected_products:
+        decision = _decision(
             status="unavailable",
             reason_code="change_impact_unavailable",
             evaluated_at=normalized_evaluated_at,
         )
-    return _evaluate_owner_acceptance_for_impact(
-        evidence=evidence,
-        store=store,
-        evaluated_at=normalized_evaluated_at,
-    )
+    else:
+        decision = _evaluate_owner_acceptance_for_impact(
+            evidence=evidence,
+            store=store,
+            evaluated_at=normalized_evaluated_at,
+        )
+    # Copy the already validated diagnostic without resolving authority again.
+    return decision.model_copy(update={"change_impact_coverage": impact.coverage})
 
 
 def record_owner_acceptance_event(
