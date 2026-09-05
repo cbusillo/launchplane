@@ -607,15 +607,16 @@ def _stored_evidence_match(
     rule: ChangeImpactComponentRule,
     boundary: GeneratedBoundary | None = None,
 ) -> ChangeImpactMatchedEvidence:
+    floors = join_floors(rule_floors(rule), boundary.floors if boundary else ChangeImpactFloors())
     return ChangeImpactMatchedEvidence(
         source=(
             "launchplane_dependency" if evidence.kind == "dependency" else "launchplane_reviewer"
         ),
         component=evidence.component,
         rule_id=rule.rule_id,
-        review_tier=rule.review_tier,
-        governance_impact=rule.governance_impact,
-        production_affecting=rule.production_affecting,
+        review_tier="sensitive" if floors.sensitive else "routine",
+        governance_impact=True if floors.governance else None,
+        production_affecting=True if floors.production else None,
         affected_products=tuple(
             sorted(
                 set(boundary.affected_products if boundary else rule.affected_products)
