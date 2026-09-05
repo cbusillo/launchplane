@@ -5861,6 +5861,48 @@
           "run_status"
         ]
       },
+      "ChangeImpactCoverage": {
+        "additionalProperties": false,
+        "description": "Bounded path-coverage diagnostics, independent of classification authority.",
+        "properties": {
+          "state": {
+            "enum": [
+              "complete",
+              "incomplete"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "truncated": {
+            "default": false,
+            "title": "Truncated",
+            "type": "boolean"
+          },
+          "unmatched_path_count": {
+            "minimum": 0,
+            "title": "Unmatched Path Count",
+            "type": "integer"
+          },
+          "unmatched_path_samples": {
+            "default": [],
+            "items": {
+              "maxLength": 256,
+              "type": "string"
+            },
+            "maxItems": 20,
+            "title": "Unmatched Path Samples",
+            "type": "array"
+          }
+        },
+        "required": [
+          "state",
+          "truncated",
+          "unmatched_path_count",
+          "unmatched_path_samples"
+        ],
+        "title": "ChangeImpactCoverage",
+        "type": "object"
+      },
       "ChangeImpactTarget": {
         "additionalProperties": false,
         "properties": {
@@ -13139,6 +13181,16 @@
               }
             ]
           },
+          "change_impact_coverage": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ChangeImpactCoverage"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "current_event": {
             "anyOf": [
               {
@@ -13221,6 +13273,7 @@
         "required": [
           "admissible",
           "binding",
+          "change_impact_coverage",
           "current_event",
           "evaluated_at",
           "human_action_semantics",

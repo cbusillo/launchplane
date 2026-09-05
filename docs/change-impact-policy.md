@@ -237,6 +237,20 @@ credentials and an injectable repository-evidence provider protocol for tests.
 
 ## Persistence
 
+Fresh evaluation and current-policy reads require an effective `active` policy.
+They never fall back to a `superseded` revision when active authority is absent.
+A supplied evaluation timestamp does not turn the fresh-evidence API into a
+historical reconstruction API. Immutable historical policy and review records
+remain intact, with unchanged digests.
+
+This intentionally changes broken superseded-only histories from implicit reuse
+to `policy_unavailable` and sensitive, unknown classification. Operators can
+detect that state with the existing policy read: `current_policy` is null while
+`policy_history_count` is nonzero. Repair requires an explicitly reviewed policy
+operation under existing authorization; this correction performs no backfill,
+policy activation, or grant change. Normal atomic policy CAS leaves one active
+revision, so correctly maintained histories retain their existing behavior.
+
 Filesystem rehearsal records live under `launchplane_change_impact_policies/`.
 PostgreSQL uses `launchplane_change_impact_policies`. Migration
 `d2e4f6a8b0c2` creates an empty table and indexes only; it does not infer or

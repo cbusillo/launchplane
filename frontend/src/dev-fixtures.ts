@@ -3005,6 +3005,7 @@ export function ownerAcceptanceEvaluationForFixture(
     schema_version: 1,
     status: "pending",
     reason_code: "acceptance_missing",
+    change_impact_coverage: null,
     binding,
     current_event: null,
     admissible: false,
@@ -3094,6 +3095,7 @@ export function governanceProjectionForFixture(
       : [product];
   const decision: OwnerAcceptanceDecision = {
     schema_version: 1,
+    change_impact_coverage: null,
     status: currentStatus,
     reason_code: currentReason,
     binding,
