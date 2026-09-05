@@ -119,9 +119,7 @@ def evaluate_engineering_review_decision(
         )
     reference = github_pull_request_reference(pr_url=work_request.result_pr_url)
     reference_repository = (
-        ""
-        if reference is None
-        else f"{reference['owner']}/{reference['repo']}".casefold()
+        "" if reference is None else f"{reference['owner']}/{reference['repo']}".casefold()
     )
     if (
         reference is None
@@ -134,9 +132,8 @@ def evaluate_engineering_review_decision(
         )
     repository_evidence = repository_evidence_provider.resolve(request.target)
     target = repository_evidence.target
-    if (
-        target.repository.casefold() != reference_repository
-        or target.pull_request_number != int(reference["pr_number"])
+    if target.repository.casefold() != reference_repository or target.pull_request_number != int(
+        reference["pr_number"]
     ):
         raise EngineeringReviewDecisionConflictError(
             "Server-resolved engineering review target does not match the stored work request."
@@ -228,12 +225,8 @@ def _decision_record(
         status, reason_code = "approved", "required_reviews_approved"
 
     authority_id = active_authority.authority_id if active_authority is not None else ""
-    authority_digest = (
-        active_authority.authority_digest if active_authority is not None else ""
-    )
-    authority_revision = (
-        active_authority.policy_revision if active_authority is not None else None
-    )
+    authority_digest = active_authority.authority_digest if active_authority is not None else ""
+    authority_revision = active_authority.policy_revision if active_authority is not None else None
     return EngineeringReviewDecisionRecord(
         status=status,
         reason_code=reason_code,
@@ -244,6 +237,8 @@ def _decision_record(
         change_impact_policy_record_id=impact.policy_record_id,
         change_impact_policy_revision=impact.policy_revision,
         change_impact_policy_digest=impact.policy_digest,
+        binding_hash_version=impact.binding_hash_version,
+        change_impact_decision_digest=impact.change_impact_decision_digest,
         engineering_review_tier=impact.engineering_review_tier,
         required_review_count=required,
         authority_id=authority_id,
