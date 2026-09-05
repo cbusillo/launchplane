@@ -20,6 +20,7 @@ from control_plane.contracts.every_code_work_request import (
     EveryCodeWorkRequestRecord,
     EveryCodeWorkRequestStatusUpdate,
     apply_every_code_work_request_status,
+    requeue_every_code_work_request,
 )
 from control_plane.every_code_github_webhook import (
     EveryCodeGitHubWebhookDependencies,
@@ -1170,6 +1171,175 @@ class EveryCodeGitHubWebhookRequestTests(unittest.TestCase):
             close_payload["result"]["request"]["result_summary"],
             "Linked pull request merged: https://github.com/cbusillo/code/pull/26",
         )
+
+    def test_every_code_pull_request_close_enriches_completed_request(self) -> None:
+        secret = "launchplane-every-code-webhook-secret"
+        issue_payload = _every_code_github_issue_labeled_payload()
+        pr_payload = _every_code_github_pull_request_closed_payload()
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict(
+                os.environ,
+                {"LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret},
+            ),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            app = create_every_code_github_webhook_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            _create_status, create_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/github-webhook",
+                payload=issue_payload,
+                authorization="",
+                headers={
+                    "X-GitHub-Event": "issues",
+                    "X-GitHub-Delivery": "delivery-terminal-issue",
+                    "X-Hub-Signature-256": _github_webhook_signature(issue_payload, secret),
+                },
+            )
+            request_id = str(create_payload["records"]["request_id"])
+            _claim_every_code_work_request_in_filesystem(state_dir, request_id)
+            _update_every_code_work_request_status_in_filesystem(
+                state_dir,
+                request_id,
+                state="done",
+                updated_at="2026-05-06T16:00:00Z",
+                result_pr_url="https://github.com/cbusillo/code/pull/26",
+                result_summary="Opened PR.",
+            )
+
+            close_status, close_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/github-webhook",
+                payload=pr_payload,
+                authorization="",
+                headers={
+                    "X-GitHub-Event": "pull_request",
+                    "X-GitHub-Delivery": "delivery-terminal-pr-close",
+                    "X-Hub-Signature-256": _github_webhook_signature(pr_payload, secret),
+                },
+            )
+
+        request = close_payload["result"]["request"]
+        self.assertEqual(close_status, 202)
+        self.assertEqual(close_payload["records"]["state"], "done")
+        self.assertEqual(request["finished_at"], "2026-05-06T16:00:00Z")
+        self.assertEqual(request["fencing_token"], 1)
+        self.assertEqual(request["error_message"], "")
+        self.assertEqual(
+            request["result_summary"],
+            "Linked pull request merged: https://github.com/cbusillo/code/pull/26\nOpened PR.",
+        )
+
+    def test_every_code_pull_request_close_reports_concurrent_lifecycle_change(self) -> None:
+        secret = "launchplane-every-code-webhook-secret"
+        issue_payload = _every_code_github_issue_labeled_payload()
+        pr_payload = _every_code_github_pull_request_closed_payload()
+        original_close = FilesystemRecordStore.close_every_code_work_request_for_pull_request_record
+        interleaved_lifecycle_ids: list[str] = []
+
+        def close_after_rerun(
+            store: FilesystemRecordStore,
+            *,
+            request_id: str,
+            expected_lifecycle_id: str,
+            pr_url: str,
+            merged: bool,
+            closed_at: str,
+        ) -> EveryCodeWorkRequestRecord | None:
+            current = store.read_every_code_work_request_record(request_id)
+            rerun = requeue_every_code_work_request(
+                current,
+                queued_at="2026-05-06T16:19:59Z",
+                trigger_actor="cbusillo",
+            )
+            store.write_every_code_work_request_record(rerun)
+            interleaved_lifecycle_ids.append(rerun.lifecycle_id)
+            return original_close(
+                store,
+                request_id=request_id,
+                expected_lifecycle_id=expected_lifecycle_id,
+                pr_url=pr_url,
+                merged=merged,
+                closed_at=closed_at,
+            )
+
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict(
+                os.environ,
+                {"LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret},
+            ),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            app = create_every_code_github_webhook_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            _create_status, create_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/github-webhook",
+                payload=issue_payload,
+                authorization="",
+                headers={
+                    "X-GitHub-Event": "issues",
+                    "X-GitHub-Delivery": "delivery-rerun-race-issue",
+                    "X-Hub-Signature-256": _github_webhook_signature(issue_payload, secret),
+                },
+            )
+            request_id = str(create_payload["records"]["request_id"])
+            _claim_every_code_work_request_in_filesystem(state_dir, request_id)
+            _update_every_code_work_request_status_in_filesystem(
+                state_dir,
+                request_id,
+                state="done",
+                updated_at="2026-05-06T16:00:00Z",
+                result_pr_url="https://github.com/cbusillo/code/pull/26",
+                result_summary="Opened PR.",
+            )
+
+            with (
+                patch.object(
+                    FilesystemRecordStore,
+                    "close_every_code_work_request_for_pull_request_record",
+                    new=close_after_rerun,
+                ),
+                self.assertLogs("control_plane.every_code_github_webhook", level="WARNING") as logs,
+            ):
+                close_status, close_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/every-code/github-webhook",
+                    payload=pr_payload,
+                    authorization="",
+                    headers={
+                        "X-GitHub-Event": "pull_request",
+                        "X-GitHub-Delivery": "delivery-rerun-race-pr",
+                        "X-Hub-Signature-256": _github_webhook_signature(pr_payload, secret),
+                    },
+                )
+            persisted = FilesystemRecordStore(state_dir).read_every_code_work_request_record(
+                request_id
+            )
+
+        self.assertEqual(close_status, 202)
+        self.assertTrue(close_payload["skipped"])
+        self.assertEqual(close_payload["reason"], "linked_every_code_request_lifecycle_changed")
+        self.assertEqual(close_payload["result"]["state"], "queued")
+        self.assertEqual(persisted.state, "queued")
+        self.assertEqual(persisted.lifecycle_id, interleaved_lifecycle_ids[0])
+        self.assertEqual(persisted.result_pr_url, "")
+        self.assertIn(str(close_payload["trace_id"]), logs.output[0])
+        self.assertIn(request_id, logs.output[0])
 
     def test_every_code_pull_request_close_blocks_unmerged_linked_request(self) -> None:
         secret = "launchplane-every-code-webhook-secret"
