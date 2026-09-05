@@ -23,7 +23,7 @@ from control_plane.contracts.owner_acceptance import (
     OwnerAcceptanceResolutionEvidence,
     OwnerAcceptanceTransitionError,
     OwnerAcceptanceViewerBindingEligibility,
-    owner_acceptance_event_replay_digest,
+    owner_acceptance_event_replay_matches,
     owner_acceptance_human_action_semantics,
 )
 from control_plane.github_app_identity import GitHubAppInstallationToken
@@ -279,9 +279,7 @@ def _owner_acceptance_event_persistence_outcome(
             exc_info=True,
         )
         return "unknown"
-    if owner_acceptance_event_replay_digest(persisted) == owner_acceptance_event_replay_digest(
-        record
-    ):
+    if owner_acceptance_event_replay_matches(persisted, record):
         return "persisted"
     logger.error("Owner acceptance event id resolved to a different persisted payload.")
     return "unknown"

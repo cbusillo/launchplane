@@ -7,6 +7,12 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from control_plane.contracts.change_impact_binding import (
+    ChangeImpactBindingHashVersion,
+    change_impact_bound_payload,
+    validate_change_impact_binding,
+)
+
 from control_plane.contracts.advisory_check_projection import (
     ENGINEERING_REVIEW_CHECK_NAME,
 )
@@ -64,6 +70,8 @@ class EngineeringReviewDecisionRecord(BaseModel):
     change_impact_policy_record_id: str = ""
     change_impact_policy_revision: int | None = Field(default=None, ge=1)
     change_impact_policy_digest: str = ""
+    binding_hash_version: ChangeImpactBindingHashVersion | None = None
+    change_impact_decision_digest: str | None = None
     engineering_review_tier: ChangeImpactReviewTier
     required_review_count: Literal[1, 2]
     authority_id: str = ""
@@ -97,6 +105,9 @@ class EngineeringReviewDecisionRecord(BaseModel):
         if self.required_review_count == 2 and self.status == "approved":
             if len(set(self.qualifying_model_families)) < 2:
                 raise ValueError("Sensitive approval requires model-family diversity.")
+        validate_change_impact_binding(
+            self.binding_hash_version, self.change_impact_decision_digest
+        )
         binding = build_engineering_review_decision_binding(self)
         expected_id = f"engineering-review-decision-{binding[:24]}"
         if self.decision_binding_sha256 and self.decision_binding_sha256 != binding:
@@ -137,6 +148,9 @@ def build_engineering_review_decision_binding(
         mode="json",
         exclude={"decision_id", "decision_binding_sha256", "evaluated_at"},
         exclude_none=True,
+    )
+    payload = change_impact_bound_payload(
+        payload, version=record.binding_hash_version, domain="engineering-review-decision-v2"
     )
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")

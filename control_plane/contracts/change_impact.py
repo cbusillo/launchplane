@@ -8,6 +8,11 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from control_plane.contracts.change_impact_binding import (
+    ChangeImpactBindingHashVersion,
+    validate_change_impact_binding,
+)
+
 
 CHANGE_IMPACT_POLICY_READ_ACTION = "change_impact_policy.read"
 CHANGE_IMPACT_POLICY_WRITE_ACTION = "change_impact_policy.write"
@@ -536,6 +541,15 @@ class ChangeImpactEvaluation(BaseModel):
     matched_evidence: tuple[ChangeImpactMatchedEvidence, ...] = ()
     unknown_evidence: tuple[str, ...] = ()
     coverage: ChangeImpactCoverage | None = None
+    binding_hash_version: ChangeImpactBindingHashVersion | None = None
+    change_impact_decision_digest: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_binding_identity(self) -> "ChangeImpactEvaluation":
+        validate_change_impact_binding(
+            self.binding_hash_version, self.change_impact_decision_digest
+        )
+        return self
 
 
 def build_change_impact_component_rule_id(rule: ChangeImpactComponentRule) -> str:

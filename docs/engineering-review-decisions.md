@@ -33,3 +33,20 @@ Routes:
 
 The rollout remains shadow-only until routine and sensitive canaries prove the
 exact-head behavior and a later policy change deliberately enables enforcement.
+
+## Versioned Impact Identity
+
+Optional `binding_hash_version` and `change_impact_decision_digest` fields
+preserve the legacy decision ID and digest when omitted. Version `2` requires a
+scoped decision digest and a distinct hash domain. It excludes only the
+change-impact policy record ID, revision, and full digest from semantic
+identity; those fields remain stored as original provenance. Re-evaluating
+identical v2 semantics returns the original immutable decision even when the
+current full-policy provenance differs. Exact target, lifecycle, authority,
+review outcome, required count, and qualifying runs remain bound.
+
+Admission requires the newest decision to match the current impact hash version and
+compares versioned scoped impact identity for v2. Mixed or missing identities
+fail closed. Legacy admission continues comparing full-policy digests, and all
+other authority dimensions and exact-head checks remain unchanged. This
+compatibility slice adds no v2 digest producer or policy activation.
