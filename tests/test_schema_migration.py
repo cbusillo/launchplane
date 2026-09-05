@@ -1673,7 +1673,7 @@ class SchemaMigrationTests(unittest.TestCase):
             for primary_key in CRITICAL_PRIMARY_KEYS
         }
 
-        self.assertEqual(EXPECTED_ALEMBIC_HEAD_REVISION, "c0e2f4a6b8d1")
+        self.assertEqual(EXPECTED_ALEMBIC_HEAD_REVISION, "d1f3a5b7c9e2")
         self.assertFalse(
             [index.index_name for index in CRITICAL_SCHEMA_INDEXES if len(index.index_name) > 63]
         )

@@ -188,6 +188,22 @@ CAS apply/dry-run endpoint:
 Policy writes are `policy_admin`. Evaluation reads are server-derived authority inputs.
 Generated OpenAPI is the client contract source.
 
+Policy apply derives original-writer attribution from the authenticated local
+admin/operator or GitHub Actions identity after the existing authorization check.
+Other identity kinds are refused by the audited apply handler.
+The audit contains the verified subject, bounded workflow identity fields where
+applicable, server trace ID, and server timestamp. Client `source`, reasons, and
+metadata do not identify the actor. No credentials or raw token claims are stored.
+The additive `audit` readback sits outside the v1 policy payload and digest.
+
+Apply requires database storage so policy, predecessor supersession, and audit
+commit or roll back together. Replays return the original audit, including
+`legacy_unattributed` for records created without one; they never assign a new
+actor to historical work. Dry runs return `not_applied` and write nothing.
+Filesystem rehearsal APIs remain available without attribution and their policy
+readback reports `attribution_unavailable`; the audited HTTP apply path refuses
+that storage capability.
+
 The evaluation request schema contains only `target.repository`,
 `target.pull_request_number`, and optional non-authoritative metadata. Extra
 fields are rejected. The production route uses Launchplane-managed GitHub
@@ -199,3 +215,8 @@ Filesystem rehearsal records live under `launchplane_change_impact_policies/`.
 PostgreSQL uses `launchplane_change_impact_policies`. Migration
 `d2e4f6a8b0c2` creates an empty table and indexes only; it does not infer or
 backfill product inventory from repository text.
+
+Migration `d1f3a5b7c9e2` adds nullable original-writer audit JSON beside policy
+rows. Existing rows remain unattributed. Superseding a policy preserves its
+original audit. This migration does not grant policy administration authority or
+change runtime credentials.
