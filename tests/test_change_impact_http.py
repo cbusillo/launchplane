@@ -229,6 +229,32 @@ def _app(
 
 
 class ChangeImpactHttpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_v2_policy_dry_run_is_available_but_activation_is_blocked(self) -> None:
+        from tests.test_change_impact_v2 import _rule, _v2_policy
+
+        with TemporaryDirectory() as directory:
+            store = _ChangeImpactStore(Path(directory))
+            app = _app(store=store, provider=_EvidenceProvider(_repository_evidence()))
+            policy = _v2_policy(_rule("docs", "docs"))
+            async with lifespan_client(app) as client:
+                dry_run = await client.post(
+                    CHANGE_IMPACT_POLICY_APPLY_ROUTE,
+                    json={"mode": "dry_run", "record": policy.model_dump()},
+                )
+                applied = await client.post(
+                    CHANGE_IMPACT_POLICY_APPLY_ROUTE,
+                    json={"mode": "apply", "record": policy.model_dump()},
+                )
+                ambiguous = _v2_policy(_rule("first", "docs"), _rule("second", "docs"))
+                invalid = await client.post(
+                    CHANGE_IMPACT_POLICY_APPLY_ROUTE,
+                    json={"mode": "dry_run", "record": ambiguous.model_dump()},
+                )
+            self.assertEqual(dry_run.status_code, 202, dry_run.text)
+            self.assertEqual(applied.status_code, 409, applied.text)
+            self.assertEqual(invalid.status_code, 409, invalid.text)
+            self.assertEqual(store.list_change_impact_policy_records(), ())
+
     async def test_evaluation_exposes_server_derived_coverage_gaps(self) -> None:
         with TemporaryDirectory() as directory:
             store = _ChangeImpactStore(Path(directory))
