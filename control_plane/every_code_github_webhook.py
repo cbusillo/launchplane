@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import json
+import logging
 import os
 import re
 from pathlib import Path
@@ -22,7 +23,6 @@ from control_plane.contracts.every_code_pr_feedback_record import (
 from control_plane.contracts.every_code_work_request import (
     EveryCodeWorkRequestRecord,
     close_every_code_work_request_for_issue,
-    close_every_code_work_request_for_pull_request,
 )
 from control_plane.every_code_work_request_write import (
     EveryCodeWorkRequestCreateEnvelope,
@@ -54,6 +54,7 @@ _GITHUB_ISSUE_REFERENCE_PATTERN = re.compile(
     r"|(?:(?P<repository>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#|#)(?P<number>\d+)",
     re.IGNORECASE,
 )
+_LOGGER = logging.getLogger(__name__)
 
 _EveryCodeWebhookResponse = tuple[int, dict[str, object]]
 
@@ -134,6 +135,16 @@ class _EveryCodeWorkRequestStore(Protocol):
         claimed_at: str,
     ) -> EveryCodeWorkRequestRecord | None: ...
 
+    def close_every_code_work_request_for_pull_request_record(
+        self,
+        *,
+        request_id: str,
+        expected_lifecycle_id: str,
+        pr_url: str,
+        merged: bool,
+        closed_at: str,
+    ) -> EveryCodeWorkRequestRecord | None: ...
+
     def write_every_code_pr_feedback_record(self, record: EveryCodePrFeedbackRecord) -> object: ...
 
     def list_every_code_pr_feedback_records(
@@ -170,6 +181,7 @@ def _every_code_work_request_store(record_store: object) -> _EveryCodeWorkReques
         "read_every_code_work_request_record",
         "list_every_code_work_request_records",
         "claim_every_code_work_request_record",
+        "close_every_code_work_request_for_pull_request_record",
         "write_every_code_pr_feedback_record",
         "list_every_code_pr_feedback_records",
         "write_every_code_preview_gate_record",
@@ -781,31 +793,53 @@ def _handle_every_code_pull_request_webhook(
 
     updated_records: list[EveryCodeWorkRequestRecord] = []
     terminal_records: list[EveryCodeWorkRequestRecord] = []
+    lifecycle_changed_records: list[EveryCodeWorkRequestRecord] = []
+    nonterminal_pr_mismatch_records: list[EveryCodeWorkRequestRecord] = []
     for record in candidate_records.values():
-        closed_record = close_every_code_work_request_for_pull_request(
-            record,
+        closed_record = every_code_store.close_every_code_work_request_for_pull_request_record(
+            request_id=record.request_id,
+            expected_lifecycle_id=record.lifecycle_id,
             pr_url=pr_url,
             merged=merged,
             closed_at=closed_at,
         )
         if closed_record is None:
-            terminal_records.append(record)
+            current_record = every_code_store.read_every_code_work_request_record(record.request_id)
+            if current_record.lifecycle_id != record.lifecycle_id:
+                lifecycle_changed_records.append(current_record)
+                _LOGGER.warning(
+                    "Every Code PR closure skipped after lifecycle change "
+                    "trace_id=%s request_id=%s",
+                    trace_id,
+                    record.request_id,
+                )
+            elif current_record.state not in {"done", "blocked"}:
+                nonterminal_pr_mismatch_records.append(current_record)
+            else:
+                terminal_records.append(current_record)
             continue
-        every_code_store.write_every_code_work_request_record(closed_record)
         updated_records.append(closed_record)
 
     if not updated_records:
-        terminal_record = terminal_records[0]
+        if lifecycle_changed_records:
+            skipped_record = lifecycle_changed_records[0]
+            reason = "linked_every_code_request_lifecycle_changed"
+        elif nonterminal_pr_mismatch_records:
+            skipped_record = nonterminal_pr_mismatch_records[0]
+            reason = "linked_every_code_request_nonterminal_pr_mismatch"
+        else:
+            skipped_record = terminal_records[0]
+            reason = "linked_every_code_request_already_terminal"
         return (
             202,
             {
                 "status": "accepted",
                 "trace_id": trace_id,
                 "skipped": True,
-                "reason": "linked_every_code_request_already_terminal",
+                "reason": reason,
                 "result": {
-                    "request_id": terminal_record.request_id,
-                    "state": terminal_record.state,
+                    "request_id": skipped_record.request_id,
+                    "state": skipped_record.state,
                 },
                 "github_delivery_id": delivery_id,
             },

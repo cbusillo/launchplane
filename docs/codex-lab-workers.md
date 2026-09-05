@@ -30,6 +30,40 @@ The retired `EVERY_CODE_SESSION_ORIGIN`, `EVERY_CODE_REQUEST_ID`,
 assignments are no longer generated. Request IDs remain opaque durable record
 identifiers; historical `every-code-` prefixes do not select an executable.
 
+## Feedback workspace lifetime
+
+When a request finishes with a result PR, the worker stops the completed
+process but retains its worktree and saved session state for later PR feedback.
+Feedback can arrive after intervening polling passes, so cleanup must preserve
+the state needed to reuse the same request and worktree.
+The retained worktree remains worker-owned and is not a workspace for manual
+processes: terminal-process cleanup continues during polling.
+
+A signed linked-PR close or merge event records closure even if execution
+already finished. The closure marker prefixes the existing result summary;
+it describes the PR, not the execution outcome. That metadata does not change
+the completed execution's outcome, fencing token, or finish time. First
+observed closure remains final for this request even if the PR is reopened.
+Once closure is recorded, ordinary
+cleanup may remove the saved workspace under its existing safety checks.
+Terminal requests without a result PR remain eligible for cleanup. Dirty or
+uninspectable worktrees continue to be protected independently.
+
+Cleanup reconciliation also preserves workspaces awaiting PR feedback and
+reports `awaiting_pull_request_feedback`. A missed closure event can therefore
+retain disk state; absence of closure evidence is not permission to delete it.
+For a missed event, an authorized repository operator can redeliver the
+original GitHub webhook through GitHub's delivery interface. Launchplane still
+validates the signed event and its request/PR match. Do not replace missing
+closure evidence with a local record edit or manual deletion.
+
+Workspace retention alone does not enable production feedback relaunch. The
+current service status API rejects terminal-to-running transitions, while the
+rerun API requires approved write-intent evidence. The local direct-store
+feedback path does not prove that service-backed transition or a fresh fence.
+A supported feedback-resume lifecycle must preserve those authorization and
+fencing requirements; do not work around them with a local record write.
+
 Codex Lab's session client maps this provenance into the Discord Blue
 [remote agent session contract](https://github.com/cbusillo/discord-blue/blob/main/docs/agent-session-protocol.md).
 It connects to `/agent-session/connect`; Launchplane does not implement the

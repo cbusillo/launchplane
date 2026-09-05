@@ -7,6 +7,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from control_plane.contracts.idempotency_record import parse_launchplane_mutation_timestamp
+
 
 EveryCodeWorkRequestSource = Literal["github_issue_label", "manual", "reconciliation"]
 EveryCodeWorkRequestState = Literal["queued", "claimed", "running", "done", "blocked"]
@@ -344,10 +346,25 @@ def close_every_code_work_request_for_pull_request(
         raise ValueError("Every Code PR close update requires pr_url")
     if not closed_at.strip():
         raise ValueError("Every Code PR close update requires closed_at")
-    if record.result_pr_url.strip() and record.result_pr_url.strip() != normalized_pr_url:
+    stored_pr_url = record.result_pr_url.strip()
+    if stored_pr_url and stored_pr_url != normalized_pr_url:
         return None
     if record.state in {"done", "blocked"}:
-        return None
+        if not stored_pr_url or _every_code_request_has_pull_request_closure_summary(record):
+            return None
+        closure_summary = (
+            f"Linked pull request merged: {normalized_pr_url}"
+            if merged
+            else f"Linked pull request closed without merge: {normalized_pr_url}"
+        )
+        existing_summary = record.result_summary.strip()
+        summary = f"{closure_summary}\n{existing_summary}" if existing_summary else closure_summary
+        return record.model_copy(
+            update={
+                "updated_at": _latest_every_code_timestamp(record.updated_at, closed_at),
+                "result_summary": summary,
+            }
+        )
 
     state: EveryCodeWorkRequestState = "done" if merged else "blocked"
     summary = (
@@ -371,6 +388,25 @@ def close_every_code_work_request_for_pull_request(
     if not record.started_at.strip():
         updates["started_at"] = closed_at
     return record.model_copy(update=updates)
+
+
+def _every_code_request_has_pull_request_closure_summary(
+    record: EveryCodeWorkRequestRecord,
+) -> bool:
+    summary = record.result_summary.strip()
+    return summary.startswith("Linked pull request merged:") or summary.startswith(
+        "Linked pull request closed without merge:"
+    )
+
+
+def _latest_every_code_timestamp(current: str, candidate: str) -> str:
+    current_datetime = parse_launchplane_mutation_timestamp(
+        current, field_name="Every Code work request updated_at"
+    )
+    candidate_datetime = parse_launchplane_mutation_timestamp(
+        candidate, field_name="Every Code pull request closed_at"
+    )
+    return candidate if candidate_datetime > current_datetime else current
 
 
 def close_every_code_work_request_for_issue(
