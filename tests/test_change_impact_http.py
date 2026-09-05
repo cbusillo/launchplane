@@ -38,9 +38,11 @@ from control_plane.service_auth import (
     GitHubActionsIdentity,
     GitHubHumanIdentity,
     LaunchplaneIdentity,
+    LocalOperatorIdentity,
     action_safety,
 )
 from control_plane.storage.filesystem import FilesystemRecordStore
+from control_plane.storage.postgres import PostgresRecordStore
 from tests.support.http import lifespan_client
 
 
@@ -174,6 +176,23 @@ class _ChangeImpactStore(FilesystemRecordStore):
         return self._stored_evidence
 
 
+class _AuditedChangeImpactStore(PostgresRecordStore):
+    def __init__(self, root: Path) -> None:
+        super().__init__(database_url=f"sqlite+pysqlite:///{root / 'policy.sqlite'}")
+        self.ensure_schema()
+
+    def list_change_impact_stored_evidence(
+        self,
+        *,
+        repository_id: str,
+        pull_request_number: int,
+        head_sha: str,
+        tree_sha: str,
+    ) -> tuple[ChangeImpactStoredEvidence, ...]:
+        self.last_evidence_lookup = (repository_id, pull_request_number, head_sha, tree_sha)
+        return (_stored_dependency(),)
+
+
 def _stored_dependency() -> ChangeImpactStoredEvidence:
     return ChangeImpactStoredEvidence(
         record_id="dependency-record-1",
@@ -258,9 +277,14 @@ class ChangeImpactHttpTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_apply_read_and_server_derived_evaluate_are_authoritative(self) -> None:
         with TemporaryDirectory() as directory:
-            store = _ChangeImpactStore(Path(directory), (_stored_dependency(),))
+            store = _AuditedChangeImpactStore(Path(directory))
+            self.addCleanup(store.close)
             provider = _EvidenceProvider(_repository_evidence())
-            app = _app(store=store, provider=provider)
+            app = _app(
+                store=store,
+                provider=provider,
+                identity=LocalOperatorIdentity(subject="operator:test", token_label="test"),
+            )
             policy = _policy()
 
             async with lifespan_client(app) as client:

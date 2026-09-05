@@ -18,12 +18,15 @@ from uuid import uuid4
 from alembic import command as alembic_command
 from alembic.config import Config as AlembicConfig
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError, OperationalError
 
 from control_plane import authz_grant_service, authz_policy_activation
+from tests.test_change_impact import _policy as _change_impact_policy
+from tests.test_change_impact_policy_audit import _audit as _change_impact_audit
+from control_plane.contracts.change_impact_audit import ChangeImpactPolicyAuditedWriteResult
 from control_plane.contracts.idempotency_record import (
     LaunchplaneIdempotencyRecord,
     build_launchplane_idempotency_record_id,
@@ -6032,3 +6035,103 @@ class RealPostgresProviderOperationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RealPostgresChangeImpactAuditTests(unittest.TestCase):
+    def test_concurrent_replay_returns_the_winning_original_writer(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            record = _change_impact_policy()
+            barrier = threading.Barrier(2)
+
+            def write(subject: str) -> ChangeImpactPolicyAuditedWriteResult:
+                barrier.wait(timeout=10)
+                return store.compare_and_write_change_impact_policy_record_with_audit(
+                    record,
+                    audit=_change_impact_audit(subject),
+                    expected_current_record_id="",
+                    expected_current_policy_digest="",
+                )
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                futures = [
+                    executor.submit(write, subject) for subject in ("operator:a", "operator:b")
+                ]
+                results = [future.result(timeout=30) for future in futures]
+            self.assertEqual(sorted(result.status for result in results), ["replayed", "written"])
+            winner = next(result for result in results if result.status == "written")
+            self.assertEqual([result.audit for result in results], [winner.audit, winner.audit])
+            self.assertEqual(store.read_change_impact_policy_audit(record.record_id), winner.audit)
+            self.assertEqual(store.list_change_impact_policy_records(), (record,))
+
+    def test_failed_audited_successor_rolls_back_policy_and_actor(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            first = _change_impact_policy()
+            original = _change_impact_audit()
+            store.compare_and_write_change_impact_policy_record_with_audit(
+                first,
+                audit=original,
+                expected_current_record_id="",
+                expected_current_policy_digest="",
+            )
+            second = _change_impact_policy(revision=2, supersedes_record_id=first.record_id)
+
+            def reject_insert(
+                _connection: object, _cursor: object, statement: str, *_: object
+            ) -> None:
+                if statement.startswith("INSERT INTO launchplane_change_impact_policies"):
+                    raise RuntimeError("injected audit insert failure")
+
+            event.listen(store._engine, "before_cursor_execute", reject_insert)
+            try:
+                with self.assertRaisesRegex(RuntimeError, "injected audit"):
+                    store.compare_and_write_change_impact_policy_record_with_audit(
+                        second,
+                        audit=_change_impact_audit("operator:second", revision=2),
+                        expected_current_record_id=first.record_id,
+                        expected_current_policy_digest=first.policy_digest,
+                    )
+            finally:
+                event.remove(store._engine, "before_cursor_execute", reject_insert)
+            self.assertEqual(store.list_change_impact_policy_records(), (first,))
+            self.assertEqual(store.read_change_impact_policy_audit(first.record_id), original)
+
+    def test_upgrade_preserves_legacy_policy_without_attributing_replay(self) -> None:
+        with _isolated_postgres_database() as database_url:
+            _upgrade_empty_database_to_head(database_url)
+            store = PostgresRecordStore(database_url=database_url)
+            first = _change_impact_policy()
+            try:
+                store.write_change_impact_policy_record(first)
+            finally:
+                store.close()
+            config = _alembic_config(database_url)
+            alembic_command.downgrade(config, "c0e2f4a6b8d1")
+            engine = create_engine(database_url)
+            try:
+                self.assertNotIn(
+                    "audit_payload",
+                    {
+                        column["name"]
+                        for column in inspect(engine).get_columns(
+                            "launchplane_change_impact_policies"
+                        )
+                    },
+                )
+            finally:
+                engine.dispose()
+            alembic_command.upgrade(config, "head")
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                store.verify_schema()
+                self.assertEqual(store.read_change_impact_policy_record(first.record_id), first)
+                self.assertIsNone(store.read_change_impact_policy_audit(first.record_id))
+                replay = store.compare_and_write_change_impact_policy_record_with_audit(
+                    first,
+                    audit=_change_impact_audit(),
+                    expected_current_record_id="",
+                    expected_current_policy_digest="",
+                )
+                self.assertEqual(replay.status, "replayed")
+                self.assertIsNone(replay.audit)
+            finally:
+                store.close()

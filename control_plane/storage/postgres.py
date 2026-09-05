@@ -68,6 +68,10 @@ from control_plane.contracts.authz_policy_record import (
 )
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.change_impact import ChangeImpactPolicyRecord
+from control_plane.contracts.change_impact_audit import (
+    ChangeImpactPolicyAuditRecord,
+    ChangeImpactPolicyAuditedWriteResult,
+)
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
@@ -2756,6 +2760,7 @@ class LaunchplaneChangeImpactPolicyRow(Base):
     supersedes_record_id: Mapped[str | None] = mapped_column(String, nullable=True)
     policy_digest: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+    audit_payload: Mapped[PayloadDict | None] = mapped_column(PayloadJsonType, nullable=True)
 
 
 class LaunchplanePreviewPrFeedbackNotificationAttemptRow(Base):
@@ -20035,6 +20040,44 @@ class PostgresRecordStore(HumanSessionStore):
         expected_current_record_id: str,
         expected_current_policy_digest: str,
     ) -> Literal["written", "replayed"]:
+        return self._compare_and_write_change_impact_policy_record(
+            record,
+            audit=None,
+            expected_current_record_id=expected_current_record_id,
+            expected_current_policy_digest=expected_current_policy_digest,
+        ).status
+
+    def compare_and_write_change_impact_policy_record_with_audit(
+        self,
+        record: ChangeImpactPolicyRecord,
+        *,
+        audit: ChangeImpactPolicyAuditRecord,
+        expected_current_record_id: str,
+        expected_current_policy_digest: str,
+    ) -> ChangeImpactPolicyAuditedWriteResult:
+        validated = ChangeImpactPolicyAuditRecord.model_validate(audit.model_dump(mode="json"))
+        if (
+            validated.record_id != record.record_id
+            or validated.policy_digest != record.policy_digest
+        ):
+            raise ChangeImpactPolicyConflictError(
+                "Policy audit does not match the policy identity."
+            )
+        return self._compare_and_write_change_impact_policy_record(
+            record,
+            audit=validated,
+            expected_current_record_id=expected_current_record_id,
+            expected_current_policy_digest=expected_current_policy_digest,
+        )
+
+    def _compare_and_write_change_impact_policy_record(
+        self,
+        record: ChangeImpactPolicyRecord,
+        *,
+        audit: ChangeImpactPolicyAuditRecord | None,
+        expected_current_record_id: str,
+        expected_current_policy_digest: str,
+    ) -> ChangeImpactPolicyAuditedWriteResult:
         with self._session_factory() as session:
             self._begin_serialized_write(session)
             try:
@@ -20080,8 +20123,10 @@ class PostgresRecordStore(HumanSessionStore):
                     raise ChangeImpactPolicyConflictError(
                         "change impact policy replay status conflicts with history."
                     )
+                original_row = next(row for row in rows if row.record_id == record.record_id)
+                original_audit = self._change_impact_audit_from_row(original_row)
                 session.commit()
-                return "replayed"
+                return ChangeImpactPolicyAuditedWriteResult(status="replayed", audit=original_audit)
             current_records = tuple(existing for existing in records if existing.status == "active")
             if len(current_records) > 1:
                 raise ChangeImpactPolicySequenceError(
@@ -20117,14 +20162,37 @@ class PostgresRecordStore(HumanSessionStore):
                     raise ChangeImpactPolicySequenceError(
                         "Next change impact policy effective_at cannot precede current revision."
                     )
-                session.merge(
-                    self._change_impact_policy_row(
-                        current.model_copy(update={"status": "superseded"})
-                    )
+                current_row = next(row for row in rows if row.record_id == current.record_id)
+                current_row.status = "superseded"
+                current_row.payload = self._payload_dict(
+                    current.model_copy(update={"status": "superseded"})
                 )
-            session.merge(self._change_impact_policy_row(record))
+                session.flush()
+            row = self._change_impact_policy_row(record)
+            row.audit_payload = self._payload_dict(audit) if audit is not None else None
+            session.add(row)
             session.commit()
-            return "written"
+            return ChangeImpactPolicyAuditedWriteResult(status="written", audit=audit)
+
+    def read_change_impact_policy_audit(
+        self, record_id: str
+    ) -> ChangeImpactPolicyAuditRecord | None:
+        with self._session_factory() as session:
+            row = session.get(LaunchplaneChangeImpactPolicyRow, record_id)
+            if row is None:
+                raise FileNotFoundError(record_id)
+            return self._change_impact_audit_from_row(row)
+
+    @staticmethod
+    def _change_impact_audit_from_row(
+        row: LaunchplaneChangeImpactPolicyRow,
+    ) -> ChangeImpactPolicyAuditRecord | None:
+        if row.audit_payload is None:
+            return None
+        audit = ChangeImpactPolicyAuditRecord.model_validate(row.audit_payload)
+        if audit.record_id != row.record_id or audit.policy_digest != row.policy_digest:
+            raise ChangeImpactPolicyConflictError("Stored policy audit identity is inconsistent.")
+        return audit
 
     def write_change_impact_policy_record(
         self,

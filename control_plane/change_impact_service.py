@@ -20,6 +20,10 @@ from control_plane.contracts.change_impact import (
     ChangeImpactTarget,
     ChangeImpactTargetReference,
 )
+from control_plane.contracts.change_impact_audit import (
+    ChangeImpactAttributionStatus,
+    ChangeImpactPolicyAuditRecord,
+)
 
 
 class ChangeImpactPolicyConflictError(ValueError):
@@ -79,6 +83,8 @@ class ChangeImpactPolicyApplyResult(BaseModel):
     schema_version: int = Field(default=1, ge=1)
     status: ChangeImpactApplyStatus
     record: ChangeImpactPolicyRecord
+    audit: ChangeImpactPolicyAuditRecord | None = None
+    attribution_status: ChangeImpactAttributionStatus = "attribution_unavailable"
 
 
 class ChangeImpactPolicyReadModel(BaseModel):
@@ -88,6 +94,14 @@ class ChangeImpactPolicyReadModel(BaseModel):
     repository_id: str
     current_policy: ChangeImpactPolicyRecord | None = None
     policy_history_count: int = Field(default=0, ge=0)
+    audit: ChangeImpactPolicyAuditRecord | None = None
+    attribution_status: ChangeImpactAttributionStatus = "attribution_unavailable"
+
+
+class ChangeImpactPolicyAuditReadStore(Protocol):
+    def read_change_impact_policy_audit(
+        self, record_id: str
+    ) -> ChangeImpactPolicyAuditRecord | None: ...
 
 
 RecordT = TypeVar("RecordT", bound=ChangeImpactPolicyRecord)
@@ -136,12 +150,27 @@ def get_change_impact_policy_read_model(
     *,
     store: ChangeImpactPolicyReadStore,
     repository_id: str,
+    audit_store: ChangeImpactPolicyAuditReadStore | None = None,
 ) -> ChangeImpactPolicyReadModel:
     records = store.list_change_impact_policy_records(repository_id=repository_id)
+    current = _safe_current_policy(records)
+    audit = (
+        audit_store.read_change_impact_policy_audit(current.record_id)
+        if audit_store is not None and current is not None
+        else None
+    )
     return ChangeImpactPolicyReadModel(
         repository_id=repository_id.strip(),
-        current_policy=_safe_current_policy(records),
+        current_policy=current,
         policy_history_count=len(records),
+        audit=audit,
+        attribution_status=(
+            "attributed"
+            if audit is not None
+            else "legacy_unattributed"
+            if audit_store is not None and current is not None
+            else "attribution_unavailable"
+        ),
     )
 
 
