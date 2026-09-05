@@ -166,7 +166,7 @@ class GeneratedBoundaryTests(unittest.TestCase):
 
     def test_artifact_stored_extension_keeps_generator_production_floor(self) -> None:
         policy = _v2_policy(
-            _rule("source", "src", products=(_product("api"),), production=True),
+            _rule("source", "src", products=(_product("api"),), production=True, governance=True),
             _generated(),
         )
         result = evaluate_change_impact(
@@ -177,6 +177,13 @@ class GeneratedBoundaryTests(unittest.TestCase):
         self.assertEqual(result.status, "success")
         self.assertEqual(
             tuple(p.product for p in result.production_affecting_products), ("api", "extra")
+        )
+        self.assertEqual(
+            tuple(
+                (row.review_tier, row.governance_impact, row.production_affecting)
+                for row in result.matched_evidence
+            ),
+            (("sensitive", True, True), ("sensitive", True, True)),
         )
 
     def test_invalid_generator_graphs_fail_before_evaluation(self) -> None:

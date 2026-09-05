@@ -118,6 +118,11 @@ its path ancestors, its generators, and ancestors of every generator prefix.
 Ancestor products never enter the union. A losing generated ancestor contributes
 only its own floors; its generator edges are not expanded.
 
+For v2, file and stored-evidence rows report the component's derived review,
+governance, and production flags, including its generator boundary. Path-ancestor
+floors remain separate floor-only evidence and are joined into the aggregate
+decision; per-row flags do not replace that aggregate authority.
+
 Resolution is pure and bounded, computed once per evaluation into immutable
 per-generator contributions for later scoped decision binding. Mapping changes
 remain distinguishable even when aggregate products and floors are identical.
