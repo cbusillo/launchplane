@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 
+from control_plane.change_impact_generated import validate_generated_boundaries
 from control_plane.contracts.change_impact import (
     ChangeImpactComponentRule,
     ChangeImpactPolicyRecord,
@@ -26,14 +27,19 @@ def validate_change_impact_v2_policy(policy: ChangeImpactPolicyRecord) -> None:
         return
     prefixes: set[str] = set()
     for rule in policy.component_rules:
-        if not rule.affected_products and rule.product_impact != "declared_none":
-            raise ValueError("v2 rules require explicit products or declared_none")
+        if (
+            not rule.affected_products
+            and rule.product_impact != "declared_none"
+            and rule.generated_by is None
+        ):
+            raise ValueError("v2 rules require explicit products, declared_none, or generated_by")
         for prefix in rule.path_prefixes:
             if not prefix or "." in prefix.split("/") or "" in prefix.split("/"):
                 raise ValueError("v2 prefixes must be canonical non-root paths")
             if prefix in prefixes:
                 raise ValueError("v2 policy has equal-specificity component ambiguity")
             prefixes.add(prefix)
+    validate_generated_boundaries(policy)
 
 
 def select_change_impact_path_rule(
