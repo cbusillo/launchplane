@@ -2969,6 +2969,46 @@ def _owner_control_shadow_envelope(
 
 
 class RealPostgresStorageConcurrencyTests(unittest.TestCase):
+    def test_v2_owner_replay_across_policy_provenance_keeps_one_original_event(self) -> None:
+        records = []
+        for revision in (1, 2):
+            payload = _owner_acceptance_event(
+                occurred_at=f"2026-08-07T12:0{revision}:00Z"
+            ).model_dump(mode="json", exclude={"event_id", "acceptance_id"})
+            payload["binding"].pop("binding_sha256")
+            payload["binding"].update(
+                binding_hash_version=2,
+                change_impact_decision_digest="e" * 64,
+                change_impact_policy_record_id=f"impact-r{revision}",
+                change_impact_policy_revision=revision,
+                change_impact_policy_digest=str(revision) * 64,
+            )
+            records.append(OwnerAcceptanceEventRecord.model_validate(payload))
+        with _store_for_fresh_head_database() as store:
+            second_store = PostgresRecordStore(database_url=store.database_url)
+            barrier = threading.Barrier(2)
+
+            def write(index: int) -> str:
+                active_store = (store, second_store)[index]
+                barrier.wait(timeout=10)
+                return active_store.write_owner_acceptance_event_record(records[index])
+
+            try:
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    outcomes = tuple(executor.map(write, (0, 1)))
+                self.assertCountEqual(outcomes, ("written", "replayed"))
+                original = records[outcomes.index("written")].model_copy(
+                    update={"subject_sequence": 1}
+                )
+                self.assertEqual(store.list_owner_acceptance_event_records(), (original,))
+                for record in records:
+                    self.assertEqual(store.write_owner_acceptance_event_record(record), "replayed")
+                self.assertEqual(
+                    store.read_owner_acceptance_event_record(original.event_id), original
+                )
+            finally:
+                second_store.close()
+
     def test_owner_control_challenge_issuance_serializes_one_active_operation(self) -> None:
         with _store_for_fresh_head_database() as store:
             private_key = Ed25519PrivateKey.generate()

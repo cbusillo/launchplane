@@ -2779,7 +2779,9 @@ function _ownerAcceptanceBinding(overrides: {
 }) {
   return {
     action: overrides.action ?? "deploy",
+    binding_hash_version: null,
     binding_sha256: overrides.binding_sha256,
+    change_impact_decision_digest: null,
     change_impact_policy_digest: "b".repeat(64),
     change_impact_policy_record_id: "policy-001",
     change_impact_policy_revision: 1,

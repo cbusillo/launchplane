@@ -3367,6 +3367,29 @@
             "title": "Affected Products",
             "type": "array"
           },
+          "binding_hash_version": {
+            "anyOf": [
+              {
+                "const": 2,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Binding Hash Version"
+          },
+          "change_impact_decision_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Change Impact Decision Digest"
+          },
           "classification_model": {
             "anyOf": [
               {
@@ -6483,6 +6506,29 @@
               }
             ],
             "title": "Authority Policy Revision"
+          },
+          "binding_hash_version": {
+            "anyOf": [
+              {
+                "const": 2,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Binding Hash Version"
+          },
+          "change_impact_decision_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Change Impact Decision Digest"
           },
           "change_impact_policy_digest": {
             "default": "",
@@ -18019,10 +18065,33 @@
             "title": "Action",
             "type": "string"
           },
+          "binding_hash_version": {
+            "anyOf": [
+              {
+                "const": 2,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Binding Hash Version"
+          },
           "binding_sha256": {
             "default": "",
             "title": "Binding Sha256",
             "type": "string"
+          },
+          "change_impact_decision_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Change Impact Decision Digest"
           },
           "change_impact_policy_digest": {
             "title": "Change Impact Policy Digest",
