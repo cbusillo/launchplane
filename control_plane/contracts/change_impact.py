@@ -143,6 +143,8 @@ class ChangeImpactComponentRule(BaseModel):
     affected_products: tuple[ChangeImpactProductScope, ...] = ()
     review_tier: ChangeImpactReviewTier = "routine"
     production_affecting: bool | None = None
+    product_impact: Literal["declared_none"] | None = None
+    governance_impact: bool | None = None
     reason: str
 
     @model_validator(mode="after")
@@ -152,6 +154,10 @@ class ChangeImpactComponentRule(BaseModel):
         object.__setattr__(self, "component", _required_token(self.component, "component"))
         if self.production_affecting is False:
             object.__setattr__(self, "production_affecting", None)
+        if self.governance_impact is False:
+            object.__setattr__(self, "governance_impact", None)
+        if self.product_impact is not None and self.affected_products:
+            raise ValueError("declared_none cannot accompany affected products")
         object.__setattr__(
             self,
             "path_prefixes",
@@ -186,6 +192,7 @@ class ChangeImpactPolicyRecord(BaseModel):
     policy_revision: int = Field(ge=1)
     component_rules: tuple[ChangeImpactComponentRule, ...]
     default_unknown_review_tier: Literal["sensitive"] = "sensitive"
+    classification_model: Literal["v2"] | None = None
     effective_at: str
     source: str
     reason: str
@@ -213,6 +220,11 @@ class ChangeImpactPolicyRecord(BaseModel):
         )
         if not self.component_rules:
             raise ValueError("change-impact policy requires component_rules")
+        if self.classification_model is None and any(
+            rule.product_impact is not None or rule.governance_impact is not None
+            for rule in self.component_rules
+        ):
+            raise ValueError("v2 rule fields require classification_model v2")
         rule_ids = tuple(rule.rule_id for rule in self.component_rules)
         if len(rule_ids) != len(set(rule_ids)):
             raise ValueError("change-impact policy cannot repeat component rule IDs")
@@ -491,6 +503,8 @@ class ChangeImpactMatchedEvidence(BaseModel):
     review_tier: ChangeImpactReviewTier | None = None
     production_affecting: bool | None = None
     affected_products: tuple[ChangeImpactProductScope, ...] = ()
+    review_floor_only: bool = False
+    governance_impact: bool | None = None
     reason: str
 
 
@@ -536,6 +550,8 @@ class ChangeImpactEvaluation(BaseModel):
     matched_evidence: tuple[ChangeImpactMatchedEvidence, ...] = ()
     unknown_evidence: tuple[str, ...] = ()
     coverage: ChangeImpactCoverage | None = None
+    classification_model: Literal["v2"] | None = None
+    governance_impact: bool | None = None
 
 
 def build_change_impact_component_rule_id(rule: ChangeImpactComponentRule) -> str:
