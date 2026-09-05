@@ -256,7 +256,7 @@ class ChangeImpactDecisionDigestTests(unittest.TestCase):
             _v2_policy(
                 parent,
                 _rule_with(source, component="replacement"),
-                _generated("artifact", "replacement"),
+                _rule_with(_generated(), generated_by=("replacement",)),
             ),
         )
         results = [

@@ -91,7 +91,7 @@ def build_change_impact_decision_digest(
         raise ValueError("scoped identity requires successful v2 classification")
     validate_v2_file_evidence(repository_evidence)
     paths: list[dict[str, object]] = []
-    for file in sorted(repository_evidence.changed_files, key=lambda file: file.path):
+    for file in sorted(repository_evidence.changed_files, key=lambda changed: changed.path):
         selection = select_change_impact_path_rule(path=file.path, rules=policy.component_rules)
         if selection is None:
             raise ValueError("scoped identity requires complete path authority")
@@ -144,8 +144,7 @@ def build_change_impact_decision_digest(
             include=CHANGE_IMPACT_DECISION_FIELDS,
         ),
     }
+    # JSON defaults to ASCII escapes; str.encode defaults to UTF-8.
     return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode(
-            "utf-8"
-        )
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
