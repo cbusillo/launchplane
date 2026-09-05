@@ -151,7 +151,7 @@
           "reviewed_dry_run",
           "expected_policy_digest"
         ],
-        "schema_fingerprint_sha256": "123a88f33b1072e8d2638039a3e90d2827b42f9b5b69d41237c924347e8ac6ab",
+        "schema_fingerprint_sha256": "92ffceffe42ea64c829e71e69eb405fa452fb34fb7e54f469c6d5606c8eb458a",
         "supported_surfaces": [
           "agent_helper",
           "operator_ui",
@@ -177,7 +177,7 @@
           "503"
         ],
         "reviewed_evidence": [],
-        "schema_fingerprint_sha256": "fb07affd73856afb39ac0aeba65dbbcab7a92413f07cf599b0213afc7d88732d",
+        "schema_fingerprint_sha256": "7626b4b974ffe0b822553785fed15acfd2acff2c89bddb7d27c2788e6336b0c7",
         "supported_surfaces": [
           "agent_helper",
           "read_only_service"
@@ -423,8 +423,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "7dae91844a07c916dd95e6b7f2b2495dbd359e76"
+    "source_commit_sha": "af620ee96bb7f1f5b8a6e3249712319ee2c7a55a"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "ca0d7340e4c6fb3293bddbccad6a7974b7729569ca8edf5625d951371ed1eb0e"
+  "semantic_digest_sha256": "fe741ddbe6e989f7251c7b49aa563984049a23e2160fefe6e97acdccf52fdf15"
 }
