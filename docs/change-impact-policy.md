@@ -72,6 +72,14 @@ reviewed CAS operation through existing policy-administrator authority.
 
 ## Evidence Authority
 
+The GitHub provider retains each rename destination with an explicit
+`previous_path` and the corresponding removed origin path. Missing or invalid
+rename origins and repeated real provider paths fail evidence resolution for every
+policy version; they cannot silently erase a classification boundary. Valid
+legacy changes keep their existing product and review classification. Recreated
+origins and rename swaps preserve real change kinds; synthetic removed origins
+are added only where the provider supplied no real entry for that path.
+
 Launchplane resolves evaluation evidence through two server-owned boundaries:
 
 - A server-authenticated GitHub provider resolves immutable repository identity,
