@@ -1,23 +1,28 @@
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Annotated, Literal
+from typing import Annotated, Literal, cast
 
 from fastapi import Depends, Query
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from control_plane.change_impact_service import (
     ChangeImpactPolicyApplyResult,
+    ChangeImpactPolicyAuditReadStore,
     ChangeImpactPolicyConflictError,
     ChangeImpactPolicySequenceError,
     ChangeImpactPolicyReadModel,
     ChangeImpactRepositoryEvidenceProvider,
     ChangeImpactTrustedCallerBinding,
-    apply_change_impact_policy,
     evaluate_change_impact,
     get_change_impact_policy_read_model,
     load_change_impact_stored_evidence,
     require_change_impact_policy_read_store,
-    require_change_impact_policy_store,
+)
+from control_plane.change_impact_policy_audit import (
+    ChangeImpactPolicyAttributionError,
+    apply_change_impact_policy_with_audit,
+    derive_change_impact_policy_audit,
+    require_change_impact_policy_audited_store,
 )
 from control_plane.change_impact_github import (
     ChangeImpactRepositoryEvidenceError,
@@ -131,6 +136,11 @@ def register_change_impact_read_routes(
             read_model = get_change_impact_policy_read_model(
                 store=store,
                 repository_id=repository_id,
+                audit_store=(
+                    cast(ChangeImpactPolicyAuditReadStore, record_store)
+                    if callable(getattr(record_store, "read_change_impact_policy_audit", None))
+                    else None
+                ),
             )
         except TypeError as error:
             raise common.http_error(
@@ -281,10 +291,22 @@ def register_change_impact_write_routes(
                 message="Caller cannot write change-impact policy records.",
             )
         try:
-            store = require_change_impact_policy_store(record_store)
-            result = apply_change_impact_policy(
+            audit = derive_change_impact_policy_audit(
+                identity=identity, record=envelope.record, trace_id=trace_id
+            )
+        except (ChangeImpactPolicyAttributionError, ValidationError) as error:
+            raise dependencies.http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="policy_attribution_unavailable",
+                message="Caller cannot provide policy administration attribution.",
+            ) from error
+        try:
+            store = require_change_impact_policy_audited_store(record_store)
+            result = apply_change_impact_policy_with_audit(
                 store=store,
                 record=envelope.record,
+                audit=audit,
                 expected_current_record_id=envelope.expected_current_record_id,
                 expected_current_policy_digest=envelope.expected_current_policy_digest,
                 mode=envelope.mode,
