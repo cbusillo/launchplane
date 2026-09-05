@@ -18,6 +18,7 @@ from control_plane.contracts.change_impact import (
 )
 from control_plane.contracts.merge_readiness import (
     MERGE_READINESS_POLICY_DIMENSIONS,
+    MergeReadinessAuthorityMode,
     MergeReadinessPolicyFingerprintEvidence,
     MergeReadinessPolicyFingerprints,
     MergeReadinessTarget,
@@ -242,6 +243,7 @@ class LiveMergeAdmissionEvaluator:
             impact=target_evidence.impact,
             owner_decision=target_evidence.owner_decision,
             engineering_decision=engineering_decision,
+            engineering_review_authority=repository_policy.engineering_review_mode,
             engineering_authority_digest=(
                 active_authority.authority_digest if active_authority is not None else None
             ),
@@ -423,6 +425,7 @@ class LiveMergeAdmissionEvaluator:
         technical_checks: TenantAdmissionTechnicalChecks,
         landing_policy_sha256: str,
         current_merge_train_policy_sha256: str,
+        engineering_review_authority: MergeReadinessAuthorityMode = "required",
     ) -> MergeReadinessPolicyFingerprints:
         technical_policy_sha256 = _canonical_sha256(
             {
@@ -436,7 +439,9 @@ class LiveMergeAdmissionEvaluator:
         expected_impact, current_impact = impact_binding_fingerprints(
             impact=impact,
             owner_decision=owner_decision,
-            engineering_decision=engineering_decision,
+            engineering_decision=(
+                engineering_decision if engineering_review_authority == "required" else None
+            ),
         )
         expected_engineering = (
             str(getattr(engineering_decision, "authority_digest", "")).strip()
