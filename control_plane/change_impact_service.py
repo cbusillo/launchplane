@@ -446,13 +446,7 @@ def _current_policy(
         raise ValueError("multiple active change-impact policies")
     if active:
         return active[0]
-    if not matching:
-        return None
-    highest_revision = max(record.policy_revision for record in matching)
-    current = tuple(record for record in matching if record.policy_revision == highest_revision)
-    if len(current) != 1:
-        raise ValueError("ambiguous change-impact policy history")
-    return current[0]
+    return None
 
 
 def _policy_matches_target(
