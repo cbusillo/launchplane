@@ -344,17 +344,23 @@ class GitHubChangeImpactRepositoryEvidenceProvider:
                 filename = _required_string(file_payload, "filename")
                 status = _required_string(file_payload, "status").lower()
                 change_kind = _change_kind(status)
-                evidence_by_path[filename] = ChangeImpactChangedFileEvidence(
-                    path=filename,
-                    change_kind=change_kind,
-                )
+                previous_filename: str | None = None
                 if status == "renamed":
-                    previous_filename = str(file_payload.get("previous_filename", "")).strip()
-                    if previous_filename:
-                        evidence_by_path[previous_filename] = ChangeImpactChangedFileEvidence(
-                            path=previous_filename,
-                            change_kind="removed",
+                    origin = file_payload.get("previous_filename")
+                    if not isinstance(origin, str) or not origin.strip():
+                        raise ChangeImpactRepositoryEvidenceError(
+                            "GitHub renamed file is missing a valid previous_filename: "
+                            + filename[:256]
                         )
+                    previous_filename = origin.strip()
+                evidence = ChangeImpactChangedFileEvidence(
+                    path=filename, change_kind=change_kind, previous_path=previous_filename
+                )
+                if evidence.path in evidence_by_path:
+                    raise ChangeImpactRepositoryEvidenceError(
+                        "GitHub changed-file evidence repeats a path: " + evidence.path[:256]
+                    )
+                evidence_by_path[evidence.path] = evidence
             if len(files) < 100:
                 break
         else:
@@ -365,6 +371,15 @@ class GitHubChangeImpactRepositoryEvidenceProvider:
             raise ChangeImpactRepositoryEvidenceError(
                 "GitHub pull request did not return changed-file evidence."
             )
+        # Real entries retain their change kind when a rename recreates or swaps a path.
+        for evidence in tuple(evidence_by_path.values()):
+            if (
+                evidence.previous_path is not None
+                and evidence.previous_path not in evidence_by_path
+            ):
+                evidence_by_path[evidence.previous_path] = ChangeImpactChangedFileEvidence(
+                    path=evidence.previous_path, change_kind="removed"
+                )
         return tuple(evidence_by_path.values())
 
 
