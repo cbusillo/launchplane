@@ -15,7 +15,7 @@ from tests.test_change_impact_v2 import _repository_evidence
 from tests.test_change_impact_v2 import _rule, _v2_policy
 
 
-def _generated(component: str = "artifact", *generators: str) -> ChangeImpactComponentRule:
+def _generated(*generators: str, component: str = "artifact") -> ChangeImpactComponentRule:
     return ChangeImpactComponentRule(
         component=component,
         path_prefixes=(f"generated/{component}",),
@@ -56,7 +56,7 @@ class GeneratedBoundaryTests(unittest.TestCase):
             (("none", "source"), ("api",), "required"),
         ):
             with self.subTest(leaves=leaves):
-                policy = _v2_policy(none, direct, _generated("artifact", *leaves))
+                policy = _v2_policy(none, direct, _generated(*leaves))
                 boundary = resolve_generated_boundaries(policy)["artifact"]
                 result = evaluate_change_impact(
                     repository_evidence=_repository_evidence("generated/artifact/schema.json"),
@@ -114,7 +114,7 @@ class GeneratedBoundaryTests(unittest.TestCase):
     def test_losing_generated_generator_ancestor_does_not_expand(self) -> None:
         policy = _v2_policy(
             _generated(),
-            _generated("ancestor", "unused").model_copy(
+            _generated("unused", component="ancestor").model_copy(
                 update={"path_prefixes": ("src",), "rule_id": ""}
             ),
             _rule("source", "src/api", products=(_product("api"),)),
@@ -129,18 +129,14 @@ class GeneratedBoundaryTests(unittest.TestCase):
             _rule("a", "a", products=(_product("api"),)),
             _rule("b", "b", products=(_product("api"),)),
         )
-        first = resolve_generated_boundaries(_v2_policy(*leaves, _generated("artifact", "a")))[
-            "artifact"
-        ]
-        second = resolve_generated_boundaries(_v2_policy(*leaves, _generated("artifact", "b")))[
-            "artifact"
-        ]
+        first = resolve_generated_boundaries(_v2_policy(*leaves, _generated("a")))["artifact"]
+        second = resolve_generated_boundaries(_v2_policy(*leaves, _generated("b")))["artifact"]
         self.assertEqual(first.affected_products, second.affected_products)
         self.assertNotEqual(asdict(first), asdict(second))
 
     def test_resolution_ignores_prose_and_input_order_and_is_immutable(self) -> None:
         leaves = (_rule("a", "a", products=(_product("api"),)), _rule("b", "b"))
-        policy = _v2_policy(*leaves, _generated("artifact", "b", "a"))
+        policy = _v2_policy(*leaves, _generated("b", "a"))
         original = policy.model_dump(mode="json")
         resolved = resolve_generated_boundaries(policy)
         payload = policy.model_dump(exclude={"policy_digest"})
@@ -189,9 +185,9 @@ class GeneratedBoundaryTests(unittest.TestCase):
 
     def test_invalid_generator_graphs_fail_before_evaluation(self) -> None:
         cases = (
-            ((_generated("artifact", "missing"),), "missing"),
-            ((_generated("artifact", "artifact"),), "itself"),
-            ((_generated(), _generated("source", "artifact")), "terminal"),
+            ((_generated("missing"),), "missing"),
+            ((_generated("artifact"),), "itself"),
+            ((_generated(), _generated("artifact", component="source")), "terminal"),
             (
                 (
                     _generated(),
@@ -229,9 +225,9 @@ class GeneratedBoundaryTests(unittest.TestCase):
                 ChangeImpactComponentRule.model_validate(payload | update)
         leaves = tuple(_rule(f"s{i}", f"src/{i}") for i in range(20))
         generators = tuple(rule.component for rule in leaves)
-        policy = _v2_policy(*leaves, _generated("artifact", *generators))
+        policy = _v2_policy(*leaves, _generated(*generators))
         self.assertEqual(len(resolve_generated_boundaries(policy)["artifact"].generators), 20)
-        artifacts = tuple(_generated(f"a{i}", *generators) for i in range(21))
+        artifacts = tuple(_generated(*generators, component=f"a{i}") for i in range(21))
         validate_change_impact_v2_policy(_v2_policy(*leaves, *artifacts[:20]))
         with self.assertRaisesRegex(ValueError, "400 edges"):
             validate_change_impact_v2_policy(_v2_policy(*leaves, *artifacts))

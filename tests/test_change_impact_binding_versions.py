@@ -294,8 +294,8 @@ class ChangeImpactBindingVersionTests(unittest.TestCase):
             provider = _EvidenceProvider(_repository_evidence())
             revision = [1]
 
-            def classify(**kwargs: object) -> ChangeImpactEvaluation:
-                actual = evaluate_change_impact(**kwargs)  # type: ignore[arg-type]
+            def classify(**classification_kwargs: object) -> ChangeImpactEvaluation:
+                actual = evaluate_change_impact(**classification_kwargs)  # type: ignore[arg-type]
                 return ChangeImpactEvaluation.model_validate(
                     actual.model_dump(mode="json")
                     | {
