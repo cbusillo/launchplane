@@ -758,7 +758,7 @@ class LiveMergeAdmissionEvaluatorTests(unittest.TestCase):
                         LiveMergeAdmissionEvaluator,
                         "_policy_fingerprints",
                         return_value=_policy_fingerprints(),
-                    ),
+                    ) as fingerprints,
                     patch(
                         "control_plane.merge_admission_live.evaluate_merge_train_structural_candidate",
                         return_value=structural_result,
@@ -787,6 +787,9 @@ class LiveMergeAdmissionEvaluatorTests(unittest.TestCase):
                     )
 
                 self.assertEqual(captured["engineering_review_authority"], mode)
+                self.assertEqual(
+                    fingerprints.call_args.kwargs["engineering_review_authority"], mode
+                )
 
     def test_live_queue_is_rediscovered_and_inserted_pr_refuses_admission(self) -> None:
         candidate_record, landing_record, controller_state, _ = _guard_records()
