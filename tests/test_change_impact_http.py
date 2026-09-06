@@ -158,6 +158,7 @@ class _ChangeImpactStore(FilesystemRecordStore):
     ) -> None:
         super().__init__(root)
         self._stored_evidence = stored_evidence
+        self.last_evidence_lookup: tuple[str, int, str, str] | None = None
 
     def list_change_impact_stored_evidence(
         self,
@@ -203,11 +204,23 @@ def _stored_dependency() -> ChangeImpactStoredEvidence:
     )
 
 
-def _http_error(**kwargs: object) -> HTTPException:
-    return HTTPException(
-        status_code=int(str(kwargs["status_code"])),
-        detail=kwargs,
-    )
+def _http_error(
+    *,
+    status_code: int,
+    trace_id: str,
+    code: str,
+    message: str,
+    authz: dict[str, object] | None = None,
+) -> HTTPException:
+    detail: dict[str, object] = {
+        "status_code": status_code,
+        "trace_id": trace_id,
+        "code": code,
+        "message": message,
+    }
+    if authz is not None:
+        detail["authz"] = authz
+    return HTTPException(status_code=status_code, detail=detail)
 
 
 def _app(

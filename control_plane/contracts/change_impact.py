@@ -91,12 +91,8 @@ def _normalize_timestamp(value: str, field_name: str) -> str:
 
 
 def _canonical_sha256(payload: object) -> str:
-    encoded = json.dumps(
-        payload,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=True,
-    ).encode("utf-8")
+    # JSON defaults to ASCII escapes; str.encode defaults to UTF-8.
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest()
 
 
