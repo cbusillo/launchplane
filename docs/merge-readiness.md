@@ -118,12 +118,40 @@ affected-product subjects, the adapter emits one canonical
 impact evidence is unavailable before subjects can be resolved, that same
 unscoped facet is `unknown` and fails closed.
 
-For that successful `not_required` path, there is intentionally no historical
-Owner or engineering binding from which to recover an expected impact-policy
-digest. The live adapter therefore binds the expected impact fingerprint to the
-same current policy evaluation that proved the change has no affected-product
-subjects. Missing or non-successful impact evidence never receives this
-fallback and continues to fail closed.
+If that successful `not_required` path has no Owner or required engineering
+binding record supplied to the comparison, the live adapter binds the expected
+impact fingerprint to the same current policy evaluation that proved the change
+has no affected-product subjects. Missing or non-successful impact evidence never
+receives this fallback and continues to fail closed.
+
+The impact fingerprint follows the evaluation's binding version. Legacy
+bindings retain their full-policy digest comparison. V2 bindings compare the
+scoped decision digest while retaining the full policy record ID, revision and
+digest as provenance. Unrelated policy edits can preserve the scoped identity;
+changed authoritative classification inputs cannot. Among records supplied to
+the impact comparison, mixed binding versions or missing or inconsistent v2
+digests fail closed. The latest engineering decision from a different version is
+not used; the existing
+required/advisory engineering policy determines the consequence of missing
+evidence. The adapter never searches older decisions for a usable review. See
+[change-impact policy](change-impact-policy.md#scoped-decision-identity-and-total-fallback)
+for the exact projection and [Owner acceptance](owner-acceptance.md#versioned-change-impact-bindings)
+for immutable replay semantics.
+
+A successful engineering-only v2 classification can have governance-sensitive
+review floors and no affected products. Its `owner_not_required` facet requires
+no Owner binding or event. A required v2 engineering review decision contributes
+its recorded scoped digest to the comparison and must match the current
+evaluation. Missing or inconsistent digests fail closed. Only when no binding
+record is supplied does the adapter use the current evaluation's own scoped
+fingerprint, failing closed if it is absent. Exact structural candidate,
+head/tree, technical, policy and controller-fence checks still apply. This path
+creates no human acceptance and does not activate v2 policy.
+
+Advisory engineering records remain diagnostic evidence in the engineering
+facet and are excluded from the impact authority comparison. A stale shadow
+record cannot introduce an impact-policy blocker. Current Owner binding drift
+still fails that comparison; advisory mode does not exempt the impact dimension.
 
 ## Advisory Checks
 
