@@ -42,6 +42,12 @@ missing or stale evidence is corrected. A pre-effect policy refusal is not
 durable effect ambiguity and must not be converted into controller
 reconciliation.
 
+Unavailable or malformed authoritative repository evidence refuses admission
+with `repository_evidence_unavailable`; evidence that changes during resolution
+uses `repository_evidence_stale`. Both are pre-effect denials: the controller
+returns a normal block and releases its lease without requiring reconciliation.
+The denial exposes a bounded message, not raw provider details or file paths.
+
 ## Outcome Boundary
 
 Outcomes use only three public states:
