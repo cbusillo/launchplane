@@ -14,9 +14,23 @@ from control_plane.contracts.change_impact import (
     ChangeImpactComponentRule,
     ChangeImpactPolicyRecord,
     ChangeImpactProductScope,
+    ChangeImpactRepositoryEvidence,
 )
 from control_plane.storage.filesystem import FilesystemRecordStore
-from tests.test_change_impact import _policy, _product, _repository_evidence, _stored_evidence
+from tests.test_change_impact import _policy, _product, _stored_evidence
+from tests.test_change_impact import _repository_evidence as _legacy_evidence
+
+
+def _repository_evidence(*paths: str) -> ChangeImpactRepositoryEvidence:
+    evidence = _legacy_evidence(*paths)
+    return evidence.model_copy(
+        update={
+            "changed_files": tuple(
+                file.model_copy(update={"change_kind": "modified"})
+                for file in evidence.changed_files
+            )
+        }
+    )
 
 
 def _v2_policy(*rules: ChangeImpactComponentRule) -> ChangeImpactPolicyRecord:

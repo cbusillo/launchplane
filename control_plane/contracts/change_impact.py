@@ -335,6 +335,7 @@ class ChangeImpactChangedFileEvidence(BaseModel):
     schema_version: int = Field(default=1, ge=1)
     path: str
     change_kind: ChangeImpactChangeKind = "unknown"
+    previous_path: str | None = None
     source: Literal["server_diff"] = "server_diff"
 
     @model_validator(mode="after")
@@ -342,6 +343,11 @@ class ChangeImpactChangedFileEvidence(BaseModel):
         if self.schema_version != 1:
             raise ValueError("Unsupported change-impact file evidence schema version.")
         object.__setattr__(self, "path", _normalize_path(self.path, "path"))
+        if self.previous_path is not None:
+            previous_path = _normalize_path(self.previous_path, "previous_path")
+            if self.change_kind != "renamed" or previous_path == self.path:
+                raise ValueError("previous_path requires a rename from a distinct path")
+            object.__setattr__(self, "previous_path", previous_path)
         return self
 
 

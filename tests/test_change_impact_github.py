@@ -356,8 +356,9 @@ class ChangeImpactGitHubEvidenceProviderTests(unittest.TestCase):
             def __call__(self, *, path: str, token: str) -> object:
                 if "/files?" in path:
                     self.paths.append(path)
+                    page = path.rsplit("=", 1)[-1]
                     return [
-                        {"filename": f"path-{index}.py", "status": "modified"}
+                        {"filename": f"path-{page}-{index}.py", "status": "modified"}
                         for index in range(100)
                     ]
                 return super().__call__(path=path, token=token)

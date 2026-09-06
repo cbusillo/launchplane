@@ -9,6 +9,7 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from control_plane.contracts.change_impact import ChangeImpactCoverage
 from control_plane.contracts.change_impact_binding import (
     ChangeImpactBindingHashVersion,
     change_impact_bound_payload,
@@ -896,6 +897,7 @@ class OwnerAcceptanceDecision(BaseModel):
     admissible: bool = False
     human_action_semantics: OwnerAcceptanceHumanActionSemantics = "none"
     products: tuple[OwnerAcceptanceProductDecision, ...] = ()
+    change_impact_coverage: ChangeImpactCoverage | None = None
     evaluated_at: str
 
     @model_validator(mode="after")

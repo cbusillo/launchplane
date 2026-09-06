@@ -3760,6 +3760,27 @@
       "ChangeImpactPolicyApplyResult": {
         "additionalProperties": false,
         "properties": {
+          "attribution_status": {
+            "default": "attribution_unavailable",
+            "enum": [
+              "attributed",
+              "legacy_unattributed",
+              "attribution_unavailable",
+              "not_applied"
+            ],
+            "title": "Attribution Status",
+            "type": "string"
+          },
+          "audit": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ChangeImpactPolicyAuditRecord"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "record": {
             "$ref": "#/components/schemas/ChangeImpactPolicyRecord"
           },
@@ -3787,9 +3808,98 @@
         "title": "ChangeImpactPolicyApplyResult",
         "type": "object"
       },
+      "ChangeImpactPolicyAuditRecord": {
+        "additionalProperties": false,
+        "properties": {
+          "actor_kind": {
+            "enum": [
+              "local_admin",
+              "local_operator",
+              "github_actions"
+            ],
+            "title": "Actor Kind",
+            "type": "string"
+          },
+          "actor_subject": {
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Actor Subject",
+            "type": "string"
+          },
+          "policy_digest": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Policy Digest",
+            "type": "string"
+          },
+          "record_id": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Record Id",
+            "type": "string"
+          },
+          "recorded_at": {
+            "format": "date-time",
+            "title": "Recorded At",
+            "type": "string"
+          },
+          "schema_version": {
+            "const": 1,
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "trace_id": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Trace Id",
+            "type": "string"
+          },
+          "workflow_identity": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ChangeImpactPolicyWorkflowIdentity"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "record_id",
+          "policy_digest",
+          "actor_kind",
+          "actor_subject",
+          "trace_id",
+          "recorded_at"
+        ],
+        "title": "ChangeImpactPolicyAuditRecord",
+        "type": "object"
+      },
       "ChangeImpactPolicyReadModel": {
         "additionalProperties": false,
         "properties": {
+          "attribution_status": {
+            "default": "attribution_unavailable",
+            "enum": [
+              "attributed",
+              "legacy_unattributed",
+              "attribution_unavailable",
+              "not_applied"
+            ],
+            "title": "Attribution Status",
+            "type": "string"
+          },
+          "audit": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ChangeImpactPolicyAuditRecord"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "current_policy": {
             "anyOf": [
               {
@@ -3952,6 +4062,59 @@
           "reason"
         ],
         "title": "ChangeImpactPolicyRecord",
+        "type": "object"
+      },
+      "ChangeImpactPolicyWorkflowIdentity": {
+        "additionalProperties": false,
+        "properties": {
+          "job_workflow_ref": {
+            "maxLength": 512,
+            "title": "Job Workflow Ref",
+            "type": "string"
+          },
+          "ref": {
+            "maxLength": 512,
+            "title": "Ref",
+            "type": "string"
+          },
+          "repository": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Repository",
+            "type": "string"
+          },
+          "repository_id": {
+            "default": "",
+            "maxLength": 64,
+            "title": "Repository Id",
+            "type": "string"
+          },
+          "repository_owner_id": {
+            "default": "",
+            "maxLength": 64,
+            "title": "Repository Owner Id",
+            "type": "string"
+          },
+          "sha": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Sha",
+            "type": "string"
+          },
+          "workflow_ref": {
+            "maxLength": 512,
+            "title": "Workflow Ref",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repository",
+          "workflow_ref",
+          "job_workflow_ref",
+          "ref",
+          "sha"
+        ],
+        "title": "ChangeImpactPolicyWorkflowIdentity",
         "type": "object"
       },
       "ChangeImpactProductScope": {
@@ -18442,6 +18605,16 @@
             "anyOf": [
               {
                 "$ref": "#/components/schemas/OwnerAcceptanceBinding"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "change_impact_coverage": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ChangeImpactCoverage"
               },
               {
                 "type": "null"

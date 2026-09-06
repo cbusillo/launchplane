@@ -48,5 +48,7 @@ review outcome, required count, and qualifying runs remain bound.
 Admission requires the newest decision to match the current impact hash version and
 compares versioned scoped impact identity for v2. Mixed or missing identities
 fail closed. Legacy admission continues comparing full-policy digests, and all
-other authority dimensions and exact-head checks remain unchanged. This
-compatibility slice adds no v2 digest producer or policy activation.
+other authority dimensions and exact-head checks remain unchanged. Successful
+v2 evaluations derive scoped identity from current server-owned classification
+inputs; unknown and stale results cannot publish it. V2 policy activation
+remains unavailable pending rollout qualification.

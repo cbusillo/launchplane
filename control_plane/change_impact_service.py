@@ -6,6 +6,10 @@ from typing import Literal, Protocol, TypeVar, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from control_plane.change_impact_decision_digest import (
+    build_change_impact_decision_digest,
+    validate_v2_file_evidence,
+)
 from control_plane.change_impact_generated import (
     ChangeImpactFloors,
     GeneratedBoundary,
@@ -30,6 +34,10 @@ from control_plane.contracts.change_impact import (
     ChangeImpactStoredEvidence,
     ChangeImpactTarget,
     ChangeImpactTargetReference,
+)
+from control_plane.contracts.change_impact_audit import (
+    ChangeImpactAttributionStatus,
+    ChangeImpactPolicyAuditRecord,
 )
 
 
@@ -90,6 +98,8 @@ class ChangeImpactPolicyApplyResult(BaseModel):
     schema_version: int = Field(default=1, ge=1)
     status: ChangeImpactApplyStatus
     record: ChangeImpactPolicyRecord
+    audit: ChangeImpactPolicyAuditRecord | None = None
+    attribution_status: ChangeImpactAttributionStatus = "attribution_unavailable"
 
 
 class ChangeImpactPolicyReadModel(BaseModel):
@@ -99,6 +109,14 @@ class ChangeImpactPolicyReadModel(BaseModel):
     repository_id: str
     current_policy: ChangeImpactPolicyRecord | None = None
     policy_history_count: int = Field(default=0, ge=0)
+    audit: ChangeImpactPolicyAuditRecord | None = None
+    attribution_status: ChangeImpactAttributionStatus = "attribution_unavailable"
+
+
+class ChangeImpactPolicyAuditReadStore(Protocol):
+    def read_change_impact_policy_audit(
+        self, record_id: str
+    ) -> ChangeImpactPolicyAuditRecord | None: ...
 
 
 RecordT = TypeVar("RecordT", bound=ChangeImpactPolicyRecord)
@@ -113,6 +131,20 @@ class ChangeImpactTrustedCallerBinding:
     ref: str = ""
 
 
+def validate_change_impact_policy_apply_request(
+    *, record: ChangeImpactPolicyRecord, mode: ChangeImpactApplyMode
+) -> None:
+    """Share policy validation and the staged activation gate across apply services."""
+    try:
+        validate_change_impact_v2_policy(record)
+    except ValueError as error:
+        raise ChangeImpactPolicySequenceError(str(error)) from error
+    if mode != "dry_run" and record.classification_model == "v2":
+        raise ChangeImpactPolicySequenceError(
+            "v2 classification apply is unavailable pending rollout qualification"
+        )
+
+
 def apply_change_impact_policy(
     *,
     store: ChangeImpactPolicyStore,
@@ -121,10 +153,7 @@ def apply_change_impact_policy(
     expected_current_policy_digest: str = "",
     mode: ChangeImpactApplyMode = "apply",
 ) -> ChangeImpactPolicyApplyResult:
-    try:
-        validate_change_impact_v2_policy(record)
-    except ValueError as error:
-        raise ChangeImpactPolicySequenceError(str(error)) from error
+    validate_change_impact_policy_apply_request(record=record, mode=mode)
     replay = _validate_policy_append(
         records=store.list_change_impact_policy_records(repository_id=record.repository_id),
         record=record,
@@ -135,10 +164,6 @@ def apply_change_impact_policy(
         return ChangeImpactPolicyApplyResult(
             status="would_replay" if replay else "would_apply",
             record=record,
-        )
-    if record.classification_model == "v2":
-        raise ChangeImpactPolicySequenceError(
-            "v2 classification apply is unavailable pending scoped binding and rename support"
         )
     write_status = store.compare_and_write_change_impact_policy_record(
         record,
@@ -155,12 +180,27 @@ def get_change_impact_policy_read_model(
     *,
     store: ChangeImpactPolicyReadStore,
     repository_id: str,
+    audit_store: ChangeImpactPolicyAuditReadStore | None = None,
 ) -> ChangeImpactPolicyReadModel:
     records = store.list_change_impact_policy_records(repository_id=repository_id)
+    current = _safe_current_policy(records)
+    audit = (
+        audit_store.read_change_impact_policy_audit(current.record_id)
+        if audit_store is not None and current is not None
+        else None
+    )
     return ChangeImpactPolicyReadModel(
         repository_id=repository_id.strip(),
-        current_policy=_safe_current_policy(records),
+        current_policy=current,
         policy_history_count=len(records),
+        audit=audit,
+        attribution_status=(
+            "attributed"
+            if audit is not None
+            else "legacy_unattributed"
+            if audit_store is not None and current is not None
+            else "attribution_unavailable"
+        ),
     )
 
 
@@ -235,6 +275,18 @@ def evaluate_change_impact(
             policy=policy,
             unknown_evidence=("v2 policy rules have ambiguous or implicit authority",),
         )
+
+    if policy.classification_model == "v2":
+        try:
+            validate_v2_file_evidence(repository_evidence)
+        except ValueError:
+            return _unknown_evaluation(
+                target=target,
+                status="unknown",
+                reason_code="repository_evidence_incomplete",
+                policy=policy,
+                unknown_evidence=("v2 file change kinds and rename origins must be complete",),
+            )
 
     matched: list[ChangeImpactMatchedEvidence] = []
     affected_products: set[ChangeImpactProductScope] = set()
@@ -357,7 +409,7 @@ def evaluate_change_impact(
 
     affected = _affected_products(affected_products)
     review_tier: Literal["routine", "sensitive"] = "sensitive" if sensitive else "routine"
-    return ChangeImpactEvaluation(
+    evaluation = ChangeImpactEvaluation(
         status="success",
         reason_code="change_impact_classified",
         target=target,
@@ -375,6 +427,18 @@ def evaluate_change_impact(
         classification_model=policy.classification_model,
         governance_impact=governance_impact if policy.classification_model == "v2" else None,
     )
+    if policy.classification_model == "v2":
+        digest = build_change_impact_decision_digest(
+            repository_evidence=repository_evidence,
+            policy=policy,
+            stored_evidence=stored_evidence,
+            generated_boundaries=generated_boundaries,
+            evaluation=evaluation,
+        )
+        return evaluation.model_copy(
+            update={"binding_hash_version": 2, "change_impact_decision_digest": digest}
+        )
+    return evaluation
 
 
 def require_change_impact_policy_store(store: object) -> ChangeImpactPolicyStore:
@@ -509,13 +573,7 @@ def _current_policy(
         raise ValueError("multiple active change-impact policies")
     if active:
         return active[0]
-    if not matching:
-        return None
-    highest_revision = max(record.policy_revision for record in matching)
-    current = tuple(record for record in matching if record.policy_revision == highest_revision)
-    if len(current) != 1:
-        raise ValueError("ambiguous change-impact policy history")
-    return current[0]
+    return None
 
 
 def _policy_matches_target(
@@ -646,7 +704,9 @@ def _unknown_evaluation(
         policy_record_id=policy.record_id if policy is not None else "",
         policy_revision=policy.policy_revision if policy is not None else None,
         policy_digest=policy.policy_digest if policy is not None else "",
-        engineering_review_tier="sensitive",
+        engineering_review_tier=policy.default_unknown_review_tier
+        if policy is not None
+        else "sensitive",
         required_engineering_review_count=2,
         owner_impact="unknown" if not affected_products else "required",
         affected_products=affected_products,

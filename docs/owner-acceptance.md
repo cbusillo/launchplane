@@ -73,8 +73,10 @@ used to prove the serving artifact remains bound.
 
 Bindings support optional `binding_hash_version` and
 `change_impact_decision_digest` fields. Both remain absent on the current v1
-evaluator path. This compatibility support does not enable v2 classification or
-activate a policy.
+evaluator path. Successful v2 evaluations produce the pair from the
+[scoped authority projection](change-impact-policy.md#scoped-decision-identity-and-total-fallback).
+Unknown and stale evaluations produce neither field; v2 policy activation
+remains unavailable pending rollout qualification.
 
 An omitted version preserves the exact legacy binding, acceptance, event, and
 replay digests. Version `2` requires an explicit SHA-256 scoped decision digest
@@ -474,6 +476,19 @@ pending run. The output lists the aggregate state plus each affected product and
 binding. The check is excluded from Launchplane technical-check inputs and cannot
 replace the Launchplane decision. The projection response is schema version 2 and
 reports both the exact GitHub check-run status and its nullable conclusion.
+
+Owner evaluation responses also carry nullable `change_impact_coverage` from
+the existing change-impact evaluation. The check summary distinguishes unavailable,
+complete, and incomplete coverage, including the exact unmatched-path count and
+bounded escaped path samples. Sample truncation is explicit; it does not reduce
+the reported total. Coverage can be available before Owner admission prerequisites
+are met. It remains diagnostic and does not change the Owner decision, check
+conclusion, binding, or immutable human event. A coverage-only change refreshes
+the projection identity. Existing responses that omit coverage remain readable.
+
+This diagnostic uses existing evaluation and projection entrypoints. Automatic
+pull-request lifecycle projection remains tracked separately in #2162 and subject
+to the Owner milestone pause in #2164.
 
 ## Combined Governance Read Model
 

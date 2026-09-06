@@ -5,6 +5,10 @@ from dataclasses import dataclass
 import hashlib
 import json
 
+from control_plane.change_impact_github import (
+    ChangeImpactRepositoryEvidenceError,
+    ChangeImpactRepositoryEvidenceStaleError,
+)
 from control_plane.change_impact_service import (
     ChangeImpactRepositoryEvidenceProvider,
     evaluate_change_impact,
@@ -18,6 +22,7 @@ from control_plane.contracts.change_impact import (
 )
 from control_plane.contracts.merge_readiness import (
     MERGE_READINESS_POLICY_DIMENSIONS,
+    MergeReadinessAuthorityMode,
     MergeReadinessPolicyFingerprintEvidence,
     MergeReadinessPolicyFingerprints,
     MergeReadinessTarget,
@@ -69,7 +74,10 @@ from control_plane.merge_train_policy_source import (
 from control_plane.merge_train_structural_provenance import (
     evaluate_merge_train_structural_candidate,
 )
-from control_plane.owner_acceptance import evaluate_owner_acceptance
+from control_plane.owner_acceptance import (
+    OwnerAcceptanceEvaluationUnavailableError,
+    evaluate_owner_acceptance,
+)
 from control_plane.tenant_admission_controller import (
     TenantAdmissionControllerGitHubClient,
     TenantAdmissionTechnicalChecks,
@@ -166,15 +174,34 @@ class LiveMergeAdmissionEvaluator:
                 "Live merge queue or base identity changed from the landing-plan lineage.",
                 reason_code="landing_lineage_changed",
             )
-        entry_evidence = tuple(
-            self._entry_evidence(
-                repository=landing_plan.repository,
-                pull_request_number=candidate_entry.pull_request_number,
-                evaluated_at=evaluated_at,
-                position=candidate_entry.position,
+        try:
+            entry_evidence = tuple(
+                self._entry_evidence(
+                    repository=landing_plan.repository,
+                    pull_request_number=candidate_entry.pull_request_number,
+                    evaluated_at=evaluated_at,
+                    position=candidate_entry.position,
+                )
+                for candidate_entry in candidate_record.candidate.entries
             )
-            for candidate_entry in candidate_record.candidate.entries
-        )
+        except (
+            ChangeImpactRepositoryEvidenceError,
+            OwnerAcceptanceEvaluationUnavailableError,
+        ) as error:
+            evidence_error = (
+                error.__cause__
+                if isinstance(error, OwnerAcceptanceEvaluationUnavailableError)
+                else error
+            )
+            if not isinstance(evidence_error, ChangeImpactRepositoryEvidenceError):
+                raise
+            if isinstance(evidence_error, ChangeImpactRepositoryEvidenceStaleError):
+                message = "Authoritative repository evidence changed during merge admission."
+                reason_code = "repository_evidence_stale"
+            else:
+                message = "Authoritative repository evidence is unavailable for merge admission."
+                reason_code = "repository_evidence_unavailable"
+            raise MergeAdmissionDeniedError(message, reason_code=reason_code) from error
         observations = tuple(item.observation for item in entry_evidence)
         combined_owner_review = self._combined_owner_review(
             landing_plan_record=landing_plan_record,
@@ -242,6 +269,7 @@ class LiveMergeAdmissionEvaluator:
             impact=target_evidence.impact,
             owner_decision=target_evidence.owner_decision,
             engineering_decision=engineering_decision,
+            engineering_review_authority=repository_policy.engineering_review_mode,
             engineering_authority_digest=(
                 active_authority.authority_digest if active_authority is not None else None
             ),
@@ -423,6 +451,7 @@ class LiveMergeAdmissionEvaluator:
         technical_checks: TenantAdmissionTechnicalChecks,
         landing_policy_sha256: str,
         current_merge_train_policy_sha256: str,
+        engineering_review_authority: MergeReadinessAuthorityMode = "required",
     ) -> MergeReadinessPolicyFingerprints:
         technical_policy_sha256 = _canonical_sha256(
             {
@@ -436,7 +465,9 @@ class LiveMergeAdmissionEvaluator:
         expected_impact, current_impact = impact_binding_fingerprints(
             impact=impact,
             owner_decision=owner_decision,
-            engineering_decision=engineering_decision,
+            engineering_decision=(
+                engineering_decision if engineering_review_authority == "required" else None
+            ),
         )
         expected_engineering = (
             str(getattr(engineering_decision, "authority_digest", "")).strip()

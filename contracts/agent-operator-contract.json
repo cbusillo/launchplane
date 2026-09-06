@@ -151,7 +151,7 @@
           "reviewed_dry_run",
           "expected_policy_digest"
         ],
-        "schema_fingerprint_sha256": "123a88f33b1072e8d2638039a3e90d2827b42f9b5b69d41237c924347e8ac6ab",
+        "schema_fingerprint_sha256": "92ffceffe42ea64c829e71e69eb405fa452fb34fb7e54f469c6d5606c8eb458a",
         "supported_surfaces": [
           "agent_helper",
           "operator_ui",
@@ -177,7 +177,7 @@
           "503"
         ],
         "reviewed_evidence": [],
-        "schema_fingerprint_sha256": "fb07affd73856afb39ac0aeba65dbbcab7a92413f07cf599b0213afc7d88732d",
+        "schema_fingerprint_sha256": "7626b4b974ffe0b822553785fed15acfd2acff2c89bddb7d27c2788e6336b0c7",
         "supported_surfaces": [
           "agent_helper",
           "read_only_service"
@@ -392,7 +392,7 @@
           "503"
         ],
         "reviewed_evidence": [],
-        "schema_fingerprint_sha256": "589c557a0975f0a3a98e3894636923d141a66e75d7c35e324f2540f6eff582fe",
+        "schema_fingerprint_sha256": "e931225ece74d36fed4b78b9ff540ad9eebff9b2aed1dafaedaa55a20e4c53d2",
         "supported_surfaces": [
           "read_only_service",
           "operator_ui"
@@ -423,8 +423,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "f8c315ae3f431ae1061a6e190b61831c1b4a88ba"
+    "source_commit_sha": "aa8c253031ab6fd00ec7d7efaeff0841ab94ae17"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "e649cfdddf82262640eb8654147a2d34901b5300dfe41e8bafaf7023199cda6d"
+  "semantic_digest_sha256": "fe741ddbe6e989f7251c7b49aa563984049a23e2160fefe6e97acdccf52fdf15"
 }
