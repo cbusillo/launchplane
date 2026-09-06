@@ -181,6 +181,7 @@ class _AuditedChangeImpactStore(PostgresRecordStore):
     def __init__(self, root: Path) -> None:
         super().__init__(database_url=f"sqlite+pysqlite:///{root / 'policy.sqlite'}")
         self.ensure_schema()
+        self.last_evidence_lookup: tuple[str, int, str, str] | None = None
 
     def list_change_impact_stored_evidence(
         self,
