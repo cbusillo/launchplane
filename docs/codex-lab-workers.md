@@ -64,6 +64,25 @@ feedback path does not prove that service-backed transition or a fresh fence.
 A supported feedback-resume lifecycle must preserve those authorization and
 fencing requirements; do not work around them with a local record write.
 
+`tests/test_http_app_every_code_restart_boundary.py` exercises the real
+FastAPI routes with lifespan handling and the SQL record store on SQLite.
+It checks terminal restart rejection for both worker-token and update-scoped
+callers, the separation of rerun authority from approved intent, and rejection
+of old-fence or wrong-host callbacks after an authorized rerun and fresh claim.
+Rejected writes must preserve the complete stored request. This is service
+contract evidence, not PostgreSQL concurrency or positive feedback-resume
+acceptance. The existing PostgreSQL integration gate separately covers claims,
+heartbeats, stale recovery, status fencing, and completion racing linked-PR
+closure.
+
+The worker test module's `_EveryCodeApiHandler` is a transport fixture with
+direct record writes; its successful reruns and feedback sessions do not prove
+service authorization or atomic restart behavior. Direct-store delayed-feedback
+tests establish workspace retention only. Issue
+[#2328](https://github.com/cbusillo/launchplane/issues/2328) tracks the remaining
+authority decisions and service/PostgreSQL acceptance matrix under
+[#2058](https://github.com/cbusillo/launchplane/issues/2058).
+
 Codex Lab's session client maps this provenance into the Discord Blue
 [remote agent session contract](https://github.com/cbusillo/discord-blue/blob/main/docs/agent-session-protocol.md).
 It connects to `/agent-session/connect`; Launchplane does not implement the
