@@ -12,9 +12,7 @@ from control_plane.dokploy import api as dokploy_api
 VeriReelRecoveryScheduleInstance = Literal["testing", "prod", "preview"]
 
 VERIREEL_BILLING_RECOVERY_SCHEDULE_NAME = "verireel-billing-recovery"
-VERIREEL_BILLING_RECOVERY_TARGET_URL = (
-    "http://127.0.0.1:3000/api/cron/billing-recovery"
-)
+VERIREEL_BILLING_RECOVERY_TARGET_URL = "http://127.0.0.1:3000/api/cron/billing-recovery"
 VERIREEL_BILLING_RECOVERY_CANARY_TIMEOUT_SECONDS = 180
 
 _RECOVERY_CRON_EXPRESSIONS: dict[VeriReelRecoveryScheduleInstance, str] = {
@@ -59,7 +57,9 @@ def cron_matches_utc(expression: str, scheduled_at: datetime) -> bool:
 def _validate_cron_expression(expression: str) -> None:
     fields = expression.split()
     if len(fields) != 5:
-        raise click.ClickException("VeriReel billing-recovery cron expression must have five fields.")
+        raise click.ClickException(
+            "VeriReel billing-recovery cron expression must have five fields."
+        )
     try:
         for field, minimum, maximum in zip(
             fields,
@@ -80,8 +80,7 @@ def _cron_field_matches(field: str, value: int, *, minimum: int, maximum: int) -
         if any(not part for part in parts):
             raise ValueError(f"Invalid cron list: {field!r}")
         return any(
-            _cron_field_matches(part, value, minimum=minimum, maximum=maximum)
-            for part in parts
+            _cron_field_matches(part, value, minimum=minimum, maximum=maximum) for part in parts
         )
     if field == "*":
         return True

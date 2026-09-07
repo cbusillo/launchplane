@@ -53,12 +53,19 @@ class _WorkerStore:
 
     def read_work_request(self, request_id: str) -> EveryCodeWorkRequestRecord:
         return EveryCodeWorkRequestRecord(
-            request_id="request", lifecycle_id="lifecycle", source="manual", state="done",
-            repository="example/repository", issue_number=42,
+            request_id="request",
+            lifecycle_id="lifecycle",
+            source="manual",
+            state="done",
+            repository="example/repository",
+            issue_number=42,
             issue_url="https://github.com/example/repository/issues/42",
-            trigger_label="every-code", queued_at="2026-08-06T00:00:00Z",
-            updated_at="2026-08-06T00:00:00Z", claimed_at="2026-08-06T00:00:00Z",
-            claimed_by_host="worker", started_at="2026-08-06T00:00:00Z",
+            trigger_label="every-code",
+            queued_at="2026-08-06T00:00:00Z",
+            updated_at="2026-08-06T00:00:00Z",
+            claimed_at="2026-08-06T00:00:00Z",
+            claimed_by_host="worker",
+            started_at="2026-08-06T00:00:00Z",
             finished_at="2026-08-06T00:00:00Z",
             result_pr_url="https://github.com/example/repository/pull/42",
         )
@@ -78,14 +85,17 @@ class EngineeringReviewWorkerTests(unittest.TestCase):
             ):
                 _verify_worktree(worktree, HEAD_SHA, TREE_SHA)
 
-            with patch(
-                "control_plane.engineering_review_worker.subprocess.run",
-                side_effect=(
-                    subprocess.CompletedProcess((), 0, f"{HEAD_SHA}\n", ""),
-                    subprocess.CompletedProcess((), 0, f"{TREE_SHA}\n", ""),
-                    subprocess.CompletedProcess((), 0, "?? injected.txt\n", ""),
+            with (
+                patch(
+                    "control_plane.engineering_review_worker.subprocess.run",
+                    side_effect=(
+                        subprocess.CompletedProcess((), 0, f"{HEAD_SHA}\n", ""),
+                        subprocess.CompletedProcess((), 0, f"{TREE_SHA}\n", ""),
+                        subprocess.CompletedProcess((), 0, "?? injected.txt\n", ""),
+                    ),
                 ),
-            ), self.assertRaisesRegex(RuntimeError, "not clean"):
+                self.assertRaisesRegex(RuntimeError, "not clean"),
+            ):
                 _verify_worktree(worktree, HEAD_SHA, TREE_SHA)
 
     def test_lease_timeout_and_failure_summary_are_bounded(self) -> None:
@@ -110,9 +120,7 @@ class EngineeringReviewWorkerTests(unittest.TestCase):
                     "binary_sha256": hashlib.sha256(executable.read_bytes()).hexdigest(),
                 }
             )
-            claimed = claim_engineering_review_run(
-                pending, claimed_at="2026-08-06T00:00:00Z"
-            )
+            claimed = claim_engineering_review_run(pending, claimed_at="2026-08-06T00:00:00Z")
             assignment = EngineeringReviewRunAssignment(
                 run=engineering_review_run_view(claimed),
                 credential=credential,
@@ -130,16 +138,20 @@ class EngineeringReviewWorkerTests(unittest.TestCase):
                 store.current = assignment.run.model_copy(update={"state": "completed"})
                 return subprocess.CompletedProcess(command, 0, "", "")
 
-            with patch.dict(
-                os.environ,
-                {
-                    "LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN": "broad-worker-token",
-                    "LAUNCHPLANE_EVERY_CODE_GITHUB_TOKEN": "broad-github-token",
-                },
-            ), patch(
-                "control_plane.engineering_review_worker.every_code_worktree_root",
-                return_value=Path(temporary_directory),
-            ), patch("control_plane.engineering_review_worker._verify_worktree"):
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN": "broad-worker-token",
+                        "LAUNCHPLANE_EVERY_CODE_GITHUB_TOKEN": "broad-github-token",
+                    },
+                ),
+                patch(
+                    "control_plane.engineering_review_worker.every_code_worktree_root",
+                    return_value=Path(temporary_directory),
+                ),
+                patch("control_plane.engineering_review_worker._verify_worktree"),
+            ):
                 result = run_engineering_review_worker_once(
                     store=store,
                     worker_runtime_id=claimed.worker_runtime_id,
@@ -150,9 +162,7 @@ class EngineeringReviewWorkerTests(unittest.TestCase):
                 )
 
         self.assertEqual(captured_command[0], str(executable))
-        self.assertEqual(
-            captured_command[captured_command.index("--model") + 1], claimed.model_id
-        )
+        self.assertEqual(captured_command[captured_command.index("--model") + 1], claimed.model_id)
         self.assertNotIn("LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN", captured_environment)
         self.assertNotIn("LAUNCHPLANE_EVERY_CODE_GITHUB_TOKEN", captured_environment)
         self.assertEqual(

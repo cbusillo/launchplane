@@ -89,7 +89,10 @@ class CaptureLaunchplaneDeployDiagnosticsTests(unittest.TestCase):
                         }
                     },
                     "NetworkSettings": {
-                        "Networks": {"dokploy-network": {}, "compose-launchplane-random_default": {}}
+                        "Networks": {
+                            "dokploy-network": {},
+                            "compose-launchplane-random_default": {},
+                        }
                     },
                 }
             if path == "/api/compose.readLogs":

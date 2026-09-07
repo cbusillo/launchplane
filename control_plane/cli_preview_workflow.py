@@ -170,15 +170,11 @@ def _build_preview_workflow_event(
     action_label_payload = _preview_workflow_object(github_event.get("label"))
     input_payload = _preview_workflow_object(github_event.get("inputs"))
 
-    resolved_labels = label_names or _preview_workflow_label_names(
-        pull_request.get("labels")
-    )
+    resolved_labels = label_names or _preview_workflow_label_names(pull_request.get("labels"))
     resolved_event_name = _preview_workflow_string(event_name) or os.environ.get(
         "GITHUB_EVENT_NAME", ""
     )
-    resolved_action = event_action.strip() or _preview_workflow_string(
-        github_event.get("action")
-    )
+    resolved_action = event_action.strip() or _preview_workflow_string(github_event.get("action"))
     resolved_operation = _preview_workflow_string(operation) or _preview_workflow_string(
         input_payload.get("operation")
     )

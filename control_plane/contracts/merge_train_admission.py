@@ -292,9 +292,7 @@ def _parse_timestamp(value: str) -> datetime:
 
 
 def _format_timestamp(value: datetime) -> str:
-    return value.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace(
-        "+00:00", "Z"
-    )
+    return value.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def _normalize_required_value(value: str, error_message: str) -> str:

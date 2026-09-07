@@ -18,7 +18,9 @@ class PreviewPrepareClientActionTests(unittest.TestCase):
             ACTION_METADATA.read_text(encoding="utf-8"),
         )
 
-    def run_setup_action(self, *, output_path: Path, github_output: Path) -> subprocess.CompletedProcess[str]:
+    def run_setup_action(
+        self, *, output_path: Path, github_output: Path
+    ) -> subprocess.CompletedProcess[str]:
         if shutil.which("node") is None:
             self.skipTest("node is required to test the preview prepare action")
 
@@ -33,7 +35,9 @@ class PreviewPrepareClientActionTests(unittest.TestCase):
             text=True,
         )
 
-    def run_client_script(self, client_path: Path, script_body: str) -> subprocess.CompletedProcess[str]:
+    def run_client_script(
+        self, client_path: Path, script_body: str
+    ) -> subprocess.CompletedProcess[str]:
         if shutil.which("node") is None:
             self.skipTest("node is required to test the preview prepare client")
 
@@ -77,7 +81,9 @@ console.log(Object.keys(client).sort().join(','));
     def test_client_builds_same_repo_refresh_outputs(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             client_path = Path(temporary_directory) / "preview-client.mjs"
-            self.run_setup_action(output_path=client_path, github_output=Path(temporary_directory) / "out")
+            self.run_setup_action(
+                output_path=client_path, github_output=Path(temporary_directory) / "out"
+            )
 
             result = self.run_client_script(
                 client_path,
@@ -120,7 +126,9 @@ console.log(JSON.stringify(outputs));
     def test_client_marks_fork_or_dependabot_preview_as_unsupported(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             client_path = Path(temporary_directory) / "preview-client.mjs"
-            self.run_setup_action(output_path=client_path, github_output=Path(temporary_directory) / "out")
+            self.run_setup_action(
+                output_path=client_path, github_output=Path(temporary_directory) / "out"
+            )
 
             result = self.run_client_script(
                 client_path,
@@ -159,7 +167,9 @@ console.log(JSON.stringify({ fork, dependabot }));
     def test_client_fails_closed_when_actor_is_missing(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             client_path = Path(temporary_directory) / "preview-client.mjs"
-            self.run_setup_action(output_path=client_path, github_output=Path(temporary_directory) / "out")
+            self.run_setup_action(
+                output_path=client_path, github_output=Path(temporary_directory) / "out"
+            )
 
             result = self.run_client_script(
                 client_path,
@@ -186,7 +196,9 @@ console.log(JSON.stringify(outputs));
     def test_client_rejects_invalid_preview_image_facts(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             client_path = Path(temporary_directory) / "preview-client.mjs"
-            self.run_setup_action(output_path=client_path, github_output=Path(temporary_directory) / "out")
+            self.run_setup_action(
+                output_path=client_path, github_output=Path(temporary_directory) / "out"
+            )
 
             result = self.run_client_script(
                 client_path,

@@ -39,33 +39,44 @@ class EmergencyDokployRollbackTests(unittest.TestCase):
             "LAUNCHPLANE_DOKPLOY_DEPLOY_TIMEOUT_SECONDS": "12",
         }
 
-        with patch.dict(os.environ, env, clear=True), patch.object(
-            script_module.control_plane_dokploy,
-            "fetch_dokploy_target_payload",
-            return_value={"env": "DOCKER_IMAGE_REFERENCE=ghcr.io/example/launchplane@sha256:new\n"},
-        ) as fetch_target, patch.object(
-            script_module.control_plane_dokploy,
-            "render_dokploy_env_text_with_overrides",
-            return_value="DOCKER_IMAGE_REFERENCE=ghcr.io/example/launchplane@sha256:old\n",
-        ) as render_env, patch.object(
-            script_module.control_plane_dokploy,
-            "update_dokploy_target_env",
-        ) as update_env, patch.object(
-            script_module.control_plane_dokploy,
-            "latest_deployment_for_target",
-            return_value={"deploymentId": "deploy-before"},
-        ), patch.object(
-            script_module.control_plane_dokploy,
-            "deployment_key",
-            return_value="deploy-before",
-        ), patch.object(
-            script_module.control_plane_dokploy,
-            "trigger_deployment",
-        ) as trigger_deployment, patch.object(
-            script_module.control_plane_dokploy,
-            "wait_for_target_deployment",
-            return_value={"status": "done", "deploymentId": "deploy-after"},
-        ) as wait_for_deployment:
+        with (
+            patch.dict(os.environ, env, clear=True),
+            patch.object(
+                script_module.control_plane_dokploy,
+                "fetch_dokploy_target_payload",
+                return_value={
+                    "env": "DOCKER_IMAGE_REFERENCE=ghcr.io/example/launchplane@sha256:new\n"
+                },
+            ) as fetch_target,
+            patch.object(
+                script_module.control_plane_dokploy,
+                "render_dokploy_env_text_with_overrides",
+                return_value="DOCKER_IMAGE_REFERENCE=ghcr.io/example/launchplane@sha256:old\n",
+            ) as render_env,
+            patch.object(
+                script_module.control_plane_dokploy,
+                "update_dokploy_target_env",
+            ) as update_env,
+            patch.object(
+                script_module.control_plane_dokploy,
+                "latest_deployment_for_target",
+                return_value={"deploymentId": "deploy-before"},
+            ),
+            patch.object(
+                script_module.control_plane_dokploy,
+                "deployment_key",
+                return_value="deploy-before",
+            ),
+            patch.object(
+                script_module.control_plane_dokploy,
+                "trigger_deployment",
+            ) as trigger_deployment,
+            patch.object(
+                script_module.control_plane_dokploy,
+                "wait_for_target_deployment",
+                return_value={"status": "done", "deploymentId": "deploy-after"},
+            ) as wait_for_deployment,
+        ):
             evidence = cast(Any, script_module.run_break_glass_rollback)()
 
         self.assertEqual(evidence["schema_version"], 1)

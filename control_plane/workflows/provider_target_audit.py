@@ -81,8 +81,7 @@ class ProviderTargetAuditResult(BaseModel):
             "warning_count": self.warning_count,
             "counts": self.counts,
             "findings": [
-                finding.model_dump(mode="json", exclude_none=True)
-                for finding in self.findings
+                finding.model_dump(mode="json", exclude_none=True) for finding in self.findings
             ],
         }
 
@@ -110,9 +109,7 @@ def audit_provider_targets(
         for record in record_store.list_dokploy_target_id_records()
     }
     route_keys = sorted(
-        physical_records.keys()
-        | dokploy_target_records.keys()
-        | dokploy_target_id_records.keys()
+        physical_records.keys() | dokploy_target_records.keys() | dokploy_target_id_records.keys()
     )
     findings: list[ProviderTargetAuditFinding] = []
     inspected_route_count = 0
@@ -245,9 +242,7 @@ def _audit_route(
             projected_record=projected_record,
         )
     )
-    if len(findings) == 0 or all(
-        finding.status == "future_provider" for finding in findings
-    ):
+    if len(findings) == 0 or all(finding.status == "future_provider" for finding in findings):
         findings.append(
             _finding(
                 context=context,
@@ -281,8 +276,7 @@ def _compare_records(
                 instance=instance,
                 status="identity_mismatch",
                 severity="blocked",
-                detail="provider-target identity mismatch: "
-                + ", ".join(identity_differences),
+                detail="provider-target identity mismatch: " + ", ".join(identity_differences),
                 physical_record=physical_record,
                 projected_record=projected_record,
             )

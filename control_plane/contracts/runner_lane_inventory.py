@@ -18,15 +18,11 @@ class RunnerLaneRecord(BaseModel):
     @model_validator(mode="after")
     def _normalize_record(self) -> "RunnerLaneRecord":
         self.name = _required_text(self.name, "runner lane requires name")
-        self.repository = _required_text(
-            self.repository, "runner lane requires repository"
-        )
+        self.repository = _required_text(self.repository, "runner lane requires repository")
         self.status = _required_text(self.status, "runner lane requires status").lower()
         self.labels = tuple(sorted({label.strip() for label in self.labels if label.strip()}))
         self.host_hint = self.host_hint.strip()
-        self.observed_at = _required_text(
-            self.observed_at, "runner lane requires observed_at"
-        )
+        self.observed_at = _required_text(self.observed_at, "runner lane requires observed_at")
         return self
 
 

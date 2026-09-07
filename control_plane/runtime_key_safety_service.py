@@ -175,12 +175,8 @@ def merge_runtime_key_safety_target_scopes(
         if existing_scope is None:
             scopes_by_context[requested_scope.context] = requested_scope
             continue
-        existing_restricted = bool(
-            existing_scope.instances or existing_scope.instance_patterns
-        )
-        requested_restricted = bool(
-            requested_scope.instances or requested_scope.instance_patterns
-        )
+        existing_restricted = bool(existing_scope.instances or existing_scope.instance_patterns)
+        requested_restricted = bool(requested_scope.instances or requested_scope.instance_patterns)
         if not existing_restricted or not requested_restricted:
             scopes_by_context[requested_scope.context] = requested_scope.model_copy(
                 update={"instances": (), "instance_patterns": ()}
@@ -188,9 +184,7 @@ def merge_runtime_key_safety_target_scopes(
             continue
         scopes_by_context[requested_scope.context] = requested_scope.model_copy(
             update={
-                "instances": tuple(
-                    sorted({*existing_scope.instances, *requested_scope.instances})
-                ),
+                "instances": tuple(sorted({*existing_scope.instances, *requested_scope.instances})),
                 "instance_patterns": tuple(
                     sorted(
                         {
@@ -205,9 +199,7 @@ def merge_runtime_key_safety_target_scopes(
 
 
 def _has_legacy_scope(rule: RuntimeSecretSafetyRule) -> bool:
-    return bool(
-        rule.allowed_contexts or rule.allowed_instances or rule.allowed_instance_patterns
-    )
+    return bool(rule.allowed_contexts or rule.allowed_instances or rule.allowed_instance_patterns)
 
 
 def merge_runtime_key_safety_instance_scope(

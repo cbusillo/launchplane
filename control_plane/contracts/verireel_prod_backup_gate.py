@@ -12,9 +12,7 @@ class VeriReelProdBackupGateRequest(BaseModel):
     context: str = "verireel"
     instance: str = "prod"
     backup_record_id: str
-    timeout_seconds: int = Field(
-        default=DEFAULT_VERIREEL_PROD_BACKUP_GATE_TIMEOUT_SECONDS, ge=1
-    )
+    timeout_seconds: int = Field(default=DEFAULT_VERIREEL_PROD_BACKUP_GATE_TIMEOUT_SECONDS, ge=1)
 
     @model_validator(mode="after")
     def _validate_request(self) -> "VeriReelProdBackupGateRequest":
@@ -34,9 +32,7 @@ class VeriReelProdBackupGateWorkerRequest(BaseModel):
     context: str
     instance: str
     backup_record_id: str
-    timeout_seconds: int = Field(
-        default=DEFAULT_VERIREEL_PROD_BACKUP_GATE_TIMEOUT_SECONDS, ge=1
-    )
+    timeout_seconds: int = Field(default=DEFAULT_VERIREEL_PROD_BACKUP_GATE_TIMEOUT_SECONDS, ge=1)
 
 
 class VeriReelProdBackupGateWorkerResult(BaseModel):

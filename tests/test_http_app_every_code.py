@@ -2048,15 +2048,11 @@ class FastApiEveryCodeReadTests(unittest.IsolatedAsyncioTestCase):
             "complete_engineering_review_run",
         )
         self.assertEqual(
-            openapi["paths"]["/v1/engineering-review-decisions/evaluate"]["post"][
-                "operationId"
-            ],
+            openapi["paths"]["/v1/engineering-review-decisions/evaluate"]["post"]["operationId"],
             "evaluate_engineering_review_decision",
         )
         self.assertEqual(
-            openapi["paths"]["/v1/engineering-review-decisions/project"]["post"][
-                "operationId"
-            ],
+            openapi["paths"]["/v1/engineering-review-decisions/project"]["post"]["operationId"],
             "project_engineering_review_decision",
         )
         create_schema = json.dumps(

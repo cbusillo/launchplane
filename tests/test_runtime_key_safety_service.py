@@ -252,9 +252,7 @@ class RuntimeKeySafetyServiceTests(unittest.TestCase):
                 RuntimeSecretSafetyRule(
                     binding_key="POSTGRES_PASSWORD",
                     secret_class="shared_safe",
-                    allowed_targets=(
-                        _target_scope("verireel-testing", instances=("pr-216",)),
-                    ),
+                    allowed_targets=(_target_scope("verireel-testing", instances=("pr-216",)),),
                 ),
             ),
             (
