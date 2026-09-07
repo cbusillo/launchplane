@@ -9,3 +9,5 @@ title: Python Style
 - Avoid abbreviations and low-signal variable names.
 - Prefer `pathlib.Path` over string path manipulation.
 - Keep CLI commands thin; put real logic in package modules.
+- Run the Ruff formatting check defined in `.github/github.json`; CI enforces it
+  for both same-repository and fork pull requests.
