@@ -18,7 +18,9 @@ class SmokeMaintenanceClientActionTests(unittest.TestCase):
             ACTION_METADATA.read_text(encoding="utf-8"),
         )
 
-    def run_setup_action(self, *, output_path: Path, github_output: Path) -> subprocess.CompletedProcess[str]:
+    def run_setup_action(
+        self, *, output_path: Path, github_output: Path
+    ) -> subprocess.CompletedProcess[str]:
         if shutil.which("node") is None:
             self.skipTest("node is required to test the smoke maintenance action")
 
@@ -33,7 +35,9 @@ class SmokeMaintenanceClientActionTests(unittest.TestCase):
             text=True,
         )
 
-    def run_client_script(self, client_path: Path, script_body: str) -> subprocess.CompletedProcess[str]:
+    def run_client_script(
+        self, client_path: Path, script_body: str
+    ) -> subprocess.CompletedProcess[str]:
         if shutil.which("node") is None:
             self.skipTest("node is required to test the smoke maintenance client")
 
@@ -76,7 +80,9 @@ console.log(Object.keys(client).sort().join(','));
     def test_client_builds_verireel_smoke_request(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             client_path = Path(temporary_directory) / "smoke-client.mjs"
-            self.run_setup_action(output_path=client_path, github_output=Path(temporary_directory) / "out")
+            self.run_setup_action(
+                output_path=client_path, github_output=Path(temporary_directory) / "out"
+            )
 
             result = self.run_client_script(
                 client_path,
@@ -127,7 +133,9 @@ console.log(JSON.stringify({ request, idempotencyKey }));
     def test_client_derives_stable_owner_smoke_intent(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             client_path = Path(temporary_directory) / "smoke-client.mjs"
-            self.run_setup_action(output_path=client_path, github_output=Path(temporary_directory) / "out")
+            self.run_setup_action(
+                output_path=client_path, github_output=Path(temporary_directory) / "out"
+            )
 
             result = self.run_client_script(
                 client_path,
@@ -153,7 +161,9 @@ console.log(JSON.stringify(request.payload.maintenance));
     def test_client_derives_stable_grant_smoke_intent(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             client_path = Path(temporary_directory) / "smoke-client.mjs"
-            self.run_setup_action(output_path=client_path, github_output=Path(temporary_directory) / "out")
+            self.run_setup_action(
+                output_path=client_path, github_output=Path(temporary_directory) / "out"
+            )
 
             result = self.run_client_script(
                 client_path,
@@ -179,7 +189,9 @@ console.log(JSON.stringify(request.payload.maintenance));
     def test_client_derives_stable_delete_smoke_intent(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             client_path = Path(temporary_directory) / "smoke-client.mjs"
-            self.run_setup_action(output_path=client_path, github_output=Path(temporary_directory) / "out")
+            self.run_setup_action(
+                output_path=client_path, github_output=Path(temporary_directory) / "out"
+            )
 
             result = self.run_client_script(
                 client_path,
@@ -205,7 +217,9 @@ console.log(JSON.stringify(request.payload.maintenance));
     def test_client_rejects_mismatched_smoke_intent(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             client_path = Path(temporary_directory) / "smoke-client.mjs"
-            self.run_setup_action(output_path=client_path, github_output=Path(temporary_directory) / "out")
+            self.run_setup_action(
+                output_path=client_path, github_output=Path(temporary_directory) / "out"
+            )
 
             result = self.run_client_script(
                 client_path,
@@ -229,7 +243,9 @@ client.buildLaunchplaneSmokeMaintenanceRequest({
     def test_client_rejects_unsupported_smoke_context_action(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             client_path = Path(temporary_directory) / "smoke-client.mjs"
-            self.run_setup_action(output_path=client_path, github_output=Path(temporary_directory) / "out")
+            self.run_setup_action(
+                output_path=client_path, github_output=Path(temporary_directory) / "out"
+            )
 
             result = self.run_client_script(
                 client_path,
@@ -247,12 +263,16 @@ client.buildLaunchplaneSmokeMaintenanceRequest({
             )
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("Unsupported VeriReel smoke maintenance context/action combination", result.stderr)
+        self.assertIn(
+            "Unsupported VeriReel smoke maintenance context/action combination", result.stderr
+        )
 
     def test_client_rejects_workflow_maintenance_action(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             client_path = Path(temporary_directory) / "smoke-client.mjs"
-            self.run_setup_action(output_path=client_path, github_output=Path(temporary_directory) / "out")
+            self.run_setup_action(
+                output_path=client_path, github_output=Path(temporary_directory) / "out"
+            )
 
             result = self.run_client_script(
                 client_path,
@@ -273,7 +293,9 @@ client.buildLaunchplaneSmokeMaintenanceRequest({
     def test_client_posts_oidc_authenticated_request(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             client_path = Path(temporary_directory) / "smoke-client.mjs"
-            self.run_setup_action(output_path=client_path, github_output=Path(temporary_directory) / "out")
+            self.run_setup_action(
+                output_path=client_path, github_output=Path(temporary_directory) / "out"
+            )
 
             result = self.run_client_script(
                 client_path,
@@ -309,19 +331,25 @@ console.log(JSON.stringify({ calls, result }));
         payload = json.loads(result.stdout)
         calls = payload["calls"]
         self.assertEqual(calls[0]["url"], "https://oidc.example/token?audience=launchplane.example")
-        self.assertEqual(calls[1]["url"], "https://launchplane.example/v1/drivers/verireel/app-maintenance")
+        self.assertEqual(
+            calls[1]["url"], "https://launchplane.example/v1/drivers/verireel/app-maintenance"
+        )
         self.assertEqual(calls[1]["init"]["headers"]["Authorization"], "Bearer oidc-token")
         self.assertEqual(
             calls[1]["init"]["headers"]["Idempotency-Key"],
             "product-smoke-maintenance:verireel:verireel:testing:promote-owner:owner-route-promote-owner:::owner@example.com",
         )
-        self.assertEqual(json.loads(calls[1]["init"]["body"])["maintenance"]["action"], "promote-owner")
+        self.assertEqual(
+            json.loads(calls[1]["init"]["body"])["maintenance"]["action"], "promote-owner"
+        )
         self.assertEqual(payload["result"]["statusCode"], 200)
 
     def test_client_reports_non_json_http_failure_body(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             client_path = Path(temporary_directory) / "smoke-client.mjs"
-            self.run_setup_action(output_path=client_path, github_output=Path(temporary_directory) / "out")
+            self.run_setup_action(
+                output_path=client_path, github_output=Path(temporary_directory) / "out"
+            )
 
             result = self.run_client_script(
                 client_path,
@@ -356,7 +384,9 @@ await client.requestLaunchplaneSmokeMaintenance({
     def test_client_fails_on_blocked_maintenance_result(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             client_path = Path(temporary_directory) / "smoke-client.mjs"
-            self.run_setup_action(output_path=client_path, github_output=Path(temporary_directory) / "out")
+            self.run_setup_action(
+                output_path=client_path, github_output=Path(temporary_directory) / "out"
+            )
 
             result = self.run_client_script(
                 client_path,
@@ -390,7 +420,9 @@ await client.requestLaunchplaneSmokeMaintenance({
     def test_client_requires_github_oidc_environment(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             client_path = Path(temporary_directory) / "smoke-client.mjs"
-            self.run_setup_action(output_path=client_path, github_output=Path(temporary_directory) / "out")
+            self.run_setup_action(
+                output_path=client_path, github_output=Path(temporary_directory) / "out"
+            )
 
             result = self.run_client_script(
                 client_path,

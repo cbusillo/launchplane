@@ -121,8 +121,8 @@ def build_merge_train_run_record(
 
 
 def build_merge_train_run_record_id(record: MergeTrainRunRecord) -> str:
-    normalized_timestamp = record.recorded_at.replace("-", "").replace(":", "").replace(
-        "+00:00", "Z"
+    normalized_timestamp = (
+        record.recorded_at.replace("-", "").replace(":", "").replace("+00:00", "Z")
     )
     digest_payload = record.model_dump(mode="json", exclude={"run_id"})
     digest = hashlib.sha256(

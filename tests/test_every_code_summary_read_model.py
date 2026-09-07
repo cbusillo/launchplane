@@ -98,7 +98,9 @@ class EveryCodeSummaryReadModelTests(unittest.TestCase):
         self.assertIn("work_request_record", {entry.code for entry in summaries[191].evidence})
         self.assertNotIn("private", summaries[191].model_dump_json())
         self.assertEqual(summaries[192].summary_status, "complete")
-        self.assertEqual(summaries[192].result_pr_url, "https://github.com/cbusillo/launchplane/pull/200")
+        self.assertEqual(
+            summaries[192].result_pr_url, "https://github.com/cbusillo/launchplane/pull/200"
+        )
         self.assertEqual(summaries[192].result_summary, "PR opened with focused implementation.")
 
     def test_summary_supports_repo_issue_and_state_filters(self) -> None:

@@ -69,15 +69,11 @@ class EveryCodePreviewGateRecord(BaseModel):
         return self
 
 
-def build_every_code_preview_gate_id(
-    *, repository: str, pr_number: int, head_sha: str
-) -> str:
+def build_every_code_preview_gate_id(*, repository: str, pr_number: int, head_sha: str) -> str:
     normalized_repository = repository.strip().lower()
     normalized_sha = head_sha.strip().lower()
     if not normalized_repository or pr_number < 1 or not normalized_sha:
-        raise ValueError(
-            "Every Code preview gate id requires repository, pr_number, and head_sha"
-        )
+        raise ValueError("Every Code preview gate id requires repository, pr_number, and head_sha")
     digest = hashlib.sha256(
         f"{normalized_repository}#{pr_number}:{normalized_sha}".encode("utf-8")
     ).hexdigest()[:16]

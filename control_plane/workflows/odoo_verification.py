@@ -183,7 +183,9 @@ def verify_odoo_stable_readiness(
     except click.ClickException as error:
         return OdooVerificationResult(
             health_status="fail" if verify_health and health_status != "pass" else health_status,
-            canonical_status="fail" if verify_canonical and canonical_status != "pass" else canonical_status,
+            canonical_status="fail"
+            if verify_canonical and canonical_status != "pass"
+            else canonical_status,
             logo_status="fail" if verify_logo and logo_status != "pass" else logo_status,
             evidence=OdooVerificationEvidence(
                 base_url=normalized_base_url,
@@ -299,7 +301,9 @@ def _verify_logo_route(
         evidence = OdooVerificationProbeEvidence(
             probe="logo", url=logo_url, status_code=status_code, content_type=content_type
         )
-        if status_code < 400 and not ("text/html" in content_type.lower() and "404" in body[:500].lower()):
+        if status_code < 400 and not (
+            "text/html" in content_type.lower() and "404" in body[:500].lower()
+        ):
             return evidence.model_copy(update={"status": "pass"}), tuple(checked_urls)
         failure_class = "http" if status_code >= 400 else "html_404"
         last_failure = evidence.model_copy(
@@ -328,7 +332,9 @@ def _candidate_logo_urls(*, base_url: str, timeout_seconds: int) -> tuple[str, .
     normalized_base_url = base_url.rstrip("/")
     fallback_url = f"{normalized_base_url}/web/image/website/1/logo"
     candidates: list[str] = []
-    status_code, body, _content_type = _http_text(normalized_base_url, timeout_seconds=timeout_seconds)
+    status_code, body, _content_type = _http_text(
+        normalized_base_url, timeout_seconds=timeout_seconds
+    )
     if status_code < 400:
         candidates.extend(_extract_same_origin_logo_urls(base_url=normalized_base_url, body=body))
     if fallback_url not in candidates:

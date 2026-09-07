@@ -199,12 +199,8 @@ def _normalize_unique_values(values: tuple[str, ...], empty_message: str) -> tup
 
 def _validate_instance_pattern(pattern: str, field_name: str) -> None:
     if any(character in pattern for character in ("/", "\\")):
-        raise ValueError(
-            f"runtime secret safety {field_name} cannot contain path separators"
-        )
+        raise ValueError(f"runtime secret safety {field_name} cannot contain path separators")
     if not any(character not in "*?[]!" for character in pattern):
-        raise ValueError(
-            f"runtime secret safety {field_name} must contain a literal character"
-        )
+        raise ValueError(f"runtime secret safety {field_name} must contain a literal character")
     if any(character in string.whitespace for character in pattern):
         raise ValueError(f"runtime secret safety {field_name} cannot contain whitespace")

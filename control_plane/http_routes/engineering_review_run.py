@@ -289,9 +289,7 @@ def register_engineering_review_routes(
                 store=require_engineering_review_run_create_store(record_store),
                 work_request_id=request.work_request_id,
                 target_resolver=write_dependencies.target_resolver,
-                repository_evidence_provider=(
-                    write_dependencies.repository_evidence_provider
-                ),
+                repository_evidence_provider=(write_dependencies.repository_evidence_provider),
             )
         except (
             TypeError,

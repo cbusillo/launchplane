@@ -149,9 +149,7 @@ def build_agent_write_intent_record_id(
     request: AgentWriteIntentRequest,
     evaluation: AgentWriteIntentEvaluation,
 ) -> str:
-    normalized_timestamp = recorded_at.replace("-", "").replace(":", "").replace(
-        "+00:00", "Z"
-    )
+    normalized_timestamp = recorded_at.replace("-", "").replace(":", "").replace("+00:00", "Z")
     payload = {
         "trace_id": trace_id,
         "intent": request.model_dump(mode="json"),
@@ -216,7 +214,9 @@ def evaluate_agent_write_intent(
             safe_to_execute=False,
             next_action="Fix the managed secret binding policy or destination before requesting this intent.",
             reason_code="secret_evidence_denied",
-            audit=audit.model_copy(update={"decision": "denied", "reason_code": "secret_evidence_denied"}),
+            audit=audit.model_copy(
+                update={"decision": "denied", "reason_code": "secret_evidence_denied"}
+            ),
             secret_evidence=resolved_secret_evidence,
         )
     if request.mode == "apply" and request.intent in _DRY_RUN_ONLY_INTENTS:
@@ -231,7 +231,9 @@ def evaluate_agent_write_intent(
             safe_to_execute=False,
             next_action="Run this intent in dry_run mode before requesting apply authority.",
             reason_code="dry_run_required",
-            audit=audit.model_copy(update={"decision": "denied", "reason_code": "dry_run_required"}),
+            audit=audit.model_copy(
+                update={"decision": "denied", "reason_code": "dry_run_required"}
+            ),
             secret_evidence=resolved_secret_evidence,
         )
     if not authorized:

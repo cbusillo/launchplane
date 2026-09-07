@@ -25,8 +25,12 @@ from control_plane.every_code_worker import (
 
 
 class EngineeringReviewWorkerStore(Protocol):
-    def list_pending(self, *, worker_runtime_id: str, worker_host: str) -> tuple[EngineeringReviewRunView, ...]: ...
-    def claim(self, request: EngineeringReviewRunClaimRequest) -> EngineeringReviewRunAssignment: ...
+    def list_pending(
+        self, *, worker_runtime_id: str, worker_host: str
+    ) -> tuple[EngineeringReviewRunView, ...]: ...
+    def claim(
+        self, request: EngineeringReviewRunClaimRequest
+    ) -> EngineeringReviewRunAssignment: ...
     def start(self, request: EngineeringReviewRunWorkerUpdate) -> EngineeringReviewRunView: ...
     def read(self, run_id: str) -> EngineeringReviewRunView: ...
     def fail(self, request: EngineeringReviewRunWorkerFailure) -> EngineeringReviewRunView: ...
@@ -134,10 +138,14 @@ def run_engineering_review_worker_once(
         store.start(update)
         command = (
             str(executable),
-            "--model", run.model_id,
-            "--sandbox", "read-only",
-            "--ask-for-approval", "never",
-            "--cd", str(worktree),
+            "--model",
+            run.model_id,
+            "--sandbox",
+            "read-only",
+            "--ask-for-approval",
+            "never",
+            "--cd",
+            str(worktree),
             "exec",
             _review_prompt(run.run_id),
         )
@@ -227,14 +235,27 @@ def _verify_worktree(worktree: Path, expected_head_sha: str, expected_tree_sha: 
 
 
 def _review_environment(*, service_url: str, credential: str) -> dict[str, str]:
-    allowed = {key: value for key, value in os.environ.items() if key in {
-        "HOME", "USER", "LOGNAME", "TMPDIR", "LANG", "LC_ALL", "SSL_CERT_FILE",
-        "SSL_CERT_DIR", "CODE_HOME", "CODEX_HOME",
-    }}
+    allowed = {
+        key: value
+        for key, value in os.environ.items()
+        if key
+        in {
+            "HOME",
+            "USER",
+            "LOGNAME",
+            "TMPDIR",
+            "LANG",
+            "LC_ALL",
+            "SSL_CERT_FILE",
+            "SSL_CERT_DIR",
+            "CODE_HOME",
+            "CODEX_HOME",
+        }
+    }
     allowed["PATH"] = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
-    allowed["LAUNCHPLANE_ENGINEERING_REVIEW_URL"] = service_url.rstrip(
-        "/"
-    ) + "/v1/engineering-review-runs/complete"
+    allowed["LAUNCHPLANE_ENGINEERING_REVIEW_URL"] = (
+        service_url.rstrip("/") + "/v1/engineering-review-runs/complete"
+    )
     allowed["LAUNCHPLANE_ENGINEERING_REVIEW_CREDENTIAL"] = credential
     allowed.pop("LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN", None)
     allowed.pop(EVERY_CODE_GITHUB_TOKEN_ENV_KEY, None)
