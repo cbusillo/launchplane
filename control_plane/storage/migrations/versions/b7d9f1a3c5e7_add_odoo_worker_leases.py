@@ -97,9 +97,7 @@ def downgrade() -> None:
         _REPLACEMENT_TABLE, _REPLACEMENT_CLAIM_INDEX
     ):
         op.drop_index(_REPLACEMENT_CLAIM_INDEX, table_name=_REPLACEMENT_TABLE)
-    if _table_exists(_BOOTSTRAP_TABLE) and _index_exists(
-        _BOOTSTRAP_TABLE, _BOOTSTRAP_CLAIM_INDEX
-    ):
+    if _table_exists(_BOOTSTRAP_TABLE) and _index_exists(_BOOTSTRAP_TABLE, _BOOTSTRAP_CLAIM_INDEX):
         op.drop_index(_BOOTSTRAP_CLAIM_INDEX, table_name=_BOOTSTRAP_TABLE)
     _drop_lease_columns(_REPLACEMENT_TABLE)
     _drop_lease_columns(_BOOTSTRAP_TABLE)

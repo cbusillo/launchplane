@@ -2239,11 +2239,9 @@ ODOO_DB_PASSWORD = "file-secret"
                         "--allow-direct-db-mutation",
                     ],
                 )
-                context_values = (
-                    control_plane_runtime_environments.resolve_runtime_context_values(
-                        control_plane_root=control_plane_root,
-                        context_name="launchplane",
-                    )
+                context_values = control_plane_runtime_environments.resolve_runtime_context_values(
+                    control_plane_root=control_plane_root,
+                    context_name="launchplane",
                 )
 
             self.assertEqual(result.exit_code, 0, result.output)

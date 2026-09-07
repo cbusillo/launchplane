@@ -56,9 +56,7 @@ def upgrade() -> None:
             sa.Column("attempt", sa.Integer(), server_default="0", nullable=False),
             sa.Column(
                 "payload",
-                sa.JSON().with_variant(
-                    postgresql.JSONB(astext_type=sa.Text()), "postgresql"
-                ),
+                sa.JSON().with_variant(postgresql.JSONB(astext_type=sa.Text()), "postgresql"),
                 nullable=False,
             ),
             sa.PrimaryKeyConstraint("operation_id"),

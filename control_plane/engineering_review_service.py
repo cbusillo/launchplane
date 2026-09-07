@@ -240,8 +240,8 @@ def create_engineering_review_runs(
         )
         plaintext_credential, credential_hash = generate_engineering_review_run_credential()
         try:
-            credential_ciphertext, credential_key_id = (
-                control_plane_secrets._encrypt_secret_value(plaintext_credential)
+            credential_ciphertext, credential_key_id = control_plane_secrets._encrypt_secret_value(
+                plaintext_credential
             )
         except Exception as error:
             raise EngineeringReviewUnavailableError(
@@ -304,7 +304,9 @@ def resolve_engineering_review_pull_request_target(
         )
     reference = github_pull_request_reference(pr_url=work_request.result_pr_url)
     if reference is None:
-        raise EngineeringReviewConflictError("Stored work request result_pr_url is not a GitHub PR.")
+        raise EngineeringReviewConflictError(
+            "Stored work request result_pr_url is not a GitHub PR."
+        )
     owner = str(reference["owner"])
     repo = str(reference["repo"])
     pr_number = int(reference["pr_number"])

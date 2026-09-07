@@ -364,9 +364,7 @@ await import('./{ACTION_ENTRYPOINT.as_posix()}');
             central_offset = int.from_bytes(archive[end_offset + 16 : end_offset + 20], "little")
             checksum_and_sizes = archive[central_offset + 16 : central_offset + 28]
             descriptor = b"PK\x07\x08" + checksum_and_sizes
-            mutated = bytearray(
-                archive[:central_offset] + descriptor + archive[central_offset:]
-            )
+            mutated = bytearray(archive[:central_offset] + descriptor + archive[central_offset:])
             mutated[6:8] = (int.from_bytes(mutated[6:8], "little") | 8).to_bytes(2, "little")
             mutated[14:26] = b"\0" * 12
             moved_central_offset = central_offset + len(descriptor)
@@ -405,9 +403,7 @@ await import('./{ACTION_ENTRYPOINT.as_posix()}');
             end_offset = archive.rfind(b"PK\x05\x06")
             central_offset = int.from_bytes(archive[end_offset + 16 : end_offset + 20], "little")
             hidden_data = b"hidden"
-            mutated = bytearray(
-                archive[:central_offset] + hidden_data + archive[central_offset:]
-            )
+            mutated = bytearray(archive[:central_offset] + hidden_data + archive[central_offset:])
             moved_end_offset = end_offset + len(hidden_data)
             mutated[moved_end_offset + 16 : moved_end_offset + 20] = (
                 central_offset + len(hidden_data)

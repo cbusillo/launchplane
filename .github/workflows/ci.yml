@@ -43,6 +43,9 @@ jobs:
       - name: Run Ruff
         run: uv run --extra dev ruff check .
 
+      - name: Check Ruff formatting
+        run: uv run --extra dev ruff format --check .
+
       - name: Run mypy
         run: uv run --extra dev mypy control_plane tests
 
@@ -73,6 +76,9 @@ jobs:
 
       - name: Run Ruff
         run: uv run --extra dev ruff check .
+
+      - name: Check Ruff formatting
+        run: uv run --extra dev ruff format --check .
 
       - name: Run mypy
         run: uv run --extra dev mypy control_plane tests

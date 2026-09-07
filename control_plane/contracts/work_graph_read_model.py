@@ -569,7 +569,11 @@ def _recommendation_reasons(
 def _safe_to_start(*, issue: WorkGraphIssueSnapshot, state: WorkItemState) -> bool:
     if state != "ready":
         return False
-    return issue.focus in {"Now", "Next"} or issue.check_state == "failure" or issue.deploy_state == "failure"
+    return (
+        issue.focus in {"Now", "Next"}
+        or issue.check_state == "failure"
+        or issue.deploy_state == "failure"
+    )
 
 
 def _next_action(
@@ -589,7 +593,9 @@ def _next_action(
     if recommendation == "quick_win":
         return "Start a focused branch from the linked source of truth."
     if recommendation == "deep_work":
-        return "Confirm the next slice, then start a focused branch from the linked source of truth."
+        return (
+            "Confirm the next slice, then start a focused branch from the linked source of truth."
+        )
     return "Review the linked source of truth before changing code."
 
 

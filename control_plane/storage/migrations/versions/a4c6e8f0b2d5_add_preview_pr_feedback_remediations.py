@@ -29,8 +29,7 @@ def _index_exists(index_name: str) -> bool:
     if not _table_exists():
         return False
     return index_name in {
-        str(index["name"])
-        for index in sa.inspect(op.get_bind()).get_indexes(_TABLE)
+        str(index["name"]) for index in sa.inspect(op.get_bind()).get_indexes(_TABLE)
     }
 
 

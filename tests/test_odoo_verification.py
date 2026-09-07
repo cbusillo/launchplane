@@ -105,7 +105,11 @@ class OdooVerificationTests(unittest.TestCase):
             self.assertEqual(timeout_seconds, 5)
             calls.append(url)
             if url == "https://cm-testing.example.com":
-                return 200, '<link rel="canonical" href="https://cm-testing.example.com">', "text/html"
+                return (
+                    200,
+                    '<link rel="canonical" href="https://cm-testing.example.com">',
+                    "text/html",
+                )
             if url == "https://cm-testing.example.com/web/image/website/1/logo":
                 return 200, "image-bytes", "image/png"
             return 404, "missing", "text/plain"
@@ -170,7 +174,11 @@ class OdooVerificationTests(unittest.TestCase):
             self.assertEqual(timeout_seconds, 5)
             calls.append(url)
             if url == "https://cm-testing.example.com":
-                return 200, '<link rel="canonical" href="https://cm-testing.example.com">', "text/html"
+                return (
+                    200,
+                    '<link rel="canonical" href="https://cm-testing.example.com">',
+                    "text/html",
+                )
             if url == "https://cm-testing.example.com/web/image/website/1/logo":
                 return 404, "missing", "text/plain"
             return 404, "missing", "text/plain"
@@ -212,7 +220,9 @@ class OdooVerificationTests(unittest.TestCase):
             return 200, "<html>not canonical yet</html>", "text/html"
 
         with (
-            patch("control_plane.workflows.odoo_verification._http_text", side_effect=fake_http_text),
+            patch(
+                "control_plane.workflows.odoo_verification._http_text", side_effect=fake_http_text
+            ),
             patch(
                 "control_plane.workflows.odoo_verification.time.sleep",
                 side_effect=lambda _seconds: None,
@@ -237,11 +247,17 @@ class OdooVerificationTests(unittest.TestCase):
         def fake_http_text(url: str, *, timeout_seconds: int) -> tuple[int, str, str]:
             calls.append(url)
             if url == "https://cm-testing.example.com":
-                return 200, '<link rel="canonical" href="https://cm-testing.example.com">', "text/html"
+                return (
+                    200,
+                    '<link rel="canonical" href="https://cm-testing.example.com">',
+                    "text/html",
+                )
             return 404, "missing", "text/plain"
 
         with (
-            patch("control_plane.workflows.odoo_verification._http_text", side_effect=fake_http_text),
+            patch(
+                "control_plane.workflows.odoo_verification._http_text", side_effect=fake_http_text
+            ),
             patch(
                 "control_plane.workflows.odoo_verification.time.sleep",
                 side_effect=lambda _seconds: None,
@@ -325,7 +341,9 @@ class OdooVerificationTests(unittest.TestCase):
             return 200, '{"status":"ok"}', "application/json"
 
         with (
-            patch("control_plane.workflows.odoo_verification._http_text", side_effect=fake_http_text),
+            patch(
+                "control_plane.workflows.odoo_verification._http_text", side_effect=fake_http_text
+            ),
             patch(
                 "control_plane.workflows.odoo_verification.time.sleep",
                 side_effect=lambda _seconds: None,
@@ -356,7 +374,9 @@ class OdooVerificationTests(unittest.TestCase):
             return 200, '{"status":"ok"}', "application/json"
 
         with (
-            patch("control_plane.workflows.odoo_verification._http_text", side_effect=fake_http_text),
+            patch(
+                "control_plane.workflows.odoo_verification._http_text", side_effect=fake_http_text
+            ),
             patch(
                 "control_plane.workflows.odoo_verification.time.sleep",
                 side_effect=lambda _seconds: None,
@@ -387,7 +407,9 @@ class OdooVerificationTests(unittest.TestCase):
             return 200, '{"status":"healthy"}', "application/json"
 
         with (
-            patch("control_plane.workflows.odoo_verification._http_text", side_effect=fake_http_text),
+            patch(
+                "control_plane.workflows.odoo_verification._http_text", side_effect=fake_http_text
+            ),
             patch(
                 "control_plane.workflows.odoo_verification.time.sleep",
                 side_effect=lambda _seconds: None,

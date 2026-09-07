@@ -193,19 +193,15 @@ class ProductRetirementOperatorWorkflowTests(unittest.TestCase):
         assert request_step is not None
         self.assertRegex(
             request_step.uses,
-            re.compile(
-                r"^cbusillo/launchplane/\.github/actions/launchplane-request@[0-9a-f]{40}$"
-            ),
+            re.compile(r"^cbusillo/launchplane/\.github/actions/launchplane-request@[0-9a-f]{40}$"),
         )
         self.assertEqual(request_step.with_values["route-path"], "/v1/product-retirement")
 
-        validation = self.reusable_workflow.step_named(
-            "retire", "Validate exact retirement intent"
-        )
+        validation = self.reusable_workflow.step_named("retire", "Validate exact retirement intent")
         self.assertIsNotNone(validation)
         assert validation is not None
         self.assertIn('case "$MODE" in', validation.run)
-        self.assertIn('plan|apply)', validation.run)
+        self.assertIn("plan|apply)", validation.run)
         self.assertIn("exactly bind product, instance, and target digest", validation.run)
 
         evidence = self.reusable_workflow.step_named(
@@ -216,9 +212,7 @@ class ProductRetirementOperatorWorkflowTests(unittest.TestCase):
         for identifier in ("target_id", "domain_ids", "provider_operation_key"):
             self.assertIn(identifier, evidence.run)
 
-        upload = self.reusable_workflow.step_named(
-            "retire", "Upload redacted retirement evidence"
-        )
+        upload = self.reusable_workflow.step_named("retire", "Upload redacted retirement evidence")
         self.assertIsNotNone(upload)
         assert upload is not None
         self.assertEqual(

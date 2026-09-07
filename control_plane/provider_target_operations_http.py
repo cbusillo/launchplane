@@ -79,9 +79,7 @@ def provider_target_operation_authorized(
     request: ProviderTargetOperationEnvelope,
 ) -> bool:
     action = (
-        "provider_target.backfill"
-        if request.mode == "backfill-apply"
-        else "provider_target.audit"
+        "provider_target.backfill" if request.mode == "backfill-apply" else "provider_target.audit"
     )
     return authz_policy.allows(
         identity=identity,
