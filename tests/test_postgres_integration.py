@@ -6594,3 +6594,604 @@ class RealPostgresFeedbackResumeEvidenceTests(unittest.TestCase):
                 self.assertEqual(store.list_every_code_feedback_acceptance_records(), ())
             finally:
                 store.close()
+
+
+class RealPostgresFeedbackIntentMintTests(unittest.TestCase):
+    @staticmethod
+    def seed(
+        store: PostgresRecordStore,
+    ) -> tuple[Any, EveryCodeWorkRequestRecord, LaunchplaneAuthzPolicyRecord]:
+        from control_plane.service_auth import GitHubHumanPolicyRule, LaunchplaneAuthzPolicy
+        from tests.test_every_code_feedback_resume_intent import request_fixture
+        from control_plane.contracts.every_code_feedback_resume import (
+            every_code_feedback_eligible_until,
+        )
+
+        now = (
+            (datetime.now(timezone.utc) - timedelta(seconds=60))
+            .isoformat(timespec="microseconds")
+            .replace("+00:00", "Z")
+        )
+        original = _feedback_acceptance()
+        revision = original.revision.model_dump()
+        revision.update(provider_updated_at=now, revision_digest="")
+        acceptance = type(original).model_validate(
+            {
+                **original.model_dump(),
+                "revision": revision,
+                "received_at": now,
+                "created_at": now,
+                "eligible_until": every_code_feedback_eligible_until(
+                    first_received_at=now, provider_updated_at=now
+                ),
+                "acceptance_digest": "",
+            }
+        )
+        request = request_fixture()
+        store.write_every_code_work_request_record(request)
+        store.write_every_code_feedback_acceptance_record(acceptance)
+        policy = LaunchplaneAuthzPolicyRecord(
+            record_id="policy-mint",
+            source="test",
+            updated_at=now,
+            policy=LaunchplaneAuthzPolicy(
+                schema_version=2,
+                github_humans=(
+                    GitHubHumanPolicyRule(
+                        managed_set_id="feedback-test",
+                        managed_rule_id="human",
+                        github_ids=(90,),
+                        products=("launchplane",),
+                        contexts=("launchplane",),
+                        actions=("every_code_feedback_resume.request",),
+                        instances=("github-repository:34",),
+                    ),
+                ),
+            ),
+        )
+        return acceptance, request, store.seed_authz_policy_if_absent(policy)
+
+    @staticmethod
+    def observation() -> Any:
+        from tests.test_every_code_feedback_resume_intent import observation_fixture
+
+        return observation_fixture(
+            datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+        )
+
+    def test_concurrent_mint_replays_one_immutable_record_without_request_mutation(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            acceptance, request, _ = self.seed(store)
+            barrier = threading.Barrier(2)
+            observation = self.observation()
+
+            def mint() -> Any:
+                barrier.wait(timeout=5)
+                return store.mint_every_code_feedback_resume_intent(
+                    acceptance_id=acceptance.acceptance_id, open_observation=observation
+                )
+
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                results = [
+                    future.result(timeout=15) for future in [pool.submit(mint), pool.submit(mint)]
+                ]
+            self.assertEqual(sorted(result.status for result in results), ["mint", "replay"])
+            self.assertEqual(results[0].record, results[1].record)
+            self.assertEqual(
+                len(
+                    store.list_every_code_feedback_resume_intent_records(
+                        request_id=request.request_id
+                    )
+                ),
+                1,
+            )
+            self.assertEqual(store.read_every_code_work_request_record(request.request_id), request)
+            replay = store.mint_every_code_feedback_resume_intent(
+                acceptance_id=acceptance.acceptance_id, open_observation=None
+            )
+            self.assertEqual(replay.record, results[0].record)
+            self.assertEqual(replay.status, "replay")
+
+    def test_replay_denies_revoked_policy_and_same_fence_state_mismatch(self) -> None:
+        from control_plane.service_auth import LaunchplaneAuthzPolicy
+
+        with _store_for_fresh_head_database() as store:
+            acceptance, request, policy = self.seed(store)
+            result = store.mint_every_code_feedback_resume_intent(
+                acceptance_id=acceptance.acceptance_id, open_observation=self.observation()
+            )
+            self.assertEqual(result.status, "mint")
+            store.write_every_code_work_request_record(
+                request.model_copy(update={"state": "blocked", "error_message": "stopped"})
+            )
+            self.assertEqual(
+                store.mint_every_code_feedback_resume_intent(
+                    acceptance_id=acceptance.acceptance_id, open_observation=None
+                ).status,
+                "terminal_snapshot_mismatch",
+            )
+            replacement = LaunchplaneAuthzPolicyRecord(
+                record_id="policy-revoked",
+                revision=policy.revision + 1,
+                source="test",
+                updated_at=policy.updated_at,
+                policy=LaunchplaneAuthzPolicy(schema_version=2),
+            )
+            written = store.compare_and_write_authz_policy_record(
+                expected_record=policy, replacement_record=replacement
+            )
+            self.assertEqual(written.status, "written")
+            self.assertEqual(
+                store.mint_every_code_feedback_resume_intent(
+                    acceptance_id=acceptance.acceptance_id, open_observation=None
+                ).status,
+                "authority_denied",
+            )
+
+    def test_new_lifecycle_mints_new_intent_preserving_old_record(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            acceptance, request, _ = self.seed(store)
+            first = store.mint_every_code_feedback_resume_intent(
+                acceptance_id=acceptance.acceptance_id, open_observation=self.observation()
+            )
+            updated = request.model_copy(update={"lifecycle_id": "lifecycle-2", "fencing_token": 3})
+            store.write_every_code_work_request_record(updated)
+            second = store.mint_every_code_feedback_resume_intent(
+                acceptance_id=acceptance.acceptance_id, open_observation=self.observation()
+            )
+            self.assertEqual((first.status, second.status), ("mint", "mint"))
+            assert first.record is not None and second.record is not None
+            self.assertNotEqual(first.record.intent_id, second.record.intent_id)
+            self.assertEqual(
+                store.read_every_code_feedback_resume_intent_record(first.record.intent_id),
+                first.record,
+            )
+            self.assertEqual(
+                store.mint_every_code_feedback_resume_intent(
+                    acceptance_id=acceptance.acceptance_id, open_observation=None
+                ).record,
+                second.record,
+            )
+            self.assertEqual(
+                len(
+                    store.list_every_code_feedback_resume_intent_records(
+                        request_id=request.request_id
+                    )
+                ),
+                2,
+            )
+
+    def test_advisory_contention_times_out_without_minting(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            acceptance, request, _ = self.seed(store)
+            with store._engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "SELECT pg_advisory_xact_lock(hashtextextended('launchplane:active-authz-policy', 0))"
+                    )
+                )
+                with ThreadPoolExecutor(max_workers=1) as pool:
+                    result = pool.submit(
+                        store.mint_every_code_feedback_resume_intent,
+                        acceptance_id=acceptance.acceptance_id,
+                        open_observation=self.observation(),
+                    ).result(timeout=12)
+            self.assertEqual(result.status, "contention")
+            self.assertEqual(
+                store.list_every_code_feedback_resume_intent_records(request_id=request.request_id),
+                (),
+            )
+
+    def test_row_wait_consumes_observation_freshness_before_mint(self) -> None:
+        from tests.test_every_code_feedback_resume_intent import observation_fixture
+
+        with _store_for_fresh_head_database() as store:
+            acceptance, request, _ = self.seed(store)
+            reached_lock = threading.Event()
+
+            def before_query(
+                conn: Any,
+                cursor: Any,
+                statement: str,
+                parameters: Any,
+                context: Any,
+                executemany: bool,
+            ) -> None:
+                if (
+                    "launchplane_every_code_work_requests" in statement
+                    and "FOR UPDATE" in statement
+                ):
+                    reached_lock.set()
+
+            event.listen(store._engine, "before_cursor_execute", before_query)
+            try:
+                with ThreadPoolExecutor(max_workers=1) as pool:
+                    with store._engine.begin() as connection:
+                        connection.execute(
+                            text(
+                                "SELECT request_id FROM launchplane_every_code_work_requests WHERE request_id = :id FOR UPDATE"
+                            ),
+                            {"id": request.request_id},
+                        )
+                        reached_lock.clear()
+                        observation = observation_fixture(
+                            (datetime.now(timezone.utc) - timedelta(seconds=29))
+                            .isoformat(timespec="microseconds")
+                            .replace("+00:00", "Z")
+                        )
+                        future = pool.submit(
+                            store.mint_every_code_feedback_resume_intent,
+                            acceptance_id=acceptance.acceptance_id,
+                            open_observation=observation,
+                        )
+                        self.assertTrue(reached_lock.wait(timeout=5))
+                        time.sleep(2.2)
+                    result = future.result(timeout=10)
+                self.assertEqual(result.status, "pull_request_observation_stale")
+                self.assertEqual(
+                    store.list_every_code_feedback_resume_intent_records(
+                        request_id=request.request_id
+                    ),
+                    (),
+                )
+            finally:
+                event.remove(store._engine, "before_cursor_execute", before_query)
+
+    def test_closure_wins_and_legacy_intent_is_never_promoted(self) -> None:
+        from tests.test_every_code_feedback_resume_storage import _intent
+
+        with _store_for_fresh_head_database() as store:
+            acceptance, request, _ = self.seed(store)
+            legacy = _intent(_feedback_acceptance())
+            # Use eligible contemporary time while preserving the legacy proof version.
+            legacy = type(legacy).model_validate(
+                {
+                    **legacy.model_dump(),
+                    "issued_at": acceptance.created_at,
+                    "eligible_until": acceptance.eligible_until,
+                    "acceptance_digest": acceptance.acceptance_digest,
+                    "intent_digest": "",
+                }
+            )
+            store._write_every_code_feedback_resume_intent_fixture_record(legacy)
+            self.assertEqual(
+                store.mint_every_code_feedback_resume_intent(
+                    acceptance_id=acceptance.acceptance_id, open_observation=self.observation()
+                ).status,
+                "legacy_unverified",
+            )
+            closure = EveryCodeLinkedPullRequestClosureRecord(
+                closure_id="closure-mint",
+                request_id=request.request_id,
+                repository_id=34,
+                pull_request_number=1,
+                pull_request_node_id="PR_node",
+                merged=False,
+                closed_at=acceptance.created_at,
+                github_delivery_id="closed",
+            )
+            store.write_every_code_linked_pull_request_closure_record(closure)
+            self.assertEqual(
+                store.mint_every_code_feedback_resume_intent(
+                    acceptance_id=acceptance.acceptance_id, open_observation=self.observation()
+                ).status,
+                "pull_request_closed",
+            )
+
+    def test_policy_replacement_and_mint_serialize_in_both_orders(self) -> None:
+        from control_plane.service_auth import LaunchplaneAuthzPolicy
+
+        for mint_first in (True, False):
+            with self.subTest(mint_first=mint_first), _store_for_fresh_head_database() as store:
+                acceptance, request, policy = self.seed(store)
+                replacement = LaunchplaneAuthzPolicyRecord(
+                    record_id="policy-after-mint",
+                    revision=policy.revision + 1,
+                    source="test",
+                    updated_at=policy.updated_at,
+                    policy=LaunchplaneAuthzPolicy(schema_version=2),
+                )
+                acquired, attempted, release = (
+                    threading.Event(),
+                    threading.Event(),
+                    threading.Event(),
+                )
+                local = threading.local()
+                original = store._lock_active_authz_policy
+
+                def locked(session: Any) -> None:
+                    if not getattr(local, "hold", False):
+                        attempted.set()
+                    original(session)
+                    if getattr(local, "hold", False):
+                        acquired.set()
+                        if not release.wait(timeout=10):
+                            raise TimeoutError("test failed to release policy lock")
+
+                def perform(mint: bool, hold: bool) -> Any:
+                    local.hold = hold
+                    if mint:
+                        return store.mint_every_code_feedback_resume_intent(
+                            acceptance_id=acceptance.acceptance_id,
+                            open_observation=self.observation(),
+                        )
+                    return store.compare_and_write_authz_policy_record(
+                        expected_record=policy, replacement_record=replacement
+                    )
+
+                with patch.object(store, "_lock_active_authz_policy", side_effect=locked):
+                    with ThreadPoolExecutor(max_workers=2) as pool:
+                        first = pool.submit(perform, mint_first, True)
+                        try:
+                            self.assertTrue(acquired.wait(timeout=5))
+                            second = pool.submit(perform, not mint_first, False)
+                            self.assertTrue(attempted.wait(timeout=5))
+                            self.assertFalse(second.done())
+                        finally:
+                            release.set()
+                        first_result, second_result = (
+                            first.result(timeout=10),
+                            second.result(timeout=10),
+                        )
+                minted = first_result if mint_first else second_result
+                self.assertEqual(minted.status, "mint" if mint_first else "authority_denied")
+                self.assertEqual(
+                    len(
+                        store.list_every_code_feedback_resume_intent_records(
+                            request_id=request.request_id
+                        )
+                    ),
+                    int(mint_first),
+                )
+
+    def test_closure_and_mint_serialize_in_both_orders(self) -> None:
+        for mint_first in (True, False):
+            with self.subTest(mint_first=mint_first), _store_for_fresh_head_database() as store:
+                acceptance, request, _ = self.seed(store)
+                closure = EveryCodeLinkedPullRequestClosureRecord(
+                    closure_id="closure-interleaved",
+                    request_id=request.request_id,
+                    repository_id=34,
+                    pull_request_number=1,
+                    pull_request_node_id="PR_node",
+                    merged=False,
+                    closed_at=acceptance.created_at,
+                    github_delivery_id="closed-interleaved",
+                )
+                acquired, attempted, release = (
+                    threading.Event(),
+                    threading.Event(),
+                    threading.Event(),
+                )
+                local = threading.local()
+
+                def before(
+                    conn: Any,
+                    cursor: Any,
+                    statement: str,
+                    parameters: Any,
+                    context: Any,
+                    executemany: bool,
+                ) -> None:
+                    if (
+                        "launchplane_every_code_work_requests" in statement
+                        and "FOR UPDATE" in statement
+                        and not getattr(local, "hold", False)
+                    ):
+                        attempted.set()
+
+                def after(
+                    conn: Any,
+                    cursor: Any,
+                    statement: str,
+                    parameters: Any,
+                    context: Any,
+                    executemany: bool,
+                ) -> None:
+                    if (
+                        "launchplane_every_code_work_requests" in statement
+                        and "FOR UPDATE" in statement
+                        and getattr(local, "hold", False)
+                    ):
+                        acquired.set()
+                        if not release.wait(timeout=10):
+                            raise TimeoutError("test failed to release request lock")
+
+                def perform(mint: bool, hold: bool) -> Any:
+                    local.hold = hold
+                    if mint:
+                        return store.mint_every_code_feedback_resume_intent(
+                            acceptance_id=acceptance.acceptance_id,
+                            open_observation=self.observation(),
+                        )
+                    return store.write_every_code_linked_pull_request_closure_record(closure)
+
+                event.listen(store._engine, "before_cursor_execute", before)
+                event.listen(store._engine, "after_cursor_execute", after)
+                try:
+                    with ThreadPoolExecutor(max_workers=2) as pool:
+                        first = pool.submit(perform, mint_first, True)
+                        try:
+                            self.assertTrue(acquired.wait(timeout=5))
+                            second = pool.submit(perform, not mint_first, False)
+                            self.assertTrue(attempted.wait(timeout=5))
+                            self.assertFalse(second.done())
+                        finally:
+                            release.set()
+                        first_result, second_result = (
+                            first.result(timeout=10),
+                            second.result(timeout=10),
+                        )
+                    minted = first_result if mint_first else second_result
+                    self.assertEqual(minted.status, "mint" if mint_first else "pull_request_closed")
+                    self.assertEqual(
+                        store.mint_every_code_feedback_resume_intent(
+                            acceptance_id=acceptance.acceptance_id, open_observation=None
+                        ).status,
+                        "pull_request_closed",
+                    )
+                finally:
+                    event.remove(store._engine, "before_cursor_execute", before)
+                    event.remove(store._engine, "after_cursor_execute", after)
+
+    def test_newer_acceptance_and_mint_serialize_in_both_orders(self) -> None:
+        from control_plane.contracts.every_code_feedback_resume import (
+            every_code_feedback_eligible_until,
+        )
+
+        for mint_first in (True, False):
+            with self.subTest(mint_first=mint_first), _store_for_fresh_head_database() as store:
+                acceptance, request, _ = self.seed(store)
+                newer_at = (
+                    datetime.now(timezone.utc)
+                    .isoformat(timespec="microseconds")
+                    .replace("+00:00", "Z")
+                )
+                revision = acceptance.revision.model_dump()
+                revision.update(
+                    feedback_id="feedback-newer",
+                    provider_updated_at=newer_at,
+                    body_sha256="b" * 64,
+                    revision_digest="",
+                )
+                newer = type(acceptance).model_validate(
+                    {
+                        **acceptance.model_dump(),
+                        "acceptance_id": "acceptance-newer",
+                        "revision": revision,
+                        "github_delivery_id": "delivery-newer",
+                        "received_at": newer_at,
+                        "created_at": newer_at,
+                        "eligible_until": every_code_feedback_eligible_until(
+                            first_received_at=newer_at,
+                            provider_updated_at=newer_at,
+                        ),
+                        "acceptance_digest": "",
+                    }
+                )
+                acquired, attempted, release = (
+                    threading.Event(),
+                    threading.Event(),
+                    threading.Event(),
+                )
+                local = threading.local()
+
+                def before(
+                    conn: Any,
+                    cursor: Any,
+                    statement: str,
+                    parameters: Any,
+                    context: Any,
+                    executemany: bool,
+                ) -> None:
+                    if (
+                        "launchplane_every_code_work_requests" in statement
+                        and "FOR UPDATE" in statement
+                        and not getattr(local, "hold", False)
+                    ):
+                        attempted.set()
+
+                def after(
+                    conn: Any,
+                    cursor: Any,
+                    statement: str,
+                    parameters: Any,
+                    context: Any,
+                    executemany: bool,
+                ) -> None:
+                    if (
+                        "launchplane_every_code_work_requests" in statement
+                        and "FOR UPDATE" in statement
+                        and getattr(local, "hold", False)
+                    ):
+                        acquired.set()
+                        if not release.wait(timeout=10):
+                            raise TimeoutError("test failed to release request lock")
+
+                def perform(mint: bool, hold: bool) -> Any:
+                    local.hold = hold
+                    if mint:
+                        return store.mint_every_code_feedback_resume_intent(
+                            acceptance_id=acceptance.acceptance_id,
+                            open_observation=self.observation(),
+                        )
+                    return store.write_every_code_feedback_acceptance_record(newer)
+
+                event.listen(store._engine, "before_cursor_execute", before)
+                event.listen(store._engine, "after_cursor_execute", after)
+                try:
+                    with ThreadPoolExecutor(max_workers=2) as pool:
+                        first = pool.submit(perform, mint_first, True)
+                        try:
+                            self.assertTrue(acquired.wait(timeout=5))
+                            second = pool.submit(perform, not mint_first, False)
+                            self.assertTrue(attempted.wait(timeout=5))
+                            self.assertFalse(second.done())
+                        finally:
+                            release.set()
+                        first_result, second_result = (
+                            first.result(timeout=10),
+                            second.result(timeout=10),
+                        )
+                    minted = first_result if mint_first else second_result
+                    self.assertEqual(
+                        minted.status,
+                        "mint" if mint_first else "acceptance_superseded",
+                    )
+                    self.assertEqual(
+                        len(
+                            store.list_every_code_feedback_resume_intent_records(
+                                request_id=request.request_id
+                            )
+                        ),
+                        int(mint_first),
+                    )
+                finally:
+                    event.remove(store._engine, "before_cursor_execute", before)
+                    event.remove(store._engine, "after_cursor_execute", after)
+
+    def test_unique_constraint_backstop_reselects_exact_snapshot(self) -> None:
+        from sqlalchemy.orm import Session
+
+        for changed_state in (False, True):
+            with (
+                self.subTest(changed_state=changed_state),
+                _store_for_fresh_head_database() as store,
+            ):
+                acceptance, request, _ = self.seed(store)
+                first = store.mint_every_code_feedback_resume_intent(
+                    acceptance_id=acceptance.acceptance_id, open_observation=self.observation()
+                )
+                if changed_state:
+                    store.write_every_code_work_request_record(
+                        request.model_copy(update={"state": "blocked", "error_message": "stopped"})
+                    )
+                original_scalar = Session.scalar
+                missed = False
+
+                def miss_once(session: Any, statement: Any, *args: Any, **kwargs: Any) -> Any:
+                    nonlocal missed
+                    sql = str(statement)
+                    if not missed and "FROM launchplane_every_code_feedback_resume_intents" in sql:
+                        missed = True
+                        return None
+                    return original_scalar(session, statement, *args, **kwargs)
+
+                with patch.object(Session, "scalar", new=miss_once):
+                    result = store.mint_every_code_feedback_resume_intent(
+                        acceptance_id=acceptance.acceptance_id, open_observation=self.observation()
+                    )
+                self.assertTrue(missed)
+                self.assertEqual(
+                    result.status, "terminal_snapshot_mismatch" if changed_state else "replay"
+                )
+                if not changed_state:
+                    self.assertEqual(result.record, first.record)
+                self.assertEqual(
+                    len(
+                        store.list_every_code_feedback_resume_intent_records(
+                            request_id=request.request_id
+                        )
+                    ),
+                    1,
+                )
