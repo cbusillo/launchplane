@@ -3759,6 +3759,7 @@ class LaunchplaneEveryCodePullRequestClosureRow(Base):
             "closure_digest", name="launchplane_every_code_pull_request_closure_digest_uidx"
         ),
         UniqueConstraint(
+            "request_id",
             "repository_id",
             "pr_number",
             "closed_at",
@@ -15216,6 +15217,21 @@ class PostgresRecordStore(HumanSessionStore):
                     return
                 raise EveryCodeFeedbackResumeStorageConflictError(
                     f"immutable Every Code feedback resume identity {record.closure_id!r} conflicts"
+                )
+            existing_event = session.scalar(
+                select(LaunchplaneEveryCodePullRequestClosureRow)
+                .where(
+                    LaunchplaneEveryCodePullRequestClosureRow.request_id == record.request_id,
+                    LaunchplaneEveryCodePullRequestClosureRow.repository_id == record.repository_id,
+                    LaunchplaneEveryCodePullRequestClosureRow.pr_number
+                    == record.pull_request_number,
+                    LaunchplaneEveryCodePullRequestClosureRow.closed_at == record.closed_at,
+                )
+                .limit(1)
+            )
+            if existing_event is not None:
+                raise EveryCodeFeedbackResumeStorageConflictError(
+                    "immutable linked pull-request closure event conflicts"
                 )
             matching_acceptances = session.scalars(
                 select(LaunchplaneEveryCodeFeedbackAcceptanceRow).where(

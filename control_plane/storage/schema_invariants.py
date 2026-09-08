@@ -646,6 +646,12 @@ CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
         unique=True,
     ),
     CriticalIndex(
+        "launchplane_every_code_pull_request_closures",
+        "launchplane_every_code_pull_request_closure_event_uidx",
+        ("request_id", "repository_id", "pr_number", "closed_at"),
+        unique=True,
+    ),
+    CriticalIndex(
         "launchplane_administrator_enrollments",
         "launchplane_administrator_enrollment_challenge_uq",
         ("challenge_sha256",),

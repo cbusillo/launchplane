@@ -223,6 +223,7 @@ def upgrade() -> None:
             "closure_digest", name="launchplane_every_code_pull_request_closure_digest_uidx"
         ),
         sa.UniqueConstraint(
+            "request_id",
             "repository_id",
             "pr_number",
             "closed_at",

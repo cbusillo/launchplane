@@ -6508,6 +6508,62 @@ class RealPostgresFeedbackResumeEvidenceTests(unittest.TestCase):
                 event.remove(other._engine, "after_cursor_execute", after_query)
                 other.close()
 
+    def test_same_pull_request_closure_is_recorded_for_each_request(self) -> None:
+        from control_plane.storage.postgres import EveryCodeFeedbackResumeStorageConflictError
+
+        with _store_for_fresh_head_database() as store:
+            first_request = self.seed_request(store)
+            second_request = first_request.model_copy(
+                update={
+                    "request_id": "request-2",
+                    "lifecycle_id": "lifecycle-other",
+                }
+            )
+            store.write_every_code_work_request_record(second_request)
+            first = EveryCodeLinkedPullRequestClosureRecord(
+                closure_id="closure-request-1",
+                request_id=first_request.request_id,
+                repository_id=34,
+                pull_request_number=1,
+                pull_request_node_id="PR_node",
+                merged=False,
+                closed_at=FEEDBACK_T1,
+                github_delivery_id="closure-delivery",
+            )
+            second = EveryCodeLinkedPullRequestClosureRecord.model_validate(
+                {
+                    **first.model_dump(),
+                    "closure_id": "closure-request-2",
+                    "request_id": second_request.request_id,
+                    "closure_digest": "",
+                }
+            )
+            store.write_every_code_linked_pull_request_closure_record(first)
+            store.write_every_code_linked_pull_request_closure_record(second)
+            self.assertEqual(
+                store.list_every_code_linked_pull_request_closure_records(
+                    request_id=first_request.request_id
+                ),
+                (first,),
+            )
+            self.assertEqual(
+                store.list_every_code_linked_pull_request_closure_records(
+                    request_id=second_request.request_id
+                ),
+                (second,),
+            )
+
+            conflicting = EveryCodeLinkedPullRequestClosureRecord.model_validate(
+                {
+                    **first.model_dump(),
+                    "closure_id": "closure-request-1-conflict",
+                    "merged": True,
+                    "closure_digest": "",
+                }
+            )
+            with self.assertRaises(EveryCodeFeedbackResumeStorageConflictError):
+                store.write_every_code_linked_pull_request_closure_record(conflicting)
+
     def test_additive_migration_preserves_legacy_feedback_shape_and_queue(self) -> None:
         from control_plane.contracts.every_code_pr_feedback_record import EveryCodePrFeedbackRecord
 
