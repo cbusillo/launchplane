@@ -496,7 +496,7 @@ class OwnerAcceptanceHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(payload["result"]["conclusion"])
         self.assertEqual(
             calls[-2]["body"]["details_url"],
-            "https://ops.example.test/ui/engineering/owner-acceptance?repository=example%2Fweb&pull_request=2022",
+            "https://ops.example.test/ui/owner-review?repository=example%2Fweb&pull_request=2022",
         )
         self.assertEqual(calls[-2]["body"]["status"], "in_progress")
         self.assertNotIn("conclusion", calls[-2]["body"])
@@ -547,7 +547,7 @@ class OwnerAcceptanceHttpTests(unittest.IsolatedAsyncioTestCase):
         projection_body = github_api.successful_write_bodies[-1]
         self.assertEqual(
             projection_body["details_url"],
-            "https://ops.example.test/ui/engineering/owner-acceptance?repository=example%2Fweb&pull_request=2022",
+            "https://ops.example.test/ui/owner-review?repository=example%2Fweb&pull_request=2022",
         )
 
     async def test_prewrite_projection_failure_blocks_event_append(self) -> None:

@@ -4,9 +4,19 @@ import test from "node:test";
 import {
   engineeringPath,
   engineeringViewLabel,
+  ownerReviewPath,
   ownerAcceptanceLookupFromSearch,
   parseAppRoute,
 } from "../src/route-model.ts";
+
+test("Owner review has one exact top-level route", () => {
+  assert.equal(ownerReviewPath(), "/ui/owner-review");
+  assert.deepEqual(parseAppRoute(ownerReviewPath()), { kind: "owner-review" });
+  assert.deepEqual(parseAppRoute("/ui/owner-review/nested"), {
+    kind: "not-found",
+    path: "/ui/owner-review/nested",
+  });
+});
 
 test("engineering hub and every child route deep-link exactly", () => {
   assert.deepEqual(parseAppRoute("/ui/engineering"), {
