@@ -1,11 +1,15 @@
-# AGENTS.md — Every Code Operating Guide (Read Me First)
+# AGENTS.md — Launchplane Operating Guide (Read Me First)
 
-Treat this file as the launch checklist for each Every Code session in
-`launchplane`.
+Treat this file as the launch checklist for each engineering session in
+`launchplane`, whichever client is operating in the repository.
 
 ## Start Here
 
 - Use the documentation index in `docs/README.md` before reading deeper files.
+- Use [plan issue #2240](https://github.com/cbusillo/launchplane/issues/2240) as
+  the durable source for the active reconciliation direction. Keep current
+  runtime facts separate from proposed behavior until the proposal is
+  implemented, reviewed, deployed, and explicitly activated.
 - Before changing code, open the matching style page in `docs/style/`.
 - Keep prompts lean and prefer linking repo docs over pasting large excerpts.
 
@@ -32,6 +36,18 @@ Treat this file as the launch checklist for each Every Code session in
   config is Launchplane's own minimal bootstrap/root-of-trust wiring required
   for the service to start and reach DB-backed records and managed secrets.
 
+## Reconciled Target Boundary
+
+- Read `docs/authorization-authority.md` as the target direction for one scoped
+  engineering delegation, included diagnostic reads, client parity, and a
+  separately reviewed bounded-pilot activation; it is not current runtime
+  authority. A pilot amendment does not lift the broader issue `#2058` freeze.
+- Read `docs/owner-acceptance.md` as the target direction for narrow site Owner
+  visibility, acceptance, and feedback; it is not current runtime authority and
+  Owner decisions grant no operational power.
+- Keep Launchplane merge/delivery provider-neutral. GitHub is the current source-
+  control adapter and Dokploy is the current application deployment provider.
+
 ## Operating Guardrails
 
 - Prefer fail-closed behavior over silent fallback.
@@ -44,7 +60,8 @@ Treat this file as the launch checklist for each Every Code session in
   records over ad hoc service-host env for product/runtime configuration.
 - Use the deployed Launchplane service API or the operator UI for shared and
   production live mutations. Do not use local CLI live-target commands from an
-  arbitrary checkout as a fallback; add or use a service endpoint first.
+  arbitrary checkout as a fallback; use a supported service capability or
+  record the exact missing service/activation prerequisite.
 - Treat service-host env as bootstrap-only unless a repo doc explicitly calls
   out a narrower scoped bootstrap or rehearsal exception.
 - Do not hard-code real tenant, product, repository, branch, domain, or operator
@@ -68,14 +85,16 @@ Treat this file as the launch checklist for each Every Code session in
 
 ## Workflow Loop
 
-- Plan → patch → targeted tests → iterate → gate.
+- Plan → patch → proportionate behavior tests → iterate → required gate.
 - Keep changes small and coherent around a single ownership boundary.
 
 ## Quality Gates
 
 - Use `.github/github.json` for the current test, lint,
   typecheck, build, inspection, and docs-freshness gates.
-- Add targeted tests whenever contract or storage behavior changes.
+- Add targeted tests whenever contract or storage behavior changes. Broaden to
+  integration or full-suite proof when the changed behavior, a failure, or the
+  configured review/CI gate justifies it.
 
 ## Repo Boundaries
 

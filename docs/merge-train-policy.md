@@ -2,13 +2,15 @@
 
 ## Terminology
 
-Launchplane currently ships a Level 1 ordered merge queue baseline. It reads a
-fresh GitHub snapshot, orders eligible pull requests, selects the first eligible
-entry, and applies at most one worker transition per service call. That baseline
-is useful for fail-closed ordering, but it is not the full batch merge train
-target.
+Launchplane currently ships a GitHub-backed Level 1 ordered merge queue baseline.
+It reads a fresh GitHub snapshot, orders eligible pull requests, selects the first
+eligible entry, and applies at most one worker transition per service call. That
+baseline is useful for fail-closed ordering, but it is not the provider-neutral
+delivery target.
 
-The full Launchplane merge train target is a batch-validating train:
+The full Launchplane merge train target is a provider-neutral, batch-validating
+train. Source-control-specific reads and effects belong behind an adapter; the
+steps below describe the current GitHub adapter:
 
 1. Collect eligible queued pull requests for one repository/base branch.
 2. Build one combined batch candidate from the base branch plus queued pull
@@ -140,6 +142,13 @@ the blocking pull request with `blocked_label` before stopping.
 higher throughput over strict ordering. A worker must still mark the failed pull
 request with `blocked_label` before considering later entries.
 
+For the reconciled pilot, ordinary missing acceptance or check evidence holds the
+affected change rather than pausing unrelated eligible work. A broader pause is
+valid only for a proven dependency edge, a shared-state/integration fence, or an
+unknown effect that makes later mutation unsafe. Existing active policies retain
+their current behavior until a reviewed DB-backed policy replacement is
+activated; this target paragraph does not change live scheduling.
+
 ## Batch Train Target
 
 The batch train is the first full-train implementation target because it proves
@@ -200,6 +209,10 @@ required-check evidence. Candidate-specific cancellation must not broaden a
 workflow's cancellation policy for ordinary base-branch pushes.
 
 ### PR-Native Landing
+
+This section documents the current GitHub adapter. Other source-control
+providers must implement the same Launchplane-owned landing contract behind a
+provider adapter.
 
 After a batch candidate passes, Launchplane lands the original pull requests in
 queue order using GitHub's pull request merge API and the configured

@@ -2224,6 +2224,15 @@ run` is the foreground loop intended for an external process supervisor, and
 
 ## Manager Preview Approval Event Record
 
+These records describe current compatibility behavior and must remain readable
+as historical evidence through migration and rollback. The reconciled target in
+issue `#2240` uses authoritative Owner-acceptance evidence from the trusted
+Launchplane Owner surface. New delivery admission must consume that Owner
+evidence through a separately authorized Launchplane job; a manager event cannot
+confer merge, deploy, configuration, secret, or policy authority. Retire current
+manager admission only after replacement coverage is proved, without deleting
+the append-only ledger.
+
 - One append-only event per manager decision or lifecycle invalidation for an
   exact rendered preview identity. Events use deterministic ids derived from
   the exact binding, action, and source event so delivery retries replay without
@@ -2272,6 +2281,10 @@ run` is the foreground loop intended for an external process supervisor, and
   promotion evidence fingerprint, and denies before provider mutation unless
   the decision is `approved`. Removing the managed approval rule disables this
   admission requirement without deleting event history.
+
+The preceding promotion join is a current-runtime fact, not the target contract.
+Its replacement must bind the full accepted delivery evidence conservatively and
+use current Owner acceptance plus independent delivery authority.
 
 ## Launchplane Preview Enablement Record
 

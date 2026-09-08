@@ -4,6 +4,14 @@ title: Launchplane Docs
 
 Use these docs as the source of truth for `launchplane`.
 
+The durable reconciliation direction is tracked in
+[issue #2240](https://github.com/cbusillo/launchplane/issues/2240). These pages
+contain both current implementation contracts and future targets. A target does
+not describe live authority or runtime behavior until its implementation,
+review, deployment, and explicit activation are recorded. In particular, the
+issue `#2058` authorization freeze remains active while the bounded delegated-
+delivery pilot and its DB-native activation/rollback amendment are prepared.
+
 - [architecture.md](architecture.md) — ownership boundaries and system shape.
 - [config-boundary.md](config-boundary.md) — bootstrap-vs-DB config authority
   and checked-in config authority limits.
@@ -25,8 +33,8 @@ Use these docs as the source of truth for `launchplane`.
   Launchplane driver type or product driver.
 - [ui-standards.md](ui-standards.md) — tenant-first Launchplane UI direction and
   review rubric.
-- [operator-experience.md](operator-experience.md) — API-first product,
-  environment, settings, promotion, cleanup, and UI rebuild contract.
+- [operator-experience.md](operator-experience.md) — product, environment,
+  owner-review, settings, promotion, cleanup, and UI delivery contract.
 - [post-v2-audit.md](post-v2-audit.md) — post-v2 product, security,
   persistence, contract, test, and modularity audit baseline and execution
   graph.

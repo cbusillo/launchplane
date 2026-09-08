@@ -242,7 +242,21 @@ the comment fails closed: it tells reviewers not to merge and exposes no Owner
 action instructions. Repositories classified as not requiring Owner acceptance
 receive the ordinary ready-preview comment without an interactive Owner handoff.
 
+The reconciled pilot keeps the decision itself on a trusted Launchplane Owner
+surface, visually separate from untrusted preview content. Owner acceptance is
+bound to the complete accepted delivery evidence and is consumed by a separately
+authorized Launchplane delivery job; it never authorizes merge, deploy, source,
+configuration, secrets, or access administration. Changed or incomplete binding
+evidence requires fresh review.
+
 ## Manager Preview Approval
+
+The mechanism below documents current compatibility behavior and retained
+history. It is not the target Owner model for issue `#2240`. Reconciliation must
+move current admission to authoritative Owner acceptance on the trusted
+Launchplane surface, preserve historical manager events for audit/rollback, and
+retire the manager command/status authority only after replacement coverage is
+proved. It must not treat manager approval as operational permission.
 
 Manager approval is a Launchplane-owned interaction layered on the serving
 preview evidence. Product workflows do not parse approval comments, resolve a

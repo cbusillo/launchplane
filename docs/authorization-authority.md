@@ -96,6 +96,23 @@ payloads are not diagnostic substitutes.
 
 ## Target Model
 
+The reconciled target in
+[issue #2240](https://github.com/cbusillo/launchplane/issues/2240) is prospective.
+For an ordinary engineering session, one small DB-backed capability set should
+authorize the coherent delegated job and its necessary diagnostic reads;
+session issuance and request narrowing should derive from that existing scope
+instead of requiring a new proposal/apply ceremony for every route. Site Owner
+acceptance remains product-decision evidence consumed by an independently
+authorized delivery request and never grants merge, deploy, configuration,
+secret, or policy-administration power.
+
+The currently implemented action-by-action policy evaluation, diagnostic
+routes, activation bridges, and recovery mechanisms recorded in this document
+remain the runtime contract until that replacement is implemented, reviewed,
+deployed, and activated. The administration surface described immediately below
+is itself the target model. This target text grants no capability and does not
+relax the active freeze.
+
 The DB-native administration surface must support authenticated administrators
 through Launchplane's API and UI:
 
@@ -358,6 +375,15 @@ Landing these read contracts does not authorize their production grants and
 does not relax the active freeze. Production policy changes still require the
 separate reviewed administration gate owned by `#2058`/`#2061`; total-lockout
 recovery remains explicitly deferred.
+
+The first delegated-delivery pilot must use a separately reviewed current
+`#2058` amendment and an already-supported DB-administration route. The prepared
+change must name the exact activation and revocation effects, understandable
+administrator confirmation, read-back, data-aware rollback, and the existing
+authority path that installs it. No GitHub-secret grant, workflow workaround,
+direct database write, borrowed credential, future endpoint, or manual merge may
+substitute for the supported path or authorize its own installation. That bounded
+amendment does not lift the broader authorization freeze.
 
 After parity and administration gates pass, protected desired-set secrets and
 routine authorization workflows must be retired. GitHub may remain an identity
