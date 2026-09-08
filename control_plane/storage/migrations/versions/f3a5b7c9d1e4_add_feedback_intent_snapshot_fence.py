@@ -17,7 +17,7 @@ branch_labels: tuple[str, ...] | None = None
 depends_on: tuple[str, ...] | None = None
 
 _TABLE = "launchplane_every_code_feedback_resume_intents"
-_INDEX = "launchplane_feedback_resume_intent_snapshot_uidx"
+_INDEX = "launchplane_every_code_feedback_resume_intent_snapshot_uidx"
 
 
 def upgrade() -> None:

@@ -3,6 +3,9 @@
 The future adapter must read both objects independently through managed GitHub
 transport, then capture observed_at after the response completes. This helper
 performs no transport and must never receive webhook/request-owned copies.
+Closed/merged or mismatched repository evidence returns None. Malformed required
+PR identifiers or timestamps raise ValidationError; the future transport adapter
+must classify malformed provider data explicitly rather than treating it as open.
 """
 
 from __future__ import annotations

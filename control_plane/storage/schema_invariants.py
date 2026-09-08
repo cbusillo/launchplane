@@ -617,7 +617,7 @@ _ODOO_STABLE_ACTIVE_OPERATION_PREDICATE_TOKENS = (
 CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
     CriticalIndex(
         "launchplane_every_code_feedback_resume_intents",
-        "launchplane_feedback_resume_intent_snapshot_uidx",
+        "launchplane_every_code_feedback_resume_intent_snapshot_uidx",
         ("acceptance_id", "expected_lifecycle_id", "expected_fencing_token"),
         unique=True,
     ),

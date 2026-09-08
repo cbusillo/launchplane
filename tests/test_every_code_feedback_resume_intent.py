@@ -93,6 +93,7 @@ class FeedbackResumeIntentTests(unittest.TestCase):
         self.assertEqual(self.decision().status, "mint")
         cases: list[tuple[dict[str, Any], str]] = [
             ({"open_observation": None}, "pull_request_state_unknown"),
+            ({"database_now": "2026-09-07T11:59:59.000000Z"}, "clock_anomaly"),
             ({"closure_present": True}, "pull_request_closed"),
             ({"current_policy_provenance": None}, "authority_denied"),
             ({"database_now": _acceptance().eligible_until}, "acceptance_expired"),

@@ -206,10 +206,6 @@ class EveryCodeFeedbackAuthorizationTests(unittest.TestCase):
             )
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class FeedbackHumanPolicySchemaBoundaryTests(unittest.TestCase):
     def test_new_rule_constraints_require_explicit_feedback_resolver_review(self) -> None:
         from control_plane.service_auth import ScopedAuthzPolicyRule
@@ -227,3 +223,7 @@ class FeedbackHumanPolicySchemaBoundaryTests(unittest.TestCase):
             set(GitHubHumanPolicyRule.model_fields),
             scope_fields | {"github_ids", "logins", "organizations", "roles", "teams"},
         )
+
+
+if __name__ == "__main__":
+    unittest.main()

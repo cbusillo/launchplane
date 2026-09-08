@@ -7034,6 +7034,122 @@ class RealPostgresFeedbackIntentMintTests(unittest.TestCase):
                     event.remove(store._engine, "before_cursor_execute", before)
                     event.remove(store._engine, "after_cursor_execute", after)
 
+    def test_newer_acceptance_and_mint_serialize_in_both_orders(self) -> None:
+        from control_plane.contracts.every_code_feedback_resume import (
+            every_code_feedback_eligible_until,
+        )
+
+        for mint_first in (True, False):
+            with self.subTest(mint_first=mint_first), _store_for_fresh_head_database() as store:
+                acceptance, request, _ = self.seed(store)
+                newer_at = (
+                    datetime.now(timezone.utc)
+                    .isoformat(timespec="microseconds")
+                    .replace("+00:00", "Z")
+                )
+                revision = acceptance.revision.model_dump()
+                revision.update(
+                    feedback_id="feedback-newer",
+                    provider_updated_at=newer_at,
+                    body_sha256="b" * 64,
+                    revision_digest="",
+                )
+                newer = type(acceptance).model_validate(
+                    {
+                        **acceptance.model_dump(),
+                        "acceptance_id": "acceptance-newer",
+                        "revision": revision,
+                        "github_delivery_id": "delivery-newer",
+                        "received_at": newer_at,
+                        "created_at": newer_at,
+                        "eligible_until": every_code_feedback_eligible_until(
+                            first_received_at=newer_at,
+                            provider_updated_at=newer_at,
+                        ),
+                        "acceptance_digest": "",
+                    }
+                )
+                acquired, attempted, release = (
+                    threading.Event(),
+                    threading.Event(),
+                    threading.Event(),
+                )
+                local = threading.local()
+
+                def before(
+                    conn: Any,
+                    cursor: Any,
+                    statement: str,
+                    parameters: Any,
+                    context: Any,
+                    executemany: bool,
+                ) -> None:
+                    if (
+                        "launchplane_every_code_work_requests" in statement
+                        and "FOR UPDATE" in statement
+                        and not getattr(local, "hold", False)
+                    ):
+                        attempted.set()
+
+                def after(
+                    conn: Any,
+                    cursor: Any,
+                    statement: str,
+                    parameters: Any,
+                    context: Any,
+                    executemany: bool,
+                ) -> None:
+                    if (
+                        "launchplane_every_code_work_requests" in statement
+                        and "FOR UPDATE" in statement
+                        and getattr(local, "hold", False)
+                    ):
+                        acquired.set()
+                        if not release.wait(timeout=10):
+                            raise TimeoutError("test failed to release request lock")
+
+                def perform(mint: bool, hold: bool) -> Any:
+                    local.hold = hold
+                    if mint:
+                        return store.mint_every_code_feedback_resume_intent(
+                            acceptance_id=acceptance.acceptance_id,
+                            open_observation=self.observation(),
+                        )
+                    return store.write_every_code_feedback_acceptance_record(newer)
+
+                event.listen(store._engine, "before_cursor_execute", before)
+                event.listen(store._engine, "after_cursor_execute", after)
+                try:
+                    with ThreadPoolExecutor(max_workers=2) as pool:
+                        first = pool.submit(perform, mint_first, True)
+                        try:
+                            self.assertTrue(acquired.wait(timeout=5))
+                            second = pool.submit(perform, not mint_first, False)
+                            self.assertTrue(attempted.wait(timeout=5))
+                            self.assertFalse(second.done())
+                        finally:
+                            release.set()
+                        first_result, second_result = (
+                            first.result(timeout=10),
+                            second.result(timeout=10),
+                        )
+                    minted = first_result if mint_first else second_result
+                    self.assertEqual(
+                        minted.status,
+                        "mint" if mint_first else "acceptance_superseded",
+                    )
+                    self.assertEqual(
+                        len(
+                            store.list_every_code_feedback_resume_intent_records(
+                                request_id=request.request_id
+                            )
+                        ),
+                        int(mint_first),
+                    )
+                finally:
+                    event.remove(store._engine, "before_cursor_execute", before)
+                    event.remove(store._engine, "after_cursor_execute", after)
+
     def test_unique_constraint_backstop_reselects_exact_snapshot(self) -> None:
         from sqlalchemy.orm import Session
 

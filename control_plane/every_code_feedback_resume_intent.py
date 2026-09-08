@@ -40,6 +40,7 @@ EveryCodeFeedbackIntentDecisionStatus = Literal[
     "legacy_unverified",
     "missing",
     "contention",
+    "clock_anomaly",
 ]
 
 
@@ -75,7 +76,7 @@ def decide_every_code_feedback_resume_intent(
     if now >= parse_every_code_feedback_timestamp(acceptance.eligible_until):
         return EveryCodeFeedbackIntentMintResult("acceptance_expired")
     if now < parse_every_code_feedback_timestamp(acceptance.created_at):
-        return EveryCodeFeedbackIntentMintResult("binding_mismatch")
+        return EveryCodeFeedbackIntentMintResult("clock_anomaly")
     if request.state not in {"done", "blocked"} or not request.claimed_by_host:
         return EveryCodeFeedbackIntentMintResult("request_not_terminal")
     if closure_present:

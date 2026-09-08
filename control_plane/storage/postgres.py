@@ -3627,11 +3627,12 @@ class LaunchplaneEveryCodeFeedbackResumeIntentRow(Base):
         UniqueConstraint(
             "intent_digest", name="launchplane_every_code_feedback_resume_intent_digest_uidx"
         ),
-        UniqueConstraint(
+        Index(
+            "launchplane_every_code_feedback_resume_intent_snapshot_uidx",
             "acceptance_id",
             "expected_lifecycle_id",
             "expected_fencing_token",
-            name="launchplane_feedback_resume_intent_snapshot_uidx",
+            unique=True,
         ),
         Index(
             "launchplane_every_code_feedback_resume_intent_request_idx",
