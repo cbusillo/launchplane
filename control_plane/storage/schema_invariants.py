@@ -10,7 +10,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
 AUTHZ_COMPATIBILITY_FLOOR_REVISION = "f3b5d7e9a1c2"
-EXPECTED_ALEMBIC_HEAD_REVISION = "d1f3a5b7c9e2"
+EXPECTED_ALEMBIC_HEAD_REVISION = "e2f4a6b8c0d3"
 RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS = (EXPECTED_ALEMBIC_HEAD_REVISION,)
 _AUTHZ_POLICY_TABLE = "launchplane_authz_policies"
 _AUTHZ_POLICY_WRITE_FENCE_TRIGGER = "launchplane_authz_policy_write_fence"
@@ -59,6 +59,36 @@ class CriticalPrimaryKey:
 
 
 CRITICAL_POSTGRES_COLUMN_TYPES: tuple[CriticalColumnType, ...] = (
+    CriticalColumnType(
+        "launchplane_every_code_feedback_acceptances",
+        "payload",
+        ("jsonb",),
+    ),
+    CriticalColumnType(
+        "launchplane_every_code_feedback_resume_intents",
+        "payload",
+        ("jsonb",),
+    ),
+    CriticalColumnType(
+        "launchplane_every_code_feedback_resume_operations",
+        "payload",
+        ("jsonb",),
+    ),
+    CriticalColumnType(
+        "launchplane_every_code_feedback_resume_receipts",
+        "payload",
+        ("jsonb",),
+    ),
+    CriticalColumnType(
+        "launchplane_every_code_feedback_resume_recovery_evidence",
+        "payload",
+        ("jsonb",),
+    ),
+    CriticalColumnType(
+        "launchplane_every_code_pull_request_closures",
+        "payload",
+        ("jsonb",),
+    ),
     CriticalColumnType(
         "launchplane_merge_train_policies",
         "payload",
@@ -585,6 +615,42 @@ _ODOO_STABLE_ACTIVE_OPERATION_PREDICATE_TOKENS = (
 )
 
 CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
+    CriticalIndex(
+        "launchplane_every_code_feedback_acceptances",
+        "launchplane_every_code_feedback_acceptance_revision_uidx",
+        ("repository_id", "feedback_kind", "feedback_object_id", "revision_digest"),
+        unique=True,
+    ),
+    CriticalIndex(
+        "launchplane_every_code_feedback_acceptances",
+        "launchplane_every_code_feedback_acceptance_revision_time_uidx",
+        ("repository_id", "feedback_kind", "feedback_object_id", "provider_updated_at"),
+        unique=True,
+    ),
+    CriticalIndex(
+        "launchplane_every_code_feedback_resume_operations",
+        "launchplane_every_code_feedback_resume_operation_intent_uidx",
+        ("intent_id",),
+        unique=True,
+    ),
+    CriticalIndex(
+        "launchplane_every_code_feedback_resume_operations",
+        "launchplane_every_code_feedback_resume_operation_lifecycle_uidx",
+        ("request_id", "lifecycle_id"),
+        unique=True,
+    ),
+    CriticalIndex(
+        "launchplane_every_code_feedback_resume_receipts",
+        "launchplane_every_code_feedback_resume_receipt_kind_uidx",
+        ("operation_id", "receipt_kind"),
+        unique=True,
+    ),
+    CriticalIndex(
+        "launchplane_every_code_pull_request_closures",
+        "launchplane_every_code_pull_request_closure_event_uidx",
+        ("request_id", "repository_id", "pr_number", "closed_at"),
+        unique=True,
+    ),
     CriticalIndex(
         "launchplane_administrator_enrollments",
         "launchplane_administrator_enrollment_challenge_uq",
