@@ -31,6 +31,15 @@ Until that work closes:
 This freeze does not prohibit code, tests, documentation, threat-model work, or
 dry-run-only validation that cannot mutate live policy.
 
+The approved [feedback continuation foundation](every-code-feedback-resume.md)
+defines `every_code_feedback_resume.request` and
+`every_code_feedback_resume.execute` as separate exclusively instance-scoped
+actions. Structural immutable-ID human matching and exact authenticated worker
+matching produce policy provenance only; they create no grant, live route or
+execution authority. The webhook-specific human predicate does not synthesize a
+browser identity or expand browser role permissions. New live grants and worker
+enablement retain the production freeze and rollout approvals.
+
 Owner-control channel-session, issued-challenge, and shadow-verification event
 records are inert verification evidence, not authorization policy or grants.
 They define no HTTP action, route, managed set, workflow, secret, or production

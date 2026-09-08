@@ -42,6 +42,16 @@ from control_plane.contracts.every_code_work_request import (
     EveryCodeWorkRequestRecord,
     EveryCodeWorkRequestStatusUpdate,
 )
+from control_plane.contracts.every_code_feedback_resume import (
+    EveryCodeFeedbackAcceptanceRecord,
+    EveryCodeVerifiedFeedbackRevision,
+    EveryCodeLinkedPullRequestClosureRecord,
+)
+from tests.test_every_code_feedback_resume_storage import (
+    _acceptance as _feedback_acceptance,
+    T0 as FEEDBACK_T0,
+    T1 as FEEDBACK_T1,
+)
 from control_plane.contracts.manager_preview_approval import (
     ManagerPreviewApprovalAuthorization,
     ManagerPreviewApprovalBinding,
@@ -6294,5 +6304,293 @@ class RealPostgresChangeImpactAuditTests(unittest.TestCase):
                 )
                 self.assertEqual(replay.status, "replayed")
                 self.assertIsNone(replay.audit)
+            finally:
+                store.close()
+
+
+class RealPostgresFeedbackResumeEvidenceTests(unittest.TestCase):
+    @staticmethod
+    def seed_request(store: PostgresRecordStore) -> EveryCodeWorkRequestRecord:
+        acceptance = _feedback_acceptance()
+        record = EveryCodeWorkRequestRecord(
+            request_id=acceptance.request_id,
+            lifecycle_id="lifecycle-1",
+            source="github_issue_label",
+            state="done",
+            repository=acceptance.revision.repository,
+            issue_number=acceptance.issue_number,
+            issue_url=acceptance.issue_url,
+            trigger_label="every-code",
+            queued_at=FEEDBACK_T0,
+            updated_at=FEEDBACK_T0,
+            claimed_at=FEEDBACK_T0,
+            claimed_by_host="worker-1",
+            fencing_token=2,
+            attempt=2,
+            started_at=FEEDBACK_T0,
+            finished_at=FEEDBACK_T0,
+            result_pr_url=acceptance.retained_pull_request_url,
+        )
+        store.write_every_code_work_request_record(record)
+        return record
+
+    def test_concurrent_duplicate_revision_keeps_one_original_acceptance(self) -> None:
+        first = _feedback_acceptance()
+        redelivery = _feedback_acceptance(
+            acceptance_id="acceptance-redelivery",
+            github_delivery_id="delivery-redelivery",
+            received_at=FEEDBACK_T1,
+            created_at=FEEDBACK_T1,
+        )
+        with _store_for_fresh_head_database() as store:
+            original_request = self.seed_request(store)
+            other = PostgresRecordStore(database_url=store.database_url)
+            barrier = threading.Barrier(2)
+
+            def persist(
+                writer: PostgresRecordStore, record: EveryCodeFeedbackAcceptanceRecord
+            ) -> EveryCodeFeedbackAcceptanceRecord:
+                barrier.wait(timeout=5)
+                return writer.write_every_code_feedback_acceptance_record(record)
+
+            try:
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    futures = (
+                        executor.submit(persist, store, first),
+                        executor.submit(persist, other, redelivery),
+                    )
+                    results = tuple(future.result(timeout=10) for future in futures)
+                self.assertEqual(results[0], results[1])
+                stored = store.list_every_code_feedback_acceptance_records(
+                    request_id=first.request_id
+                )
+                self.assertEqual(stored, (results[0],))
+                expected_originals = {
+                    first.acceptance_id: first.received_at,
+                    redelivery.acceptance_id: redelivery.received_at,
+                }
+                self.assertIn(stored[0].acceptance_id, expected_originals)
+                self.assertEqual(
+                    stored[0].received_at,
+                    expected_originals[stored[0].acceptance_id],
+                )
+                self.assertEqual(store.list_every_code_pr_feedback_records(), ())
+                self.assertEqual(
+                    store.read_every_code_work_request_record(first.request_id), original_request
+                )
+            finally:
+                other.close()
+
+    def test_concurrent_equal_time_changed_digest_is_one_acceptance_and_one_conflict(self) -> None:
+        from control_plane.storage.postgres import EveryCodeFeedbackResumeStorageConflictError
+
+        first = _feedback_acceptance()
+        changed_revision = EveryCodeVerifiedFeedbackRevision.model_validate(
+            {**first.revision.model_dump(), "body_sha256": "b" * 64, "revision_digest": ""}
+        )
+        changed = _feedback_acceptance(
+            acceptance_id="acceptance-changed", revision=changed_revision
+        )
+        with _store_for_fresh_head_database() as store:
+            self.seed_request(store)
+            other = PostgresRecordStore(database_url=store.database_url)
+            barrier = threading.Barrier(2)
+
+            def persist(
+                writer: PostgresRecordStore, record: EveryCodeFeedbackAcceptanceRecord
+            ) -> str:
+                barrier.wait(timeout=5)
+                try:
+                    writer.write_every_code_feedback_acceptance_record(record)
+                except EveryCodeFeedbackResumeStorageConflictError:
+                    return "conflict"
+                return "accepted"
+
+            try:
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    futures = (
+                        executor.submit(persist, store, first),
+                        executor.submit(persist, other, changed),
+                    )
+                    results = tuple(future.result(timeout=10) for future in futures)
+                self.assertCountEqual(results, ("accepted", "conflict"))
+                self.assertEqual(
+                    len(
+                        store.list_every_code_feedback_acceptance_records(
+                            request_id=first.request_id
+                        )
+                    ),
+                    1,
+                )
+            finally:
+                other.close()
+
+    def test_closure_evidence_waits_for_request_row_lock_without_changing_execution(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            original_request = self.seed_request(store)
+            other = PostgresRecordStore(database_url=store.database_url)
+            attempted_lock = threading.Event()
+            completed_lock = threading.Event()
+            closure = EveryCodeLinkedPullRequestClosureRecord(
+                closure_id="closure-lock-proof",
+                request_id=original_request.request_id,
+                repository_id=34,
+                pull_request_number=1,
+                pull_request_node_id="PR_node",
+                merged=False,
+                closed_at=FEEDBACK_T1,
+                github_delivery_id="closure-delivery",
+            )
+
+            def before_query(
+                connection: Any,
+                cursor: Any,
+                statement: str,
+                parameters: Any,
+                context: Any,
+                executemany: bool,
+            ) -> None:
+                del connection, cursor, parameters, context, executemany
+                if (
+                    "launchplane_every_code_work_requests" in statement
+                    and "FOR UPDATE" in statement
+                ):
+                    attempted_lock.set()
+
+            def after_query(
+                connection: Any,
+                cursor: Any,
+                statement: str,
+                parameters: Any,
+                context: Any,
+                executemany: bool,
+            ) -> None:
+                del connection, cursor, parameters, context, executemany
+                if (
+                    "launchplane_every_code_work_requests" in statement
+                    and "FOR UPDATE" in statement
+                ):
+                    completed_lock.set()
+
+            event.listen(other._engine, "before_cursor_execute", before_query)
+            event.listen(other._engine, "after_cursor_execute", after_query)
+            try:
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    with store._session_factory() as session:
+                        session.execute(
+                            text(
+                                "SELECT request_id FROM launchplane_every_code_work_requests "
+                                "WHERE request_id = :request_id FOR UPDATE"
+                            ),
+                            {"request_id": original_request.request_id},
+                        )
+                        future = executor.submit(
+                            other.write_every_code_linked_pull_request_closure_record, closure
+                        )
+                        self.assertTrue(attempted_lock.wait(timeout=5))
+                        self.assertFalse(completed_lock.is_set())
+                        self.assertFalse(future.done())
+                        session.commit()
+                    future.result(timeout=10)
+                self.assertTrue(completed_lock.is_set())
+                self.assertEqual(
+                    store.list_every_code_linked_pull_request_closure_records(
+                        request_id=original_request.request_id
+                    ),
+                    (closure,),
+                )
+                self.assertEqual(
+                    store.read_every_code_work_request_record(original_request.request_id),
+                    original_request,
+                )
+            finally:
+                event.remove(other._engine, "before_cursor_execute", before_query)
+                event.remove(other._engine, "after_cursor_execute", after_query)
+                other.close()
+
+    def test_same_pull_request_closure_is_recorded_for_each_request(self) -> None:
+        from control_plane.storage.postgres import EveryCodeFeedbackResumeStorageConflictError
+
+        with _store_for_fresh_head_database() as store:
+            first_request = self.seed_request(store)
+            second_request = first_request.model_copy(
+                update={
+                    "request_id": "request-2",
+                    "lifecycle_id": "lifecycle-other",
+                }
+            )
+            store.write_every_code_work_request_record(second_request)
+            first = EveryCodeLinkedPullRequestClosureRecord(
+                closure_id="closure-request-1",
+                request_id=first_request.request_id,
+                repository_id=34,
+                pull_request_number=1,
+                pull_request_node_id="PR_node",
+                merged=False,
+                closed_at=FEEDBACK_T1,
+                github_delivery_id="closure-delivery",
+            )
+            second = EveryCodeLinkedPullRequestClosureRecord.model_validate(
+                {
+                    **first.model_dump(),
+                    "closure_id": "closure-request-2",
+                    "request_id": second_request.request_id,
+                    "closure_digest": "",
+                }
+            )
+            store.write_every_code_linked_pull_request_closure_record(first)
+            store.write_every_code_linked_pull_request_closure_record(second)
+            self.assertEqual(
+                store.list_every_code_linked_pull_request_closure_records(
+                    request_id=first_request.request_id
+                ),
+                (first,),
+            )
+            self.assertEqual(
+                store.list_every_code_linked_pull_request_closure_records(
+                    request_id=second_request.request_id
+                ),
+                (second,),
+            )
+
+            conflicting = EveryCodeLinkedPullRequestClosureRecord.model_validate(
+                {
+                    **first.model_dump(),
+                    "closure_id": "closure-request-1-conflict",
+                    "merged": True,
+                    "closure_digest": "",
+                }
+            )
+            with self.assertRaises(EveryCodeFeedbackResumeStorageConflictError):
+                store.write_every_code_linked_pull_request_closure_record(conflicting)
+
+    def test_additive_migration_preserves_legacy_feedback_shape_and_queue(self) -> None:
+        from control_plane.contracts.every_code_pr_feedback_record import EveryCodePrFeedbackRecord
+
+        legacy = EveryCodePrFeedbackRecord(
+            feedback_id="legacy-feedback",
+            request_id="request-1",
+            repository="example/repo",
+            pr_number=1,
+            pr_url="https://github.com/example/repo/pull/1",
+            feedback_kind="issue_comment",
+            github_delivery_id="legacy-delivery",
+            github_id="81",
+            actor="legacy-author",
+            body="Legacy pending feedback",
+            received_at=FEEDBACK_T0,
+        )
+        with _isolated_postgres_database() as database_url:
+            config = _alembic_config(database_url)
+            alembic_command.upgrade(config, "d1f3a5b7c9e2")
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                store.write_every_code_pr_feedback_record(legacy)
+                alembic_command.upgrade(config, "head")
+                store.verify_schema()
+                self.assertEqual(
+                    store.list_every_code_pr_feedback_records(status="pending"), (legacy,)
+                )
+                self.assertEqual(store.list_every_code_feedback_acceptance_records(), ())
             finally:
                 store.close()
