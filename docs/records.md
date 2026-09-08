@@ -1255,6 +1255,23 @@ the original opening effect completed before its attempt record committed.
 Delivery attempts are the idempotency boundary for notifications, while incident
 records remain the source of truth for active public-ingress state.
 
+## Every Code Feedback Resume Evidence
+
+The independent [feedback continuation foundation](every-code-feedback-resume.md)
+stores immutable acceptance, terminal intent, operation, explicit PR closure,
+startup/handoff receipt and recovery evidence in separate SQL tables. Their
+typed contracts reject malformed immutable identities, inconsistent digests and
+renewed eligibility deadlines. Changed replay conflicts rather than overwriting
+the earlier record. These records remain isolated from the existing feedback
+queue and are not wired into live lifecycle transitions.
+
+The legacy feedback path's repository-login/local-planning trust is not inherited
+by the new request action. Neither a legacy feedback row nor an ordinary worker
+status or rerun intent establishes feedback-resume authority. Persisted receipt
+fixtures and recovery observations do not authorize execution or operator
+resolution; those service-owned transitions remain separately implemented and
+gated as described in the linked contract.
+
 ## Every Code Notification Records
 
 Every Code notification policy records are DB-backed Launchplane records under

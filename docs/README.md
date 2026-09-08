@@ -88,3 +88,5 @@ Use these docs as the source of truth for `launchplane`.
   code-quality guardrails.
 - [codex-lab-workers.md](codex-lab-workers.md) — executable selection, session
   provenance, and retirement verification.
+- [every-code-feedback-resume.md](every-code-feedback-resume.md) — approved
+  feedback continuation foundation, evidence semantics and production gates.

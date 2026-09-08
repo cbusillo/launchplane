@@ -7,6 +7,8 @@ _NON_DESCRIPTOR_INSTANCE_SCOPED_AUTHZ_ACTIONS = frozenset(
     {
         "backup_gate.write",
         "deployment.read",
+        "every_code_feedback_resume.request",
+        "every_code_feedback_resume.execute",
         "generic_web_deploy_recovery_provider_evidence.read",
         "inventory.read",
         "product_profile.health_monitoring.apply",
