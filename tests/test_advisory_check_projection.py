@@ -14,7 +14,10 @@ from control_plane.contracts.advisory_check_projection import (
     OWNER_ACCEPTANCE_CHECK_NAME,
 )
 from control_plane.github_app_identity import GitHubAppInstallationToken
-from control_plane.owner_acceptance_projection import owner_acceptance_workbench_url
+from control_plane.owner_acceptance_projection import (
+    owner_acceptance_workbench_url,
+    owner_review_url,
+)
 
 
 HEAD_SHA = "a" * 40
@@ -91,6 +94,13 @@ class AdvisoryCheckProjectionTests(unittest.TestCase):
             tree_sha="c" * 40,
         )
 
+        self.assertEqual(
+            owner_review_url(
+                public_origin="https://ops.example.test/",
+                target=target,
+            ),
+            "https://ops.example.test/ui/owner-review?repository=example%2Frepo&pull_request=7",
+        )
         self.assertEqual(
             owner_acceptance_workbench_url(
                 public_origin="https://ops.example.test/",

@@ -446,6 +446,41 @@ merge-ready, or authorize production. The stored API and ledger action remains
 `accepted`; the human-facing label clarifies its scope rather than introducing a
 second semantic state.
 
+## Owner Product Review Route
+
+`/ui/owner-review?repository=<owner/repo>&pull_request=<number>` is a focused
+browser view over the existing exact evaluation and event routes. It has minimal
+product-review chrome and does not load the product catalog, Current-items list,
+recorded ledger, or Engineering Ops navigation. Every returned per-product
+binding is shown independently with its server-bound preview URL, exact
+viewer-capability controls, operation identity, and binding-drift refresh. A
+reviewer never selects the first binding implicitly. Missing or malformed query
+scope fails closed without an evaluation request.
+
+The page uses neutral contract fields only; it does not require a PR narrative,
+test summary, or newly inferred readiness. Request-changes and revoke retain the
+existing reason and confirmation rules. When accepting an identical binding that
+previously requested changes, the reviewer supplies a plain resolution
+explanation and the browser attaches the current server-bound preview and serving
+generation identifiers as evidence references. The trusted Launchplane page
+keeps the decision controls while each preview opens as an external page.
+Advisory checks link directly to this focused route and retain an explicit
+Engineering details link in their summary for the compatibility workbench.
+
+This source UI does not establish product-scoped read isolation. The current
+evaluation route first authorizes the broad Launchplane `owner-acceptance` read
+context and returns the full decision; per-binding capabilities govern action
+visibility and the event route independently revalidates writes. Before narrowly
+scoped site Owners can be enrolled, Launchplane still needs a separately reviewed
+owner-safe evaluation projection and product-scoped read authorization. Hidden
+controls are chrome scoping, not evidence of foreign-product denial.
+
+The browser operation controller retains an uncertain request and idempotency key
+while the page remains mounted. Its persisted recovery record contains identity,
+not the potentially sensitive feedback payload. After a reload, the Owner page
+therefore blocks a reconstructed retry and requires reconciliation of the unknown
+outcome before another decision; it does not create a changed request or new key.
+
 ## Advisory GitHub Projection
 
 `POST /v1/owner-acceptance/project` projects the current aggregate decision as
