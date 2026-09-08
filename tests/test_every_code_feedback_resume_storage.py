@@ -178,9 +178,9 @@ class EveryCodeFeedbackResumeStorageTests(unittest.TestCase):
         accepted = _acceptance()
         intent = _intent(accepted)
         with self.assertRaisesRegex(ValueError, "acceptance does not exist"):
-            self.store.write_every_code_feedback_resume_intent_record(intent)
+            self.store._write_every_code_feedback_resume_intent_fixture_record(intent)
         self.store.write_every_code_feedback_acceptance_record(accepted)
-        self.store.write_every_code_feedback_resume_intent_record(intent)
+        self.store._write_every_code_feedback_resume_intent_fixture_record(intent)
         operation = _operation(accepted, intent)
         mismatched = operation.model_copy(
             update={"binding": operation.binding.model_copy(update={"request_id": "request-2"})}
@@ -193,7 +193,7 @@ class EveryCodeFeedbackResumeStorageTests(unittest.TestCase):
         intent = _intent(accepted)
         operation = _operation(accepted, intent)
         self.store.write_every_code_feedback_acceptance_record(accepted)
-        self.store.write_every_code_feedback_resume_intent_record(intent)
+        self.store._write_every_code_feedback_resume_intent_fixture_record(intent)
         stale_fence = operation.model_copy(
             update={
                 "binding": operation.binding.model_copy(
@@ -214,7 +214,7 @@ class EveryCodeFeedbackResumeStorageTests(unittest.TestCase):
         intent = _intent(accepted)
         operation = _operation(accepted, intent)
         self.store.write_every_code_feedback_acceptance_record(accepted)
-        self.store.write_every_code_feedback_resume_intent_record(intent)
+        self.store._write_every_code_feedback_resume_intent_fixture_record(intent)
         self.store.write_every_code_feedback_resume_operation_record(operation)
         startup = EveryCodeFeedbackStartupReceiptRecord(
             receipt_id="receipt-1",
