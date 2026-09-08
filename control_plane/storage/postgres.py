@@ -111,6 +111,16 @@ from control_plane.contracts.engineering_review_decision import (
     EngineeringReviewDecisionRecord,
 )
 from control_plane.contracts.every_code_pr_feedback_record import EveryCodePrFeedbackRecord
+from control_plane.contracts.every_code_feedback_resume import (
+    EveryCodeFeedbackAcceptanceRecord,
+    EveryCodeFeedbackHandoffReceiptRecord,
+    EveryCodeFeedbackRecoveryDispositionRecord,
+    EveryCodeFeedbackResumeIntentRecord,
+    EveryCodeFeedbackResumeOperationRecord,
+    EveryCodeFeedbackStartupReceiptRecord,
+    EveryCodeLinkedPullRequestClosureRecord,
+    parse_every_code_feedback_timestamp,
+)
 from control_plane.contracts.generic_web_rollback import GenericWebRollbackPlanRecord
 from control_plane.contracts.idempotency_record import (
     LaunchplaneIdempotencyRecord,
@@ -422,6 +432,11 @@ from control_plane.storage.schema_invariants import (
 )
 
 RecordModel = TypeVar("RecordModel", bound=BaseModel)
+
+
+class EveryCodeFeedbackResumeStorageConflictError(ValueError):
+    """Raised when an immutable resume-evidence identity is reused differently."""
+
 
 _SQLITE_OWNER_ACCEPTANCE_PROJECTION_LOCKS_GUARD = Lock()
 _SQLITE_OWNER_ACCEPTANCE_PROJECTION_LOCKS: dict[str, Lock] = {}
@@ -3538,6 +3553,234 @@ class LaunchplaneEveryCodePrFeedbackRow(Base):
     actor: Mapped[str] = mapped_column(String, nullable=False)
     received_at: Mapped[str] = mapped_column(String, nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneEveryCodeFeedbackAcceptanceRow(Base):
+    __tablename__ = "launchplane_every_code_feedback_acceptances"
+    __table_args__ = (
+        CheckConstraint(
+            "repository_id > 0",
+            name="launchplane_every_code_feedback_acceptance_repository_id_ck",
+        ),
+        UniqueConstraint(
+            "repository_id",
+            "feedback_kind",
+            "feedback_object_id",
+            "revision_digest",
+            name="launchplane_every_code_feedback_acceptance_revision_uidx",
+        ),
+        UniqueConstraint(
+            "acceptance_digest",
+            name="launchplane_every_code_feedback_acceptance_digest_uidx",
+        ),
+        UniqueConstraint(
+            "repository_id",
+            "feedback_kind",
+            "feedback_object_id",
+            "provider_updated_at",
+            name="launchplane_every_code_feedback_acceptance_revision_time_uidx",
+        ),
+        Index(
+            "launchplane_every_code_feedback_acceptance_request_idx",
+            "request_id",
+            "received_at",
+            "feedback_id",
+        ),
+    )
+
+    acceptance_id: Mapped[str] = mapped_column(String, primary_key=True)
+    request_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("launchplane_every_code_work_requests.request_id"),
+        nullable=False,
+    )
+    repository_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    pr_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    feedback_id: Mapped[str] = mapped_column(String, nullable=False)
+    feedback_kind: Mapped[str] = mapped_column(String, nullable=False)
+    feedback_object_id: Mapped[str] = mapped_column(String, nullable=False)
+    revision_digest: Mapped[str] = mapped_column(String, nullable=False)
+    acceptance_digest: Mapped[str] = mapped_column(String, nullable=False)
+    provider_updated_at: Mapped[str] = mapped_column(String, nullable=False)
+    received_at: Mapped[str] = mapped_column(String, nullable=False)
+    eligible_until: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneEveryCodeFeedbackResumeIntentRow(Base):
+    __tablename__ = "launchplane_every_code_feedback_resume_intents"
+    __table_args__ = (
+        CheckConstraint(
+            "expected_fencing_token >= 0",
+            name="launchplane_every_code_feedback_resume_intent_fence_ck",
+        ),
+        UniqueConstraint(
+            "intent_digest", name="launchplane_every_code_feedback_resume_intent_digest_uidx"
+        ),
+        Index(
+            "launchplane_every_code_feedback_resume_intent_request_idx",
+            "request_id",
+            "issued_at",
+        ),
+    )
+
+    intent_id: Mapped[str] = mapped_column(String, primary_key=True)
+    request_id: Mapped[str] = mapped_column(String, nullable=False)
+    acceptance_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("launchplane_every_code_feedback_acceptances.acceptance_id"),
+        nullable=False,
+    )
+    expected_lifecycle_id: Mapped[str] = mapped_column(String, nullable=False)
+    expected_fencing_token: Mapped[int] = mapped_column(Integer, nullable=False)
+    intent_digest: Mapped[str] = mapped_column(String, nullable=False)
+    issued_at: Mapped[str] = mapped_column(String, nullable=False)
+    eligible_until: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneEveryCodeFeedbackResumeOperationRow(Base):
+    __tablename__ = "launchplane_every_code_feedback_resume_operations"
+    __table_args__ = (
+        CheckConstraint(
+            "fencing_token > 0",
+            name="launchplane_every_code_feedback_resume_operation_fence_ck",
+        ),
+        UniqueConstraint(
+            "intent_id", name="launchplane_every_code_feedback_resume_operation_intent_uidx"
+        ),
+        UniqueConstraint(
+            "request_id",
+            "lifecycle_id",
+            name="launchplane_every_code_feedback_resume_operation_lifecycle_uidx",
+        ),
+        UniqueConstraint(
+            "launch_nonce", name="launchplane_every_code_feedback_resume_operation_nonce_uidx"
+        ),
+        Index(
+            "launchplane_every_code_feedback_resume_operation_request_idx",
+            "request_id",
+            "created_at",
+        ),
+    )
+
+    operation_id: Mapped[str] = mapped_column(String, primary_key=True)
+    intent_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("launchplane_every_code_feedback_resume_intents.intent_id"),
+        nullable=False,
+    )
+    acceptance_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("launchplane_every_code_feedback_acceptances.acceptance_id"),
+        nullable=False,
+    )
+    request_id: Mapped[str] = mapped_column(String, nullable=False)
+    lifecycle_id: Mapped[str] = mapped_column(String, nullable=False)
+    fencing_token: Mapped[int] = mapped_column(Integer, nullable=False)
+    launch_nonce: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[str] = mapped_column(String, nullable=False)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneEveryCodeFeedbackResumeReceiptRow(Base):
+    __tablename__ = "launchplane_every_code_feedback_resume_receipts"
+    __table_args__ = (
+        CheckConstraint(
+            "fencing_token > 0",
+            name="launchplane_every_code_feedback_resume_receipt_fence_ck",
+        ),
+        UniqueConstraint(
+            "operation_id",
+            "receipt_kind",
+            name="launchplane_every_code_feedback_resume_receipt_kind_uidx",
+        ),
+    )
+
+    receipt_id: Mapped[str] = mapped_column(String, primary_key=True)
+    operation_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("launchplane_every_code_feedback_resume_operations.operation_id"),
+        nullable=False,
+    )
+    request_id: Mapped[str] = mapped_column(String, nullable=False)
+    lifecycle_id: Mapped[str] = mapped_column(String, nullable=False)
+    fencing_token: Mapped[int] = mapped_column(Integer, nullable=False)
+    launch_nonce: Mapped[str] = mapped_column(String, nullable=False)
+    receipt_kind: Mapped[str] = mapped_column(String, nullable=False)
+    recorded_at: Mapped[str] = mapped_column(String, nullable=False)
+    receipt_digest: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneEveryCodeFeedbackResumeRecoveryRow(Base):
+    __tablename__ = "launchplane_every_code_feedback_resume_recovery_evidence"
+    __table_args__ = (
+        CheckConstraint(
+            "fencing_token > 0",
+            name="launchplane_every_code_feedback_resume_recovery_fence_ck",
+        ),
+        Index(
+            "launchplane_every_code_feedback_resume_recovery_operation_idx",
+            "operation_id",
+            "observed_at",
+        ),
+    )
+
+    evidence_id: Mapped[str] = mapped_column(String, primary_key=True)
+    operation_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("launchplane_every_code_feedback_resume_operations.operation_id"),
+        nullable=False,
+    )
+    request_id: Mapped[str] = mapped_column(String, nullable=False)
+    lifecycle_id: Mapped[str] = mapped_column(String, nullable=False)
+    fencing_token: Mapped[int] = mapped_column(Integer, nullable=False)
+    launch_nonce: Mapped[str] = mapped_column(String, nullable=False)
+    disposition: Mapped[str] = mapped_column(String, nullable=False)
+    observed_at: Mapped[str] = mapped_column(String, nullable=False)
+    evidence_digest: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneEveryCodePullRequestClosureRow(Base):
+    __tablename__ = "launchplane_every_code_pull_request_closures"
+    __table_args__ = (
+        CheckConstraint(
+            "repository_id > 0",
+            name="launchplane_every_code_pull_request_closure_repository_id_ck",
+        ),
+        UniqueConstraint(
+            "closure_digest", name="launchplane_every_code_pull_request_closure_digest_uidx"
+        ),
+        UniqueConstraint(
+            "request_id",
+            "repository_id",
+            "pr_number",
+            "closed_at",
+            name="launchplane_every_code_pull_request_closure_event_uidx",
+        ),
+        Index(
+            "launchplane_every_code_pull_request_closure_request_idx",
+            "request_id",
+            "closed_at",
+        ),
+    )
+
+    closure_id: Mapped[str] = mapped_column(String, primary_key=True)
+    request_id: Mapped[str] = mapped_column(String, nullable=False)
+    repository_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    pr_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    pr_node_id: Mapped[str] = mapped_column(String, nullable=False)
+    closed_at: Mapped[str] = mapped_column(String, nullable=False)
+    merged: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    delivery_id: Mapped[str] = mapped_column(String, nullable=False)
+    closure_digest: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -14677,6 +14920,350 @@ class PostgresRecordStore(HumanSessionStore):
             )
         )
 
+    @staticmethod
+    def _immutable_resume_row_matches(row: Base, payload: PayloadDict) -> bool:
+        return _payload_from_row(row) == payload
+
+    def _insert_immutable_resume_row(
+        self,
+        *,
+        row: Base,
+        orm_model: type[Base],
+        identity_column: Any,
+        identity: str,
+        record: BaseModel,
+    ) -> None:
+        payload = self._payload_dict(record)
+        with self._session_factory() as session:
+            existing = session.scalar(select(orm_model).where(identity_column == identity).limit(1))
+            if existing is not None:
+                if self._immutable_resume_row_matches(existing, payload):
+                    return
+                raise EveryCodeFeedbackResumeStorageConflictError(
+                    f"immutable Every Code feedback resume identity {identity!r} conflicts"
+                )
+            session.add(row)
+            try:
+                session.commit()
+            except IntegrityError as error:
+                session.rollback()
+                replay = session.scalar(
+                    select(orm_model).where(identity_column == identity).limit(1)
+                )
+                if replay is not None and _payload_from_row(replay) == payload:
+                    return
+                raise EveryCodeFeedbackResumeStorageConflictError(
+                    f"immutable Every Code feedback resume identity {identity!r} conflicts"
+                ) from error
+
+    def write_every_code_feedback_acceptance_record(
+        self, record: EveryCodeFeedbackAcceptanceRecord
+    ) -> EveryCodeFeedbackAcceptanceRecord:
+        record = EveryCodeFeedbackAcceptanceRecord.model_validate(record.model_dump())
+        payload = self._payload_dict(record)
+        revision = record.revision
+        with self._session_factory() as session:
+            request_statement = select(LaunchplaneEveryCodeWorkRequestRow).where(
+                LaunchplaneEveryCodeWorkRequestRow.request_id == record.request_id
+            )
+            if not self.database_url.startswith("sqlite"):
+                request_statement = request_statement.with_for_update()
+            request_row = session.scalar(request_statement)
+            if request_row is None:
+                raise ValueError("feedback acceptance work request does not exist")
+            request = EveryCodeWorkRequestRecord.model_validate(request_row.payload)
+            if (
+                request.repository != revision.repository
+                or request.issue_number != record.issue_number
+                or request.issue_url != record.issue_url
+                or request.result_pr_url != record.retained_pull_request_url
+            ):
+                raise ValueError("feedback acceptance does not match stored work request")
+            if not self.database_url.startswith("sqlite"):
+                object_lock_key = (
+                    f"every-code-feedback:{revision.repository_id}:"
+                    f"{revision.feedback_kind}:{revision.object_id}"
+                )
+                session.execute(
+                    text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
+                    {"lock_key": object_lock_key},
+                )
+            existing_identity = session.get(
+                LaunchplaneEveryCodeFeedbackAcceptanceRow, record.acceptance_id
+            )
+            if existing_identity is not None:
+                if self._immutable_resume_row_matches(existing_identity, payload):
+                    return record
+                raise EveryCodeFeedbackResumeStorageConflictError(
+                    f"immutable Every Code feedback resume identity {record.acceptance_id!r} conflicts"
+                )
+            existing_revision = session.scalar(
+                select(LaunchplaneEveryCodeFeedbackAcceptanceRow)
+                .where(
+                    LaunchplaneEveryCodeFeedbackAcceptanceRow.feedback_object_id
+                    == str(revision.object_id),
+                    LaunchplaneEveryCodeFeedbackAcceptanceRow.repository_id
+                    == revision.repository_id,
+                    LaunchplaneEveryCodeFeedbackAcceptanceRow.feedback_kind
+                    == revision.feedback_kind,
+                    LaunchplaneEveryCodeFeedbackAcceptanceRow.revision_digest
+                    == revision.revision_digest,
+                )
+                .limit(1)
+            )
+            if existing_revision is not None:
+                if existing_revision.request_id != record.request_id:
+                    raise EveryCodeFeedbackResumeStorageConflictError(
+                        "verified feedback revision is already bound to another request"
+                    )
+                return EveryCodeFeedbackAcceptanceRecord.model_validate(existing_revision.payload)
+            latest_revision = session.scalar(
+                select(LaunchplaneEveryCodeFeedbackAcceptanceRow)
+                .where(
+                    LaunchplaneEveryCodeFeedbackAcceptanceRow.feedback_object_id
+                    == str(revision.object_id),
+                    LaunchplaneEveryCodeFeedbackAcceptanceRow.repository_id
+                    == revision.repository_id,
+                    LaunchplaneEveryCodeFeedbackAcceptanceRow.feedback_kind
+                    == revision.feedback_kind,
+                )
+                .order_by(LaunchplaneEveryCodeFeedbackAcceptanceRow.provider_updated_at.desc())
+                .limit(1)
+            )
+            if latest_revision is not None:
+                if latest_revision.request_id != record.request_id:
+                    raise EveryCodeFeedbackResumeStorageConflictError(
+                        "feedback object is already bound to another work request"
+                    )
+                if latest_revision.provider_updated_at >= revision.provider_updated_at:
+                    reason = (
+                        "ambiguous equal-time feedback revision"
+                        if latest_revision.provider_updated_at == revision.provider_updated_at
+                        else "feedback revision is older than stored evidence"
+                    )
+                    raise EveryCodeFeedbackResumeStorageConflictError(reason)
+            session.add(
+                LaunchplaneEveryCodeFeedbackAcceptanceRow(
+                    acceptance_id=record.acceptance_id,
+                    request_id=record.request_id,
+                    repository_id=revision.repository_id,
+                    pr_number=revision.pull_request_number,
+                    feedback_id=revision.feedback_id,
+                    feedback_kind=revision.feedback_kind,
+                    feedback_object_id=str(revision.object_id),
+                    revision_digest=revision.revision_digest,
+                    acceptance_digest=record.acceptance_digest,
+                    provider_updated_at=revision.provider_updated_at,
+                    received_at=record.received_at,
+                    eligible_until=record.eligible_until,
+                    status=record.status,
+                    payload=self._payload_dict(record),
+                )
+            )
+            session.commit()
+            return record
+
+    def write_every_code_feedback_resume_intent_record(
+        self, record: EveryCodeFeedbackResumeIntentRecord
+    ) -> None:
+        record = EveryCodeFeedbackResumeIntentRecord.model_validate(record.model_dump())
+        acceptance = self.read_every_code_feedback_acceptance_record(record.acceptance_id)
+        if acceptance is None:
+            raise ValueError("resume intent acceptance does not exist")
+        if (
+            acceptance.request_id != record.request_id
+            or acceptance.acceptance_digest != record.acceptance_digest
+            or acceptance.eligible_until != record.eligible_until
+        ):
+            raise ValueError("resume intent does not match immutable acceptance binding")
+        self._insert_immutable_resume_row(
+            row=LaunchplaneEveryCodeFeedbackResumeIntentRow(
+                intent_id=record.intent_id,
+                request_id=record.request_id,
+                acceptance_id=record.acceptance_id,
+                expected_lifecycle_id=record.expected_lifecycle_id,
+                expected_fencing_token=record.expected_fencing_token,
+                intent_digest=record.intent_digest,
+                issued_at=record.issued_at,
+                eligible_until=record.eligible_until,
+                status="pending",
+                payload=self._payload_dict(record),
+            ),
+            orm_model=LaunchplaneEveryCodeFeedbackResumeIntentRow,
+            identity_column=LaunchplaneEveryCodeFeedbackResumeIntentRow.intent_id,
+            identity=record.intent_id,
+            record=record,
+        )
+
+    def write_every_code_feedback_resume_operation_record(
+        self, record: EveryCodeFeedbackResumeOperationRecord
+    ) -> None:
+        record = EveryCodeFeedbackResumeOperationRecord.model_validate(record.model_dump())
+        intent = self.read_every_code_feedback_resume_intent_record(record.intent_id)
+        acceptance = self.read_every_code_feedback_acceptance_record(record.acceptance_id)
+        if intent is None or acceptance is None:
+            raise ValueError("resume operation requires stored intent and acceptance")
+        binding = record.binding
+        if (
+            intent.acceptance_id != record.acceptance_id
+            or intent.request_id != binding.request_id
+            or acceptance.request_id != binding.request_id
+            or record.execution_policy.instance
+            != f"github-repository:{acceptance.revision.repository_id}"
+        ):
+            raise ValueError("resume operation does not match intent and acceptance binding")
+        if binding.fencing_token <= intent.expected_fencing_token:
+            raise ValueError("resume operation fencing token must advance beyond intent fence")
+        if parse_every_code_feedback_timestamp(
+            record.committed_at, "committed_at"
+        ) >= parse_every_code_feedback_timestamp(intent.eligible_until, "eligible_until"):
+            raise ValueError("resume operation must commit before intent eligibility expires")
+        self._insert_immutable_resume_row(
+            row=LaunchplaneEveryCodeFeedbackResumeOperationRow(
+                operation_id=record.operation_id,
+                intent_id=record.intent_id,
+                acceptance_id=record.acceptance_id,
+                request_id=binding.request_id,
+                lifecycle_id=binding.lifecycle_id,
+                fencing_token=binding.fencing_token,
+                launch_nonce=binding.launch_nonce,
+                status=record.state,
+                created_at=record.committed_at,
+                updated_at=record.updated_at,
+                payload=self._payload_dict(record),
+            ),
+            orm_model=LaunchplaneEveryCodeFeedbackResumeOperationRow,
+            identity_column=LaunchplaneEveryCodeFeedbackResumeOperationRow.operation_id,
+            identity=record.operation_id,
+            record=record,
+        )
+
+    def write_every_code_feedback_resume_receipt_record(
+        self,
+        record: EveryCodeFeedbackStartupReceiptRecord | EveryCodeFeedbackHandoffReceiptRecord,
+    ) -> None:
+        record = type(record).model_validate(record.model_dump())
+        operation = self.read_every_code_feedback_resume_operation_record(record.operation_id)
+        if operation is None or operation.binding != record.binding:
+            raise ValueError("resume receipt does not match stored operation binding")
+        self._insert_immutable_resume_row(
+            row=LaunchplaneEveryCodeFeedbackResumeReceiptRow(
+                receipt_id=record.receipt_id,
+                operation_id=record.operation_id,
+                request_id=record.binding.request_id,
+                lifecycle_id=record.binding.lifecycle_id,
+                fencing_token=record.binding.fencing_token,
+                launch_nonce=record.binding.launch_nonce,
+                receipt_kind=record.receipt_kind,
+                recorded_at=record.recorded_at,
+                receipt_digest=record.evidence_sha256,
+                payload=self._payload_dict(record),
+            ),
+            orm_model=LaunchplaneEveryCodeFeedbackResumeReceiptRow,
+            identity_column=LaunchplaneEveryCodeFeedbackResumeReceiptRow.receipt_id,
+            identity=record.receipt_id,
+            record=record,
+        )
+
+    def write_every_code_feedback_recovery_disposition_record(
+        self, record: EveryCodeFeedbackRecoveryDispositionRecord
+    ) -> None:
+        record = EveryCodeFeedbackRecoveryDispositionRecord.model_validate(record.model_dump())
+        operation = self.read_every_code_feedback_resume_operation_record(record.operation_id)
+        if operation is None or operation.binding != record.binding:
+            raise ValueError("recovery evidence does not match stored operation binding")
+        self._insert_immutable_resume_row(
+            row=LaunchplaneEveryCodeFeedbackResumeRecoveryRow(
+                evidence_id=record.recovery_id,
+                operation_id=record.operation_id,
+                request_id=record.binding.request_id,
+                lifecycle_id=record.binding.lifecycle_id,
+                fencing_token=record.binding.fencing_token,
+                launch_nonce=record.binding.launch_nonce,
+                disposition=record.disposition,
+                observed_at=record.recorded_at,
+                evidence_digest=record.evidence_sha256,
+                payload=self._payload_dict(record),
+            ),
+            orm_model=LaunchplaneEveryCodeFeedbackResumeRecoveryRow,
+            identity_column=LaunchplaneEveryCodeFeedbackResumeRecoveryRow.evidence_id,
+            identity=record.recovery_id,
+            record=record,
+        )
+
+    def write_every_code_linked_pull_request_closure_record(
+        self, record: EveryCodeLinkedPullRequestClosureRecord
+    ) -> None:
+        record = EveryCodeLinkedPullRequestClosureRecord.model_validate(record.model_dump())
+        payload = self._payload_dict(record)
+        with self._session_factory() as session:
+            request_statement = select(LaunchplaneEveryCodeWorkRequestRow).where(
+                LaunchplaneEveryCodeWorkRequestRow.request_id == record.request_id
+            )
+            if not self.database_url.startswith("sqlite"):
+                request_statement = request_statement.with_for_update()
+            request_row = session.scalar(request_statement)
+            if request_row is None:
+                raise ValueError("pull-request closure work request does not exist")
+            request = EveryCodeWorkRequestRecord.model_validate(request_row.payload)
+            expected_pull_request_url = (
+                f"https://github.com/{request.repository}/pull/{record.pull_request_number}"
+            )
+            if request.result_pr_url != expected_pull_request_url:
+                raise ValueError("pull-request closure does not match stored work request")
+            existing = session.get(LaunchplaneEveryCodePullRequestClosureRow, record.closure_id)
+            if existing is not None:
+                if self._immutable_resume_row_matches(existing, payload):
+                    return
+                raise EveryCodeFeedbackResumeStorageConflictError(
+                    f"immutable Every Code feedback resume identity {record.closure_id!r} conflicts"
+                )
+            existing_event = session.scalar(
+                select(LaunchplaneEveryCodePullRequestClosureRow)
+                .where(
+                    LaunchplaneEveryCodePullRequestClosureRow.request_id == record.request_id,
+                    LaunchplaneEveryCodePullRequestClosureRow.repository_id == record.repository_id,
+                    LaunchplaneEveryCodePullRequestClosureRow.pr_number
+                    == record.pull_request_number,
+                    LaunchplaneEveryCodePullRequestClosureRow.closed_at == record.closed_at,
+                )
+                .limit(1)
+            )
+            if existing_event is not None:
+                raise EveryCodeFeedbackResumeStorageConflictError(
+                    "immutable linked pull-request closure event conflicts"
+                )
+            matching_acceptances = session.scalars(
+                select(LaunchplaneEveryCodeFeedbackAcceptanceRow).where(
+                    LaunchplaneEveryCodeFeedbackAcceptanceRow.request_id == record.request_id
+                )
+            ).all()
+            if matching_acceptances and not any(
+                acceptance.repository_id == record.repository_id
+                and acceptance.pr_number == record.pull_request_number
+                and EveryCodeFeedbackAcceptanceRecord.model_validate(
+                    acceptance.payload
+                ).revision.pull_request_node_id
+                == record.pull_request_node_id
+                for acceptance in matching_acceptances
+            ):
+                raise ValueError("pull-request closure conflicts with stored feedback identity")
+            session.add(
+                LaunchplaneEveryCodePullRequestClosureRow(
+                    closure_id=record.closure_id,
+                    request_id=record.request_id,
+                    repository_id=record.repository_id,
+                    pr_number=record.pull_request_number,
+                    pr_node_id=record.pull_request_node_id,
+                    closed_at=record.closed_at,
+                    merged=record.merged,
+                    delivery_id=record.github_delivery_id,
+                    closure_digest=record.closure_digest,
+                    payload=self._payload_dict(record),
+                )
+            )
+            session.commit()
+
     def write_every_code_notification_policy_record(
         self, record: EveryCodeNotificationPolicyRecord
     ) -> None:
@@ -16564,6 +17151,175 @@ class PostgresRecordStore(HumanSessionStore):
             order_by=(
                 LaunchplaneEveryCodePrFeedbackRow.received_at.desc(),
                 LaunchplaneEveryCodePrFeedbackRow.feedback_id.desc(),
+            ),
+            limit=limit,
+            offset=offset,
+        )
+
+    def _read_every_code_feedback_resume_model(
+        self,
+        *,
+        model_type: type[RecordModel],
+        orm_model: type[Base],
+        identity_column: Any,
+        identity: str,
+    ) -> RecordModel | None:
+        return self._read_optional_model(
+            model_type=model_type,
+            orm_model=orm_model,
+            filters=(identity_column == identity,),
+        )
+
+    def read_every_code_feedback_acceptance_record(
+        self, acceptance_id: str
+    ) -> EveryCodeFeedbackAcceptanceRecord | None:
+        return self._read_every_code_feedback_resume_model(
+            model_type=EveryCodeFeedbackAcceptanceRecord,
+            orm_model=LaunchplaneEveryCodeFeedbackAcceptanceRow,
+            identity_column=LaunchplaneEveryCodeFeedbackAcceptanceRow.acceptance_id,
+            identity=acceptance_id,
+        )
+
+    def list_every_code_feedback_acceptance_records(
+        self, *, request_id: str = "", limit: int = 100, offset: int = 0
+    ) -> tuple[EveryCodeFeedbackAcceptanceRecord, ...]:
+        if limit < 1 or limit > 500 or offset < 0:
+            raise ValueError("resume evidence pagination requires limit 1..500 and offset >= 0")
+        filters = (
+            (LaunchplaneEveryCodeFeedbackAcceptanceRow.request_id == request_id,)
+            if request_id
+            else ()
+        )
+        return self._list_models(
+            model_type=EveryCodeFeedbackAcceptanceRecord,
+            orm_model=LaunchplaneEveryCodeFeedbackAcceptanceRow,
+            filters=filters,
+            order_by=(
+                LaunchplaneEveryCodeFeedbackAcceptanceRow.received_at.asc(),
+                LaunchplaneEveryCodeFeedbackAcceptanceRow.feedback_id.asc(),
+            ),
+            limit=limit,
+            offset=offset,
+        )
+
+    def read_every_code_feedback_resume_intent_record(
+        self, intent_id: str
+    ) -> EveryCodeFeedbackResumeIntentRecord | None:
+        return self._read_every_code_feedback_resume_model(
+            model_type=EveryCodeFeedbackResumeIntentRecord,
+            orm_model=LaunchplaneEveryCodeFeedbackResumeIntentRow,
+            identity_column=LaunchplaneEveryCodeFeedbackResumeIntentRow.intent_id,
+            identity=intent_id,
+        )
+
+    def list_every_code_feedback_resume_intent_records(
+        self, *, request_id: str = "", limit: int = 100, offset: int = 0
+    ) -> tuple[EveryCodeFeedbackResumeIntentRecord, ...]:
+        if limit < 1 or limit > 500 or offset < 0:
+            raise ValueError("resume evidence pagination requires limit 1..500 and offset >= 0")
+        filters = (
+            (LaunchplaneEveryCodeFeedbackResumeIntentRow.request_id == request_id,)
+            if request_id
+            else ()
+        )
+        return self._list_models(
+            model_type=EveryCodeFeedbackResumeIntentRecord,
+            orm_model=LaunchplaneEveryCodeFeedbackResumeIntentRow,
+            filters=filters,
+            order_by=(
+                LaunchplaneEveryCodeFeedbackResumeIntentRow.issued_at.desc(),
+                LaunchplaneEveryCodeFeedbackResumeIntentRow.intent_id.desc(),
+            ),
+            limit=limit,
+            offset=offset,
+        )
+
+    def read_every_code_feedback_resume_operation_record(
+        self, operation_id: str
+    ) -> EveryCodeFeedbackResumeOperationRecord | None:
+        return self._read_every_code_feedback_resume_model(
+            model_type=EveryCodeFeedbackResumeOperationRecord,
+            orm_model=LaunchplaneEveryCodeFeedbackResumeOperationRow,
+            identity_column=LaunchplaneEveryCodeFeedbackResumeOperationRow.operation_id,
+            identity=operation_id,
+        )
+
+    def list_every_code_feedback_resume_operation_records(
+        self, *, request_id: str = "", limit: int = 100, offset: int = 0
+    ) -> tuple[EveryCodeFeedbackResumeOperationRecord, ...]:
+        if limit < 1 or limit > 500 or offset < 0:
+            raise ValueError("resume evidence pagination requires limit 1..500 and offset >= 0")
+        filters = (
+            (LaunchplaneEveryCodeFeedbackResumeOperationRow.request_id == request_id,)
+            if request_id
+            else ()
+        )
+        return self._list_models(
+            model_type=EveryCodeFeedbackResumeOperationRecord,
+            orm_model=LaunchplaneEveryCodeFeedbackResumeOperationRow,
+            filters=filters,
+            order_by=(
+                LaunchplaneEveryCodeFeedbackResumeOperationRow.created_at.desc(),
+                LaunchplaneEveryCodeFeedbackResumeOperationRow.operation_id.desc(),
+            ),
+            limit=limit,
+            offset=offset,
+        )
+
+    def list_every_code_feedback_resume_receipt_records(
+        self, *, operation_id: str, limit: int = 100, offset: int = 0
+    ) -> tuple[EveryCodeFeedbackStartupReceiptRecord | EveryCodeFeedbackHandoffReceiptRecord, ...]:
+        if limit < 1 or limit > 500 or offset < 0:
+            raise ValueError("resume evidence pagination requires limit 1..500 and offset >= 0")
+        with self._session_factory() as session:
+            rows = session.scalars(
+                select(LaunchplaneEveryCodeFeedbackResumeReceiptRow)
+                .where(LaunchplaneEveryCodeFeedbackResumeReceiptRow.operation_id == operation_id)
+                .order_by(
+                    LaunchplaneEveryCodeFeedbackResumeReceiptRow.recorded_at.asc(),
+                    LaunchplaneEveryCodeFeedbackResumeReceiptRow.receipt_id.asc(),
+                )
+                .limit(limit)
+                .offset(offset)
+            ).all()
+            return tuple(
+                (
+                    EveryCodeFeedbackStartupReceiptRecord
+                    if row.receipt_kind == "startup"
+                    else EveryCodeFeedbackHandoffReceiptRecord
+                ).model_validate(row.payload)
+                for row in rows
+            )
+
+    def list_every_code_feedback_recovery_disposition_records(
+        self, *, operation_id: str, limit: int = 100, offset: int = 0
+    ) -> tuple[EveryCodeFeedbackRecoveryDispositionRecord, ...]:
+        if limit < 1 or limit > 500 or offset < 0:
+            raise ValueError("resume evidence pagination requires limit 1..500 and offset >= 0")
+        return self._list_models(
+            model_type=EveryCodeFeedbackRecoveryDispositionRecord,
+            orm_model=LaunchplaneEveryCodeFeedbackResumeRecoveryRow,
+            filters=(LaunchplaneEveryCodeFeedbackResumeRecoveryRow.operation_id == operation_id,),
+            order_by=(
+                LaunchplaneEveryCodeFeedbackResumeRecoveryRow.observed_at.asc(),
+                LaunchplaneEveryCodeFeedbackResumeRecoveryRow.evidence_id.asc(),
+            ),
+            limit=limit,
+            offset=offset,
+        )
+
+    def list_every_code_linked_pull_request_closure_records(
+        self, *, request_id: str, limit: int = 100, offset: int = 0
+    ) -> tuple[EveryCodeLinkedPullRequestClosureRecord, ...]:
+        if limit < 1 or limit > 500 or offset < 0:
+            raise ValueError("resume evidence pagination requires limit 1..500 and offset >= 0")
+        return self._list_models(
+            model_type=EveryCodeLinkedPullRequestClosureRecord,
+            orm_model=LaunchplaneEveryCodePullRequestClosureRow,
+            filters=(LaunchplaneEveryCodePullRequestClosureRow.request_id == request_id,),
+            order_by=(
+                LaunchplaneEveryCodePullRequestClosureRow.closed_at.asc(),
+                LaunchplaneEveryCodePullRequestClosureRow.closure_id.asc(),
             ),
             limit=limit,
             offset=offset,

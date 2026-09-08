@@ -39,6 +39,7 @@
     "engineeringReviewDecisions": "docs/engineering-review-decisions.md",
     "operations": "docs/operations.md",
     "records": "docs/records.md",
+    "everyCodeFeedbackResume": "docs/every-code-feedback-resume.md",
     "secrets": "docs/secrets.md",
     "githubActionsSecurity": "docs/github-actions-security.md",
     "dependencyHealthContract": "docs/dependency-health-contract.md",
