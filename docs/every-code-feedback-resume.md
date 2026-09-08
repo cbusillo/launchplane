@@ -116,7 +116,15 @@ agent accepted feedback.
 
 Protocol decisions are advisory values, not authenticated state transitions.
 In particular, a `no_action` decision never authorizes persisting its suggested
-phase. Receipt digests are attested evidence references until the service adds
+phase. An `adopt` decision identifies an observed process; it must preserve any
+stronger retained startup or handoff evidence instead of resetting progress to
+`registered`. Receipt digests are attested evidence references until the service adds
 authenticated receipt ingestion. A sender must retain the original receipt ID
 for redelivery; generating a replacement ID conflicts with immutable receipt
 evidence for the same operation and receipt kind.
+
+Strict GitHub policy IDs preserve already-normalized DB records and reject
+malformed new policy input. Secret-held desired sets were not inspected for this
+change. Before any separately authorized reconciliation resumes, verify that
+their `github_ids` contain unquoted positive integers. The #2058 freeze remains
+in effect; this compatibility check does not authorize reconciliation.
