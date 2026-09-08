@@ -123,7 +123,7 @@ test.describe("operator journeys", () => {
     await page.goto(path);
     await page.getByRole("button", { name: "Sign out" }).click();
 
-    await expect(page).toHaveURL(new RegExp(`${path.replace(/[?]/g, "\\?")}$`));
+    await expect(page).toHaveURL((url) => `${url.pathname}${url.search}` === path);
     await expect(
       page.getByRole("heading", { level: 1, name: "Sign in to review this change" }),
     ).toBeVisible();
