@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import tempfile
 import unittest
@@ -11,6 +12,7 @@ from pydantic import ValidationError
 from control_plane.contracts.canonical_json import canonical_json_bytes
 from control_plane.contracts.ordinary_agent import (
     OrdinaryAgentBudget,
+    OrdinaryAgentEvidenceStore,
     OrdinaryAgentEffectRecord,
     OrdinaryAgentEligibilityResult,
     OrdinaryAgentPolicyRule,
@@ -88,6 +90,43 @@ def eligibility_result(
 
 
 class OrdinaryAgentContractTests(unittest.TestCase):
+    def test_inert_modules_import_only_contract_and_pure_dependencies(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        allowed = {
+            "__future__",
+            "typing",
+            "pydantic",
+            "control_plane.contracts.canonical_json",
+            "control_plane.contracts.ordinary_agent",
+        }
+        for relative in (
+            "control_plane/contracts/ordinary_agent.py",
+            "control_plane/ordinary_agent_eligibility.py",
+        ):
+            tree = ast.parse((root / relative).read_text())
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    self.assertTrue({alias.name for alias in node.names} <= allowed, relative)
+                elif isinstance(node, ast.ImportFrom):
+                    self.assertIn(node.module, allowed, relative)
+                    self.assertEqual(node.level, 0, relative)
+
+    def test_partial_guard_establishment_can_record_unknown_without_success(self) -> None:
+        for reservations, fences in ((("reservation-one",), ()), ((), ("fence-one",))):
+            record = OrdinaryAgentEffectRecord(
+                **INERT,
+                record_id="unknown-one",
+                request_id="request_one",
+                state="unknown_reconciliation_required",
+                completed_effects=(),
+                active_reservations=reservations,
+                active_fences=fences,
+                provider_ttl_residual_seconds=None,
+                success=False,
+            )
+            self.assertFalse(record.success)
+            self.assertFalse(record.authorizes_execution)
+
     def test_eligibility_rejects_contradictory_decision_and_reason(self) -> None:
         payload = eligibility_result().model_dump()
         for changes in (
@@ -232,7 +271,9 @@ class OrdinaryAgentContractTests(unittest.TestCase):
 
     def test_test_store_round_trip_replay_conflict_and_missing_reads(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            store = TestOrdinaryAgentEvidenceStore(snapshots=(snapshot(),))
+            store: OrdinaryAgentEvidenceStore = TestOrdinaryAgentEvidenceStore(
+                snapshots=(snapshot(),)
+            )
             result = eligibility_result()
             self.assertEqual(store.read_snapshot("policy-1"), snapshot())
             self.assertIsNone(store.read_snapshot("missing"))

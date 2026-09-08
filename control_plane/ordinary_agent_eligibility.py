@@ -4,6 +4,7 @@ from typing import cast
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.ordinary_agent import (
+    OrdinaryAgentAction,
     OrdinaryAgentCredentialEvidence,
     OrdinaryAgentEligibilityResult,
     OrdinaryAgentLease,
@@ -25,7 +26,7 @@ def _fingerprint(
     principal: OrdinaryAgentPrincipal,
     rule: OrdinaryAgentPolicyRule | None,
     target: OrdinaryAgentTarget,
-    action: str,
+    action: OrdinaryAgentAction,
     managed_set_id: str,
     managed_rule_id: str,
     decision: str,
@@ -63,7 +64,7 @@ def evaluate_ordinary_agent_policy(
     snapshot: OrdinaryAgentPolicySnapshot,
     principal: OrdinaryAgentPrincipal,
     target: OrdinaryAgentTarget,
-    action: str,
+    action: OrdinaryAgentAction,
     managed_set_id: str,
     managed_rule_id: str,
 ) -> OrdinaryAgentPolicyEvaluation:
@@ -138,13 +139,13 @@ def evaluate_ordinary_agent_eligibility(
     lease: OrdinaryAgentLease,
     request: OrdinaryAgentRequest,
 ) -> OrdinaryAgentEligibilityResult:
-    if isinstance(now, bool) or not isinstance(now, int) or now < 0:
-        raise ValueError("now must be a non-negative integer")
+    if isinstance(now, bool) or not isinstance(now, int) or not 0 <= now <= 2**63 - 1:
+        raise ValueError("now must be a non-negative signed-64-bit integer")
     policy = evaluate_ordinary_agent_policy(
         snapshot=snapshot,
         principal=principal,
-        target=request.target,
-        action=request.action,
+        target=lease.target,
+        action=lease.action,
         managed_set_id=lease.managed_set_id,
         managed_rule_id=lease.managed_rule_id,
     )
@@ -190,7 +191,10 @@ def _eligibility_reason(
     # Stable refusal order: principal/profile, target, chain, time, policy, request, budget.
     if principal.status != "active":
         return "principal_revoked"
-    if principal.execution_profile == "read_only" and request.action == "guarded_merge":
+    if principal.execution_profile == "read_only" and "guarded_merge" in (
+        request.action,
+        lease.action,
+    ):
         return "principal_read_only"
     if lease.target != request.target:
         return "lease_target_mismatch"
@@ -228,8 +232,6 @@ def _eligibility_reason(
             return cast(OrdinaryAgentReasonCode, f"{name}_revoked")
     if policy.decision != "allow":
         return policy.reason_code
-    if lease.action not in policy.bound_rule_actions:
-        return "lease_action_not_allowed"
     if lease.effective_decision_fingerprint != policy.effective_decision_fingerprint:
         return "effective_decision_fingerprint_mismatch"
     if request.action != lease.action:

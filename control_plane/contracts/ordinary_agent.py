@@ -47,9 +47,7 @@ OrdinaryAgentReasonCode = Literal[
     "rule_principal_mismatch",
     "rule_target_mismatch",
     "action_not_allowed",
-    "lease_action_not_allowed",
     "effective_decision_fingerprint_mismatch",
-    "request_target_mismatch",
     "request_action_mismatch",
     "budget_window_inactive",
     "budget_exhausted",
@@ -81,7 +79,7 @@ class InertRecord(StrictFrozenModel):
 
 
 class OrdinaryAgentPrincipal(InertRecord):
-    record_id: str = Field(min_length=1)
+    record_id: str = Field(min_length=1, max_length=256)
     principal_id: str = Field(pattern=r"^[a-z][a-z0-9_-]{2,127}$")
     execution_profile: PrincipalProfile
     status: PrincipalStatus
@@ -89,7 +87,7 @@ class OrdinaryAgentPrincipal(InertRecord):
 
 class OrdinaryAgentTarget(StrictFrozenModel):
     repository_id: int = Field(gt=0, le=2**63 - 1)
-    repository: str = Field(pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+    repository: str = Field(max_length=140, pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
     base_branch: str = Field(min_length=1, max_length=255)
 
     @field_validator("repository")
@@ -124,7 +122,7 @@ class OrdinaryAgentTarget(StrictFrozenModel):
 
 
 class OrdinaryAgentCredentialEvidence(InertRecord):
-    record_id: str = Field(min_length=1)
+    record_id: str = Field(min_length=1, max_length=256)
     credential_id: str = Field(pattern=r"^[a-z][a-z0-9_-]{2,127}$")
     credential_version: int = Field(ge=1, le=2**63 - 1)
     credential_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -141,7 +139,7 @@ class OrdinaryAgentCredentialEvidence(InertRecord):
 
 
 class OrdinaryAgentSession(InertRecord):
-    record_id: str = Field(min_length=1)
+    record_id: str = Field(min_length=1, max_length=256)
     session_id: str = Field(pattern=r"^[a-z][a-z0-9_-]{2,127}$")
     principal_id: str = Field(pattern=r"^[a-z][a-z0-9_-]{2,127}$")
     credential_id: str = Field(pattern=r"^[a-z][a-z0-9_-]{2,127}$")
@@ -173,7 +171,7 @@ class OrdinaryAgentPolicyRule(StrictFrozenModel):
 
 
 class OrdinaryAgentPolicySnapshot(InertRecord):
-    record_id: str = Field(min_length=1)
+    record_id: str = Field(min_length=1, max_length=256)
     revision: int = Field(ge=1, le=2**63 - 1)
     policy_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     input_domain_id: Literal["ordinary-agent-effective-inputs-v1"]
@@ -197,7 +195,7 @@ class OrdinaryAgentBudget(StrictFrozenModel):
 
 
 class OrdinaryAgentLease(InertRecord):
-    record_id: str = Field(min_length=1)
+    record_id: str = Field(min_length=1, max_length=256)
     lease_id: str = Field(pattern=r"^[a-z][a-z0-9_-]{2,127}$")
     session_id: str = Field(pattern=r"^[a-z][a-z0-9_-]{2,127}$")
     principal_id: str = Field(pattern=r"^[a-z][a-z0-9_-]{2,127}$")
@@ -224,7 +222,7 @@ class OrdinaryAgentPullRequest(StrictFrozenModel):
 
 
 class OrdinaryAgentRequest(InertRecord):
-    record_id: str = Field(min_length=1)
+    record_id: str = Field(min_length=1, max_length=256)
     request_id: str = Field(pattern=r"^[a-z][a-z0-9_-]{2,127}$")
     idempotency_key: str = Field(min_length=1, max_length=256)
     lease_id: str = Field(pattern=r"^[a-z][a-z0-9_-]{2,127}$")
@@ -255,14 +253,14 @@ class OrdinaryAgentRequest(InertRecord):
 
 
 class OrdinaryAgentPolicyEvaluation(InertRecord):
-    record_id: str = Field(min_length=1)
+    record_id: str = Field(min_length=1, max_length=256)
     decision: PolicyDecision
     reason_code: OrdinaryAgentReasonCode
-    policy_record_id: str = Field(min_length=1)
+    policy_record_id: str = Field(min_length=1, max_length=256)
     policy_revision: int = Field(ge=1, le=2**63 - 1)
     policy_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
-    managed_set_id: str | None
-    managed_rule_id: str | None
+    managed_set_id: str | None = Field(pattern=r"^[a-z0-9][a-z0-9._:/-]{0,127}$")
+    managed_rule_id: str | None = Field(pattern=r"^[a-z0-9][a-z0-9._:/-]{0,127}$")
     bound_rule_actions: tuple[OrdinaryAgentAction, ...]
     effective_decision_fingerprint: str = Field(pattern=r"^oae-fp-v1:[0-9a-f]{64}$")
 
@@ -280,16 +278,16 @@ class OrdinaryAgentPolicyEvaluation(InertRecord):
 
 
 class OrdinaryAgentEligibilityResult(InertRecord):
-    record_id: str = Field(min_length=1)
+    record_id: str = Field(min_length=1, max_length=256)
     evaluated_at: int = Field(ge=0, le=2**63 - 1)
-    request_id: str = Field(min_length=1)
+    request_id: str = Field(min_length=1, max_length=256)
     request_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     principal_id: str = Field(pattern=r"^[a-z][a-z0-9_-]{2,127}$")
     session_id: str = Field(pattern=r"^[a-z][a-z0-9_-]{2,127}$")
     lease_id: str = Field(pattern=r"^[a-z][a-z0-9_-]{2,127}$")
     decision: EligibilityDecision
     reason_code: OrdinaryAgentReasonCode
-    policy_record_id: str = Field(min_length=1)
+    policy_record_id: str = Field(min_length=1, max_length=256)
     policy_revision: int = Field(ge=1, le=2**63 - 1)
     policy_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     effective_decision_fingerprint: str = Field(pattern=r"^oae-fp-v1:[0-9a-f]{64}$")
@@ -304,8 +302,8 @@ class OrdinaryAgentEligibilityResult(InertRecord):
 
 
 class OrdinaryAgentEffectRecord(InertRecord):
-    record_id: str = Field(min_length=1)
-    request_id: str = Field(min_length=1)
+    record_id: str = Field(min_length=1, max_length=256)
+    request_id: str = Field(min_length=1, max_length=256)
     state: EffectState
     completed_effects: tuple[str, ...]
     active_reservations: tuple[str, ...]
@@ -322,9 +320,13 @@ class OrdinaryAgentEffectRecord(InertRecord):
         if self.state != "completed" and self.success:
             raise ValueError("only completed effect records may report success")
         if self.state == "unknown_reconciliation_required" and not (
-            self.active_reservations and self.active_fences
+            self.active_reservations or self.active_fences
         ):
-            raise ValueError("unknown effects must retain reservations and fences")
+            raise ValueError("unknown effects must retain their observed reservations or fences")
+        if self.state == "in_flight" and not (self.active_reservations or self.active_fences):
+            raise ValueError("in-flight effects require observed protection")
+        if self.state == "stopped_budget_exhausted" and self.active_reservations:
+            raise ValueError("known budget stop cannot conceal outstanding effect reservations")
         if self.state == "partially_completed" and (
             not self.completed_effects or not (self.active_reservations or self.active_fences)
         ):

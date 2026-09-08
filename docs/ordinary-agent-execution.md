@@ -69,7 +69,9 @@ uses sorted keys and integer values, and is hashed with SHA-256. The fingerprint
 has an `oae-fp-v1:` prefix and a lowercase digest.
 
 An unrelated policy revision may leave the effective fingerprint unchanged while
-the result records fresh policy provenance. A changed bound rule, ambiguous
+the result carries the newly supplied policy provenance. `policy_digest` is
+unverified in these proposed models; production integration must bind it to the
+actual active record and evaluated rule content. A changed bound rule, ambiguous
 managed identity, overriding read-only/revoked principal restriction, or unknown
 semantics cannot preserve a positive decision. The proposed evaluator does not
 invent a second deny-rule language. If production integration discovers another
@@ -79,21 +81,32 @@ must cover those inputs, including applicable deny/precedence rules.
 
 ## Eligibility and recovery
 
-Schema validation precedes eligibility evaluation. The pure evaluator uses a
+Schema validation precedes eligibility evaluation. Policy is evaluated for the
+lease target and action, then the request is checked against that lease. The pure evaluator uses a
 stable first-failure order for principal restrictions, exact target, identity
 chain, lifetime/revocation, policy/rule/fingerprint, request scope and available
 budget/recovery evidence. It reports a bounded reason, evaluated policy provenance and a canonical digest
 of the exact request, the supplied evaluation time, and principal/session/lease
 references. These are internal
-proposed evidence records, not a public denial response. A public projection must
+proposed evidence records, not a public denial response. The caller must provide
+a unique `result_record_id` for each distinct evaluation; reuse is permitted only
+for a byte-identical replay, and conflicting same-ID results must never overwrite
+history. A public projection must
 redact policy provenance and collapse foreign/nonexistent target distinctions
 through an authorized self-read path. It does not reserve budget, authenticate a caller, check CI, consume
 Owner acceptance, or perform provider operations.
 
 Recovery evidence distinguishes completed effects, partial completion, known
-budget exhaustion and unresolved provider outcomes. Unknown outcomes retain
-reservations and fences and cannot claim success or authorize replay. Budget
-exhaustion is a known stop, not an unknown result. Provider credential expiry and
+budget exhaustion and unresolved provider outcomes. Unknown outcomes retain their observed reservations or fences and cannot claim
+success or authorize replay. An interruption while establishing protection may
+leave only one kind of guard; the record must preserve that incomplete state
+rather than inventing a guard or rejecting the recovery evidence. It grants no
+new effect permission. Runtime reconciliation must retain every known guard and
+restore the required protection before any new effect. In-flight records require
+observed protection; a known budget stop cannot conceal outstanding effect
+reservations. Completion requires success and no active protection, and may have
+zero provider effects for a confirmed no-op. Budget exhaustion is a known stop,
+not an unknown result. Provider credential expiry and
 in-flight effects remain explicit because revocation cannot recall an already
 sent GitHub request atomically.
 
