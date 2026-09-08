@@ -18,6 +18,7 @@ from pydantic import (
     ConfigDict,
     Field,
     SerializerFunctionWrapHandler,
+    StrictInt,
     model_serializer,
     model_validator,
 )
@@ -577,7 +578,7 @@ class GitHubActionsPolicyRule(PatternScopedAuthzPolicyRule):
 class GitHubHumanPolicyRule(ScopedAuthzPolicyRule):
     model_config = ConfigDict(extra="forbid")
 
-    github_ids: tuple[int, ...] = ()
+    github_ids: tuple[StrictInt, ...] = ()
     logins: tuple[str, ...] = ()
     organizations: tuple[str, ...] = ()
     teams: tuple[str, ...] = ()

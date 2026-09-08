@@ -79,9 +79,15 @@ The worker test module's `_EveryCodeApiHandler` is a transport fixture with
 direct record writes; its successful reruns and feedback sessions do not prove
 service authorization or atomic restart behavior. Direct-store delayed-feedback
 tests establish workspace retention only. Issue
-[#2328](https://github.com/cbusillo/launchplane/issues/2328) tracks the remaining
-authority decisions and service/PostgreSQL acceptance matrix under
+[#2328](https://github.com/cbusillo/launchplane/issues/2328) tracks the approved
+implementation and remaining service/PostgreSQL acceptance matrix under
 [#2058](https://github.com/cbusillo/launchplane/issues/2058).
+
+The [feedback continuation foundation](every-code-feedback-resume.md) adds strict
+contracts, isolated SQL evidence and inert launch protocol tests. It does not
+wire the deployed worker or prove positive service-backed restart. A distinct
+exact session handoff receipt and supported operator recovery remain mandatory
+before production enablement.
 
 Codex Lab's session client maps this provenance into the Discord Blue
 [remote agent session contract](https://github.com/cbusillo/discord-blue/blob/main/docs/agent-session-protocol.md).
