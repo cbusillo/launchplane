@@ -35,6 +35,9 @@ PRIVILEGED_OPERATION_WORKER_REQUIRED_RELATIONS = (
     "launchplane_secret_audit_events_secret_idx",
     "launchplane_privileged_operation_worker_heartbeats",
     "launchplane_privop_worker_heartbeats_freshness_idx",
+    "launchplane_ordinary_agent_deliveries",
+    "ordinary_agent_delivery_expiry_idx",
+    "launchplane_ordinary_agent_delivery_audits",
 )
 
 

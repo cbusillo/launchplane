@@ -70,6 +70,14 @@ request fingerprint. The entry point has no HTTP route, descriptor registration,
 worker dispatch, or filesystem import path. Schema-v3 policy persistence remains
 fenced, so the tables alone cannot activate an ordinary agent.
 
+The supervised privileged-operation worker performs bounded expiry maintenance
+for private ordinary-agent delivery rows. The database clock and the delivery
+row's current state determine expiry; retries are idempotent and retain the
+audit rows needed for credential and key-retirement custody. Cleanup failure has
+separate redacted telemetry and process-local backoff, so a poisoned delivery
+cannot block unrelated privileged-operation execution. The worker's normal poll
+heartbeat does not assert cleanup success.
+
 ## Schema Migrations
 
 Launchplane uses SQLAlchemy ORM models as the persistence boundary and Alembic as
