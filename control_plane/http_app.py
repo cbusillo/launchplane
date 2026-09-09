@@ -4142,6 +4142,7 @@ def create_launchplane_fastapi_app(
             if request.url.path == _AUTHZ_ACTIVATION_PREFLIGHT_ROUTE or (
                 request.url.path in _AUTHZ_NO_STORE_ROUTES
                 or request.url.path.startswith(_SOLO_ADMINISTRATION_CONFIRMATION_ROUTE)
+                or request.url.path.startswith(("/v1/agent/ordinary-agent-", "/v1/ordinary-agent-"))
             ):
                 response.headers["Cache-Control"] = "no-store"
             return response

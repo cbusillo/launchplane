@@ -1088,8 +1088,17 @@ class FastApiServiceRuntimeReadTests(unittest.IsolatedAsyncioTestCase):
                     "/v1/agent/ordinary-agent-enrollments/unknown-operation/claim",
                     headers={"Authorization": f"Bearer {claim.value}"},
                 )
+                invalid_path = await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/agent/ordinary-agent-enrollments/" + "x" * 257 + "/claim",
+                    headers={"Authorization": f"Bearer {claim.value}"},
+                )
             finally:
                 store.close()
+        self.assertEqual(invalid_path.status_code, 400)
+        self.assertEqual(invalid_path.headers["cache-control"], "no-store")
+        self.assertNotIn(claim.value, invalid_path.text)
         self.assertEqual(response.status_code, 401)
         self.assertEqual(response.headers["cache-control"], "no-store")
         self.assertNotIn(claim.value, response.text)

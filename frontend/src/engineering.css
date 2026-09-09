@@ -2601,3 +2601,37 @@
     width: 100%;
   }
 }
+
+/* The exact agent request leads with the decision, scope and finite limits. */
+.ordinary-agent-review-scope {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+}
+.ordinary-agent-review h3 {
+  margin: 0 0 .5rem;
+  overflow-wrap: anywhere;
+}
+.ordinary-agent-review-scope ul {
+  margin: 0;
+  padding-inline-start: 1.2rem;
+}
+.ordinary-agent-review-limits {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: .75rem 1rem;
+  margin: 0;
+}
+.ordinary-agent-review-limits dt {
+  color: var(--muted-strong);
+  font-size: .85rem;
+}
+.ordinary-agent-review-limits dd {
+  margin: .25rem 0 0;
+}
+@media (max-width: 600px) {
+  .ordinary-agent-review-scope,
+  .ordinary-agent-review-limits {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

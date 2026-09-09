@@ -352,3 +352,13 @@ Engineering Ops privileged-operation page. The page reads that operation's
 review directly and preserves server authorization checks; it does not require
 searching the operation list. Ordinary delegation presentation and its
 server-authoritative approval adapter are a separate part of client integration.
+
+The enrollment preparation helper resolves an explicitly supplied nonsecret App
+ID and managed-secret binding selector against current LP records. It selects
+one exact ordinary-agent policy rule and the latest repository inventory, then
+performs the supported read-only App/installation inspection. Missing selectors,
+ambiguous records, and retired inventory do not fall back to another binding.
+Rotation carries the current principal and custody predecessor into the reviewed
+intent. Preparation creates no authority or credential; final apply still checks
+these bindings in its transaction. Installation tooling must obtain the selectors
+from verified setup facts rather than asking the administrator to type them.
