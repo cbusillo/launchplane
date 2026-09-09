@@ -174,13 +174,28 @@ class OrdinaryAgentMergeTrainEffectExecutor:
 
         def call(client: GitHubMergeTrainClient) -> OrdinaryAgentCompletedOutcome:
             nonlocal result
+            base_ref = "refs/heads/" + effect.lineage.base_branch
+            if _read_ref_sha(
+                client.transport, effect.lineage.repository, base_ref
+            ) != effect.rolling_base_sha:
+                raise MergeTrainGitHubError("landing_base_moved", status_code=409)
+            _require_landing_pull_request(client.transport, effect)
             result = LegacyMergeTrainEffectExecutor(client=client).land_pull_request(effect)
             proof = _read_commit_proof(
                 client.transport,
                 effect.lineage.repository,
                 result,
-                ref="refs/heads/" + effect.lineage.base_branch,
+                ref=base_ref,
             )
+            current_base = _read_ref_sha(
+                client.transport, effect.lineage.repository, base_ref
+            )
+            if current_base != result and not client.branch_contains_commit(
+                repository=effect.lineage.repository,
+                branch_ref=effect.lineage.base_branch,
+                commit_sha=result,
+            ):
+                raise MergeTrainGitHubError("landing_result_not_contained", status_code=409)
             return OrdinaryAgentCompletedOutcome(result_sha=result, proof=proof)
 
         self._dispatch(call)
@@ -201,11 +216,28 @@ class OrdinaryAgentMergeTrainEffectExecutor:
     def label_stack_child(self, effect: StackChildLabelEffect) -> None:
         self._require_command("stack_child_label", effect)
 
+        def already_present(client: GitHubMergeTrainClient) -> bool:
+            payload = client.transport.request(
+                method="GET",
+                path=(
+                    f"/repos/{effect.lineage.repository}/issues/"
+                    f"{effect.pull_request_number}/labels?per_page=100"
+                ),
+            )
+            if not isinstance(payload, list):
+                raise MergeTrainGitHubError("ordinary_label_observation_malformed")
+            names = {
+                str(item.get("name") or "").strip()
+                for item in payload
+                if isinstance(item, dict)
+            }
+            return effect.label in names
+
         def call(client: GitHubMergeTrainClient) -> OrdinaryAgentCompletedOutcome:
             LegacyMergeTrainEffectExecutor(client=client).label_stack_child(effect)
             return OrdinaryAgentCompletedOutcome()
 
-        self._dispatch(call)
+        self._dispatch(call, no_dispatch_preflight=already_present)
 
     def close_stack_child(self, effect: StackChildCloseEffect) -> None:
         self._require_command("stack_child_close", effect)
@@ -226,7 +258,10 @@ class OrdinaryAgentMergeTrainEffectExecutor:
         return False
 
     def _dispatch(
-        self, call: Callable[[GitHubMergeTrainClient], OrdinaryAgentCompletedOutcome]
+        self,
+        call: Callable[[GitHubMergeTrainClient], OrdinaryAgentCompletedOutcome],
+        *,
+        no_dispatch_preflight: Callable[[GitHubMergeTrainClient], bool] | None = None,
     ) -> None:
         reservation = self._effect_store.reserve_ordinary_custody_attempt(
             effect_id=self._record.effect_id,
@@ -262,8 +297,17 @@ class OrdinaryAgentMergeTrainEffectExecutor:
                     + max(0, expiry.timestamp() - datetime.now(expiry.tzinfo).timestamp()),
                     monotonic=self._monotonic,
                 )
+                client = GitHubMergeTrainClient(transport=transport)
+                if no_dispatch_preflight is not None and no_dispatch_preflight(client):
+                    self._effect_store.complete_ordinary_effect_without_dispatch(
+                        effect_id=self._record.effect_id,
+                        expected_effect_revision=reservation.effect_revision,
+                        disposition="label_already_present",
+                    )
+                    outcome_recorded = True
+                    return
                 try:
-                    outcome = call(GitHubMergeTrainClient(transport=transport))
+                    outcome = call(client)
                 except MergeTrainGitHubError as error:
                     if error.status_code not in {400, 401, 403, 404, 409, 422}:
                         raise
@@ -303,6 +347,14 @@ class OrdinaryAgentMergeTrainEffectExecutor:
 def _read_ref_proof(
     transport: MergeTrainGitHubTransport, repository: str, reference: str
 ) -> OrdinaryAgentRefObservation:
+    sha = _read_ref_sha(transport, repository, reference)
+    commit = _read_commit_proof(transport, repository, sha, ref=reference)
+    return commit
+
+
+def _read_ref_sha(
+    transport: MergeTrainGitHubTransport, repository: str, reference: str
+) -> str:
     path = reference.removeprefix("refs/")
     payload = transport.request(
         method="GET",
@@ -313,8 +365,7 @@ def _read_ref_proof(
     sha = str(payload["object"].get("sha") or "").strip()
     if not sha:
         raise MergeTrainGitHubError("ordinary_ref_proof_malformed")
-    commit = _read_commit_proof(transport, repository, sha, ref=reference)
-    return commit
+    return sha
 
 
 def _read_commit_proof(
@@ -379,3 +430,24 @@ def _read_pull_request_observation(
         merge_commit_sha=(str(payload.get("merge_commit_sha") or "").strip() or None),
         head_parents=proof.parents,
     )
+
+
+def _require_landing_pull_request(
+    transport: MergeTrainGitHubTransport, effect: PullRequestLandingEffect
+) -> None:
+    payload = transport.request(
+        method="GET",
+        path=f"/repos/{effect.lineage.repository}/pulls/{effect.pull_request_number}",
+    )
+    if not isinstance(payload, dict):
+        raise MergeTrainGitHubError("landing_pull_request_malformed")
+    head, base = payload.get("head"), payload.get("base")
+    if not isinstance(head, dict) or not isinstance(base, dict):
+        raise MergeTrainGitHubError("landing_pull_request_malformed")
+    if (
+        str(payload.get("state") or "").lower() != "open"
+        or str(head.get("sha") or "").strip() != effect.head_sha
+        or str(base.get("ref") or "").strip() != effect.lineage.base_branch
+        or str(base.get("sha") or "").strip() != effect.rolling_base_sha
+    ):
+        raise MergeTrainGitHubError("landing_pull_request_moved", status_code=409)
