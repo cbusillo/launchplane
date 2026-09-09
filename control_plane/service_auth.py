@@ -391,6 +391,8 @@ def read_bearer_token(authorization_header: str) -> str:
 def bearer_identity_from_token(
     *, token: str, config: BearerIdentityConfig
 ) -> TerminalAgentIdentity | LocalOperatorIdentity | LocalAdminIdentity | None:
+    if token.startswith("lp_ordinary_"):
+        raise PermissionError("Ordinary credentials require the ordinary-agent gateway.")
     if config.local_admin_token.strip() and secrets.compare_digest(
         token, config.local_admin_token.strip()
     ):

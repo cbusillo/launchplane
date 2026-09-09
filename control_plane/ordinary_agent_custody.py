@@ -16,6 +16,10 @@ from control_plane.contracts.ordinary_agent_custody import (
     OrdinaryAgentCustodyCandidate,
     OrdinaryAgentCustodyIssueAttempt,
 )
+from control_plane.contracts.ordinary_agent_provider import (
+    ORDINARY_AGENT_GITHUB_APP_INTEGRATION as ORDINARY_AGENT_GITHUB_APP_INTEGRATION,
+    ORDINARY_AGENT_GITHUB_APP_PRIVATE_KEY_BINDING as ORDINARY_AGENT_GITHUB_APP_PRIVATE_KEY_BINDING,
+)
 from control_plane.contracts.secret_record import SecretBinding, SecretRecord, SecretVersion
 from control_plane.github_app_identity import (
     GitHubApiRequest,
@@ -28,8 +32,6 @@ from control_plane.github_app_identity import (
 from control_plane.workflows.launchplane import github_api_request
 
 
-ORDINARY_AGENT_GITHUB_APP_INTEGRATION = "ordinary_agent_github_app"
-ORDINARY_AGENT_GITHUB_APP_PRIVATE_KEY_BINDING = "private_key"
 DISPATCH_WINDOW_SECONDS = 30
 
 

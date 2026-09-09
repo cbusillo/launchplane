@@ -37,6 +37,39 @@ current record. Shared writes use
 `launchplane_repository_inventory_records`; filesystem storage provides local
 rehearsal parity only.
 
+### Ordinary-Agent Lifecycle
+
+Four DB-backed tables hold the authoritative but currently unreachable
+ordinary-agent lifecycle boundary:
+
+- `launchplane_ordinary_agent_principals` stores linear principal revisions and
+  enforces one current revision per principal.
+- `launchplane_ordinary_agent_authentication_credentials` stores the
+  agent-to-Launchplane authentication digest and lifetime, with one current
+  credential per principal and one row per credential version. It never stores
+  bearer material or a provider App key/token.
+- `launchplane_ordinary_agent_credential_custody` stores the exact redacted
+  Launchplane-held provider App custody reference, including inventory and
+  managed-secret version provenance. It stores no decrypted secret or minted
+  token.
+- `launchplane_ordinary_agent_lifecycle_audits` stores one immutable redacted
+  outcome per privileged operation, including its own version-neutral current
+  administrator-policy provenance.
+
+Enroll and rotation append the principal, authentication credential, custody,
+and audit records in the same transaction as a completed inner idempotency
+receipt. Rotation advances exactly one credential version. Revocation appends a
+revoked principal revision and marks the current authentication credential
+revoked without reading custody or calling a provider. The store derives the
+receipt after DB time and server-allocated revisions are known; callers cannot
+supply response content or run callbacks while locks are held.
+
+The internal mutation requires its exact code-owned scope and route, uses the
+operation ID as its idempotency key, and binds the complete apply envelope in the
+request fingerprint. The entry point has no HTTP route, descriptor registration,
+worker dispatch, or filesystem import path. Schema-v3 policy persistence remains
+fenced, so the tables alone cannot activate an ordinary agent.
+
 ## Schema Migrations
 
 Launchplane uses SQLAlchemy ORM models as the persistence boundary and Alembic as
