@@ -18,6 +18,7 @@ from control_plane.contracts.ordinary_agent_snapshot import (
 from control_plane.github_app_identity import GitHubApiRequest
 from control_plane.ordinary_agent_custody import (
     OrdinaryAgentCustodyAttemptStore,
+    OrdinaryAgentCustodyCleanupUnknown,
     OrdinaryAgentCustodySecretStore,
     ordinary_agent_provider_token_lease,
 )
@@ -183,9 +184,31 @@ def _acquire_read(
                 monotonic=monotonic,
             )
             result = reader(transport)
+            if result.counts != _request_counts(transport):
+                raise OrdinaryAgentProviderEvidenceError("provider_request_counts_mismatch")
+            if purpose == "snapshot" and isinstance(
+                result, OrdinaryAgentMergeTrainSnapshotResult
+            ):
+                store.record_ordinary_agent_snapshot_success(
+                    attempt_id=attempt_id,
+                    custody_attempt_id=reservation.custody_attempt_id,
+                    result=result,
+                )
+            elif purpose == "candidate_check" and isinstance(
+                result, OrdinaryAgentCandidateCheckResult
+            ):
+                store.record_ordinary_agent_candidate_check_success(
+                    attempt_id=attempt_id,
+                    custody_attempt_id=reservation.custody_attempt_id,
+                    result=result,
+                )
+            else:
+                raise OrdinaryAgentProviderEvidenceError("provider_result_type_mismatch")
     except Exception as error:
         counts = _request_counts(transport)
-        if isinstance(error, OrdinaryAgentProviderDeferred):
+        if isinstance(error, OrdinaryAgentCustodyCleanupUnknown):
+            reason = "cleanup_unknown"
+        elif isinstance(error, OrdinaryAgentProviderDeferred):
             reason = "provider_wait"
         elif isinstance(error, OrdinaryAgentProviderEvidenceError):
             reason = error.reason_code
@@ -208,27 +231,9 @@ def _acquire_read(
         raise
     if result is None:
         raise RuntimeError("ordinary provider reader returned no result")
-    if result.counts != _request_counts(transport):
-        store.record_ordinary_agent_read_failure(
-            attempt_id=attempt_id,
-            custody_attempt_id=reservation.custody_attempt_id,
-            reason_code="provider_incomplete",
-            counts=_request_counts(transport),
-        )
-        raise OrdinaryAgentProviderEvidenceError("provider_request_counts_mismatch")
-    if purpose == "snapshot" and isinstance(result, OrdinaryAgentMergeTrainSnapshotResult):
-        store.record_ordinary_agent_snapshot_success(
-            attempt_id=attempt_id,
-            custody_attempt_id=reservation.custody_attempt_id,
-            result=result,
-        )
+    if isinstance(result, OrdinaryAgentMergeTrainSnapshotResult):
         return result
-    if purpose == "candidate_check" and isinstance(result, OrdinaryAgentCandidateCheckResult):
-        store.record_ordinary_agent_candidate_check_success(
-            attempt_id=attempt_id,
-            custody_attempt_id=reservation.custody_attempt_id,
-            result=result,
-        )
+    if isinstance(result, OrdinaryAgentCandidateCheckResult):
         return result
     raise RuntimeError("ordinary provider reader returned the wrong result type")
 

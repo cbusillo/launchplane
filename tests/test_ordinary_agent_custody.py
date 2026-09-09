@@ -14,6 +14,7 @@ from control_plane.contracts.ordinary_agent_custody import (
 )
 from control_plane.contracts.secret_record import SecretBinding, SecretRecord, SecretVersion
 from control_plane.ordinary_agent_custody import (
+    OrdinaryAgentCustodyCleanupUnknown,
     OrdinaryAgentCustodyError,
     OrdinaryAgentCustodyUnavailable,
     ordinary_agent_provider_token_lease,
@@ -324,7 +325,7 @@ class OrdinaryAgentCustodyTests(unittest.TestCase):
                 }
             raise OSError("revoke outcome unknown")
 
-        with self.assertRaises(OSError):
+        with self.assertRaisesRegex(OrdinaryAgentCustodyCleanupUnknown, "cleanup outcome"):
             with ordinary_agent_provider_token_lease(
                 record_store=self.store,
                 secret_store=self.store,
