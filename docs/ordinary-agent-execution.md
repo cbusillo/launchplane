@@ -274,6 +274,33 @@ it does not serialize two distinct principals operating on one repository;
 guarded execution must supply its own cross-principal effect fence.
 
 
+## Session and finite-job storage integration
+
+The session lifecycle calculations consume current principal, credential and
+policy records. They do not authenticate a caller or authorize provider writes
+on their own. The storage transaction must verify the issuer proof and the
+receiver-bound approved delegation, resolve operation replay before calculating
+issuance, and serialize session, lease and finite-request records. Reconnecting
+to the same approved operation returns the stored session, including terminal
+state; it does not renew its lifetime. Separate approved operations can coexist.
+
+One finite request is one job. Admission charges its PR count once against the
+lease; effect reservations spend the action allowance. Existing-job checks do
+not spend admission capacity again. A bounded refresh preserves the original
+PR and stack-edit scope and consumes the original refresh allowance with a
+binding-revision compare-and-swap. Cancellation does not refund capacity.
+
+The internal dispatcher can continue an already admitted job only under its
+original explicit finite continuation grant. The interactive session and lease
+remain expired; this path cannot create new requests or renew either record.
+Current policy, current credential version, revocation, the original budget
+window and the finite deadline still apply. Cancellation of an unknown provider
+effect retains its durable reconciliation fence and execution-record links.
+The joined storage implementation persists these records, validates current
+issuer provenance and serializes admission budget updates. It does not register
+an ordinary HTTP route or dispatch provider effects; the separate semantic-effect
+gateway must reauthorize within its own reservation transaction.
+
 ## Internal authentication and private delivery
 
 The service generates an opaque random credential with a bounded canonical
@@ -326,6 +353,82 @@ client connection flow. Authenticated proposal/approval descriptors, client
 installation, ordinary HTTP admission, session/effect integration, and exact-scope
 live qualification remain separate prerequisites. Owner acceptance remains tied
 to a PR preview and never requires reading code.
+
+
+## Authenticated session approval boundary
+
+Initial enrollment can include optional `session_attenuation`. Its whole stable
+intent, including the finite session bounds, must first receive authenticated
+administrator approval. The domain operation row records the canonical approved
+intent; enrollment validates that exact row, digest and immutable administrator
+identity before issuing the session alongside the credential. Adding or changing
+attenuation after approval fails. Absence preserves the previous issuer intent.
+
+An already enrolled client proposes a fresh bounded session using its ordinary
+credential. The service stores the exact proposal and private credential proof
+provenance. The browser approves that stored operation using its signed human
+session and CSRF token; it never receives the ordinary bearer. The application
+adapter verifies signature, CSRF and existing claims currency. Storage then locks
+and rereads the human session, rechecks the current exact administrator policy,
+and verifies the current ordinary principal/credential and original proposal.
+Session issuance and domain approval commit together. Reuse of an operation with
+a different intent fails deterministically; historical replay returns the stored
+session, including cancellation, without renewal. No credential redelivery or
+policy write is required for another approved session.
+
+The domain session operation is the sole approval authority. Future generic
+operation views must project it rather than maintain a second independent
+approval. Initial issuer preparation must consume its exact approved intent and
+respect the original absolute session deadline; it must not reset deadlines from
+worker execution time. Public descriptors and browser/agent transport remain
+separate integration work. These internal adapters do not activate any route.
+
+The session lock order appends domain operation, session, lease and finite job
+after the issuer's policy/principal/credential/delivery locks. Browser approval
+locks the human session first; existing human logout/CSRF mutations lock only that
+row. Rotation, principal revocation and unclaimed credential expiry cancel all
+matching sessions and pending jobs in the same transaction. Dispatched unknown
+effects keep their reconciliation state and execution references.
+
+
+The initial proposed intent contains planned credential identity/lifetimes only,
+with no generated credential hashes or assumed administrator. The actual browser
+approver supplies verified identity; the domain transaction derives the exact
+current managed administrator binding. The private approved-intent read gives the
+worker a canonical issuer-intent digest. Only after approval does the issuer
+generate a credential; constructing the apply envelope checks its identity and
+lifetime against that plan. Standalone enrollment without a session follows the
+same stored approval protocol and creates no dummy lease. Activated adapters use
+`apply_approved_ordinary_agent_enrollment`, whose typed locator is verified against
+the persisted domain approval inside the issuer transaction. The original issuer
+foundation primitive remains an internal unregistered compatibility boundary.
+
+Public operation views contain original requested scope, finite bounds, credential
+ID/version and diagnostic status only. They exclude proof/receiver/approval hashes
+and private payloads. `approved` and `applied` describe historical records, not
+permission to dispatch; expired, revoked and current-policy-blocked status remain
+distinct. Request replay likewise returns history without new writes or authority.
+
+
+Administrator lifecycle controls use the same signed human session, CSRF, and
+current managed administrator checks as approval. Cancelling a pending request
+also cancels an approved enrollment that has not been applied: its durable
+operation tombstone fences recovery and final issuer apply. An applied operation
+cannot be labelled cancelled. Revoking one session cancels its leases and finite
+jobs; disconnecting a principal revokes all of its credentials and sessions through
+the atomic lifecycle writer. Neither control depends on a still-present ordinary
+agent rule or a valid ordinary bearer. Unknown execution outcomes retain their
+reconciliation fence. Disconnect audit bindings are derived from the actual
+human request; authority is rechecked against the locked human and current policy
+inside the mutation transaction, never conferred by an audit hash.
+
+The public operation view distinguishes the authenticated terminal requester from
+the recipient credential, and displays the reviewed credential/delivery deadlines
+even when no session was requested. An authenticated terminal may reconnect to
+its own initial proposal; ordinary clients and human administrators retain their
+separate read paths. Private bounded worker discovery returns only approved,
+unapplied, uncancelled, unexpired operation references. Discovery does not
+replace authoritative read and final apply checks.
 
 ## Private client HTTP delivery
 

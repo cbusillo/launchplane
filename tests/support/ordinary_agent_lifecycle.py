@@ -19,6 +19,7 @@ from control_plane.contracts.ordinary_agent_enrollment import (
     OrdinaryAgentPrincipalPreState,
 )
 from control_plane.contracts.ordinary_agent_lifecycle import (
+    OrdinaryAgentApprovedEnrollmentIntent,
     ORDINARY_AGENT_ENROLLMENT_MUTATION_ROUTE,
     ORDINARY_AGENT_ENROLLMENT_MUTATION_SCOPE,
     OrdinaryAgentAdministratorAuthorizationBinding,
@@ -396,3 +397,29 @@ def apply_test_enrollment(
     return store.compare_and_apply_ordinary_agent_enrollment(
         envelope=prepared, mutation=mutation, issuance=issuance
     )
+
+
+def prepare_approved_test_issuance(
+    approved: OrdinaryAgentApprovedEnrollmentIntent,
+) -> tuple[
+    OrdinaryAgentEnrollApplyEnvelope | OrdinaryAgentRotateCredentialApplyEnvelope,
+    OrdinaryAgentIssuanceBundle,
+]:
+    intent = approved.intent
+    planned = intent.authentication_credential
+    bundle = issue_ordinary_agent_credential(
+        principal_id=intent.principal_id,
+        credential_id=planned.credential_id,
+        credential_version=1 if intent.action == "enroll" else (intent.credential_version or 0) + 1,
+        valid_from=planned.valid_from,
+        expires_at=planned.expires_at,
+        operation_id=intent.operation_id,
+        receiver_claim_sha256=intent.delivery.receiver_claim_sha256,
+        delivery_expires_at=intent.delivery.expires_at,
+        intent_sha256=approved.issuance_intent_sha256,
+        encrypt=lambda value: (
+            Fernet(TEST_ISSUER_KEY).encrypt(value.encode()).decode(),
+            "test-issuer",
+        ),
+    )
+    return approved.apply_envelope(bundle.candidate), bundle

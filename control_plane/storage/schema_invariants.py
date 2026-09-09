@@ -10,7 +10,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
 AUTHZ_COMPATIBILITY_FLOOR_REVISION = "f3b5d7e9a1c2"
-EXPECTED_ALEMBIC_HEAD_REVISION = "e2b7d9a1c4f6"
+EXPECTED_ALEMBIC_HEAD_REVISION = "f3c8e1a2d5b7"
 RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS = (EXPECTED_ALEMBIC_HEAD_REVISION,)
 _AUTHZ_POLICY_TABLE = "launchplane_authz_policies"
 _AUTHZ_POLICY_WRITE_FENCE_TRIGGER = "launchplane_authz_policy_write_fence"
@@ -59,6 +59,12 @@ class CriticalPrimaryKey:
 
 
 CRITICAL_POSTGRES_COLUMN_TYPES: tuple[CriticalColumnType, ...] = (
+    CriticalColumnType("launchplane_ordinary_agent_sessions", "credential_version", ("bigint",)),
+    CriticalColumnType("launchplane_ordinary_agent_leases", "revision", ("bigint",)),
+    CriticalColumnType("launchplane_ordinary_agent_sessions", "payload", ("jsonb",)),
+    CriticalColumnType("launchplane_ordinary_agent_leases", "payload", ("jsonb",)),
+    CriticalColumnType("launchplane_ordinary_agent_finite_requests", "payload", ("jsonb",)),
+    CriticalColumnType("launchplane_ordinary_agent_session_operations", "payload", ("jsonb",)),
     CriticalColumnType("launchplane_ordinary_agent_deliveries", "delivery_expires_at", ("bigint",)),
     CriticalColumnType("launchplane_ordinary_agent_deliveries", "credential_version", ("bigint",)),
     CriticalColumnType(
@@ -657,6 +663,18 @@ _ODOO_STABLE_ACTIVE_OPERATION_PREDICATE_TOKENS = (
 )
 
 CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
+    CriticalIndex(
+        "launchplane_ordinary_agent_finite_requests",
+        "ordinary_finite_request_idempotency_uq",
+        ("principal_id", "idempotency_key"),
+        unique=True,
+    ),
+    CriticalIndex(
+        "launchplane_ordinary_agent_sessions",
+        "ordinary_session_operation_uq",
+        ("operation_id", "principal_id", "credential_id", "credential_version"),
+        unique=True,
+    ),
     CriticalIndex(
         "launchplane_ordinary_agent_deliveries",
         "ordinary_agent_delivery_version_uq",
@@ -1393,6 +1411,9 @@ CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
 )
 
 CRITICAL_PRIMARY_KEYS: tuple[CriticalPrimaryKey, ...] = (
+    CriticalPrimaryKey(
+        "launchplane_ordinary_agent_session_operations", ("principal_id", "operation_id")
+    ),
     CriticalPrimaryKey("launchplane_ordinary_agent_deliveries", ("operation_id",)),
     CriticalPrimaryKey("launchplane_ordinary_agent_delivery_audits", ("event_id",)),
     CriticalPrimaryKey(
