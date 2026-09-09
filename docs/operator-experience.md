@@ -4,12 +4,15 @@ title: Operator Experience
 
 ## Direction
 
-Launchplane operator work is API-first. Finish the product/environment API
-contract before rebuilding the browser UI. The current React UI is transitional;
-do not spend time refining its context picker or product-config layout except
-for secret-safety regressions.
+Launchplane operator work is API-first, but the minimum trusted Owner preview page
+and readable denial explanation ship with the end-to-end delegated-delivery
+slice. Do not defer that usable path until every backend abstraction is complete.
+The current React context picker and product-config layout remain transitional.
+Do not refine those transitional layouts except to correct secret-safety
+regressions.
 
-Owner authorization activation uses the signed-in browser session directly.
+Current DB policy-administration activation uses the signed-in browser session
+directly; this is an administrator path, not site Owner operational authority.
 The parameterless activation self-check returns only whether that exact
 immutable GitHub identity may administer policy now, plus bounded evaluation
 and opaque policy-generation evidence. It has no local-admin bearer helper,
@@ -40,6 +43,10 @@ but those jobs must have separate navigation:
   engineering-review evidence, dependency health, admission, landing outcomes,
   and only the exact-change/dependency state needed to decide whether a change
   may enter an environment.
+- **Owner Review** (target) will show a plain-language change, isolated preview,
+  decision, and observed delivery state. It will allow only accept, request
+  changes, revoke, and feedback for the Owner's product; it will expose no source,
+  configuration, deploy, merge, secret, or access-administration action.
 
 Product Ops is the default surface. Delivery Governance may reuse the same
 session, theme, and API transport, but it must not become a general issue
@@ -280,6 +287,12 @@ acceptance and its immutable history, current ephemeral readiness, immutable
 admission, landing outcome, and GitHub observations in separately named
 regions. The route name is transitional; the evidence contract is forge-neutral.
 It is read-only and does not add a browser mutation contract.
+
+The issue `#2240` target adds a trusted Owner route over the same separated
+evidence. It must distinguish proposed, accepted, waiting, live, and
+failed/unknown state; observed runtime state remains independent from delivery
+job state. This route and its narrow Owner writes are prospective until the
+corresponding service contract is implemented and activated.
 
 The transitional Engineering privileged-operation route consumes the
 server-computed semantic review projection for its list cards and activity
@@ -547,6 +560,8 @@ When the API contract is ready, rebuild the UI around:
 - promotion dry-run and workflow dispatch
 - preview state and lifecycle actions
 - activity and diagnostics
+- a separate trusted Owner-review route with narrow decision and feedback
+  controls
 
 Reusable pieces from the current UI may survive only if they fit the new model:
 session/auth client, API request wrapper, status formatting, evidence formatting,

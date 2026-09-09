@@ -6,19 +6,21 @@ title: Testing Style
 - Prefer deterministic file-system tests using `TemporaryDirectory`.
 - Test fail-closed behavior explicitly.
 - Keep fixtures small and inline unless they are reused heavily.
-- Default local full-suite entrypoint is
+- When a full suite is justified, the local entrypoint is
   `uv run --extra dev launchplane ci unittest-shard local`.
 
 ## Local test loop
 
-Run a focused unittest module or test method before the full suite:
+Run focused behavior tests for the changed contract first:
 
 ```bash
 uv run --extra dev python -m unittest tests.test_module_name
 uv run --extra dev python -m unittest tests.test_module_name.TestCaseName.test_behavior
 ```
 
-Before review, run the official local full-suite gate:
+Run the official local full-suite gate before review when the change spans shared
+contracts, storage, authorization, generated surfaces, or another broad risk, or
+when `.github/github.json` names it as the applicable required gate:
 
 ```bash
 uv run --extra dev launchplane ci unittest-shard local
@@ -89,11 +91,16 @@ shard plan includes per-target timing-source diagnostics:
 - `default`: no timing history exists yet, so the planner uses the conservative
   default estimate until a shard timing artifact teaches it better.
 
-GitHub Actions remains the source of truth for required pull-request gates. The
-local command is the official pre-review full-suite proof; the PostgreSQL
-integration command is the official production storage-semantics proof when a
-local or CI PostgreSQL service is available. Neither local command replaces CI's
-runner isolation, artifact retention, or required status checks.
+GitHub Actions remains the source of truth for required pull-request gates.
+Local validation should be proportionate: use targeted behavior proof by
+default, then add the full suite, PostgreSQL integration, browser, generated-
+contract, or other gate when the affected boundary or observed risk requires it.
+When PostgreSQL storage semantics require proof, the PostgreSQL integration
+command is the official production storage-semantics proof with a local or CI
+PostgreSQL service.
+Do not add tests that merely restate a copied value or mirror the implementation.
+No local command replaces CI's runner isolation, artifact retention, or required
+status checks.
 
 ## Browser smoke
 

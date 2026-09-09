@@ -7,6 +7,10 @@ title: Product Owner Policy
 Launchplane owns the authoritative product/system Owner policy used by exact-change
 Owner acceptance. The policy remains independent from production authorization,
 promotion, technical checks, engineering review, and provider landing effects.
+An Owner may view product change and observed runtime status and may accept,
+request changes, revoke acceptance, or give feedback. Owner membership never
+grants source, configuration, deploy, merge, secret, access-administration, or
+other operational authority.
 
 The contract has one human `Owner` class. Membership and evaluated actors are
 bound only to an immutable, positive numeric GitHub user ID. GitHub Actions,
@@ -34,6 +38,13 @@ human's immutable GitHub ID appears in the current product/system policy and
 matches the action's repository and environment scope.
 
 ## Scoped Review Policy
+
+The bullets below describe current runtime policy. The reconciled target in
+issue `#2240` permits the actual current product Owner to accept their own
+product change even when the same human contributed engineering work, while
+independent technical review remains separate. Implementing that target requires
+an explicit policy/schema migration and activation; this paragraph does not
+change current self-review evaluation.
 
 `ProductOwnerPolicyRecord` also carries three scoped policies that shape Owner
 product-review admissibility. They are fail-closed by default, so a policy
