@@ -390,13 +390,27 @@ def _impact_composition_result(
             subject_positions.setdefault((subject.product, subject.system), set()).add(
                 entry.position
             )
-    if any(len(positions) > 1 for positions in path_positions.values()):
+    if any(len(positions) > 1 for positions in path_positions.values()) and not (
+        _attested_engineering_only_composition(evaluation.entries)
+    ):
         reasons.append("structural_changed_path_overlap")
     if any(len(positions) > 1 for positions in subject_positions.values()):
         reasons.append("structural_same_subject_combined_review_required")
-    if not reasons:
-        return None, False
     review = evaluation.combined_owner_review
+    if not reasons:
+        if review is None:
+            return None, False
+        if not _combined_review_matches(review=review, evaluation=evaluation):
+            return (
+                _bound_result(
+                    evaluation,
+                    candidate_record,
+                    landing_plan_record,
+                    "structural_combined_owner_review_mismatch",
+                ),
+                False,
+            )
+        return None, True
     if review is None:
         return (
             _bound_result_reasons(
@@ -418,6 +432,35 @@ def _impact_composition_result(
             False,
         )
     return None, True
+
+
+def _attested_engineering_only_composition(
+    entries: tuple[MergeTrainStructuralEntryObservation, ...],
+) -> bool:
+    supported_models = {"legacy_v1", "v2"}
+    models: set[str] = set()
+    policy_digests: set[str] = set()
+    for entry in entries:
+        reviewed = entry.reviewed_delta
+        current = entry.current_delta
+        if reviewed is None or current is None:
+            return False
+        if reviewed.fingerprint_sha256 != current.fingerprint_sha256:
+            return False
+        if (
+            reviewed.change_impact_model not in supported_models
+            or current.change_impact_model not in supported_models
+            or reviewed.change_impact_policy_digest is None
+            or current.change_impact_policy_digest is None
+            or reviewed.affected_subjects
+            or current.affected_subjects
+        ):
+            return False
+        models.update((reviewed.change_impact_model, current.change_impact_model))
+        policy_digests.update(
+            (reviewed.change_impact_policy_digest, current.change_impact_policy_digest)
+        )
+    return len(models) == 1 and len(policy_digests) == 1
 
 
 def _combined_review_matches(
