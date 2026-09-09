@@ -56,6 +56,9 @@ MIN_RECONCILIATION_BACKOFF_SECONDS = 15
 MAX_RECONCILIATION_OBSERVATIONS_PER_EFFECT = 3
 MAX_RECONCILIATION_CUSTODY_MINTS_PER_EFFECT = 9
 MAX_TOTAL_CUSTODY_MINT_ATTEMPTS_PER_EFFECT = 18
+MAX_SNAPSHOT_PROVIDER_ATTEMPTS = 3
+MAX_CANDIDATE_CHECK_OBSERVATIONS = 9
+CANDIDATE_CHECK_DELAYS_SECONDS = (60, 120, 240, 480, 900)
 
 Identifier = Annotated[str, Field(min_length=1, max_length=256)]
 Digest = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
@@ -239,7 +242,7 @@ class OrdinaryAgentCompletedOutcome(StrictFrozenModel):
 
 class OrdinaryAgentKnownNotDispatchedOutcome(StrictFrozenModel):
     kind: Literal["known_not_dispatched"] = "known_not_dispatched"
-    reason: Literal["local_ttl", "transport_not_sent", "provider_rejected"]
+    reason: Literal["local_ttl", "transport_not_sent", "provider_rejected", "non_mergeable"]
 
 
 class OrdinaryAgentUnknownOutcome(StrictFrozenModel):
@@ -267,6 +270,7 @@ class OrdinaryAgentRefObservation(StrictFrozenModel):
     sha: str | None = Field(default=None, max_length=64)
     parents: tuple[str, ...] = ()
     tree_sha: str | None = Field(default=None, max_length=64)
+    contained_head_sha: str | None = Field(default=None, max_length=64)
     commit_message: str = Field(default="", max_length=8192)
 
     @field_validator("parents", mode="before")
