@@ -1852,7 +1852,8 @@
           "schema_version": {
             "enum": [
               1,
-              2
+              2,
+              3
             ],
             "title": "Schema Version",
             "type": "integer"
@@ -2372,7 +2373,8 @@
           "schema_version": {
             "enum": [
               1,
-              2
+              2,
+              3
             ],
             "title": "Schema Version",
             "type": "integer"
@@ -12366,11 +12368,20 @@
             "title": "Local Operators",
             "type": "array"
           },
+          "ordinary_agents": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/OrdinaryAgentPolicyRule"
+            },
+            "title": "Ordinary Agents",
+            "type": "array"
+          },
           "schema_version": {
             "default": 1,
             "enum": [
               1,
-              2
+              2,
+              3
             ],
             "title": "Schema Version",
             "type": "integer"
@@ -12801,7 +12812,8 @@
           "authz_policy_schema_version": {
             "enum": [
               1,
-              2
+              2,
+              3
             ],
             "title": "Authz Policy Schema Version",
             "type": "integer"
@@ -18140,6 +18152,81 @@
           "url"
         ],
         "title": "OdooWebsiteBootstrapRoute",
+        "type": "object"
+      },
+      "OrdinaryAgentPolicyRule": {
+        "additionalProperties": false,
+        "properties": {
+          "actions": {
+            "items": {
+              "enum": [
+                "self_read",
+                "preflight",
+                "guarded_merge"
+              ],
+              "type": "string"
+            },
+            "minItems": 1,
+            "title": "Actions",
+            "type": "array"
+          },
+          "managed_rule_id": {
+            "pattern": "^[a-z0-9][a-z0-9._:/-]{0,127}$",
+            "title": "Managed Rule Id",
+            "type": "string"
+          },
+          "managed_set_id": {
+            "pattern": "^[a-z0-9][a-z0-9._:/-]{0,127}$",
+            "title": "Managed Set Id",
+            "type": "string"
+          },
+          "principal_id": {
+            "pattern": "^[a-z][a-z0-9_-]{2,127}$",
+            "title": "Principal Id",
+            "type": "string"
+          },
+          "target": {
+            "$ref": "#/components/schemas/OrdinaryAgentTarget"
+          }
+        },
+        "required": [
+          "managed_set_id",
+          "managed_rule_id",
+          "principal_id",
+          "target",
+          "actions"
+        ],
+        "title": "OrdinaryAgentPolicyRule",
+        "type": "object"
+      },
+      "OrdinaryAgentTarget": {
+        "additionalProperties": false,
+        "properties": {
+          "base_branch": {
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Base Branch",
+            "type": "string"
+          },
+          "repository": {
+            "maxLength": 140,
+            "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+            "title": "Repository",
+            "type": "string"
+          },
+          "repository_id": {
+            "exclusiveMinimum": 0.0,
+            "maximum": 9.223372036854776e+18,
+            "title": "Repository Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "repository_id",
+          "repository",
+          "base_branch"
+        ],
+        "title": "OrdinaryAgentTarget",
         "type": "object"
       },
       "OwnerAcceptanceAuthorization": {
@@ -43219,11 +43306,20 @@
                         "title": "Local Operators",
                         "type": "array"
                       },
+                      "ordinary_agents": {
+                        "default": [],
+                        "items": {
+                          "$ref": "#/$defs/OrdinaryAgentPolicyRule"
+                        },
+                        "title": "Ordinary Agents",
+                        "type": "array"
+                      },
                       "schema_version": {
                         "default": 1,
                         "enum": [
                           1,
-                          2
+                          2,
+                          3
                         ],
                         "title": "Schema Version",
                         "type": "integer"
@@ -43392,6 +43488,81 @@
                       }
                     },
                     "title": "LocalOperatorPolicyRule",
+                    "type": "object"
+                  },
+                  "OrdinaryAgentPolicyRule": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "actions": {
+                        "items": {
+                          "enum": [
+                            "self_read",
+                            "preflight",
+                            "guarded_merge"
+                          ],
+                          "type": "string"
+                        },
+                        "minItems": 1,
+                        "title": "Actions",
+                        "type": "array"
+                      },
+                      "managed_rule_id": {
+                        "pattern": "^[a-z0-9][a-z0-9._:/-]{0,127}$",
+                        "title": "Managed Rule Id",
+                        "type": "string"
+                      },
+                      "managed_set_id": {
+                        "pattern": "^[a-z0-9][a-z0-9._:/-]{0,127}$",
+                        "title": "Managed Set Id",
+                        "type": "string"
+                      },
+                      "principal_id": {
+                        "pattern": "^[a-z][a-z0-9_-]{2,127}$",
+                        "title": "Principal Id",
+                        "type": "string"
+                      },
+                      "target": {
+                        "$ref": "#/$defs/OrdinaryAgentTarget"
+                      }
+                    },
+                    "required": [
+                      "managed_set_id",
+                      "managed_rule_id",
+                      "principal_id",
+                      "target",
+                      "actions"
+                    ],
+                    "title": "OrdinaryAgentPolicyRule",
+                    "type": "object"
+                  },
+                  "OrdinaryAgentTarget": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "base_branch": {
+                        "maxLength": 255,
+                        "minLength": 1,
+                        "title": "Base Branch",
+                        "type": "string"
+                      },
+                      "repository": {
+                        "maxLength": 140,
+                        "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+                        "title": "Repository",
+                        "type": "string"
+                      },
+                      "repository_id": {
+                        "exclusiveMinimum": 0,
+                        "maximum": 9223372036854775807,
+                        "title": "Repository Id",
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "repository_id",
+                      "repository",
+                      "base_branch"
+                    ],
+                    "title": "OrdinaryAgentTarget",
                     "type": "object"
                   },
                   "TerminalAgentPolicyRule": {
@@ -44116,11 +44287,20 @@
                         "title": "Local Operators",
                         "type": "array"
                       },
+                      "ordinary_agents": {
+                        "default": [],
+                        "items": {
+                          "$ref": "#/$defs/OrdinaryAgentPolicyRule"
+                        },
+                        "title": "Ordinary Agents",
+                        "type": "array"
+                      },
                       "schema_version": {
                         "default": 1,
                         "enum": [
                           1,
-                          2
+                          2,
+                          3
                         ],
                         "title": "Schema Version",
                         "type": "integer"
@@ -44289,6 +44469,81 @@
                       }
                     },
                     "title": "LocalOperatorPolicyRule",
+                    "type": "object"
+                  },
+                  "OrdinaryAgentPolicyRule": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "actions": {
+                        "items": {
+                          "enum": [
+                            "self_read",
+                            "preflight",
+                            "guarded_merge"
+                          ],
+                          "type": "string"
+                        },
+                        "minItems": 1,
+                        "title": "Actions",
+                        "type": "array"
+                      },
+                      "managed_rule_id": {
+                        "pattern": "^[a-z0-9][a-z0-9._:/-]{0,127}$",
+                        "title": "Managed Rule Id",
+                        "type": "string"
+                      },
+                      "managed_set_id": {
+                        "pattern": "^[a-z0-9][a-z0-9._:/-]{0,127}$",
+                        "title": "Managed Set Id",
+                        "type": "string"
+                      },
+                      "principal_id": {
+                        "pattern": "^[a-z][a-z0-9_-]{2,127}$",
+                        "title": "Principal Id",
+                        "type": "string"
+                      },
+                      "target": {
+                        "$ref": "#/$defs/OrdinaryAgentTarget"
+                      }
+                    },
+                    "required": [
+                      "managed_set_id",
+                      "managed_rule_id",
+                      "principal_id",
+                      "target",
+                      "actions"
+                    ],
+                    "title": "OrdinaryAgentPolicyRule",
+                    "type": "object"
+                  },
+                  "OrdinaryAgentTarget": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "base_branch": {
+                        "maxLength": 255,
+                        "minLength": 1,
+                        "title": "Base Branch",
+                        "type": "string"
+                      },
+                      "repository": {
+                        "maxLength": 140,
+                        "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+                        "title": "Repository",
+                        "type": "string"
+                      },
+                      "repository_id": {
+                        "exclusiveMinimum": 0,
+                        "maximum": 9223372036854775807,
+                        "title": "Repository Id",
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "repository_id",
+                      "repository",
+                      "base_branch"
+                    ],
+                    "title": "OrdinaryAgentTarget",
                     "type": "object"
                   },
                   "TerminalAgentPolicyRule": {

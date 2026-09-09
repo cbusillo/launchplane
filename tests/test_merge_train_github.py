@@ -1222,6 +1222,88 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
 
         self.assertEqual(observed_candidate, baseline_candidate)
 
+    def test_landing_uses_rolling_branch_when_pr_base_projection_is_older(self) -> None:
+        for single_entry in (False, True):
+            with self.subTest(single_entry=single_entry):
+                plan = _landing_plan()
+                if single_entry:
+                    plan = type(plan).model_validate(
+                        {
+                            **plan.model_dump(mode="python"),
+                            "entries": plan.entries[:1],
+                            "landing_plan_sha256": "",
+                        }
+                    )
+                first = list(_normal_landing_responses(1, "base-main", "merge-sha-1"))
+                if single_entry:
+                    first[1] = _landing_pull_request(1, base_sha="older-projection")
+                    first.insert(2, _github_branch(sha="base-main"))
+                responses = [_github_branch(sha="base-main"), *first]
+                if not single_entry:
+                    second = list(_normal_landing_responses(2, "merge-sha-1", "merge-sha-2"))
+                    second[1] = _landing_pull_request(2, base_sha="base-main")
+                    second.insert(2, _github_branch(sha="merge-sha-1"))
+                    responses.extend([_github_branch(sha="merge-sha-1"), *second])
+                responses.append(
+                    _github_branch(sha="merge-sha-1" if single_entry else "merge-sha-2")
+                )
+                transport = RecordingMergeTrainGitHubTransport(responses=tuple(responses))
+                landed = GitHubMergeTrainClient(transport=transport).land_batch_candidate(
+                    landing_plan=plan
+                )
+                self.assertTrue(all(entry.status == "merged" for entry in landed.entries))
+                self.assertEqual(
+                    landed.entries[-1].recorded_rolling_base_sha,
+                    "base-main" if single_entry else "merge-sha-1",
+                )
+                self.assertEqual(
+                    [
+                        request.body["sha"]
+                        for request in transport.requests
+                        if request.method == "PUT" and request.body
+                    ],
+                    [entry.expected_head_sha for entry in plan.entries],
+                )
+
+    def test_lagging_projection_confirmation_rejects_foreign_identity_before_second_merge(
+        self,
+    ) -> None:
+        for confirmation in (
+            _github_branch(sha="foreign-base"),
+            _github_branch(sha="merge-sha-1", tree_sha="foreign-tree"),
+            {},
+            MergeTrainGitHubError("Provider identity read unavailable", status_code=503),
+        ):
+            with self.subTest(confirmation=confirmation):
+                transport = RecordingMergeTrainGitHubTransport(
+                    responses=(
+                        _github_branch(sha="base-main"),
+                        *_normal_landing_responses(1, "base-main", "merge-sha-1"),
+                        _github_branch(sha="merge-sha-1"),
+                        _git_commit("head-2", "tree-head-2"),
+                        _landing_pull_request(2, base_sha="base-main"),
+                        confirmation,
+                    )
+                )
+                progress = []
+                with self.assertRaises(MergeTrainGitHubError) as failure:
+                    GitHubMergeTrainClient(transport=transport).land_batch_candidate(
+                        landing_plan=_landing_plan(),
+                        checkpoint=lambda plan, entry, phase: (
+                            progress.append(plan) if phase == "entry_merged" else None
+                        ),
+                    )
+                if not confirmation or isinstance(confirmation, MergeTrainGitHubError):
+                    self.assertNotIsInstance(failure.exception, MergeTrainGitHubStaleHeadError)
+                if isinstance(confirmation, MergeTrainGitHubError):
+                    self.assertIs(failure.exception, confirmation)
+                self.assertEqual(
+                    [request.path for request in transport.requests if request.method == "PUT"],
+                    ["/repos/example/merge-train-repo/pulls/1/merge"],
+                )
+                self.assertEqual(progress[-1].entries[0].status, "merged")
+                self.assertEqual(progress[-1].entries[0].merge_commit_sha, "merge-sha-1")
+
     def test_land_batch_candidate_merges_original_prs_in_order(self) -> None:
         landing_plan = _landing_plan()
         checkpoints: list[tuple[str, int, int]] = []
@@ -1567,15 +1649,18 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                 _github_branch(sha="base-main"),
                 _git_commit("head-1", "tree-head-1"),
                 _landing_pull_request(1, base_sha="unexpected-base"),
+                _github_branch(sha="foreign-base"),
             )
         )
 
-        with self.assertRaisesRegex(MergeTrainGitHubStaleHeadError, "base moved"):
+        with self.assertRaisesRegex(MergeTrainGitHubStaleHeadError, "base branch moved"):
             GitHubMergeTrainClient(transport=transport).land_batch_candidate(
                 landing_plan=landing_plan
             )
 
-        self.assertEqual([request.method for request in transport.requests], ["GET", "GET", "GET"])
+        self.assertEqual(
+            [request.method for request in transport.requests], ["GET", "GET", "GET", "GET"]
+        )
 
     def test_land_batch_candidate_accepts_descendant_movement_after_final_merge(self) -> None:
         landing_plan = _landing_plan()
