@@ -47,10 +47,12 @@ authentication.
 
 ## Evidence and launch semantics
 
-An immutable terminal intent records the expected terminal lifecycle, fence,
-host and unchanged acceptance expiry. The foundation writer checks acceptance
-linkage; it does not verify those expectations against a locked work-request
-snapshot. Transactional minting must supply that verification. Operation evidence identifies a fresh lifecycle,
+V1 terminal intents remain readable as unverified expectations with their
+original digests. They cannot replay as verified minted evidence. V2 intents
+embed the current request-action policy provenance and immutable canonical
+PR-open observation. Transactional minting validates acceptance against the
+locked terminal request, including lifecycle, fence, state, host and retained PR.
+Operation evidence identifies a fresh lifecycle,
 execution fence, lease owner and launch nonce. SQL persistence checks the linked
 records and rejects changed replays. It does not perform the positive lifecycle
 transition in this foundation slice.
@@ -81,7 +83,7 @@ not a permission to start a process.
 
 The foundation does not complete feedback resume. Remaining service work includes
 canonical managed API ingestion, revision disposition/ordering, explicit closure
-observation, transactional intent minting and resume, monotonic fences and a
+observation, transactional resume allocation, monotonic fences and a
 separate crash-recovery budget, versioned callbacks, gate registration/release,
 receipt authentication, cancellation and evidence-bound operator recovery.
 
@@ -128,3 +130,44 @@ malformed new policy input. Secret-held desired sets were not inspected for this
 change. Before any separately authorized reconciliation resumes, verify that
 their `github_ids` contain unquoted positive integers. The #2058 freeze remains
 in effect; this compatibility check does not authorize reconciliation.
+
+## Transactional intent minting
+
+The minting method is deliberately unwired. It acquires the active-policy
+advisory lock and current policy row before the work-request lock, then reads
+closure, current acceptance and the exact acceptance/lifecycle/fence intent.
+The request lock prevents closure insertion from racing the decision even when
+no closure row exists. It selects no arbitrary latest intent by issuance time.
+A later terminal lifecycle can mint from the same still-current acceptance;
+old intents retain their original snapshot and cannot cross lifecycle fences.
+
+PostgreSQL `clock_timestamp()` is captured after all locks, retaining fractional
+seconds. The generic mutation timestamp formatter truncates fractional seconds
+and is unsuitable for this freshness boundary. A fresh canonical open observation
+may be at most 30 seconds old or five seconds in the future relative to the DB
+clock, inclusive; clock skew means worst real age can reach 35 seconds. No cached
+fallback supplies open evidence. Each mint transaction sets a five-second lock
+timeout and a fifteen-second statement timeout. Contention fails closed without
+an automatic retry. SQLite verifies portability, not clock precision or locking.
+
+Identical snapshot replay returns the original byte-equivalent v2 record, after
+current policy, acceptance eligibility, closure and terminal snapshot checks.
+It needs no new open observation and never proves current openness or grants
+execution. A changed terminal state at the same lifecycle/fence conflicts. Any
+recorded PR closure keeps this acceptance ineligible; reopening cannot revive
+it. The closure ledger is not a read model of current GitHub state. Reopen
+handling and current-state convergence remain requirements for ingestion.
+
+V2 observation and issuance provenance live in the existing immutable JSON
+payload. Migration adds only a composite uniqueness index and preserves the
+existing digest uniqueness. Historical duplicate terminal snapshots cause a
+migration failure requiring reviewed resolution; migration deletes or promotes
+no historical evidence. The private fixture writer accepts v1 only.
+
+The canonical observation helper validates independently supplied managed API
+repository and PR objects; it performs no network read and its Python type does
+not authenticate the caller. Future trusted adapter code must capture observation
+time after the complete managed response, map closed/merged/errors to no open
+observation, and never pass webhook/request-owned copies. No HTTP schema accepts
+these observations. Actual allocation and release must recheck current authority,
+expiry and canonical PR state; minting alone consumes no execution or intent.
