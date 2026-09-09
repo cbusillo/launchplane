@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from control_plane.contracts.ordinary_agent_effect import (
+    CandidateRefDeleteCommand,
     EffectState,
     OrdinaryAgentCompletedOutcome,
     OrdinaryAgentEffectRecord,
@@ -16,6 +17,10 @@ from control_plane.contracts.ordinary_agent_effect import (
     OrdinaryAgentReconciliationObservation,
     OrdinaryAgentRefObservation,
     OrdinaryAgentUnknownOutcome,
+)
+from control_plane.contracts.merge_train_effect import (
+    CandidateRefDeleteEffect,
+    MergeTrainEffectLineage,
 )
 from control_plane.merge_train_github import (
     MergeTrainGitHubError,
@@ -115,6 +120,53 @@ class LandingDispatchTests(unittest.TestCase):
         with self.assertRaises(OrdinaryLandingDispatchStopped):
             replay_dispatcher.dispatch()
         self.assertEqual(replay_inner.requests, [])
+
+    def test_completed_landing_and_retained_cleanup_leave_no_unresolved_effects(self) -> None:
+        _, dispatcher = self.dispatcher([{"merged": True, "sha": self.result_sha}, self.proof])
+        self.assertEqual(dispatcher.dispatch(), self.result_sha)
+        landing_effect = self.fixture.store.read_ordinary_agent_effect(
+            effect_id=self.finalized.effect.effect_id
+        )
+        self.assertEqual(landing_effect.state, "completed")
+
+        landing_plan = self.fixture.plan.landing_plan
+        delete_effect = CandidateRefDeleteEffect(
+            lineage=MergeTrainEffectLineage(
+                repository=landing_plan.repository,
+                base_branch=landing_plan.base_branch,
+                batch_id=landing_plan.batch_id,
+                landing_plan_id=landing_plan.plan_id,
+            ),
+            candidate_ref=landing_plan.candidate_ref,
+            expected_ref_sha=landing_plan.candidate_sha,
+        )
+        cleanup_record = self.fixture.store.reserve_ordinary_agent_effect(
+            request_id=self.fixture.request.request_id,
+            expected_binding_revision=1,
+            controller_fence=self.fixture.fence,
+            command=CandidateRefDeleteCommand(effect=delete_effect),
+            semantic_ordinal=2,
+        )
+        executor = OrdinaryAgentMergeTrainEffectExecutor(
+            record=cleanup_record,
+            controller_fence=self.fixture.fence,
+            effect_store=self.fixture.store,
+            custody_store=self.fixture.store,
+            secret_store=self.fixture.store,
+        )
+        self.assertFalse(executor.delete_candidate_ref(delete_effect))
+
+        cleanup_effect = self.fixture.store.read_ordinary_agent_effect(
+            effect_id=cleanup_record.effect_id
+        )
+        self.assertEqual(cleanup_effect.state, "retained_no_conditional_delete")
+        self.assertEqual(
+            self.fixture.store.read_ordinary_agent_job(
+                proof=self.fixture.fixture.fixture.proof,
+                request_id=self.fixture.request.request_id,
+            ).unresolved_effects,
+            0,
+        )
 
     def test_ambiguous_merge_response_remains_unknown_without_retry(self) -> None:
         inner, dispatcher = self.dispatcher(
