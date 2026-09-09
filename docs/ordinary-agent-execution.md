@@ -244,6 +244,14 @@ token-backed client before invoking that core. Ordinary integration must provide
 its scoped client and joined bound-record adapters; passing an ordinary bearer
 to the privileged controller route is not an integration path.
 
+The ordinary controller adapter filters planning reads to the exact job binding
+and target. Acquisitions and checkpoints use joined storage operations; after a
+progress successor is stored, a checkpoint rereads its authoritative record ID.
+Ordinary wrapper builders include the binding before calculating their IDs.
+Release uses a history-only fence operation, including terminal cleanup after a
+worker crash, so cancellation does not require reacquiring execution authority.
+This adapter alone does not register an executor or activate the worker stage.
+
 ## Validation boundary
 
 Tests use synthetic principals and targets. Canonical JSON round trips and

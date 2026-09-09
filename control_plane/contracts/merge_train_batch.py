@@ -407,9 +407,11 @@ def build_merge_train_batch_candidate_record(
     candidate: MergeTrainBatchCandidate,
     source: str,
     updated_at: str,
+    ordinary_job_binding: OrdinaryAgentJobBinding | None = None,
 ) -> MergeTrainBatchCandidateRecord:
     record_without_id = MergeTrainBatchCandidateRecord(
         record_id="pending",
+        ordinary_job_binding=ordinary_job_binding,
         source=source,
         updated_at=updated_at,
         candidate=candidate,
@@ -440,9 +442,11 @@ def build_merge_train_batch_landing_plan_record(
     landing_plan: MergeTrainBatchLandingPlan,
     source: str,
     updated_at: str,
+    ordinary_job_binding: OrdinaryAgentJobBinding | None = None,
 ) -> MergeTrainBatchLandingPlanRecord:
     record_without_id = MergeTrainBatchLandingPlanRecord(
         record_id="pending",
+        ordinary_job_binding=ordinary_job_binding,
         source=source,
         updated_at=updated_at,
         landing_plan=landing_plan,

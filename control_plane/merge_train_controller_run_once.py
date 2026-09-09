@@ -913,6 +913,7 @@ def _advance_active_landing_record(
         if phase not in {"entry_merged", "entry_skipped"}:
             return None
         progress_record = build_merge_train_batch_landing_plan_record(
+            ordinary_job_binding=lease.record.ordinary_job_binding,
             landing_plan=progress_plan,
             source=f"service:controller:landing-progress:{trace_id}",
             updated_at=lease.record.updated_at,
@@ -995,6 +996,7 @@ def _advance_active_landing_record(
     except MergeTrainGitHubStaleHeadError as error:
         stale_plan = stale_merge_train_landing_plan(active_landing_record.landing_plan)
         stale_record = build_merge_train_batch_landing_plan_record(
+            ordinary_job_binding=lease.record.ordinary_job_binding,
             landing_plan=stale_plan,
             source=f"service:controller:stale-landing:{trace_id}",
             updated_at=recorded_at,
@@ -1018,6 +1020,7 @@ def _advance_active_landing_record(
         }
 
     landed_record = build_merge_train_batch_landing_plan_record(
+        ordinary_job_binding=lease.record.ordinary_job_binding,
         landing_plan=landed_plan,
         source=f"service:controller:land:{trace_id}",
         updated_at=recorded_at,
@@ -1168,6 +1171,7 @@ def _finish_landed_merge_train_batch(
             },
         )
         progress_record = build_merge_train_stack_collapse_plan_record(
+            ordinary_job_binding=lease.record.ordinary_job_binding,
             plan=progress_plan.model_copy(update={"updated_at": lease.record.updated_at}),
             source=f"service:controller:child-disposition-progress:{trace_id}",
             updated_at=lease.record.updated_at,
@@ -1184,6 +1188,7 @@ def _finish_landed_merge_train_batch(
         checkpoint=checkpoint_child_disposition,
     )
     reconciled_record = build_merge_train_stack_collapse_plan_record(
+        ordinary_job_binding=lease.record.ordinary_job_binding,
         plan=reconciled_collapse_plan,
         source=f"service:controller:child-disposition:{trace_id}",
         updated_at=recorded_at,
@@ -1443,6 +1448,7 @@ def _advance_active_candidate_record(
         }
     if request.mutate:
         updated_candidate_record = build_merge_train_batch_candidate_record(
+            ordinary_job_binding=lease.record.ordinary_job_binding,
             candidate=candidate,
             source=f"service:controller:{controller_action}:{trace_id}",
             updated_at=recorded_at,
@@ -1601,6 +1607,7 @@ def _advance_passed_candidate_record(
         created_at=recorded_at,
     )
     landing_record = build_merge_train_batch_landing_plan_record(
+        ordinary_job_binding=lease.record.ordinary_job_binding,
         landing_plan=landing_plan,
         source=f"service:controller:landing-plan:{trace_id}",
         updated_at=recorded_at,
@@ -1792,6 +1799,7 @@ def _advance_waiting_stack_collapse_record(
         ),
     )
     candidate_record = build_merge_train_batch_candidate_record(
+        ordinary_job_binding=lease.record.ordinary_job_binding,
         candidate=candidate,
         source=f"service:controller:stack-collapse-admit:{trace_id}",
         updated_at=recorded_at,
@@ -1924,6 +1932,7 @@ def _advance_planned_stack_collapse_record(
                 },
             )
             progress_record = build_merge_train_stack_collapse_plan_record(
+                ordinary_job_binding=lease.record.ordinary_job_binding,
                 plan=progress_plan.model_copy(update={"updated_at": lease.record.updated_at}),
                 source=f"service:controller:stack-collapse-progress:{trace_id}",
                 updated_at=lease.record.updated_at,
@@ -1938,6 +1947,7 @@ def _advance_planned_stack_collapse_record(
             checkpoint=checkpoint_collapse_progress,
         )
         executed_record = build_merge_train_stack_collapse_plan_record(
+            ordinary_job_binding=lease.record.ordinary_job_binding,
             plan=executed_plan,
             source=f"service:controller:stack-collapse-execute:{trace_id}",
             updated_at=recorded_at,
@@ -2014,6 +2024,7 @@ def _advance_from_live_snapshot(
                 step_payload={"collapse_id": stack_collapse_plan.collapse_id},
             )
             stack_collapse_record = build_merge_train_stack_collapse_plan_record(
+                ordinary_job_binding=lease.record.ordinary_job_binding,
                 plan=stack_collapse_plan,
                 source=f"service:controller:stack-collapse-plan:{trace_id}",
                 updated_at=recorded_at,
@@ -2084,6 +2095,7 @@ def _advance_from_live_snapshot(
             },
         )
         candidate_record = build_merge_train_batch_candidate_record(
+            ordinary_job_binding=lease.record.ordinary_job_binding,
             candidate=candidate,
             source=f"service:controller:candidate-plan:{trace_id}",
             updated_at=recorded_at,
@@ -2165,6 +2177,7 @@ def try_reflow_failed_merge_train_candidate(
     }
     if mutate:
         candidate_record = build_merge_train_batch_candidate_record(
+            ordinary_job_binding=active_candidate_record.ordinary_job_binding,
             candidate=candidate,
             source=f"service:controller:candidate-reflow:{trace_id}",
             updated_at=recorded_at,

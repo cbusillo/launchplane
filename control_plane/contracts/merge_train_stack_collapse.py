@@ -562,9 +562,11 @@ def build_merge_train_stack_collapse_plan_record(
     plan: MergeTrainStackCollapsePlan,
     source: str,
     updated_at: str,
+    ordinary_job_binding: OrdinaryAgentJobBinding | None = None,
 ) -> MergeTrainStackCollapsePlanRecord:
     record_without_id = MergeTrainStackCollapsePlanRecord(
         record_id="pending",
+        ordinary_job_binding=ordinary_job_binding,
         source=source,
         updated_at=updated_at,
         plan=plan,
