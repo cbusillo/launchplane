@@ -56,6 +56,8 @@ delivery pilot and its DB-native activation/rollback amendment are prepared.
   baseline, Docker credential isolation, and readiness contract.
 - [runner-host-hygiene.md](runner-host-hygiene.md) — report-only shared runner
   host hygiene evidence, budgets, and future apply boundary.
+- [ordinary-agent-execution.md](ordinary-agent-execution.md) — inert proposed
+  ordinary-agent scope, eligibility, fingerprint and administration boundaries.
 - [agent-context-boundary.md](agent-context-boundary.md) — public-safe agent
   context, caller profiles, scoped intent, redaction, and provenance boundary.
 - [agent-operator-contract.md](agent-operator-contract.md) — generated,

@@ -253,8 +253,30 @@ def build_every_code_feedback_acceptance_digest(
     return _canonical_digest(payload)
 
 
+class EveryCodeFeedbackPullRequestOpenObservation(_StrictFrozenModel):
+    """Persisted provider evidence; this type itself supplies no authority."""
+
+    repository_id: StrictInt = Field(gt=0)
+    repository_owner_id: StrictInt = Field(gt=0)
+    pull_request_number: StrictInt = Field(gt=0)
+    pull_request_node_id: str
+    state: Literal["open"] = "open"
+    observed_at: str
+    observation_digest: str = ""
+
+    @model_validator(mode="after")
+    def validate_observation(self) -> EveryCodeFeedbackPullRequestOpenObservation:
+        _opaque_id(self.pull_request_node_id, "pull_request_node_id")
+        _timestamp(self.observed_at, "observed_at")
+        expected = _canonical_digest(self.model_dump(mode="json", exclude={"observation_digest"}))
+        if self.observation_digest and self.observation_digest != expected:
+            raise ValueError("observation_digest does not match PR observation")
+        object.__setattr__(self, "observation_digest", expected)
+        return self
+
+
 class EveryCodeFeedbackResumeIntentRecord(_StrictFrozenModel):
-    schema_version: Literal[1] = 1
+    schema_version: Literal[1, 2] = 1
     intent_id: str
     request_id: str
     acceptance_id: str
@@ -267,6 +289,8 @@ class EveryCodeFeedbackResumeIntentRecord(_StrictFrozenModel):
     issued_at: str
     eligible_until: str
     worker_idempotency_key: str
+    issuance_policy: EveryCodeFeedbackPolicyDecisionProvenance | None = None
+    open_observation: EveryCodeFeedbackPullRequestOpenObservation | None = None
     intent_digest: str = ""
 
     @model_validator(mode="after")
@@ -287,6 +311,18 @@ class EveryCodeFeedbackResumeIntentRecord(_StrictFrozenModel):
         _timestamp(self.eligible_until, "eligible_until")
         if eligible <= issued or eligible > issued + EVERY_CODE_FEEDBACK_MAX_AGE:
             raise ValueError("intent expiry must be after issuance and within 24 hours")
+        if self.schema_version == 1:
+            if self.issuance_policy is not None or self.open_observation is not None:
+                raise ValueError("legacy intent cannot claim verified issuance evidence")
+        else:
+            if self.issuance_policy is None or self.open_observation is None:
+                raise ValueError("minted intent requires issuance policy and open observation")
+            if (
+                self.issuance_policy.action != EVERY_CODE_FEEDBACK_RESUME_REQUEST_ACTION
+                or self.issuance_policy.instance
+                != f"github-repository:{self.open_observation.repository_id}"
+            ):
+                raise ValueError("minted intent policy does not match PR observation")
         expected = build_every_code_feedback_resume_intent_digest(self)
         if self.intent_digest and self.intent_digest != expected:
             raise ValueError("intent_digest does not match immutable intent")
@@ -297,7 +333,12 @@ class EveryCodeFeedbackResumeIntentRecord(_StrictFrozenModel):
 def build_every_code_feedback_resume_intent_digest(
     record: EveryCodeFeedbackResumeIntentRecord,
 ) -> str:
-    return _canonical_digest(record.model_dump(mode="json", exclude={"intent_digest"}))
+    payload = record.model_dump(mode="json", exclude={"intent_digest"})
+    if record.schema_version == 1:
+        # Preserve the historical v1 digest; absent v2 proof never becomes authority.
+        payload.pop("issuance_policy", None)
+        payload.pop("open_observation", None)
+    return _canonical_digest(payload)
 
 
 class EveryCodeFeedbackLaunchBinding(_StrictFrozenModel):
