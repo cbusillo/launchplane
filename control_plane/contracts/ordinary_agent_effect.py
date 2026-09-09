@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from typing import Annotated, Literal, Protocol, TypeAlias
+from dataclasses import fields
+import json
 
-from pydantic import Field, field_validator
+from pydantic import Field, TypeAdapter, field_validator
 
 from control_plane.contracts.ordinary_agent import OrdinaryAgentTarget, StrictFrozenModel
 from control_plane.contracts.ordinary_agent_custody import OrdinaryAgentCustodyCandidate
@@ -12,6 +14,7 @@ from control_plane.contracts.ordinary_agent_session_lifecycle import (
     OrdinaryAgentFiniteRequestRecord,
 )
 from control_plane.contracts.merge_train_effect import (
+    MergeTrainEffectLineage,
     CandidateRefPrepareEffect,
     CandidateHeadMergeEffect,
     PullRequestHeadRefreshEffect,
@@ -21,6 +24,19 @@ from control_plane.contracts.merge_train_effect import (
     StackChildLabelEffect,
     StackChildCloseEffect,
     CandidateRefDeleteEffect,
+)
+
+from control_plane.contracts.merge_train_controller_state import MergeTrainControllerStateRecord
+from control_plane.contracts.merge_train_batch import (
+    MergeTrainBatchCandidateRecord,
+    MergeTrainBatchLandingPlanRecord,
+)
+from control_plane.contracts.merge_train_stack_collapse import MergeTrainStackCollapsePlanRecord
+
+OrdinaryAgentProgressRecord: TypeAlias = (
+    MergeTrainBatchCandidateRecord
+    | MergeTrainBatchLandingPlanRecord
+    | MergeTrainStackCollapsePlanRecord
 )
 
 MAX_CUSTODY_MINT_ATTEMPTS_PER_DISPATCH_CHILD = 3
@@ -40,47 +56,68 @@ Digest = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 Epoch = Annotated[int, Field(ge=0, le=2**63 - 1)]
 
 
-class CandidateRefPrepareCommand(StrictFrozenModel):
+class _SemanticCommand(StrictFrozenModel):
+    @field_validator("effect", mode="before", check_fields=False)
+    @classmethod
+    def decode_persisted_effect(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            return value
+        effect_type = cls.model_fields["effect"].annotation
+        if effect_type is None:
+            raise ValueError("semantic command has no effect type")
+        if set(value) - {field.name for field in fields(effect_type)}:
+            raise ValueError("unknown semantic effect field")
+        lineage = value.get("lineage")
+        if isinstance(lineage, dict) and set(lineage) - {
+            field.name for field in fields(MergeTrainEffectLineage)
+        }:
+            raise ValueError("unknown semantic lineage field")
+        # Strict JSON decoding reconstructs existing frozen dataclasses without
+        # permitting scalar coercion or silently accepting future command fields.
+        return TypeAdapter(effect_type).validate_json(json.dumps(value), strict=True)
+
+
+class CandidateRefPrepareCommand(_SemanticCommand):
     kind: Literal["candidate_ref_prepare"] = "candidate_ref_prepare"
     effect: CandidateRefPrepareEffect
 
 
-class CandidateHeadMergeCommand(StrictFrozenModel):
+class CandidateHeadMergeCommand(_SemanticCommand):
     kind: Literal["candidate_head_merge"] = "candidate_head_merge"
     effect: CandidateHeadMergeEffect
 
 
-class PullRequestHeadRefreshCommand(StrictFrozenModel):
+class PullRequestHeadRefreshCommand(_SemanticCommand):
     kind: Literal["pull_request_head_refresh"] = "pull_request_head_refresh"
     effect: PullRequestHeadRefreshEffect
 
 
-class StackChildMergeCommand(StrictFrozenModel):
+class StackChildMergeCommand(_SemanticCommand):
     kind: Literal["stack_child_merge"] = "stack_child_merge"
     effect: StackChildMergeEffect
 
 
-class PullRequestLandingCommand(StrictFrozenModel):
+class PullRequestLandingCommand(_SemanticCommand):
     kind: Literal["pull_request_landing"] = "pull_request_landing"
     effect: PullRequestLandingEffect
 
 
-class StackChildCommentCommand(StrictFrozenModel):
+class StackChildCommentCommand(_SemanticCommand):
     kind: Literal["stack_child_comment"] = "stack_child_comment"
     effect: StackChildCommentEffect
 
 
-class StackChildLabelCommand(StrictFrozenModel):
+class StackChildLabelCommand(_SemanticCommand):
     kind: Literal["stack_child_label"] = "stack_child_label"
     effect: StackChildLabelEffect
 
 
-class StackChildCloseCommand(StrictFrozenModel):
+class StackChildCloseCommand(_SemanticCommand):
     kind: Literal["stack_child_close"] = "stack_child_close"
     effect: StackChildCloseEffect
 
 
-class CandidateRefDeleteCommand(StrictFrozenModel):
+class CandidateRefDeleteCommand(_SemanticCommand):
     kind: Literal["candidate_ref_delete"] = "candidate_ref_delete"
     effect: CandidateRefDeleteEffect
 
@@ -189,6 +226,7 @@ class OrdinaryAgentCompletedOutcome(StrictFrozenModel):
     result_sha: str | None = Field(default=None, max_length=64)
     result_id: str | None = Field(default=None, max_length=256)
     no_op: bool = False
+    proof: OrdinaryAgentRefObservation | OrdinaryAgentPullRequestObservation | None = None
 
 
 class OrdinaryAgentKnownNotDispatchedOutcome(StrictFrozenModel):
@@ -220,6 +258,7 @@ class OrdinaryAgentRefObservation(StrictFrozenModel):
     ref: Identifier
     sha: str | None = Field(default=None, max_length=64)
     parents: tuple[str, ...] = ()
+    tree_sha: str | None = Field(default=None, max_length=64)
     commit_message: str = Field(default="", max_length=8192)
 
     @field_validator("parents", mode="before")
@@ -238,9 +277,11 @@ class OrdinaryAgentPullRequestObservation(StrictFrozenModel):
     state: Literal["open", "closed"]
     merged: bool
     merge_commit_sha: str | None = Field(default=None, max_length=64)
+    merge_commit_tree_sha: str | None = Field(default=None, max_length=64)
+    merge_commit_parents: tuple[str, ...] = ()
     head_parents: tuple[str, ...] = ()
 
-    @field_validator("head_parents", mode="before")
+    @field_validator("head_parents", "merge_commit_parents", mode="before")
     @classmethod
     def read_parents(cls, value: object) -> object:
         return tuple(value) if isinstance(value, list) else value
@@ -313,6 +354,7 @@ class OrdinaryAgentClaimedJob(StrictFrozenModel):
     request: OrdinaryAgentFiniteRequestRecord
     claim_fence: OrdinaryAgentJobClaimFence
     claim_expires_at: Epoch
+    controller_fence: OrdinaryAgentControllerFence | None = None
 
 
 class OrdinaryAgentJobAttemptDisposition(StrictFrozenModel):
@@ -370,6 +412,49 @@ class OrdinaryAgentJobWorkerStore(Protocol):
     ) -> OrdinaryAgentJobView: ...
 
 
+class OrdinaryAgentControllerStore(Protocol):
+    def acquire_ordinary_merge_train_controller_state_record(
+        self,
+        *,
+        claim_fence: OrdinaryAgentJobClaimFence,
+        expected_binding_revision: int,
+        policy_key: str,
+        policy_sha256: str,
+        lease_seconds: int,
+        initial_active_action: str,
+        initial_active_phase: str,
+        adoptable_active_actions: tuple[str, ...],
+    ) -> MergeTrainControllerStateRecord: ...
+
+    def compare_and_set_ordinary_merge_train_controller_state_record(
+        self,
+        *,
+        request_id: str,
+        expected_binding_revision: int,
+        controller_fence: OrdinaryAgentControllerFence,
+        record: MergeTrainControllerStateRecord,
+        lease_seconds: int,
+    ) -> MergeTrainControllerStateRecord: ...
+
+    def write_ordinary_merge_train_record(
+        self,
+        *,
+        request_id: str,
+        expected_binding_revision: int,
+        controller_fence: OrdinaryAgentControllerFence,
+        record: OrdinaryAgentProgressRecord,
+        expected_predecessor_record_id: str | None = None,
+    ) -> OrdinaryAgentProgressRecord: ...
+
+    def yield_ordinary_merge_train_controller_state_record(
+        self,
+        *,
+        request_id: str,
+        expected_binding_revision: int,
+        controller_fence: OrdinaryAgentControllerFence,
+    ) -> MergeTrainControllerStateRecord: ...
+
+
 class OrdinaryAgentEffectStore(Protocol):
     def reserve_ordinary_custody_attempt(
         self, *, effect_id: str, expected_effect_revision: int
@@ -413,3 +498,6 @@ class OrdinaryAgentEffectStore(Protocol):
         *,
         quota_key: OrdinaryAgentProviderQuotaKey,
     ) -> OrdinaryAgentProviderWaitRecord | None: ...
+
+
+OrdinaryAgentCompletedOutcome.model_rebuild()
