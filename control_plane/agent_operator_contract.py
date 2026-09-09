@@ -81,6 +81,60 @@ class OperationSpec:
 
 OPERATION_SPECS = (
     OperationSpec(
+        "POST",
+        "/v1/agent/ordinary-agent-session-proposals/{operation_id}/cancel",
+        "Cancel this ordinary principal's issued session.",
+        ("ordinary_agent_client",),
+        ("cancel",),
+        "none",
+        (),
+    ),
+    OperationSpec(
+        "POST",
+        "/v1/agent/ordinary-agent-enrollments",
+        "Propose an exact agent connection for signed administrator review.",
+        ("terminal_agent_client",),
+        ("plan",),
+        "none",
+        (),
+    ),
+    OperationSpec(
+        "GET",
+        "/v1/agent/ordinary-agent-enrollments/{principal_id}/{operation_id}",
+        "Read the authenticated terminal client's connection request.",
+        ("terminal_agent_client",),
+        ("read",),
+        "none",
+        (),
+    ),
+    OperationSpec(
+        "POST",
+        "/v1/agent/ordinary-agent-session-proposals",
+        "Propose a bounded session using the current ordinary credential.",
+        ("ordinary_agent_client",),
+        ("plan",),
+        "none",
+        (),
+    ),
+    OperationSpec(
+        "GET",
+        "/v1/agent/ordinary-agent-session-proposals/{operation_id}",
+        "Read this ordinary principal's session request.",
+        ("ordinary_agent_client",),
+        ("read",),
+        "none",
+        (),
+    ),
+    OperationSpec(
+        "POST",
+        "/v1/agent/ordinary-agent-enrollments/{operation_id}/claim",
+        "Recover a receiver-bound credential directly into private client custody.",
+        ("private_agent_client",),
+        ("claim",),
+        "none",
+        ("receiver_bound_delivery", "private_response_custody"),
+    ),
+    OperationSpec(
         "GET",
         "/v1/agent/context",
         "Read public-safe Launchplane context for an agent task.",
@@ -482,6 +536,13 @@ def build_agent_operator_contract(
         operation_id = operation.get("operationId")
         if not isinstance(operation_id, str) or not operation_id:
             raise AgentOperatorContractError(f"Missing operation ID: {spec.method} {spec.path}")
+        if (
+            "private_agent_client" in spec.supported_surfaces
+            and operation.get("x-launchplane-response-custody") != "private-client-only"
+        ):
+            raise AgentOperatorContractError(
+                "Private client operation lacks response custody metadata"
+            )
         normalized_operation = _normalize_operation(operation, components, {})
         parameter_names = {
             str(parameter.get("name", "")).lower()

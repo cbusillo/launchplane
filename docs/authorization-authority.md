@@ -472,6 +472,13 @@ until the worker's terminal reauthorization, then revoke every canary rule and
 read the active policy back after terminal verification or any post-activation
 worker stop.
 
+Ordinary-agent activation additionally requires the delivery migration before
+the worker image and a separate successful
+`ordinary_agent_delivery_cleanup_succeeded` event from that image. Deploying the
+image starts this empty-table maintenance scan automatically, but does not by
+itself enroll an agent or add an authorization rule, route, or grant. The
+privileged-operation heartbeat is not cleanup evidence.
+
 Activation remains a separately owner-approved DB-native administration event;
 it is not authorized by landing code. Keep #2204 open until actual migration,
 rollback, read-back, and soak evidence exists, and keep #2177 open until its

@@ -20030,7 +20030,20 @@ class PostgresRecordStore(HumanSessionStore):
             )
         if row.cancelled_at is not None:
             status, reason = "cancelled", "operation_cancelled"
+        current_policy_actions = (
+            rules[0].actions
+            if len(rules) == 1
+            and rules[0].principal_id == row.principal_id
+            and rules[0].target == target
+            else ()
+        )
         return OrdinaryAgentSessionOperationView(
+            current_policy_actions=current_policy_actions,
+            current_policy_execution_profile=(
+                derive_ordinary_agent_execution_profile(current_policy_actions)
+                if current_policy_actions
+                else None
+            ),
             requester_kind="terminal_agent" if row.kind == "initial" else "ordinary_agent",
             requester_subject=(
                 str(row.payload["requester_subject"]) if row.kind == "initial" else row.principal_id
@@ -20084,6 +20097,23 @@ class PostgresRecordStore(HumanSessionStore):
         operation_id: str,
     ) -> OrdinaryAgentSessionOperationView:
         """Authenticated terminal ingress may read only its original proposed connection."""
+        view = self.replay_proposed_ordinary_agent_enrollment(
+            requester=requester, principal_id=principal_id, operation_id=operation_id
+        )
+        if view is None:
+            raise OrdinaryAgentSessionAdmissionDenied("session_proposal_unavailable")
+        return view
+
+    @_private_ordinary_agent_operation
+    def replay_proposed_ordinary_agent_enrollment(
+        self,
+        *,
+        requester: TerminalAgentIdentity,
+        principal_id: str,
+        operation_id: str,
+        request_sha256: str | None = None,
+    ) -> OrdinaryAgentSessionOperationView | None:
+        """Recover an exact authenticated proposal without regenerating its prepared scope."""
         with self._session_factory() as session:
             self._begin_serialized_write(session)
             self._lock_active_authz_policy(session)
@@ -20100,13 +20130,19 @@ class PostgresRecordStore(HumanSessionStore):
             row = session.get(
                 LaunchplaneOrdinaryAgentSessionOperationRow, (principal_id, operation_id)
             )
+            if row is None:
+                return None
             if (
-                row is None
-                or row.kind != "initial"
+                row.kind != "initial"
                 or row.payload.get("requester_subject") != requester.subject
                 or row.payload.get("requester_token_label") != requester.token_label
             ):
                 raise OrdinaryAgentSessionAdmissionDenied("session_proposal_unavailable")
+            if (
+                request_sha256 is not None
+                and self._ordinary_agent_initial_intent(row).request_sha256 != request_sha256
+            ):
+                raise OrdinaryAgentSessionAdmissionDenied("idempotency_conflict")
             return self._ordinary_agent_operation_view(
                 session,
                 row=row,

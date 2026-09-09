@@ -9,6 +9,15 @@ DATABASE_URL_ENV_VARS = ("LAUNCHPLANE_DATABASE_URL",)
 PRIVILEGED_OPERATION_WORKER_CONNECT_TIMEOUT_SECONDS = 10
 PRIVILEGED_OPERATION_WORKER_STATEMENT_TIMEOUT_MILLISECONDS = 30_000
 PRIVILEGED_OPERATION_WORKER_REQUIRED_RELATIONS = (
+    "launchplane_repository_inventory_records",
+    "launchplane_ordinary_agent_principals",
+    "launchplane_ordinary_agent_session_operations",
+    "launchplane_ordinary_agent_sessions",
+    "launchplane_ordinary_agent_leases",
+    "launchplane_ordinary_agent_finite_requests",
+    "launchplane_ordinary_agent_authentication_credentials",
+    "launchplane_ordinary_agent_credential_custody",
+    "launchplane_ordinary_agent_lifecycle_audits",
     "launchplane_privileged_operations",
     "launchplane_privileged_operations_status_idx",
     "launchplane_privileged_operations_descriptor_idx",
@@ -35,6 +44,9 @@ PRIVILEGED_OPERATION_WORKER_REQUIRED_RELATIONS = (
     "launchplane_secret_audit_events_secret_idx",
     "launchplane_privileged_operation_worker_heartbeats",
     "launchplane_privop_worker_heartbeats_freshness_idx",
+    "launchplane_ordinary_agent_deliveries",
+    "ordinary_agent_delivery_expiry_idx",
+    "launchplane_ordinary_agent_delivery_audits",
 )
 
 

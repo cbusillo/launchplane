@@ -1372,6 +1372,62 @@ export type OdooWebsiteBootstrapRoute = {
     url: string;
 };
 
+export type OrdinaryAgentConnectionView = {
+    principal_id: string;
+    schema_version: 1;
+    status: 'revoked';
+};
+
+export type OrdinaryAgentDisconnectRequest = {
+    source_event_id: string;
+};
+
+export type OrdinaryAgentOperationClientResponse = {
+    operation: OrdinaryAgentSessionOperationView;
+    review_url: string;
+    schema_version: 1;
+};
+
+export type OrdinaryAgentSessionAttenuation = {
+    action_limit: number;
+    actions: Array<'self_read' | 'preflight' | 'guarded_merge'>;
+    continuation_expires_at: number | null;
+    lease_expires_at: number;
+    pull_request_limit: number;
+    refresh_allowance: number;
+    session_expires_at: number;
+};
+
+export type OrdinaryAgentSessionOperationView = {
+    applied: boolean;
+    attenuation: OrdinaryAgentSessionAttenuation | null;
+    can_approve: boolean;
+    credential_expires_at: number;
+    credential_id: string;
+    credential_version: number;
+    current_policy_actions: Array<'self_read' | 'preflight' | 'guarded_merge'>;
+    current_policy_execution_profile: 'read_only' | 'guarded_executor' | null;
+    delivery_expires_at: number | null;
+    kind: 'initial' | 'existing';
+    operation_id: string;
+    principal_id: string;
+    reason_code: string | null;
+    requester_kind: 'terminal_agent' | 'ordinary_agent';
+    requester_subject: string;
+    requester_token_label: string | null;
+    schema_version: 1;
+    session_expires_at: number | null;
+    session_id: string | null;
+    status: 'pending' | 'approved' | 'expired' | 'revoked' | 'blocked' | 'cancelled';
+    target: OrdinaryAgentTarget;
+};
+
+export type OrdinaryAgentTarget = {
+    base_branch: string;
+    repository: string;
+    repository_id: number;
+};
+
 export type OwnerAcceptanceAuthorization = {
     authorized_at: string;
     owner_github_id: number;
@@ -3672,6 +3728,29 @@ export type ReadGovernanceProjectionResponses = {
 
 export type ReadGovernanceProjectionResponse = ReadGovernanceProjectionResponses[keyof ReadGovernanceProjectionResponses];
 
+export type ReadHumanOrdinaryAgentOperationData = {
+    body?: never;
+    path: {
+        principal_id: string;
+        operation_id: string;
+    };
+    query?: never;
+    url: '/v1/ordinary-agent-operations/{principal_id}/{operation_id}';
+};
+
+export type ReadHumanOrdinaryAgentOperationErrors = {
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type ReadHumanOrdinaryAgentOperationError = ReadHumanOrdinaryAgentOperationErrors[keyof ReadHumanOrdinaryAgentOperationErrors];
+
+export type ReadHumanOrdinaryAgentOperationResponses = {
+    200: OrdinaryAgentOperationClientResponse;
+};
+
+export type ReadHumanOrdinaryAgentOperationResponse = ReadHumanOrdinaryAgentOperationResponses[keyof ReadHumanOrdinaryAgentOperationResponses];
+
 export type ListOwnerAcceptanceCurrentItemsData = {
     body?: never;
     headers?: {
@@ -4428,6 +4507,97 @@ export type ReadTenantAdmissionEvaluationResponses = {
 };
 
 export type ReadTenantAdmissionEvaluationResponse = ReadTenantAdmissionEvaluationResponses[keyof ReadTenantAdmissionEvaluationResponses];
+
+export type DisconnectOrdinaryAgentPrincipalData = {
+    body: OrdinaryAgentDisconnectRequest;
+    path: {
+        principal_id: string;
+    };
+    query?: never;
+    url: '/v1/ordinary-agent-connections/{principal_id}/disconnect';
+};
+
+export type DisconnectOrdinaryAgentPrincipalErrors = {
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type DisconnectOrdinaryAgentPrincipalError = DisconnectOrdinaryAgentPrincipalErrors[keyof DisconnectOrdinaryAgentPrincipalErrors];
+
+export type DisconnectOrdinaryAgentPrincipalResponses = {
+    200: OrdinaryAgentConnectionView;
+};
+
+export type DisconnectOrdinaryAgentPrincipalResponse = DisconnectOrdinaryAgentPrincipalResponses[keyof DisconnectOrdinaryAgentPrincipalResponses];
+
+export type ApproveOrdinaryAgentOperationData = {
+    body?: never;
+    path: {
+        principal_id: string;
+        operation_id: string;
+    };
+    query?: never;
+    url: '/v1/ordinary-agent-operations/{principal_id}/{operation_id}/approve';
+};
+
+export type ApproveOrdinaryAgentOperationErrors = {
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type ApproveOrdinaryAgentOperationError = ApproveOrdinaryAgentOperationErrors[keyof ApproveOrdinaryAgentOperationErrors];
+
+export type ApproveOrdinaryAgentOperationResponses = {
+    200: OrdinaryAgentOperationClientResponse;
+};
+
+export type ApproveOrdinaryAgentOperationResponse = ApproveOrdinaryAgentOperationResponses[keyof ApproveOrdinaryAgentOperationResponses];
+
+export type CancelOrdinaryAgentOperationData = {
+    body?: never;
+    path: {
+        principal_id: string;
+        operation_id: string;
+    };
+    query?: never;
+    url: '/v1/ordinary-agent-operations/{principal_id}/{operation_id}/cancel';
+};
+
+export type CancelOrdinaryAgentOperationErrors = {
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type CancelOrdinaryAgentOperationError = CancelOrdinaryAgentOperationErrors[keyof CancelOrdinaryAgentOperationErrors];
+
+export type CancelOrdinaryAgentOperationResponses = {
+    200: OrdinaryAgentOperationClientResponse;
+};
+
+export type CancelOrdinaryAgentOperationResponse = CancelOrdinaryAgentOperationResponses[keyof CancelOrdinaryAgentOperationResponses];
+
+export type RevokeOrdinaryAgentSessionData = {
+    body?: never;
+    path: {
+        principal_id: string;
+        session_id: string;
+    };
+    query?: never;
+    url: '/v1/ordinary-agent-sessions/{principal_id}/{session_id}/revoke';
+};
+
+export type RevokeOrdinaryAgentSessionErrors = {
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type RevokeOrdinaryAgentSessionError = RevokeOrdinaryAgentSessionErrors[keyof RevokeOrdinaryAgentSessionErrors];
+
+export type RevokeOrdinaryAgentSessionResponses = {
+    200: OrdinaryAgentOperationClientResponse;
+};
+
+export type RevokeOrdinaryAgentSessionResponse = RevokeOrdinaryAgentSessionResponses[keyof RevokeOrdinaryAgentSessionResponses];
 
 export type WriteOwnerAcceptanceEventData = {
     body: OwnerAcceptanceEventEnvelope;
