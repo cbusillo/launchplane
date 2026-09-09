@@ -138,6 +138,21 @@ from control_plane.contracts.idempotency_record import (
     format_launchplane_mutation_timestamp,
     parse_launchplane_mutation_timestamp,
 )
+from control_plane.contracts.ordinary_agent_lifecycle import (
+    ORDINARY_AGENT_ENROLLMENT_MUTATION_ROUTE,
+    ORDINARY_AGENT_ENROLLMENT_MUTATION_SCOPE,
+    OrdinaryAgentAuthenticationCredentialRecord,
+    OrdinaryAgentCredentialCustodyRecord,
+    OrdinaryAgentEnrollApplyEnvelope,
+    OrdinaryAgentEnrollmentApplyEnvelope,
+    OrdinaryAgentEnrollmentCompareWriteResult,
+    OrdinaryAgentEnrollmentReceipt,
+    OrdinaryAgentLifecycleAuditRecord,
+    OrdinaryAgentPrincipalRecord,
+    OrdinaryAgentRevokePrincipalApplyEnvelope,
+    OrdinaryAgentRotateCredentialApplyEnvelope,
+    ordinary_agent_enrollment_envelope_sha256,
+)
 from control_plane.contracts.ingress_canary_route_record import IngressCanaryRouteRecord
 from control_plane.contracts.ingress_route_audit_record import IngressRouteAuditRecord
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
@@ -387,6 +402,11 @@ from control_plane.repository_inventory import (
     RepositoryInventoryConflictError,
     RepositoryInventorySequenceError,
     plan_repository_inventory_append,
+)
+from control_plane.ordinary_agent_enrollment import derive_ordinary_agent_execution_profile
+from control_plane.ordinary_agent_lifecycle import (
+    build_ordinary_agent_lifecycle_write_set,
+    supersede_authentication_credential_record,
 )
 from control_plane.production_backup_authority import (
     ProductionBackupAuthorityWritePlan,
@@ -1987,6 +2007,135 @@ class LaunchplaneRepositoryInventoryRow(Base):
     inventory_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
     recorded_at: Mapped[str] = mapped_column(String, nullable=False)
     inventory_digest: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneOrdinaryAgentPrincipalRow(Base):
+    __tablename__ = "launchplane_ordinary_agent_principals"
+    __table_args__ = (
+        CheckConstraint(
+            "lifecycle_status IN ('active', 'revoked')",
+            name="launchplane_ordinary_agent_principal_status_ck",
+        ),
+        CheckConstraint(
+            "principal_revision >= 1",
+            name="launchplane_ordinary_agent_principal_revision_ck",
+        ),
+        Index(
+            "launchplane_ordinary_agent_principal_revision_uidx",
+            "principal_id",
+            "principal_revision",
+            unique=True,
+        ),
+        Index(
+            "launchplane_ordinary_agent_principal_current_uidx",
+            "principal_id",
+            unique=True,
+            sqlite_where=text("is_current = 1"),
+            postgresql_where=text("is_current"),
+        ),
+    )
+
+    record_id: Mapped[str] = mapped_column(String, primary_key=True)
+    principal_id: Mapped[str] = mapped_column(String, nullable=False)
+    principal_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    lifecycle_status: Mapped[str] = mapped_column(String, nullable=False)
+    is_current: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    credential_id: Mapped[str] = mapped_column(String, nullable=False)
+    credential_version: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    credential_digest: Mapped[str] = mapped_column(String, nullable=False)
+    custody_record_id: Mapped[str] = mapped_column(String, nullable=False)
+    custody_sha256: Mapped[str] = mapped_column(String, nullable=False)
+    recorded_at: Mapped[str] = mapped_column(String, nullable=False)
+    record_sha256: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneOrdinaryAgentAuthenticationCredentialRow(Base):
+    __tablename__ = "launchplane_ordinary_agent_authentication_credentials"
+    __table_args__ = (
+        CheckConstraint(
+            "lifecycle_status IN ('active', 'superseded', 'revoked')",
+            name="launchplane_ordinary_agent_auth_credential_status_ck",
+        ),
+        CheckConstraint(
+            "credential_version >= 1",
+            name="launchplane_ordinary_agent_auth_credential_version_ck",
+        ),
+        Index(
+            "launchplane_ordinary_agent_auth_credential_version_uidx",
+            "credential_id",
+            "credential_version",
+            unique=True,
+        ),
+        Index(
+            "launchplane_ordinary_agent_auth_credential_current_uidx",
+            "principal_id",
+            unique=True,
+            sqlite_where=text("is_current = 1"),
+            postgresql_where=text("is_current"),
+        ),
+    )
+
+    record_id: Mapped[str] = mapped_column(String, primary_key=True)
+    principal_id: Mapped[str] = mapped_column(String, nullable=False)
+    credential_id: Mapped[str] = mapped_column(String, nullable=False)
+    credential_version: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    lifecycle_status: Mapped[str] = mapped_column(String, nullable=False)
+    is_current: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    credential_digest: Mapped[str] = mapped_column(String, nullable=False)
+    recorded_at: Mapped[str] = mapped_column(String, nullable=False)
+    record_sha256: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneOrdinaryAgentCredentialCustodyRow(Base):
+    __tablename__ = "launchplane_ordinary_agent_credential_custody"
+    __table_args__ = (
+        Index(
+            "launchplane_ordinary_agent_custody_credential_version_uidx",
+            "credential_id",
+            "credential_version",
+            unique=True,
+        ),
+        Index(
+            "launchplane_ordinary_agent_custody_principal_idx",
+            "principal_id",
+            "credential_version",
+        ),
+    )
+
+    record_id: Mapped[str] = mapped_column(String, primary_key=True)
+    principal_id: Mapped[str] = mapped_column(String, nullable=False)
+    credential_id: Mapped[str] = mapped_column(String, nullable=False)
+    credential_version: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    predecessor_record_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    recorded_at: Mapped[str] = mapped_column(String, nullable=False)
+    custody_sha256: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneOrdinaryAgentLifecycleAuditRow(Base):
+    __tablename__ = "launchplane_ordinary_agent_lifecycle_audits"
+    __table_args__ = (
+        Index(
+            "launchplane_ordinary_agent_lifecycle_audit_operation_uidx",
+            "operation_id",
+            unique=True,
+        ),
+        Index(
+            "launchplane_ordinary_agent_lifecycle_audit_principal_idx",
+            "principal_id",
+            "occurred_at",
+        ),
+    )
+
+    event_id: Mapped[str] = mapped_column(String, primary_key=True)
+    operation_id: Mapped[str] = mapped_column(String, nullable=False)
+    principal_id: Mapped[str] = mapped_column(String, nullable=False)
+    action: Mapped[str] = mapped_column(String, nullable=False)
+    occurred_at: Mapped[str] = mapped_column(String, nullable=False)
+    audit_sha256: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -17991,6 +18140,654 @@ class PostgresRecordStore(HumanSessionStore):
                 LaunchplaneReleaseTupleRow.context.asc(),
                 LaunchplaneReleaseTupleRow.channel.asc(),
             ),
+        )
+
+    @classmethod
+    def _ordinary_agent_principal_row(
+        cls, record: OrdinaryAgentPrincipalRecord
+    ) -> LaunchplaneOrdinaryAgentPrincipalRow:
+        return LaunchplaneOrdinaryAgentPrincipalRow(
+            record_id=record.record_id,
+            principal_id=record.principal_id,
+            principal_revision=record.principal_revision,
+            lifecycle_status=record.status,
+            is_current=True,
+            credential_id=record.credential_id,
+            credential_version=record.credential_version,
+            credential_digest=record.credential_digest,
+            custody_record_id=record.custody_record_id,
+            custody_sha256=record.custody_sha256,
+            recorded_at=record.recorded_at,
+            record_sha256=record.record_sha256,
+            payload=cls._payload_dict(record),
+        )
+
+    @classmethod
+    def _ordinary_agent_authentication_credential_row(
+        cls, record: OrdinaryAgentAuthenticationCredentialRecord
+    ) -> LaunchplaneOrdinaryAgentAuthenticationCredentialRow:
+        return LaunchplaneOrdinaryAgentAuthenticationCredentialRow(
+            record_id=record.record_id,
+            principal_id=record.principal_id,
+            credential_id=record.credential_id,
+            credential_version=record.credential_version,
+            lifecycle_status=record.status,
+            is_current=True,
+            credential_digest=record.credential_digest,
+            recorded_at=record.recorded_at,
+            record_sha256=record.record_sha256,
+            payload=cls._payload_dict(record),
+        )
+
+    @classmethod
+    def _ordinary_agent_custody_row(
+        cls, record: OrdinaryAgentCredentialCustodyRecord
+    ) -> LaunchplaneOrdinaryAgentCredentialCustodyRow:
+        return LaunchplaneOrdinaryAgentCredentialCustodyRow(
+            record_id=record.record_id,
+            principal_id=record.principal_id,
+            credential_id=record.credential_id,
+            credential_version=record.credential_version,
+            predecessor_record_id=record.predecessor_record_id,
+            recorded_at=record.recorded_at,
+            custody_sha256=record.custody_sha256,
+            payload=cls._payload_dict(record),
+        )
+
+    @classmethod
+    def _ordinary_agent_lifecycle_audit_row(
+        cls, record: OrdinaryAgentLifecycleAuditRecord
+    ) -> LaunchplaneOrdinaryAgentLifecycleAuditRow:
+        return LaunchplaneOrdinaryAgentLifecycleAuditRow(
+            event_id=record.event_id,
+            operation_id=record.operation_id,
+            principal_id=record.principal_id,
+            action=record.action,
+            occurred_at=record.occurred_at,
+            audit_sha256=record.audit_sha256,
+            payload=cls._payload_dict(record),
+        )
+
+    def _lock_ordinary_agent_principal(self, session: Any, *, principal_id: str) -> None:
+        if self.database_url.startswith("sqlite"):
+            return
+        session.execute(
+            text("select pg_advisory_xact_lock(hashtextextended(:lock_name, 0))"),
+            {"lock_name": f"launchplane:ordinary-agent-principal:{principal_id}"},
+        )
+
+    @staticmethod
+    def _ordinary_agent_enrollment_rejection(
+        *,
+        session: Any,
+        reservation_row: LaunchplaneIdempotencyRow,
+        status: Literal[
+            "policy_drift",
+            "administrator_denied",
+            "principal_drift",
+            "inventory_drift",
+            "secret_drift",
+            "custody_drift",
+            "invalid_transition",
+        ],
+        current_principal: OrdinaryAgentPrincipalRecord | None = None,
+    ) -> OrdinaryAgentEnrollmentCompareWriteResult:
+        session.delete(reservation_row)
+        session.commit()
+        return OrdinaryAgentEnrollmentCompareWriteResult(
+            status=status,
+            current_principal=current_principal,
+        )
+
+    def compare_and_apply_ordinary_agent_enrollment(
+        self,
+        *,
+        envelope: OrdinaryAgentEnrollmentApplyEnvelope,
+        mutation: DbOnlyMutationRequest,
+    ) -> OrdinaryAgentEnrollmentCompareWriteResult:
+        if mutation.scope != ORDINARY_AGENT_ENROLLMENT_MUTATION_SCOPE:
+            raise ValueError("ordinary-agent enrollment mutation scope does not match")
+        if mutation.route_path != ORDINARY_AGENT_ENROLLMENT_MUTATION_ROUTE:
+            raise ValueError("ordinary-agent enrollment mutation route does not match")
+        if mutation.idempotency_key != envelope.operation_id:
+            raise ValueError("ordinary-agent enrollment idempotency key must equal operation ID")
+        if mutation.request_fingerprint != ordinary_agent_enrollment_envelope_sha256(envelope):
+            raise ValueError("ordinary-agent enrollment fingerprint does not match envelope")
+        if mutation.response_payload or mutation.replay_response_payload is not None:
+            raise ValueError("ordinary-agent enrollment response is derived by the store")
+        if mutation.confirmation_consumption is not None:
+            raise ValueError("ordinary-agent enrollment cannot consume policy confirmation")
+        if not 100 <= mutation.response_status_code <= 599:
+            raise ValueError("DB-only mutation response status must be between 100 and 599.")
+        if not mutation.response_trace_id.strip():
+            raise ValueError("DB-only mutation response trace id is required.")
+
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            reservation_status, reservation_row, reservation = (
+                self._reserve_db_only_mutation_in_session(session=session, mutation=mutation)
+            )
+            if reservation_status != "acquired":
+                if reservation_status == "replayed":
+                    receipt_payload = reservation.response_payload.get("receipt")
+                    if not isinstance(receipt_payload, dict):
+                        raise RuntimeError(
+                            "Completed ordinary-agent enrollment reservation lacks its receipt."
+                        )
+                    return OrdinaryAgentEnrollmentCompareWriteResult(
+                        status="replayed",
+                        receipt=OrdinaryAgentEnrollmentReceipt.model_validate(receipt_payload),
+                        idempotency_record=reservation,
+                    )
+                return OrdinaryAgentEnrollmentCompareWriteResult(
+                    status=cast(
+                        Literal[
+                            "idempotency_conflict",
+                            "reservation_in_progress",
+                            "reconciliation_required",
+                        ],
+                        reservation_status,
+                    ),
+                    idempotency_record=reservation,
+                )
+            if reservation_row is None:
+                raise RuntimeError("Acquired enrollment reservation has no stored row.")
+
+            self._lock_active_authz_policy(session)
+            policy_statement = (
+                select(LaunchplaneAuthzPolicyRow)
+                .where(LaunchplaneAuthzPolicyRow.status == "active")
+                .order_by(desc(LaunchplaneAuthzPolicyRow.revision))
+            )
+            if not self.database_url.startswith("sqlite"):
+                policy_statement = policy_statement.with_for_update()
+            policy_rows = tuple(session.scalars(policy_statement).all())
+            if len(policy_rows) != 1:
+                return self._ordinary_agent_enrollment_rejection(
+                    session=session,
+                    reservation_row=reservation_row,
+                    status="policy_drift",
+                )
+            policy_record = self._read_authz_policy_row(policy_rows[0])
+            administrator = envelope.administrator
+            if (
+                administrator.policy_record_id != policy_record.record_id
+                or administrator.policy_revision != policy_record.revision
+                or administrator.policy_schema_version != policy_record.policy.schema_version
+                or administrator.policy_sha256 != policy_record.policy_sha256
+                or administrator.policy_source != policy_record.source
+            ):
+                return self._ordinary_agent_enrollment_rejection(
+                    session=session,
+                    reservation_row=reservation_row,
+                    status="policy_drift",
+                )
+            matching_administrator_rules = tuple(
+                rule
+                for rule in policy_record.policy.github_humans
+                if rule.managed_set_id == administrator.managed_set_id
+                and rule.managed_rule_id == administrator.managed_rule_id
+            )
+            if len(matching_administrator_rules) != 1:
+                return self._ordinary_agent_enrollment_rejection(
+                    session=session,
+                    reservation_row=reservation_row,
+                    status="administrator_denied",
+                )
+            administrator_rule = matching_administrator_rules[0]
+            if not (
+                administrator.administrator_github_id in administrator_rule.github_ids
+                and "admin" in administrator_rule.roles
+                and administrator.action in administrator_rule.actions
+                and administrator_rule.products == ("launchplane",)
+                and administrator_rule.contexts == ("launchplane",)
+                and not administrator_rule.logins
+                and not administrator_rule.organizations
+                and not administrator_rule.teams
+                and not administrator_rule.instances
+            ):
+                return self._ordinary_agent_enrollment_rejection(
+                    session=session,
+                    reservation_row=reservation_row,
+                    status="administrator_denied",
+                )
+
+            self._lock_ordinary_agent_principal(session, principal_id=envelope.principal_id)
+            principal_statement = (
+                select(LaunchplaneOrdinaryAgentPrincipalRow)
+                .where(
+                    LaunchplaneOrdinaryAgentPrincipalRow.principal_id == envelope.principal_id,
+                    LaunchplaneOrdinaryAgentPrincipalRow.is_current.is_(True),
+                )
+                .limit(2)
+            )
+            if not self.database_url.startswith("sqlite"):
+                principal_statement = principal_statement.with_for_update()
+            principal_rows = tuple(session.scalars(principal_statement).all())
+            if len(principal_rows) > 1:
+                return self._ordinary_agent_enrollment_rejection(
+                    session=session,
+                    reservation_row=reservation_row,
+                    status="principal_drift",
+                )
+            principal_row = principal_rows[0] if principal_rows else None
+            current_principal = (
+                self._read_payload(
+                    model_type=OrdinaryAgentPrincipalRecord,
+                    payload=principal_row.payload,
+                )
+                if principal_row is not None
+                else None
+            )
+            if isinstance(envelope, OrdinaryAgentEnrollApplyEnvelope):
+                if current_principal is not None:
+                    return self._ordinary_agent_enrollment_rejection(
+                        session=session,
+                        reservation_row=reservation_row,
+                        status="invalid_transition",
+                        current_principal=current_principal,
+                    )
+            else:
+                if current_principal is None or current_principal.status != "active":
+                    return self._ordinary_agent_enrollment_rejection(
+                        session=session,
+                        reservation_row=reservation_row,
+                        status="invalid_transition",
+                        current_principal=current_principal,
+                    )
+                if (
+                    envelope.principal.record_id != current_principal.record_id
+                    or envelope.principal.revision != current_principal.principal_revision
+                    or envelope.principal.pre_state_sha256 != current_principal.record_sha256
+                ):
+                    return self._ordinary_agent_enrollment_rejection(
+                        session=session,
+                        reservation_row=reservation_row,
+                        status="principal_drift",
+                        current_principal=current_principal,
+                    )
+
+            current_credential: OrdinaryAgentAuthenticationCredentialRecord | None = None
+            credential_row: LaunchplaneOrdinaryAgentAuthenticationCredentialRow | None = None
+            execution_profile = (
+                current_principal.execution_profile
+                if current_principal is not None
+                else "read_only"
+            )
+            if not isinstance(envelope, OrdinaryAgentRevokePrincipalApplyEnvelope):
+                if (
+                    policy_record.policy.schema_version != 3
+                    or envelope.policy.record_id != policy_record.record_id
+                    or envelope.policy.revision != policy_record.revision
+                    or envelope.policy.policy_sha256 != policy_record.policy_sha256
+                ):
+                    return self._ordinary_agent_enrollment_rejection(
+                        session=session,
+                        reservation_row=reservation_row,
+                        status="policy_drift",
+                        current_principal=current_principal,
+                    )
+                ordinary_rules = tuple(
+                    rule
+                    for rule in policy_record.policy.ordinary_agents
+                    if rule.principal_id == envelope.principal_id
+                    and rule.managed_set_id == envelope.policy.managed_set_id
+                    and rule.managed_rule_id == envelope.policy.managed_rule_id
+                )
+                if len(ordinary_rules) != 1 or ordinary_rules[0].target != envelope.policy.target:
+                    return self._ordinary_agent_enrollment_rejection(
+                        session=session,
+                        reservation_row=reservation_row,
+                        status="policy_drift",
+                        current_principal=current_principal,
+                    )
+                execution_profile = derive_ordinary_agent_execution_profile(
+                    ordinary_rules[0].actions
+                )
+
+                self._lock_repository_inventory_write(
+                    session,
+                    repository_id=str(envelope.policy.target.repository_id),
+                )
+                inventory_statement = (
+                    select(LaunchplaneRepositoryInventoryRow)
+                    .where(
+                        LaunchplaneRepositoryInventoryRow.repository_id
+                        == str(envelope.policy.target.repository_id)
+                    )
+                    .order_by(LaunchplaneRepositoryInventoryRow.inventory_revision.desc())
+                )
+                if not self.database_url.startswith("sqlite"):
+                    inventory_statement = inventory_statement.with_for_update()
+                inventory_rows = tuple(session.scalars(inventory_statement).all())
+                inventory_binding = envelope.custody.repository_inventory
+                if not inventory_rows:
+                    return self._ordinary_agent_enrollment_rejection(
+                        session=session,
+                        reservation_row=reservation_row,
+                        status="inventory_drift",
+                        current_principal=current_principal,
+                    )
+                inventory = self._read_payload(
+                    model_type=RepositoryInventoryRecord,
+                    payload=inventory_rows[0].payload,
+                )
+                if (
+                    inventory.record_id != inventory_binding.record_id
+                    or inventory.inventory_revision != inventory_binding.inventory_revision
+                    or inventory.inventory_digest != inventory_binding.inventory_digest
+                    or inventory.inventory_state != "tracked"
+                    or inventory.repository != envelope.policy.target.repository.lower()
+                ):
+                    return self._ordinary_agent_enrollment_rejection(
+                        session=session,
+                        reservation_row=reservation_row,
+                        status="inventory_drift",
+                        current_principal=current_principal,
+                    )
+
+                secret_binding = envelope.custody.managed_secret
+                binding_statement = select(LaunchplaneSecretBindingRow).where(
+                    LaunchplaneSecretBindingRow.binding_id == secret_binding.binding_id
+                )
+                secret_statement = select(LaunchplaneSecretRow).where(
+                    LaunchplaneSecretRow.secret_id == secret_binding.secret_id
+                )
+                version_statement = select(LaunchplaneSecretVersionRow).where(
+                    LaunchplaneSecretVersionRow.version_id == secret_binding.secret_version_id
+                )
+                if not self.database_url.startswith("sqlite"):
+                    binding_statement = binding_statement.with_for_update()
+                    secret_statement = secret_statement.with_for_update()
+                    version_statement = version_statement.with_for_update()
+                binding_row = session.scalar(binding_statement)
+                secret_row = session.scalar(secret_statement)
+                version_row = session.scalar(version_statement)
+                if binding_row is None or secret_row is None or version_row is None:
+                    return self._ordinary_agent_enrollment_rejection(
+                        session=session,
+                        reservation_row=reservation_row,
+                        status="secret_drift",
+                        current_principal=current_principal,
+                    )
+                binding_record = self._read_payload(
+                    model_type=SecretBinding, payload=binding_row.payload
+                )
+                secret_record = self._read_payload(
+                    model_type=SecretRecord, payload=secret_row.payload
+                )
+                secret_version = self._read_payload(
+                    model_type=SecretVersion, payload=version_row.payload
+                )
+                if not (
+                    binding_record.secret_id == secret_binding.secret_id
+                    and binding_record.integration == secret_binding.integration
+                    and binding_record.binding_key == secret_binding.binding_key
+                    and binding_record.status == "configured"
+                    and secret_record.status == "configured"
+                    and secret_record.integration == secret_binding.integration
+                    and secret_record.current_version_id == secret_binding.secret_version_id
+                    and secret_version.secret_id == secret_binding.secret_id
+                ):
+                    return self._ordinary_agent_enrollment_rejection(
+                        session=session,
+                        reservation_row=reservation_row,
+                        status="secret_drift",
+                        current_principal=current_principal,
+                    )
+
+            credential_statement: Any | None = None
+            if current_principal is not None:
+                credential_statement = (
+                    select(LaunchplaneOrdinaryAgentAuthenticationCredentialRow)
+                    .where(
+                        LaunchplaneOrdinaryAgentAuthenticationCredentialRow.record_id
+                        == (
+                            f"ordinary-agent-auth-credential-"
+                            f"{current_principal.credential_id}-v"
+                            f"{current_principal.credential_version}"
+                        )
+                    )
+                    .limit(1)
+                )
+                if not self.database_url.startswith("sqlite"):
+                    credential_statement = credential_statement.with_for_update()
+                credential_row = session.scalar(credential_statement)
+                if credential_row is None and not isinstance(
+                    envelope, OrdinaryAgentRevokePrincipalApplyEnvelope
+                ):
+                    return self._ordinary_agent_enrollment_rejection(
+                        session=session,
+                        reservation_row=reservation_row,
+                        status="principal_drift",
+                        current_principal=current_principal,
+                    )
+                current_credential = (
+                    self._read_payload(
+                        model_type=OrdinaryAgentAuthenticationCredentialRecord,
+                        payload=credential_row.payload,
+                    )
+                    if credential_row is not None
+                    else None
+                )
+                if current_credential is not None and (
+                    current_credential.credential_id != current_principal.credential_id
+                    or current_credential.credential_version != current_principal.credential_version
+                    or current_credential.credential_digest != current_principal.credential_digest
+                ):
+                    return self._ordinary_agent_enrollment_rejection(
+                        session=session,
+                        reservation_row=reservation_row,
+                        status="principal_drift",
+                        current_principal=current_principal,
+                    )
+                if isinstance(envelope, OrdinaryAgentRotateCredentialApplyEnvelope) and (
+                    current_credential is None
+                    or envelope.credential_id != current_credential.credential_id
+                    or envelope.credential_version != current_credential.credential_version
+                ):
+                    return self._ordinary_agent_enrollment_rejection(
+                        session=session,
+                        reservation_row=reservation_row,
+                        status="principal_drift",
+                        current_principal=current_principal,
+                    )
+
+            if isinstance(envelope, OrdinaryAgentRotateCredentialApplyEnvelope):
+                if current_principal is None:
+                    raise RuntimeError("Credential rotation lost its locked principal record.")
+                predecessor_statement = (
+                    select(LaunchplaneOrdinaryAgentCredentialCustodyRow)
+                    .where(
+                        LaunchplaneOrdinaryAgentCredentialCustodyRow.record_id
+                        == envelope.custody.predecessor_record_id
+                    )
+                    .limit(1)
+                )
+                if not self.database_url.startswith("sqlite"):
+                    predecessor_statement = predecessor_statement.with_for_update()
+                predecessor_row = session.scalar(predecessor_statement)
+                if predecessor_row is None or (
+                    predecessor_row.record_id != current_principal.custody_record_id
+                    or predecessor_row.custody_sha256 != envelope.custody.predecessor_sha256
+                    or predecessor_row.custody_sha256 != current_principal.custody_sha256
+                ):
+                    return self._ordinary_agent_enrollment_rejection(
+                        session=session,
+                        reservation_row=reservation_row,
+                        status="custody_drift",
+                        current_principal=current_principal,
+                    )
+
+            recorded_at = self._database_mutation_timestamp(session)
+            if not isinstance(envelope, OrdinaryAgentRevokePrincipalApplyEnvelope):
+                recorded_epoch = int(
+                    parse_launchplane_mutation_timestamp(
+                        recorded_at,
+                        field_name="ordinary_agent_enrollment_recorded_at",
+                    ).timestamp()
+                )
+                authentication_candidate = envelope.authentication_credential
+                if not (
+                    authentication_candidate.valid_from
+                    <= recorded_epoch
+                    < authentication_candidate.expires_at
+                ):
+                    return self._ordinary_agent_enrollment_rejection(
+                        session=session,
+                        reservation_row=reservation_row,
+                        status="invalid_transition",
+                        current_principal=current_principal,
+                    )
+                if not envelope.custody.valid_from <= recorded_epoch < envelope.custody.expires_at:
+                    return self._ordinary_agent_enrollment_rejection(
+                        session=session,
+                        reservation_row=reservation_row,
+                        status="custody_drift",
+                        current_principal=current_principal,
+                    )
+            write_set = build_ordinary_agent_lifecycle_write_set(
+                envelope=envelope,
+                previous_principal=current_principal,
+                previous_credential=current_credential,
+                execution_profile=execution_profile,
+                recorded_at=recorded_at,
+            )
+            if principal_row is not None:
+                principal_row.is_current = False
+                self._after_ordinary_agent_enrollment_write_step("supersede_principal")
+            if current_credential is not None:
+                if credential_row is None:
+                    raise RuntimeError("Current credential has no locked storage row.")
+                if write_set.credential is None:
+                    raise RuntimeError("Current credential has no resulting lifecycle record.")
+                credential_row.is_current = isinstance(
+                    envelope, OrdinaryAgentRevokePrincipalApplyEnvelope
+                )
+                updated_credential = (
+                    write_set.credential
+                    if isinstance(envelope, OrdinaryAgentRevokePrincipalApplyEnvelope)
+                    else supersede_authentication_credential_record(current_credential)
+                )
+                credential_row.lifecycle_status = updated_credential.status
+                credential_row.record_sha256 = updated_credential.record_sha256
+                credential_row.payload = self._payload_dict(updated_credential)
+                self._after_ordinary_agent_enrollment_write_step("retire_credential")
+            session.add(self._ordinary_agent_principal_row(write_set.principal))
+            session.flush()
+            self._after_ordinary_agent_enrollment_write_step("insert_principal")
+            if not isinstance(envelope, OrdinaryAgentRevokePrincipalApplyEnvelope):
+                if write_set.credential is None:
+                    raise RuntimeError("Enrollment write set is missing authentication evidence.")
+                session.add(
+                    self._ordinary_agent_authentication_credential_row(write_set.credential)
+                )
+                session.flush()
+                self._after_ordinary_agent_enrollment_write_step("insert_credential")
+                if write_set.custody is None:
+                    raise RuntimeError("Enrollment write set is missing custody evidence.")
+                session.add(self._ordinary_agent_custody_row(write_set.custody))
+                session.flush()
+                self._after_ordinary_agent_enrollment_write_step("insert_custody")
+            session.add(self._ordinary_agent_lifecycle_audit_row(write_set.audit))
+            session.flush()
+            self._after_ordinary_agent_enrollment_write_step("insert_audit")
+            completion = complete_launchplane_mutation_reservation(
+                reservation,
+                response_status_code=mutation.response_status_code,
+                response_trace_id=mutation.response_trace_id,
+                completed_at=self._database_mutation_timestamp(session),
+                response_payload={"receipt": write_set.receipt.model_dump(mode="json")},
+            )
+            self._sync_idempotency_row(reservation_row, completion)
+            self._after_ordinary_agent_enrollment_write_step("complete_idempotency")
+            session.commit()
+            return OrdinaryAgentEnrollmentCompareWriteResult(
+                status="written",
+                receipt=write_set.receipt,
+                current_principal=write_set.principal,
+                idempotency_record=completion,
+            )
+
+    def _after_ordinary_agent_enrollment_write_step(self, _step_name: str) -> None:
+        return None
+
+    def read_current_ordinary_agent_principal(
+        self, *, principal_id: str
+    ) -> OrdinaryAgentPrincipalRecord | None:
+        with self._session_factory() as session:
+            rows = tuple(
+                session.scalars(
+                    select(LaunchplaneOrdinaryAgentPrincipalRow)
+                    .where(
+                        LaunchplaneOrdinaryAgentPrincipalRow.principal_id == principal_id,
+                        LaunchplaneOrdinaryAgentPrincipalRow.is_current.is_(True),
+                    )
+                    .limit(2)
+                ).all()
+            )
+        if len(rows) > 1:
+            raise RuntimeError("Multiple current ordinary-agent principal records found.")
+        if not rows:
+            return None
+        return self._read_payload(model_type=OrdinaryAgentPrincipalRecord, payload=rows[0].payload)
+
+    def read_ordinary_agent_principal_record(
+        self, *, record_id: str
+    ) -> OrdinaryAgentPrincipalRecord | None:
+        with self._session_factory() as session:
+            row = session.get(LaunchplaneOrdinaryAgentPrincipalRow, record_id)
+        if row is None:
+            return None
+        return self._read_payload(model_type=OrdinaryAgentPrincipalRecord, payload=row.payload)
+
+    def read_ordinary_agent_authentication_credential(
+        self, *, credential_id: str, credential_version: int
+    ) -> OrdinaryAgentAuthenticationCredentialRecord | None:
+        with self._session_factory() as session:
+            row = session.scalar(
+                select(LaunchplaneOrdinaryAgentAuthenticationCredentialRow)
+                .where(
+                    LaunchplaneOrdinaryAgentAuthenticationCredentialRow.credential_id
+                    == credential_id,
+                    LaunchplaneOrdinaryAgentAuthenticationCredentialRow.credential_version
+                    == credential_version,
+                )
+                .limit(1)
+            )
+        if row is None:
+            return None
+        return self._read_payload(
+            model_type=OrdinaryAgentAuthenticationCredentialRecord,
+            payload=row.payload,
+        )
+
+    def read_ordinary_agent_credential_custody(
+        self, *, record_id: str
+    ) -> OrdinaryAgentCredentialCustodyRecord | None:
+        with self._session_factory() as session:
+            row = session.get(LaunchplaneOrdinaryAgentCredentialCustodyRow, record_id)
+        if row is None:
+            return None
+        return self._read_payload(
+            model_type=OrdinaryAgentCredentialCustodyRecord,
+            payload=row.payload,
+        )
+
+    def read_ordinary_agent_lifecycle_audit(
+        self, *, operation_id: str
+    ) -> OrdinaryAgentLifecycleAuditRecord | None:
+        with self._session_factory() as session:
+            row = session.scalar(
+                select(LaunchplaneOrdinaryAgentLifecycleAuditRow)
+                .where(LaunchplaneOrdinaryAgentLifecycleAuditRow.operation_id == operation_id)
+                .limit(1)
+            )
+        if row is None:
+            return None
+        return self._read_payload(
+            model_type=OrdinaryAgentLifecycleAuditRecord,
+            payload=row.payload,
         )
 
     def _lock_active_authz_policy(self, session: Any) -> None:

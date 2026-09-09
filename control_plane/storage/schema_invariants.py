@@ -10,7 +10,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
 AUTHZ_COMPATIBILITY_FLOOR_REVISION = "f3b5d7e9a1c2"
-EXPECTED_ALEMBIC_HEAD_REVISION = "f3a5b7c9d1e4"
+EXPECTED_ALEMBIC_HEAD_REVISION = "d9a4c7e2f6b1"
 RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS = (EXPECTED_ALEMBIC_HEAD_REVISION,)
 _AUTHZ_POLICY_TABLE = "launchplane_authz_policies"
 _AUTHZ_POLICY_WRITE_FENCE_TRIGGER = "launchplane_authz_policy_write_fence"
@@ -603,6 +603,36 @@ CRITICAL_POSTGRES_COLUMN_TYPES: tuple[CriticalColumnType, ...] = (
         "launchplane_solo_administration_confirmation_events",
         "authorizes_policy",
         ("boolean", "bool"),
+    ),
+    CriticalColumnType(
+        "launchplane_ordinary_agent_principals",
+        "payload",
+        ("jsonb",),
+    ),
+    CriticalColumnType(
+        "launchplane_ordinary_agent_principals",
+        "is_current",
+        ("boolean", "bool"),
+    ),
+    CriticalColumnType(
+        "launchplane_ordinary_agent_authentication_credentials",
+        "payload",
+        ("jsonb",),
+    ),
+    CriticalColumnType(
+        "launchplane_ordinary_agent_authentication_credentials",
+        "is_current",
+        ("boolean", "bool"),
+    ),
+    CriticalColumnType(
+        "launchplane_ordinary_agent_credential_custody",
+        "payload",
+        ("jsonb",),
+    ),
+    CriticalColumnType(
+        "launchplane_ordinary_agent_lifecycle_audits",
+        "payload",
+        ("jsonb",),
     ),
 )
 
@@ -1292,6 +1322,44 @@ CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
         "launchplane_owner_control_lifecycle_event_challenge_idx",
         ("challenge_nonce", "occurred_at"),
     ),
+    CriticalIndex(
+        "launchplane_ordinary_agent_principals",
+        "launchplane_ordinary_agent_principal_revision_uidx",
+        ("principal_id", "principal_revision"),
+        unique=True,
+    ),
+    CriticalIndex(
+        "launchplane_ordinary_agent_principals",
+        "launchplane_ordinary_agent_principal_current_uidx",
+        ("principal_id",),
+        unique=True,
+        predicate_expression="is_current",
+    ),
+    CriticalIndex(
+        "launchplane_ordinary_agent_authentication_credentials",
+        "launchplane_ordinary_agent_auth_credential_version_uidx",
+        ("credential_id", "credential_version"),
+        unique=True,
+    ),
+    CriticalIndex(
+        "launchplane_ordinary_agent_authentication_credentials",
+        "launchplane_ordinary_agent_auth_credential_current_uidx",
+        ("principal_id",),
+        unique=True,
+        predicate_expression="is_current",
+    ),
+    CriticalIndex(
+        "launchplane_ordinary_agent_credential_custody",
+        "launchplane_ordinary_agent_custody_credential_version_uidx",
+        ("credential_id", "credential_version"),
+        unique=True,
+    ),
+    CriticalIndex(
+        "launchplane_ordinary_agent_lifecycle_audits",
+        "launchplane_ordinary_agent_lifecycle_audit_operation_uidx",
+        ("operation_id",),
+        unique=True,
+    ),
 )
 
 CRITICAL_PRIMARY_KEYS: tuple[CriticalPrimaryKey, ...] = (
@@ -1345,6 +1413,22 @@ CRITICAL_PRIMARY_KEYS: tuple[CriticalPrimaryKey, ...] = (
     CriticalPrimaryKey(
         "launchplane_repository_inventory_records",
         ("record_id",),
+    ),
+    CriticalPrimaryKey(
+        "launchplane_ordinary_agent_principals",
+        ("record_id",),
+    ),
+    CriticalPrimaryKey(
+        "launchplane_ordinary_agent_authentication_credentials",
+        ("record_id",),
+    ),
+    CriticalPrimaryKey(
+        "launchplane_ordinary_agent_credential_custody",
+        ("record_id",),
+    ),
+    CriticalPrimaryKey(
+        "launchplane_ordinary_agent_lifecycle_audits",
+        ("event_id",),
     ),
     CriticalPrimaryKey(
         "launchplane_production_backup_targets",

@@ -4,9 +4,9 @@ title: Ordinary Agent Execution Contracts
 
 # Ordinary Agent Execution Contracts
 
-The ordinary-agent models describe proposed, inert execution evidence. They are
-not part of the service authentication union, HTTP routes, production record
-store, or provider executor. Eligibility computed from fixture records is not
+The ordinary-agent execution models describe proposed, inert execution evidence.
+They are not part of the service authentication union, HTTP routes, or provider
+executor. Eligibility computed from fixture records is not
 authentication, merge admission, human acceptance, or permission to perform an
 effect.
 
@@ -34,12 +34,40 @@ same v1/v2 records that previous service images can parse. A future persisted v3
 record will be unreadable to those images, so they cannot be rollback targets
 after v3 activation.
 
-The enrollment request and review contracts are also dormant in this phase.
+The enrollment request and review contracts remain dormant in this phase.
 They parse exact enroll, credential-rotation, and principal-revocation pre-state,
 derive the minimum execution profile from the bound rule, and return only a
 stable unavailable result. They have no registered privileged-operation
-descriptor, route, worker dispatch, storage table, custody integration, or
-effect path.
+descriptor, route, worker dispatch, credential issuer/verifier, provider call,
+session path, or effect path.
+
+The authoritative lifecycle store is present behind that unreachable boundary.
+Its internal apply envelope separates an agent-to-Launchplane authentication
+credential candidate from Launchplane-held provider App custody. The first
+contains a service-derived authentication digest and no bearer value. The second
+contains only provider-inspected App, exact target, permission, inventory, and
+managed-secret record/version metadata; it contains no private key or minted
+token. The future authentication issuer must derive the digest from actual
+credential material and arrange delivery separately. The stored receipt is
+redacted and therefore does not define or constrain that delivery mechanism.
+
+One PostgreSQL transaction reserves the descriptor-specific inner idempotency
+tuple, locks the active authorization policy, serializes the principal even when
+it is absent, and then locks the exact inventory, secret, credential, and custody
+evidence. It rechecks the exact immutable human administrator rule and, for
+enroll/rotate, the schema-v3 ordinary rule and every CAS input. It writes the
+principal, authentication credential, custody reference, audit, and store-built
+receipt together. No callback, provider request, secret decryption, or token mint
+runs under those locks. Revoke requires current immutable administrator authority
+and the principal CAS but deliberately does not require an ordinary rule,
+inventory, secret, or readable custody. A missing authentication credential does
+not block principal revocation: the receipt and audit explicitly omit credential
+record evidence while retaining the principal's last known credential reference.
+
+These storage records do not grant execution. Their only callable entry point is
+the internal store method used by tests; production policy schema-v3 writes stay
+fenced, and there is no descriptor or route that can construct or dispatch the
+apply envelope.
 
 Every proposed record requires the `proposed_ordinary_agent_v1` record kind,
 `authority_state = "inert"`, and `authorizes_execution = false`. Missing markers,
@@ -145,8 +173,8 @@ Live execution will require serialized effect permits and fresh authorization at
 every effect boundary. Revocation must prevent new permits while allowing honest
 read-only reconciliation and protective fencing. Any new provider mutation during
 repair requires its own current authority. The proposed storage interface and
-in-memory test fixture do not prove those database or distributed-system
-properties.
+authoritative lifecycle records do not yet prove session, effect-permit,
+provider-custody, or distributed recovery properties.
 
 ## Human administration integration check
 
@@ -186,11 +214,13 @@ production boundaries.
 
 ## Validation boundary
 
-Tests use synthetic principals/targets and an in-memory fixture. Canonical JSON
-round trips and same-ID replay/conflict tests establish the proposed serialization
-contract. No production adapter or migration is registered. These tests do not
-prove PostgreSQL row locking, atomic live budget reservations, provider credential
-custody, deployed authentication, or live merge readiness.
+Tests use synthetic principals and targets. Canonical JSON round trips and
+same-ID replay/conflict tests establish the inert evaluation contract. Separate
+SQLite portability tests cover lifecycle read/write/replay/drift, while the
+PostgreSQL integration gate applies the migration from empty schema and proves
+concurrent first enrollment, reservation-first locking, and whole-transaction
+rollback. These tests do not prove deployed authentication, token delivery,
+provider credential custody, live budget reservations, or live merge readiness.
 
 Required production integration proofs remain distinct from this source-only
 contract: full-policy evaluator conformance, database transactions and revocation
