@@ -1,6 +1,7 @@
 """Preparation history remains charged even when no merge is dispatched."""
 
 import unittest
+from types import SimpleNamespace
 from datetime import datetime, timezone
 import hashlib
 from unittest.mock import patch
@@ -42,7 +43,11 @@ from control_plane.contracts.ordinary_agent_effect import (
 )
 from control_plane.contracts.ordinary_agent_session_lifecycle import OrdinaryAgentLeaseRecord
 from control_plane.ordinary_agent_session_lifecycle import OrdinaryAgentSessionAdmissionDenied
-from control_plane.github_app_identity import ordinary_agent_effect_permissions
+from control_plane.github_app_identity import (
+    ordinary_agent_effect_permissions,
+    GitHubAppInstallationToken,
+)
+from control_plane.ordinary_agent_custody import ordinary_agent_provider_token_lease
 from control_plane.storage.postgres import (
     LaunchplaneMergeTrainBatchCandidateRow,
     LaunchplaneMergeTrainBatchLandingPlanRow,
@@ -330,6 +335,44 @@ class OrdinaryAgentLandingStorageTests(unittest.TestCase):
             proposal=proposal,
             custody_attempt_id=preparation.custody_attempt_id,
         )
+
+    def test_supported_custody_lease_stamps_and_closes_the_reserved_preparation(self) -> None:
+        preparation = self.reserve().preparation
+        now = self.fixture.fixture.now
+        token = GitHubAppInstallationToken(
+            token="test-provider-token",
+            app_id=preparation.candidate.expected_app_id,
+            installation_id=77,
+            repository_id=preparation.target.repository_id,
+            repository=preparation.target.repository,
+            expires_at=datetime.fromtimestamp(now + 300, timezone.utc).isoformat(),
+        )
+        with (
+            patch(
+                "control_plane.ordinary_agent_custody.resolve_ordinary_agent_github_app_identity",
+                return_value=SimpleNamespace(identity=None),
+            ),
+            patch(
+                "control_plane.ordinary_agent_custody.mint_ordinary_agent_installation_token",
+                return_value=token,
+            ),
+            ordinary_agent_provider_token_lease(
+                record_store=self.store,
+                secret_store=self.store,
+                candidate=preparation.candidate,
+                idempotency_key=preparation.idempotency_key,
+                request_payload=preparation.request_payload,
+                api_request=lambda **kwargs: None,
+                monotonic=lambda: 0.0,
+                utc_now=lambda: datetime.fromtimestamp(now, timezone.utc),
+            ) as lease,
+        ):
+            stamped = self.reserve().preparation
+            self.assertIsNotNone(stamped.work_expires_at)
+            self.assertGreater(stamped.revision, preparation.revision)
+            self.assertEqual(stamped.custody_attempt_id, lease.attempt_id)
+        closed = self.store.read_ordinary_agent_custody_issue_attempt(lease.attempt_id)
+        self.assertEqual((closed.state, closed.close_reason), ("closed", "confirmed_revoked"))
 
     def test_joined_finalization_replay_never_issues_a_second_dispatch(self) -> None:
         preparation, proposal = self.observed_proposal()

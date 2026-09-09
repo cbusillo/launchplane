@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from control_plane.contracts.ordinary_agent_provider import ordinary_agent_enrollment_permissions
 from unittest.mock import patch
 
 from cryptography.hazmat.primitives import serialization
@@ -37,7 +38,9 @@ class OrdinaryAgentEnrollmentPreparationTests(unittest.TestCase):
                 "id": 77,
                 "app_id": 42,
                 "account": {"id": 912001, "login": "example"},
-                "permissions": {"metadata": "read", "contents": "write", "pull_requests": "write"},
+                "permissions": dict(
+                    item.split(":", 1) for item in ordinary_agent_enrollment_permissions()
+                ),
             }
 
         def prepare(

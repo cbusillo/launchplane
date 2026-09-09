@@ -22761,6 +22761,8 @@ class PostgresRecordStore(HumanSessionStore):
                     pull_request_number=pull_request_number,
                 )
             )
+            if any(item.merge_method != "merge" for item in plan.landing_plan.entries):
+                raise OrdinaryAgentSessionAdmissionDenied("landing_merge_method_unsupported")
             if len(candidate_record.candidate.entries) > MAX_ORDINARY_LANDING_ENTRIES:
                 raise OrdinaryAgentSessionAdmissionDenied("landing_entry_limit_exceeded")
             if any(
@@ -22828,6 +22830,7 @@ class PostgresRecordStore(HumanSessionStore):
             budget = context.lease.budget
             if budget.actions_used >= budget.action_limit:
                 raise OrdinaryAgentSessionAdmissionDenied("budget_exhausted")
+            custody_key = "landing-" + canonical_json_sha256({"landing": preparation_id})
             record = effect_contracts.OrdinaryAgentLandingPreparation(
                 preparation_id=preparation_id,
                 request_id=request_id,
@@ -22853,8 +22856,8 @@ class PostgresRecordStore(HumanSessionStore):
                 credential_id=context.credential.credential_id,
                 credential_version=context.credential.credential_version,
                 credential_digest=context.credential.credential_digest,
-                custody_attempt_id="custody-" + canonical_json_sha256({"landing": preparation_id}),
-                idempotency_key="landing-" + canonical_json_sha256({"landing": preparation_id}),
+                custody_attempt_id="custody_" + hashlib.sha256(custody_key.encode()).hexdigest(),
+                idempotency_key=custody_key,
                 candidate=candidate,
                 reserved_at=context.now,
             )
@@ -23514,6 +23517,20 @@ class PostgresRecordStore(HumanSessionStore):
             ):
                 raise OrdinaryAgentSessionAdmissionDenied("reconciliation_provenance_conflict")
             state = classify_effect_reconciliation(record, typed_observation.observation)
+            landing_conflict_reason: str | None = None
+            if record.command.kind == "pull_request_landing" and state == "completed_observed":
+                try:
+                    self._require_ordinary_landing_result_tree(
+                        session, child_id=child_id, proof=typed_observation.observation
+                    )
+                except OrdinaryAgentSessionAdmissionDenied as error:
+                    if error.reason_code not in {
+                        "landing_result_tree_mismatch",
+                        "landing_result_parents_mismatch",
+                    }:
+                        raise
+                    state = "terminal_conflict"
+                    landing_conflict_reason = error.reason_code
             count = record.reconciliation_count + 1
             unresolved = state == "reconciliation_required"
             session.add(
@@ -23536,7 +23553,7 @@ class PostgresRecordStore(HumanSessionStore):
                     "reason_code": "reconciliation_exhausted"
                     if unresolved
                     and count >= effect_contracts.MAX_RECONCILIATION_OBSERVATIONS_PER_EFFECT
-                    else None,
+                    else landing_conflict_reason,
                 }
             )
             self._ordinary_agent_save_effect(row, updated)
@@ -24528,6 +24545,45 @@ class PostgresRecordStore(HumanSessionStore):
             raise OrdinaryAgentSessionAdmissionDenied("dispatch_history_conflict")
         return row, record, child
 
+    def _require_ordinary_landing_result_tree(
+        self, session: Any, *, child_id: str, proof: object
+    ) -> None:
+        binding = session.scalar(
+            select(LaunchplaneOrdinaryAgentLandingBindingRow).where(
+                LaunchplaneOrdinaryAgentLandingBindingRow.child_id == child_id
+            )
+        )
+        finalized = (
+            None
+            if binding is None
+            else self._read_ordinary_landing_finalization(
+                session, preparation_id=binding.preparation_id
+            )
+        )
+        tree_sha = (
+            proof.tree_sha
+            if isinstance(proof, effect_contracts.OrdinaryAgentRefObservation)
+            else proof.merge_commit_tree_sha
+            if isinstance(proof, effect_contracts.OrdinaryAgentPullRequestObservation)
+            else None
+        )
+        if finalized is None:
+            raise OrdinaryAgentSessionAdmissionDenied("landing_binding_unavailable")
+        if tree_sha != finalized.preparation.expected_merge_tree_sha:
+            raise OrdinaryAgentSessionAdmissionDenied("landing_result_tree_mismatch")
+        parents = (
+            proof.parents
+            if isinstance(proof, effect_contracts.OrdinaryAgentRefObservation)
+            else proof.merge_commit_parents
+            if isinstance(proof, effect_contracts.OrdinaryAgentPullRequestObservation)
+            else ()
+        )
+        if parents != (
+            finalized.preparation.expected_base_sha,
+            finalized.preparation.entry.expected_head_sha,
+        ):
+            raise OrdinaryAgentSessionAdmissionDenied("landing_result_parents_mismatch")
+
     @_private_ordinary_agent_operation
     def record_ordinary_semantic_outcome(
         self,
@@ -24555,6 +24611,10 @@ class PostgresRecordStore(HumanSessionStore):
             next_due: int | None = None
             if typed_outcome.kind == "completed":
                 state = require_completed_effect_proof(record, typed_outcome)
+                if record.command.kind == "pull_request_landing":
+                    self._require_ordinary_landing_result_tree(
+                        session, child_id=child_id, proof=typed_outcome.proof
+                    )
             elif typed_outcome.kind == "known_not_dispatched":
                 state = (
                     "terminal_conflict"

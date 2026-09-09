@@ -633,8 +633,35 @@ original 75-second work window. Finalization and dispatch retain their separate
 30-second minimum. These checks use the earlier work or token deadline and never
 renew it. Failed requests and reported GraphQL costs, including partial responses
 and queries exceeding the per-query limit, remain in quota accounting. The
-concrete acquisition path and fleet budget proof remain integration work.
+complete custody orchestration and fleet budget proof remain integration work.
+
+The prepared landing reader batches initial identities and final confirmation,
+reads the combined candidate's checks against both classic and evaluated branch
+rules, and obtains each entry's files and contributing identities through the
+same deadline-bound transport. Missing required checks remain unavailable. Its
+queue snapshot reports source-head checks as unknown because only combined
+candidate checks were queried. Terminal predecessors retain immutable commit
+evidence even when their source branches have been deleted. Confirmation proves
+identity stability; it does not renew the original protection observation.
+
+The finalized landing dispatcher supports merge commits and consumes only a
+newly created finalization. It sends one PR merge request through that same
+transport and requires the current base ref, result tree and ordered parents to
+match the approved step. Storage independently checks the result tree against
+the consumed preparation. Definite provider rejection and a pre-dispatch
+deadline remain distinct from a lost response or unproven merge result. Replay
+does not dispatch, and the generic ordinary effect executor cannot reacquire
+custody to land. Worker orchestration and complete fleet budget qualification
+remain required before this path is enabled.
 
 These internal records and tests do not activate ordinary execution or establish
 installed-client or production usability. Service wiring and the guarded landing
 admission integration must use the same joined boundaries before publication.
+
+A reconciliation read that proves a different merge tree or ordered parents is
+retained as a terminal conflict with its specific reason. It never counts as
+successful landing and is not repeatedly retried as an unrecorded observation.
+Preparation custody IDs use the supported token helper's idempotency identity,
+so issuance stamps and cleanup closes the original reservation. Enrollment
+builds its declared profiles and permissions from the shared provider contract;
+it still rejects provider permissions outside that contract.

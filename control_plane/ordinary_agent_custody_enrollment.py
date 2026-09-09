@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from pydantic import TypeAdapter
+
 from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.ordinary_agent_enrollment import OrdinaryAgentPolicyBinding
@@ -65,23 +67,16 @@ def build_provider_inspected_custody_candidate(
         api_request=api_request,
     )
     inspection_sha256 = _provider_inspection_sha256(inspection)
-    effect_profiles: tuple[OrdinaryAgentEffectProfile, ...] = (
-        "guarded_merge",
-        "head_refresh",
-        "pr_disposition",
+    effect_profiles = TypeAdapter(tuple[OrdinaryAgentEffectProfile, ...]).validate_python(
+        ordinary_agent_enrollment_effect_profiles()
     )
-    if effect_profiles != ordinary_agent_enrollment_effect_profiles():
-        raise RuntimeError("Ordinary-agent enrollment effect profile contract drifted.")
-    permissions = (
-        OrdinaryAgentProviderPermission(name="contents", access="write"),
-        OrdinaryAgentProviderPermission(name="metadata", access="read"),
-        OrdinaryAgentProviderPermission(name="pull_requests", access="write"),
+    permissions = tuple(
+        OrdinaryAgentProviderPermission.model_validate(
+            dict(zip(("name", "access"), item.split(":", 1)))
+        )
+        for item in ordinary_agent_enrollment_permissions()
     )
-    if (
-        tuple(f"{item.name}:{item.access}" for item in permissions)
-        != (ordinary_agent_enrollment_permissions())
-        or inspection.permissions != ordinary_agent_enrollment_permissions()
-    ):
+    if inspection.permissions != ordinary_agent_enrollment_permissions():
         raise RuntimeError("Ordinary-agent enrollment permission contract drifted.")
     candidate = OrdinaryAgentCredentialCustodyCandidate(
         principal_id=principal_id,

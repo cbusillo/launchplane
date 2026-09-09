@@ -11,6 +11,10 @@ from control_plane.contracts.ordinary_agent_enrollment import OrdinaryAgentPolic
 from control_plane.contracts.ordinary_agent_lifecycle import OrdinaryAgentManagedSecretBinding
 from control_plane.contracts.repository_inventory import RepositoryInventoryRecord
 from control_plane.contracts.secret_record import SecretBinding, SecretRecord, SecretVersion
+from control_plane.contracts.ordinary_agent_provider import (
+    ordinary_agent_enrollment_permissions,
+    ordinary_agent_enrollment_effect_profiles,
+)
 from control_plane.github_app_identity import GitHubAppIdentityError
 from control_plane.ordinary_agent_custody import OrdinaryAgentCustodyError
 from control_plane.ordinary_agent_custody_enrollment import (
@@ -87,9 +91,7 @@ class OrdinaryAgentCustodyEnrollmentTests(unittest.TestCase):
                 "app_id": 42,
                 "account": {"id": 456, "login": "example"},
                 "permissions": {
-                    "contents": "write",
-                    "metadata": "read",
-                    "pull_requests": "write",
+                    **dict(item.split(":", 1) for item in ordinary_agent_enrollment_permissions()),
                 },
             }
 
@@ -113,11 +115,11 @@ class OrdinaryAgentCustodyEnrollmentTests(unittest.TestCase):
         self.assertEqual(candidate.provider_inspection_sha256, result.provider_inspection_sha256)
         self.assertEqual(
             candidate.effect_profiles,
-            ("guarded_merge", "head_refresh", "pr_disposition"),
+            ordinary_agent_enrollment_effect_profiles(),
         )
         self.assertEqual(
             tuple((item.name, item.access) for item in candidate.permissions),
-            (("contents", "write"), ("metadata", "read"), ("pull_requests", "write")),
+            tuple(tuple(item.split(":", 1)) for item in ordinary_agent_enrollment_permissions()),
         )
         self.assertEqual(len(calls), 2)
         self.assertTrue(all("method" not in call for call in calls))
@@ -149,9 +151,7 @@ class OrdinaryAgentCustodyEnrollmentTests(unittest.TestCase):
                 "app_id": 42,
                 "account": {"id": 456, "login": "example"},
                 "permissions": {
-                    "contents": "write",
-                    "metadata": "read",
-                    "pull_requests": "write",
+                    **dict(item.split(":", 1) for item in ordinary_agent_enrollment_permissions()),
                     "workflows": "write",
                 },
             }

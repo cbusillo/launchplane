@@ -1114,6 +1114,7 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
         runner = CliRunner()
         records = [SimpleNamespace(operation_id="operation-secret-id", status="executed")]
         with (
+            patch("control_plane.cli_service.time.monotonic", return_value=100.0),
             patch("control_plane.cli_service.Event", return_value=TestStopEvent()),
             patch(
                 "control_plane.cli_service.build_privileged_operation_worker_store",
