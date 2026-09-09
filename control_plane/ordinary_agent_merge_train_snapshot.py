@@ -5,9 +5,12 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import datetime, timezone
 import time
+from typing import Protocol, cast
 
 from control_plane.contracts.ordinary_agent_effect import (
     OrdinaryAgentControllerFence,
+    OrdinaryAgentProviderQuotaKey,
+    OrdinaryAgentProviderWaitRecord,
     OrdinaryAgentSnapshotStore,
 )
 from control_plane.contracts.ordinary_agent_snapshot import (
@@ -28,6 +31,7 @@ from control_plane.ordinary_agent_github_transport import (
     ORDINARY_SNAPSHOT_WORK_SECONDS,
     OrdinaryAgentProviderDeferred,
     OrdinaryAgentProviderEvidenceError,
+    require_installation_provider_ready,
 )
 from control_plane.workflows.launchplane import github_api_request
 
@@ -38,6 +42,12 @@ SnapshotReader = Callable[
 CandidateCheckReader = Callable[
     [DeadlineMergeTrainGitHubTransport], OrdinaryAgentCandidateCheckResult
 ]
+
+
+class _ProviderWaitStore(Protocol):
+    def read_provider_wait(
+        self, *, quota_key: OrdinaryAgentProviderQuotaKey
+    ) -> OrdinaryAgentProviderWaitRecord | None: ...
 
 
 class _ApiRequestTransport:
@@ -169,6 +179,13 @@ def _acquire_read(
             api_request=api_request,
             monotonic=monotonic,
             utc_now=utc_now,
+            before_token_mint=lambda app_id, installation_id: require_installation_provider_ready(
+                app_id=app_id,
+                installation_id=installation_id,
+                resource_classes=("core", "graphql", "secondary"),
+                read_provider_wait=cast(_ProviderWaitStore, store).read_provider_wait,
+                utc_now=utc_now,
+            ),
         ) as lease:
             token_expiry = datetime.fromisoformat(
                 lease.installation_token.expires_at.replace("Z", "+00:00")

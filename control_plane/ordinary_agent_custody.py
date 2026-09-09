@@ -182,6 +182,7 @@ def ordinary_agent_provider_token_lease(
     api_request: GitHubApiRequest = github_api_request,
     monotonic: Callable[[], float] = time.monotonic,
     utc_now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+    before_token_mint: Callable[[int, int], None] | None = None,
 ) -> Iterator[OrdinaryAgentProviderTokenLease]:
     idempotency_digest = _sha256_text(idempotency_key)
     request_digest = _sha256_text(
@@ -246,6 +247,7 @@ def ordinary_agent_provider_token_lease(
                 effect_profile=candidate.effect_profile,
                 api_request=bounded_request,
                 now=utc_now(),
+                before_token_mint=before_token_mint,
             )
         except Exception:
             if dispatch_attempted:

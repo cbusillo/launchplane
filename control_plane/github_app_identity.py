@@ -42,6 +42,14 @@ _ORDINARY_AGENT_EFFECT_PERMISSION_CEILINGS: dict[str, dict[str, str]] = {
         "pull_requests": "read",
         "statuses": "read",
     },
+    "merge_train_landing": {
+        "administration": "read",
+        "checks": "read",
+        "contents": "write",
+        "metadata": "read",
+        "pull_requests": "write",
+        "statuses": "read",
+    },
     "close_pull_request": {"metadata": "read", "pull_requests": "write"},
     "comment_pull_request": {"metadata": "read", "pull_requests": "write"},
     "label_pull_request": {"metadata": "read", "pull_requests": "write"},
@@ -141,6 +149,7 @@ def mint_ordinary_agent_installation_token(
     effect_profile: str,
     api_request: GitHubApiRequest = github_api_request,
     now: datetime | None = None,
+    before_token_mint: Callable[[int, int], None] | None = None,
 ) -> GitHubAppInstallationToken:
     ceiling = _ORDINARY_AGENT_EFFECT_PERMISSION_CEILINGS.get(effect_profile)
     if ceiling is None:
@@ -158,6 +167,7 @@ def mint_ordinary_agent_installation_token(
         permission_boundary_label="selected profile",
         api_request=api_request,
         now=now,
+        before_token_mint=before_token_mint,
     )
 
 
@@ -307,6 +317,7 @@ def _mint_repository_installation_token(
     permission_boundary_label: str,
     api_request: GitHubApiRequest,
     now: datetime | None,
+    before_token_mint: Callable[[int, int], None] | None = None,
 ) -> GitHubAppInstallationToken:
     normalized_repository = repository.strip()
     if normalized_repository.count("/") != 1:
@@ -371,6 +382,8 @@ def _mint_repository_installation_token(
         allowed_permissions=allowed_installation_permissions,
         permission_boundary_label=permission_boundary_label,
     )
+    if before_token_mint is not None:
+        before_token_mint(identity.app_id, installation_id)
     token_payload = json_object(
         _github_api_request(
             api_request,
