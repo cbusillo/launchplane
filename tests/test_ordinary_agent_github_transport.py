@@ -24,6 +24,24 @@ class OrdinaryAgentGitHubTransportTests(unittest.TestCase):
         with self.assertRaisesRegex(OrdinaryAgentProviderDeferred, "provider_attempt_deadline"):
             transport.request(method="POST", path="/graphql", body={"query": "query {}"})
         self.assertEqual(inner.requests, [])
+        self.assertEqual(transport.graphql_requests + transport.rest_core_requests, 0)
+
+    def test_failed_provider_calls_remain_in_request_accounting(self) -> None:
+        inner = RecordingMergeTrainGitHubTransport(
+            responses=(TimeoutError("response lost"), TimeoutError("response lost"))
+        )
+        transport = DeadlineMergeTrainGitHubTransport(
+            transport=inner,
+            work_deadline=100,
+            token_deadline=100,
+            monotonic=lambda: 0,
+        )
+        for method, path in (("POST", "/graphql"), ("GET", "/repos/example/project")):
+            with self.assertRaises(TimeoutError):
+                transport.request(method=method, path=path)
+        self.assertEqual(transport.graphql_requests, 1)
+        self.assertEqual(transport.rest_core_requests, 1)
+        self.assertEqual(len(inner.requests), 2)
 
     def test_partial_graphql_response_never_becomes_completed_evidence(self) -> None:
         transport = DeadlineMergeTrainGitHubTransport(
