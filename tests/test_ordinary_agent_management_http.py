@@ -12,7 +12,10 @@ from control_plane.ordinary_agent_enrollment_worker import (
     OrdinaryAgentEnrollmentRecoveryState,
     recover_ordinary_agent_enrollments_once,
 )
-from control_plane.ordinary_agent_session_approval import approve_ordinary_agent_enrollment
+from control_plane.ordinary_agent_session_approval import (
+    approve_ordinary_agent_enrollment,
+    disconnect_ordinary_agent_principal,
+)
 from control_plane.service_auth import (
     BearerIdentityConfig,
     GitHubHumanIdentity,
@@ -20,6 +23,7 @@ from control_plane.service_auth import (
 )
 from control_plane.service_human_auth import GitHubOAuthConfig, HumanSessionManager
 from control_plane.storage.postgres import PostgresRecordStore
+from tests import test_ordinary_agent_effect_storage as effect_support
 from tests.support.http import lifespan_client
 from tests.support.ordinary_agent_lifecycle import (
     ADMIN_GITHUB_ID,
@@ -31,6 +35,54 @@ from tests.support.ordinary_agent_lifecycle import (
 
 
 class OrdinaryAgentManagementHTTPTests(unittest.IsolatedAsyncioTestCase):
+    async def test_job_reads_use_current_ordinary_or_signed_administrator_identity(self) -> None:
+        fixture = effect_support.OrdinaryAgentEffectStorageTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        session = fixture.fixture
+        app = create_launchplane_fastapi_app(
+            verifier=Mock(),
+            authz_policy=session.policy.policy,
+            record_store_factory=lambda: fixture.store,
+            human_session_manager=session.manager,
+        )
+        agent_headers = {"Authorization": f"Bearer {session.bundle.token.value}"}
+        browser_headers = {"Cookie": session.manager.session_cookie_header(session.human)}
+        agent_path = f"/v1/agent/ordinary-agent-jobs/{fixture.request.request_id}"
+        human_path = (
+            f"/v1/ordinary-agent-jobs/{fixture.request.principal_id}/{fixture.request.request_id}"
+        )
+        async with lifespan_client(app) as client:
+            own = await client.get(agent_path, headers=agent_headers)
+            self.assertEqual(own.status_code, 200, own.text)
+            self.assertEqual(own.json()["request_id"], fixture.request.request_id)
+            self.assertEqual(own.json()["principal_id"], fixture.request.principal_id)
+            administrator = await client.get(human_path, headers=browser_headers)
+            self.assertEqual(administrator.status_code, 200, administrator.text)
+            self.assertEqual(administrator.json(), own.json())
+            missing = await client.get(
+                "/v1/agent/ordinary-agent-jobs/unknown-request", headers=agent_headers
+            )
+            foreign = await client.get(
+                f"/v1/ordinary-agent-jobs/another-principal/{fixture.request.request_id}",
+                headers=browser_headers,
+            )
+            bearer_on_human = await client.get(human_path, headers=agent_headers)
+            self.assertEqual(missing.status_code, 403)
+            self.assertEqual(foreign.status_code, 403)
+            self.assertEqual(bearer_on_human.status_code, 403)
+            self.assertNotIn(session.bundle.token.value, own.text + missing.text + foreign.text)
+            disconnect_ordinary_agent_principal(
+                store=fixture.store,
+                manager=session.manager,
+                cookie_header=session.manager.session_cookie_header(session.human),
+                csrf_token=session.manager.csrf_token(session.human),
+                principal_id=fixture.request.principal_id,
+                source_event_id="job-read-revoke",
+            )
+            withdrawn = await client.get(agent_path, headers=agent_headers)
+            self.assertEqual(withdrawn.status_code, 403)
+
     async def test_ordinary_proposal_and_signed_browser_approval_are_separate_authorities(
         self,
     ) -> None:
