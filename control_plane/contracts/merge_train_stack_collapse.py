@@ -7,6 +7,14 @@ from typing import Callable, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from control_plane.contracts.merge_train_effect import (
+    MergeTrainEffectLineage,
+    MergeTrainSemanticEffectExecutor,
+    StackChildCloseEffect,
+    StackChildCommentEffect,
+    StackChildLabelEffect,
+    StackChildMergeEffect,
+)
 from control_plane.merge_train import MergeTrainStackDiscoveryResult
 
 
@@ -229,6 +237,7 @@ def execute_merge_train_stack_collapse_plan(
     *,
     plan: MergeTrainStackCollapsePlan,
     branch_client: MergeTrainStackCollapseBranchClient,
+    effect_executor: MergeTrainSemanticEffectExecutor | None = None,
     updated_at: str,
     checkpoint: Callable[[MergeTrainStackCollapsePlan], None] | None = None,
 ) -> MergeTrainStackCollapsePlan:
@@ -269,16 +278,33 @@ def execute_merge_train_stack_collapse_plan(
             parent_pull_request_number=mutation.parent_pull_request_number,
         )
         if not merge_commit_sha:
-            merge_commit_sha = branch_client.merge_stack_child_into_parent(
-                repository=plan.repository,
-                child_head_sha=child_head_sha,
-                expected_parent_head_sha=expected_parent_head_sha,
-                parent_head_ref=mutation.parent_head_ref,
-                protected_base_ref=plan.base_branch,
-                collapse_id=plan.collapse_id,
-                child_pull_request_number=mutation.child_pull_request_number,
-                parent_pull_request_number=mutation.parent_pull_request_number,
-            )
+            if effect_executor is None:
+                merge_commit_sha = branch_client.merge_stack_child_into_parent(
+                    repository=plan.repository,
+                    child_head_sha=child_head_sha,
+                    expected_parent_head_sha=expected_parent_head_sha,
+                    parent_head_ref=mutation.parent_head_ref,
+                    protected_base_ref=plan.base_branch,
+                    collapse_id=plan.collapse_id,
+                    child_pull_request_number=mutation.child_pull_request_number,
+                    parent_pull_request_number=mutation.parent_pull_request_number,
+                )
+            else:
+                merge_commit_sha = effect_executor.merge_stack_child(
+                    StackChildMergeEffect(
+                        lineage=MergeTrainEffectLineage(
+                            repository=plan.repository,
+                            base_branch=plan.base_branch,
+                            collapse_id=plan.collapse_id,
+                        ),
+                        child_head_sha=child_head_sha,
+                        expected_parent_head_sha=expected_parent_head_sha,
+                        parent_head_ref=mutation.parent_head_ref,
+                        protected_base_ref=plan.base_branch,
+                        child_pull_request_number=mutation.child_pull_request_number,
+                        parent_pull_request_number=mutation.parent_pull_request_number,
+                    )
+                )
         updated_mutations.append(
             mutation.model_copy(
                 update={
@@ -315,6 +341,7 @@ def reconcile_merge_train_stack_children_after_root_landing(
     *,
     plan: MergeTrainStackCollapsePlan,
     disposition_client: MergeTrainStackChildDispositionClient,
+    effect_executor: MergeTrainSemanticEffectExecutor | None = None,
     root_merge_commit_sha: str,
     label: str,
     updated_at: str,
@@ -350,27 +377,66 @@ def reconcile_merge_train_stack_children_after_root_landing(
             body_contains=comment_body,
         )
         if not comment_url:
-            comment_url = disposition_client.comment_pull_request(
-                repository=plan.repository,
-                pull_request_number=disposition.pull_request_number,
-                body=comment_body,
-            )
+            if effect_executor is None:
+                comment_url = disposition_client.comment_pull_request(
+                    repository=plan.repository,
+                    pull_request_number=disposition.pull_request_number,
+                    body=comment_body,
+                )
+            else:
+                comment_url = effect_executor.comment_stack_child(
+                    StackChildCommentEffect(
+                        lineage=MergeTrainEffectLineage(
+                            repository=plan.repository,
+                            base_branch=plan.base_branch,
+                            collapse_id=plan.collapse_id,
+                        ),
+                        pull_request_number=disposition.pull_request_number,
+                        body=comment_body,
+                    )
+                )
         if not disposition_client.pull_request_has_label(
             repository=plan.repository,
             pull_request_number=disposition.pull_request_number,
             label=normalized_label,
         ):
-            disposition_client.add_pull_request_label(
-                repository=plan.repository,
-                pull_request_number=disposition.pull_request_number,
-                label=normalized_label,
-            )
+            if effect_executor is None:
+                disposition_client.add_pull_request_label(
+                    repository=plan.repository,
+                    pull_request_number=disposition.pull_request_number,
+                    label=normalized_label,
+                )
+            else:
+                effect_executor.label_stack_child(
+                    StackChildLabelEffect(
+                        lineage=MergeTrainEffectLineage(
+                            repository=plan.repository,
+                            base_branch=plan.base_branch,
+                            collapse_id=plan.collapse_id,
+                        ),
+                        pull_request_number=disposition.pull_request_number,
+                        label=normalized_label,
+                    )
+                )
         if not pull_request_closed:
-            disposition_client.close_pull_request(
-                repository=plan.repository,
-                pull_request_number=disposition.pull_request_number,
-                expected_head_sha=disposition.expected_head_sha,
-            )
+            if effect_executor is None:
+                disposition_client.close_pull_request(
+                    repository=plan.repository,
+                    pull_request_number=disposition.pull_request_number,
+                    expected_head_sha=disposition.expected_head_sha,
+                )
+            else:
+                effect_executor.close_stack_child(
+                    StackChildCloseEffect(
+                        lineage=MergeTrainEffectLineage(
+                            repository=plan.repository,
+                            base_branch=plan.base_branch,
+                            collapse_id=plan.collapse_id,
+                        ),
+                        pull_request_number=disposition.pull_request_number,
+                        expected_head_sha=disposition.expected_head_sha,
+                    )
+                )
         updated_dispositions.append(
             disposition.model_copy(
                 update={
