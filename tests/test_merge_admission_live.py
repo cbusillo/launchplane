@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import Literal
 import unittest
 from unittest.mock import patch
 
@@ -335,6 +336,37 @@ def _owner_facet(evaluation: MergeAdmissionEvaluation) -> MergeReadinessOwnerFac
 
 
 class LiveMergeAdmissionRealStoreTests(unittest.TestCase):
+    def test_live_engineering_only_delta_attests_active_legacy_policy(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _seed_owner_store(Path(directory))
+            evidence = _repository_evidence(path="control_plane/example.py")
+            evaluator = LiveMergeAdmissionEvaluator(
+                store=store,
+                repository_evidence_provider=_EvidenceProvider(evidence),
+                technical_check_client=_TechnicalCheckClient(),
+            )
+
+            entry_evidence = evaluator._entry_evidence(
+                repository=OWNER_REPOSITORY,
+                pull_request_number=2022,
+                evaluated_at="2026-08-11T03:01:00Z",
+                position=1,
+            )
+
+        reviewed = entry_evidence.observation.reviewed_delta
+        current = entry_evidence.observation.current_delta
+        self.assertEqual(entry_evidence.impact.status, "success")
+        self.assertEqual(entry_evidence.owner_decision.status, "not_required")
+        self.assertIsNotNone(reviewed)
+        self.assertIsNotNone(current)
+        assert reviewed is not None and current is not None
+        self.assertEqual(reviewed.fingerprint_sha256, current.fingerprint_sha256)
+        self.assertEqual(current.change_impact_model, "legacy_v1")
+        self.assertEqual(
+            current.change_impact_policy_digest,
+            entry_evidence.impact.policy_digest,
+        )
+
     def test_pending_changes_requested_revoked_and_stale_owner_states(self) -> None:
         scenarios = ("pending", "changes_requested", "revoked", "stale")
         expected_reasons = {
@@ -594,6 +626,59 @@ class LiveMergeAdmissionRealStoreTests(unittest.TestCase):
 
 
 class LiveMergeAdmissionEvaluatorTests(unittest.TestCase):
+    def test_structural_delta_attests_only_current_supported_change_impact_models(self) -> None:
+        target = ChangeImpactTarget(
+            repository_id="101",
+            repository_owner_id="202",
+            repository=REPOSITORY,
+            pull_request_number=2083,
+            head_sha=HEAD_SHA,
+            tree_sha=TREE_SHA,
+        )
+        evidence = ChangeImpactRepositoryEvidence(
+            target=target,
+            changed_files=(ChangeImpactChangedFileEvidence(path="control_plane/example.py"),),
+        )
+        evaluator = LiveMergeAdmissionEvaluator(
+            store=object(),
+            repository_evidence_provider=_UnusedRepositoryEvidenceProvider(),
+            technical_check_client=_TechnicalCheckClient(),
+        )
+        cases: tuple[tuple[int, Literal["v2"] | None, str, str | None], ...] = (
+            (1, None, POLICY_SHA, "legacy_v1"),
+            (1, "v2", POLICY_SHA, "v2"),
+            (2, "v2", POLICY_SHA, None),
+            (1, None, "", None),
+        )
+
+        for schema_version, classification_model, policy_digest, expected in cases:
+            with self.subTest(
+                schema_version=schema_version,
+                classification_model=classification_model,
+                policy_digest=policy_digest,
+            ):
+                impact = ChangeImpactEvaluation(
+                    schema_version=schema_version,
+                    status="success",
+                    reason_code="change_impact_classified",
+                    target=target,
+                    policy_digest=policy_digest,
+                    classification_model=classification_model,
+                )
+
+                delta = evaluator._current_delta(
+                    repository_evidence=evidence,
+                    impact=impact,
+                )
+
+                self.assertIsNotNone(delta)
+                assert delta is not None
+                self.assertEqual(delta.change_impact_model, expected)
+                self.assertEqual(
+                    delta.change_impact_policy_digest,
+                    policy_digest if expected is not None else None,
+                )
+
     def test_engineering_only_change_binds_current_impact_policy(self) -> None:
         target = ChangeImpactTarget(
             repository_id="101",
