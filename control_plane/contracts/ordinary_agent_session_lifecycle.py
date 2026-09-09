@@ -10,6 +10,7 @@ from control_plane.contracts.ordinary_agent import (
     OrdinaryAgentBudget,
     OrdinaryAgentPullRequest,
     OrdinaryAgentTarget,
+    PrincipalProfile,
     StrictFrozenModel,
 )
 
@@ -170,6 +171,8 @@ class OrdinaryAgentSessionOperationView(StrictFrozenModel):
     kind: Literal["initial", "existing"]
     status: Literal["pending", "approved", "expired", "revoked", "blocked", "cancelled"]
     reason_code: str | None = None
+    current_policy_actions: tuple[OrdinaryAgentAction, ...] = ()
+    current_policy_execution_profile: PrincipalProfile | None = None
     requester_kind: Literal["terminal_agent", "ordinary_agent"]
     requester_subject: str
     requester_token_label: str | None = None

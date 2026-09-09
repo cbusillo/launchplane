@@ -7,6 +7,7 @@ export interface OrdinaryAgentDelegationReviewProps {
   repository: string;
   baseBranch: string;
   permissions: readonly string[];
+  currentExecutionProfile: "read_only" | "guarded_executor" | null;
   credentialExpiresAt: number;
   sessionExpiresAt: number | null;
   leaseExpiresAt: number | null;
@@ -76,6 +77,11 @@ export function OrdinaryAgentDelegationReview(
         </div>
         <span role="status">{statusLabels[props.status]}</span>
       </header>
+      <p>{props.currentExecutionProfile === "read_only"
+        ? "Current policy permits read-only access. Merging is not permitted."
+        : props.currentExecutionProfile === "guarded_executor"
+          ? "Current policy permits engineering delegation. Each session still needs approval."
+          : "No engineering execution enabled."}</p>
       <div className="ordinary-agent-review-scope">
         <div>
           <h3>{props.repository}</h3>
@@ -118,7 +124,7 @@ export function OrdinaryAgentDelegationReview(
       ) : null}
       {props.canApprove && props.status === "pending" ? (
         <div className="privileged-operation-actions">
-          <button type="button" disabled={submitting || submitted || !deadlinesReadable} onClick={() => void approve()}>
+          <button className="button button-primary" type="button" disabled={submitting || submitted || !deadlinesReadable} onClick={() => void approve()}>
             {submitting ? "Recording approval…" : connection ? "Approve connection" : "Approve session"}
           </button>
         </div>

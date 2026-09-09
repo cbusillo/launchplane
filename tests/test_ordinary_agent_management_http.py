@@ -1,0 +1,293 @@
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from pathlib import Path
+from tempfile import TemporaryDirectory
+import unittest
+from unittest.mock import Mock, patch
+
+from control_plane.contracts.ordinary_agent_lifecycle import OrdinaryAgentEnrollmentIntent
+from control_plane.http_app import create_launchplane_fastapi_app
+from control_plane.ordinary_agent_enrollment_worker import (
+    OrdinaryAgentEnrollmentRecoveryState,
+    recover_ordinary_agent_enrollments_once,
+)
+from control_plane.ordinary_agent_session_approval import approve_ordinary_agent_enrollment
+from control_plane.service_auth import (
+    BearerIdentityConfig,
+    GitHubHumanIdentity,
+    TerminalAgentIdentity,
+)
+from control_plane.service_human_auth import GitHubOAuthConfig, HumanSessionManager
+from control_plane.storage.postgres import PostgresRecordStore
+from tests.support.http import lifespan_client
+from tests.support.ordinary_agent_lifecycle import (
+    ADMIN_GITHUB_ID,
+    enrollment_envelope,
+    prepare_approved_test_issuance,
+    setup_ordinary_agent_authority,
+    replace_policy_without_ordinary_agent_rule,
+)
+
+
+class OrdinaryAgentManagementHTTPTests(unittest.IsolatedAsyncioTestCase):
+    async def test_ordinary_proposal_and_signed_browser_approval_are_separate_authorities(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as directory:
+            store = PostgresRecordStore(
+                database_url=f"sqlite+pysqlite:///{Path(directory) / 'db.sqlite3'}"
+            )
+            self.addCleanup(store.close)
+            store.ensure_schema()
+            policy, inventory = setup_ordinary_agent_authority(store)
+            manager = HumanSessionManager(
+                config=GitHubOAuthConfig(
+                    client_id="test",
+                    client_secret="test",
+                    public_url="https://example.test",
+                    session_secret="test-session-secret",
+                ),
+                session_store=store,
+            )
+            human = manager.issue(
+                GitHubHumanIdentity(
+                    login="test-admin",
+                    github_id=ADMIN_GITHUB_ID,
+                    name="Test",
+                    email="test@example.test",
+                    organizations=frozenset(),
+                    teams=frozenset(),
+                    role="admin",
+                )
+            )
+            initial = OrdinaryAgentEnrollmentIntent.from_envelope(
+                enrollment_envelope(policy_record=policy, inventory=inventory)
+            )
+            store.propose_ordinary_agent_enrollment(
+                intent=initial,
+                requester=TerminalAgentIdentity(subject="test-cli", token_label="test"),
+            )
+            approved = approve_ordinary_agent_enrollment(
+                store=store,
+                manager=manager,
+                cookie_header=manager.session_cookie_header(human),
+                csrf_token=manager.csrf_token(human),
+                principal_id=initial.principal_id,
+                operation_id=initial.operation_id,
+            )
+            envelope, bundle = prepare_approved_test_issuance(approved)
+            with patch(
+                "control_plane.ordinary_agent_enrollment_worker.issue_ordinary_agent_credential",
+                return_value=bundle,
+            ):
+                state = OrdinaryAgentEnrollmentRecoveryState()
+                recovered = recover_ordinary_agent_enrollments_once(
+                    record_store=store, state=state, lease_owner="http-worker", limit=20
+                )
+                self.assertEqual(recovered.applied, 1)
+                self.assertEqual(recovered.failed, 0)
+                replayed = recover_ordinary_agent_enrollments_once(
+                    record_store=store, state=state, lease_owner="http-worker", limit=20
+                )
+                self.assertEqual(replayed.processed, 0)
+            verifier = Mock()
+            app = create_launchplane_fastapi_app(
+                verifier=verifier,
+                authz_policy=policy.policy,
+                record_store_factory=lambda: store,
+                human_session_manager=manager,
+                bearer_identity_config=BearerIdentityConfig(
+                    local_admin_token=bundle.token.value,
+                    local_admin_subject="legacy-admin",
+                    local_admin_token_label="legacy-admin",
+                ),
+            )
+            now = int(datetime.now(timezone.utc).timestamp())
+            browser_headers = {
+                "Cookie": manager.session_cookie_header(human),
+                "Origin": manager.public_origin,
+                "Sec-Fetch-Site": "same-origin",
+                "Sec-Fetch-Mode": "cors",
+                "Sec-Fetch-Dest": "empty",
+                "X-CSRF-Token": manager.csrf_token(human),
+            }
+            async with lifespan_client(app) as client:
+                proposed = await client.post(
+                    "/v1/agent/ordinary-agent-session-proposals",
+                    headers={"Authorization": f"Bearer {bundle.token.value}"},
+                    json={
+                        "operation_id": "http-session-one",
+                        "attenuation": {
+                            "actions": ["guarded_merge"],
+                            "session_expires_at": now + 100,
+                            "lease_expires_at": now + 90,
+                            "action_limit": 4,
+                            "pull_request_limit": 2,
+                            "refresh_allowance": 1,
+                        },
+                    },
+                )
+                self.assertEqual(proposed.status_code, 200, proposed.text)
+                operation = proposed.json()["operation"]
+                self.assertEqual(operation["status"], "pending")
+                self.assertNotIn(bundle.token.value, proposed.text)
+                self.assertNotIn(bundle.candidate.credential_digest, proposed.text)
+                path = f"/v1/ordinary-agent-operations/{operation['principal_id']}/{operation['operation_id']}"
+                denied = await client.post(
+                    path + "/approve", headers={"Authorization": f"Bearer {bundle.token.value}"}
+                )
+                self.assertEqual(denied.status_code, 403)
+                invalid_csrf = await client.post(
+                    path + "/approve", headers={**browser_headers, "X-CSRF-Token": "invalid"}
+                )
+                self.assertEqual(invalid_csrf.status_code, 403)
+                reviewed = await client.get(
+                    path, headers={"Cookie": manager.session_cookie_header(human)}
+                )
+                self.assertEqual(reviewed.status_code, 200, reviewed.text)
+                self.assertTrue(reviewed.json()["operation"]["can_approve"])
+                self.assertEqual(
+                    reviewed.json()["operation"]["current_policy_execution_profile"],
+                    "guarded_executor",
+                )
+                accepted = await client.post(path + "/approve", headers=browser_headers)
+                self.assertEqual(accepted.status_code, 200, accepted.text)
+                session_id = accepted.json()["operation"]["session_id"]
+                self.assertTrue(session_id)
+                replay = await client.post(path + "/approve", headers=browser_headers)
+                self.assertEqual(replay.json()["operation"]["session_id"], session_id)
+                revoked = await client.post(
+                    f"/v1/ordinary-agent-sessions/agent_one/{session_id}/revoke",
+                    headers=browser_headers,
+                )
+                self.assertEqual(revoked.status_code, 200, revoked.text)
+                self.assertEqual(revoked.json()["operation"]["status"], "revoked")
+                self.assertEqual(revoked.headers["cache-control"], "no-store")
+                replace_policy_without_ordinary_agent_rule(store, current=policy)
+                withdrawn = await client.get(
+                    path, headers={"Cookie": manager.session_cookie_header(human)}
+                )
+                self.assertEqual(withdrawn.status_code, 200, withdrawn.text)
+                self.assertEqual(withdrawn.json()["operation"]["current_policy_actions"], [])
+                self.assertIsNone(withdrawn.json()["operation"]["current_policy_execution_profile"])
+                verifier.verify.assert_not_called()
+
+    async def test_terminal_connection_proposal_uses_its_capability_and_never_caller_approval(
+        self,
+    ) -> None:
+        from sqlalchemy import delete
+        from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
+        from control_plane.contracts.ordinary_agent_client import (
+            ORDINARY_AGENT_ENROLLMENT_PROPOSE_ACTION,
+        )
+        from control_plane.ordinary_agent_enrollment_preparation import (
+            PreparedOrdinaryAgentEnrollmentScope,
+        )
+        from control_plane.service_auth import TerminalAgentPolicyRule
+        from control_plane.storage.postgres import LaunchplaneAuthzPolicyRow
+
+        with TemporaryDirectory() as directory:
+            store = PostgresRecordStore(
+                database_url=f"sqlite+pysqlite:///{Path(directory) / 'db.sqlite3'}"
+            )
+            self.addCleanup(store.close)
+            store.ensure_schema()
+            original, inventory = setup_ordinary_agent_authority(store)
+            policy = LaunchplaneAuthzPolicyRecord(
+                record_id="http-terminal-policy",
+                revision=2,
+                source="test:http",
+                updated_at=original.updated_at,
+                policy=original.policy.model_copy(
+                    update={
+                        "terminal_agents": (
+                            TerminalAgentPolicyRule(
+                                managed_set_id="terminal-client",
+                                managed_rule_id="connect",
+                                subjects=("cli-client",),
+                                token_labels=("client",),
+                                products=("launchplane",),
+                                contexts=("launchplane",),
+                                actions=(ORDINARY_AGENT_ENROLLMENT_PROPOSE_ACTION,),
+                            ),
+                        )
+                    }
+                ),
+            )
+            with store._session_factory() as session:
+                session.execute(delete(LaunchplaneAuthzPolicyRow))
+                session.commit()
+            store._write_row(store._authz_policy_row(policy))
+            fixture = enrollment_envelope(policy_record=policy, inventory=inventory)
+            scope = PreparedOrdinaryAgentEnrollmentScope(
+                policy=fixture.policy,
+                custody=fixture.custody,
+                principal=None,
+                credential_id=None,
+                credential_version=None,
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=Mock(),
+                authz_policy=policy.policy,
+                record_store_factory=lambda: store,
+                bearer_identity_config=BearerIdentityConfig(
+                    terminal_agent_token="terminal-client-private",
+                    terminal_agent_subject="cli-client",
+                    terminal_agent_token_label="client",
+                    local_admin_token="administrator-private",
+                    local_admin_subject="admin",
+                    local_admin_token_label="admin",
+                ),
+            )
+            request = {
+                "action": "enroll",
+                "operation_id": "http-connect-one",
+                "principal_id": "agent_one",
+                "target": fixture.policy.target.model_dump(mode="json"),
+                "github_app_id": 42,
+                "secret_binding_id": fixture.custody.managed_secret.binding_id,
+                "credential_valid_from": fixture.authentication_credential.valid_from,
+                "credential_expires_at": fixture.authentication_credential.expires_at,
+                "delivery": fixture.delivery.model_dump(mode="json"),
+            }
+            with patch(
+                "control_plane.ordinary_agent_enrollment_preparation.prepare_ordinary_agent_enrollment_scope",
+                return_value=scope,
+            ) as prepare:
+                async with lifespan_client(app) as client:
+                    path = "/v1/agent/ordinary-agent-enrollments"
+                    denied = await client.post(
+                        path,
+                        headers={"Authorization": "Bearer administrator-private"},
+                        json=request,
+                    )
+                    self.assertEqual(denied.status_code, 403)
+                    prepare.assert_not_called()
+                    invalid = await client.post(
+                        path,
+                        headers={"Authorization": "Bearer terminal-client-private"},
+                        json={**request, "approval_sha256": "private-unreviewed-approval"},
+                    )
+                    self.assertEqual(invalid.status_code, 400)
+                    self.assertNotIn("private-unreviewed-approval", invalid.text)
+                    prepare.assert_not_called()
+                    accepted = await client.post(
+                        path,
+                        headers={"Authorization": "Bearer terminal-client-private"},
+                        json=request,
+                    )
+                    self.assertEqual(accepted.status_code, 200, accepted.text)
+                    self.assertEqual(accepted.json()["operation"]["status"], "pending")
+                    self.assertFalse(accepted.json()["operation"]["applied"])
+                    self.assertIn("principal_id=agent_one", accepted.json()["review_url"])
+                    self.assertNotIn(fixture.delivery.receiver_claim_sha256, accepted.text)
+                    self.assertIsNone(
+                        store.read_current_ordinary_agent_principal(principal_id="agent_one")
+                    )
+                    replay = await client.post(
+                        path,
+                        headers={"Authorization": "Bearer terminal-client-private"},
+                        json=request,
+                    )
+                    self.assertEqual(replay.json(), accepted.json())

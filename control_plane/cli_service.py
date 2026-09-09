@@ -25,6 +25,10 @@ from control_plane.outbox_worker import (
     run_outbox_worker_once,
 )
 from control_plane.openapi_export import write_canonical_openapi
+from control_plane.ordinary_agent_enrollment_worker import (
+    OrdinaryAgentEnrollmentRecoveryState,
+    recover_ordinary_agent_enrollments_once,
+)
 from control_plane.privileged_operation_worker import (
     OrdinaryAgentDeliveryCleanupState,
     PrivilegedOperationExecutionStore,
@@ -504,6 +508,12 @@ def service_privileged_operation_workers_run_once(
         now_monotonic=time.monotonic(),
         error_backoff_seconds=15,
     )
+    enrollment = recover_ordinary_agent_enrollments_once(
+        record_store=store,
+        state=OrdinaryAgentEnrollmentRecoveryState(),
+        lease_owner=generated_lease_owner,
+        limit=limit,
+    )
     records = execute_approved_privileged_operations_once(
         record_store=store,
         lease_owner=generated_lease_owner,
@@ -514,6 +524,12 @@ def service_privileged_operation_workers_run_once(
             {
                 "processed": len(records),
                 "statuses": [record.status for record in records],
+                "enrollment_recovery": {
+                    "processed": enrollment.processed,
+                    "applied": enrollment.applied,
+                    "blocked": enrollment.blocked,
+                    "failed": enrollment.failed,
+                },
                 "delivery_cleanup": {
                     "status": cleanup.status,
                     "expired_deliveries": cleanup.expired_deliveries,
@@ -606,6 +622,7 @@ def service_privileged_operation_workers_run(
         first_poll_attempted = False
         consecutive_errors = 0
         cleanup_state = OrdinaryAgentDeliveryCleanupState()
+        enrollment_state = OrdinaryAgentEnrollmentRecoveryState()
 
         def report_schema_probe_succeeded() -> None:
             nonlocal schema_probe_succeeded
@@ -671,6 +688,25 @@ def service_privileged_operation_workers_run(
                                 "error_type": cleanup.error_type,
                                 "consecutive_failures": cleanup.consecutive_failures,
                                 "retry_seconds": cleanup.retry_seconds,
+                            },
+                            sort_keys=True,
+                        )
+                    )
+                enrollment = recover_ordinary_agent_enrollments_once(
+                    record_store=store,
+                    state=enrollment_state,
+                    lease_owner=generated_lease_owner,
+                    limit=limit,
+                )
+                if enrollment.processed or enrollment.failed:
+                    click.echo(
+                        json.dumps(
+                            {
+                                "event": "ordinary_agent_enrollment_recovery",
+                                "processed": enrollment.processed,
+                                "applied": enrollment.applied,
+                                "blocked": enrollment.blocked,
+                                "failed": enrollment.failed,
                             },
                             sort_keys=True,
                         )

@@ -469,6 +469,20 @@ def _prepare_approved_merge_train_policy_import(
 
 
 class PrivilegedOperationWorkerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # These loop tests isolate generic operations and cleanup. The actual
+        # enrollment recovery is exercised with shared storage by its HTTP test.
+        from control_plane.ordinary_agent_enrollment_worker import (
+            OrdinaryAgentEnrollmentRecoveryResult,
+        )
+
+        self.enrollment_recovery = self.enterContext(
+            patch(
+                "control_plane.cli_service.recover_ordinary_agent_enrollments_once",
+                return_value=OrdinaryAgentEnrollmentRecoveryResult(),
+            )
+        )
+
     def test_delivery_cleanup_retries_without_exposing_failure_detail(self) -> None:
         store = _WorkerStore(
             cleanup_results=[

@@ -4,20 +4,22 @@ title: Ordinary Agent Execution Contracts
 
 # Ordinary Agent Execution Contracts
 
-The ordinary-agent execution models describe proposed, inert execution evidence.
-They are not part of the service authentication union, HTTP routes, or provider
-executor. Eligibility computed from fixture records is not
-authentication, merge admission, human acceptance, or permission to perform an
-effect.
+Launchplane has a separate ordinary-agent credential, enrollment and session
+boundary. It does not add ordinary credentials to the legacy service identity
+union. Dedicated client routes propose connections and sessions; signed-browser
+routes review, approve, cancel and revoke their persisted domain operations.
+The service worker recovers approved enrollment and expires private delivery
+capsules. This source integration is not a deployed installation or a merge
+permission: ordinary effect/admission transport and the activation package still
+require their own complete implementation and qualification.
 
-Authorization-policy schema v3 is currently a compatibility reader and version
-discriminator only. It can deserialize an `ordinary_agents` rule collection,
-report the observed schema version and rule count, and retain the rules during a
-record round trip. The five existing human, workflow, and operator identity
-types keep their schema-v2 evaluation behavior. The generic authorization
-evaluator has no ordinary-agent identity branch and deliberately ignores the
-ordinary-agent rules. Only the separate pure evaluator described below can
-reason about those rules, and its result remains inert.
+The older `proposed_ordinary_agent_v1` evidence models and their pure eligibility
+result remain inert fixture contracts. They do not authenticate a caller or
+perform an effect. The generic authorization evaluator still ignores ordinary
+rules; the dedicated gateway and joined lifecycle checks enforce them. Existing
+human, workflow and operator identities retain their established behavior. The
+new terminal enrollment proposer checks one current managed capability directly
+under schema v2/v3 rather than coercing v3 through a v2-only generic helper.
 
 Schema-v3 policy writes are not activated. The authoritative store rejects a v3
 seed even when no active record exists, rejects v3 replacement records, and
@@ -34,15 +36,10 @@ same v1/v2 records that previous service images can parse. A future persisted v3
 record will be unreadable to those images, so they cannot be rollback targets
 after v3 activation.
 
-The enrollment request and review contracts remain dormant in this phase.
-They parse exact enroll, credential-rotation, and principal-revocation pre-state,
-derive the minimum execution profile from the bound rule, and return only a
-stable unavailable result. They have no registered privileged-operation
-descriptor, route, worker dispatch, provider call, session path, or effect path.
-Internal authentication issuance and verification primitives exist; no public
-ordinary authentication gateway is registered.
-
-The authoritative lifecycle store is present behind that unreachable boundary.
+The earlier dormant enrollment request/review API remains a compatibility
+surface. The new compiled client requests use the persisted enrollment domain
+instead. Its authoritative lifecycle store is reachable only through the
+service-owned approved-operation worker and the signed administrator controls.
 Its internal apply envelope separates an agent-to-Launchplane authentication
 credential candidate from Launchplane-held provider App custody. The first
 contains a service-derived authentication digest and no bearer value. The second
@@ -348,10 +345,9 @@ retain their historical operation evidence while reporting current retirement
 safety. Private persistence failures expose a safe error category, SQLSTATE and
 trace ID, suppressing SQL parameters and PostgreSQL failing-row detail.
 
-These are internal source primitives and transaction proofs, not an activated
-client connection flow. Authenticated proposal/approval descriptors, client
-installation, ordinary HTTP admission, session/effect integration, and exact-scope
-live qualification remain separate prerequisites. Owner acceptance remains tied
+These source primitives and transaction proofs now have dedicated client and
+browser adapters. Installed private client support, ordinary effect/admission
+integration, and exact-scope live qualification remain separate prerequisites. Owner acceptance remains tied
 to a PR preview and never requires reading code.
 
 
@@ -380,8 +376,8 @@ The domain session operation is the sole approval authority. Future generic
 operation views must project it rather than maintain a second independent
 approval. Initial issuer preparation must consume its exact approved intent and
 respect the original absolute session deadline; it must not reset deadlines from
-worker execution time. Public descriptors and browser/agent transport remain
-separate integration work. These internal adapters do not activate any route.
+worker execution time. Dedicated client and browser routes below invoke these adapters. They do not
+activate schema-v3 policy writes or ordinary provider effects.
 
 The session lock order appends domain operation, session, lease and finite job
 after the issuer's policy/principal/credential/delivery locks. Browser approval
@@ -460,15 +456,18 @@ private response custody evidence. It is not an LLM-visible generic tool result,
 operator UI response, or public agent context. The client must save the credential
 privately before reporting redacted readiness, reject authorization redirects,
 and reuse the same operation/receiver proof for delivery retries. Request logging,
-tracing, ingress rate limits, cleanup scheduling, installed private client support,
-and authenticated enrollment proposal/approval remain activation prerequisites.
+tracing, ingress rate limits, installed private client support and qualification
+of the deployed cleanup/worker image remain activation prerequisites.
 The route creates no principal, session, policy, or grant on its own.
 
 An exact operation review link can include `operation_id` on the existing
 Engineering Ops privileged-operation page. The page reads that operation's
 review directly and preserves server authorization checks; it does not require
-searching the operation list. Ordinary delegation presentation and its
-server-authoritative approval adapter are a separate part of client integration.
+searching the operation list. An ordinary request adds its opaque `principal_id`
+and opens the domain-backed agent review directly. It shows authenticated
+requester, exact repository, current policy ceiling, requested session limits and
+absolute deadlines without exposing code, digests, or credentials. Missing bound
+policy means no engineering execution enabled; it is not inferred read-only access.
 
 The enrollment preparation helper resolves an explicitly supplied nonsecret App
 ID and managed-secret binding selector against current LP records. It selects
@@ -479,3 +478,40 @@ Rotation carries the current principal and custody predecessor into the reviewed
 intent. Preparation creates no authority or credential; final apply still checks
 these bindings in its transaction. Installation tooling must obtain the selectors
 from verified setup facts rather than asking the administrator to type them.
+
+
+## Client proposal and recovery protocol
+
+`POST /v1/agent/ordinary-agent-enrollments` accepts the compiled
+`ordinary-agent-enrollment` request from an authenticated terminal client with
+one current managed `ordinary_agent_enrollment.propose` capability. Operator or
+administrator credentials do not substitute for that client identity. The
+request contains setup selectors and absolute lifetimes, never administrator,
+approval or provider-proof fields. It returns only its own public operation view
+and a relative exact-review URL. The same requester can reconnect through
+`GET /v1/agent/ordinary-agent-enrollments/{principal_id}/{operation_id}`.
+
+An existing ordinary credential uses
+`POST /v1/agent/ordinary-agent-session-proposals` for a bounded session and the
+corresponding operation GET for status. Its cancellation endpoint cancels only
+its issued session. These routes never run legacy credential resolution. Signed
+browser decisions use `/v1/ordinary-agent-operations/{principal_id}/{operation_id}`
+with approval/cancel suffixes; session revoke and whole-principal disconnect have
+distinct routes and controls. Current immutable administrator authority, signed
+cookie, origin/fetch metadata and CSRF are required for every browser mutation.
+The browser receives public views, never private issuer or session write sets.
+
+The existing privileged-operation worker scans authoritative approved initial
+operations, checks their original deadlines and exact current policy before
+preparing issuer material, and calls domain-backed joined apply. Its cursor
+advances on failures and wraps on an empty page; one blocked page cannot pin
+later requests. Per-operation failures report counts only and do not alter the
+generic worker's failure threshold or heartbeat. Existing reviewed delivery
+cleanup keeps its independent failure/backoff behavior. There is no public
+execute route, second approval store, new scheduler, or post-commit-only wake-up.
+
+The shared private helper/CLI/Lab installation remains separate: it must generate
+and retain receiver proof privately, save the claimed credential atomically
+before reporting readiness, reuse finite approved sessions, and handle bounded
+status retries without GitHub polling. No installed-consumer or live usability
+claim follows from these source and controlled browser/HTTP checks alone.

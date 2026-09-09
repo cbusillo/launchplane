@@ -25,8 +25,18 @@ import {
   EngineeringRouteFrame,
 } from "./EngineeringRouteUi";
 import { formatTime } from "./format";
+import { EngineeringOrdinaryAgentRoute } from "./EngineeringOrdinaryAgentRoute";
 
-export function EngineeringPrivilegedOperationsRoute({
+export function EngineeringPrivilegedOperationsRoute({ fixtureMode }: { fixtureMode: DevFixtureMode }) {
+  const query = new URLSearchParams(window.location.search);
+  const principalId = query.get("principal_id");
+  if (principalId !== null) {
+    return <EngineeringOrdinaryAgentRoute principalId={principalId} operationId={query.get("operation_id") ?? ""} />;
+  }
+  return <DefaultPrivilegedOperationsRoute fixtureMode={fixtureMode} />;
+}
+
+function DefaultPrivilegedOperationsRoute({
   fixtureMode,
 }: {
   fixtureMode: DevFixtureMode;

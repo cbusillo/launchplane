@@ -20030,7 +20030,20 @@ class PostgresRecordStore(HumanSessionStore):
             )
         if row.cancelled_at is not None:
             status, reason = "cancelled", "operation_cancelled"
+        current_policy_actions = (
+            rules[0].actions
+            if len(rules) == 1
+            and rules[0].principal_id == row.principal_id
+            and rules[0].target == target
+            else ()
+        )
         return OrdinaryAgentSessionOperationView(
+            current_policy_actions=current_policy_actions,
+            current_policy_execution_profile=(
+                derive_ordinary_agent_execution_profile(current_policy_actions)
+                if current_policy_actions
+                else None
+            ),
             requester_kind="terminal_agent" if row.kind == "initial" else "ordinary_agent",
             requester_subject=(
                 str(row.payload["requester_subject"]) if row.kind == "initial" else row.principal_id

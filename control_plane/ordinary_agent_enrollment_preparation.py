@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from typing import Literal
 
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
+from control_plane.contracts.canonical_json import canonical_json_sha256
+from control_plane.contracts.ordinary_agent_client import OrdinaryAgentEnrollmentClientRequest
 from control_plane.contracts.ordinary_agent import OrdinaryAgentTarget
 from control_plane.contracts.ordinary_agent_enrollment import (
     OrdinaryAgentPolicyBinding,
@@ -13,6 +15,8 @@ from control_plane.contracts.ordinary_agent_enrollment import (
 )
 from control_plane.contracts.ordinary_agent_lifecycle import (
     OrdinaryAgentCredentialCustodyCandidate,
+    OrdinaryAgentEnrollmentIntent,
+    OrdinaryAgentPlannedAuthenticationCredential,
     OrdinaryAgentManagedSecretBinding,
 )
 from control_plane.github_app_identity import GitHubApiRequest
@@ -139,4 +143,62 @@ def prepare_ordinary_agent_enrollment_scope(
         principal=principal,
         credential_id=credential_id,
         credential_version=credential_version,
+    )
+
+
+def prepare_ordinary_agent_enrollment_intent(
+    *,
+    store: PostgresRecordStore,
+    policy_record: LaunchplaneAuthzPolicyRecord,
+    request: OrdinaryAgentEnrollmentClientRequest,
+    now: int,
+    api_request: GitHubApiRequest = github_api_request,
+) -> OrdinaryAgentEnrollmentIntent:
+    """Construct reviewed provenance from real scope, without generating a secret."""
+    if not request.credential_valid_from <= now < request.delivery.expires_at <= now + 900:
+        raise ValueError("requested delivery window is unavailable")
+    scope = prepare_ordinary_agent_enrollment_scope(
+        store=store,
+        policy_record=policy_record,
+        action=request.action,
+        principal_id=request.principal_id,
+        target=request.target,
+        github_app_id=request.github_app_id,
+        secret_binding_id=request.secret_binding_id,
+        valid_from=request.credential_valid_from,
+        expires_at=request.credential_expires_at,
+        api_request=api_request,
+    )
+    request_sha256 = canonical_json_sha256(request.model_dump(mode="json"))
+    evidence_sha256 = canonical_json_sha256(scope.custody.model_dump(mode="json"))
+    credential_id = (
+        scope.credential_id
+        or "credential_"
+        + canonical_json_sha256(
+            {
+                "domain": "ordinary-agent-client-credential-v1",
+                "principal_id": request.principal_id,
+                "operation_id": request.operation_id,
+            }
+        )[:48]
+    )
+    return OrdinaryAgentEnrollmentIntent(
+        action=request.action,
+        operation_id=request.operation_id,
+        principal_id=request.principal_id,
+        request_sha256=request_sha256,
+        evidence_sha256=evidence_sha256,
+        plan_sha256=canonical_json_sha256({"request": request_sha256, "evidence": evidence_sha256}),
+        policy=scope.policy,
+        principal=scope.principal,
+        credential_id=scope.credential_id,
+        credential_version=scope.credential_version,
+        authentication_credential=OrdinaryAgentPlannedAuthenticationCredential(
+            credential_id=credential_id,
+            valid_from=request.credential_valid_from,
+            expires_at=request.credential_expires_at,
+        ),
+        delivery=request.delivery,
+        custody=scope.custody,
+        session_attenuation=request.session_attenuation,
     )

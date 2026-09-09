@@ -32,6 +32,23 @@ class AgentOperatorContractTests(unittest.TestCase):
             [(spec.method, spec.path) for spec in OPERATION_SPECS],
         )
         expected_operation_ids = {
+            ("POST", "/v1/agent/ordinary-agent-enrollments"): "propose_ordinary_agent_enrollment",
+            (
+                "GET",
+                "/v1/agent/ordinary-agent-enrollments/{principal_id}/{operation_id}",
+            ): "read_proposed_ordinary_agent_enrollment",
+            (
+                "POST",
+                "/v1/agent/ordinary-agent-session-proposals",
+            ): "propose_ordinary_agent_session",
+            (
+                "GET",
+                "/v1/agent/ordinary-agent-session-proposals/{operation_id}",
+            ): "read_ordinary_agent_session_operation",
+            (
+                "POST",
+                "/v1/agent/ordinary-agent-session-proposals/{operation_id}/cancel",
+            ): "cancel_ordinary_agent_session",
             (
                 "POST",
                 "/v1/agent/ordinary-agent-enrollments/{operation_id}/claim",
@@ -59,6 +76,11 @@ class AgentOperatorContractTests(unittest.TestCase):
             ("GET", "/v1/governance/projection"): "read_governance_projection",
         }
         expected_dependencies = {
+            "propose_ordinary_agent_enrollment": ["read_terminal_enrollment_requester"],
+            "read_proposed_ordinary_agent_enrollment": ["read_terminal_enrollment_requester"],
+            "propose_ordinary_agent_session": ["read_ordinary_agent_proof"],
+            "read_ordinary_agent_session_operation": ["read_ordinary_agent_proof"],
+            "cancel_ordinary_agent_session": ["read_ordinary_agent_proof"],
             "claim_ordinary_agent_credential": ["read_ordinary_agent_receiver_claim"],
             "read_agent_context": ["read_identity"],
             "evaluate_agent_write_intent": ["read_browser_mutation_identity"],

@@ -2635,3 +2635,10 @@
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+.ordinary-agent-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .75rem;
+  margin-top: 1rem;
+}
