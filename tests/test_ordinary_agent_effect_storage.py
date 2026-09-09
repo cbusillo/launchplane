@@ -409,20 +409,8 @@ class OrdinaryAgentEffectStorageTests(unittest.TestCase):
                 controller_fence=fence,
             )
 
-    def test_snapshot_replay_and_cleanup_uncertainty_preserve_normalized_result(self) -> None:
-        _, fence, _ = self.prepare_refresh()
-        attempt = self.store.reserve_ordinary_agent_snapshot_attempt(
-            request_id=self.request.request_id, expected_binding_revision=1, controller_fence=fence
-        )
-        replay = self.store.reserve_ordinary_agent_snapshot_attempt(
-            request_id=self.request.request_id, expected_binding_revision=1, controller_fence=fence
-        )
-        self.assertEqual(attempt, replay)
-        permit = self.store.reserve_ordinary_agent_read_custody_attempt(
-            attempt_id=attempt.attempt_id, expected_attempt_revision=attempt.revision
-        )
-        self.issue(permit)
-        result = snapshots.OrdinaryAgentMergeTrainSnapshotResult(
+    def snapshot_result(self) -> snapshots.OrdinaryAgentMergeTrainSnapshotResult:
+        return snapshots.OrdinaryAgentMergeTrainSnapshotResult(
             snapshot=MergeTrainDryRunSnapshot(
                 repository=self.request.target.repository,
                 base_branch=self.request.target.base_branch,
@@ -432,6 +420,8 @@ class OrdinaryAgentEffectStorageTests(unittest.TestCase):
                         number=item.number,
                         head_sha=item.head_sha,
                         created_at="2026-01-01T00:00:00Z",
+                        mergeable="mergeable",
+                        required_checks_status="pass",
                     )
                     for item in self.request.pull_requests
                 ),
@@ -452,13 +442,28 @@ class OrdinaryAgentEffectStorageTests(unittest.TestCase):
                 source="both",
                 classic_sha256="a" * 64,
                 evaluated_rules_sha256="b" * 64,
-                required_checks=(),
+                required_checks=(snapshots.OrdinaryAgentRequiredCheck(context="ci"),),
             ),
             counts=snapshots.OrdinaryAgentProviderRequestCounts(
                 rest_core_requests=1, graphql_requests=1, graphql_points=1
             ),
             snapshot_sha256="c" * 64,
         )
+
+    def test_snapshot_replay_and_cleanup_uncertainty_preserve_normalized_result(self) -> None:
+        _, fence, _ = self.prepare_refresh()
+        attempt = self.store.reserve_ordinary_agent_snapshot_attempt(
+            request_id=self.request.request_id, expected_binding_revision=1, controller_fence=fence
+        )
+        replay = self.store.reserve_ordinary_agent_snapshot_attempt(
+            request_id=self.request.request_id, expected_binding_revision=1, controller_fence=fence
+        )
+        self.assertEqual(attempt, replay)
+        permit = self.store.reserve_ordinary_agent_read_custody_attempt(
+            attempt_id=attempt.attempt_id, expected_attempt_revision=attempt.revision
+        )
+        self.issue(permit)
+        result = self.snapshot_result()
         observed = self.store.record_ordinary_agent_snapshot_success(
             attempt_id=attempt.attempt_id,
             custody_attempt_id=permit.custody_attempt_id,
@@ -498,6 +503,130 @@ class OrdinaryAgentEffectStorageTests(unittest.TestCase):
         )
         self.assertEqual(recovered.result, result)
         self.assertEqual(recovered.state, "completed")
+
+    def test_pending_source_observations_wait_then_accept_without_using_failure_budget(
+        self,
+    ) -> None:
+        _, fence, _ = self.prepare_refresh()
+        ready = self.snapshot_result()
+        initial_time = self.fixture.now
+        with patch(
+            "control_plane.contracts.ordinary_agent_effect.CANDIDATE_CHECK_DELAYS_SECONDS", (1,)
+        ):
+            for index in range(5):
+                attempt = self.store.reserve_ordinary_agent_snapshot_attempt(
+                    request_id=self.request.request_id,
+                    expected_binding_revision=1,
+                    controller_fence=fence,
+                )
+                permit = self.store.reserve_ordinary_agent_read_custody_attempt(
+                    attempt_id=attempt.attempt_id,
+                    expected_attempt_revision=attempt.revision,
+                )
+                self.issue(permit)
+                # Alternate pending checks, unknown checks and unknown mergeability.
+                values = (
+                    {"required_checks_status": "pending"},
+                    {"required_checks_status": "unknown"},
+                    {"mergeable": "unknown"},
+                    {"required_checks_status": "pending"},
+                    {},
+                )[index]
+                result = ready.model_copy(
+                    update={
+                        "snapshot": ready.snapshot.model_copy(
+                            update={
+                                "pull_requests": tuple(
+                                    item.model_copy(update=values)
+                                    for item in ready.snapshot.pull_requests
+                                )
+                            }
+                        )
+                    }
+                )
+                observed = self.store.record_ordinary_agent_snapshot_success(
+                    attempt_id=attempt.attempt_id,
+                    custody_attempt_id=permit.custody_attempt_id,
+                    result=result,
+                )
+                if index == 0:
+                    self.store.mark_ordinary_agent_custody_cleanup_unknown(
+                        attempt_id=permit.custody_attempt_id
+                    )
+                    self.store.record_ordinary_agent_read_failure(
+                        attempt_id=attempt.attempt_id,
+                        custody_attempt_id=permit.custody_attempt_id,
+                        reason_code="cleanup_unknown",
+                        counts=result.counts,
+                    )
+                self.store.close_ordinary_agent_custody_issue_attempt(
+                    attempt_id=permit.custody_attempt_id,
+                    reason="confirmed_revoked",
+                )
+                if index < 4:
+                    self.assertEqual(observed.state, "completed")
+                    with self.assertRaisesRegex(
+                        OrdinaryAgentSessionAdmissionDenied, "source_check_wait"
+                    ):
+                        self.store.reserve_ordinary_agent_snapshot_attempt(
+                            request_id=self.request.request_id,
+                            expected_binding_revision=1,
+                            controller_fence=fence,
+                        )
+                    self.fixture.clock.return_value = datetime.fromtimestamp(
+                        initial_time + index + 1, timezone.utc
+                    ).isoformat()
+                else:
+                    replay = self.store.reserve_ordinary_agent_snapshot_attempt(
+                        request_id=self.request.request_id,
+                        expected_binding_revision=1,
+                        controller_fence=fence,
+                    )
+                    self.assertEqual(replay.result, ready)
+                    self.assertEqual(replay.attempt_id, attempt.attempt_id)
+
+    def test_unconfigured_checks_remain_exhausted_after_cleanup_recovery(self) -> None:
+        _, fence, _ = self.prepare_refresh()
+        ready = self.snapshot_result()
+        result = ready.model_copy(
+            update={"protection": ready.protection.model_copy(update={"required_checks": ()})}
+        )
+        attempt = self.store.reserve_ordinary_agent_snapshot_attempt(
+            request_id=self.request.request_id,
+            expected_binding_revision=1,
+            controller_fence=fence,
+        )
+        permit = self.store.reserve_ordinary_agent_read_custody_attempt(
+            attempt_id=attempt.attempt_id,
+            expected_attempt_revision=attempt.revision,
+        )
+        self.issue(permit)
+        observed = self.store.record_ordinary_agent_snapshot_success(
+            attempt_id=attempt.attempt_id,
+            custody_attempt_id=permit.custody_attempt_id,
+            result=result,
+        )
+        self.assertEqual(observed.reason_code, "required_checks_unconfigured")
+        self.assertEqual(observed.state, "exhausted")
+        self.store.mark_ordinary_agent_custody_cleanup_unknown(attempt_id=permit.custody_attempt_id)
+        self.store.record_ordinary_agent_read_failure(
+            attempt_id=attempt.attempt_id,
+            custody_attempt_id=permit.custody_attempt_id,
+            reason_code="cleanup_unknown",
+            counts=result.counts,
+        )
+        self.store.close_ordinary_agent_custody_issue_attempt(
+            attempt_id=permit.custody_attempt_id,
+            reason="confirmed_revoked",
+        )
+        with self.assertRaisesRegex(
+            OrdinaryAgentSessionAdmissionDenied, "required_checks_unconfigured"
+        ):
+            self.store.reserve_ordinary_agent_snapshot_attempt(
+                request_id=self.request.request_id,
+                expected_binding_revision=1,
+                controller_fence=fence,
+            )
 
     def test_expiry_during_dispatch_validation_does_not_checkpoint(self) -> None:
         effect, fence, _ = self.prepare_refresh()

@@ -23973,10 +23973,26 @@ class PostgresRecordStore(HumanSessionStore):
                     if actual_attempts and all(
                         item is not None and item.state == "closed" for item in actual_attempts
                     ):
+                        outcome = session.get(
+                            LaunchplaneOrdinaryAgentReadOutcomeRow, latest.attempt_id
+                        )
+                        completion = (
+                            outcome.payload.get("completion") if outcome is not None else None
+                        )
+                        if latest.result is not None and not isinstance(completion, dict):
+                            completion = {
+                                "state": "exhausted",
+                                "reason_code": "read_recovery_evidence_unavailable",
+                                "next_due_at": None,
+                            }
+                        restored = (
+                            completion
+                            if isinstance(completion, dict)
+                            else {"state": "incomplete", "reason_code": "cleanup_unknown"}
+                        )
                         latest = latest.model_copy(
                             update={
-                                "state": "completed" if latest.result is not None else "incomplete",
-                                "reason_code": None,
+                                **restored,
                                 "revision": latest.revision + 1,
                                 "updated_at": context.now,
                             }
@@ -23992,14 +24008,24 @@ class PostgresRecordStore(HumanSessionStore):
                         )
                         matching = (*matching[:-1], latest)
                 if latest.state in {"fenced", "exhausted"}:
-                    raise OrdinaryAgentSessionAdmissionDenied("read_attempts_exhausted")
+                    # Persist cleanup recovery even when its original decision
+                    # was terminal. Replays report the same exact prerequisite.
+                    session.commit()
+                    raise OrdinaryAgentSessionAdmissionDenied(
+                        latest.reason_code or "read_attempts_exhausted"
+                    )
                 if latest.next_due_at is not None and latest.next_due_at > context.now:
-                    raise OrdinaryAgentSessionAdmissionDenied("candidate_check_wait")
+                    raise OrdinaryAgentSessionAdmissionDenied(
+                        "source_check_wait" if purpose == "snapshot" else "candidate_check_wait"
+                    )
                 if latest.state == "completed":
                     result = latest.result
-                    if purpose == "snapshot" or (
+                    if (
+                        isinstance(result, snapshot_contracts.OrdinaryAgentMergeTrainSnapshotResult)
+                        and not result.awaits_source_observation
+                    ) or (
                         isinstance(result, snapshot_contracts.OrdinaryAgentCandidateCheckResult)
-                        and result.status != "pending"
+                        and result.status not in {"pending", "unknown"}
                     ):
                         session.commit()
                         return latest
@@ -24007,6 +24033,13 @@ class PostgresRecordStore(HumanSessionStore):
                 observations = sum(item.state == "completed" for item in matching)
                 if failures >= effect_contracts.MAX_SNAPSHOT_PROVIDER_ATTEMPTS:
                     raise OrdinaryAgentSessionAdmissionDenied("read_attempts_exhausted")
+                if (
+                    purpose == "snapshot"
+                    and observations >= effect_contracts.MAX_SNAPSHOT_SOURCE_OBSERVATIONS
+                ):
+                    raise OrdinaryAgentSessionAdmissionDenied(
+                        "source_check_observation_budget_exhausted"
+                    )
                 if (
                     purpose == "candidate_check"
                     and observations >= effect_contracts.MAX_CANDIDATE_CHECK_OBSERVATIONS
@@ -24281,7 +24314,7 @@ class PostgresRecordStore(HumanSessionStore):
             payload = {"kind": "success", "result": result.model_dump(mode="json")}
             existing = session.get(LaunchplaneOrdinaryAgentReadOutcomeRow, attempt_id)
             if existing is not None:
-                if existing.payload != payload:
+                if any(existing.payload.get(key) != value for key, value in payload.items()):
                     raise OrdinaryAgentSessionAdmissionDenied("immutable_read_outcome_conflict")
                 return record
             if record.state != "reading":
@@ -24297,6 +24330,8 @@ class PostgresRecordStore(HumanSessionStore):
                 raise OrdinaryAgentSessionAdmissionDenied("read_issuance_unproven")
             now = self._ordinary_agent_database_epoch(session)
             protection_changed = False
+            reason: str | None = None
+            exhausted = False
             next_due: int | None = None
             if isinstance(result, snapshot_contracts.OrdinaryAgentMergeTrainSnapshotResult):
                 if (
@@ -24313,6 +24348,40 @@ class PostgresRecordStore(HumanSessionStore):
                     )
                 ):
                     raise OrdinaryAgentSessionAdmissionDenied("snapshot_scope_conflict")
+                if not result.protection.required_checks:
+                    exhausted, reason = True, "required_checks_unconfigured"
+                elif result.awaits_source_observation:
+                    previous = (
+                        session.scalar(
+                            select(func.count())
+                            .select_from(LaunchplaneOrdinaryAgentReadAttemptRow)
+                            .where(
+                                LaunchplaneOrdinaryAgentReadAttemptRow.request_id
+                                == record.request_id,
+                                LaunchplaneOrdinaryAgentReadAttemptRow.binding_revision
+                                == record.binding_revision,
+                                LaunchplaneOrdinaryAgentReadAttemptRow.purpose == "snapshot",
+                                LaunchplaneOrdinaryAgentReadAttemptRow.state == "completed",
+                            )
+                        )
+                        or 0
+                    )
+                    ordinal = previous + 1
+                    exhausted = ordinal >= effect_contracts.MAX_SNAPSHOT_SOURCE_OBSERVATIONS
+                    reason = (
+                        "source_check_observation_budget_exhausted"
+                        if exhausted
+                        else "source_checks_undecided"
+                    )
+                    delays = effect_contracts.CANDIDATE_CHECK_DELAYS_SECONDS
+                    next_due = (
+                        min(
+                            now + delays[min(ordinal - 1, len(delays) - 1)],
+                            request.continuation_expires_at or request.expires_at,
+                        )
+                        if not exhausted
+                        else None
+                    )
             else:
                 if (
                     record.purpose != "candidate_check"
@@ -24330,15 +24399,18 @@ class PostgresRecordStore(HumanSessionStore):
                     )
                 )
                 originals = [
-                    effect_contracts.OrdinaryAgentSnapshotAttemptRecord.model_validate(
-                        item.payload
-                    ).result
+                    effect_contracts.OrdinaryAgentSnapshotAttemptRecord.model_validate(item.payload)
                     for item in snapshot_rows
                 ]
                 snapshots = [
-                    item
+                    item.result
                     for item in originals
-                    if isinstance(item, snapshot_contracts.OrdinaryAgentMergeTrainSnapshotResult)
+                    if item.state == "completed"
+                    and isinstance(
+                        item.result, snapshot_contracts.OrdinaryAgentMergeTrainSnapshotResult
+                    )
+                    and not item.result.awaits_source_observation
+                    and item.result.protection.required_checks
                 ]
                 if len(snapshots) != 1:
                     raise OrdinaryAgentSessionAdmissionDenied("snapshot_unavailable")
@@ -24370,23 +24442,33 @@ class PostgresRecordStore(HumanSessionStore):
                         payload=result.model_dump(mode="json"),
                     )
                 )
-                if result.status == "pending":
+                if result.status in {"pending", "unknown"}:
                     delays = effect_contracts.CANDIDATE_CHECK_DELAYS_SECONDS
                     next_due = min(
                         now + delays[min(ordinal - 1, len(delays) - 1)],
                         request.continuation_expires_at or request.expires_at,
                     )
+                    if ordinal >= effect_contracts.MAX_CANDIDATE_CHECK_OBSERVATIONS:
+                        exhausted, reason = True, "candidate_check_observation_budget_exhausted"
+                        next_due = None
+                if protection_changed:
+                    exhausted, reason = True, "protection_changed"
+                    next_due = None
+            completion = {
+                "state": "exhausted" if exhausted else "completed",
+                "reason_code": reason,
+                "next_due_at": next_due,
+            }
+            payload["completion"] = completion
             session.add(
                 LaunchplaneOrdinaryAgentReadOutcomeRow(attempt_id=attempt_id, payload=payload)
             )
             updated = record.model_copy(
                 update={
-                    "state": "exhausted" if protection_changed else "completed",
-                    "reason_code": "protection_changed" if protection_changed else None,
+                    **completion,
                     "revision": record.revision + 1,
                     "result": result,
                     "updated_at": now,
-                    "next_due_at": next_due,
                 }
             )
             row.state, row.revision, row.payload = (

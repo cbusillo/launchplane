@@ -12,6 +12,7 @@ from control_plane.contracts.ordinary_agent_effect import (
     OrdinaryAgentProviderQuotaKey,
     OrdinaryAgentProviderWaitRecord,
     OrdinaryAgentSnapshotStore,
+    OrdinaryAgentSnapshotAttemptRecord,
 )
 from control_plane.contracts.ordinary_agent_snapshot import (
     OrdinaryAgentCandidateCheckResult,
@@ -34,6 +35,7 @@ from control_plane.ordinary_agent_github_transport import (
     require_installation_provider_ready,
 )
 from control_plane.workflows.launchplane import github_api_request
+from control_plane.ordinary_agent_session_lifecycle import OrdinaryAgentSessionAdmissionDenied
 
 
 SnapshotReader = Callable[
@@ -170,6 +172,7 @@ def _acquire_read(
     started = monotonic()
     transport: DeadlineMergeTrainGitHubTransport | None = None
     result: OrdinaryAgentMergeTrainSnapshotResult | OrdinaryAgentCandidateCheckResult | None = None
+    recorded: OrdinaryAgentSnapshotAttemptRecord | None = None
     try:
         with ordinary_agent_provider_token_lease(
             record_store=custody_store,
@@ -205,7 +208,7 @@ def _acquire_read(
             if result.counts != _request_counts(transport):
                 raise OrdinaryAgentProviderEvidenceError("provider_request_counts_mismatch")
             if purpose == "snapshot" and isinstance(result, OrdinaryAgentMergeTrainSnapshotResult):
-                store.record_ordinary_agent_snapshot_success(
+                recorded = store.record_ordinary_agent_snapshot_success(
                     attempt_id=attempt_id,
                     custody_attempt_id=reservation.custody_attempt_id,
                     result=result,
@@ -213,7 +216,7 @@ def _acquire_read(
             elif purpose == "candidate_check" and isinstance(
                 result, OrdinaryAgentCandidateCheckResult
             ):
-                store.record_ordinary_agent_candidate_check_success(
+                recorded = store.record_ordinary_agent_candidate_check_success(
                     attempt_id=attempt_id,
                     custody_attempt_id=reservation.custody_attempt_id,
                     result=result,
@@ -245,6 +248,15 @@ def _acquire_read(
             counts=counts,
         )
         raise
+    # The response is immutable; report its decision only after custody cleanup,
+    # outside the provider-failure handler so it cannot append a conflicting outcome.
+    if recorded is not None and recorded.state in {"fenced", "exhausted"}:
+        raise OrdinaryAgentSessionAdmissionDenied(recorded.reason_code or "read_attempts_exhausted")
+    if (
+        isinstance(result, OrdinaryAgentMergeTrainSnapshotResult)
+        and result.awaits_source_observation
+    ):
+        raise OrdinaryAgentSessionAdmissionDenied("source_check_wait")
     if result is None:
         raise RuntimeError("ordinary provider reader returned no result")
     if isinstance(result, OrdinaryAgentMergeTrainSnapshotResult):

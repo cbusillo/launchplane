@@ -598,11 +598,18 @@ stored head-refresh evidence may update the request binding, without resetting
 its deadline or spending a second action.
 
 Normalized provider snapshots and candidate-check observations have durable read
-attempts. Successful replay uses the stored result. Token cleanup uncertainty
-fences subsequent work while retaining that result; confirmed cleanup permits
-recovery without another snapshot call. Candidate observations keep the original
-protection evidence and finite backoff budget. Provider quota waits are shared
-monotonic deadlines for their actual quota identity, independent of job expiry.
+attempts. Source snapshots with pending/unknown checks or unknown mergeability
+retain their successful response but wait for bounded re-observation; only decided
+source evidence can be replayed into planning. Source observations have a separate
+nine-observation budget, preserving the three-attempt provider-failure budget.
+Candidate pending and unknown results share their existing nine-observation cap.
+Both use the finite candidate-check backoff within the original request deadline.
+Missing required-check configuration terminates the read instead of polling forever.
+Token cleanup uncertainty fences subsequent work while retaining the immutable
+response and its readiness decision; confirmed cleanup restores that decision and
+its retry time, never promoting pending or exhausted evidence to ready. Candidate
+observations bind protection to the accepted source snapshot. Provider quota waits
+are shared monotonic deadlines for their actual quota identity, independent of job expiry.
 
 Ordinary controller and candidate/landing/collapse records carry an explicit job
 binding. Generic writers cannot adopt them. Joined progress successors preserve

@@ -75,6 +75,13 @@ class OrdinaryAgentMergeTrainSnapshotResult(StrictFrozenModel):
     counts: OrdinaryAgentProviderRequestCounts
     snapshot_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
+    @property
+    def awaits_source_observation(self) -> bool:
+        return any(
+            item.mergeable == "unknown" or item.required_checks_status in {"pending", "unknown"}
+            for item in self.snapshot.pull_requests
+        )
+
     @field_validator("head_identities", mode="before")
     @classmethod
     def normalize_heads(cls, value: object) -> object:
