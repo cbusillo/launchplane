@@ -33,6 +33,11 @@ routing and safety evidence only; it never becomes live runtime authority.
 
 ## Caller Profiles
 
+This section describes current runtime caller profiles. The reconciled target in
+issue `#2240` makes Codex CLI and Codex Lab equal clients of one
+session-scoped service contract; it does not make a client executable an
+authority source.
+
 Agent context callers are identified as compact agent consumers:
 
 - `automation_worker`: GitHub Actions or service automation. Authorization comes
@@ -92,6 +97,11 @@ waive anything. Incomplete candidate queries fail rather than falling back to
 repository-name or file heuristics. Section-level authorization or provider
 failure leaves the other context sections available.
 
+Those three tenant-admission paths describe current compatibility. The issue
+`#2240` target replaces manager-preview admission with authoritative Owner
+acceptance on the trusted Launchplane surface; agent context may report or
+diagnose that decision but may never author it.
+
 Agents may call lower-level read models directly when they need a narrower
 surface:
 
@@ -103,6 +113,8 @@ surface:
 - `GET /v1/work-graph/tenant-admission/evaluation`
 
 ## Scoped Intents
+
+### Current runtime
 
 Agents do not receive broad write credentials. They can preflight a scoped
 candidate through:
@@ -126,6 +138,22 @@ freshness, and any route-specific source or idempotency binding before mutating.
 For example, Every Code rerun execution consumes an approved `every_code_rerun`
 record and still requires `every_code_work_request.rerun` authorization before
 requeueing the work request.
+
+### Reconciled target (not active)
+
+An ordinary delegated engineering session should receive one bounded
+capability for the product, environment, task, and lifetime. That capability
+includes the redacted diagnostic reads needed to implement, test, diagnose, and
+request delivery within the same scope. Launchplane derives the exact pull
+request, evidence, target, and next allowed action. The client should not have
+to submit manually copied pull-request IDs, policy hashes, or routine reasons,
+or trigger another policy proposal/apply cycle for each internal route.
+
+Execution still revalidates scope, expiry, revocation, technical evidence,
+Owner acceptance when product experience changes, idempotency, and effect
+fences. The delegation cannot mint broader authority or manufacture Owner
+acceptance. Activation requires the separately reviewed `#2058` amendment; the
+current intent and route-specific checks above remain authoritative until then.
 
 ## Redaction And Provenance
 
