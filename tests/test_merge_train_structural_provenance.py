@@ -17,8 +17,9 @@ from control_plane.contracts.merge_train_structural_provenance import (
     MergeTrainCombinedCandidateOwnerReview,
     MergeTrainOwnerEvidenceBinding,
     MergeTrainRollingStep,
-    MergeTrainStructuralDeltaFingerprint,
     MergeTrainStructuralCandidateResult,
+    MergeTrainStructuralChangeImpactModel,
+    MergeTrainStructuralDeltaFingerprint,
     MergeTrainStructuralEntryBinding,
     MergeTrainStructuralEntryObservation,
     MergeTrainStructuralEvaluationInput,
@@ -245,6 +246,107 @@ class MergeTrainStructuralProvenanceTests(unittest.TestCase):
         self.assertEqual(reviewed.status, "exact")
         self.assertIn("structural_combined_owner_review_recorded", reviewed.reason_codes)
 
+    def test_attested_engineering_only_path_overlap_is_exact(self) -> None:
+        candidate_record, landing_record = _records((_entry(1, 1), _entry(2, 2)))
+
+        for model in ("legacy_v1", "v2"):
+            with self.subTest(model=model):
+                evaluation = _evaluation(
+                    candidate_record,
+                    landing_record,
+                    target_position=1,
+                    current_paths={1: ("shared.py",), 2: ("shared.py",)},
+                    change_impact_models={1: model, 2: model},
+                    change_impact_policy_digests={1: "a" * 64, 2: "a" * 64},
+                )
+
+                result = evaluate_merge_train_structural_candidate(
+                    evaluation=evaluation,
+                    candidate_record=candidate_record,
+                    landing_plan_record=landing_record,
+                )
+
+                self.assertEqual(result.status, "exact")
+                self.assertIn("structural_batch_entry_exact", result.reason_codes)
+                self.assertNotIn("structural_changed_path_overlap", result.reason_codes)
+
+    def test_overlap_attestation_is_fail_closed_for_model_policy_and_subjects(self) -> None:
+        candidate_record, landing_record = _records((_entry(1, 1), _entry(2, 2)))
+        shared = MergeTrainStructuralSubject(product="video", system="verification")
+        cases: tuple[
+            tuple[
+                str,
+                dict[int, MergeTrainStructuralChangeImpactModel],
+                dict[int, str],
+                dict[int, tuple[MergeTrainStructuralSubject, ...]],
+            ],
+            ...,
+        ] = (
+            ("unattested", {}, {}, {}),
+            ("mixed_models", {1: "legacy_v1", 2: "v2"}, {1: "a" * 64, 2: "a" * 64}, {}),
+            ("policy_drift", {1: "v2", 2: "v2"}, {1: "a" * 64, 2: "b" * 64}, {}),
+            (
+                "affected_subject",
+                {1: "v2", 2: "v2"},
+                {1: "a" * 64, 2: "a" * 64},
+                {1: (shared,)},
+            ),
+        )
+        for case, models, policy_digests, subjects in cases:
+            with self.subTest(case=case):
+                evaluation = _evaluation(
+                    candidate_record,
+                    landing_record,
+                    target_position=1,
+                    current_paths={1: ("shared.py",), 2: ("shared.py",)},
+                    change_impact_models=models,
+                    change_impact_policy_digests=policy_digests,
+                    current_subjects=subjects,
+                )
+
+                result = evaluate_merge_train_structural_candidate(
+                    evaluation=evaluation,
+                    candidate_record=candidate_record,
+                    landing_plan_record=landing_record,
+                )
+
+                self.assertEqual(result.status, "mismatch")
+                self.assertIn("structural_changed_path_overlap", result.reason_codes)
+
+    def test_nonblocking_overlap_still_validates_supplied_combined_review(self) -> None:
+        candidate_record, landing_record = _records((_entry(1, 1), _entry(2, 2)))
+        evaluation = _evaluation(
+            candidate_record,
+            landing_record,
+            target_position=1,
+            current_paths={1: ("shared.py",), 2: ("shared.py",)},
+            change_impact_models={1: "v2", 2: "v2"},
+            change_impact_policy_digests={1: "a" * 64, 2: "a" * 64},
+        )
+        mismatched_review = MergeTrainCombinedCandidateOwnerReview(
+            evidence_bindings=(
+                MergeTrainOwnerEvidenceBinding(
+                    event_id="owner-acceptance:l1:unrelated",
+                    binding_sha256="b" * 64,
+                ),
+            ),
+            candidate_sha256="unrelated-candidate",
+            landing_plan_sha256=evaluation.active_landing_plan_sha256,
+            policy_key=evaluation.policy_key,
+            policy_sha256=evaluation.policy_sha256,
+            entries=evaluation.entries,
+        )
+        supplied = evaluation.model_copy(update={"combined_owner_review": mismatched_review})
+
+        result = evaluate_merge_train_structural_candidate(
+            evaluation=supplied,
+            candidate_record=candidate_record,
+            landing_plan_record=landing_record,
+        )
+
+        self.assertEqual(result.status, "mismatch")
+        self.assertIn("structural_combined_owner_review_mismatch", result.reason_codes)
+
     def test_combined_owner_evidence_is_non_authoritative_and_digest_bound(self) -> None:
         candidate_record, landing_record = _records((_entry(1, 1), _entry(2, 2)))
         evaluation = _evaluation(
@@ -275,6 +377,30 @@ class MergeTrainStructuralProvenanceTests(unittest.TestCase):
         self.assertEqual(round_tripped.review_sha256, review.review_sha256)
         with self.assertRaisesRegex(ValidationError, "entry digest"):
             MergeTrainCombinedCandidateOwnerReview.model_validate(tampered_payload)
+
+    def test_delta_attestation_preserves_legacy_hashes_and_binds_supported_values(self) -> None:
+        entry = _entry(1, 1)
+        legacy = _delta(entry, paths=("shared.py",), subjects=())
+        legacy_payload = legacy.model_dump(mode="json")
+        attested = _delta(
+            entry,
+            paths=("shared.py",),
+            subjects=(),
+            change_impact_model="v2",
+            change_impact_policy_digest="a" * 64,
+        )
+        tampered = attested.model_dump(mode="json")
+        tampered["change_impact_model"] = "legacy_v1"
+
+        self.assertNotIn("change_impact_model", legacy_payload)
+        self.assertNotIn("change_impact_policy_digest", legacy_payload)
+        self.assertEqual(
+            legacy.fingerprint_sha256,
+            "54a9de73aa8c07d643987d8adf65dcd80f9a31092e4f0e720c6cde2268ab32ee",
+        )
+        self.assertNotEqual(attested.fingerprint_sha256, legacy.fingerprint_sha256)
+        with self.assertRaisesRegex(ValidationError, "digest does not match"):
+            MergeTrainStructuralDeltaFingerprint.model_validate(tampered)
 
     def test_provenance_and_landing_digest_round_trip_after_progress(self) -> None:
         candidate_record, landing_record = _records((_entry(1, 1),))
@@ -449,12 +575,16 @@ def _delta(
     *,
     paths: tuple[str, ...],
     subjects: tuple[MergeTrainStructuralSubject, ...],
+    change_impact_model: MergeTrainStructuralChangeImpactModel | None = None,
+    change_impact_policy_digest: str | None = None,
 ) -> MergeTrainStructuralDeltaFingerprint:
     return MergeTrainStructuralDeltaFingerprint(
         head_sha=entry.head_sha,
         head_tree_sha=entry.head_tree_sha,
         changed_paths=paths,
         affected_subjects=subjects,
+        change_impact_model=change_impact_model,
+        change_impact_policy_digest=change_impact_policy_digest,
     )
 
 
@@ -470,12 +600,16 @@ def _evaluation(
     reviewed_paths: dict[int, tuple[str, ...]] | None = None,
     current_subjects: dict[int, tuple[MergeTrainStructuralSubject, ...]] | None = None,
     reviewed_subjects: dict[int, tuple[MergeTrainStructuralSubject, ...]] | None = None,
+    change_impact_models: dict[int, MergeTrainStructuralChangeImpactModel] | None = None,
+    change_impact_policy_digests: dict[int, str] | None = None,
 ) -> MergeTrainStructuralEvaluationInput:
     candidate = candidate_record.candidate
     current_paths = current_paths or {}
     reviewed_paths = reviewed_paths or current_paths
     current_subjects = current_subjects or {}
     reviewed_subjects = reviewed_subjects or current_subjects
+    change_impact_models = change_impact_models or {}
+    change_impact_policy_digests = change_impact_policy_digests or {}
     observations = []
     for entry in candidate.entries:
         default_paths = (f"src/pr-{entry.pull_request_number}.py",)
@@ -484,6 +618,10 @@ def _evaluation(
                 entry,
                 paths=current_paths.get(entry.pull_request_number, default_paths),
                 subjects=current_subjects.get(entry.pull_request_number, ()),
+                change_impact_model=change_impact_models.get(entry.pull_request_number),
+                change_impact_policy_digest=change_impact_policy_digests.get(
+                    entry.pull_request_number
+                ),
             )
             if include_deltas
             else None
@@ -493,6 +631,10 @@ def _evaluation(
                 entry,
                 paths=reviewed_paths.get(entry.pull_request_number, default_paths),
                 subjects=reviewed_subjects.get(entry.pull_request_number, ()),
+                change_impact_model=change_impact_models.get(entry.pull_request_number),
+                change_impact_policy_digest=change_impact_policy_digests.get(
+                    entry.pull_request_number
+                ),
             )
             if include_deltas
             else None

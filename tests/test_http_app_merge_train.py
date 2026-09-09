@@ -1,7 +1,7 @@
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import cast
+from typing import Any, cast
 from unittest.mock import patch
 
 from click import ClickException
@@ -1952,6 +1952,21 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_stale_landing_returns_accepted_result_and_replays_idempotently(self) -> None:
+        class PartialLandingThenStale(_StaleLandingMergeTrainGitHubClient):
+            def land_batch_candidate(self, **kwargs: Any) -> Any:
+                plan = kwargs["landing_plan"]
+                entry = plan.entries[0].model_copy(
+                    update={
+                        "status": "merged",
+                        "merge_commit_sha": "d" * 40,
+                        "merge_commit_tree_sha": "e" * 40,
+                    }
+                )
+                progress = plan.model_copy(update={"entries": (entry,) + plan.entries[1:]})
+                record = kwargs["checkpoint"](progress, entry, "entry_merged")
+                kwargs["admission_guard"].update_landing_plan_record(record)
+                return super().land_batch_candidate(**kwargs)
+
         with (
             TemporaryDirectory() as temporary_directory_name,
             patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
@@ -1984,7 +1999,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
                     await _post_merge_train_controller_run_once(app, request_payload)
             with patch(
                 "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
-                _StaleLandingMergeTrainGitHubClient,
+                PartialLandingThenStale,
             ):
                 stale_response = await _post_merge_train_controller_run_once(
                     app, request_payload, idempotency_key="controller-stale-landing"
@@ -2011,7 +2026,8 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
             if record.record_id
             == stale_payload["records"]["merge_train_batch_landing_plan_record_id"]
         )
-        self.assertEqual(stale_record.landing_plan.entries[0].status, "stale")
+        self.assertEqual(stale_record.landing_plan.entries[0].status, "merged")
+        self.assertEqual(stale_record.landing_plan.entries[0].merge_commit_sha, "d" * 40)
         self.assertTrue(stale_record.source.startswith("service:controller:stale-landing:"))
 
     async def test_admission_block_recovers_stuck_pre_provider_reconciliation(self) -> None:

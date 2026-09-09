@@ -123,3 +123,19 @@ attempt and admission bindings are unique. Landing observations are unique and
 ordered authoritatively by admission plus observation sequence, with timestamps
 retained only as metadata. Exact replay is idempotent; conflicting replay fails
 closed.
+
+
+## Rolling branch identity and PR projections
+
+Sequential landing uses the authoritative target branch SHA and tree as its
+rolling base. PR detail must still report an open PR, the exact expected head,
+and the expected target branch. If its base SHA projection differs, Launchplane
+performs one bounded branch-identity confirmation and requires the same rolling
+SHA and tree before admission. The existing identity reader may additionally
+read the commit when the branch response omits its tree. This is not a polling
+loop; unknown or unavailable branch evidence cannot authorize a merge.
+
+A later stale error preserves the latest persisted landing checkpoint, including
+already merged entries. Provider transport or malformed-response errors retain
+their existing error types. Confirmation does not make GitHub observation and
+merge atomic; response commit proof and final containment remain required.
