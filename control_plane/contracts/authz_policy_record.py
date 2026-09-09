@@ -11,6 +11,16 @@ from control_plane.service_auth import LaunchplaneAuthzPolicy
 
 
 AuthzPolicyStatus = Literal["active", "superseded"]
+AUTHZ_POLICY_SCHEMA_V3_WRITE_NOT_ACTIVATED = "authz_policy_schema_v3_write_not_activated"
+
+
+class AuthzPolicySchemaWriteNotActivatedError(ValueError):
+    """Raised while schema-v3 policy persistence remains mechanically disabled."""
+
+
+def require_authz_policy_schema_write_activated(*policies: LaunchplaneAuthzPolicy) -> None:
+    if any(policy.schema_version == 3 for policy in policies):
+        raise AuthzPolicySchemaWriteNotActivatedError(AUTHZ_POLICY_SCHEMA_V3_WRITE_NOT_ACTIVATED)
 
 
 def authz_policy_sha256(policy: LaunchplaneAuthzPolicy) -> str:
@@ -21,6 +31,8 @@ def authz_policy_sha256(policy: LaunchplaneAuthzPolicy) -> str:
         payload.pop("local_operators", None)
     if not policy.local_admins:
         payload.pop("local_admins", None)
+    if not policy.ordinary_agents:
+        payload.pop("ordinary_agents", None)
     canonical_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
 
