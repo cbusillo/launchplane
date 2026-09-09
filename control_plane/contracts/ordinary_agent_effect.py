@@ -206,6 +206,11 @@ class OrdinaryAgentLandingPreparation(StrictFrozenModel):
     effect_id: Identifier | None = None
     reason_code: Identifier | None = None
 
+    @field_validator("authority", mode="before")
+    @classmethod
+    def normalize_authority(cls, value: object) -> object:
+        return tuple(value) if isinstance(value, list) else value
+
     @property
     def request_payload(self) -> dict[str, object]:
         return {
@@ -300,6 +305,7 @@ class OrdinaryAgentSemanticDispatchAttemptRecord(StrictFrozenModel):
     custody_attempt_id: Identifier
     dispatch_checkpoint_at: Epoch
     fixed_token_expires_at: Epoch
+    work_expires_at: Epoch | None = None
     controller_fence: OrdinaryAgentControllerFence
     command_sha256: Digest
 

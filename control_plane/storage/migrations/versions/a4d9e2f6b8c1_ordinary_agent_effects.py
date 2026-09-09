@@ -13,6 +13,42 @@ depends_on: str | Sequence[str] | None = None
 
 def upgrade() -> None:
     payload = sa.JSON().with_variant(JSONB(), "postgresql")
+    if (
+        "launchplane_ordinary_agent_landing_preparations"
+        not in sa.inspect(op.get_bind()).get_table_names()
+    ):
+        op.create_table(
+            "launchplane_ordinary_agent_landing_preparations",
+            sa.Column("preparation_id", sa.String(), primary_key=True),
+            sa.Column("request_id", sa.String(), nullable=False),
+            sa.Column("lease_id", sa.String(), nullable=False),
+            sa.Column("binding_revision", sa.BigInteger(), nullable=False),
+            sa.Column("pull_request_number", sa.BigInteger(), nullable=False),
+            sa.Column("action_ordinal", sa.BigInteger(), nullable=False),
+            sa.Column("custody_attempt_id", sa.String(), nullable=False),
+            sa.Column("revision", sa.BigInteger(), nullable=False),
+            sa.Column("payload", payload, nullable=False),
+            sa.UniqueConstraint("lease_id", "action_ordinal", name="ordinary_landing_charge_uq"),
+            sa.UniqueConstraint(
+                "request_id",
+                "binding_revision",
+                "pull_request_number",
+                name="ordinary_landing_entry_uq",
+            ),
+            sa.UniqueConstraint("custody_attempt_id", name="ordinary_landing_custody_uq"),
+        )
+    if (
+        "launchplane_ordinary_agent_landing_bindings"
+        not in sa.inspect(op.get_bind()).get_table_names()
+    ):
+        op.create_table(
+            "launchplane_ordinary_agent_landing_bindings",
+            sa.Column("preparation_id", sa.String(), primary_key=True),
+            sa.Column("admission_id", sa.String(), nullable=False, unique=True),
+            sa.Column("effect_id", sa.String(), nullable=False, unique=True),
+            sa.Column("child_id", sa.String(), nullable=False, unique=True),
+            sa.Column("payload", payload, nullable=False),
+        )
     if "launchplane_ordinary_agent_effects" not in sa.inspect(op.get_bind()).get_table_names():
         op.create_table(
             "launchplane_ordinary_agent_effects",
@@ -229,6 +265,47 @@ def upgrade() -> None:
 
 def _install_guards() -> None:
     op.execute("""
+        CREATE OR REPLACE FUNCTION launchplane_ordinary_landing_identity_guard() RETURNS trigger AS $$
+        BEGIN
+            IF TG_OP = 'DELETE' THEN RAISE EXCEPTION 'ordinary landing history is permanent'; END IF;
+            IF TG_OP = 'UPDATE' AND
+                (NEW.preparation_id, NEW.request_id, NEW.lease_id, NEW.binding_revision,
+                 NEW.pull_request_number, NEW.action_ordinal, NEW.custody_attempt_id)
+                IS DISTINCT FROM
+                (OLD.preparation_id, OLD.request_id, OLD.lease_id, OLD.binding_revision,
+                 OLD.pull_request_number, OLD.action_ordinal, OLD.custody_attempt_id)
+            THEN RAISE EXCEPTION 'ordinary landing identity is immutable'; END IF;
+            IF TG_OP = 'UPDATE' AND
+                (NEW.payload - ARRAY['revision','state','work_expires_at','evidence','authority','effect_id','reason_code'])
+                IS DISTINCT FROM
+                (OLD.payload - ARRAY['revision','state','work_expires_at','evidence','authority','effect_id','reason_code'])
+            THEN RAISE EXCEPTION 'ordinary landing intent is immutable'; END IF;
+            IF TG_OP = 'UPDATE' AND OLD.payload->>'work_expires_at' IS NOT NULL
+                AND NEW.payload->'work_expires_at' IS DISTINCT FROM OLD.payload->'work_expires_at'
+            THEN RAISE EXCEPTION 'ordinary landing deadline is immutable'; END IF;
+            IF TG_OP = 'UPDATE' AND OLD.payload->>'state' IN ('observed','consumed') AND
+                (NEW.payload->'evidence', NEW.payload->'authority') IS DISTINCT FROM
+                (OLD.payload->'evidence', OLD.payload->'authority')
+            THEN RAISE EXCEPTION 'ordinary landing evidence is immutable'; END IF;
+            IF TG_OP = 'UPDATE' AND OLD.payload->>'state' IN ('consumed','terminal')
+                AND NEW.payload IS DISTINCT FROM OLD.payload
+            THEN RAISE EXCEPTION 'ordinary landing terminal history is immutable'; END IF;
+            IF NEW.payload->>'preparation_id' IS DISTINCT FROM NEW.preparation_id
+                OR NEW.payload->>'request_id' IS DISTINCT FROM NEW.request_id
+                OR NEW.payload->>'lease_id' IS DISTINCT FROM NEW.lease_id
+                OR (NEW.payload->>'binding_revision')::bigint IS DISTINCT FROM NEW.binding_revision
+                OR (NEW.payload->'entry'->>'pull_request_number')::bigint IS DISTINCT FROM NEW.pull_request_number
+                OR (NEW.payload->>'action_ordinal')::bigint IS DISTINCT FROM NEW.action_ordinal
+                OR NEW.payload->>'custody_attempt_id' IS DISTINCT FROM NEW.custody_attempt_id
+                OR (NEW.payload->>'revision')::bigint IS DISTINCT FROM NEW.revision
+            THEN RAISE EXCEPTION 'ordinary landing payload identity mismatch'; END IF;
+            RETURN NEW;
+        END; $$ LANGUAGE plpgsql;
+    """)
+    op.execute(
+        "CREATE TRIGGER ordinary_landing_identity BEFORE INSERT OR UPDATE OR DELETE ON launchplane_ordinary_agent_landing_preparations FOR EACH ROW EXECUTE FUNCTION launchplane_ordinary_landing_identity_guard()"
+    )
+    op.execute("""
         CREATE OR REPLACE FUNCTION launchplane_ordinary_effect_identity_guard() RETURNS trigger AS $$
         BEGIN
             IF TG_OP = 'DELETE' THEN RAISE EXCEPTION 'ordinary effect history is permanent'; END IF;
@@ -324,9 +401,14 @@ def _install_guards() -> None:
     op.execute(
         "CREATE TRIGGER ordinary_append_only BEFORE UPDATE OR DELETE ON launchplane_ordinary_agent_candidate_check_observations FOR EACH ROW EXECUTE FUNCTION launchplane_ordinary_append_only_guard()"
     )
+    op.execute(
+        "CREATE TRIGGER ordinary_append_only BEFORE UPDATE OR DELETE ON launchplane_ordinary_agent_landing_bindings FOR EACH ROW EXECUTE FUNCTION launchplane_ordinary_append_only_guard()"
+    )
 
 
 def downgrade() -> None:
+    op.drop_table("launchplane_ordinary_agent_landing_bindings")
+    op.drop_table("launchplane_ordinary_agent_landing_preparations")
     op.drop_table("launchplane_ordinary_agent_candidate_check_observations")
     op.drop_table("launchplane_ordinary_agent_read_outcomes")
     op.drop_table("launchplane_ordinary_agent_read_custody")
@@ -340,6 +422,7 @@ def downgrade() -> None:
     op.drop_table("launchplane_ordinary_agent_semantic_dispatches")
     op.drop_table("launchplane_ordinary_agent_effects")
     if op.get_bind().dialect.name == "postgresql":
+        op.execute("DROP FUNCTION IF EXISTS launchplane_ordinary_landing_identity_guard()")
         op.execute("DROP FUNCTION IF EXISTS launchplane_ordinary_effect_identity_guard()")
         op.execute("DROP FUNCTION IF EXISTS launchplane_ordinary_append_only_guard()")
         op.execute("DROP FUNCTION IF EXISTS launchplane_ordinary_read_identity_guard()")

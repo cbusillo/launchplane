@@ -59,9 +59,9 @@ class OrdinaryAgentProtectionEvidence(StrictFrozenModel):
             raise ValueError("classic protection source requires its digest")
         if self.source == "evaluated_rules" and self.classic_sha256 is not None:
             raise ValueError("evaluated-rules-only evidence cannot carry a classic digest")
-        if len({(item.context.casefold(), item.integration_id) for item in self.required_checks}) != len(
-            self.required_checks
-        ):
+        if len(
+            {(item.context.casefold(), item.integration_id) for item in self.required_checks}
+        ) != len(self.required_checks):
             raise ValueError("required check evidence must be unique")
         return self
 
@@ -83,9 +83,7 @@ class OrdinaryAgentMergeTrainSnapshotResult(StrictFrozenModel):
     def validate_bound_identities(self) -> OrdinaryAgentMergeTrainSnapshotResult:
         if self.base_identity.sha != self.snapshot.base_sha:
             raise ValueError("snapshot base identity must match its base SHA")
-        expected_heads = {
-            item.number: item.head_sha for item in self.snapshot.pull_requests
-        }
+        expected_heads = {item.number: item.head_sha for item in self.snapshot.pull_requests}
         observed_heads = {
             item.pull_request_number: item.identity.sha for item in self.head_identities
         }
@@ -111,6 +109,7 @@ class OrdinaryAgentLandingEvidence(StrictFrozenModel):
     base_ref: str = Field(min_length=1, max_length=255)
     base_identity: OrdinaryAgentCommitIdentity
     repository_evidence: ChangeImpactRepositoryEvidence
+    candidate_sha: str = Field(min_length=1, max_length=64)
     technical_checks: TenantAdmissionTechnicalChecks
     protection: OrdinaryAgentProtectionEvidence
     expected_merge_tree_sha: str = Field(min_length=1, max_length=64)
@@ -128,8 +127,10 @@ class OrdinaryAgentLandingEvidence(StrictFrozenModel):
             or self.repository_evidence.base is None
             or self.repository_evidence.base.base_ref != self.base_ref
             or self.repository_evidence.base.base_sha != self.base_identity.sha
-            or self.technical_checks.head_sha != target.head_sha
+            or self.technical_checks.head_sha != self.candidate_sha
             or self.technical_checks.base_sha != self.base_identity.sha
+            or {(item.context, item.integration_id) for item in self.protection.required_checks}
+            != {(item.name, item.app_id) for item in self.technical_checks.required_checks}
         ):
             raise ValueError("landing evidence identities must be exact and internally consistent")
         return self

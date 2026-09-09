@@ -610,6 +610,15 @@ history; terminal history cleanup retires only that job's database lineage and
 retains unresolved provider fences. Candidate refs are job-and-binding scoped and
 are retained when the provider offers no conditional delete.
 
+Landing preparation reserves one action and custody attempt before bounded
+provider observation. Checks identify the tested candidate commit; the individual
+source PR has separate head and diff evidence. Finalization rechecks current
+authority, controller ownership and remaining time, then commits the admission,
+effect, first dispatch attempt and consumed preparation in one transaction.
+Failure rolls back those records together. A repeated finalization returns history
+and never authorizes another provider call, including after the original lease
+expires. Provider calls happen outside the transaction.
+
 These internal records and tests do not activate ordinary execution or establish
 installed-client or production usability. Service wiring and the guarded landing
 admission integration must use the same joined boundaries before publication.
