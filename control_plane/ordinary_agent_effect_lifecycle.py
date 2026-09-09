@@ -29,6 +29,7 @@ def require_completed_effect_proof(
             not isinstance(proof, effects.OrdinaryAgentRefObservation)
             or proof.ref != command.effect.candidate_ref
             or not proof.tree_sha
+            or not proof.sha
             or proof.sha != outcome.result_sha
         ):
             _deny()
@@ -47,6 +48,7 @@ def require_completed_effect_proof(
             or proof.ref
             not in {command.effect.parent_head_ref, "refs/heads/" + command.effect.parent_head_ref}
             or not proof.tree_sha
+            or not proof.sha
             or proof.sha != outcome.result_sha
             or proof.parents
             != (command.effect.expected_parent_head_sha, command.effect.child_head_sha)
@@ -61,6 +63,7 @@ def require_completed_effect_proof(
         if isinstance(proof, effects.OrdinaryAgentRefObservation):
             if (
                 proof.ref != "refs/heads/" + record.target.base_branch
+                or not proof.sha
                 or proof.sha != outcome.result_sha
                 or not proof.tree_sha
                 or proof.parents != landing_parents
@@ -85,6 +88,8 @@ def require_completed_effect_proof(
             or proof.number != command.effect.pull_request_number
             or proof.base_ref != record.target.base_branch
             or proof.base_sha != command.effect.expected_base_sha
+            or not proof.head_sha
+            or proof.head_sha != outcome.result_sha
             or proof.head_sha == command.effect.expected_head_sha
             or not {command.effect.expected_head_sha, command.effect.expected_base_sha}.issubset(
                 proof.head_parents

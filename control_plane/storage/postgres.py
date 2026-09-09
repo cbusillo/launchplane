@@ -228,6 +228,7 @@ from control_plane.contracts.owner_control_shadow_verifier import (
     revoke_owner_control_channel_session_record,
 )
 from control_plane.contracts.merge_train_batch import (
+    build_ordinary_merge_train_candidate_ref,
     MergeTrainBatchCandidateRecord,
     MergeTrainBatchLandingPlanRecord,
 )
@@ -17858,6 +17859,10 @@ class PostgresRecordStore(HumanSessionStore):
         self, record: MergeAdmissionRecord
     ) -> tuple[MergeAdmissionRecord, bool]:
         with self._session_factory() as session:
+            self._advisory_lock_merge_train_controller(session, record.controller_key)
+            self._require_legacy_merge_train_target_unbound(
+                session, repository=record.repository, base_branch=record.base_branch
+            )
             existing_row = session.scalar(
                 select(LaunchplaneMergeAdmissionRow).where(
                     LaunchplaneMergeAdmissionRow.attempt_id == record.attempt_id
@@ -18035,6 +18040,14 @@ class PostgresRecordStore(HumanSessionStore):
         self, record: MergeLandingOutcomeRecord
     ) -> tuple[MergeLandingOutcomeRecord, bool]:
         admission = self.read_merge_admission_record(record.admission_id)
+        with self._session_factory() as check_session:
+            plan_row = check_session.get(
+                LaunchplaneMergeTrainBatchLandingPlanRow, admission.landing_plan_record_id
+            )
+            if plan_row is not None and plan_row.payload.get("ordinary_job_binding") is not None:
+                raise OrdinaryAgentSessionAdmissionDenied(
+                    "ordinary_outcome_requires_joined_history"
+                )
         validate_merge_landing_outcome_for_admission(admission=admission, outcome=record)
         prior_records = self.list_merge_landing_outcome_records(
             admission_id=record.admission_id,
@@ -20748,6 +20761,24 @@ class PostgresRecordStore(HumanSessionStore):
                 binding_revision=expected_binding_revision,
             )
             observed_at = self._database_mutation_timestamp(session)
+            for effect_row in session.scalars(
+                select(LaunchplaneOrdinaryAgentEffectRow).where(
+                    LaunchplaneOrdinaryAgentEffectRow.request_id != context.request.request_id,
+                    LaunchplaneOrdinaryAgentEffectRow.payload["target"]["repository"].as_string()
+                    == target.repository,
+                    LaunchplaneOrdinaryAgentEffectRow.payload["target"]["base_branch"].as_string()
+                    == target.base_branch,
+                )
+            ):
+                other = OrdinaryAgentEffectRecord.model_validate(effect_row.payload)
+                if other.target == target and other.state in {
+                    "reserved",
+                    "dispatching",
+                    "waiting_provider",
+                    "reconciliation_required",
+                    "rebind_pending",
+                }:
+                    raise OrdinaryAgentSessionAdmissionDenied("target_busy")
             active_progress = self._ordinary_agent_active_progress(
                 session, repository=target.repository, base_branch=target.base_branch
             )
@@ -21050,6 +21081,19 @@ class PostgresRecordStore(HumanSessionStore):
                 or not numbers.issubset({item.number for item in context.request.pull_requests})
             ):
                 raise OrdinaryAgentSessionAdmissionDenied("record_scope_conflict")
+            inner = (
+                record.candidate
+                if isinstance(record, MergeTrainBatchCandidateRecord)
+                else record.landing_plan
+                if isinstance(record, MergeTrainBatchLandingPlanRecord)
+                else record.plan
+            )
+            if (
+                inner.policy_key != controller.policy_key
+                or inner.policy_sha256 != controller.policy_sha256
+            ):
+                raise OrdinaryAgentSessionAdmissionDenied("progress_policy_conflict")
+            self._require_ordinary_agent_progress_evidence(session, context=context, record=record)
             existing = session.get(type(row), record.record_id, with_for_update=True)
             if isinstance(
                 existing,
@@ -21197,6 +21241,173 @@ class PostgresRecordStore(HumanSessionStore):
         )
         return context, row, record
 
+    def _ordinary_agent_bound_effect_results(
+        self,
+        session: Any,
+        *,
+        request: OrdinaryAgentFiniteRequestRecord,
+    ) -> tuple[tuple[OrdinaryAgentEffectRecord, str], ...]:
+        results: list[tuple[OrdinaryAgentEffectRecord, str]] = []
+        for row in session.scalars(
+            select(LaunchplaneOrdinaryAgentEffectRow)
+            .where(
+                LaunchplaneOrdinaryAgentEffectRow.request_id == request.request_id,
+                LaunchplaneOrdinaryAgentEffectRow.binding_revision == request.binding_revision,
+            )
+            .order_by(LaunchplaneOrdinaryAgentEffectRow.action_ordinal)
+        ):
+            effect = OrdinaryAgentEffectRecord.model_validate(row.payload)
+            if effect.state not in {"completed", "completed_observed"}:
+                continue
+            child = session.scalar(
+                select(LaunchplaneOrdinaryAgentSemanticDispatchRow).where(
+                    LaunchplaneOrdinaryAgentSemanticDispatchRow.effect_id == effect.effect_id,
+                    LaunchplaneOrdinaryAgentSemanticDispatchRow.semantic_ordinal
+                    == effect.dispatch_count,
+                )
+            )
+            if child is None:
+                continue
+            outcome = session.get(LaunchplaneOrdinaryAgentSemanticOutcomeRow, child.child_id)
+            sha = ""
+            if outcome is not None and outcome.payload.get("kind") == "completed":
+                sha = (
+                    effect_contracts.OrdinaryAgentCompletedOutcome.model_validate(
+                        outcome.payload
+                    ).result_sha
+                    or ""
+                )
+            if not sha:
+                for observation_row in session.scalars(
+                    select(LaunchplaneOrdinaryAgentEffectReconciliationRow).where(
+                        LaunchplaneOrdinaryAgentEffectReconciliationRow.child_id == child.child_id
+                    )
+                ):
+                    observation = (
+                        effect_contracts.OrdinaryAgentReconciliationObservation.model_validate(
+                            observation_row.payload
+                        ).observation
+                    )
+                    if classify_effect_reconciliation(effect, observation) == "completed_observed":
+                        if isinstance(observation, effect_contracts.OrdinaryAgentRefObservation):
+                            sha = observation.sha or ""
+                        elif isinstance(
+                            observation, effect_contracts.OrdinaryAgentPullRequestObservation
+                        ):
+                            sha = observation.merge_commit_sha or ""
+            if sha:
+                results.append((effect, sha))
+        return tuple(results)
+
+    def _ordinary_agent_proven_heads(
+        self,
+        session: Any,
+        *,
+        request: OrdinaryAgentFiniteRequestRecord,
+    ) -> dict[int, str]:
+        heads = {item.number: item.head_sha for item in request.pull_requests}
+        for effect, sha in self._ordinary_agent_bound_effect_results(session, request=request):
+            if effect.command.kind != "stack_child_merge":
+                continue
+            command = effect.command.effect
+            if (
+                heads.get(command.parent_pull_request_number) != command.expected_parent_head_sha
+                or heads.get(command.child_pull_request_number) != command.child_head_sha
+            ):
+                raise OrdinaryAgentSessionAdmissionDenied("collapse_history_conflict")
+            heads[command.parent_pull_request_number] = sha
+        return heads
+
+    def _require_ordinary_agent_progress_evidence(
+        self,
+        session: Any,
+        *,
+        context: _OrdinaryAgentCurrentJobContext,
+        record: effect_contracts.OrdinaryAgentProgressRecord,
+    ) -> None:
+        request = context.request
+        heads = self._ordinary_agent_proven_heads(session, request=request)
+        results = self._ordinary_agent_bound_effect_results(session, request=request)
+        if isinstance(record, MergeTrainBatchCandidateRecord):
+            candidate = record.candidate
+            assert record.ordinary_job_binding is not None
+            if (
+                candidate.base_sha != request.base_sha
+                or candidate.candidate_ref
+                != build_ordinary_merge_train_candidate_ref(
+                    binding=record.ordinary_job_binding, batch_id=candidate.batch_id
+                )
+                or any(
+                    heads.get(entry.pull_request_number) != entry.head_sha
+                    for entry in candidate.entries
+                )
+            ):
+                raise OrdinaryAgentSessionAdmissionDenied("candidate_scope_conflict")
+            if (
+                candidate.candidate_sha
+                and candidate.candidate_sha != request.base_sha
+                and not any(
+                    effect.command.kind == "candidate_head_merge"
+                    and effect.command.effect.candidate_ref == candidate.candidate_ref
+                    and sha == candidate.candidate_sha
+                    for effect, sha in results
+                )
+            ):
+                raise OrdinaryAgentSessionAdmissionDenied("candidate_response_unproven")
+            root = candidate.stack_collapse_root
+            changed = any(
+                entry.head_sha
+                != next(
+                    item.head_sha
+                    for item in request.pull_requests
+                    if item.number == entry.pull_request_number
+                )
+                for entry in candidate.entries
+            )
+            if changed:
+                if root is None:
+                    raise OrdinaryAgentSessionAdmissionDenied("collapse_lineage_required")
+                collapse_row = session.get(
+                    LaunchplaneMergeTrainStackCollapsePlanRow, root.collapse_record_id
+                )
+                if collapse_row is None:
+                    raise OrdinaryAgentSessionAdmissionDenied("collapse_lineage_unavailable")
+                collapse = MergeTrainStackCollapsePlanRecord.model_validate(collapse_row.payload)
+                if (
+                    collapse.ordinary_job_binding != record.ordinary_job_binding
+                    or collapse.plan.collapse_id != root.collapse_id
+                    or collapse.plan.root_pull_request_number != root.root_pull_request_number
+                    or heads.get(root.root_pull_request_number) != root.collapsed_root_head_sha
+                    or not any(
+                        item.merge_commit_sha == root.collapsed_root_head_sha
+                        for item in collapse.plan.mutations
+                    )
+                ):
+                    raise OrdinaryAgentSessionAdmissionDenied("collapse_lineage_conflict")
+        elif isinstance(record, MergeTrainStackCollapsePlanRecord):
+            for mutation in record.plan.mutations:
+                if mutation.merge_commit_sha and not any(
+                    effect.command.kind == "stack_child_merge"
+                    and effect.command.effect.lineage.collapse_id == record.plan.collapse_id
+                    and effect.command.effect.child_pull_request_number
+                    == mutation.child_pull_request_number
+                    and effect.command.effect.parent_pull_request_number
+                    == mutation.parent_pull_request_number
+                    and sha == mutation.merge_commit_sha
+                    for effect, sha in results
+                ):
+                    raise OrdinaryAgentSessionAdmissionDenied("collapse_response_unproven")
+        else:
+            plan = record.landing_plan
+            for entry in plan.entries:
+                if heads.get(entry.pull_request_number) != entry.expected_head_sha:
+                    raise OrdinaryAgentSessionAdmissionDenied("landing_head_conflict")
+                if entry.expected_base_sha != request.base_sha and not any(
+                    effect.command.kind == "pull_request_landing" and sha == entry.expected_base_sha
+                    for effect, sha in results
+                ):
+                    raise OrdinaryAgentSessionAdmissionDenied("landing_base_unproven")
+
     def _require_ordinary_agent_command_scope(
         self,
         session: Any,
@@ -21212,7 +21423,7 @@ class PostgresRecordStore(HumanSessionStore):
             or lineage.base_branch != request.target.base_branch
         ):
             raise OrdinaryAgentSessionAdmissionDenied("effect_scope_conflict")
-        heads = {item.number: item.head_sha for item in request.pull_requests}
+        heads = self._ordinary_agent_proven_heads(session, request=request)
         if command.kind == "pull_request_head_refresh":
             if (
                 heads.get(command.effect.pull_request_number) != command.effect.expected_head_sha
@@ -21235,6 +21446,8 @@ class PostgresRecordStore(HumanSessionStore):
                 or candidate.batch_id != lineage.batch_id
                 or candidate.candidate_ref != command.effect.candidate_ref
                 or candidate.base_sha != request.base_sha
+                or candidate.policy_key != controller.policy_key
+                or candidate.policy_sha256 != controller.policy_sha256
             ):
                 raise OrdinaryAgentSessionAdmissionDenied("effect_record_conflict")
             if (
@@ -21260,6 +21473,8 @@ class PostgresRecordStore(HumanSessionStore):
                 or landing.ordinary_job_binding != controller.ordinary_job_binding
                 or landing.landing_plan.plan_id != lineage.landing_plan_id
                 or landing.landing_plan.batch_id != lineage.batch_id
+                or landing.landing_plan.policy_key != controller.policy_key
+                or landing.landing_plan.policy_sha256 != controller.policy_sha256
             ):
                 raise OrdinaryAgentSessionAdmissionDenied("effect_record_conflict")
             if command.kind == "candidate_ref_delete":
@@ -21268,9 +21483,17 @@ class PostgresRecordStore(HumanSessionStore):
             elif not any(
                 entry.pull_request_number == command.effect.pull_request_number
                 and entry.expected_head_sha == command.effect.head_sha
-                and entry.expected_base_sha == command.effect.rolling_base_sha
+                and command.effect.rolling_base_sha
+                == next(
+                    (
+                        previous.merge_commit_sha
+                        for previous in reversed(landing.landing_plan.entries[:index])
+                        if previous.status in {"merged", "skipped"} and previous.merge_commit_sha
+                    ),
+                    request.base_sha,
+                )
                 and entry.merge_method == command.effect.merge_method
-                for entry in landing.landing_plan.entries
+                for index, entry in enumerate(landing.landing_plan.entries)
             ):
                 raise OrdinaryAgentSessionAdmissionDenied("effect_head_conflict")
             return
@@ -21282,13 +21505,18 @@ class PostgresRecordStore(HumanSessionStore):
             collapse_wrapper.status != "active"
             or collapse_wrapper.ordinary_job_binding != controller.ordinary_job_binding
             or collapse_wrapper.plan.collapse_id != lineage.collapse_id
+            or collapse_wrapper.plan.policy_key != controller.policy_key
+            or collapse_wrapper.plan.policy_sha256 != controller.policy_sha256
         ):
             raise OrdinaryAgentSessionAdmissionDenied("effect_record_conflict")
         if command.kind == "stack_child_merge":
             if (
                 command.effect.child_pull_request_number
                 not in request.permitted_stack_edit_pull_requests
-                or command.effect.parent_pull_request_number not in heads
+                or heads.get(command.effect.child_pull_request_number)
+                != command.effect.child_head_sha
+                or heads.get(command.effect.parent_pull_request_number)
+                != command.effect.expected_parent_head_sha
                 or command.effect.protected_base_ref != request.target.base_branch
                 or not any(
                     m.child_pull_request_number == command.effect.child_pull_request_number
@@ -21312,6 +21540,117 @@ class PostgresRecordStore(HumanSessionStore):
                 raise OrdinaryAgentSessionAdmissionDenied("effect_stack_scope_conflict")
         else:
             raise OrdinaryAgentSessionAdmissionDenied("unknown_semantic_command")
+
+    @_private_ordinary_agent_operation
+    def create_ordinary_merge_landing_outcome_record_if_absent(
+        self,
+        *,
+        request_id: str,
+        expected_binding_revision: int,
+        record: MergeLandingOutcomeRecord,
+    ) -> tuple[MergeLandingOutcomeRecord, bool]:
+        """Project exact persisted dispatch history without reauthorizing a provider call."""
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            locator = session.get(LaunchplaneMergeAdmissionRow, record.admission_id)
+            if locator is None:
+                raise OrdinaryAgentSessionAdmissionDenied("landing_admission_unavailable")
+            original = MergeAdmissionRecord.model_validate(locator.payload)
+            self._advisory_lock_merge_train_controller(session, original.controller_key)
+            admission_row = session.get(
+                LaunchplaneMergeAdmissionRow,
+                record.admission_id,
+                with_for_update=True,
+                populate_existing=True,
+            )
+            assert admission_row is not None
+            admission = MergeAdmissionRecord.model_validate(admission_row.payload)
+            plan_row = session.get(
+                LaunchplaneMergeTrainBatchLandingPlanRow, admission.landing_plan_record_id
+            )
+            if plan_row is None:
+                raise OrdinaryAgentSessionAdmissionDenied("landing_plan_unavailable")
+            plan = MergeTrainBatchLandingPlanRecord.model_validate(plan_row.payload)
+            binding = plan.ordinary_job_binding
+            if (
+                binding is None
+                or binding.request_id != request_id
+                or binding.binding_revision != expected_binding_revision
+            ):
+                raise OrdinaryAgentSessionAdmissionDenied("landing_history_binding_conflict")
+            validate_merge_landing_outcome_for_admission(admission=admission, outcome=record)
+            prior_rows = tuple(
+                session.scalars(
+                    select(LaunchplaneMergeLandingOutcomeRow)
+                    .where(
+                        LaunchplaneMergeLandingOutcomeRow.admission_id == admission.admission_id,
+                    )
+                    .order_by(LaunchplaneMergeLandingOutcomeRow.observation_sequence.desc())
+                )
+            )
+            if prior_rows:
+                prior = MergeLandingOutcomeRecord.model_validate(prior_rows[0].payload)
+                if prior.observation_sequence == record.observation_sequence:
+                    if prior != record:
+                        raise OrdinaryAgentSessionAdmissionDenied(
+                            "immutable_landing_outcome_conflict"
+                        )
+                    return prior, False
+                validate_merge_landing_outcome_successor(prior=prior, successor=record)
+            elif record.observation_sequence != 1:
+                raise OrdinaryAgentSessionAdmissionDenied("landing_outcome_predecessor_missing")
+            matches = []
+            for effect_row in session.scalars(
+                select(LaunchplaneOrdinaryAgentEffectRow).where(
+                    LaunchplaneOrdinaryAgentEffectRow.request_id == request_id,
+                    LaunchplaneOrdinaryAgentEffectRow.binding_revision == expected_binding_revision,
+                )
+            ):
+                effect = OrdinaryAgentEffectRecord.model_validate(effect_row.payload)
+                if (
+                    effect.command.kind == "pull_request_landing"
+                    and effect.command.effect.admission_id == admission.admission_id
+                ):
+                    matches.append(effect)
+            if len(matches) > 1 or (
+                record.provider_effect_attempted and (not matches or not matches[0].dispatch_count)
+            ):
+                raise OrdinaryAgentSessionAdmissionDenied("landing_dispatch_unproven")
+            if record.status == "landed":
+                if not matches or matches[0].state not in {"completed", "completed_observed"}:
+                    raise OrdinaryAgentSessionAdmissionDenied("landing_response_unproven")
+                request_row = session.get(LaunchplaneOrdinaryAgentFiniteRequestRow, request_id)
+                if request_row is None:
+                    raise OrdinaryAgentSessionAdmissionDenied("job_unavailable")
+                request = OrdinaryAgentFiniteRequestRecord.model_validate(request_row.payload)
+                # Keep the historical binding even if a later refresh changed the request.
+                historical_request = request.model_copy(
+                    update={"binding_revision": expected_binding_revision}
+                )
+                if not any(
+                    effect.effect_id == matches[0].effect_id and sha == record.merge_commit_sha
+                    for effect, sha in self._ordinary_agent_bound_effect_results(
+                        session, request=historical_request
+                    )
+                ):
+                    raise OrdinaryAgentSessionAdmissionDenied("landing_response_conflict")
+            session.add(
+                LaunchplaneMergeLandingOutcomeRow(
+                    outcome_id=record.outcome_id,
+                    outcome_binding_sha256=record.outcome_binding_sha256,
+                    admission_id=record.admission_id,
+                    attempt_id=record.attempt_id,
+                    observation_sequence=record.observation_sequence,
+                    status=record.status,
+                    repository=record.repository,
+                    base_branch=record.base_branch,
+                    pull_request_number=record.pull_request_number,
+                    observed_at=record.observed_at,
+                    payload=self._payload_dict(record),
+                )
+            )
+            session.commit()
+            return record, True
 
     @_private_ordinary_agent_operation
     def create_ordinary_merge_admission_record_if_absent(
@@ -21418,6 +21757,25 @@ class PostgresRecordStore(HumanSessionStore):
                 if row.command_sha256 != digest:
                     raise OrdinaryAgentSessionAdmissionDenied("effect_replay_conflict")
                 return OrdinaryAgentEffectRecord.model_validate(row.payload)
+            for prior_row in session.scalars(
+                select(LaunchplaneOrdinaryAgentEffectRow).where(
+                    LaunchplaneOrdinaryAgentEffectRow.request_id == request_id,
+                    LaunchplaneOrdinaryAgentEffectRow.binding_revision == expected_binding_revision,
+                )
+            ):
+                prior = OrdinaryAgentEffectRecord.model_validate(prior_row.payload)
+                if prior.command_sha256 == digest:
+                    raise OrdinaryAgentSessionAdmissionDenied("semantic_command_already_reserved")
+                if prior.state in {
+                    "reserved",
+                    "dispatching",
+                    "waiting_provider",
+                    "reconciliation_required",
+                    "rebind_pending",
+                }:
+                    raise OrdinaryAgentSessionAdmissionDenied("prior_effect_unresolved")
+            if self._ordinary_agent_job_custody_uncertainty(session, request_id):
+                raise OrdinaryAgentSessionAdmissionDenied("custody_cleanup_required")
             self._require_ordinary_agent_command_scope(
                 session, context=context, controller=controller, command=command
             )
@@ -21481,6 +21839,10 @@ class PostgresRecordStore(HumanSessionStore):
         *,
         principal: OrdinaryAgentPrincipalRecord,
         custody_attempt_id: str | None = None,
+        resource_classes: tuple[Literal["core", "graphql", "secondary"], ...] = (
+            "core",
+            "secondary",
+        ),
     ) -> None:
         custody_row = session.get(
             LaunchplaneOrdinaryAgentCredentialCustodyRow, principal.custody_record_id
@@ -21508,7 +21870,7 @@ class PostgresRecordStore(HumanSessionStore):
                 ).model_dump()
             )
             for kind, identity in identities
-            for resource in ("core", "graphql", "secondary")
+            for resource in resource_classes
         )
         for key in keys:
             if not self.database_url.startswith("sqlite"):
@@ -21578,6 +21940,16 @@ class PostgresRecordStore(HumanSessionStore):
         record = OrdinaryAgentEffectRecord.model_validate(row.payload)
         if (
             record.request_id != context.request.request_id
+            or record.session_id != context.session.session_id
+            or record.principal_id != context.principal.principal_id
+            or record.credential_id != context.credential.credential_id
+            or record.credential_version != context.credential.credential_version
+            or record.credential_digest != context.credential.credential_digest
+            or record.target != context.request.target
+            or row.lease_id != record.lease_id
+            or row.request_id != record.request_id
+            or row.scope_sha256 != record.scope_sha256
+            or row.binding_revision != record.binding_revision
             or record.lease_id != context.lease.lease_id
             or record.scope_sha256 != context.request.scope_sha256
             or not 1
@@ -21822,6 +22194,26 @@ class PostgresRecordStore(HumanSessionStore):
                 >= effect_contracts.MAX_RECONCILIATION_OBSERVATIONS_PER_EFFECT
             ):
                 raise OrdinaryAgentSessionAdmissionDenied("reconciliation_exhausted")
+            child_row = session.scalar(
+                select(LaunchplaneOrdinaryAgentSemanticDispatchRow).where(
+                    LaunchplaneOrdinaryAgentSemanticDispatchRow.effect_id == effect_id,
+                    LaunchplaneOrdinaryAgentSemanticDispatchRow.semantic_ordinal
+                    == record.dispatch_count,
+                )
+            )
+            request_row = session.get(LaunchplaneOrdinaryAgentFiniteRequestRow, record.request_id)
+            if child_row is None or request_row is None:
+                raise OrdinaryAgentSessionAdmissionDenied("reconciliation_provenance_unavailable")
+            child = effect_contracts.OrdinaryAgentSemanticDispatchAttemptRecord.model_validate(
+                child_row.payload
+            )
+            request = OrdinaryAgentFiniteRequestRecord.model_validate(request_row.payload)
+            if now > min(
+                child.dispatch_checkpoint_at
+                + effect_contracts.ASYNC_PROVIDER_OBSERVATION_WINDOW_SECONDS,
+                request.continuation_expires_at or request.expires_at,
+            ):
+                raise OrdinaryAgentSessionAdmissionDenied("reconciliation_window_exhausted")
             reservations = sorted(
                 (
                     effect_contracts.OrdinaryAgentCustodyAttemptReservation.model_validate(
@@ -21974,7 +22366,7 @@ class PostgresRecordStore(HumanSessionStore):
                     "revision": record.revision + 1,
                     "reconciliation_count": count,
                     "updated_at": now,
-                    "next_observation_at": now + effect_contracts.MIN_RECONCILIATION_BACKOFF_SECONDS
+                    "next_observation_at": child.dispatch_checkpoint_at + (15, 45, 120)[count]
                     if unresolved
                     and count < effect_contracts.MAX_RECONCILIATION_OBSERVATIONS_PER_EFFECT
                     else None,
@@ -22165,6 +22557,25 @@ class PostgresRecordStore(HumanSessionStore):
     ) -> OrdinaryAgentEffectRecord:
         with self._session_factory() as session:
             self._begin_serialized_write(session)
+            historical_row = session.get(LaunchplaneOrdinaryAgentEffectRow, effect_id)
+            if historical_row is None:
+                raise OrdinaryAgentSessionAdmissionDenied("effect_unavailable")
+            historical = OrdinaryAgentEffectRecord.model_validate(historical_row.payload)
+            self._advisory_lock_merge_train_controller(
+                session, historical.controller_fence.controller_key
+            )
+            completion_payload = {
+                "disposition": disposition,
+                "observation": typed_observation.model_dump(mode="json")
+                if typed_observation is not None
+                else None,
+            }
+            prior = session.get(LaunchplaneOrdinaryAgentEffectCompletionRow, effect_id)
+            if prior is not None:
+                if prior.payload != completion_payload:
+                    raise OrdinaryAgentSessionAdmissionDenied("immutable_completion_conflict")
+                session.refresh(historical_row)
+                return OrdinaryAgentEffectRecord.model_validate(historical_row.payload)
             context, row, record = self._ordinary_agent_reserved_effect_context(
                 session, effect_id=effect_id
             )
@@ -22198,7 +22609,9 @@ class PostgresRecordStore(HumanSessionStore):
                     )
                 )
                 if (
-                    reservation.effect_id != effect_id
+                    OrdinaryAgentCustodyIssueAttempt.model_validate(actual.payload).token_expires_at
+                    is None
+                    or reservation.effect_id != effect_id
                     or reservation.purpose != "dispatch"
                     or actual.request_sha256
                     != canonical_json_sha256(
@@ -22219,12 +22632,7 @@ class PostgresRecordStore(HumanSessionStore):
             session.add(
                 LaunchplaneOrdinaryAgentEffectCompletionRow(
                     effect_id=effect_id,
-                    payload={
-                        "disposition": disposition,
-                        "observation": typed_observation.model_dump(mode="json")
-                        if typed_observation is not None
-                        else None,
-                    },
+                    payload=completion_payload,
                 )
             )
             updated = record.model_copy(
@@ -22329,6 +22737,32 @@ class PostgresRecordStore(HumanSessionStore):
             matching = tuple(item for item in records if item.candidate_sha == candidate_sha)
             if matching:
                 latest = matching[-1]
+                if latest.state == "fenced" and latest.reason_code == "cleanup_unknown":
+                    actual_attempts = [
+                        session.get(LaunchplaneOrdinaryAgentCustodyIssueAttemptRow, identity)
+                        for identity in latest.custody_attempt_ids
+                    ]
+                    if actual_attempts and all(
+                        item is not None and item.state == "closed" for item in actual_attempts
+                    ):
+                        latest = latest.model_copy(
+                            update={
+                                "state": "completed" if latest.result is not None else "incomplete",
+                                "reason_code": None,
+                                "revision": latest.revision + 1,
+                                "updated_at": context.now,
+                            }
+                        )
+                        latest_row = session.get(
+                            LaunchplaneOrdinaryAgentReadAttemptRow, latest.attempt_id
+                        )
+                        assert latest_row is not None
+                        latest_row.state, latest_row.revision, latest_row.payload = (
+                            latest.state,
+                            latest.revision,
+                            self._payload_dict(latest),
+                        )
+                        matching = (*matching[:-1], latest)
                 if latest.state in {"fenced", "exhausted"}:
                     raise OrdinaryAgentSessionAdmissionDenied("read_attempts_exhausted")
                 if latest.next_due_at is not None and latest.next_due_at > context.now:
@@ -22339,6 +22773,7 @@ class PostgresRecordStore(HumanSessionStore):
                         isinstance(result, snapshot_contracts.OrdinaryAgentCandidateCheckResult)
                         and result.status != "pending"
                     ):
+                        session.commit()
                         return latest
                 failures = sum(item.state == "incomplete" for item in matching)
                 observations = sum(item.state == "completed" for item in matching)
@@ -22459,7 +22894,11 @@ class PostgresRecordStore(HumanSessionStore):
                     lease_acquired_at=controller.lease_acquired_at,
                 ),
             )
-            self._lock_ordinary_agent_provider_waits(session, principal=context.principal)
+            self._lock_ordinary_agent_provider_waits(
+                session,
+                principal=context.principal,
+                resource_classes=("core", "graphql", "secondary"),
+            )
             row = session.get(
                 LaunchplaneOrdinaryAgentReadAttemptRow,
                 attempt_id,
@@ -22875,7 +23314,12 @@ class PostgresRecordStore(HumanSessionStore):
             child_row.payload
         )
         if (
-            child.effect_id != record.effect_id
+            record.command_sha256 != canonical_json_sha256(record.command.model_dump(mode="json"))
+            or row.command_sha256 != record.command_sha256
+            or row.request_id != record.request_id
+            or row.binding_revision != record.binding_revision
+            or row.action_ordinal != record.action_ordinal
+            or child.effect_id != record.effect_id
             or child.command_sha256 != record.command_sha256
             or child.controller_fence.controller_key != record.controller_fence.controller_key
             or child.semantic_ordinal > record.dispatch_count
@@ -23022,6 +23466,9 @@ class PostgresRecordStore(HumanSessionStore):
         if custody_uncertain and not unresolved:
             unresolved = 1
         cancelled = request.cancellation_requested_at is not None or request.status == "cancelled"
+        expired = self._ordinary_agent_database_epoch(session) >= (
+            request.continuation_expires_at or request.expires_at
+        )
         status: Literal[
             "pending",
             "running",
@@ -23034,6 +23481,7 @@ class PostgresRecordStore(HumanSessionStore):
         ]
         if unresolved and (
             cancelled
+            or expired
             or custody_uncertain
             or any(item.state == "reconciliation_required" for item in effects)
         ):
@@ -23044,6 +23492,8 @@ class PostgresRecordStore(HumanSessionStore):
             status = "reconciliation_required"
         elif request.status == "completed" or (claim is not None and claim.status == "completed"):
             status = "completed"
+        elif expired:
+            status = "partially_completed" if completed else "blocked"
         elif claim is not None and claim.status in {
             "pending",
             "running",
@@ -23067,8 +23517,14 @@ class PostgresRecordStore(HumanSessionStore):
             "snapshot_unavailable",
             "job_expired",
             "worker_interrupted",
+            "protection_changed",
+            "candidate_check_observation_budget_exhausted",
+            "custody_cleanup_required",
+            "prior_effect_unresolved",
         }
         reason = claim.reason_code if claim is not None and claim.reason_code in reasons else None
+        if expired and status not in {"completed", "cancelled", "reconciliation_required"}:
+            reason = "job_expired"
         return OrdinaryAgentJobView(
             request_id=request.request_id,
             principal_id=request.principal_id,
@@ -23364,19 +23820,102 @@ class PostgresRecordStore(HumanSessionStore):
     ) -> OrdinaryAgentJobView:
         with self._session_factory() as session:
             self._begin_serialized_write(session)
+            locator = session.get(LaunchplaneOrdinaryAgentFiniteRequestRow, claim_fence.request_id)
+            if locator is None:
+                raise OrdinaryAgentSessionAdmissionDenied("job_unavailable")
+            located = OrdinaryAgentFiniteRequestRecord.model_validate(locator.payload)
+            key = build_merge_train_controller_key(
+                repository=located.target.repository, base_branch=located.target.base_branch
+            )
+            self._advisory_lock_merge_train_controller(session, key)
+            controller_row = session.get(
+                LaunchplaneMergeTrainControllerStateRow, key, with_for_update=True
+            )
             now = self._ordinary_agent_database_epoch(session)
             row = session.get(
                 LaunchplaneOrdinaryAgentJobClaimRow, claim_fence.request_id, with_for_update=True
             )
             self._require_ordinary_agent_claim(session, claim_fence=claim_fence, now=now)
             assert row is not None
-            request_row = session.get(LaunchplaneOrdinaryAgentFiniteRequestRow, row.request_id)
+            request_row = session.get(
+                LaunchplaneOrdinaryAgentFiniteRequestRow,
+                row.request_id,
+                with_for_update=True,
+                populate_existing=True,
+            )
             if request_row is None:
                 raise OrdinaryAgentSessionAdmissionDenied("job_unavailable")
             request = OrdinaryAgentFiniteRequestRecord.model_validate(request_row.payload)
             view = self._ordinary_agent_job_view(session, request=request, claim=row)
             if disposition.status == "completed" and view.unresolved_effects:
                 raise OrdinaryAgentSessionAdmissionDenied("unresolved_effects")
+            self._require_ordinary_agent_claim(
+                session, claim_fence=claim_fence, now=self._ordinary_agent_database_epoch(session)
+            )
+            if (
+                disposition.status == "completed"
+                and request.cancellation_requested_at is None
+                and request.status != "cancelled"
+            ):
+                binding = OrdinaryAgentJobBinding(
+                    request_id=request.request_id,
+                    scope_sha256=request.scope_sha256,
+                    binding_revision=request.binding_revision,
+                )
+                controller = (
+                    MergeTrainControllerStateRecord.model_validate(controller_row.payload)
+                    if controller_row is not None
+                    else None
+                )
+                if (
+                    controller is not None
+                    and controller.status != "idle"
+                    and controller.ordinary_job_binding == binding
+                ):
+                    raise OrdinaryAgentSessionAdmissionDenied("controller_not_yielded")
+                for model in (
+                    LaunchplaneMergeTrainBatchCandidateRow,
+                    LaunchplaneMergeTrainBatchLandingPlanRow,
+                    LaunchplaneMergeTrainStackCollapsePlanRow,
+                ):
+                    for raw_progress in session.scalars(
+                        select(model)
+                        .where(
+                            model.repository == request.target.repository.lower(),
+                            model.base_branch == request.target.base_branch,
+                            model.status == "active",
+                        )
+                        .with_for_update()
+                    ):
+                        progress = cast(
+                            LaunchplaneMergeTrainBatchCandidateRow
+                            | LaunchplaneMergeTrainBatchLandingPlanRow
+                            | LaunchplaneMergeTrainStackCollapsePlanRow,
+                            raw_progress,
+                        )
+                        if progress.payload.get("ordinary_job_binding") != binding.model_dump(
+                            mode="json"
+                        ):
+                            continue
+                        if (
+                            controller is None
+                            or controller.status != "idle"
+                            or controller.last_record_id != progress.record_id
+                        ):
+                            raise OrdinaryAgentSessionAdmissionDenied(
+                                "progress_completion_fence_conflict"
+                            )
+                        progress.status = "superseded"
+                        progress.payload = {**progress.payload, "status": "superseded"}
+                self._retire_ordinary_agent_reserved_effects(
+                    session, request_id=request.request_id, now=now
+                )
+                if self._ordinary_agent_job_view(
+                    session, request=request, claim=row
+                ).unresolved_effects:
+                    raise OrdinaryAgentSessionAdmissionDenied("unresolved_effects")
+                request = request.model_copy(update={"status": "completed"})
+                request_row.payload = self._payload_dict(request)
             row.status, row.reason_code = disposition.status, disposition.reason_code
             row.claim_expires_at = 0
             row.next_due_at = max(now, disposition.next_due_at or now)
@@ -23527,6 +24066,25 @@ class PostgresRecordStore(HumanSessionStore):
         """Only completed exact refresh evidence may advance a finite request binding."""
         with self._session_factory() as session:
             self._begin_serialized_write(session)
+            self._advisory_lock_merge_train_controller(session, controller_fence.controller_key)
+            historical_row = session.get(LaunchplaneOrdinaryAgentEffectRow, effect_id)
+            if historical_row is not None:
+                historical = OrdinaryAgentEffectRecord.model_validate(historical_row.payload)
+                if historical.rebound_revision is not None:
+                    request_row = session.get(
+                        LaunchplaneOrdinaryAgentFiniteRequestRow, historical.request_id
+                    )
+                    if (
+                        request_row is None
+                        or historical.controller_fence.controller_key
+                        != controller_fence.controller_key
+                        or historical.revision != expected_effect_revision + 1
+                    ):
+                        raise OrdinaryAgentSessionAdmissionDenied("refresh_replay_conflict")
+                    replay = OrdinaryAgentFiniteRequestRecord.model_validate(request_row.payload)
+                    if replay.binding_revision != historical.rebound_revision:
+                        raise OrdinaryAgentSessionAdmissionDenied("refresh_superseded")
+                    return replay  # Historical replay; dispatch still requires current joined authority.
             context, row, record = self._ordinary_agent_reserved_effect_context(
                 session, effect_id=effect_id, controller_fence=controller_fence
             )
@@ -23585,7 +24143,7 @@ class PostgresRecordStore(HumanSessionStore):
                 request=context.request,
                 base_sha=observation.base_sha,
                 pull_requests=tuple(
-                    item.model_copy(update={"head_sha": observation.head_sha})
+                    OrdinaryAgentPullRequest(number=item.number, head_sha=observation.head_sha)
                     if item.number == observation.number
                     else item
                     for item in context.request.pull_requests
@@ -23638,6 +24196,15 @@ class PostgresRecordStore(HumanSessionStore):
         with self._session_factory() as session:
             self._begin_serialized_write(session)
             request, row, _, _, _ = self._ordinary_agent_job_context(session, request_id=request_id)
+            if (
+                session.scalar(
+                    select(LaunchplaneOrdinaryAgentEffectRow.effect_id)
+                    .where(LaunchplaneOrdinaryAgentEffectRow.request_id == request_id)
+                    .limit(1)
+                )
+                is not None
+            ):
+                raise OrdinaryAgentSessionAdmissionDenied("effect_linked_refresh_required")
             updated = rebind_ordinary_agent_finite_request(
                 request=request,
                 base_sha=base_sha,
