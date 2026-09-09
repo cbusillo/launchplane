@@ -36,11 +36,15 @@ admission again never authorizes replay of the provider mutation.
 
 If fresh readiness or structural evidence refuses admission before the provider
 checkpoint, the controller returns an accepted `block` result with a stable
-reason code and the public-safe readiness facets. It releases the controller
-lease cleanly and leaves the landing plan available for a later pass after the
-missing or stale evidence is corrected. A pre-effect policy refusal is not
-durable effect ambiguity and must not be converted into controller
-reconciliation.
+reason code and the public-safe readiness facets. When structural evaluation
+completed, the result also includes its status, reason codes, effective base
+commit and tree, and candidate, landing-plan, and provenance digests. This
+diagnostic is projected from the same evaluation that refused admission; it
+does not re-evaluate, authorize, or persist a rejected admission. The controller
+releases its lease cleanly and leaves the landing plan available for a later
+pass after the missing or stale evidence is corrected. A pre-effect policy
+refusal is not durable effect ambiguity and must not be converted into
+controller reconciliation.
 
 Unavailable or malformed authoritative repository evidence refuses admission
 with `repository_evidence_unavailable`; evidence that changes during resolution
