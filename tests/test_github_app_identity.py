@@ -126,12 +126,11 @@ class GitHubAppIdentityTests(unittest.TestCase):
             calls.append(dict(kwargs))
             if kwargs["path"] == "/app":
                 return {"id": 42}
-            if kwargs["path"] == "/repos/example/repo":
-                return {"id": 123, "full_name": "example/repo"}
             if kwargs["path"] == "/repos/example/repo/installation":
                 return {
                     "id": 77,
                     "app_id": 42,
+                    "account": {"id": 456, "login": "example"},
                     "permissions": {
                         "contents": "write",
                         "metadata": "read",
@@ -144,6 +143,7 @@ class GitHubAppIdentityTests(unittest.TestCase):
             identity=GitHubAppIdentity(app_id=42, private_key=self.private_key),
             repository="example/repo",
             repository_id="123",
+            repository_owner_id="456",
             api_request=api_request,
             now=datetime(2026, 8, 7, 14, 0, tzinfo=timezone.utc),
         )
@@ -151,6 +151,7 @@ class GitHubAppIdentityTests(unittest.TestCase):
         self.assertEqual(result.app_id, 42)
         self.assertEqual(result.installation_id, 77)
         self.assertEqual(result.repository_id, 123)
+        self.assertEqual(result.repository_owner_id, 456)
         self.assertEqual(result.repository, "example/repo")
         self.assertEqual(
             result.permissions,
@@ -160,31 +161,34 @@ class GitHubAppIdentityTests(unittest.TestCase):
             tuple(call["path"] for call in calls),
             (
                 "/app",
-                "/repos/example/repo",
                 "/repos/example/repo/installation",
             ),
         )
         self.assertTrue(all("method" not in call for call in calls))
 
-    def test_inspection_rejects_repository_or_permission_drift(self) -> None:
-        def inspect(*, repository_payload: object, permissions: object) -> None:
+    def test_inspection_rejects_owner_or_permission_drift(self) -> None:
+        def inspect(*, account: object, permissions: object) -> None:
             def api_request(**kwargs: object) -> object:
                 if kwargs["path"] == "/app":
                     return {"id": 42}
-                if kwargs["path"] == "/repos/example/repo":
-                    return repository_payload
-                return {"id": 77, "app_id": 42, "permissions": permissions}
+                return {
+                    "id": 77,
+                    "app_id": 42,
+                    "account": account,
+                    "permissions": permissions,
+                }
 
             inspect_ordinary_agent_github_app_installation(
                 identity=GitHubAppIdentity(app_id=42, private_key=self.private_key),
                 repository="example/repo",
                 repository_id="123",
+                repository_owner_id="456",
                 api_request=api_request,
             )
 
-        with self.assertRaisesRegex(GitHubAppIdentityError, "exact repository identity"):
+        with self.assertRaisesRegex(GitHubAppIdentityError, "inventory owner"):
             inspect(
-                repository_payload={"id": 999, "full_name": "example/repo"},
+                account={"id": 999, "login": "example"},
                 permissions={
                     "contents": "write",
                     "metadata": "read",
@@ -193,7 +197,7 @@ class GitHubAppIdentityTests(unittest.TestCase):
             )
         with self.assertRaisesRegex(GitHubAppIdentityError, "beyond"):
             inspect(
-                repository_payload={"id": 123, "full_name": "example/repo"},
+                account={"id": 456, "login": "example"},
                 permissions={
                     "contents": "write",
                     "metadata": "read",

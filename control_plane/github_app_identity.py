@@ -33,6 +33,11 @@ _ORDINARY_AGENT_EFFECT_PERMISSION_CEILINGS: dict[str, dict[str, str]] = {
     "comment_pull_request": {"metadata": "read", "pull_requests": "write"},
     "label_pull_request": {"metadata": "read", "pull_requests": "write"},
 }
+_ORDINARY_AGENT_INSTALLATION_PERMISSION_CEILING = {
+    "contents": "write",
+    "metadata": "read",
+    "pull_requests": "write",
+}
 
 GitHubApiRequest = Callable[..., object]
 
@@ -60,9 +65,17 @@ class GitHubAppInstallationToken:
 
 @dataclass(frozen=True, slots=True)
 class GitHubAppInstallationInspection:
+    """App installation evidence bound to a DB-inventory repository identity.
+
+    ``repository_id`` and ``repository`` are validated caller inputs, not fields
+    returned by the App-JWT installation endpoint. App, installation, account,
+    and permission values are provider-observed.
+    """
+
     app_id: int
     installation_id: int
     repository_id: int
+    repository_owner_id: int
     repository: str
     permissions: tuple[str, ...]
 
@@ -99,7 +112,9 @@ def mint_repository_installation_token(
         repository=repository,
         repository_id=repository_id,
         requested_permissions={"checks": "write"},
+        required_installation_permissions={"checks": "write"},
         allowed_installation_permissions=_ALLOWED_INSTALLATION_PERMISSIONS,
+        allowed_token_permissions=_ALLOWED_INSTALLATION_PERMISSIONS,
         identity_label="Launchplane advisory GitHub App",
         permission_boundary_label="advisory check projection",
         api_request=api_request,
@@ -125,7 +140,9 @@ def mint_ordinary_agent_installation_token(
         repository=repository,
         repository_id=repository_id,
         requested_permissions=requested,
-        allowed_installation_permissions=ceiling,
+        required_installation_permissions=_ORDINARY_AGENT_INSTALLATION_PERMISSION_CEILING,
+        allowed_installation_permissions=_ORDINARY_AGENT_INSTALLATION_PERMISSION_CEILING,
+        allowed_token_permissions=ceiling,
         identity_label="Ordinary-agent GitHub App",
         permission_boundary_label="selected profile",
         api_request=api_request,
@@ -149,7 +166,10 @@ def ordinary_agent_enrollment_effect_profiles() -> tuple[str, ...]:
 
 
 def ordinary_agent_enrollment_permissions() -> tuple[str, ...]:
-    return ("contents:write", "metadata:read", "pull_requests:write")
+    return tuple(
+        f"{permission}:{access}"
+        for permission, access in sorted(_ORDINARY_AGENT_INSTALLATION_PERMISSION_CEILING.items())
+    )
 
 
 def inspect_ordinary_agent_github_app_installation(
@@ -157,14 +177,23 @@ def inspect_ordinary_agent_github_app_installation(
     identity: GitHubAppIdentity,
     repository: str,
     repository_id: str,
+    repository_owner_id: str,
     api_request: GitHubApiRequest = github_api_request,
     now: datetime | None = None,
 ) -> GitHubAppInstallationInspection:
+    """Inspect an App installation without minting a repository token."""
     normalized_repository = repository.strip()
     if normalized_repository.count("/") != 1:
         raise GitHubAppIdentityError("GitHub App repository must use owner/name.")
     owner, repo = normalized_repository.split("/", 1)
-    if not owner or not repo or not repository_id.isdecimal() or int(repository_id) < 1:
+    if (
+        not owner
+        or not repo
+        or not repository_id.isdecimal()
+        or int(repository_id) < 1
+        or not repository_owner_id.isdecimal()
+        or int(repository_owner_id) < 1
+    ):
         raise GitHubAppIdentityError("GitHub App repository identity is invalid.")
     issued_at = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     try:
@@ -193,33 +222,8 @@ def inspect_ordinary_agent_github_app_installation(
         != identity.app_id
     ):
         raise GitHubAppIdentityError("GitHub App identity does not match configured app id.")
-    repository_payload = json_object(
-        _github_api_request(
-            api_request,
-            path=f"/repos/{quote(owner, safe='')}/{quote(repo, safe='')}",
-            token=app_jwt,
-        ),
-        "GitHub repository inspection response",
-        error_type=GitHubAppIdentityError,
-    )
     numeric_repository_id = int(repository_id)
-    if (
-        required_positive_int(
-            repository_payload.get("id"),
-            "GitHub repository inspection response requires id.",
-            error_type=GitHubAppIdentityError,
-        )
-        != numeric_repository_id
-        or required_string_text(
-            repository_payload.get("full_name"),
-            "GitHub repository inspection response requires full_name.",
-            error_type=GitHubAppIdentityError,
-        ).casefold()
-        != normalized_repository.casefold()
-    ):
-        raise GitHubAppIdentityError(
-            "GitHub repository inspection does not match exact repository identity."
-        )
+    numeric_repository_owner_id = int(repository_owner_id)
     installation_payload = json_object(
         _github_api_request(
             api_request,
@@ -229,6 +233,28 @@ def inspect_ordinary_agent_github_app_installation(
         "GitHub App installation response",
         error_type=GitHubAppIdentityError,
     )
+    account_payload = json_object(
+        installation_payload.get("account"),
+        "GitHub App installation account",
+        error_type=GitHubAppIdentityError,
+    )
+    if (
+        required_positive_int(
+            account_payload.get("id"),
+            "GitHub App installation account requires id.",
+            error_type=GitHubAppIdentityError,
+        )
+        != numeric_repository_owner_id
+        or required_string_text(
+            account_payload.get("login"),
+            "GitHub App installation account requires login.",
+            error_type=GitHubAppIdentityError,
+        ).casefold()
+        != owner.casefold()
+    ):
+        raise GitHubAppIdentityError(
+            "GitHub App installation account does not match repository inventory owner."
+        )
     installation_id = required_positive_int(
         installation_payload.get("id"),
         "GitHub App installation response requires id.",
@@ -260,6 +286,7 @@ def inspect_ordinary_agent_github_app_installation(
         app_id=identity.app_id,
         installation_id=installation_id,
         repository_id=numeric_repository_id,
+        repository_owner_id=numeric_repository_owner_id,
         repository=normalized_repository,
         permissions=tuple(
             f"{permission}:{access}" for permission, access in sorted(observed_permissions.items())
@@ -273,7 +300,9 @@ def _mint_repository_installation_token(
     repository: str,
     repository_id: str,
     requested_permissions: Mapping[str, str],
+    required_installation_permissions: Mapping[str, str],
     allowed_installation_permissions: Mapping[str, str],
+    allowed_token_permissions: Mapping[str, str],
     identity_label: str,
     permission_boundary_label: str,
     api_request: GitHubApiRequest,
@@ -338,7 +367,7 @@ def _mint_repository_installation_token(
     _validate_permissions(
         installation_payload.get("permissions"),
         label="installation",
-        required_permissions=requested_permissions,
+        required_permissions=required_installation_permissions,
         allowed_permissions=allowed_installation_permissions,
         permission_boundary_label=permission_boundary_label,
     )
@@ -375,7 +404,7 @@ def _mint_repository_installation_token(
             token_payload.get("permissions"),
             label="installation token",
             required_permissions=requested_permissions,
-            allowed_permissions=allowed_installation_permissions,
+            allowed_permissions=allowed_token_permissions,
             permission_boundary_label=permission_boundary_label,
         )
         repositories = token_payload.get("repositories")

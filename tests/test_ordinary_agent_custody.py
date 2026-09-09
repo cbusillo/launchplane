@@ -128,7 +128,7 @@ class OrdinaryAgentCustodyTests(unittest.TestCase):
                     "permissions": {
                         "contents": "write",
                         "metadata": "read",
-                        "pull_requests": "read",
+                        "pull_requests": "write",
                     },
                 }
             if path == "/app/installations/77/access_tokens":
@@ -190,7 +190,7 @@ class OrdinaryAgentCustodyTests(unittest.TestCase):
                     "permissions": {
                         "contents": "write",
                         "metadata": "read",
-                        "pull_requests": "read",
+                        "pull_requests": "write",
                     },
                 }
             mint_calls += 1
@@ -247,7 +247,7 @@ class OrdinaryAgentCustodyTests(unittest.TestCase):
                     "permissions": {
                         "contents": "write",
                         "metadata": "read",
-                        "pull_requests": "read",
+                        "pull_requests": "write",
                     },
                 }
             if path == "/app/installations/77/access_tokens":
@@ -296,7 +296,7 @@ class OrdinaryAgentCustodyTests(unittest.TestCase):
                     "permissions": {
                         "contents": "write",
                         "metadata": "read",
-                        "pull_requests": "read",
+                        "pull_requests": "write",
                     },
                 }
             if path == "/app/installations/77/access_tokens":
