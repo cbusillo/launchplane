@@ -1,7 +1,7 @@
 """add authoritative ordinary-agent lifecycle records
 
 Revision ID: d9a4c7e2f6b1
-Revises: f3a5b7c9d1e4
+Revises: c8f2a6d4e9b1
 Create Date: 2026-09-08 00:00:00.000000+00:00
 """
 
@@ -14,7 +14,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 revision: str = "d9a4c7e2f6b1"
-down_revision: str | None = "f3a5b7c9d1e4"
+down_revision: str | None = "c8f2a6d4e9b1"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

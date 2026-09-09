@@ -69,6 +69,7 @@ from control_plane.contracts.owner_acceptance import (
     OwnerAcceptanceTransitionError,
     owner_acceptance_runtime_identity_binding,
 )
+from control_plane.contracts.ordinary_agent_custody import OrdinaryAgentCustodyCandidate
 from control_plane.contracts.owner_control import (
     ApprovalRequest,
     ChannelBindingRecord,
@@ -2987,6 +2988,49 @@ def _owner_control_shadow_envelope(
 
 
 class RealPostgresStorageConcurrencyTests(unittest.TestCase):
+    def test_ordinary_agent_custody_fence_serializes_same_principal_repository(self) -> None:
+        candidate = OrdinaryAgentCustodyCandidate(
+            principal_id="agent_one",
+            repository_id=123,
+            repository="example/repo",
+            base_branch="main",
+            credential_id="credential_one",
+            credential_version=1,
+            secret_id="secret-app",
+            secret_binding_id="binding-app",
+            secret_version_id="version-1",
+            expected_app_id=42,
+            effect_profile="guarded_merge",
+        )
+        with _store_for_fresh_head_database() as first_store:
+            second_store = PostgresRecordStore(database_url=first_store.database_url)
+            barrier = threading.Barrier(2)
+
+            def acquire(index: int) -> str:
+                barrier.wait(timeout=10)
+                store = (first_store, second_store)[index]
+                status, _record = store.acquire_ordinary_agent_custody_issue_attempt(
+                    attempt_id=f"custody_attempt_{index}",
+                    idempotency_key_sha256=str(index + 1) * 64,
+                    request_sha256=str(index + 3) * 64,
+                    candidate=candidate.model_copy(
+                        update={
+                            "repository": "example/renamed" if index else "example/repo",
+                            "base_branch": "release/next" if index else "main",
+                        }
+                    ),
+                    requested_permissions=("contents:write",),
+                    dispatch_window_seconds=30,
+                )
+                return status
+
+            try:
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    outcomes = tuple(executor.map(acquire, (0, 1)))
+                self.assertCountEqual(outcomes, ("acquired", "fenced"))
+            finally:
+                second_store.close()
+
     def test_v2_owner_replay_across_policy_provenance_keeps_one_original_event(self) -> None:
         records = []
         for revision in (1, 2):
