@@ -126,9 +126,12 @@ class OrdinaryAgentCustodyTests(unittest.TestCase):
                     "id": 77,
                     "app_id": 42,
                     "permissions": {
+                        "administration": "read",
+                        "checks": "read",
                         "contents": "write",
                         "metadata": "read",
                         "pull_requests": "write",
+                        "statuses": "read",
                     },
                 }
             if path == "/app/installations/77/access_tokens":
@@ -188,9 +191,12 @@ class OrdinaryAgentCustodyTests(unittest.TestCase):
                     "id": 77,
                     "app_id": 42,
                     "permissions": {
+                        "administration": "read",
+                        "checks": "read",
                         "contents": "write",
                         "metadata": "read",
                         "pull_requests": "write",
+                        "statuses": "read",
                     },
                 }
             mint_calls += 1
@@ -245,9 +251,12 @@ class OrdinaryAgentCustodyTests(unittest.TestCase):
                     "id": 77,
                     "app_id": 42,
                     "permissions": {
+                        "administration": "read",
+                        "checks": "read",
                         "contents": "write",
                         "metadata": "read",
                         "pull_requests": "write",
+                        "statuses": "read",
                     },
                 }
             if path == "/app/installations/77/access_tokens":
@@ -294,9 +303,12 @@ class OrdinaryAgentCustodyTests(unittest.TestCase):
                     "id": 77,
                     "app_id": 42,
                     "permissions": {
+                        "administration": "read",
+                        "checks": "read",
                         "contents": "write",
                         "metadata": "read",
                         "pull_requests": "write",
+                        "statuses": "read",
                     },
                 }
             if path == "/app/installations/77/access_tokens":
