@@ -10,7 +10,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
 AUTHZ_COMPATIBILITY_FLOOR_REVISION = "f3b5d7e9a1c2"
-EXPECTED_ALEMBIC_HEAD_REVISION = "f3a5b7c9d1e4"
+EXPECTED_ALEMBIC_HEAD_REVISION = "c8f2a6d4e9b1"
 RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS = (EXPECTED_ALEMBIC_HEAD_REVISION,)
 _AUTHZ_POLICY_TABLE = "launchplane_authz_policies"
 _AUTHZ_POLICY_WRITE_FENCE_TRIGGER = "launchplane_authz_policy_write_fence"
@@ -540,6 +540,16 @@ CRITICAL_POSTGRES_COLUMN_TYPES: tuple[CriticalColumnType, ...] = (
         ("jsonb",),
     ),
     CriticalColumnType(
+        "launchplane_ordinary_agent_custody_issue_attempts",
+        "payload",
+        ("jsonb",),
+    ),
+    CriticalColumnType(
+        "launchplane_ordinary_agent_custody_issue_attempts",
+        "repository_id",
+        ("bigint", "int8"),
+    ),
+    CriticalColumnType(
         "launchplane_administrator_enrollments",
         "proposer_github_id",
         ("bigint", "int8"),
@@ -662,6 +672,18 @@ CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
         "launchplane_administrator_enrollment_challenge_uq",
         ("challenge_sha256",),
         unique=True,
+    ),
+    CriticalIndex(
+        "launchplane_ordinary_agent_custody_issue_attempts",
+        "launchplane_ordinary_agent_custody_active_fence_uidx",
+        ("principal_id", "repository_id"),
+        unique=True,
+        predicate_expression=("state IN ('minting','issued','issue_unknown','cleanup_unknown')"),
+    ),
+    CriticalIndex(
+        "launchplane_ordinary_agent_custody_issue_attempts",
+        "launchplane_ordinary_agent_custody_state_residual_idx",
+        ("state", "residual_expires_at"),
     ),
     CriticalIndex(
         "launchplane_administrator_enrollments",
@@ -1421,6 +1443,10 @@ CRITICAL_PRIMARY_KEYS: tuple[CriticalPrimaryKey, ...] = (
     CriticalPrimaryKey(
         "launchplane_administrator_enrollments",
         ("enrollment_id",),
+    ),
+    CriticalPrimaryKey(
+        "launchplane_ordinary_agent_custody_issue_attempts",
+        ("attempt_id",),
     ),
     CriticalPrimaryKey(
         "launchplane_solo_administration_confirmations",
