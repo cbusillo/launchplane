@@ -21,11 +21,11 @@ from control_plane.contracts.merge_train_effect import (
 )
 from control_plane.contracts.ordinary_agent_effect import (
     OrdinaryAgentCompletedOutcome,
+    OrdinaryAgentAcceptedAsyncOutcome,
     OrdinaryAgentControllerFence,
     OrdinaryAgentEffectRecord,
     OrdinaryAgentEffectStore,
     OrdinaryAgentKnownNotDispatchedOutcome,
-    OrdinaryAgentPullRequestObservation,
     OrdinaryAgentRefObservation,
     OrdinaryAgentUnknownOutcome,
 )
@@ -50,6 +50,7 @@ from control_plane.workflows.launchplane import github_api_request
 
 
 TransportFactory = Callable[[str], MergeTrainGitHubTransport]
+DispatchOutcome = OrdinaryAgentCompletedOutcome | OrdinaryAgentAcceptedAsyncOutcome
 
 
 class OrdinaryAgentEffectTerminal(RuntimeError):
@@ -142,11 +143,9 @@ class OrdinaryAgentMergeTrainEffectExecutor:
     def refresh_pull_request_head(self, effect: PullRequestHeadRefreshEffect) -> None:
         self._require_command("pull_request_head_refresh", effect)
 
-        def call(client: GitHubMergeTrainClient) -> OrdinaryAgentCompletedOutcome:
+        def call(client: GitHubMergeTrainClient) -> DispatchOutcome:
             LegacyMergeTrainEffectExecutor(client=client).refresh_pull_request_head(effect)
-            return OrdinaryAgentCompletedOutcome(
-                proof=_read_pull_request_observation(client.transport, effect)
-            )
+            return OrdinaryAgentAcceptedAsyncOutcome()
 
         self._dispatch(call)
 
@@ -259,7 +258,7 @@ class OrdinaryAgentMergeTrainEffectExecutor:
 
     def _dispatch(
         self,
-        call: Callable[[GitHubMergeTrainClient], OrdinaryAgentCompletedOutcome],
+        call: Callable[[GitHubMergeTrainClient], DispatchOutcome],
         *,
         no_dispatch_preflight: Callable[[GitHubMergeTrainClient], bool] | None = None,
     ) -> None:
@@ -394,41 +393,6 @@ def _read_commit_proof(
             for parent in parents
             if isinstance(parent, dict)
         ),
-    )
-
-
-def _read_pull_request_observation(
-    transport: MergeTrainGitHubTransport, effect: PullRequestHeadRefreshEffect
-) -> OrdinaryAgentPullRequestObservation:
-    payload = transport.request(
-        method="GET",
-        path=(
-            f"/repos/{effect.lineage.repository}/pulls/"
-            f"{effect.pull_request_number}"
-        ),
-    )
-    if not isinstance(payload, dict):
-        raise MergeTrainGitHubError("ordinary_pull_request_proof_malformed")
-    head, base = payload.get("head"), payload.get("base")
-    if not isinstance(head, dict) or not isinstance(base, dict):
-        raise MergeTrainGitHubError("ordinary_pull_request_proof_malformed")
-    head_sha = str(head.get("sha") or "").strip()
-    proof = _read_commit_proof(
-        transport,
-        effect.lineage.repository,
-        head_sha,
-        ref=str(head.get("ref") or "").strip(),
-    )
-    return OrdinaryAgentPullRequestObservation(
-        repository=effect.lineage.repository,
-        number=effect.pull_request_number,
-        head_sha=head_sha,
-        base_ref=str(base.get("ref") or "").strip(),
-        base_sha=str(base.get("sha") or "").strip(),
-        state="closed" if str(payload.get("state") or "").lower() == "closed" else "open",
-        merged=bool(payload.get("merged")),
-        merge_commit_sha=(str(payload.get("merge_commit_sha") or "").strip() or None),
-        head_parents=proof.parents,
     )
 
 
