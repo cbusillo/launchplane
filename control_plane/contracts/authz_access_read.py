@@ -366,7 +366,7 @@ class AuthzPolicyRecordSummary(BaseModel):
     revision: int = Field(ge=1)
     policy_sha256: str
     updated_at: str
-    schema_version: Literal[1, 2]
+    schema_version: Literal[1, 2, 3]
 
 
 class AuthzPolicyHealthSummary(BaseModel):
@@ -440,7 +440,7 @@ class AuthzPolicyAdministrationProvenance(BaseModel):
     source: str
     updated_at: str
     policy_sha256: str
-    schema_version: Literal[1, 2]
+    schema_version: Literal[1, 2, 3]
 
 
 class AuthzPolicyAdministrationResponse(BaseModel):
