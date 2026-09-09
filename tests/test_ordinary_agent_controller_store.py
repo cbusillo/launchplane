@@ -1,6 +1,11 @@
 import unittest
 from unittest.mock import Mock
 
+from control_plane.contracts.merge_train_batch import (
+    MergeTrainBatchCandidate,
+    MergeTrainBatchEntry,
+    build_merge_train_batch_candidate_record,
+)
 from control_plane.contracts.merge_train_controller_state import (
     MergeTrainControllerLeaseLostError,
     build_merge_train_controller_state_record,
@@ -19,6 +24,8 @@ from control_plane.merge_train_controller_run_once import MergeTrainControllerLe
 from control_plane.ordinary_agent_controller_store import (
     OrdinaryAgentControllerAdapter,
     OrdinaryAgentControllerReadStore,
+    OrdinaryAgentProgressAdapter,
+    OrdinaryAgentProgressReadStore,
 )
 from tests.support.ordinary_agent_lifecycle import TARGET
 
@@ -66,6 +73,62 @@ class OrdinaryAgentControllerStoreTests(unittest.TestCase):
                 "active_record_id": "predecessor",
             }
         )
+        store.acquire_ordinary_merge_train_controller_state_record.return_value = record
+        adapter.acquire_merge_train_controller_state_record(
+            repository=TARGET.repository,
+            base_branch=TARGET.base_branch,
+            policy_key=record.policy_key,
+            policy_sha256=record.policy_sha256,
+            lease_owner="untrusted-generic-trace",
+            lease_seconds=60,
+            initial_active_action="build_candidate",
+            initial_active_phase="planning",
+            adoptable_active_actions=("build_candidate",),
+        )
+        store.acquire_ordinary_merge_train_controller_state_record.reset_mock()
+        progress_reader = Mock(spec=OrdinaryAgentProgressReadStore)
+        progress = OrdinaryAgentProgressAdapter(adapter, progress_reader)
+        candidate = MergeTrainBatchCandidate(
+            batch_id="batch-one",
+            repository=TARGET.repository,
+            base_branch=TARGET.base_branch,
+            base_sha=request.base_sha,
+            policy_key=record.policy_key,
+            policy_sha256=record.policy_sha256,
+            candidate_ref="refs/heads/test-candidate",
+            entries=(MergeTrainBatchEntry(pull_request_number=12, position=1, head_sha="b" * 40),),
+            created_at=record.updated_at,
+            updated_at=record.updated_at,
+        )
+        wrapper = build_merge_train_batch_candidate_record(
+            candidate=candidate,
+            source="test",
+            updated_at=record.updated_at,
+            ordinary_job_binding=adapter.binding,
+        )
+        progress_reader.list_merge_train_batch_candidate_records.return_value = (
+            wrapper.model_copy(update={"ordinary_job_binding": None}),
+            wrapper.model_copy(
+                update={
+                    "ordinary_job_binding": adapter.binding.model_copy(
+                        update={"binding_revision": 2}
+                    )
+                }
+            ),
+            wrapper,
+        )
+        self.assertEqual(
+            progress.list_merge_train_batch_candidate_records(
+                repository=TARGET.repository, base_branch=TARGET.base_branch, limit=1
+            ),
+            (wrapper,),
+        )
+        reader.list_merge_train_controller_state_records.return_value = (record,)
+        progress.write_merge_train_batch_candidate_record(wrapper)
+        written = store.write_ordinary_merge_train_record.call_args.kwargs
+        self.assertEqual(written["controller_fence"], adapter.acquired_fence)
+        self.assertEqual(written["expected_predecessor_record_id"], "predecessor")
+        self.assertEqual(written["record"], wrapper)
         successor = record.model_copy(update={"active_record_id": "successor"})
         foreign = record.model_copy(
             update={
@@ -86,6 +149,9 @@ class OrdinaryAgentControllerStoreTests(unittest.TestCase):
         reader.list_merge_train_controller_state_records.return_value = (changed,)
         with self.assertRaises(MergeTrainControllerLeaseLostError):
             lease.checkpoint(active_phase="must-not-run")
+        with self.assertRaises(MergeTrainControllerLeaseLostError):
+            progress.write_merge_train_batch_candidate_record(wrapper)
+        self.assertEqual(store.write_ordinary_merge_train_record.call_count, 1)
         self.assertEqual(
             store.compare_and_set_ordinary_merge_train_controller_state_record.call_count, 1
         )

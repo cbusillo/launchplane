@@ -1,8 +1,13 @@
 """Translate legacy controller coordination into joined ordinary-job operations."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 
+from control_plane.contracts.merge_train_batch import (
+    MergeTrainBatchCandidateRecord,
+    MergeTrainBatchLandingPlanRecord,
+)
+from control_plane.contracts.merge_train_stack_collapse import MergeTrainStackCollapsePlanRecord
 from control_plane.contracts.merge_train_controller_state import (
     MergeTrainControllerLeaseLostError,
     MergeTrainControllerStateRecord,
@@ -11,6 +16,7 @@ from control_plane.contracts.ordinary_agent_effect import (
     OrdinaryAgentClaimedJob,
     OrdinaryAgentControllerFence,
     OrdinaryAgentControllerStore,
+    OrdinaryAgentProgressRecord,
 )
 from control_plane.contracts.ordinary_agent_session_lifecycle import OrdinaryAgentJobBinding
 
@@ -38,6 +44,13 @@ class OrdinaryAgentControllerAdapter:
     claimed: OrdinaryAgentClaimedJob
     store: OrdinaryAgentControllerStore
     reader: OrdinaryAgentControllerReadStore
+    _acquired_fence: OrdinaryAgentControllerFence | None = field(default=None, init=False)
+
+    @property
+    def acquired_fence(self) -> OrdinaryAgentControllerFence:
+        if self._acquired_fence is None:
+            raise MergeTrainControllerLeaseLostError("ordinary controller not acquired")
+        return self._acquired_fence
 
     @property
     def binding(self) -> OrdinaryAgentJobBinding:
@@ -89,7 +102,7 @@ class OrdinaryAgentControllerAdapter:
     ) -> MergeTrainControllerStateRecord:
         self._require_target(repository, base_branch)
         # The generic trace owner is deliberately not forwarded as authority.
-        return self.store.acquire_ordinary_merge_train_controller_state_record(
+        record = self.store.acquire_ordinary_merge_train_controller_state_record(
             claim_fence=self.claimed.claim_fence,
             expected_binding_revision=self.claimed.request.binding_revision,
             policy_key=policy_key,
@@ -99,6 +112,12 @@ class OrdinaryAgentControllerAdapter:
             initial_active_phase=initial_active_phase,
             adoptable_active_actions=adoptable_active_actions,
         )
+        self._acquired_fence = OrdinaryAgentControllerFence(
+            controller_key=record.controller_key,
+            lease_owner=record.lease_owner,
+            lease_acquired_at=record.lease_acquired_at,
+        )
+        return record
 
     def compare_and_set_merge_train_controller_state_record(
         self,
@@ -154,3 +173,171 @@ class OrdinaryAgentControllerAdapter:
             expected_binding_revision=self.claimed.request.binding_revision,
             controller_fence=fence,
         )
+
+
+class OrdinaryAgentProgressReadStore(Protocol):
+    def list_merge_train_batch_candidate_records(
+        self,
+        *,
+        repository: str = "",
+        base_branch: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[MergeTrainBatchCandidateRecord, ...]: ...
+
+    def list_merge_train_batch_landing_plan_records(
+        self,
+        *,
+        repository: str = "",
+        base_branch: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[MergeTrainBatchLandingPlanRecord, ...]: ...
+
+    def list_merge_train_stack_collapse_plan_records(
+        self,
+        *,
+        repository: str = "",
+        base_branch: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[MergeTrainStackCollapsePlanRecord, ...]: ...
+
+
+@dataclass
+class OrdinaryAgentProgressAdapter:
+    controller: OrdinaryAgentControllerAdapter
+    reader: OrdinaryAgentProgressReadStore
+
+    def _filter[Record: OrdinaryAgentProgressRecord](
+        self,
+        records: tuple[Record, ...],
+        *,
+        repository: str,
+        base_branch: str,
+        status: str,
+        limit: int | None,
+    ) -> tuple[Record, ...]:
+        self.controller._require_target(repository, base_branch)
+        result: list[Record] = []
+        for record in records:
+            if record.ordinary_job_binding != self.controller.binding:
+                continue
+            if isinstance(record, MergeTrainBatchCandidateRecord):
+                repository_value, branch_value = (
+                    record.candidate.repository,
+                    record.candidate.base_branch,
+                )
+            elif isinstance(record, MergeTrainBatchLandingPlanRecord):
+                repository_value, branch_value = (
+                    record.landing_plan.repository,
+                    record.landing_plan.base_branch,
+                )
+            else:
+                repository_value, branch_value = record.plan.repository, record.plan.base_branch
+            if (
+                repository_value.lower() == repository.lower()
+                and branch_value == base_branch
+                and (not status or record.status == status)
+            ):
+                result.append(record)
+        return tuple(result if limit is None else result[:limit])
+
+    def list_merge_train_batch_candidate_records(
+        self,
+        *,
+        repository: str = "",
+        base_branch: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[MergeTrainBatchCandidateRecord, ...]:
+        self.controller._require_target(repository, base_branch)
+        return self._filter(
+            self.reader.list_merge_train_batch_candidate_records(
+                repository=repository, base_branch=base_branch, status=status
+            ),
+            repository=repository,
+            base_branch=base_branch,
+            status=status,
+            limit=limit,
+        )
+
+    def list_merge_train_batch_landing_plan_records(
+        self,
+        *,
+        repository: str = "",
+        base_branch: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[MergeTrainBatchLandingPlanRecord, ...]:
+        self.controller._require_target(repository, base_branch)
+        return self._filter(
+            self.reader.list_merge_train_batch_landing_plan_records(
+                repository=repository, base_branch=base_branch, status=status
+            ),
+            repository=repository,
+            base_branch=base_branch,
+            status=status,
+            limit=limit,
+        )
+
+    def list_merge_train_stack_collapse_plan_records(
+        self,
+        *,
+        repository: str = "",
+        base_branch: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[MergeTrainStackCollapsePlanRecord, ...]:
+        self.controller._require_target(repository, base_branch)
+        return self._filter(
+            self.reader.list_merge_train_stack_collapse_plan_records(
+                repository=repository, base_branch=base_branch, status=status
+            ),
+            repository=repository,
+            base_branch=base_branch,
+            status=status,
+            limit=limit,
+        )
+
+    def _write(self, record: OrdinaryAgentProgressRecord) -> OrdinaryAgentProgressRecord:
+        if record.ordinary_job_binding != self.controller.binding or record.status != "active":
+            raise MergeTrainControllerLeaseLostError("ordinary progress binding mismatch")
+        target = self.controller.claimed.request.target
+        records = self.controller.list_merge_train_controller_state_records(
+            repository=target.repository, base_branch=target.base_branch, limit=1
+        )
+        if not records:
+            raise MergeTrainControllerLeaseLostError("ordinary progress controller missing")
+        current = records[0]
+        fence = self.controller.acquired_fence
+        if (
+            current.controller_key != fence.controller_key
+            or current.lease_owner != fence.lease_owner
+            or current.lease_acquired_at != fence.lease_acquired_at
+        ):
+            raise MergeTrainControllerLeaseLostError("ordinary progress fence changed")
+        # This is the fence acquired for this claim, not a new authority lookup.
+        # Joined storage checks its generation, current authority and predecessor.
+        return self.controller.store.write_ordinary_merge_train_record(
+            request_id=self.controller.claimed.request.request_id,
+            expected_binding_revision=self.controller.claimed.request.binding_revision,
+            controller_fence=fence,
+            record=record,
+            expected_predecessor_record_id=current.active_record_id or None,
+        )
+
+    def write_merge_train_batch_candidate_record(
+        self, record: MergeTrainBatchCandidateRecord
+    ) -> object:
+        return self._write(record)
+
+    def write_merge_train_batch_landing_plan_record(
+        self, record: MergeTrainBatchLandingPlanRecord
+    ) -> object:
+        return self._write(record)
+
+    def write_merge_train_stack_collapse_plan_record(
+        self, record: MergeTrainStackCollapsePlanRecord
+    ) -> object:
+        return self._write(record)
