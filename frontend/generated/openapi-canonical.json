@@ -18154,6 +18154,35 @@
         "title": "OdooWebsiteBootstrapRoute",
         "type": "object"
       },
+      "OrdinaryAgentCredentialClaimResponse": {
+        "additionalProperties": false,
+        "description": "Private machine delivery; never include this response in agent context.",
+        "properties": {
+          "credential": {
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Credential",
+            "type": "string"
+          },
+          "schema_version": {
+            "const": 1,
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "status": {
+            "const": "ready",
+            "default": "ready",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "credential"
+        ],
+        "title": "OrdinaryAgentCredentialClaimResponse",
+        "type": "object"
+      },
       "OrdinaryAgentPolicyRule": {
         "additionalProperties": false,
         "properties": {
@@ -41610,6 +41639,74 @@
           }
         },
         "summary": "Read Launchplane agent context"
+      }
+    },
+    "/v1/agent/ordinary-agent-enrollments/{operation_id}/claim": {
+      "post": {
+        "operationId": "claim_ordinary_agent_credential",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "operation_id",
+            "required": true,
+            "schema": {
+              "maxLength": 256,
+              "minLength": 1,
+              "title": "Operation Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Private receiver capability, using the Bearer scheme.",
+            "in": "header",
+            "name": "Authorization",
+            "required": true,
+            "schema": {
+              "format": "password",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrdinaryAgentCredentialClaimResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "Delivery capability denied or unavailable"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Claim Ordinary Agent Credential",
+        "tags": [
+          "ordinary-agent-private"
+        ],
+        "x-launchplane-response-custody": "private-client-only"
       }
     },
     "/v1/agent/privileged-operations/plans": {

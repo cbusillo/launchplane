@@ -326,3 +326,29 @@ client connection flow. Authenticated proposal/approval descriptors, client
 installation, ordinary HTTP admission, session/effect integration, and exact-scope
 live qualification remain separate prerequisites. Owner acceptance remains tied
 to a PR preview and never requires reading code.
+
+## Private client HTTP delivery
+
+`POST /v1/agent/ordinary-agent-enrollments/{operation_id}/claim` accepts the
+receiver capability in the Authorization header using the Bearer scheme. This
+route does not run legacy terminal, operator, human-cookie, or Actions identity
+resolution. It accepts no JSON body or query input. A missing, malformed, or
+unavailable delivery uses a generic denial; errors never echo the submitted
+capability or a keyring/persistence exception. A successful response contains
+one private `credential` value and uses `Cache-Control: no-store`.
+
+Only a private client adapter may consume that response. The exported agent
+contract marks its sole supported surface as `private_agent_client` and requires
+private response custody evidence. It is not an LLM-visible generic tool result,
+operator UI response, or public agent context. The client must save the credential
+privately before reporting redacted readiness, reject authorization redirects,
+and reuse the same operation/receiver proof for delivery retries. Request logging,
+tracing, ingress rate limits, cleanup scheduling, installed private client support,
+and authenticated enrollment proposal/approval remain activation prerequisites.
+The route creates no principal, session, policy, or grant on its own.
+
+An exact operation review link can include `operation_id` on the existing
+Engineering Ops privileged-operation page. The page reads that operation's
+review directly and preserves server authorization checks; it does not require
+searching the operation list. Ordinary delegation presentation and its
+server-authoritative approval adapter are a separate part of client integration.

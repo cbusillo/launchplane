@@ -5,6 +5,7 @@ import {
   LaunchplaneApiError,
   approvePrivilegedOperation,
   readPrivilegedOperationPlans,
+  readPrivilegedOperationReview,
   readPrivilegedOperationRawDetail,
   revokePrivilegedOperation,
   type PrivilegedOperationDescriptorId,
@@ -30,6 +31,7 @@ export function EngineeringPrivilegedOperationsRoute({
 }: {
   fixtureMode: DevFixtureMode;
 }) {
+  const operationId = new URLSearchParams(window.location.search).get("operation_id");
   const [descriptorId, setDescriptorId] =
     useState<PrivilegedOperationDescriptorId>("managed-secret-reencryption");
   const loader = useCallback(
@@ -41,19 +43,31 @@ export function EngineeringPrivilegedOperationsRoute({
         await fixtureDelay(signal);
         return privilegedOperationFixture(fixtureMode, descriptorId);
       }
+      if (operationId !== null) {
+        const result = await readPrivilegedOperationReview(operationId, signal);
+        return {
+          status: result.status,
+          trace_id: result.trace_id,
+          total: 1,
+          reviews: [result.review],
+        };
+      }
       return readPrivilegedOperationPlans(signal, descriptorId);
     },
-    [descriptorId, fixtureMode],
+    [descriptorId, fixtureMode, operationId],
   );
   const resource = useEngineeringResource(
     loader,
-    `privileged-operations:${descriptorId}:${fixtureMode}`,
+    `privileged-operations:${operationId ?? descriptorId}:${fixtureMode}`,
   );
 
   return (
     <EngineeringRouteFrame
       actions={
         <div className="privileged-operation-toolbar">
+          {operationId !== null ? (
+            <a href="/ui/engineering/privileged-operations">All operation plans</a>
+          ) : (
           <div
             className="privileged-operation-kind-switch"
             aria-label="Operation type"
@@ -84,6 +98,7 @@ export function EngineeringPrivilegedOperationsRoute({
               Merge-train policy
             </button>
           </div>
+          )}
           <EngineeringResourceControls
             cancel={resource.cancel}
             refresh={resource.refresh}

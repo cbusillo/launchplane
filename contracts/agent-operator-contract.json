@@ -47,6 +47,33 @@
       {
         "idempotency": "none",
         "identity_dependencies": [
+          "read_ordinary_agent_receiver_claim"
+        ],
+        "method": "POST",
+        "modes": [
+          "claim"
+        ],
+        "operation_id": "claim_ordinary_agent_credential",
+        "path": "/v1/agent/ordinary-agent-enrollments/{operation_id}/claim",
+        "purpose": "Recover a receiver-bound credential directly into private client custody.",
+        "response_statuses": [
+          "200",
+          "401",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [
+          "receiver_bound_delivery",
+          "private_response_custody"
+        ],
+        "schema_fingerprint_sha256": "d752b1ea42fb3432eccdc727fe94966195fa179971d18d460ae1cfa4fbc45c91",
+        "supported_surfaces": [
+          "private_agent_client"
+        ]
+      },
+      {
+        "idempotency": "none",
+        "identity_dependencies": [
           "read_identity"
         ],
         "method": "GET",
@@ -423,8 +450,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "3ffb0b73cee04546d3f6224d1f52cbfda9050ace"
+    "source_commit_sha": "929ebf7689a69675d8c98a7842af8974ee96bf2f"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "b55458eaa93336bfea0ab962c5b53f2c49937ed350ecf4e8dbe89c1d193eb66e"
+  "semantic_digest_sha256": "4c17999deb70c78cd0d4c00314580aa01360dd2af6180174caace9189e89aa79"
 }

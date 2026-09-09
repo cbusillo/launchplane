@@ -1063,6 +1063,38 @@ class FastApiServiceRuntimeReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stored, ())
         verifier.verify.assert_not_called()
 
+    async def test_private_claim_does_not_fall_back_to_configured_administrator(self) -> None:
+        claim = generate_receiver_claim_secret()
+        verifier = Mock()
+        with TemporaryDirectory() as directory:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(directory) / "private-claim.sqlite3")
+            )
+            store.ensure_schema()
+            app = create_launchplane_fastapi_app(
+                verifier=verifier,
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"schema_version": 2}),
+                record_store_factory=lambda: store,
+                bearer_identity_config=BearerIdentityConfig(
+                    local_admin_token=claim.value,
+                    local_admin_subject="local-admin",
+                    local_admin_token_label="admin",
+                ),
+            )
+            try:
+                response = await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/agent/ordinary-agent-enrollments/unknown-operation/claim",
+                    headers={"Authorization": f"Bearer {claim.value}"},
+                )
+            finally:
+                store.close()
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        self.assertNotIn(claim.value, response.text)
+        verifier.verify.assert_not_called()
+
     def test_runtime_payload_defaults_deployment_marker_to_empty(self) -> None:
         with patch.dict("os.environ", {}, clear=True):
             runtime = launchplane_runtime_payload(

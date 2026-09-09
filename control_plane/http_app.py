@@ -219,6 +219,10 @@ from control_plane.http_routes import (
     request_fingerprint as build_request_fingerprint,
     require_product_profile_read_store,
 )
+from control_plane.http_routes.ordinary_agent import (
+    OrdinaryAgentRouteDependencies,
+    register_ordinary_agent_routes,
+)
 from control_plane.generic_web_deploy_recovery_http import (
     GENERIC_WEB_DEPLOY_RECOVERY_PROVIDER_EVIDENCE_ROUTE,
     GenericWebDeployRecoveryDependencies,
@@ -23598,6 +23602,10 @@ def create_launchplane_fastapi_app(
     register_privileged_operation_routes(
         app,
         dependencies=privileged_operation_route_dependencies,
+    )
+    register_ordinary_agent_routes(
+        app,
+        dependencies=OrdinaryAgentRouteDependencies(common=read_route_dependencies),
     )
     register_governance_projection_routes(
         app,

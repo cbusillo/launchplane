@@ -81,6 +81,15 @@ class OperationSpec:
 
 OPERATION_SPECS = (
     OperationSpec(
+        "POST",
+        "/v1/agent/ordinary-agent-enrollments/{operation_id}/claim",
+        "Recover a receiver-bound credential directly into private client custody.",
+        ("private_agent_client",),
+        ("claim",),
+        "none",
+        ("receiver_bound_delivery", "private_response_custody"),
+    ),
+    OperationSpec(
         "GET",
         "/v1/agent/context",
         "Read public-safe Launchplane context for an agent task.",
@@ -482,6 +491,13 @@ def build_agent_operator_contract(
         operation_id = operation.get("operationId")
         if not isinstance(operation_id, str) or not operation_id:
             raise AgentOperatorContractError(f"Missing operation ID: {spec.method} {spec.path}")
+        if (
+            "private_agent_client" in spec.supported_surfaces
+            and operation.get("x-launchplane-response-custody") != "private-client-only"
+        ):
+            raise AgentOperatorContractError(
+                "Private client operation lacks response custody metadata"
+            )
         normalized_operation = _normalize_operation(operation, components, {})
         parameter_names = {
             str(parameter.get("name", "")).lower()

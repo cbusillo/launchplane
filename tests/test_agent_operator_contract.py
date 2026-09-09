@@ -32,6 +32,10 @@ class AgentOperatorContractTests(unittest.TestCase):
             [(spec.method, spec.path) for spec in OPERATION_SPECS],
         )
         expected_operation_ids = {
+            (
+                "POST",
+                "/v1/agent/ordinary-agent-enrollments/{operation_id}/claim",
+            ): "claim_ordinary_agent_credential",
             ("GET", "/v1/agent/context"): "read_agent_context",
             ("POST", "/v1/agent/write-intents/evaluate"): "evaluate_agent_write_intent",
             ("POST", "/v1/product-config/apply"): "apply_product_config",
@@ -55,6 +59,7 @@ class AgentOperatorContractTests(unittest.TestCase):
             ("GET", "/v1/governance/projection"): "read_governance_projection",
         }
         expected_dependencies = {
+            "claim_ordinary_agent_credential": ["read_ordinary_agent_receiver_claim"],
             "read_agent_context": ["read_identity"],
             "evaluate_agent_write_intent": ["read_browser_mutation_identity"],
             "apply_product_config": ["read_browser_mutation_identity"],
