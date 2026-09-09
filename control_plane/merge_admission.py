@@ -46,10 +46,12 @@ class MergeAdmissionDeniedError(ValueError):
         *,
         reason_code: str = "merge_admission_denied",
         readiness: MergeReadinessResult | None = None,
+        structural_result: MergeTrainStructuralCandidateResult | None = None,
     ) -> None:
         super().__init__(message)
         self.reason_code = reason_code
         self.readiness = readiness
+        self.structural_result = structural_result
 
 
 class MergeAdmissionReconciliationRequiredError(RuntimeError):
@@ -215,11 +217,13 @@ class GuardedMergeAdmission:
                 "Fresh merge readiness evidence did not admit the provider effect.",
                 reason_code="merge_readiness_not_ready",
                 readiness=evaluation.readiness,
+                structural_result=evaluation.structural_result,
             )
         if evaluation.structural_result.status not in {"exact", "recorded_rolling"}:
             raise MergeAdmissionDeniedError(
                 "Fresh structural provenance did not admit the provider effect.",
                 reason_code="structural_provenance_not_admitted",
+                structural_result=evaluation.structural_result,
             )
         admitted_at = self.admission_time_provider()
         if self.controller_state_provider is not None:
