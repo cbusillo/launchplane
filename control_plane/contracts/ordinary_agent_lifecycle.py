@@ -13,6 +13,8 @@ from control_plane.contracts.ordinary_agent_enrollment import (
     OrdinaryAgentPrincipalPreState,
 )
 
+from control_plane.contracts.ordinary_agent_session_lifecycle import OrdinaryAgentSessionAttenuation
+
 
 ORDINARY_AGENT_ENROLLMENT_MUTATION_SCOPE = "ordinary-agent-enrollment"
 ORDINARY_AGENT_ENROLLMENT_MUTATION_ROUTE = (
@@ -163,6 +165,7 @@ class OrdinaryAgentEnrollApplyEnvelope(OrdinaryAgentEnrollmentApplyBase):
     expected_principal_absent: Literal[True]
     authentication_credential: OrdinaryAgentAuthenticationCredentialCandidate
     delivery: OrdinaryAgentDeliveryBinding
+    session_attenuation: OrdinaryAgentSessionAttenuation | None = None
     custody: OrdinaryAgentCredentialCustodyCandidate
 
     @model_validator(mode="after")
@@ -186,6 +189,7 @@ class OrdinaryAgentRotateCredentialApplyEnvelope(OrdinaryAgentEnrollmentApplyBas
     credential_version: int = Field(ge=1, le=2**63 - 1)
     authentication_credential: OrdinaryAgentAuthenticationCredentialCandidate
     delivery: OrdinaryAgentDeliveryBinding
+    session_attenuation: OrdinaryAgentSessionAttenuation | None = None
     custody: OrdinaryAgentCredentialCustodyCandidate
 
     @model_validator(mode="after")
@@ -446,9 +450,142 @@ def ordinary_agent_enrollment_envelope_sha256(
     envelope: OrdinaryAgentEnrollmentApplyEnvelope,
 ) -> str:
     payload = envelope.model_dump(mode="json")
+    if payload.get("session_attenuation") is None:
+        payload.pop("session_attenuation", None)
     if not isinstance(envelope, OrdinaryAgentRevokePrincipalApplyEnvelope):
         # Intent is stable across independently randomized issuance attempts.
         candidate = payload["authentication_credential"]
         candidate.pop("credential_digest")
         candidate.pop("issuance_evidence_sha256")
     return canonical_json_sha256(payload)
+
+
+def ordinary_agent_session_enrollment_intent_sha256(
+    envelope: OrdinaryAgentEnrollApplyEnvelope | OrdinaryAgentRotateCredentialApplyEnvelope,
+) -> str:
+    """Exact administrator-approved intent, before randomized issuer preparation."""
+    return OrdinaryAgentEnrollmentIntent.from_envelope(envelope).intent_sha256
+
+
+class OrdinaryAgentEnrollmentApprovalReference(StrictFrozenModel):
+    """Locator only; the apply transaction must verify persisted approval."""
+
+    principal_id: str = Field(pattern=r"^[a-z][a-z0-9_-]{2,127}$")
+    operation_id: str = Field(min_length=1, max_length=256)
+
+
+class OrdinaryAgentPlannedAuthenticationCredential(StrictFrozenModel):
+    """Approved identity/lifetime plan, before any secret is generated."""
+
+    credential_id: str = Field(pattern=r"^[a-z][a-z0-9_-]{2,127}$")
+    valid_from: int = Field(ge=0, le=2**63 - 1)
+    expires_at: int = Field(ge=1, le=2**63 - 1)
+
+    @model_validator(mode="after")
+    def validate_lifetime(self) -> OrdinaryAgentPlannedAuthenticationCredential:
+        if self.expires_at <= self.valid_from:
+            raise ValueError("planned credential expiry must follow valid_from")
+        return self
+
+
+class OrdinaryAgentEnrollmentIntent(StrictFrozenModel):
+    """Immutable proposed scope; the actual browser approver is not known yet."""
+
+    schema_version: Literal[1] = 1
+    action: Literal["enroll", "rotate_credential"]
+    operation_id: str = Field(pattern=r"^[a-z0-9][a-z0-9._:/-]{2,255}$")
+    principal_id: str = Field(pattern=r"^[a-z][a-z0-9_-]{2,127}$")
+    request_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    evidence_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    plan_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    policy: OrdinaryAgentPolicyBinding
+    principal: OrdinaryAgentPrincipalPreState | None = None
+    credential_id: str | None = None
+    credential_version: int | None = Field(default=None, ge=1, le=2**63 - 1)
+    authentication_credential: OrdinaryAgentPlannedAuthenticationCredential
+    delivery: OrdinaryAgentDeliveryBinding
+    custody: OrdinaryAgentCredentialCustodyCandidate
+    session_attenuation: OrdinaryAgentSessionAttenuation | None = None
+
+    @model_validator(mode="after")
+    def validate_intent(self) -> OrdinaryAgentEnrollmentIntent:
+        if self.custody.principal_id != self.principal_id or self.custody.policy != self.policy:
+            raise ValueError("planned custody must preserve principal and exact policy binding")
+        if self.action == "enroll":
+            if (
+                self.principal is not None
+                or self.credential_id is not None
+                or self.credential_version is not None
+                or self.custody.predecessor_record_id is not None
+            ):
+                raise ValueError("initial enrollment cannot declare rotation prestate")
+        elif (
+            self.principal is None
+            or self.credential_id != self.authentication_credential.credential_id
+            or self.credential_version is None
+            or self.custody.predecessor_record_id is None
+        ):
+            raise ValueError("rotation requires exact current credential and custody prestate")
+        return self
+
+    @classmethod
+    def from_envelope(
+        cls, envelope: OrdinaryAgentEnrollApplyEnvelope | OrdinaryAgentRotateCredentialApplyEnvelope
+    ) -> OrdinaryAgentEnrollmentIntent:
+        payload = envelope.model_dump(
+            exclude={"administrator", "approval_sha256", "expected_principal_absent"}
+        )
+        payload["authentication_credential"] = envelope.authentication_credential.model_dump(
+            include={"credential_id", "valid_from", "expires_at"}
+        )
+        return cls.model_validate(payload)
+
+    @property
+    def intent_sha256(self) -> str:
+        return canonical_json_sha256(self.model_dump(mode="json"))
+
+
+class OrdinaryAgentApprovedEnrollmentIntent(StrictFrozenModel):
+    """Private worker input: authenticated approval, still no generated credential."""
+
+    intent: OrdinaryAgentEnrollmentIntent
+    administrator: OrdinaryAgentAdministratorAuthorizationBinding
+    approval_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    def _envelope_payload(self) -> dict[str, object]:
+        payload = self.intent.model_dump(mode="json")
+        if self.intent.action == "enroll":
+            for name in ("principal", "credential_id", "credential_version"):
+                payload.pop(name)
+            payload["expected_principal_absent"] = True
+        payload["administrator"] = self.administrator.model_dump(mode="json")
+        payload["approval_sha256"] = self.approval_sha256
+        return payload
+
+    @property
+    def issuance_intent_sha256(self) -> str:
+        payload = self._envelope_payload()
+        payload["authentication_credential"] = {
+            "candidate_kind": "service_issued",
+            "principal_id": self.intent.principal_id,
+            **self.intent.authentication_credential.model_dump(mode="json"),
+        }
+        if payload.get("session_attenuation") is None:
+            payload.pop("session_attenuation", None)
+        return canonical_json_sha256(payload)
+
+    def apply_envelope(
+        self, generated_candidate: OrdinaryAgentAuthenticationCredentialCandidate
+    ) -> OrdinaryAgentEnrollApplyEnvelope | OrdinaryAgentRotateCredentialApplyEnvelope:
+        planned = self.intent.authentication_credential
+        if (
+            generated_candidate.principal_id != self.intent.principal_id
+            or generated_candidate.credential_id != planned.credential_id
+            or generated_candidate.valid_from != planned.valid_from
+            or generated_candidate.expires_at != planned.expires_at
+        ):
+            raise ValueError("generated credential does not match approved identity and lifetime")
+        payload = {**self._envelope_payload(), "authentication_credential": generated_candidate}
+        if self.intent.action == "enroll":
+            return OrdinaryAgentEnrollApplyEnvelope.model_validate(payload)
+        return OrdinaryAgentRotateCredentialApplyEnvelope.model_validate(payload)

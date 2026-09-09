@@ -14,12 +14,9 @@ from control_plane.contracts.ordinary_agent import (
 )
 
 
-class OrdinaryAgentSessionDelegation(StrictFrozenModel):
-    """Attenuation bound to an approved operation; the store verifies that approval."""
+class OrdinaryAgentSessionAttenuation(StrictFrozenModel):
+    """Requested finite bounds; no caller-supplied approval provenance."""
 
-    operation_id: str = Field(min_length=1, max_length=256)
-    approval_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    receiver_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     actions: tuple[OrdinaryAgentAction, ...] = Field(min_length=1)
     session_expires_at: int = Field(ge=1, le=2**63 - 1)
     lease_expires_at: int = Field(ge=1, le=2**63 - 1)
@@ -34,7 +31,7 @@ class OrdinaryAgentSessionDelegation(StrictFrozenModel):
         return tuple(value) if isinstance(value, list) else value
 
     @model_validator(mode="after")
-    def validate_lifetimes(self) -> OrdinaryAgentSessionDelegation:
+    def validate_lifetimes(self) -> OrdinaryAgentSessionAttenuation:
         if len(set(self.actions)) != len(self.actions):
             raise ValueError("delegated actions must be unique")
         if self.lease_expires_at > self.session_expires_at:
@@ -45,6 +42,14 @@ class OrdinaryAgentSessionDelegation(StrictFrozenModel):
         ):
             raise ValueError("continuation must have an explicit later finite deadline")
         return self
+
+
+class OrdinaryAgentSessionDelegation(OrdinaryAgentSessionAttenuation):
+    """Server-derived provenance for an authenticated approved operation."""
+
+    operation_id: str = Field(min_length=1, max_length=256)
+    approval_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    receiver_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
 class OrdinaryAgentSessionRecord(StrictFrozenModel):
@@ -154,3 +159,22 @@ class OrdinaryAgentFiniteRequestRecord(StrictFrozenModel):
                 "permitted_stack_edit_pull_requests": list(self.permitted_stack_edit_pull_requests),
             }
         )
+
+
+class OrdinaryAgentSessionOperationView(StrictFrozenModel):
+    """Public diagnostic projection, never an admission or execution capability."""
+
+    schema_version: Literal[1] = 1
+    principal_id: str
+    operation_id: str
+    kind: Literal["initial", "existing"]
+    status: Literal["pending", "approved", "expired", "revoked", "blocked"]
+    reason_code: str | None = None
+    attenuation: OrdinaryAgentSessionAttenuation | None
+    credential_id: str
+    credential_version: int
+    target: OrdinaryAgentTarget
+    session_id: str | None = None
+    session_expires_at: int | None = None
+    applied: bool = False
+    can_approve: bool = False

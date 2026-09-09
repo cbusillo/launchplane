@@ -203,8 +203,20 @@ def build_ordinary_agent_request_admission_write_set(
         or request.execution_record_ids
         or request.admitted_at != now
         or request.expires_at > lease.expires_at
-        or request.continuation_expires_at != session.delegation.continuation_expires_at
+        or (
+            request.continuation_expires_at is not None
+            and (
+                session.delegation.continuation_expires_at is None
+                or request.continuation_expires_at > session.delegation.continuation_expires_at
+            )
+        )
         or request.refresh_allowance_total > session.delegation.refresh_allowance
+        or lease.target != principal.policy.target
+        or lease.managed_set_id != principal.policy.managed_set_id
+        or lease.managed_rule_id != principal.policy.managed_rule_id
+        or lease.budget.window_start != lease.valid_from
+        or lease.budget.window_end
+        != (session.delegation.continuation_expires_at or lease.expires_at)
         or lease.action not in session.delegation.actions
         or lease.expires_at != session.delegation.lease_expires_at
         or lease.budget.action_limit != session.delegation.action_limit
