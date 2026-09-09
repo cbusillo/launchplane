@@ -266,6 +266,13 @@ partial completion, cancellation and uncertain results without offering a second
 execution action. Recorded effect counts are historical actions, not a forecast
 or percentage of the remaining work. These read routes do not activate dispatch.
 
+Merge admission can be built as an inert proposal before persistence. Proposal
+construction performs the existing evidence and history reads; it does not write
+an admission or dispatch. The legacy path immediately persists through its
+existing controller fence. The ordinary path must instead atomically finalize
+that proposal with its exact effect and dispatch checkpoint; this factoring alone
+does not implement or activate that transaction.
+
 ## Validation boundary
 
 Tests use synthetic principals and targets. Canonical JSON round trips and
