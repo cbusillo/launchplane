@@ -430,6 +430,20 @@ separate read paths. Private bounded worker discovery returns only approved,
 unapplied, uncancelled, unexpired operation references. Discovery does not
 replace authoritative read and final apply checks.
 
+Recovery discovery accepts a keyset cursor over principal and operation IDs, so
+an operation that repeatedly fails current authority checks cannot starve later
+approved requests. The worker advances the cursor and wraps on an empty page;
+a process restart may replay discovery without renewing any authority. Disconnect
+operation IDs are derived by the store from the event and exact principal
+prestate, separate from enrollment operations. Only enroll/rotate audits count
+as an applied initial proposal.
+
+A retry after successful disconnect first revalidates the current human and
+administrator authority, then returns the already-revoked principal status. It
+creates no new principal revision, revoke audit, or operation ID from the changed
+prestate. The public result is current revoked state, not a reusable authority
+receipt.
+
 ## Private client HTTP delivery
 
 `POST /v1/agent/ordinary-agent-enrollments/{operation_id}/claim` accepts the
