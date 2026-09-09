@@ -153,6 +153,23 @@ executor. See [privileged operations](privileged-operations.md) and
 [authorization authority](authorization-authority.md) for the existing human and
 production boundaries.
 
+## Merge-train semantic effect seam
+
+The existing privileged merge-train controller routes its provider mutations
+through a closed, provider-neutral semantic effect protocol. The current legacy
+executor maps those commands to the same GitHub client operations and preserves
+the existing controller route, credentials, admission checks, checkpoints,
+errors, and provider behavior. Landing commands carry the newly issued admission
+record ID; it is provenance, not a replacement for guarded admission. The
+head-refresh command has a legacy adapter, but the separate Level 1 worker
+continues using its existing interface. It is not a controller run-once phase.
+
+This seam is an internal refactoring boundary. It adds no ordinary-agent
+executor, effect permit, budget reservation, job or scope record, route, policy
+action, credential custody, or execution authority. Those integrations require
+the authoritative lifecycle and custody contracts before they can be designed
+against stable identities and state transitions.
+
 ## Validation boundary
 
 Tests use synthetic principals/targets and an in-memory fixture. Canonical JSON
