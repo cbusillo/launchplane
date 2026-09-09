@@ -13,6 +13,20 @@ from control_plane.contracts.merge_train_batch import MergeTrainBatchEntry
 from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingEntry
 from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingPlan
 from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingPlanRecord
+from control_plane.contracts.merge_train_effect import (
+    CandidateHeadMergeEffect,
+    CandidateHeadMergeOutcome,
+    CandidateRefDeleteEffect,
+    CandidateRefPrepareEffect,
+    MergeTrainEffectLineage,
+    MergeTrainSemanticEffectExecutor,
+    PullRequestHeadRefreshEffect,
+    PullRequestLandingEffect,
+    StackChildCloseEffect,
+    StackChildCommentEffect,
+    StackChildLabelEffect,
+    StackChildMergeEffect,
+)
 from control_plane.contracts.merge_train_stack_collapse import MergeTrainStackCollapseBranchClient
 from control_plane.contracts.merge_train_policy import MergeTrainMergeMethod
 from control_plane.contracts.merge_train_structural_provenance import (
@@ -89,25 +103,45 @@ class UrllibMergeTrainGitHubTransport:
 
 
 class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
-    def __init__(self, *, transport: MergeTrainGitHubTransport) -> None:
+    def __init__(
+        self,
+        *,
+        transport: MergeTrainGitHubTransport,
+        effect_executor: MergeTrainSemanticEffectExecutor | None = None,
+    ) -> None:
         self.transport = transport
+        self._effect_executor = effect_executor
+
+    @property
+    def semantic_effect_executor(self) -> MergeTrainSemanticEffectExecutor:
+        if self._effect_executor is None:
+            self._effect_executor = LegacyMergeTrainEffectExecutor(client=self)
+        return self._effect_executor
 
     def build_batch_candidate(
         self,
         *,
         candidate: MergeTrainBatchCandidate,
+        effect_executor: MergeTrainSemanticEffectExecutor | None = None,
         checkpoint: (
             Callable[[MergeTrainBatchCandidate, MergeTrainBatchEntry | None, str], None] | None
         ) = None,
     ) -> MergeTrainBatchCandidate:
+        resolved_effect_executor = effect_executor or self.semantic_effect_executor
         repository_path = _repository_path(candidate.repository)
         candidate_branch = _branch_name_from_ref(candidate.candidate_ref)
         if checkpoint is not None:
             checkpoint(candidate, None, "reset_candidate_ref")
-        self._create_or_reset_reference(
-            repository_path=repository_path,
-            reference=candidate.candidate_ref,
-            sha=candidate.base_sha,
+        resolved_effect_executor.prepare_candidate_ref(
+            CandidateRefPrepareEffect(
+                lineage=MergeTrainEffectLineage(
+                    repository=candidate.repository,
+                    base_branch=candidate.base_branch,
+                    batch_id=candidate.batch_id,
+                ),
+                candidate_ref=candidate.candidate_ref,
+                base_sha=candidate.base_sha,
+            )
         )
         if checkpoint is not None:
             checkpoint(candidate, None, "candidate_ref_ready")
@@ -135,19 +169,20 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 checkpoint(candidate, entry, "merge_candidate_entry")
             parent_sha = candidate_sha
             parent_tree_sha = candidate_tree_sha
-            payload = self.transport.request(
-                method="POST",
-                path=f"/repos/{repository_path}/merges",
-                body={
-                    "base": candidate_branch,
-                    "head": entry.head_sha,
-                    "commit_message": (
-                        f"Launchplane merge train {candidate.batch_id}: "
-                        f"merge PR #{entry.pull_request_number}"
+            merge_outcome = resolved_effect_executor.merge_candidate_head(
+                CandidateHeadMergeEffect(
+                    lineage=MergeTrainEffectLineage(
+                        repository=candidate.repository,
+                        base_branch=candidate.base_branch,
+                        batch_id=candidate.batch_id,
                     ),
-                },
+                    candidate_ref=candidate.candidate_ref,
+                    rolling_parent_sha=parent_sha,
+                    pull_request_number=entry.pull_request_number,
+                    head_sha=entry.head_sha,
+                )
             )
-            if payload is None:
+            if merge_outcome.result_sha is None:
                 observed_result_sha = _base_branch_sha(
                     transport=self.transport,
                     repository_path=repository_path,
@@ -199,9 +234,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                     )
                 candidate = progress_candidate
                 continue
-            if not isinstance(payload, dict):
-                raise MergeTrainGitHubError("GitHub merge response must be a JSON object.")
-            response_sha = _required_text(payload.get("sha"), "GitHub merge response requires sha.")
+            response_sha = merge_outcome.result_sha
             observed_candidate_sha = _wait_for_branch_sha(
                 transport=self.transport,
                 repository_path=repository_path,
@@ -278,6 +311,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         self,
         *,
         landing_plan: MergeTrainBatchLandingPlan,
+        effect_executor: MergeTrainSemanticEffectExecutor | None = None,
         admission_guard: GuardedMergeAdmission | None = None,
         recorded_at: str = "",
         provider_checkpoint: (
@@ -291,6 +325,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             | None
         ) = None,
     ) -> MergeTrainBatchLandingPlan:
+        resolved_effect_executor = effect_executor or self.semantic_effect_executor
         if admission_guard is None:
             raise MergeAdmissionDeniedError(
                 "Batch landing requires the guarded merge admission boundary."
@@ -506,13 +541,21 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                     ),
                     entry,
                 )
-            try:
-                merge_commit_sha = self.merge_pull_request(
+            effect = PullRequestLandingEffect(
+                lineage=MergeTrainEffectLineage(
                     repository=landing_plan.repository,
-                    pull_request_number=entry.pull_request_number,
-                    head_sha=entry.expected_head_sha,
-                    merge_method=entry.merge_method,
-                )
+                    base_branch=landing_plan.base_branch,
+                    batch_id=landing_plan.batch_id,
+                    landing_plan_id=landing_plan.plan_id,
+                ),
+                pull_request_number=entry.pull_request_number,
+                head_sha=entry.expected_head_sha,
+                rolling_base_sha=current_base_sha,
+                admission_id=admission.admission_id,
+                merge_method=entry.merge_method,
+            )
+            try:
+                merge_commit_sha = resolved_effect_executor.land_pull_request(effect)
             except Exception as error:
                 admission_guard.record_provider_failure(
                     admission=admission,
@@ -601,11 +644,23 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 )
         return _validated_model_update(landing_plan, entries=tuple(landed_entries))
 
-    def cleanup_batch_candidate_ref(self, *, landing_plan: MergeTrainBatchLandingPlan) -> bool:
-        repository_path = _repository_path(landing_plan.repository)
-        return self._delete_reference_if_present(
-            repository_path=repository_path,
-            reference=landing_plan.candidate_ref,
+    def cleanup_batch_candidate_ref(
+        self,
+        *,
+        landing_plan: MergeTrainBatchLandingPlan,
+        effect_executor: MergeTrainSemanticEffectExecutor | None = None,
+    ) -> bool:
+        resolved_effect_executor = effect_executor or self.semantic_effect_executor
+        return resolved_effect_executor.delete_candidate_ref(
+            CandidateRefDeleteEffect(
+                lineage=MergeTrainEffectLineage(
+                    repository=landing_plan.repository,
+                    base_branch=landing_plan.base_branch,
+                    batch_id=landing_plan.batch_id,
+                    landing_plan_id=landing_plan.plan_id,
+                ),
+                candidate_ref=landing_plan.candidate_ref,
+            )
         )
 
     def candidate_ref_exists(self, *, repository: str, reference: str) -> bool:
@@ -1219,6 +1274,96 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         )
         head = _json_object(pull_request.get("head"), "GitHub pull request head")
         return _required_text(head.get("sha"), "GitHub pull request head requires sha.")
+
+
+class LegacyMergeTrainEffectExecutor:
+    """Map provider-neutral merge-train effects to the existing GitHub client."""
+
+    def __init__(self, *, client: GitHubMergeTrainClient) -> None:
+        self.client = client
+
+    def prepare_candidate_ref(self, effect: CandidateRefPrepareEffect) -> None:
+        self.client._create_or_reset_reference(
+            repository_path=_repository_path(effect.lineage.repository),
+            reference=effect.candidate_ref,
+            sha=effect.base_sha,
+        )
+
+    def merge_candidate_head(self, effect: CandidateHeadMergeEffect) -> CandidateHeadMergeOutcome:
+        repository_path = _repository_path(effect.lineage.repository)
+        payload = self.client.transport.request(
+            method="POST",
+            path=f"/repos/{repository_path}/merges",
+            body={
+                "base": _branch_name_from_ref(effect.candidate_ref),
+                "head": effect.head_sha,
+                "commit_message": (
+                    f"Launchplane merge train {effect.lineage.batch_id}: "
+                    f"merge PR #{effect.pull_request_number}"
+                ),
+            },
+        )
+        if payload is None:
+            return CandidateHeadMergeOutcome(result_sha=None)
+        if not isinstance(payload, dict):
+            raise MergeTrainGitHubError("GitHub merge response must be a JSON object.")
+        return CandidateHeadMergeOutcome(
+            result_sha=_required_text(payload.get("sha"), "GitHub merge response requires sha.")
+        )
+
+    def refresh_pull_request_head(self, effect: PullRequestHeadRefreshEffect) -> None:
+        self.client.update_pull_request_branch(
+            repository=effect.lineage.repository,
+            pull_request_number=effect.pull_request_number,
+            expected_head_sha=effect.expected_head_sha,
+        )
+
+    def merge_stack_child(self, effect: StackChildMergeEffect) -> str:
+        return self.client.merge_stack_child_into_parent(
+            repository=effect.lineage.repository,
+            child_head_sha=effect.child_head_sha,
+            expected_parent_head_sha=effect.expected_parent_head_sha,
+            parent_head_ref=effect.parent_head_ref,
+            protected_base_ref=effect.protected_base_ref,
+            collapse_id=effect.lineage.collapse_id,
+            child_pull_request_number=effect.child_pull_request_number,
+            parent_pull_request_number=effect.parent_pull_request_number,
+        )
+
+    def land_pull_request(self, effect: PullRequestLandingEffect) -> str:
+        return self.client.merge_pull_request(
+            repository=effect.lineage.repository,
+            pull_request_number=effect.pull_request_number,
+            head_sha=effect.head_sha,
+            merge_method=effect.merge_method,
+        )
+
+    def comment_stack_child(self, effect: StackChildCommentEffect) -> str:
+        return self.client.comment_pull_request(
+            repository=effect.lineage.repository,
+            pull_request_number=effect.pull_request_number,
+            body=effect.body,
+        )
+
+    def label_stack_child(self, effect: StackChildLabelEffect) -> None:
+        self.client.add_pull_request_label(
+            repository=effect.lineage.repository,
+            pull_request_number=effect.pull_request_number,
+            label=effect.label,
+        )
+
+    def close_stack_child(self, effect: StackChildCloseEffect) -> None:
+        self.client.close_pull_request(
+            repository=effect.lineage.repository,
+            pull_request_number=effect.pull_request_number,
+            expected_head_sha=effect.expected_head_sha,
+        )
+
+    def delete_candidate_ref(self, effect: CandidateRefDeleteEffect) -> bool:
+        return self.client._delete_reference_if_present(
+            repository_path=_repository_path(effect.lineage.repository),
+            reference=effect.candidate_ref,
+        )
 
 
 class GitHubMergeTrainSnapshotReader:
