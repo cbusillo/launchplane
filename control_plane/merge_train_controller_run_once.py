@@ -320,6 +320,48 @@ def execute_merge_train_controller_run_once(
         transport=transport,
         effect_executor=effect_executor,
     )
+    return execute_merge_train_controller_with_client(
+        request=request,
+        policy=policy,
+        policy_sha256=policy_sha256,
+        repository_policy=repository_policy,
+        github_client=github_client,
+        trace_id=trace_id,
+        recorded_at=recorded_at,
+        candidate_store=candidate_store,
+        landing_store=landing_store,
+        stack_collapse_store=stack_collapse_store,
+        controller_state_store=controller_state_store,
+        admission_store=admission_store,
+        admission_evaluator=admission_evaluator,
+        before_release=before_release,
+    )
+
+
+def execute_merge_train_controller_with_client(
+    *,
+    request: MergeTrainControllerRunOnceEnvelope,
+    policy: MergeTrainPolicy,
+    policy_sha256: str,
+    repository_policy: MergeTrainRepositoryPolicy,
+    github_client: GitHubMergeTrainClient,
+    trace_id: str,
+    recorded_at: str,
+    candidate_store: MergeTrainBatchCandidateRecordStore,
+    landing_store: MergeTrainBatchLandingPlanRecordStore,
+    stack_collapse_store: MergeTrainStackCollapsePlanRecordStore,
+    controller_state_store: MergeTrainControllerStateRecordStore,
+    admission_store: MergeAdmissionRecordStore,
+    admission_evaluator: MergeAdmissionEvaluator,
+    before_release: Callable[[MergeTrainControllerRunOnceResult], None] | None = None,
+) -> MergeTrainControllerRunOnceResult:
+    """Internal controller core with an explicit caller-owned scoped provider client.
+
+    This constructs no transport or credentials. Ordinary callers must supply
+    joined bound-record adapters and their scoped semantic executor; the legacy
+    entry point above retains its established token and transport behavior.
+    """
+    transport = github_client.transport
     lease_owner = merge_train_controller_lease_owner(trace_id=trace_id)
     if request.mutate:
         controller_state = controller_state_store.acquire_merge_train_controller_state_record(

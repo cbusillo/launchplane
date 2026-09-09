@@ -238,6 +238,12 @@ action, credential custody, or execution authority. Those integrations require
 the authoritative lifecycle and custody contracts before they can be designed
 against stable identities and state transitions.
 
+The shared controller core accepts an explicit provider client and constructs no
+credential or transport. The legacy entry point still constructs its established
+token-backed client before invoking that core. Ordinary integration must provide
+its scoped client and joined bound-record adapters; passing an ordinary bearer
+to the privileged controller route is not an integration path.
+
 ## Validation boundary
 
 Tests use synthetic principals and targets. Canonical JSON round trips and
