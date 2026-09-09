@@ -22,12 +22,17 @@ ORDINARY_AGENT_ENROLLMENT_MUTATION_ROUTE = (
 )
 
 LifecycleRecordStatus = Literal["active", "superseded", "revoked"]
-OrdinaryAgentEffectProfile = Literal["guarded_merge", "head_refresh", "pr_disposition"]
+OrdinaryAgentEffectProfile = Literal[
+    "guarded_merge", "head_refresh", "merge_train_snapshot", "pr_disposition"
+]
 OrdinaryAgentProviderPermissionName = Literal[
+    "administration",
+    "checks",
     "metadata",
     "contents",
     "pull_requests",
     "issues",
+    "statuses",
 ]
 OrdinaryAgentProviderPermissionAccess = Literal["read", "write"]
 OrdinaryAgentEnrollmentCompareWriteStatus = Literal[
