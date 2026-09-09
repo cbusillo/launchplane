@@ -665,3 +665,13 @@ Preparation custody IDs use the supported token helper's idempotency identity,
 so issuance stamps and cleanup closes the original reservation. Enrollment
 builds its declared profiles and permissions from the shared provider contract;
 it still rejects provider permissions outside that contract.
+
+The internal effect-history reader returns the latest dispatch and immutable
+outcome/reconciliation evidence from one SQL snapshot without a controller write
+lock. It grants no provider access and remains available after session
+cancellation. The fresh-landing orchestrator refuses reservation replay before
+minting, retains the original issuance deadline, and persists the landing and
+progress before token revocation. A completed landing with uncertain cleanup is
+recovered through that history; it is never sent again to recover a return value.
+Quota waits retain their own reason. If preparation cleanup also fails, both
+errors remain visible rather than reporting a clean deferral.

@@ -38,6 +38,10 @@ class OrdinaryAgentLandingPostgresTests(unittest.TestCase):
                 typed_outcome=OrdinaryAgentUnknownOutcome(reason="response_ambiguous"),
             )
             self.assertEqual(fixture.finalize(preparation, proposal).disposition, "replay")
+            history = store.read_ordinary_agent_effect_history(effect_id=finalized.effect.effect_id)
+            self.assertEqual(history.effect.state, "reconciliation_required")
+            self.assertEqual(history.outcome.kind, "unknown")
+            self.assertEqual(history.child.child_id, finalized.child.child_id)
             for model, identity in (
                 (LaunchplaneOrdinaryAgentLandingPreparationRow, preparation.preparation_id),
                 (LaunchplaneOrdinaryAgentSemanticDispatchRow, finalized.child.child_id),

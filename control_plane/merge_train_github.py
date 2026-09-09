@@ -1317,9 +1317,7 @@ class LegacyMergeTrainEffectExecutor:
             raise MergeTrainGitHubError("GitHub merge response must be a JSON object.")
         tree = payload.get("tree")
         parents = payload.get("parents")
-        result_tree_sha = (
-            str(tree.get("sha") or "").strip() if isinstance(tree, dict) else ""
-        )
+        result_tree_sha = str(tree.get("sha") or "").strip() if isinstance(tree, dict) else ""
         parent_shas = (
             tuple(
                 str(parent.get("sha") or "").strip()

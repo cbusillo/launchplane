@@ -125,9 +125,7 @@ class OrdinaryAgentMergeTrainEffectExecutorTests(unittest.TestCase):
             (result.result_sha, result.result_tree_sha, result.parent_shas),
             ("c" * 40, "d" * 40, ("a" * 40, "b" * 40)),
         )
-        outcome = effect_store.record_ordinary_semantic_outcome.call_args.kwargs[
-            "typed_outcome"
-        ]
+        outcome = effect_store.record_ordinary_semantic_outcome.call_args.kwargs["typed_outcome"]
         self.assertEqual(outcome.proof.tree_sha, "d" * 40)
         self.assertEqual(outcome.proof.parents, ("a" * 40, "b" * 40))
 

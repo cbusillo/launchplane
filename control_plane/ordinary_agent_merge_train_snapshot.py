@@ -55,9 +55,7 @@ class _ApiRequestTransport:
         self._token = token
         self._api_request = api_request
 
-    def request(
-        self, *, method: str, path: str, body: dict[str, object] | None = None
-    ) -> object:
+    def request(self, *, method: str, path: str, body: dict[str, object] | None = None) -> object:
         values: dict[str, object] = {
             "method": method,
             "path": path,
@@ -164,7 +162,10 @@ def _acquire_read(
         attempt_id=attempt_id,
         expected_attempt_revision=attempt_revision,
     )
-    if reservation.purpose != purpose or reservation.candidate.effect_profile != "merge_train_snapshot":
+    if (
+        reservation.purpose != purpose
+        or reservation.candidate.effect_profile != "merge_train_snapshot"
+    ):
         raise OrdinaryAgentProviderEvidenceError("read_custody_profile_mismatch")
     started = monotonic()
     transport: DeadlineMergeTrainGitHubTransport | None = None
@@ -203,9 +204,7 @@ def _acquire_read(
             result = reader(transport)
             if result.counts != _request_counts(transport):
                 raise OrdinaryAgentProviderEvidenceError("provider_request_counts_mismatch")
-            if purpose == "snapshot" and isinstance(
-                result, OrdinaryAgentMergeTrainSnapshotResult
-            ):
+            if purpose == "snapshot" and isinstance(result, OrdinaryAgentMergeTrainSnapshotResult):
                 store.record_ordinary_agent_snapshot_success(
                     attempt_id=attempt_id,
                     custody_attempt_id=reservation.custody_attempt_id,

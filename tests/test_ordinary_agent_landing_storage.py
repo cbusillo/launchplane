@@ -81,6 +81,7 @@ class OrdinaryAgentLandingStorageTests(unittest.TestCase):
             worker_id="landing-worker", lease_seconds=300
         )
         assert claim is not None
+        self.claimed = claim
         controller = self.store.acquire_ordinary_merge_train_controller_state_record(
             claim_fence=claim.claim_fence,
             expected_binding_revision=1,
@@ -169,7 +170,6 @@ class OrdinaryAgentLandingStorageTests(unittest.TestCase):
         preparation = self.reserve().preparation
         candidate = preparation.candidate
         now = self.fixture.fixture.now
-        timestamp = datetime.fromtimestamp(now, timezone.utc).isoformat()
         self.store.acquire_ordinary_agent_custody_issue_attempt(
             attempt_id=preparation.custody_attempt_id,
             idempotency_key_sha256=hashlib.sha256(preparation.idempotency_key.encode()).hexdigest(),
@@ -191,6 +191,26 @@ class OrdinaryAgentLandingStorageTests(unittest.TestCase):
             residual_expires_at=datetime.fromtimestamp(now + 360, timezone.utc).isoformat(),
         )
         preparation = self.reserve().preparation
+        evidence = self.evidence(preparation, check_age_seconds=check_age_seconds)
+        observed = self.store.record_ordinary_landing_evidence(
+            preparation_id=preparation.preparation_id,
+            expected_revision=preparation.revision,
+            controller_fence=self.fence,
+            evidence=evidence,
+        )
+        guard = self.guard(preparation)
+        proposal = guard.build_proposal(
+            entry=preparation.entry,
+            observed_base_sha=preparation.expected_base_sha,
+            observed_base_tree_sha=preparation.expected_base_tree_sha,
+            observed_head_sha=preparation.entry.expected_head_sha,
+            observed_head_tree_sha=preparation.entry.expected_head_tree_sha,
+        )
+        return observed, proposal
+
+    def evidence(self, preparation, *, check_age_seconds=0):
+        now = self.fixture.fixture.now
+        timestamp = datetime.fromtimestamp(now, timezone.utc).isoformat()
         checks = TenantAdmissionTechnicalChecks(
             head_sha=self.candidate.candidate.candidate_sha,
             base_sha=preparation.expected_base_sha,
@@ -255,12 +275,10 @@ class OrdinaryAgentLandingStorageTests(unittest.TestCase):
             ),
             evidence_sha256="b" * 64,
         )
-        observed = self.store.record_ordinary_landing_evidence(
-            preparation_id=preparation.preparation_id,
-            expected_revision=preparation.revision,
-            controller_fence=self.fence,
-            evidence=evidence,
-        )
+        return evidence
+
+    def guard(self, preparation):
+        timestamp = datetime.fromtimestamp(self.fixture.fixture.now, timezone.utc).isoformat()
         with self.store._session_factory() as session:
             row = session.get(LaunchplaneMergeTrainControllerStateRow, self.fence.controller_key)
             assert row is not None
@@ -316,14 +334,7 @@ class OrdinaryAgentLandingStorageTests(unittest.TestCase):
             trace_id="test-joined-landing",
             admission_time_provider=lambda: timestamp,
         )
-        proposal = guard.build_proposal(
-            entry=preparation.entry,
-            observed_base_sha=preparation.expected_base_sha,
-            observed_base_tree_sha=preparation.expected_base_tree_sha,
-            observed_head_sha=preparation.entry.expected_head_sha,
-            observed_head_tree_sha=preparation.entry.expected_head_tree_sha,
-        )
-        return observed, proposal
+        return guard
 
     def finalize(
         self, preparation: OrdinaryAgentLandingPreparation, proposal: MergeAdmissionProposal

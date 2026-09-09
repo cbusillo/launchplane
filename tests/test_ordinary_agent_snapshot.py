@@ -31,15 +31,11 @@ class OrdinaryAgentSnapshotContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValidationError, "head identities"):
             OrdinaryAgentMergeTrainSnapshotResult(
                 snapshot=snapshot,
-                base_identity=OrdinaryAgentCommitIdentity(
-                    sha="a" * 40, tree_sha="c" * 40
-                ),
+                base_identity=OrdinaryAgentCommitIdentity(sha="a" * 40, tree_sha="c" * 40),
                 head_identities=(
                     OrdinaryAgentPullRequestHeadIdentity(
                         pull_request_number=7,
-                        identity=OrdinaryAgentCommitIdentity(
-                            sha="d" * 40, tree_sha="e" * 40
-                        ),
+                        identity=OrdinaryAgentCommitIdentity(sha="d" * 40, tree_sha="e" * 40),
                     ),
                 ),
                 protection=OrdinaryAgentProtectionEvidence(

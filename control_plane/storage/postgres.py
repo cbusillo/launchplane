@@ -22515,6 +22515,16 @@ class PostgresRecordStore(HumanSessionStore):
             return result
 
     @_private_ordinary_agent_operation
+    def read_ordinary_landing_preparation(
+        self, *, preparation_id: str
+    ) -> effect_contracts.OrdinaryAgentLandingPreparation:
+        with self._session_factory() as session:
+            row = session.get(LaunchplaneOrdinaryAgentLandingPreparationRow, preparation_id)
+            if row is None:
+                raise OrdinaryAgentSessionAdmissionDenied("landing_preparation_unavailable")
+            return effect_contracts.OrdinaryAgentLandingPreparation.model_validate(row.payload)
+
+    @_private_ordinary_agent_operation
     def read_ordinary_landing_finalization(
         self,
         *,
@@ -22576,7 +22586,9 @@ class PostgresRecordStore(HumanSessionStore):
         *,
         preparation_id: str,
         expected_revision: int,
-        reason_code: Literal["evidence_denied", "provider_attempt_deadline", "process_interrupted"],
+        reason_code: Literal[
+            "evidence_denied", "provider_attempt_deadline", "provider_wait", "process_interrupted"
+        ],
     ) -> effect_contracts.OrdinaryAgentLandingPreparation:
         with self._session_factory() as session:
             self._begin_serialized_write(session)
@@ -24645,6 +24657,60 @@ class PostgresRecordStore(HumanSessionStore):
             self._ordinary_agent_save_effect(row, updated)
             session.commit()
             return updated
+
+    @_private_ordinary_agent_operation
+    def read_ordinary_agent_effect_history(
+        self, *, effect_id: str
+    ) -> effect_contracts.OrdinaryAgentEffectHistory:
+        # One SQL statement observes effect state and its immutable evidence from
+        # the same database snapshot, without taking the controller's write lock.
+        # Dispatch ordinal and child insert commit together. Outcome.child_id is
+        # a primary key, so only reconciliation rows can multiply the result;
+        # the complete bounded set is sorted below, and overflow is rejected.
+        effects = LaunchplaneOrdinaryAgentEffectRow
+        children = LaunchplaneOrdinaryAgentSemanticDispatchRow
+        outcomes = LaunchplaneOrdinaryAgentSemanticOutcomeRow
+        observations = LaunchplaneOrdinaryAgentEffectReconciliationRow
+        with self._session_factory() as session:
+            rows = tuple(
+                session.execute(
+                    select(
+                        effects.payload, children.payload, outcomes.payload, observations.payload
+                    )
+                    .select_from(effects)
+                    .outerjoin(
+                        children,
+                        (children.effect_id == effects.effect_id)
+                        & (
+                            children.semantic_ordinal
+                            == effects.payload["dispatch_count"].as_integer()
+                        ),
+                    )
+                    .outerjoin(outcomes, outcomes.child_id == children.child_id)
+                    .outerjoin(observations, observations.child_id == children.child_id)
+                    .where(effects.effect_id == effect_id)
+                    .limit(effect_contracts.MAX_RECONCILIATION_OBSERVATIONS_PER_EFFECT + 1)
+                )
+            )
+            if not rows:
+                raise OrdinaryAgentSessionAdmissionDenied("effect_unavailable")
+            if len(rows) > effect_contracts.MAX_RECONCILIATION_OBSERVATIONS_PER_EFFECT:
+                raise OrdinaryAgentSessionAdmissionDenied("effect_history_conflict")
+            effect, child, outcome, _ = rows[0]
+            history = effect_contracts.OrdinaryAgentEffectHistory.model_validate(
+                {
+                    "effect": effect,
+                    "child": child,
+                    "outcome": outcome,
+                    "reconciliations": sorted(
+                        (row[3] for row in rows if row[3] is not None),
+                        key=lambda item: (item["observed_at"], item["observation_id"]),
+                    ),
+                }
+            )
+            if (history.effect.dispatch_count > 0) != (history.child is not None):
+                raise OrdinaryAgentSessionAdmissionDenied("effect_history_conflict")
+            return history
 
     @_private_ordinary_agent_operation
     def read_ordinary_agent_effect(self, *, effect_id: str) -> OrdinaryAgentEffectRecord:

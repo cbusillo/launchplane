@@ -417,6 +417,22 @@ class OrdinaryAgentReconciliationObservation(StrictFrozenModel):
     observation: OrdinaryAgentProviderObservation
 
 
+class OrdinaryAgentEffectHistory(StrictFrozenModel):
+    """Internal consistent history read; this record grants no dispatch authority."""
+
+    effect: OrdinaryAgentEffectRecord
+    child: OrdinaryAgentSemanticDispatchAttemptRecord | None = None
+    outcome: OrdinaryAgentSemanticOutcome | None = None
+    reconciliations: tuple[OrdinaryAgentReconciliationObservation, ...] = Field(
+        default=(), max_length=MAX_RECONCILIATION_OBSERVATIONS_PER_EFFECT
+    )
+
+    @field_validator("reconciliations", mode="before")
+    @classmethod
+    def read_reconciliations(cls, value: object) -> object:
+        return tuple(value) if isinstance(value, list) else value
+
+
 class OrdinaryAgentProviderQuotaKey(StrictFrozenModel):
     provider: Literal["github"] = "github"
     authority_kind: Literal["app", "installation"]
@@ -726,6 +742,9 @@ class OrdinaryAgentEffectStore(Protocol):
         typed_observation: OrdinaryAgentReconciliationObservation | None = None,
     ) -> OrdinaryAgentEffectRecord: ...
     def read_ordinary_agent_effect(self, *, effect_id: str) -> OrdinaryAgentEffectRecord: ...
+    def read_ordinary_agent_effect_history(
+        self, *, effect_id: str
+    ) -> OrdinaryAgentEffectHistory: ...
     def record_provider_wait(
         self,
         *,
@@ -753,6 +772,9 @@ class OrdinaryAgentLandingFinalization(StrictFrozenModel):
 
 
 class OrdinaryAgentLandingStore(Protocol):
+    def read_ordinary_landing_preparation(
+        self, *, preparation_id: str
+    ) -> OrdinaryAgentLandingPreparation: ...
     def reserve_ordinary_landing_preparation(
         self,
         *,
@@ -789,7 +811,9 @@ class OrdinaryAgentLandingStore(Protocol):
         *,
         preparation_id: str,
         expected_revision: int,
-        reason_code: Literal["evidence_denied", "provider_attempt_deadline", "process_interrupted"],
+        reason_code: Literal[
+            "evidence_denied", "provider_attempt_deadline", "provider_wait", "process_interrupted"
+        ],
     ) -> OrdinaryAgentLandingPreparation: ...
 
 
