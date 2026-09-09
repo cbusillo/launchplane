@@ -76,7 +76,7 @@ def acquire_ordinary_agent_merge_train_snapshot(
     )
     if isinstance(attempt.result, OrdinaryAgentMergeTrainSnapshotResult):
         return attempt.result
-    return _acquire_read(
+    result = _acquire_read(
         store=store,
         custody_store=custody_store,
         secret_store=secret_store,
@@ -89,6 +89,9 @@ def acquire_ordinary_agent_merge_train_snapshot(
         monotonic=monotonic,
         utc_now=utc_now,
     )
+    if not isinstance(result, OrdinaryAgentMergeTrainSnapshotResult):
+        raise RuntimeError("snapshot reader returned candidate-check evidence")
+    return result
 
 
 def acquire_ordinary_agent_candidate_check(
@@ -113,7 +116,7 @@ def acquire_ordinary_agent_candidate_check(
     )
     if isinstance(attempt.result, OrdinaryAgentCandidateCheckResult):
         return attempt.result
-    return _acquire_read(
+    result = _acquire_read(
         store=store,
         custody_store=custody_store,
         secret_store=secret_store,
@@ -126,6 +129,9 @@ def acquire_ordinary_agent_candidate_check(
         monotonic=monotonic,
         utc_now=utc_now,
     )
+    if not isinstance(result, OrdinaryAgentCandidateCheckResult):
+        raise RuntimeError("candidate-check reader returned snapshot evidence")
+    return result
 
 
 def _acquire_read(
@@ -146,6 +152,8 @@ def _acquire_read(
         attempt_id=attempt_id,
         expected_attempt_revision=attempt_revision,
     )
+    if reservation.purpose != purpose or reservation.candidate.effect_profile != "merge_train_snapshot":
+        raise OrdinaryAgentProviderEvidenceError("read_custody_profile_mismatch")
     started = monotonic()
     transport: DeadlineMergeTrainGitHubTransport | None = None
     result: OrdinaryAgentMergeTrainSnapshotResult | OrdinaryAgentCandidateCheckResult | None = None
@@ -173,7 +181,7 @@ def _acquire_read(
                 token_deadline=monotonic() + token_seconds,
                 monotonic=monotonic,
             )
-            result = reader(transport)  # type: ignore[arg-type]
+            result = reader(transport)
     except Exception as error:
         counts = _request_counts(transport)
         reason = (
