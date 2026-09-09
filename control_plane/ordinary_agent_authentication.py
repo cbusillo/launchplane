@@ -216,9 +216,7 @@ def issue_ordinary_agent_credential(
     _validate_digest(intent_sha256, label="ordinary-agent issuance intent")
 
     secret_text = _encoded_random(random_bytes)
-    token = OrdinaryAgentToken(
-        f"{_WIRE_PREFIX}.{credential_id}.{credential_version}.{secret_text}"
-    )
+    token = OrdinaryAgentToken(f"{_WIRE_PREFIX}.{credential_id}.{credential_version}.{secret_text}")
     proof = parse_ordinary_agent_token(token.value)
     candidate_fields: dict[str, object] = {
         "candidate_kind": "service_issued",
