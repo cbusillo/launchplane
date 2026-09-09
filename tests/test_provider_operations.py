@@ -658,45 +658,75 @@ class DurableProviderOperationRunnerTests(unittest.TestCase):
             recovery_fixture = _StoreFixture(directory)
             apply_started = Event()
             release_apply = Event()
+            renewal_failed = Event()
+            observed_at = "2026-09-01T00:00:00Z"
             holder = _FakeAdapter(
                 apply_started=apply_started,
                 apply_release=release_apply,
             )
             holder_result: dict[str, DurableProviderOperationResult] = {}
+            holder_errors: list[BaseException] = []
+
+            def database_timestamp(_session: object) -> str:
+                return observed_at
+
+            def fail_renewal(**_kwargs: object) -> None:
+                renewal_failed.set()
+                raise RuntimeError("database unavailable")
 
             def run_holder() -> None:
-                holder_result["result"] = holder_fixture.run(
-                    holder,
-                    lease_seconds=1,
-                    heartbeat_interval_seconds=0.1,
-                )
+                try:
+                    holder_result["result"] = holder_fixture.run(
+                        holder,
+                        lease_seconds=1,
+                        heartbeat_interval_seconds=0.1,
+                    )
+                except BaseException as error:
+                    holder_errors.append(error)
 
-            with patch.object(
-                holder_fixture.store,
-                "renew_mutation_reservation",
-                side_effect=RuntimeError("database unavailable"),
+            with (
+                patch.object(
+                    holder_fixture.store,
+                    "_database_mutation_timestamp",
+                    side_effect=database_timestamp,
+                ),
+                patch.object(
+                    recovery_fixture.store,
+                    "_database_mutation_timestamp",
+                    side_effect=database_timestamp,
+                ),
+                patch.object(
+                    holder_fixture.store,
+                    "renew_mutation_reservation",
+                    side_effect=fail_renewal,
+                ),
             ):
                 holder_thread = Thread(target=run_holder)
                 holder_thread.start()
-                self.assertTrue(apply_started.wait(timeout=2))
-                time.sleep(1.1)
+                try:
+                    self.assertTrue(apply_started.wait(timeout=2))
+                    self.assertTrue(renewal_failed.wait(timeout=2))
+                    observed_at = "2026-09-01T00:00:02Z"
 
-                recovery = _FakeAdapter(observation=ProviderObservation(outcome="absent"))
-                recovery_result = recovery_fixture.run(
-                    recovery,
-                    lease_owner="instance-b",
-                    response_trace_id="provider-op-trace-b",
-                    lease_seconds=1,
-                    heartbeat_interval_seconds=0.1,
-                )
+                    recovery = _FakeAdapter(observation=ProviderObservation(outcome="absent"))
+                    recovery_result = recovery_fixture.run(
+                        recovery,
+                        lease_owner="instance-b",
+                        response_trace_id="provider-op-trace-b",
+                        lease_seconds=1,
+                        heartbeat_interval_seconds=0.1,
+                    )
 
-                self.assertEqual(recovery_result.status, "reconcile_required")
-                self.assertEqual(recovery.apply_calls, 0)
-                self.assertEqual(recovery.observed_effect_phases, ["test_effect"])
-                release_apply.set()
-                holder_thread.join(timeout=5)
+                    self.assertEqual(recovery_result.status, "reconcile_required")
+                    self.assertEqual(recovery.apply_calls, 0)
+                    self.assertEqual(recovery.observed_effect_phases, ["test_effect"])
+                finally:
+                    release_apply.set()
+                    holder_thread.join(timeout=5)
+                    self.assertFalse(holder_thread.is_alive())
+                    if holder_errors:
+                        raise holder_errors[0]
 
-            self.assertFalse(holder_thread.is_alive())
             self.assertIn(holder_result["result"].status, {"adopted", "replayed"})
             self.assertEqual(holder.apply_calls, 1)
 

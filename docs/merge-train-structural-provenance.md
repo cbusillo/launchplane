@@ -33,10 +33,15 @@ readiness:
 
 Evaluation entries carry both reviewed and current fingerprints. Each
 fingerprint binds the exact head SHA/tree, normalized changed paths, and
-affected product/system subjects. The evaluator detects delta drift, changed
-path overlap, same-subject composition, and impact expansion. Missing review or
-change-impact evidence is `unknown`; contradictory current evidence is
-`mismatch`.
+affected product/system subjects. Live fingerprints also attest the supported
+change-impact model and exact policy digest that classified the delta. A changed
+path shared by multiple entries composes without Owner evidence only when every
+reviewed/current fingerprint is exact, uses the same policy digest and the same
+recognized current model, and has no affected subjects. This deliberately
+requires every batch entry to be engineering-only. Unknown models, policy
+drift, affected subjects, delta drift, and impact expansion retain the existing
+fail-closed result. Missing review or change-impact evidence is `unknown`;
+contradictory current evidence is `mismatch`.
 
 Risky composition requires combined-candidate Owner evidence bound to the exact
 candidate digest, landing-plan digest, policy, and evaluation entries. That
@@ -47,7 +52,10 @@ other effect, and cannot be replaced by a free-text evidence ID.
 The guarded merge-admission adapter is the first production caller of this pure
 boundary. It derives reviewed/current deltas and combined-candidate evidence
 from current Owner and change-impact services immediately before each batch
-entry. The structural module itself remains non-authoritative and adds no HTTP
+entry. Combined-candidate reviews are ephemeral evaluation inputs, so the live
+adapter rebuilds their digest chain from the current deltas and existing bound
+Owner event identities on every admission evaluation. The structural module
+itself remains non-authoritative and adds no HTTP
 or UI surface; [merge-admission.md](merge-admission.md) owns the L3 record and
 provider-effect boundary.
 

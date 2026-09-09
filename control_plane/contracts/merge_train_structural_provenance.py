@@ -12,6 +12,7 @@ from control_plane.contracts.merge_readiness import MergeReadinessStructuralCand
 MergeTrainStructuralCandidateStatus = MergeReadinessStructuralCandidateStatus
 MergeTrainRollingStepKind = Literal["merge_commit", "no_op_already_contained"]
 MergeTrainStructuralImpactStatus = Literal["known", "unknown"]
+MergeTrainStructuralChangeImpactModel = Literal["legacy_v1", "v2"]
 MergeTrainStructuralReasonCode = Literal[
     "structural_single_entry_exact",
     "structural_batch_entry_exact",
@@ -258,6 +259,14 @@ class MergeTrainStructuralDeltaFingerprint(BaseModel):
     head_tree_sha: str
     changed_paths: tuple[str, ...]
     affected_subjects: tuple[MergeTrainStructuralSubject, ...]
+    change_impact_model: MergeTrainStructuralChangeImpactModel | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    change_impact_policy_digest: str | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
     fingerprint_sha256: str = ""
 
     @model_validator(mode="after")
@@ -274,6 +283,19 @@ class MergeTrainStructuralDeltaFingerprint(BaseModel):
         )
         object.__setattr__(self, "changed_paths", paths)
         object.__setattr__(self, "affected_subjects", subjects)
+        if (self.change_impact_model is None) != (self.change_impact_policy_digest is None):
+            raise ValueError(
+                "Structural change-impact model and policy digest must be attested together"
+            )
+        if self.change_impact_policy_digest is not None:
+            object.__setattr__(
+                self,
+                "change_impact_policy_digest",
+                _required_sha256(
+                    self.change_impact_policy_digest,
+                    "change_impact_policy_digest",
+                ),
+            )
         expected_digest = merge_train_structural_delta_fingerprint_sha256(self)
         if self.fingerprint_sha256:
             if self.fingerprint_sha256.strip().lower() != expected_digest:
