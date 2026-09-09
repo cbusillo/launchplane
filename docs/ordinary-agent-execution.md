@@ -50,6 +50,11 @@ managed-secret record/version metadata; it contains no private key or minted
 token. The future authentication issuer must derive the digest from actual
 credential material and arrange delivery separately. The stored receipt is
 redacted and therefore does not define or constrain that delivery mechanism.
+The internal custody-enrollment builder resolves the exact managed-secret binding
+and current version, verifies the App and repository installation through
+read-only provider requests, and derives the closed permission profiles and
+inspection digest. This work happens before the storage transaction; it neither
+mints an installation token nor issues an agent authentication credential.
 
 One PostgreSQL transaction reserves the descriptor-specific inner idempotency
 tuple, locks the active authorization policy, serializes the principal even when
