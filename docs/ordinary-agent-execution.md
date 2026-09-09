@@ -5,10 +5,41 @@ title: Ordinary Agent Execution Contracts
 # Ordinary Agent Execution Contracts
 
 The ordinary-agent models describe proposed, inert execution evidence. They are
-not part of the service authentication union, active authorization-policy schema,
-HTTP routes, production record store, or provider executor. Eligibility computed
-from fixture records is not authentication, merge admission, human acceptance,
-or permission to perform an effect.
+not part of the service authentication union, HTTP routes, production record
+store, or provider executor. Eligibility computed from fixture records is not
+authentication, merge admission, human acceptance, or permission to perform an
+effect.
+
+Authorization-policy schema v3 is currently a compatibility reader and version
+discriminator only. It can deserialize an `ordinary_agents` rule collection,
+report the observed schema version and rule count, and retain the rules during a
+record round trip. The five existing human, workflow, and operator identity
+types keep their schema-v2 evaluation behavior. The generic authorization
+evaluator has no ordinary-agent identity branch and deliberately ignores the
+ordinary-agent rules. Only the separate pure evaluator described below can
+reason about those rules, and its result remains inert.
+
+Schema-v3 policy writes are not activated. The authoritative store rejects a v3
+seed even when no active record exists, rejects v3 replacement records, and
+rejects replacement, deletion, downgrade, or retirement when the observed
+active record is v3. Managed policy administration, recovery, and generated
+preview planning also reject an observed v3 policy before constructing an
+applicable v2 plan. This fence remains until a later activation slice enforces a
+minimum compatible service image and a rollback boundary.
+
+Existing v1 and v2 policies omit the empty `ordinary_agents` field from
+serialization and canonical hashing, preserving their prior payloads, digests,
+and record IDs. Phase-one deployments therefore continue to persist only the
+same v1/v2 records that previous service images can parse. A future persisted v3
+record will be unreadable to those images, so they cannot be rollback targets
+after v3 activation.
+
+The enrollment request and review contracts are also dormant in this phase.
+They parse exact enroll, credential-rotation, and principal-revocation pre-state,
+derive the minimum execution profile from the bound rule, and return only a
+stable unavailable result. They have no registered privileged-operation
+descriptor, route, worker dispatch, storage table, custody integration, or
+effect path.
 
 Every proposed record requires the `proposed_ordinary_agent_v1` record kind,
 `authority_state = "inert"`, and `authorizes_execution = false`. Missing markers,

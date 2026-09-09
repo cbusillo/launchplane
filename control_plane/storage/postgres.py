@@ -67,6 +67,7 @@ from control_plane.contracts.authz_policy_record import (
     AuthzPolicyCompareWriteResult,
     LaunchplaneAuthzPolicyRecord,
     build_authz_policy_record_id,
+    require_authz_policy_schema_write_activated,
 )
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.ordinary_agent_custody import (
@@ -18358,6 +18359,7 @@ class PostgresRecordStore(HumanSessionStore):
     def seed_authz_policy_if_absent(
         self, record: LaunchplaneAuthzPolicyRecord
     ) -> LaunchplaneAuthzPolicyRecord:
+        require_authz_policy_schema_write_activated(record.policy)
         if record.status != "active":
             raise ValueError("Authz policy seed record must be active.")
         with self._session_factory() as session:
@@ -18399,6 +18401,10 @@ class PostgresRecordStore(HumanSessionStore):
         mutation: DbOnlyMutationRequest | None = None,
         confirmation_consumption: SoloAdministrationConfirmationConsumptionBinding | None = None,
     ) -> AuthzPolicyCompareWriteResult:
+        require_authz_policy_schema_write_activated(
+            expected_record.policy,
+            *(record.policy for record in (replacement_record,) if record is not None),
+        )
         if confirmation_consumption is None and mutation is not None:
             confirmation_consumption = mutation.confirmation_consumption
         if expected_record.status != "active":

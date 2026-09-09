@@ -19,6 +19,7 @@ from pydantic import (
     Field,
     SerializerFunctionWrapHandler,
     StrictInt,
+    field_validator,
     model_serializer,
     model_validator,
 )
@@ -28,6 +29,7 @@ from control_plane.authz_scope import (
     exclusively_instance_scoped_authz_actions,
     instance_scoped_authz_actions,
 )
+from control_plane.contracts.ordinary_agent import OrdinaryAgentPolicyRule
 
 
 GITHUB_ACTIONS_OIDC_ISSUER = "https://token.actions.githubusercontent.com"
@@ -87,7 +89,7 @@ LaunchplaneIdentity: TypeAlias = (
     | LocalAdminIdentity
 )
 AuthorizationScope: TypeAlias = Literal["global", "context", "instance", "preview"]
-AuthzPolicySchemaVersion: TypeAlias = Literal[1, 2]
+AuthzPolicySchemaVersion: TypeAlias = Literal[1, 2, 3]
 AgentConsumerSubjectType: TypeAlias = Literal[
     "github_actions", "github_human", "terminal_agent", "local_operator", "local_admin"
 ]
@@ -922,6 +924,19 @@ class LaunchplaneAuthzPolicy(BaseModel):
     terminal_agents: tuple[TerminalAgentPolicyRule, ...] = ()
     local_operators: tuple[LocalOperatorPolicyRule, ...] = ()
     local_admins: tuple[LocalAdminPolicyRule, ...] = ()
+    ordinary_agents: tuple[OrdinaryAgentPolicyRule, ...] = ()
+
+    @field_validator("ordinary_agents", mode="before")
+    @classmethod
+    def _read_json_backed_ordinary_agent_rules(cls, value: object) -> object:
+        if not isinstance(value, (list, tuple)):
+            return value
+        normalized: list[object] = []
+        for item in value:
+            if isinstance(item, dict) and isinstance(item.get("actions"), list):
+                item = {**item, "actions": tuple(item["actions"])}
+            normalized.append(item)
+        return tuple(normalized)
 
     @model_validator(mode="after")
     def _validate_instance_rule_schema(self) -> "LaunchplaneAuthzPolicy":
@@ -949,7 +964,7 @@ class LaunchplaneAuthzPolicy(BaseModel):
                     raise ValueError("Schema-v1 authz policy rules cannot declare instances.")
                 if self.schema_version == 1 and rule.managed_set_id is not None:
                     raise ValueError("Schema-v1 authz policy rules cannot declare managed IDs.")
-                if self.schema_version != 2 or not rule.actions:
+                if self.schema_version not in (2, 3) or not rule.actions:
                     continue
                 requested_actions = set(rule.actions)
                 if requested_actions & exclusively_instance_actions and not rule.instances:
@@ -961,6 +976,16 @@ class LaunchplaneAuthzPolicy(BaseModel):
                         "Schema-v2 authz policy rules can only declare instances for "
                         "instance-scoped actions."
                     )
+        if self.schema_version != 3 and self.ordinary_agents:
+            raise ValueError("Ordinary-agent policy rules require authz policy schema version 3.")
+        for ordinary_rule in self.ordinary_agents:
+            ordinary_managed_identity = (
+                ordinary_rule.managed_set_id,
+                ordinary_rule.managed_rule_id,
+            )
+            if ordinary_managed_identity in managed_identities:
+                raise ValueError("Authz managed rule identities must be unique across the policy.")
+            managed_identities.add(ordinary_managed_identity)
         return self
 
     @model_serializer(mode="wrap")
@@ -976,6 +1001,8 @@ class LaunchplaneAuthzPolicy(BaseModel):
                 rule.pop("github_ids", None)
         if self.administrator_quorum is None:
             payload.pop("administrator_quorum", None)
+        if not self.ordinary_agents:
+            payload.pop("ordinary_agents", None)
         if self.schema_version == 1:
             for rule_collection_name in (
                 "github_actions",
@@ -1001,7 +1028,7 @@ class LaunchplaneAuthzPolicy(BaseModel):
         record_context: bool = True,
     ) -> AuthzEvaluation:
         resolved_target = target or AuthorizationTarget(scope="context")
-        if self.schema_version != 2 and action in exact_instance_workflow_authz_actions():
+        if self.schema_version == 1 and action in exact_instance_workflow_authz_actions():
             return _record_authz_evaluation(
                 identity=identity,
                 action=action,
@@ -1013,7 +1040,7 @@ class LaunchplaneAuthzPolicy(BaseModel):
                 record_context=record_context,
             )
         if (
-            self.schema_version == 2
+            self.schema_version in (2, 3)
             and action in exclusively_instance_scoped_authz_actions()
             and resolved_target.scope != "instance"
         ):
@@ -1246,7 +1273,8 @@ def matching_github_human_policy_rules(
 def migrate_authz_policy_to_schema_v2(
     policy: LaunchplaneAuthzPolicy,
 ) -> LaunchplaneAuthzPolicy:
-    if policy.schema_version == 2:
+    """Migrate v1 while preserving already compatible v2 and read-only v3 policies."""
+    if policy.schema_version in (2, 3):
         return policy
 
     exclusively_instance_actions = exclusively_instance_scoped_authz_actions()

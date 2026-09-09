@@ -20,6 +20,7 @@ from control_plane.contracts.authz_policy_record import (
     LaunchplaneAuthzPolicyRecord,
     authz_policy_sha256,
     build_authz_policy_record_id,
+    require_authz_policy_schema_write_activated,
 )
 from control_plane.contracts.authz_access_read import (
     AuthzManagedSetCollectionSummary,
@@ -201,6 +202,7 @@ def _normalize_authz_rule(rule: AuthzPolicyRule) -> AuthzPolicyRule:
 
 
 def _normalize_desired_authz_policy(policy: LaunchplaneAuthzPolicy) -> LaunchplaneAuthzPolicy:
+    require_authz_policy_schema_write_activated(policy)
     normalized_collections = {
         principal_type: tuple(
             sorted(
@@ -585,7 +587,7 @@ def summarize_authz_policy_record(record: LaunchplaneAuthzPolicyRecord) -> dict[
     immutable_repository_rule_count = sum(
         1 for rule in record.policy.github_actions if rule.repository_id
     )
-    return {
+    summary: dict[str, object] = {
         "record_id": record.record_id,
         "revision": record.revision,
         "status": record.status,
@@ -603,6 +605,9 @@ def summarize_authz_policy_record(record: LaunchplaneAuthzPolicyRecord) -> dict[
         "local_operators_rule_count": len(record.policy.local_operators),
         "local_admins_rule_count": len(record.policy.local_admins),
     }
+    if record.policy.ordinary_agents:
+        summary["ordinary_agent_rule_count"] = len(record.policy.ordinary_agents)
+    return summary
 
 
 def summarize_active_authz_policy_record(
@@ -1608,6 +1613,7 @@ def _desired_managed_set_payload(policy: LaunchplaneAuthzPolicy) -> list[dict[st
 def _authz_policy_without_managed_identities(
     policy: LaunchplaneAuthzPolicy,
 ) -> LaunchplaneAuthzPolicy:
+    require_authz_policy_schema_write_activated(policy)
     collections = {
         principal_type: tuple(_authz_rule_without_managed_identity(rule) for rule in rules)
         for principal_type, rules in _authz_policy_rule_collections(policy)
@@ -1662,7 +1668,7 @@ def _authz_rule_allows_identity(
     *,
     rule: AuthzPolicyRule,
     identity: AuthzApplyingIdentity,
-    schema_version: Literal[1, 2],
+    schema_version: Literal[1, 2, 3],
 ) -> bool:
     identity_matches_rule = any(
         (
@@ -1759,6 +1765,7 @@ def _reconcile_managed_policy(
     int,
     tuple[AuthzManagedCompatibilityRetirement, ...],
 ]:
+    require_authz_policy_schema_write_activated(current_policy, desired_policy)
     current_managed_rules = _managed_rules_by_id(
         policy=current_policy,
         managed_set_id=managed_set_id,
@@ -1994,6 +2001,7 @@ def plan_managed_authz_policy_reconcile(
         raise AuthzPolicyConflictError("Multiple active Launchplane authz policy records found.")
     current_record = active_records[0]
     current_policy = current_record.policy
+    require_authz_policy_schema_write_activated(current_policy, request.desired_policy)
     if current_policy.schema_version != 2 and request.schema_migration != "migrate_v1_to_v2":
         raise AuthzPolicyConflictError(
             "Managed authz policy reconciliation requires explicit "
