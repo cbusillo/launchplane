@@ -88,6 +88,12 @@ Matched-evidence prose, ordering, and multiplicity remain visible diagnostic
 provenance rather than approval authority. Existing v1 hashes are unchanged;
 no historical records are backfilled or upgraded to v2.
 
+This scoped digest identifies classifier semantics only. It does not by itself
+authorize Owner-acceptance carry-forward. The issue `#2240` pilot keeps Owner
+binding invalidation conservative until complete accepted-delivery evidence,
+including relevant backend, configuration, interaction, artifact, and observed
+runtime inputs, is proven unchanged.
+
 Unknown or stale evaluations emit no scoped binding pair. V2 requires known
 change kinds and explicit rename origins represented among the changed paths,
 including real recreated or swapped origins. The existing sensitive-only
