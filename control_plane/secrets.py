@@ -91,6 +91,8 @@ class SecretWriteStore(SecretReadStore, Protocol):
 
 
 class SecretRotationStore(SecretWriteStore, Protocol):
+    def ordinary_agent_delivery_key_usage(self) -> dict[str, int]: ...
+
     def write_secret_rotations(
         self,
         rotations: tuple[SecretRotationWrite, ...],
@@ -866,14 +868,19 @@ def reencrypt_secrets(
         }
         for record, version in zip(records, versions, strict=True)
     )
+    delivery_key_usage = record_store.ordinary_agent_delivery_key_usage()
     plan_digest = hashlib.sha256(
         json.dumps(
-            {"active_key_id": active_key_id, "entries": plan_entries},
+            {
+                "active_key_id": active_key_id,
+                "entries": plan_entries,
+                "delivery_key_usage": delivery_key_usage,
+            },
             sort_keys=True,
             separators=(",", ":"),
         ).encode("utf-8")
     ).hexdigest()
-    key_usage: dict[str, int] = {}
+    key_usage = dict(delivery_key_usage)
     for version in versions:
         key_usage[version.key_id] = key_usage.get(version.key_id, 0) + 1
 

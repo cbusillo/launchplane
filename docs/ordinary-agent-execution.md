@@ -38,8 +38,9 @@ The enrollment request and review contracts remain dormant in this phase.
 They parse exact enroll, credential-rotation, and principal-revocation pre-state,
 derive the minimum execution profile from the bound rule, and return only a
 stable unavailable result. They have no registered privileged-operation
-descriptor, route, worker dispatch, credential issuer/verifier, provider call,
-session path, or effect path.
+descriptor, route, worker dispatch, provider call, session path, or effect path.
+Internal authentication issuance and verification primitives exist; no public
+ordinary authentication gateway is registered.
 
 The authoritative lifecycle store is present behind that unreachable boundary.
 Its internal apply envelope separates an agent-to-Launchplane authentication
@@ -47,9 +48,10 @@ credential candidate from Launchplane-held provider App custody. The first
 contains a service-derived authentication digest and no bearer value. The second
 contains only provider-inspected App, exact target, permission, inventory, and
 managed-secret record/version metadata; it contains no private key or minted
-token. The future authentication issuer must derive the digest from actual
-credential material and arrange delivery separately. The stored receipt is
-redacted and therefore does not define or constrain that delivery mechanism.
+token. Enroll and rotate now require an internally generated authentication
+bundle: opaque random credential material, its verifier, and a receiver-bound
+encrypted capsule. Metadata-only candidates cannot enroll through the store.
+The stored receipt remains redacted; private delivery is a separate DB record.
 
 The internal custody-enrollment builder resolves the exact managed-secret binding
 and current version, verifies the App and repository installation through
@@ -62,12 +64,12 @@ tuple, locks the active authorization policy, serializes the principal even when
 it is absent, and then locks the exact inventory, secret, credential, and custody
 evidence. It rechecks the exact immutable human administrator rule and, for
 enroll/rotate, the schema-v3 ordinary rule and every CAS input. It writes the
-principal, authentication credential, custody reference, audit, and store-built
-receipt together. No callback, provider request, secret decryption, or token mint
+principal, authentication credential, custody reference, audit, store-built
+receipt, and private delivery capsule together. No callback, provider request, secret decryption, or token mint
 runs under those locks. Revoke requires current immutable administrator authority
 and the principal CAS but deliberately does not require an ordinary rule,
-inventory, secret, or readable custody. A missing, invalid, or misbound authentication credential does not block
-principal revocation. Unusable credential rows remain untouched; the receipt and
+inventory, secret, or readable custody. A missing, invalid, or misbound
+authentication credential does not block principal revocation. Unusable credential rows remain untouched; the receipt and
 audit omit credential record evidence while retaining the principal's last known
 credential reference. The store also requires the code-owned App integration,
 private-key binding, full installation permission ceiling, and enrollment
@@ -270,3 +272,54 @@ This foundation adds no route, worker, grant, policy write or live App binding.
 It does not activate enrollment or execution. The fence is principal-scoped, so
 it does not serialize two distinct principals operating on one repository;
 guarded execution must supply its own cross-principal effect fence.
+
+
+## Internal authentication and private delivery
+
+The service generates an opaque random credential with a bounded canonical
+locator and at least 32 random bytes. A domain-separated digest is stored, and
+verification joins the current principal, credential version, and durable issuer
+provenance at DB time. Both records must be active and consistent. A credential
+is identity only: the same mechanism serves read-only and guarded-executor
+principals, while future admission still checks current policy, session, lease,
+and effect scope. There is no positive authentication cache. Legacy marker-only
+rows have no issuer provenance and cannot authenticate; authorized rotation or
+principal revocation remains available. The reserved ordinary prefix is rejected
+before all legacy terminal/operator/administrator token comparisons.
+
+Issuance encrypts through the existing managed-secret key ring before taking DB
+locks. Enrollment idempotency commits the reviewed intent, including receiver
+binding and finite lifetimes, but excludes generated token and ciphertext
+randomness. Concurrent attempts may prepare different material; only one commits,
+and retries return its original immutable receipt plus current delivery status.
+Ciphertext, claim proof and bearer never enter public receipts or audit events.
+A database compromise together with access to the service key root can expose
+retained capsules; temporary encryption is not a claim of immunity to that threat.
+
+A separately generated receiver secret has at least 32 random bytes; only its
+independently domain-separated hash binds the request. An invalid proof cannot
+decrypt, mark attempted, consume or erase a capsule. Claim first checks current
+policy and credential state, decrypts outside locks, then reacquires the same
+policy/principal/credential/delivery lock order and rechecks the exact snapshot.
+It durably marks possible delivery before emitting plaintext. Retries recover
+the same credential until the reviewed delivery expiry, at most 15 minutes after
+DB issuance. An unrelated authorization-policy revision does not break delivery
+when the same managed principal rule and target remain present.
+
+No client acknowledgement or manual code/paste/search step is required. Expiry
+removes ciphertext. A never-attempted capsule also revokes its matching current
+authenticator, preserving the principal and newer versions; an attempted or
+ambiguous response preserves authentication until its own expiry or revocation.
+Replay reports terminal expired/revoked/superseded delivery rather than promising
+unavailable material or reminting. Recovery after the delivery window uses the
+existing authorized rotation operation. Rotate and revoke erase outstanding
+capsules even when ordinary-agent policy denies work. A response already emitted
+can race cancellation, but its credential fails subsequent current-state checks.
+Retained capsules participate in key-usage and rotation-plan accounting, blocking
+retirement of their encryption key until cleanup.
+
+These are internal source primitives and transaction proofs, not an activated
+client connection flow. Authenticated proposal/approval descriptors, client
+installation, ordinary HTTP admission, session/effect integration, and exact-scope
+live qualification remain separate prerequisites. Owner acceptance remains tied
+to a PR preview and never requires reading code.

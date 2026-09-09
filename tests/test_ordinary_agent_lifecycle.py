@@ -15,11 +15,13 @@ from control_plane.storage.postgres import (
     LaunchplaneIdempotencyRow,
     LaunchplaneOrdinaryAgentAuthenticationCredentialRow,
     LaunchplaneOrdinaryAgentCredentialCustodyRow,
+    LaunchplaneOrdinaryAgentDeliveryRow,
     LaunchplaneOrdinaryAgentLifecycleAuditRow,
     LaunchplaneOrdinaryAgentPrincipalRow,
     PostgresRecordStore,
 )
 from tests.support.ordinary_agent_lifecycle import (
+    apply_test_enrollment,
     enrollment_envelope,
     enrollment_mutation,
     revocation_envelope,
@@ -58,21 +60,17 @@ class OrdinaryAgentLifecycleStorageTests(unittest.TestCase):
                     )
                 }
             )
-            denied = store.compare_and_apply_ordinary_agent_enrollment(
-                envelope=denied_envelope, mutation=enrollment_mutation(denied_envelope)
+            denied = apply_test_enrollment(
+                store, envelope=denied_envelope, mutation=enrollment_mutation(denied_envelope)
             )
             self.assertEqual(denied.status, "administrator_denied")
             self.assertIsNone(store.read_current_ordinary_agent_principal(principal_id="agent_one"))
 
-            written = store.compare_and_apply_ordinary_agent_enrollment(
-                envelope=envelope, mutation=mutation
-            )
-            replayed = store.compare_and_apply_ordinary_agent_enrollment(
-                envelope=envelope, mutation=mutation
-            )
+            written = apply_test_enrollment(store, envelope=envelope, mutation=mutation)
+            replayed = apply_test_enrollment(store, envelope=envelope, mutation=mutation)
             changed_envelope = envelope.model_copy(update={"plan_sha256": "9" * 64})
-            conflict = store.compare_and_apply_ordinary_agent_enrollment(
-                envelope=changed_envelope, mutation=enrollment_mutation(changed_envelope)
+            conflict = apply_test_enrollment(
+                store, envelope=changed_envelope, mutation=enrollment_mutation(changed_envelope)
             )
 
             self.assertEqual(written.status, "written")
@@ -115,8 +113,8 @@ class OrdinaryAgentLifecycleStorageTests(unittest.TestCase):
             store.ensure_schema()
             policy, inventory = setup_ordinary_agent_authority(store)
             enroll = enrollment_envelope(policy_record=policy, inventory=inventory)
-            enrolled = store.compare_and_apply_ordinary_agent_enrollment(
-                envelope=enroll, mutation=enrollment_mutation(enroll)
+            enrolled = apply_test_enrollment(
+                store, envelope=enroll, mutation=enrollment_mutation(enroll)
             )
             assert enrolled.receipt is not None
             rotation = rotation_envelope(
@@ -132,16 +130,16 @@ class OrdinaryAgentLifecycleStorageTests(unittest.TestCase):
                     "custody": rotation.custody.model_copy(update={"predecessor_sha256": "9" * 64})
                 }
             )
-            rejected = store.compare_and_apply_ordinary_agent_enrollment(
-                envelope=stale_custody, mutation=enrollment_mutation(stale_custody)
+            rejected = apply_test_enrollment(
+                store, envelope=stale_custody, mutation=enrollment_mutation(stale_custody)
             )
             self.assertEqual(rejected.status, "custody_drift")
             self.assertEqual(
                 store.read_current_ordinary_agent_principal(principal_id="agent_one"),
                 enrolled.current_principal,
             )
-            rotated = store.compare_and_apply_ordinary_agent_enrollment(
-                envelope=rotation, mutation=enrollment_mutation(rotation)
+            rotated = apply_test_enrollment(
+                store, envelope=rotation, mutation=enrollment_mutation(rotation)
             )
             assert rotated.receipt is not None
             self.assertEqual(rotated.receipt.principal_revision, 2)
@@ -191,8 +189,8 @@ class OrdinaryAgentLifecycleStorageTests(unittest.TestCase):
                     )
                 }
             )
-            revoked = store.compare_and_apply_ordinary_agent_enrollment(
-                envelope=revoke, mutation=enrollment_mutation(revoke)
+            revoked = apply_test_enrollment(
+                store, envelope=revoke, mutation=enrollment_mutation(revoke)
             )
             self.assertEqual(revoked.status, "written")
             assert revoked.receipt is not None
@@ -213,8 +211,8 @@ class OrdinaryAgentLifecycleStorageTests(unittest.TestCase):
             store.ensure_schema()
             policy, inventory = setup_ordinary_agent_authority(store)
             enroll = enrollment_envelope(policy_record=policy, inventory=inventory)
-            enrolled = store.compare_and_apply_ordinary_agent_enrollment(
-                envelope=enroll, mutation=enrollment_mutation(enroll)
+            enrolled = apply_test_enrollment(
+                store, envelope=enroll, mutation=enrollment_mutation(enroll)
             )
             assert enrolled.receipt is not None
             with store._session_factory() as session:
@@ -226,8 +224,8 @@ class OrdinaryAgentLifecycleStorageTests(unittest.TestCase):
                 principal_revision=enrolled.receipt.principal_revision,
                 principal_sha256=enrolled.receipt.principal_sha256,
             )
-            revoked = store.compare_and_apply_ordinary_agent_enrollment(
-                envelope=revoke, mutation=enrollment_mutation(revoke)
+            revoked = apply_test_enrollment(
+                store, envelope=revoke, mutation=enrollment_mutation(revoke)
             )
             self.assertEqual(revoked.status, "written")
             assert revoked.current_principal is not None
@@ -238,8 +236,8 @@ class OrdinaryAgentLifecycleStorageTests(unittest.TestCase):
             assert audit is not None
             self.assertIsNone(audit.previous_credential_record_id)
             self.assertIsNone(audit.resulting_credential_record_id)
-            replayed = store.compare_and_apply_ordinary_agent_enrollment(
-                envelope=revoke, mutation=enrollment_mutation(revoke)
+            replayed = apply_test_enrollment(
+                store, envelope=revoke, mutation=enrollment_mutation(revoke)
             )
             self.assertEqual(replayed.status, "replayed")
             self.assertEqual(replayed.receipt, revoked.receipt)
@@ -251,8 +249,8 @@ class OrdinaryAgentLifecycleStorageTests(unittest.TestCase):
             store.ensure_schema()
             policy, inventory = setup_ordinary_agent_authority(store)
             enroll = enrollment_envelope(policy_record=policy, inventory=inventory)
-            enrolled = store.compare_and_apply_ordinary_agent_enrollment(
-                envelope=enroll, mutation=enrollment_mutation(enroll)
+            enrolled = apply_test_enrollment(
+                store, envelope=enroll, mutation=enrollment_mutation(enroll)
             )
             assert enrolled.receipt is not None
             with store._session_factory() as session:
@@ -275,8 +273,8 @@ class OrdinaryAgentLifecycleStorageTests(unittest.TestCase):
                 principal_revision=enrolled.receipt.principal_revision,
                 principal_sha256=enrolled.receipt.principal_sha256,
             )
-            revoked = store.compare_and_apply_ordinary_agent_enrollment(
-                envelope=revoke, mutation=enrollment_mutation(revoke)
+            revoked = apply_test_enrollment(
+                store, envelope=revoke, mutation=enrollment_mutation(revoke)
             )
             self.assertEqual(revoked.status, "written")
             assert revoked.current_principal is not None
@@ -291,8 +289,8 @@ class OrdinaryAgentLifecycleStorageTests(unittest.TestCase):
             assert audit is not None
             self.assertIsNone(audit.previous_credential_record_id)
             self.assertIsNone(audit.resulting_credential_record_id)
-            replayed = store.compare_and_apply_ordinary_agent_enrollment(
-                envelope=revoke, mutation=enrollment_mutation(revoke)
+            replayed = apply_test_enrollment(
+                store, envelope=revoke, mutation=enrollment_mutation(revoke)
             )
             self.assertEqual(replayed.status, "replayed")
             self.assertEqual(replayed.receipt, revoked.receipt)
@@ -332,8 +330,8 @@ class OrdinaryAgentLifecycleStorageTests(unittest.TestCase):
             for candidate in candidates:
                 with self.subTest(candidate=candidate):
                     envelope = enroll.model_copy(update={"custody": candidate})
-                    result = store.compare_and_apply_ordinary_agent_enrollment(
-                        envelope=envelope, mutation=enrollment_mutation(envelope)
+                    result = apply_test_enrollment(
+                        store, envelope=envelope, mutation=enrollment_mutation(envelope)
                     )
                     self.assertEqual(result.status, "custody_drift")
                     self.assertIsNone(result.idempotency_record)
@@ -348,8 +346,8 @@ class OrdinaryAgentLifecycleStorageTests(unittest.TestCase):
                         )
                     )
             # Rejections release their reservation; the real candidate can then commit once.
-            written = store.compare_and_apply_ordinary_agent_enrollment(
-                envelope=enroll, mutation=enrollment_mutation(enroll)
+            written = apply_test_enrollment(
+                store, envelope=enroll, mutation=enrollment_mutation(enroll)
             )
             self.assertEqual(written.status, "written")
             store.close()
@@ -369,9 +367,7 @@ class OrdinaryAgentLifecycleStorageTests(unittest.TestCase):
             )
             for invalid in invalid_mutations:
                 with self.subTest(mutation=invalid), self.assertRaises(ValueError):
-                    store.compare_and_apply_ordinary_agent_enrollment(
-                        envelope=envelope, mutation=invalid
-                    )
+                    apply_test_enrollment(store, envelope=envelope, mutation=invalid)
             self.assertIsNone(store.read_current_ordinary_agent_principal(principal_id="agent_one"))
             store.close()
 
@@ -380,6 +376,7 @@ class OrdinaryAgentLifecycleStorageTests(unittest.TestCase):
             "insert_principal",
             "insert_credential",
             "insert_custody",
+            "insert_delivery",
             "insert_audit",
             "complete_idempotency",
         ):
@@ -391,8 +388,8 @@ class OrdinaryAgentLifecycleStorageTests(unittest.TestCase):
                 policy, inventory = setup_ordinary_agent_authority(store)
                 envelope = enrollment_envelope(policy_record=policy, inventory=inventory)
                 with self.assertRaisesRegex(RuntimeError, step):
-                    store.compare_and_apply_ordinary_agent_enrollment(
-                        envelope=envelope, mutation=enrollment_mutation(envelope)
+                    apply_test_enrollment(
+                        store, envelope=envelope, mutation=enrollment_mutation(envelope)
                     )
                 with store._engine.connect() as connection:
                     counts = tuple(
@@ -403,9 +400,10 @@ class OrdinaryAgentLifecycleStorageTests(unittest.TestCase):
                             LaunchplaneOrdinaryAgentCredentialCustodyRow,
                             LaunchplaneOrdinaryAgentLifecycleAuditRow,
                             LaunchplaneIdempotencyRow,
+                            LaunchplaneOrdinaryAgentDeliveryRow,
                         )
                     )
-                self.assertEqual(counts, (0, 0, 0, 0, 0))
+                self.assertEqual(counts, (0, 0, 0, 0, 0, 0))
                 store.close()
 
     def test_policy_inventory_and_secret_drift_leave_no_receipt(self) -> None:
@@ -463,8 +461,8 @@ class OrdinaryAgentLifecycleStorageTests(unittest.TestCase):
                 candidate = candidate.model_copy(
                     update={"operation_id": f"ordinary-agent-drift-{position}"}
                 )
-                result = store.compare_and_apply_ordinary_agent_enrollment(
-                    envelope=candidate, mutation=enrollment_mutation(candidate)
+                result = apply_test_enrollment(
+                    store, envelope=candidate, mutation=enrollment_mutation(candidate)
                 )
                 self.assertEqual(result.status, expected_status)
                 self.assertIsNone(result.idempotency_record)

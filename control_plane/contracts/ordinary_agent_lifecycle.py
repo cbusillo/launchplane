@@ -152,11 +152,17 @@ class OrdinaryAgentEnrollmentApplyBase(StrictFrozenModel):
     administrator: OrdinaryAgentAdministratorAuthorizationBinding
 
 
+class OrdinaryAgentDeliveryBinding(StrictFrozenModel):
+    receiver_claim_sha256: str = Field(pattern=r"^[0-9a-f]{64}$", repr=False)
+    expires_at: int = Field(ge=0, le=2**63 - 1)
+
+
 class OrdinaryAgentEnrollApplyEnvelope(OrdinaryAgentEnrollmentApplyBase):
     action: Literal["enroll"]
     policy: OrdinaryAgentPolicyBinding
     expected_principal_absent: Literal[True]
     authentication_credential: OrdinaryAgentAuthenticationCredentialCandidate
+    delivery: OrdinaryAgentDeliveryBinding
     custody: OrdinaryAgentCredentialCustodyCandidate
 
     @model_validator(mode="after")
@@ -179,6 +185,7 @@ class OrdinaryAgentRotateCredentialApplyEnvelope(OrdinaryAgentEnrollmentApplyBas
     credential_id: str = Field(pattern=r"^[a-z][a-z0-9_-]{2,127}$")
     credential_version: int = Field(ge=1, le=2**63 - 1)
     authentication_credential: OrdinaryAgentAuthenticationCredentialCandidate
+    delivery: OrdinaryAgentDeliveryBinding
     custody: OrdinaryAgentCredentialCustodyCandidate
 
     @model_validator(mode="after")
@@ -428,6 +435,7 @@ class OrdinaryAgentEnrollmentCompareWriteResult(NamedTuple):
     receipt: OrdinaryAgentEnrollmentReceipt | None = None
     current_principal: OrdinaryAgentPrincipalRecord | None = None
     idempotency_record: LaunchplaneIdempotencyRecord | None = None
+    delivery_status: str | None = None
 
 
 def lifecycle_record_sha256(record: BaseModel, *, digest_field: str) -> str:
@@ -437,4 +445,10 @@ def lifecycle_record_sha256(record: BaseModel, *, digest_field: str) -> str:
 def ordinary_agent_enrollment_envelope_sha256(
     envelope: OrdinaryAgentEnrollmentApplyEnvelope,
 ) -> str:
-    return canonical_json_sha256(envelope.model_dump(mode="json"))
+    payload = envelope.model_dump(mode="json")
+    if not isinstance(envelope, OrdinaryAgentRevokePrincipalApplyEnvelope):
+        # Intent is stable across independently randomized issuance attempts.
+        candidate = payload["authentication_credential"]
+        candidate.pop("credential_digest")
+        candidate.pop("issuance_evidence_sha256")
+    return canonical_json_sha256(payload)
