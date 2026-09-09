@@ -36,13 +36,11 @@ class OrdinaryAgentLandingRepositoryEvidenceProvider:
     evidence: OrdinaryAgentLandingEvidence
 
     def resolve(self, target: ChangeImpactTargetReference) -> ChangeImpactRepositoryEvidence:
-        observed = self.evidence.repository_evidence.target
-        if (
-            target.repository != self.evidence.repository
-            or target.pull_request_number != observed.pull_request_number
-        ):
-            raise OrdinaryAgentLandingEvidenceMismatch("landing_repository_lookup_mismatch")
-        return self.evidence.repository_evidence
+        if target.repository == self.evidence.repository:
+            for entry in self.evidence.candidate_entry_evidence:
+                if entry.target.pull_request_number == target.pull_request_number:
+                    return entry
+        raise OrdinaryAgentLandingEvidenceMismatch("landing_repository_lookup_mismatch")
 
 
 @dataclass(frozen=True)

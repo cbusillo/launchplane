@@ -619,6 +619,22 @@ Failure rolls back those records together. A repeated finalization returns histo
 and never authorizes another provider call, including after the original lease
 expires. Provider calls happen outside the transaction.
 
+The landing evidence envelope includes every recorded candidate entry, including
+merged or skipped predecessors, while its queue snapshot contains only the
+remaining entries. Preparation rejects more than four entries before charging
+an action or reserving custody. File-change and contributing-identity readers
+share the existing GitHub parsing rules; a head SHA alone is not sufficient to
+reuse mutable PR diff or authorship evidence.
+
+The provider transport supports a minimum remaining-time requirement for each
+read. Landing acquisition must reserve 61 seconds before each file/commit page
+and 46 seconds before the final batched identity confirmation, within the
+original 75-second work window. Finalization and dispatch retain their separate
+30-second minimum. These checks use the earlier work or token deadline and never
+renew it. Failed requests and reported GraphQL costs, including partial responses
+and queries exceeding the per-query limit, remain in quota accounting. The
+concrete acquisition path and fleet budget proof remain integration work.
+
 These internal records and tests do not activate ordinary execution or establish
 installed-client or production usability. Service wiring and the guarded landing
 admission integration must use the same joined boundaries before publication.

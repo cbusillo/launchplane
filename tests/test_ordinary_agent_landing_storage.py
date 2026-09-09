@@ -27,6 +27,7 @@ from control_plane.tenant_admission_controller import (
     TenantAdmissionTechnicalCheckSignal,
 )
 from control_plane.merge_admission import GuardedMergeAdmission, MergeAdmissionEvaluation
+from control_plane.merge_train import MergeTrainDryRunSnapshot, MergeTrainPullRequestSnapshot
 from tests import test_merge_readiness as readiness_support
 from tests.test_merge_admission_records import _StaticEvaluator
 
@@ -219,6 +220,19 @@ class OrdinaryAgentLandingStorageTests(unittest.TestCase):
                 sha=preparation.expected_base_sha, tree_sha=preparation.expected_base_tree_sha
             ),
             repository_evidence=repository,
+            candidate_entry_evidence=(repository,),
+            snapshot=MergeTrainDryRunSnapshot(
+                repository=preparation.target.repository,
+                base_branch=preparation.target.base_branch,
+                base_sha=preparation.expected_base_sha,
+                pull_requests=(
+                    MergeTrainPullRequestSnapshot(
+                        number=preparation.entry.pull_request_number,
+                        head_sha=preparation.entry.expected_head_sha,
+                        created_at=timestamp,
+                    ),
+                ),
+            ),
             candidate_sha=self.candidate.candidate.candidate_sha,
             technical_checks=checks,
             protection=OrdinaryAgentProtectionEvidence(

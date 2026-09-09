@@ -56,23 +56,36 @@ class DeadlineMergeTrainGitHubTransport:
         self.graphql_points = 0
 
     def request(
-        self, *, method: str, path: str, body: dict[str, object] | None = None
+        self,
+        *,
+        method: str,
+        path: str,
+        body: dict[str, object] | None = None,
+        minimum_remaining_seconds: float = ORDINARY_PROVIDER_TRANSPORT_ALLOWANCE_SECONDS,
     ) -> object:
-        remaining = min(self._work_deadline, self._token_deadline) - self._monotonic()
-        if remaining < ORDINARY_PROVIDER_TRANSPORT_ALLOWANCE_SECONDS:
-            raise OrdinaryAgentProviderDeferred()
+        self.require_remaining(minimum_remaining_seconds)
         if path == "/graphql":
             self.graphql_requests += 1
         else:
             self.rest_core_requests += 1
         return self._transport.request(method=method, path=path, body=body)
 
+    def require_remaining(self, minimum_seconds: float) -> None:
+        """Reserve time for subsequent phases without extending either deadline."""
+        if not ORDINARY_PROVIDER_TRANSPORT_ALLOWANCE_SECONDS <= minimum_seconds < float("inf"):
+            raise ValueError(
+                "provider minimum remaining time must be finite and at least 15 seconds"
+            )
+        remaining = min(self._work_deadline, self._token_deadline) - self._monotonic()
+        if remaining < minimum_seconds:
+            raise OrdinaryAgentProviderDeferred()
+
     def record_graphql_points(self, points: int) -> None:
         if points < 0:
             raise OrdinaryAgentProviderEvidenceError("graphql_cost_invalid")
+        self.graphql_points += points
         if points > MAX_GRAPHQL_POINTS_PER_QUERY:
             raise OrdinaryAgentProviderEvidenceError("snapshot_query_cost_exceeded")
-        self.graphql_points += points
 
 
 def require_complete_graphql_data(
@@ -81,14 +94,18 @@ def require_complete_graphql_data(
     envelope = json_object(
         payload,
         "GitHub GraphQL response",
-        error_type=lambda message: OrdinaryAgentProviderEvidenceError(
-            "graphql_response_malformed"
-        ),
+        error_type=lambda message: OrdinaryAgentProviderEvidenceError("graphql_response_malformed"),
     )
+    data = envelope.get("data")
+    # A partial response can still consume quota. Account for reported cost
+    # before rejecting its evidence; never treat an error as a free request.
     errors = envelope.get("errors")
     if errors not in (None, []):
+        rate_limit = data.get("rateLimit") if isinstance(data, dict) else None
+        cost = rate_limit.get("cost") if isinstance(rate_limit, dict) else None
+        if isinstance(cost, int) and not isinstance(cost, bool) and cost >= 0:
+            transport.graphql_points += cost
         raise OrdinaryAgentProviderEvidenceError("graphql_field_error")
-    data = envelope.get("data")
     if not isinstance(data, dict):
         raise OrdinaryAgentProviderEvidenceError("graphql_required_data_missing")
     rate_limit = data.get("rateLimit")
@@ -111,11 +128,17 @@ def require_complete_connection(value: object, *, label: str) -> tuple[dict[str,
         raise OrdinaryAgentProviderEvidenceError(f"{label}_malformed")
     if page_info.get("hasNextPage") is not False:
         raise OrdinaryAgentProviderEvidenceError(f"{label}_truncated")
-    if isinstance(total_count, bool) or not isinstance(total_count, int) or total_count != len(nodes):
+    if (
+        isinstance(total_count, bool)
+        or not isinstance(total_count, int)
+        or total_count != len(nodes)
+    ):
         raise OrdinaryAgentProviderEvidenceError(f"{label}_truncated")
     if any(not isinstance(node, dict) for node in nodes):
         raise OrdinaryAgentProviderEvidenceError(f"{label}_malformed")
     return tuple(node for node in nodes if isinstance(node, dict))
+
+
 ProviderWaitReader = Callable[..., OrdinaryAgentProviderWaitRecord | None]
 ProviderResourceClass = Literal["core", "search", "graphql", "secondary"]
 

@@ -13,6 +13,42 @@ from control_plane.ordinary_agent_github_transport import (
 
 
 class OrdinaryAgentGitHubTransportTests(unittest.TestCase):
+    def test_slow_entry_read_preserves_final_confirmation_and_dispatch_time(self) -> None:
+        now = [0.0]
+        inner = RecordingMergeTrainGitHubTransport(responses=({"files": []},))
+        transport = DeadlineMergeTrainGitHubTransport(
+            transport=inner,
+            work_deadline=75,
+            token_deadline=100,
+            monotonic=lambda: now[0],
+        )
+        transport.request(method="GET", path="/files", minimum_remaining_seconds=61)
+        now[0] = 15
+        with self.assertRaises(OrdinaryAgentProviderDeferred):
+            transport.request(method="GET", path="/commits", minimum_remaining_seconds=61)
+        self.assertEqual(len(inner.requests), 1)
+        self.assertEqual(transport.rest_core_requests, 1)
+        transport.require_remaining(46)
+        now[0] = 30
+        with self.assertRaises(OrdinaryAgentProviderDeferred):
+            transport.request(method="POST", path="/graphql", minimum_remaining_seconds=46)
+        self.assertEqual(transport.graphql_requests, 0)
+
+    def test_phase_reserve_uses_earlier_token_expiry_and_cannot_weaken_default(self) -> None:
+        inner = RecordingMergeTrainGitHubTransport()
+        transport = DeadlineMergeTrainGitHubTransport(
+            transport=inner,
+            work_deadline=75,
+            token_deadline=60,
+            monotonic=lambda: 0,
+        )
+        with self.assertRaises(OrdinaryAgentProviderDeferred):
+            transport.request(method="GET", path="/files", minimum_remaining_seconds=61)
+        for invalid in (0, 14, float("nan"), float("inf")):
+            with self.subTest(minimum=invalid), self.assertRaises(ValueError):
+                transport.request(method="GET", path="/files", minimum_remaining_seconds=invalid)
+        self.assertEqual(inner.requests, [])
+
     def test_deadline_denies_before_provider_request(self) -> None:
         inner = RecordingMergeTrainGitHubTransport(responses=({"data": {}},))
         transport = DeadlineMergeTrainGitHubTransport(
@@ -50,14 +86,19 @@ class OrdinaryAgentGitHubTransportTests(unittest.TestCase):
             token_deadline=100,
             monotonic=lambda: 0,
         )
-        with self.assertRaisesRegex(OrdinaryAgentProviderEvidenceError, "graphql_field_error"):
-            require_complete_graphql_data(
-                {
-                    "data": {"repository": {}, "rateLimit": {"cost": 1}},
-                    "errors": [{"type": "FORBIDDEN"}],
-                },
-                transport=transport,
-            )
+        for cost in (1, 11, -1):
+            with (
+                self.subTest(cost=cost),
+                self.assertRaisesRegex(OrdinaryAgentProviderEvidenceError, "graphql_field_error"),
+            ):
+                require_complete_graphql_data(
+                    {
+                        "data": {"repository": {}, "rateLimit": {"cost": cost}},
+                        "errors": [{"type": "FORBIDDEN"}],
+                    },
+                    transport=transport,
+                )
+        self.assertEqual(transport.graphql_points, 12)
 
     def test_connection_rejects_silent_truncation(self) -> None:
         with self.assertRaisesRegex(OrdinaryAgentProviderEvidenceError, "checks_truncated"):
@@ -84,6 +125,7 @@ class OrdinaryAgentGitHubTransportTests(unittest.TestCase):
                 {"data": {"repository": {}, "rateLimit": {"cost": 11}}},
                 transport=transport,
             )
+        self.assertEqual(transport.graphql_points, 11)
 
 
 if __name__ == "__main__":

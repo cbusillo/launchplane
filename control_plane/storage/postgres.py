@@ -436,7 +436,10 @@ from control_plane.contracts.ordinary_agent_enrollment import OrdinaryAgentPrinc
 from control_plane.ordinary_agent_enrollment import derive_ordinary_agent_execution_profile
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.ordinary_agent import OrdinaryAgentPullRequest, OrdinaryAgentTarget
-from control_plane.contracts.ordinary_agent_snapshot import OrdinaryAgentLandingEvidence
+from control_plane.contracts.ordinary_agent_snapshot import (
+    MAX_ORDINARY_LANDING_ENTRIES,
+    OrdinaryAgentLandingEvidence,
+)
 from control_plane.contracts.ordinary_agent_lifecycle import (
     ordinary_agent_session_enrollment_intent_sha256,
 )
@@ -22201,7 +22204,7 @@ class PostgresRecordStore(HumanSessionStore):
         )
         with self._session_factory() as session:
             self._begin_serialized_write(session)
-            _, _, row, record = self._ordinary_landing_preparation_context(
+            context, controller, row, record = self._ordinary_landing_preparation_context(
                 session, preparation_id=preparation_id, controller_fence=controller_fence
             )
             if record.revision != expected_revision or record.state != "reserved":
@@ -22213,6 +22216,12 @@ class PostgresRecordStore(HumanSessionStore):
             if candidate_row is None:
                 raise OrdinaryAgentSessionAdmissionDenied("landing_candidate_unavailable")
             candidate_record = MergeTrainBatchCandidateRecord.model_validate(candidate_row.payload)
+            plan, _, _, _, _ = self._ordinary_landing_plan_context(
+                session,
+                context=context,
+                controller=controller,
+                pull_request_number=record.entry.pull_request_number,
+            )
             target = evidence.repository_evidence.target
             if (
                 evidence.repository_id != record.target.repository_id
@@ -22225,6 +22234,20 @@ class PostgresRecordStore(HumanSessionStore):
                 or target.tree_sha != record.entry.expected_head_tree_sha
                 or evidence.expected_merge_tree_sha != record.expected_merge_tree_sha
                 or evidence.candidate_sha != candidate_record.candidate.candidate_sha
+                or tuple(
+                    (item.target.pull_request_number, item.target.head_sha, item.target.tree_sha)
+                    for item in evidence.candidate_entry_evidence
+                )
+                != tuple(
+                    (item.pull_request_number, item.head_sha, item.head_tree_sha)
+                    for item in candidate_record.candidate.entries
+                )
+                or tuple((item.number, item.head_sha) for item in evidence.snapshot.pull_requests)
+                != tuple(
+                    (item.pull_request_number, item.expected_head_sha)
+                    for item in plan.landing_plan.entries
+                    if item.status not in {"merged", "skipped"}
+                )
                 or not record.reserved_at <= evidence.observed_at <= now
                 or not record.reserved_at <= check_evaluated_at <= evidence.observed_at
                 or now - evidence.observed_at > effect_contracts.LANDING_EVIDENCE_MAX_AGE_SECONDS
@@ -22738,6 +22761,8 @@ class PostgresRecordStore(HumanSessionStore):
                     pull_request_number=pull_request_number,
                 )
             )
+            if len(candidate_record.candidate.entries) > MAX_ORDINARY_LANDING_ENTRIES:
+                raise OrdinaryAgentSessionAdmissionDenied("landing_entry_limit_exceeded")
             if any(
                 effect_contracts.OrdinaryAgentLandingPreparation.model_validate(item.payload).state
                 in {"reserved", "observed", "terminal"}

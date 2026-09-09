@@ -4,6 +4,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 import hashlib
 import json
+from typing import Protocol
 
 from control_plane.change_impact_github import (
     ChangeImpactRepositoryEvidenceError,
@@ -122,13 +123,31 @@ class _EntryEvidence:
     observation: MergeTrainStructuralEntryObservation
 
 
+class MergeAdmissionTechnicalCheckReader(Protocol):
+    def read_technical_checks(
+        self,
+        *,
+        repository: str,
+        base_branch: str,
+        base_sha: str,
+        head_sha: str,
+        evaluated_at: str,
+    ) -> TenantAdmissionTechnicalChecks: ...
+
+
 @dataclass(frozen=True)
 class LiveMergeAdmissionEvaluator:
     store: object
     repository_evidence_provider: ChangeImpactRepositoryEvidenceProvider
-    technical_check_client: TenantAdmissionControllerGitHubClient
+    technical_check_client: MergeAdmissionTechnicalCheckReader
     policy_record_provider: Callable[[], MergeTrainPolicyRecord] | None = None
     snapshot_reader: MergeTrainSnapshotReader | None = None
+
+    def __post_init__(self) -> None:
+        if self.snapshot_reader is None and not isinstance(
+            self.technical_check_client, TenantAdmissionControllerGitHubClient
+        ):
+            raise ValueError("A transport-free check reader requires an explicit snapshot reader.")
 
     def evaluate(
         self,
@@ -146,9 +165,12 @@ class LiveMergeAdmissionEvaluator:
         evaluated_at: str,
     ) -> MergeAdmissionEvaluation:
         landing_plan = landing_plan_record.landing_plan
-        snapshot_reader = self.snapshot_reader or GitHubMergeTrainSnapshotReader(
-            transport=self.technical_check_client.transport
-        )
+        snapshot_reader = self.snapshot_reader
+        if snapshot_reader is None:
+            assert isinstance(self.technical_check_client, TenantAdmissionControllerGitHubClient)
+            snapshot_reader = GitHubMergeTrainSnapshotReader(
+                transport=self.technical_check_client.transport
+            )
         try:
             policy_record = (
                 self.policy_record_provider()
