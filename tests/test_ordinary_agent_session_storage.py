@@ -520,6 +520,7 @@ class OrdinaryAgentSessionStorageTests(unittest.TestCase):
             job = session.get(LaunchplaneOrdinaryAgentFiniteRequestRow, self.request.request_id)
             assert job is not None
             self.assertEqual(job.payload["status"], "cancelled")
+        disconnected_records = []
         for _ in range(2):
             result = disconnect_ordinary_agent_principal(
                 store=self.store,
@@ -530,6 +531,10 @@ class OrdinaryAgentSessionStorageTests(unittest.TestCase):
                 source_event_id="disconnect-test",
             )
             self.assertEqual(result.status, "revoked")
+            disconnected_records.append(
+                self.store.read_current_ordinary_agent_principal(principal_id="agent_one")
+            )
+        self.assertEqual(disconnected_records[0], disconnected_records[1])
         self.assertIsNone(self.store.verify_ordinary_agent_token(self.proof))
         with self.assertRaisesRegex(
             OrdinaryAgentSessionAdmissionDenied, "operation_already_applied"
@@ -676,3 +681,56 @@ class OrdinaryAgentSessionStorageTests(unittest.TestCase):
                     source_event_id="disconnect-logout-test",
                 )
         self.assertIsNotNone(self.store.verify_ordinary_agent_token(self.proof))
+
+    def test_recovery_keyset_advances_past_unapplied_operations(self) -> None:
+        intent = OrdinaryAgentEnrollmentIntent.from_envelope(self.envelope).model_copy(
+            update={"operation_id": "z-recovery-second"}
+        )
+        self.store.propose_ordinary_agent_enrollment(
+            intent=intent, requester=TerminalAgentIdentity(subject="test-cli", token_label="test")
+        )
+        approve_ordinary_agent_enrollment(
+            store=self.store,
+            manager=self.manager,
+            cookie_header=self.manager.session_cookie_header(self.human),
+            csrf_token=self.manager.csrf_token(self.human),
+            principal_id=intent.principal_id,
+            operation_id=intent.operation_id,
+        )
+        first = self.store.list_pending_approved_ordinary_agent_enrollments(limit=1)
+        second = self.store.list_pending_approved_ordinary_agent_enrollments(
+            limit=1, after=first[0]
+        )
+        self.assertEqual(second[0].operation_id, intent.operation_id)
+        self.assertEqual(
+            self.store.list_pending_approved_ordinary_agent_enrollments(limit=1, after=second[0]),
+            (),
+        )
+        self.assertNotEqual(first, second)
+
+    def test_disconnect_event_cannot_impersonate_pending_enrollment(self) -> None:
+        self.enroll()
+        pending = OrdinaryAgentEnrollmentIntent.from_envelope(self.envelope).model_copy(
+            update={"operation_id": "pending-enrollment-event"}
+        )
+        self.store.propose_ordinary_agent_enrollment(
+            intent=pending, requester=TerminalAgentIdentity(subject="test-cli", token_label="test")
+        )
+        disconnect_ordinary_agent_principal(
+            store=self.store,
+            manager=self.manager,
+            cookie_header=self.manager.session_cookie_header(self.human),
+            csrf_token=self.manager.csrf_token(self.human),
+            principal_id=pending.principal_id,
+            source_event_id=pending.operation_id,
+        )
+        view = cancel_pending_ordinary_agent_operation(
+            store=self.store,
+            manager=self.manager,
+            cookie_header=self.manager.session_cookie_header(self.human),
+            csrf_token=self.manager.csrf_token(self.human),
+            principal_id=pending.principal_id,
+            operation_id=pending.operation_id,
+        )
+        self.assertFalse(view.applied)
+        self.assertEqual(view.status, "cancelled")

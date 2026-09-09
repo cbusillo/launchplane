@@ -36,6 +36,7 @@ from sqlalchemy import (
     text,
     select,
 )
+from sqlalchemy import cast as sql_cast
 from sqlalchemy.dialects.postgresql import JSONB, insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Engine, make_url
@@ -19487,8 +19488,12 @@ class PostgresRecordStore(HumanSessionStore):
                 raise OrdinaryAgentSessionAdmissionDenied("session_proposal_unavailable")
             return self._ordinary_agent_initial_intent(row)
 
+    @_private_ordinary_agent_operation
     def list_pending_approved_ordinary_agent_enrollments(
-        self, *, limit: int = 100
+        self,
+        *,
+        limit: int = 100,
+        after: OrdinaryAgentEnrollmentApprovalReference | None = None,
     ) -> tuple[OrdinaryAgentEnrollmentApprovalReference, ...]:
         """Private worker discovery only; read/apply must recheck the authoritative row."""
         if not 1 <= limit <= 1000:
@@ -19499,27 +19504,39 @@ class PostgresRecordStore(HumanSessionStore):
             .where(
                 LaunchplaneOrdinaryAgentLifecycleAuditRow.principal_id == operation.principal_id,
                 LaunchplaneOrdinaryAgentLifecycleAuditRow.operation_id == operation.operation_id,
+                LaunchplaneOrdinaryAgentLifecycleAuditRow.action.in_(
+                    ("enroll", "rotate_credential")
+                ),
             )
             .exists()
         )
+        delivery_deadline = sql_cast(
+            operation.payload["intent"]["delivery"]["expires_at"].as_string(), BigInteger
+        )
+        session_deadline = sql_cast(
+            operation.payload["intent"]["session_attenuation"]["session_expires_at"].as_string(),
+            BigInteger,
+        )
+        statement = select(operation)
+        if after is not None:
+            statement = statement.where(
+                or_(
+                    operation.principal_id > after.principal_id,
+                    (operation.principal_id == after.principal_id)
+                    & (operation.operation_id > after.operation_id),
+                )
+            )
         with self._session_factory() as session:
             now = self._ordinary_agent_database_epoch(session)
             rows = session.scalars(
-                select(operation)
-                .where(
+                statement.where(
                     operation.kind == "initial",
                     operation.approval_sha256.is_not(None),
                     operation.cancelled_at.is_(None),
                     operation.terminal_session_id.is_(None),
                     ~applied,
-                    operation.payload["intent"]["delivery"]["expires_at"].as_integer() > now,
-                    func.coalesce(
-                        operation.payload["intent"]["session_attenuation"][
-                            "session_expires_at"
-                        ].as_integer(),
-                        operation.payload["intent"]["delivery"]["expires_at"].as_integer(),
-                    )
-                    > now,
+                    delivery_deadline > now,
+                    func.coalesce(session_deadline, delivery_deadline) > now,
                 )
                 .order_by(operation.principal_id, operation.operation_id)
                 .limit(limit)
@@ -19943,6 +19960,9 @@ class PostgresRecordStore(HumanSessionStore):
                 select(LaunchplaneOrdinaryAgentLifecycleAuditRow.event_id).where(
                     LaunchplaneOrdinaryAgentLifecycleAuditRow.operation_id == row.operation_id,
                     LaunchplaneOrdinaryAgentLifecycleAuditRow.principal_id == row.principal_id,
+                    LaunchplaneOrdinaryAgentLifecycleAuditRow.action.in_(
+                        ("enroll", "rotate_credential")
+                    ),
                 )
             )
             is not None
@@ -20475,6 +20495,8 @@ class PostgresRecordStore(HumanSessionStore):
         principal_id: str,
         source_event_id: str,
     ) -> OrdinaryAgentConnectionView:
+        if not source_event_id or len(source_event_id) > 256:
+            raise OrdinaryAgentSessionAdmissionDenied("invalid_source_event_id")
         # Preparation derives exact scope only. The mutation below joins actual human
         # authentication, current policy and principal CAS again in its own transaction.
         with self._session_factory() as session:
@@ -20519,9 +20541,10 @@ class PostgresRecordStore(HumanSessionStore):
             )
             # These are audit bindings derived from the actual authenticated request;
             # the joined human verifier below, never this digest, authorizes revocation.
+            operation_id = f"disconnect:{request}"
             envelope = OrdinaryAgentRevokePrincipalApplyEnvelope(
                 action="revoke_principal",
-                operation_id=source_event_id,
+                operation_id=operation_id,
                 principal_id=principal_id,
                 principal=prestate,
                 administrator=administrator,
@@ -20535,9 +20558,9 @@ class PostgresRecordStore(HumanSessionStore):
             mutation=DbOnlyMutationRequest(
                 scope=ORDINARY_AGENT_ENROLLMENT_MUTATION_SCOPE,
                 route_path=ORDINARY_AGENT_ENROLLMENT_MUTATION_ROUTE,
-                idempotency_key=source_event_id,
+                idempotency_key=operation_id,
                 request_fingerprint=ordinary_agent_enrollment_envelope_sha256(envelope),
-                lease_owner=f"human-disconnect:{source_event_id}",
+                lease_owner=f"human-disconnect:{operation_id}",
                 response_status_code=200,
                 response_trace_id=source_event_id,
                 response_payload={},

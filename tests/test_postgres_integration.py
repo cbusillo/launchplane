@@ -7635,3 +7635,38 @@ class RealPostgresOrdinaryAgentSessionTests(unittest.TestCase):
                     if transaction.is_active:
                         transaction.rollback()
                     event.remove(store._engine, "before_cursor_execute", before_statement)
+
+    def test_recovery_scan_supports_bigint_deadlines_and_keyset(self) -> None:
+        from tests import test_ordinary_agent_session_storage as session_tests
+        from control_plane.contracts.ordinary_agent_lifecycle import OrdinaryAgentEnrollmentIntent
+        from control_plane.ordinary_agent_session_approval import approve_ordinary_agent_enrollment
+        from control_plane.service_auth import TerminalAgentIdentity
+
+        with _store_for_fresh_head_database() as store:
+            fixture = session_tests.OrdinaryAgentSessionStorageTests()
+            self.addCleanup(fixture.doCleanups)
+            fixture.prepare_store(store)
+            intent = OrdinaryAgentEnrollmentIntent.from_envelope(fixture.envelope).model_copy(
+                update={
+                    "operation_id": "z-bigint-recovery",
+                    "session_attenuation": None,
+                    "delivery": fixture.envelope.delivery.model_copy(
+                        update={"expires_at": 2**31 + 100}
+                    ),
+                }
+            )
+            store.propose_ordinary_agent_enrollment(
+                intent=intent,
+                requester=TerminalAgentIdentity(subject="test-cli", token_label="test"),
+            )
+            approve_ordinary_agent_enrollment(
+                store=store,
+                manager=fixture.manager,
+                cookie_header=fixture.manager.session_cookie_header(fixture.human),
+                csrf_token=fixture.manager.csrf_token(fixture.human),
+                principal_id=intent.principal_id,
+                operation_id=intent.operation_id,
+            )
+            first = store.list_pending_approved_ordinary_agent_enrollments(limit=1)
+            page = store.list_pending_approved_ordinary_agent_enrollments(after=first[0])
+            self.assertEqual([reference.operation_id for reference in page], [intent.operation_id])
