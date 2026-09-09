@@ -26,6 +26,7 @@ from control_plane.contracts.ordinary_agent_session_lifecycle import OrdinaryAge
 from control_plane.github_app_identity import GitHubAppInstallationToken
 from control_plane.merge_train_github import RecordingMergeTrainGitHubTransport
 from control_plane.ordinary_agent_merge_train_executor import OrdinaryAgentMergeTrainEffectExecutor
+from control_plane.ordinary_agent_effect_recovery import recover_ordinary_effect
 from tests import test_ordinary_agent_effect_storage as effect_support
 from tests import test_ordinary_agent_landing_dispatch as dispatch_support
 from tests import test_ordinary_agent_landing_storage as landing_support
@@ -44,6 +45,7 @@ class OrdinaryAgentEffectHistoryTests(unittest.TestCase):
         pending = self.store.read_ordinary_agent_effect_history(effect_id=self.effect_id)
         self.assertEqual(pending.effect.state, "dispatching")
         self.assertIsNone(pending.outcome)
+        self.assertEqual(recover_ordinary_effect(pending).disposition, "observe")
         inner, dispatcher = self.fixture.dispatcher(
             [{"merged": True, "sha": self.fixture.result_sha}, self.fixture.proof]
         )
@@ -51,6 +53,9 @@ class OrdinaryAgentEffectHistoryTests(unittest.TestCase):
         complete = self.store.read_ordinary_agent_effect_history(effect_id=self.effect_id)
         assert isinstance(complete.outcome, OrdinaryAgentCompletedOutcome)
         self.assertEqual(complete.outcome.result_sha, self.fixture.result_sha)
+        recovered = recover_ordinary_effect(complete)
+        self.assertEqual(recovered.disposition, "replay")
+        self.assertEqual(recovered.completed, complete.outcome)
         session_fixture = self.fixture.fixture.fixture.fixture
         self.store.cancel_ordinary_agent_session(
             proof=session_fixture.proof,
@@ -58,6 +63,12 @@ class OrdinaryAgentEffectHistoryTests(unittest.TestCase):
         )
         self.assertEqual(
             self.store.read_ordinary_agent_effect_history(effect_id=self.effect_id), complete
+        )
+        self.assertEqual(
+            recover_ordinary_effect(
+                self.store.read_ordinary_agent_effect_history(effect_id=self.effect_id)
+            ),
+            recovered,
         )
         self.assertEqual(len(inner.requests), 2)
         self.assertEqual(
@@ -77,6 +88,10 @@ class OrdinaryAgentEffectHistoryTests(unittest.TestCase):
         observation = history.reconciliations[0].observation
         assert isinstance(observation, OrdinaryAgentPullRequestObservation)
         self.assertEqual(observation.merge_commit_sha, self.fixture.result_sha)
+        recovered = recover_ordinary_effect(history)
+        self.assertEqual(recovered.disposition, "replay")
+        assert recovered.completed is not None
+        self.assertEqual(recovered.completed.result_sha, self.fixture.result_sha)
         assert history.child is not None
         self.assertEqual(history.child.semantic_ordinal, history.effect.dispatch_count)
 
@@ -87,6 +102,7 @@ class OrdinaryAgentEffectHistoryTests(unittest.TestCase):
         history = self.store.read_ordinary_agent_effect_history(effect_id=self.effect_id)
         self.assertEqual(history.effect.state, "terminal_conflict")
         self.assertEqual(history.effect.reason_code, "landing_result_tree_mismatch")
+        self.assertEqual(recover_ordinary_effect(history).disposition, "terminal")
         assert history.outcome is not None
         self.assertEqual(history.outcome.kind, "unknown")
         self.assertEqual(len(history.reconciliations), 1)
@@ -132,6 +148,9 @@ class OrdinaryAgentUndispatchedHistoryTests(unittest.TestCase):
             "candidate_ref_retained_no_conditional_delete",
         )
         self.assertIsNone(history.undispatched_completion.observation)
+        recovered = recover_ordinary_effect(history)
+        self.assertEqual(recovered.disposition, "retained")
+        self.assertIsNone(recovered.completed)
 
     def test_existing_label_round_trips_real_custody_completion_without_dispatch(self) -> None:
         session_fixture = session_support.OrdinaryAgentSessionStorageTests()
@@ -246,6 +265,7 @@ class OrdinaryAgentUndispatchedHistoryTests(unittest.TestCase):
         ):
             executor.label_stack_child(command.effect)
         history = store.read_ordinary_agent_effect_history(effect_id=record.effect_id)
+        self.assertEqual(recover_ordinary_effect(history).disposition, "replay")
         self.assertEqual(history.effect.state, "completed_observed")
         self.assertIsNone(history.child)
         self.assertIsNone(history.outcome)

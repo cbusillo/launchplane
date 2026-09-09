@@ -36,6 +36,7 @@ from control_plane.contracts.merge_train_effect import (
 from control_plane.contracts.ordinary_agent_session_lifecycle import OrdinaryAgentLeaseRecord
 from control_plane.storage.postgres import LaunchplaneOrdinaryAgentLeaseRow
 from control_plane.ordinary_agent_session_lifecycle import OrdinaryAgentSessionAdmissionDenied
+from control_plane.ordinary_agent_effect_recovery import recover_ordinary_effect
 from tests import test_ordinary_agent_session_storage as session_support
 
 
@@ -316,6 +317,12 @@ class OrdinaryAgentEffectStorageTests(unittest.TestCase):
             typed_outcome=OrdinaryAgentCompletedOutcome(result_sha="d" * 40, proof=proof),
         )
         self.assertEqual(completed.state, "rebind_pending")
+        self.assertEqual(
+            recover_ordinary_effect(
+                self.store.read_ordinary_agent_effect_history(effect_id=effect.effect_id)
+            ).disposition,
+            "rebind",
+        )
         with self.assertRaisesRegex(
             OrdinaryAgentSessionAdmissionDenied, "effect_linked_refresh_required"
         ):
@@ -333,6 +340,12 @@ class OrdinaryAgentEffectStorageTests(unittest.TestCase):
         self.assertEqual(rebound.pull_requests[0].head_sha, "d" * 40)
         self.assertEqual(rebound.expires_at, self.request.expires_at)
         self.assertEqual(rebound.refresh_used, 1)
+        self.assertEqual(
+            recover_ordinary_effect(
+                self.store.read_ordinary_agent_effect_history(effect_id=effect.effect_id)
+            ).disposition,
+            "replay",
+        )
         self.assertEqual(
             self.store.rebind_ordinary_agent_after_head_refresh(
                 effect_id=effect.effect_id,

@@ -131,6 +131,12 @@ def classify_effect_reconciliation(
         if observation.ref != effect.candidate_ref:
             _deny()
         if observation.sha == effect.rolling_parent_sha:
+            if observation.contained_head_sha == effect.head_sha:
+                # The next candidate step also needs the unchanged tree; missing
+                # materialization is incomplete evidence, not a reason to resend.
+                if not observation.tree_sha:
+                    _deny()
+                return "completed_observed"
             return "not_dispatched"
         message = f"Launchplane merge train {effect.lineage.batch_id}: merge PR #{effect.pull_request_number}"
         if (

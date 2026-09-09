@@ -736,3 +736,21 @@ while unavailable source checks remain unknown and cannot start planning.
 Candidate checks bind to the candidate SHA and never reuse source-head results.
 These readers supply the existing custody acquisition adapters; full worker
 assembly and pending-observation recovery remain required before activation.
+
+Restart recovery interprets the latest durable dispatch and its immutable outcome
+before selecting more work. Completed or reconciled proof is replayed without a
+provider call; a missing response or accepted asynchronous action requires
+observation, and a known provider rejection or conflict is terminal. Proven local
+non-dispatch or an exact no-effect observation may use the existing finite retry
+budget; uncertain and accepted-asynchronous outcomes cannot. A fresh classification
+is only a routing decision and still requires the joined authority/custody checks.
+Candidate no-op recovery requires exact containment of the requested head at the
+unchanged rolling parent. Retained candidate refs and already-present labels keep
+their distinct completions without fabricating a dispatch.
+
+Synchronous label/close completion history is a command-bound acknowledgement,
+not a new assertion about current provider state. Commit-changing effects retain
+exact commit proof. Uncertain label/close results require typed read observations;
+recovery does not invent missing responses. Missing or inconsistent completion
+proof produces a terminal recovery decision. Child/effect binding mismatches
+remain explicit reader failures.
