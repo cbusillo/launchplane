@@ -718,3 +718,14 @@ one admin-list read: `6 × (53 - 7 + 3) = 294`. This immediate-success projectio
 includes no extra candidate-check repoll or unknown-write reconciliation. Those
 paths must appear in the measured ledger when exercised. Retained candidate-ref
 cleanup has no provider request or token lease.
+
+
+Concrete controller snapshot and candidate-check readers query exact repository,
+base and immutable head identities, provider protection, and each relevant
+commit's own checks. A single observed base policy is evaluated against each
+source head without repeating its rules request. Initial queue checks and base
+freshness remain separate: passing CI on a stale strict branch requests a refresh,
+while unavailable source checks remain unknown and cannot start planning.
+Candidate checks bind to the candidate SHA and never reuse source-head results.
+These readers supply the existing custody acquisition adapters; full worker
+assembly and pending-observation recovery remain required before activation.

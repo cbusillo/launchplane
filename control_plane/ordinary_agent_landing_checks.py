@@ -48,15 +48,37 @@ def read_landing_checks(
     custody profile, which includes administration, checks and status reads.
     This function neither acquires credentials nor proves custody itself.
     """
+    owner, name = repository.split("/", 1)
+    rules = transport.request(
+        method="GET",
+        path=f"/repos/{quote(owner, safe='')}/{quote(name, safe='')}/rules/branches/"
+        f"{quote(base_branch, safe='')}?per_page=100",
+        minimum_remaining_seconds=LANDING_ENTRY_READ_RESERVE_SECONDS,
+    )
+    return evaluate_observed_commit_checks(
+        observation=observation,
+        rules=rules,
+        base_branch=base_branch,
+        base_sha=base_sha,
+        candidate_sha=candidate_sha,
+    )
+
+
+def evaluate_observed_commit_checks(
+    *,
+    observation: OrdinaryLandingGraphQLObservation,
+    rules: object,
+    base_branch: str,
+    base_sha: str,
+    candidate_sha: str,
+) -> tuple[TenantAdmissionTechnicalChecks, OrdinaryAgentProtectionEvidence]:
+    """Evaluate captured provider policy and commit checks without another read.
+
+    Initial snapshots can apply one base-policy observation to each source head;
+    landing still evaluates its combined candidate independently.
+    """
     try:
         data = _object(json.loads(observation.repository_json))
-        owner, name = repository.split("/", 1)
-        rules = transport.request(
-            method="GET",
-            path=f"/repos/{quote(owner, safe='')}/{quote(name, safe='')}/rules/branches/"
-            f"{quote(base_branch, safe='')}?per_page=100",
-            minimum_remaining_seconds=LANDING_ENTRY_READ_RESERVE_SECONDS,
-        )
         if not isinstance(rules, list) or len(rules) >= 100:
             raise OrdinaryAgentProviderEvidenceError("landing_rules_incomplete")
         ref = _object(data.get("ref"))
