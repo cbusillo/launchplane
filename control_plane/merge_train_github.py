@@ -470,7 +470,8 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 repository_path=repository_path,
                 entry=entry,
                 expected_base_ref=landing_plan.base_branch,
-                expected_base_sha=expected_base_sha,
+                expected_base_sha=current_base_sha,
+                expected_base_tree_sha=current_base_tree_sha,
             )
             admission_guard.reconcile_existing_no_effect(
                 entry=entry,
@@ -922,6 +923,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         entry: MergeTrainBatchLandingEntry,
         expected_base_ref: str,
         expected_base_sha: str,
+        expected_base_tree_sha: str,
     ) -> None:
         pull_request = _json_object(
             self.transport.request(
@@ -953,9 +955,21 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         if base_sha != _required_value(
             expected_base_sha, "Expected pull request base SHA is required."
         ):
-            raise MergeTrainGitHubStaleHeadError(
-                "Pull request base moved outside the batch landing plan.", status_code=409
+            # PR detail may describe an older base projection. Confirm the
+            # actual branch identity once; never treat that projection as a
+            # replacement for the independently verified rolling branch.
+            confirmed_sha, confirmed_tree_sha = _base_branch_identity(
+                transport=self.transport,
+                repository_path=repository_path,
+                base_branch=expected_base_ref,
             )
+            if (confirmed_sha, confirmed_tree_sha) != (
+                expected_base_sha,
+                expected_base_tree_sha,
+            ):
+                raise MergeTrainGitHubStaleHeadError(
+                    "Target base branch moved outside the batch landing plan.", status_code=409
+                )
 
     def add_pull_request_label(
         self, *, repository: str, pull_request_number: int, label: str
