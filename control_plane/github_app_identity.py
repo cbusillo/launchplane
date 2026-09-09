@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from control_plane.contracts.ordinary_agent_provider import (
+    ordinary_agent_enrollment_effect_profiles as ordinary_agent_enrollment_effect_profiles,
+    ordinary_agent_enrollment_permissions as ordinary_agent_enrollment_permissions,
+)
+
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -33,11 +38,9 @@ _ORDINARY_AGENT_EFFECT_PERMISSION_CEILINGS: dict[str, dict[str, str]] = {
     "comment_pull_request": {"metadata": "read", "pull_requests": "write"},
     "label_pull_request": {"metadata": "read", "pull_requests": "write"},
 }
-_ORDINARY_AGENT_INSTALLATION_PERMISSION_CEILING = {
-    "contents": "write",
-    "metadata": "read",
-    "pull_requests": "write",
-}
+_ORDINARY_AGENT_INSTALLATION_PERMISSION_CEILING = dict(
+    permission.split(":", 1) for permission in ordinary_agent_enrollment_permissions()
+)
 
 GitHubApiRequest = Callable[..., object]
 
@@ -158,17 +161,6 @@ def ordinary_agent_effect_permissions(effect_profile: str) -> tuple[str, ...]:
         f"{permission}:{access}"
         for permission, access in sorted(ceiling.items())
         if permission != "metadata"
-    )
-
-
-def ordinary_agent_enrollment_effect_profiles() -> tuple[str, ...]:
-    return ("guarded_merge", "head_refresh", "pr_disposition")
-
-
-def ordinary_agent_enrollment_permissions() -> tuple[str, ...]:
-    return tuple(
-        f"{permission}:{access}"
-        for permission, access in sorted(_ORDINARY_AGENT_INSTALLATION_PERMISSION_CEILING.items())
     )
 
 
