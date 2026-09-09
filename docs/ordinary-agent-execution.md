@@ -408,3 +408,24 @@ ID/version and diagnostic status only. They exclude proof/receiver/approval hash
 and private payloads. `approved` and `applied` describe historical records, not
 permission to dispatch; expired, revoked and current-policy-blocked status remain
 distinct. Request replay likewise returns history without new writes or authority.
+
+
+Administrator lifecycle controls use the same signed human session, CSRF, and
+current managed administrator checks as approval. Cancelling a pending request
+also cancels an approved enrollment that has not been applied: its durable
+operation tombstone fences recovery and final issuer apply. An applied operation
+cannot be labelled cancelled. Revoking one session cancels its leases and finite
+jobs; disconnecting a principal revokes all of its credentials and sessions through
+the atomic lifecycle writer. Neither control depends on a still-present ordinary
+agent rule or a valid ordinary bearer. Unknown execution outcomes retain their
+reconciliation fence. Disconnect audit bindings are derived from the actual
+human request; authority is rechecked against the locked human and current policy
+inside the mutation transaction, never conferred by an audit hash.
+
+The public operation view distinguishes the authenticated terminal requester from
+the recipient credential, and displays the reviewed credential/delivery deadlines
+even when no session was requested. An authenticated terminal may reconnect to
+its own initial proposal; ordinary clients and human administrators retain their
+separate read paths. Private bounded worker discovery returns only approved,
+unapplied, uncancelled, unexpired operation references. Discovery does not
+replace authoritative read and final apply checks.

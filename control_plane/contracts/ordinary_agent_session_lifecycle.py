@@ -168,8 +168,13 @@ class OrdinaryAgentSessionOperationView(StrictFrozenModel):
     principal_id: str
     operation_id: str
     kind: Literal["initial", "existing"]
-    status: Literal["pending", "approved", "expired", "revoked", "blocked"]
+    status: Literal["pending", "approved", "expired", "revoked", "blocked", "cancelled"]
     reason_code: str | None = None
+    requester_kind: Literal["terminal_agent", "ordinary_agent"]
+    requester_subject: str
+    requester_token_label: str | None = None
+    credential_expires_at: int
+    delivery_expires_at: int | None = None
     attenuation: OrdinaryAgentSessionAttenuation | None
     credential_id: str
     credential_version: int
@@ -178,3 +183,11 @@ class OrdinaryAgentSessionOperationView(StrictFrozenModel):
     session_expires_at: int | None = None
     applied: bool = False
     can_approve: bool = False
+
+
+class OrdinaryAgentConnectionView(StrictFrozenModel):
+    """Sanitized result of an administrator disconnect, not a credential capability."""
+
+    schema_version: Literal[1] = 1
+    principal_id: str
+    status: Literal["revoked"]

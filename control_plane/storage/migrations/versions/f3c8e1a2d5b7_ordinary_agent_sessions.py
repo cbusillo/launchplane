@@ -30,6 +30,7 @@ def upgrade() -> None:
             sa.Column("approval_sha256", sa.String(), nullable=True),
             sa.Column("administrator_github_id", sa.BigInteger(), nullable=True),
             sa.Column("terminal_session_id", sa.String(), nullable=True),
+            sa.Column("cancelled_at", sa.BigInteger(), nullable=True),
             sa.Column("payload", payload, nullable=False),
         )
     if "launchplane_ordinary_agent_sessions" not in sa.inspect(op.get_bind()).get_table_names():

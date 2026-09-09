@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+from dataclasses import replace
 from pathlib import Path
+from typing import Any
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
@@ -15,11 +17,14 @@ from control_plane.contracts.ordinary_agent_lifecycle import (
 )
 from control_plane.ordinary_agent_session_approval import (
     approve_existing_ordinary_agent_session,
+    cancel_pending_ordinary_agent_operation,
+    revoke_ordinary_agent_session,
+    disconnect_ordinary_agent_principal,
     approve_ordinary_agent_enrollment,
     read_human_ordinary_agent_session_operation,
 )
 from control_plane.service_human_auth import HumanSessionManager, GitHubOAuthConfig
-from control_plane.service_auth import GitHubHumanIdentity
+from control_plane.service_auth import GitHubHumanIdentity, TerminalAgentIdentity
 from control_plane.contracts.ordinary_agent_session_lifecycle import (
     OrdinaryAgentSessionAttenuation,
     OrdinaryAgentSessionDelegation,
@@ -35,6 +40,7 @@ from control_plane.storage.postgres import (
 from tests.support.ordinary_agent_lifecycle import (
     ADMIN_GITHUB_ID,
     setup_ordinary_agent_authority,
+    replace_policy_without_ordinary_agent_rule,
     enrollment_envelope,
     enrollment_mutation,
     prepare_test_issuance,
@@ -109,7 +115,9 @@ class OrdinaryAgentSessionStorageTests(unittest.TestCase):
         intent = OrdinaryAgentEnrollmentIntent.from_envelope(
             envelope.model_copy(update={"session_attenuation": self.attenuation})
         )
-        self.store.propose_ordinary_agent_enrollment(intent=intent)
+        self.store.propose_ordinary_agent_enrollment(
+            intent=intent, requester=TerminalAgentIdentity(subject="test-cli", token_label="test")
+        )
         approved = approve_ordinary_agent_enrollment(
             store=self.store,
             manager=self.manager,
@@ -386,7 +394,8 @@ class OrdinaryAgentSessionStorageTests(unittest.TestCase):
             update={"operation_id": "plain-enrollment", "session_attenuation": None}
         )
         self.store.propose_ordinary_agent_enrollment(
-            intent=OrdinaryAgentEnrollmentIntent.from_envelope(plain)
+            requester=TerminalAgentIdentity(subject="test-cli", token_label="test"),
+            intent=OrdinaryAgentEnrollmentIntent.from_envelope(plain),
         )
         approved = approve_ordinary_agent_enrollment(
             store=self.store,
@@ -421,6 +430,17 @@ class OrdinaryAgentSessionStorageTests(unittest.TestCase):
         self.assertIsNone(view.attenuation)
         self.assertIsNone(view.session_id)
         self.assertFalse(view.can_approve)
+        disconnect_ordinary_agent_principal(
+            store=self.store,
+            manager=self.manager,
+            cookie_header=self.manager.session_cookie_header(self.human),
+            csrf_token=self.manager.csrf_token(self.human),
+            principal_id=plain.principal_id,
+            source_event_id="disconnect-no-session",
+        )
+        self.assertIsNone(
+            self.store.verify_ordinary_agent_token(parse_ordinary_agent_token(bundle.token.value))
+        )
 
     def test_operation_projection_never_exposes_private_proof_or_revives_session(self) -> None:
         self.enroll()
@@ -459,3 +479,200 @@ class OrdinaryAgentSessionStorageTests(unittest.TestCase):
         self.assertEqual(historical.status, "revoked")
         self.assertFalse(historical.can_approve)
         self.assertEqual(historical.session_id, fresh.session.session_id)
+
+    def test_cancel_approved_unapplied_intent_fences_worker_and_apply(self) -> None:
+        view = cancel_pending_ordinary_agent_operation(
+            store=self.store,
+            manager=self.manager,
+            cookie_header=self.manager.session_cookie_header(self.human),
+            csrf_token=self.manager.csrf_token(self.human),
+            principal_id=self.envelope.principal_id,
+            operation_id=self.envelope.operation_id,
+        )
+        self.assertEqual(view.status, "cancelled")
+        self.assertFalse(view.can_approve)
+        self.assertEqual(self.store.list_pending_approved_ordinary_agent_enrollments(), ())
+        with self.assertRaisesRegex(OrdinaryAgentSessionAdmissionDenied, "operation_cancelled"):
+            self.store.read_approved_ordinary_agent_enrollment(
+                principal_id=self.envelope.principal_id, operation_id=self.envelope.operation_id
+            )
+        with self.assertRaisesRegex(OrdinaryAgentSessionAdmissionDenied, "delegation_approval"):
+            self.enroll()
+        self.assertIsNone(
+            self.store.read_current_ordinary_agent_principal(principal_id="agent_one")
+        )
+
+    def test_admin_revoke_and_disconnect_work_after_ordinary_rule_removed(self) -> None:
+        self.enroll()
+        self.store.admit_ordinary_agent_finite_request(proof=self.proof, request=self.request)
+        replace_policy_without_ordinary_agent_rule(self.store, current=self.policy)
+        view = revoke_ordinary_agent_session(
+            store=self.store,
+            manager=self.manager,
+            cookie_header=self.manager.session_cookie_header(self.human),
+            csrf_token=self.manager.csrf_token(self.human),
+            principal_id="agent_one",
+            session_id=self.request.session_id,
+        )
+        self.assertEqual(view.status, "revoked")
+        self.assertIsNotNone(self.store.verify_ordinary_agent_token(self.proof))
+        with self.store._session_factory() as session:
+            job = session.get(LaunchplaneOrdinaryAgentFiniteRequestRow, self.request.request_id)
+            assert job is not None
+            self.assertEqual(job.payload["status"], "cancelled")
+        for _ in range(2):
+            result = disconnect_ordinary_agent_principal(
+                store=self.store,
+                manager=self.manager,
+                cookie_header=self.manager.session_cookie_header(self.human),
+                csrf_token=self.manager.csrf_token(self.human),
+                principal_id="agent_one",
+                source_event_id="disconnect-test",
+            )
+            self.assertEqual(result.status, "revoked")
+        self.assertIsNone(self.store.verify_ordinary_agent_token(self.proof))
+        with self.assertRaisesRegex(
+            OrdinaryAgentSessionAdmissionDenied, "operation_already_applied"
+        ):
+            cancel_pending_ordinary_agent_operation(
+                store=self.store,
+                manager=self.manager,
+                cookie_header=self.manager.session_cookie_header(self.human),
+                csrf_token=self.manager.csrf_token(self.human),
+                principal_id="agent_one",
+                operation_id=self.envelope.operation_id,
+            )
+
+    def test_human_precision_and_expiry_after_principal_wait(self) -> None:
+        human = replace(
+            self.human, created_at=self.human.created_at + timedelta(microseconds=500000)
+        )
+        self.store.write_session(human)
+        precise_now = datetime.fromtimestamp(self.now, timezone.utc) + timedelta(
+            microseconds=750000
+        )
+        self.enterContext(patch.object(self.manager, "_now", return_value=precise_now))
+        self.clock.return_value = precise_now.isoformat()
+        view = read_human_ordinary_agent_session_operation(
+            store=self.store,
+            manager=self.manager,
+            cookie_header=self.manager.session_cookie_header(human),
+            principal_id=self.envelope.principal_id,
+            operation_id=self.envelope.operation_id,
+        )
+        self.assertEqual(view.requester_subject, "test-cli")
+        self.assertEqual(view.requester_kind, "terminal_agent")
+        self.assertEqual(
+            view.credential_expires_at, self.envelope.authentication_credential.expires_at
+        )
+        lock = self.store._lock_ordinary_agent_principal
+
+        def wait(session: object, *, principal_id: str) -> None:
+            lock(session, principal_id=principal_id)
+            self.clock.return_value = datetime.fromtimestamp(
+                self.now + 86400, timezone.utc
+            ).isoformat()
+
+        with patch.object(self.store, "_lock_ordinary_agent_principal", side_effect=wait):
+            with self.assertRaisesRegex(
+                OrdinaryAgentSessionAdmissionDenied, "administrator_session_changed"
+            ):
+                cancel_pending_ordinary_agent_operation(
+                    store=self.store,
+                    manager=self.manager,
+                    cookie_header=self.manager.session_cookie_header(human),
+                    csrf_token=self.manager.csrf_token(human),
+                    principal_id=self.envelope.principal_id,
+                    operation_id=self.envelope.operation_id,
+                )
+
+    def test_other_principal_audit_does_not_mark_proposal_applied(self) -> None:
+        self.enroll()
+        intent = OrdinaryAgentEnrollmentIntent.from_envelope(self.envelope)
+        other = intent.model_copy(
+            update={
+                "principal_id": "agent_two",
+                "custody": intent.custody.model_copy(update={"principal_id": "agent_two"}),
+            }
+        )
+        self.store.propose_ordinary_agent_enrollment(
+            intent=other,
+            requester=TerminalAgentIdentity(subject="second-cli", token_label="second"),
+        )
+        view = read_human_ordinary_agent_session_operation(
+            store=self.store,
+            manager=self.manager,
+            cookie_header=self.manager.session_cookie_header(self.human),
+            principal_id="agent_two",
+            operation_id=other.operation_id,
+        )
+        self.assertFalse(view.applied)
+        self.assertEqual(view.status, "blocked")
+        self.assertEqual(view.requester_subject, "second-cli")
+
+    def test_approved_enrollment_wrapper_rejects_revoke(self) -> None:
+        self.enroll()
+        principal = self.store.read_current_ordinary_agent_principal(principal_id="agent_one")
+        assert principal is not None
+        assert isinstance(self.envelope, OrdinaryAgentEnrollApplyEnvelope)
+        envelope = revocation_envelope(
+            enrolled=self.envelope,
+            principal_record_id=principal.record_id,
+            principal_revision=principal.principal_revision,
+            principal_sha256=principal.record_sha256,
+        )
+        with self.assertRaisesRegex(
+            OrdinaryAgentSessionAdmissionDenied, "enrollment_operation_required"
+        ):
+            self.store.apply_approved_ordinary_agent_enrollment(
+                envelope=envelope, mutation=enrollment_mutation(envelope)
+            )
+        self.assertIsNotNone(self.store.verify_ordinary_agent_token(self.proof))
+
+    def test_recovery_discovery_and_terminal_status_preserve_requester_scope(self) -> None:
+        references = self.store.list_pending_approved_ordinary_agent_enrollments()
+        self.assertEqual(
+            [(row.principal_id, row.operation_id) for row in references],
+            [(self.envelope.principal_id, self.envelope.operation_id)],
+        )
+        view = self.store.read_proposed_ordinary_agent_enrollment(
+            requester=TerminalAgentIdentity(subject="test-cli", token_label="test"),
+            principal_id=self.envelope.principal_id,
+            operation_id=self.envelope.operation_id,
+        )
+        self.assertFalse(view.can_approve)
+        self.assertEqual(view.status, "approved")
+        with self.assertRaisesRegex(
+            OrdinaryAgentSessionAdmissionDenied, "session_proposal_unavailable"
+        ):
+            self.store.read_proposed_ordinary_agent_enrollment(
+                requester=TerminalAgentIdentity(subject="different-cli", token_label="test"),
+                principal_id=self.envelope.principal_id,
+                operation_id=self.envelope.operation_id,
+            )
+        self.enroll()
+        self.assertEqual(self.store.list_pending_approved_ordinary_agent_enrollments(), ())
+
+    def test_disconnect_rechecks_actual_human_after_preparation(self) -> None:
+        self.enroll()
+        apply = self.store.compare_and_apply_ordinary_agent_enrollment
+
+        def logout(**kwargs: Any) -> object:
+            self.store.delete_session(self.human.session_id)
+            return apply(**kwargs)
+
+        with patch.object(
+            self.store, "compare_and_apply_ordinary_agent_enrollment", side_effect=logout
+        ):
+            with self.assertRaisesRegex(
+                OrdinaryAgentSessionAdmissionDenied, "administrator_session_unavailable"
+            ):
+                disconnect_ordinary_agent_principal(
+                    store=self.store,
+                    manager=self.manager,
+                    cookie_header=self.manager.session_cookie_header(self.human),
+                    csrf_token=self.manager.csrf_token(self.human),
+                    principal_id="agent_one",
+                    source_event_id="disconnect-logout-test",
+                )
+        self.assertIsNotNone(self.store.verify_ordinary_agent_token(self.proof))

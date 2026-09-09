@@ -12,6 +12,7 @@ from control_plane.contracts.ordinary_agent_lifecycle import (
 )
 from control_plane.contracts.ordinary_agent_session_lifecycle import (
     OrdinaryAgentSessionOperationView,
+    OrdinaryAgentConnectionView,
 )
 from control_plane.ordinary_agent_session_lifecycle import (
     OrdinaryAgentSessionAdmissionDenied,
@@ -83,4 +84,55 @@ def read_human_ordinary_agent_session_operation(
         raise OrdinaryAgentSessionAdmissionDenied("administrator_authentication_failed")
     return store._read_human_ordinary_agent_session_operation(
         human=human, principal_id=principal_id, operation_id=operation_id
+    )
+
+
+def cancel_pending_ordinary_agent_operation(
+    *,
+    store: PostgresRecordStore,
+    manager: HumanSessionManager,
+    cookie_header: str,
+    csrf_token: str,
+    principal_id: str,
+    operation_id: str,
+) -> OrdinaryAgentSessionOperationView:
+    human = _authenticated_approver(
+        manager=manager, cookie_header=cookie_header, csrf_token=csrf_token
+    )
+    return store._cancel_pending_ordinary_agent_operation(
+        human=human, principal_id=principal_id, operation_id=operation_id
+    )
+
+
+def revoke_ordinary_agent_session(
+    *,
+    store: PostgresRecordStore,
+    manager: HumanSessionManager,
+    cookie_header: str,
+    csrf_token: str,
+    principal_id: str,
+    session_id: str,
+) -> OrdinaryAgentSessionOperationView:
+    human = _authenticated_approver(
+        manager=manager, cookie_header=cookie_header, csrf_token=csrf_token
+    )
+    return store._revoke_human_ordinary_agent_session(
+        human=human, principal_id=principal_id, session_id=session_id
+    )
+
+
+def disconnect_ordinary_agent_principal(
+    *,
+    store: PostgresRecordStore,
+    manager: HumanSessionManager,
+    cookie_header: str,
+    csrf_token: str,
+    principal_id: str,
+    source_event_id: str,
+) -> OrdinaryAgentConnectionView:
+    human = _authenticated_approver(
+        manager=manager, cookie_header=cookie_header, csrf_token=csrf_token
+    )
+    return store._disconnect_ordinary_agent_principal(
+        human=human, principal_id=principal_id, source_event_id=source_event_id
     )

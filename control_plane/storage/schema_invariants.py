@@ -59,6 +59,8 @@ class CriticalPrimaryKey:
 
 
 CRITICAL_POSTGRES_COLUMN_TYPES: tuple[CriticalColumnType, ...] = (
+    CriticalColumnType("launchplane_ordinary_agent_sessions", "credential_version", ("bigint",)),
+    CriticalColumnType("launchplane_ordinary_agent_leases", "revision", ("bigint",)),
     CriticalColumnType("launchplane_ordinary_agent_sessions", "payload", ("jsonb",)),
     CriticalColumnType("launchplane_ordinary_agent_leases", "payload", ("jsonb",)),
     CriticalColumnType("launchplane_ordinary_agent_finite_requests", "payload", ("jsonb",)),
@@ -661,6 +663,18 @@ _ODOO_STABLE_ACTIVE_OPERATION_PREDICATE_TOKENS = (
 )
 
 CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
+    CriticalIndex(
+        "launchplane_ordinary_agent_finite_requests",
+        "ordinary_finite_request_idempotency_uq",
+        ("principal_id", "idempotency_key"),
+        unique=True,
+    ),
+    CriticalIndex(
+        "launchplane_ordinary_agent_sessions",
+        "ordinary_session_operation_uq",
+        ("operation_id", "principal_id", "credential_id", "credential_version"),
+        unique=True,
+    ),
     CriticalIndex(
         "launchplane_ordinary_agent_deliveries",
         "ordinary_agent_delivery_version_uq",
