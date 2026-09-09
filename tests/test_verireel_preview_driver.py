@@ -872,6 +872,12 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
         self.assertEqual(run_command.call_count, 2)
 
     def test_preview_refresh_reuses_existing_preview_runtime_secrets(self) -> None:
+        self.enterContext(
+            patch(
+                "control_plane.workflows.verireel_preview_driver.generate_deployment_record_id",
+                return_value="deployment-preview-secret-reuse",
+            )
+        )
         captured_env: dict[str, str] = {}
 
         def capture_environment(**kwargs: object) -> None:
