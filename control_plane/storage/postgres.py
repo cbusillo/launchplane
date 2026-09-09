@@ -23267,6 +23267,8 @@ class PostgresRecordStore(HumanSessionStore):
             for kind, identity in identities
             for resource in resource_classes
         )
+        now = self._ordinary_agent_database_epoch(session)
+        retry_not_before = now
         for key in keys:
             if not self.database_url.startswith("sqlite"):
                 session.execute(
@@ -23279,10 +23281,12 @@ class PostgresRecordStore(HumanSessionStore):
                 with_for_update=True,
                 populate_existing=True,
             )
-            if wait is not None and wait.retry_not_before > self._ordinary_agent_database_epoch(
-                session
-            ):
-                raise OrdinaryAgentSessionAdmissionDenied("provider_wait")
+            if wait is not None:
+                retry_not_before = max(retry_not_before, wait.retry_not_before)
+        if retry_not_before > now:
+            raise OrdinaryAgentSessionAdmissionDenied(
+                "provider_wait", retry_not_before=retry_not_before
+            )
 
     def _ordinary_agent_reserved_effect_context(
         self,

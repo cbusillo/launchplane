@@ -25,7 +25,10 @@ MAX_GRAPHQL_POINTS_PER_QUERY = 10
 class OrdinaryAgentProviderDeferred(RuntimeError):
     """Closed pre-request deferral safe for persistence and public projection."""
 
-    def __init__(self, reason_code: str = "provider_attempt_deadline") -> None:
+    def __init__(
+        self, reason_code: str = "provider_attempt_deadline", *, retry_not_before: int | None = None
+    ) -> None:
+        self.retry_not_before = retry_not_before
         super().__init__(reason_code)
         self.reason_code = reason_code
 
@@ -157,6 +160,7 @@ def require_installation_provider_ready(
         ("app", app_id),
         ("installation", installation_id),
     )
+    retry_not_before = now_epoch
     for authority_kind, authority_id in authorities:
         for resource_class in resource_classes:
             wait = read_provider_wait(
@@ -166,5 +170,7 @@ def require_installation_provider_ready(
                     resource_class=resource_class,
                 )
             )
-            if wait is not None and wait.retry_not_before > now_epoch:
-                raise OrdinaryAgentProviderDeferred("provider_wait")
+            if wait is not None:
+                retry_not_before = max(retry_not_before, wait.retry_not_before)
+    if retry_not_before > now_epoch:
+        raise OrdinaryAgentProviderDeferred("provider_wait", retry_not_before=retry_not_before)

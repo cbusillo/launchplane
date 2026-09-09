@@ -1,18 +1,46 @@
 from __future__ import annotations
 
 import unittest
+from datetime import datetime, timezone
+from control_plane.contracts.ordinary_agent_effect import OrdinaryAgentProviderWaitRecord
 
 from control_plane.merge_train_github import RecordingMergeTrainGitHubTransport
 from control_plane.ordinary_agent_github_transport import (
     DeadlineMergeTrainGitHubTransport,
     OrdinaryAgentProviderDeferred,
     OrdinaryAgentProviderEvidenceError,
+    require_installation_provider_ready,
     require_complete_connection,
     require_complete_graphql_data,
 )
 
 
 class OrdinaryAgentGitHubTransportTests(unittest.TestCase):
+    def test_deferral_reports_latest_deadline_across_app_and_installation(self) -> None:
+        from control_plane.contracts.ordinary_agent_effect import OrdinaryAgentProviderQuotaKey
+
+        keys = []
+
+        def read(*, quota_key: OrdinaryAgentProviderQuotaKey) -> OrdinaryAgentProviderWaitRecord:
+            keys.append(quota_key)
+            return OrdinaryAgentProviderWaitRecord(
+                quota_key=quota_key,
+                observed_at=100,
+                retry_not_before=900 if quota_key.authority_kind == "installation" else 200,
+                classification="primary_rate_limit",
+            )
+
+        with self.assertRaises(OrdinaryAgentProviderDeferred) as raised:
+            require_installation_provider_ready(
+                app_id=1,
+                installation_id=2,
+                resource_classes=("core", "secondary"),
+                read_provider_wait=read,
+                utc_now=lambda: datetime.fromtimestamp(100, timezone.utc),
+            )
+        self.assertEqual(raised.exception.retry_not_before, 900)
+        self.assertEqual(len(keys), 4)
+
     def test_slow_entry_read_preserves_final_confirmation_and_dispatch_time(self) -> None:
         now = [0.0]
         inner = RecordingMergeTrainGitHubTransport(responses=({"files": []},))

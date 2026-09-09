@@ -172,9 +172,7 @@ class OrdinaryAgentControllerCheckpointStorageTests(unittest.TestCase):
             step_payload={"owner": "a", "ordinal": 1},
         )
         self._yield(request_id=self.request_a.request_id, fence=fence_a)
-        with self.assertRaisesRegex(
-            OrdinaryAgentSessionAdmissionDenied, "job_still_dispatchable"
-        ):
+        with self.assertRaisesRegex(OrdinaryAgentSessionAdmissionDenied, "job_still_dispatchable"):
             self.store.retire_ordinary_agent_job_history(claim_fence=claim_a.claim_fence)
         self._finish_waiting(claim_a)
 

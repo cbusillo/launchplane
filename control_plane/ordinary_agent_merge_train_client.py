@@ -1,11 +1,15 @@
 """Scoped controller client: durable read evidence and one candidate effect per step."""
 
 from collections.abc import Callable
-from typing import Literal
+from typing import Literal, Protocol
 
 from control_plane.contracts.merge_train_batch import (
     MergeTrainBatchCandidate,
+    MergeTrainBatchCandidateRecord,
     MergeTrainBatchEntry,
+    MergeTrainBatchLandingEntry,
+    MergeTrainBatchLandingPlan,
+    MergeTrainBatchLandingPlanRecord,
     build_ordinary_merge_train_candidate_ref,
 )
 from control_plane.contracts.merge_train_effect import (
@@ -24,12 +28,25 @@ from control_plane.contracts.ordinary_agent_snapshot import (
     OrdinaryAgentMergeTrainSnapshotResult,
 )
 from control_plane.merge_train import MergeTrainDryRunSnapshot
+from control_plane.merge_admission import GuardedMergeAdmission
 from control_plane.merge_train_github import (
     GitHubMergeTrainClient,
     MergeTrainGitHubStaleHeadError,
     _candidate_with_structural_provenance,
     _validated_model_update,
 )
+
+
+class OrdinaryAgentLandingStep(Protocol):
+    def __call__(
+        self,
+        *,
+        candidate_record: MergeTrainBatchCandidateRecord,
+        landing_plan_record: MergeTrainBatchLandingPlanRecord,
+        entry: MergeTrainBatchLandingEntry,
+        semantic_ordinal: int,
+        checkpoint: Callable[[MergeTrainBatchLandingEntry], None],
+    ) -> MergeTrainBatchLandingEntry: ...
 
 
 class _NoAmbientTransport:
@@ -45,11 +62,13 @@ class OrdinaryAgentMergeTrainClient(GitHubMergeTrainClient):
         effect_executor: MergeTrainSemanticEffectExecutor,
         snapshot: Callable[[], OrdinaryAgentMergeTrainSnapshotResult],
         candidate_check: Callable[[str], OrdinaryAgentCandidateCheckResult],
+        advance_landing_entry: OrdinaryAgentLandingStep | None = None,
     ) -> None:
         super().__init__(transport=_NoAmbientTransport(), effect_executor=effect_executor)
         self._request = request
         self._snapshot = snapshot
         self._candidate_check = candidate_check
+        self._advance_landing_entry = advance_landing_entry
 
     @property
     def binding(self) -> OrdinaryAgentJobBinding:
@@ -215,3 +234,289 @@ class OrdinaryAgentMergeTrainClient(GitHubMergeTrainClient):
         return _validated_model_update(
             candidate, required_checks_status=observation.status, status=status
         )
+
+    def land_batch_candidate(
+        self,
+        *,
+        landing_plan: MergeTrainBatchLandingPlan,
+        effect_executor: MergeTrainSemanticEffectExecutor | None = None,
+        admission_guard: GuardedMergeAdmission | None = None,
+        recorded_at: str = "",
+        provider_checkpoint: Callable[
+            [MergeTrainBatchLandingPlan, MergeTrainBatchLandingEntry], None
+        ]
+        | None = None,
+        checkpoint: Callable[
+            [MergeTrainBatchLandingPlan, MergeTrainBatchLandingEntry, str],
+            MergeTrainBatchLandingPlanRecord | None,
+        ]
+        | None = None,
+    ) -> MergeTrainBatchLandingPlan:
+        # The inherited hook records legacy provider intent. Ordinary dispatch
+        # persists its joined preparation and child attempt inside the injected
+        # step before I/O; invoking the legacy hook would create a competing path.
+        del provider_checkpoint
+        if effect_executor is not None and effect_executor is not self.semantic_effect_executor:
+            raise PermissionError("ordinary landing executor cannot be replaced")
+        if self._advance_landing_entry is None:
+            raise PermissionError("ordinary landing step is not assembled")
+        if admission_guard is None:
+            raise PermissionError("ordinary landing requires a guarded admission wrapper")
+        if checkpoint is None:
+            raise PermissionError("ordinary landing requires a durable progress checkpoint")
+        if not recorded_at.strip():
+            raise ValueError("ordinary landing requires recorded_at")
+
+        landing_record = admission_guard.landing_plan_record
+        candidate_record = admission_guard.candidate_record
+        self._validate_landing_scope(
+            landing_plan=landing_plan,
+            landing_record=landing_record,
+            candidate_record=candidate_record,
+        )
+        selected_index, rolling_base_sha, rolling_base_tree_sha = self._next_landing_entry(
+            landing_plan=landing_plan, candidate_record=candidate_record
+        )
+        if selected_index is None:
+            return landing_plan
+        selected = landing_plan.entries[selected_index]
+        provenance = candidate_record.candidate.structural_provenance
+        assert provenance is not None
+        candidate_step = provenance.steps[selected_index]
+        if candidate_step.kind == "no_op_already_contained":
+            raise PermissionError("ordinary candidate no-op requires joined no-op finalization")
+
+        checkpointed_entry: MergeTrainBatchLandingEntry | None = None
+        checkpointed_plan: MergeTrainBatchLandingPlan | None = None
+
+        def checkpoint_entry(entry: MergeTrainBatchLandingEntry) -> None:
+            nonlocal checkpointed_entry, checkpointed_plan
+            if checkpointed_entry is not None:
+                raise RuntimeError("ordinary landing entry was checkpointed more than once")
+            self._validate_merged_landing_entry(
+                planned=selected,
+                landed=entry,
+                rolling_base_sha=rolling_base_sha,
+                rolling_base_tree_sha=rolling_base_tree_sha,
+            )
+            successor = _validated_model_update(
+                landing_plan,
+                entries=(
+                    *landing_plan.entries[:selected_index],
+                    entry,
+                    *landing_plan.entries[selected_index + 1 :],
+                ),
+            )
+            persisted = checkpoint(successor, entry, "entry_merged")
+            if (
+                not isinstance(persisted, MergeTrainBatchLandingPlanRecord)
+                or persisted.status != "active"
+                or persisted.ordinary_job_binding != self.binding
+                or persisted.record_id == landing_record.record_id
+                or persisted.landing_plan != successor
+            ):
+                raise RuntimeError(
+                    "ordinary landing checkpoint did not persist the exact successor"
+                )
+            admission_guard.update_landing_plan_record(persisted)
+            checkpointed_entry = entry
+            checkpointed_plan = persisted.landing_plan
+
+        result = self._advance_landing_entry(
+            candidate_record=candidate_record,
+            landing_plan_record=landing_record,
+            entry=selected,
+            semantic_ordinal=selected.position,
+            checkpoint=checkpoint_entry,
+        )
+        if checkpointed_entry is None or checkpointed_plan is None:
+            raise RuntimeError("ordinary landing callback returned before durable checkpoint")
+        if result != checkpointed_entry:
+            raise RuntimeError("ordinary landing callback result differs from its checkpoint")
+        return checkpointed_plan
+
+    def _validate_landing_scope(
+        self,
+        *,
+        landing_plan: MergeTrainBatchLandingPlan,
+        landing_record: MergeTrainBatchLandingPlanRecord,
+        candidate_record: MergeTrainBatchCandidateRecord,
+    ) -> None:
+        candidate = candidate_record.candidate
+        provenance = candidate.structural_provenance
+        request_entries = tuple(
+            (item.number, item.head_sha) for item in self._request.pull_requests
+        )
+        candidate_entries = tuple(
+            (entry.pull_request_number, entry.head_sha) for entry in candidate.entries
+        )
+        landing_entries = tuple(
+            (entry.pull_request_number, entry.expected_head_sha) for entry in landing_plan.entries
+        )
+        expected_ref = build_ordinary_merge_train_candidate_ref(
+            binding=self.binding, batch_id=candidate.batch_id
+        )
+        if (
+            landing_record.status != "active"
+            or candidate_record.status != "active"
+            or landing_record.ordinary_job_binding != self.binding
+            or candidate_record.ordinary_job_binding != self.binding
+            or landing_record.landing_plan != landing_plan
+            or candidate.status != "passed"
+            or provenance is None
+            or not provenance.complete
+            or candidate.stack_collapse_root is not None
+            or candidate.repository.lower() != self._request.target.repository.lower()
+            or candidate.base_branch != self._request.target.base_branch
+            or candidate.base_sha != self._request.base_sha
+            or candidate.candidate_ref != expected_ref
+            or landing_plan.repository != candidate.repository
+            or landing_plan.base_branch != candidate.base_branch
+            or landing_plan.batch_id != candidate.batch_id
+            or landing_plan.candidate_ref != candidate.candidate_ref
+            or landing_plan.candidate_sha != candidate.candidate_sha
+            or landing_plan.candidate_tree_sha != candidate.candidate_tree_sha
+            or landing_plan.candidate_sha256 != candidate.candidate_sha256
+            or landing_plan.structural_provenance_sha256 != provenance.provenance_sha256
+            or landing_plan.policy_key != candidate.policy_key
+            or landing_plan.policy_sha256 != candidate.policy_sha256
+            or request_entries != candidate_entries
+            or request_entries != landing_entries
+            or len(landing_plan.entries) != len(candidate.entries)
+            or any(
+                entry.expected_base_sha != self._request.base_sha for entry in landing_plan.entries
+            )
+            or any(entry.merge_method != "merge" for entry in landing_plan.entries)
+        ):
+            raise MergeTrainGitHubStaleHeadError(
+                "ordinary landing plan does not match its finite request and guarded records",
+                status_code=409,
+            )
+        for candidate_entry, landing_entry, step in zip(
+            candidate.entries, landing_plan.entries, provenance.steps, strict=True
+        ):
+            if (
+                candidate_entry.position != landing_entry.position
+                or landing_entry.expected_head_tree_sha != candidate_entry.head_tree_sha
+                or landing_entry.recorded_candidate_parent_sha != step.parent_sha
+                or landing_entry.recorded_candidate_parent_tree_sha != step.parent_tree_sha
+                or landing_entry.recorded_candidate_result_sha != step.result_sha
+                or landing_entry.recorded_candidate_result_tree_sha != step.result_tree_sha
+            ):
+                raise MergeTrainGitHubStaleHeadError(
+                    "ordinary landing entry does not match structural provenance",
+                    status_code=409,
+                )
+
+    def _next_landing_entry(
+        self,
+        *,
+        landing_plan: MergeTrainBatchLandingPlan,
+        candidate_record: MergeTrainBatchCandidateRecord,
+    ) -> tuple[int | None, str, str]:
+        provenance = candidate_record.candidate.structural_provenance
+        assert provenance is not None
+        rolling_base_sha = provenance.base_sha
+        rolling_base_tree_sha = provenance.base_tree_sha
+        selected_index: int | None = None
+        planned_seen = False
+        for index, entry in enumerate(landing_plan.entries):
+            if entry.status in {"merging", "stale", "blocked"}:
+                raise MergeTrainGitHubStaleHeadError(
+                    "ordinary landing requires recovery for a non-resumable entry state",
+                    status_code=409,
+                )
+            if entry.status == "planned":
+                if any(
+                    (
+                        entry.recorded_rolling_base_sha,
+                        entry.recorded_rolling_base_tree_sha,
+                        entry.landed_head_sha,
+                        entry.landed_head_tree_sha,
+                        entry.merge_commit_sha,
+                        entry.merge_commit_tree_sha,
+                    )
+                ):
+                    raise MergeTrainGitHubStaleHeadError(
+                        "ordinary planned landing entry carries terminal evidence",
+                        status_code=409,
+                    )
+                planned_seen = True
+                if selected_index is None:
+                    selected_index = index
+                continue
+            if planned_seen:
+                raise MergeTrainGitHubStaleHeadError(
+                    "ordinary landing progress is not a contiguous terminal prefix",
+                    status_code=409,
+                )
+            if (
+                entry.recorded_rolling_base_sha != rolling_base_sha
+                or entry.recorded_rolling_base_tree_sha != rolling_base_tree_sha
+                or entry.landed_head_sha != entry.expected_head_sha
+                or entry.landed_head_tree_sha != entry.expected_head_tree_sha
+                or not entry.merge_commit_sha
+                or not entry.merge_commit_tree_sha
+            ):
+                raise MergeTrainGitHubStaleHeadError(
+                    "ordinary landing progress lacks exact rolling-base proof",
+                    status_code=409,
+                )
+            if entry.status == "merged":
+                if entry.merge_commit_sha == rolling_base_sha:
+                    raise MergeTrainGitHubStaleHeadError(
+                        "ordinary merged landing entry did not advance its rolling base",
+                        status_code=409,
+                    )
+                rolling_base_sha = entry.merge_commit_sha
+                rolling_base_tree_sha = entry.merge_commit_tree_sha
+            elif entry.status == "skipped":
+                if (
+                    entry.merge_commit_sha != rolling_base_sha
+                    or entry.merge_commit_tree_sha != rolling_base_tree_sha
+                ):
+                    raise MergeTrainGitHubStaleHeadError(
+                        "ordinary skipped landing entry changed its rolling base",
+                        status_code=409,
+                    )
+            else:
+                raise MergeTrainGitHubStaleHeadError(
+                    "ordinary landing entry status is unsupported", status_code=409
+                )
+        return selected_index, rolling_base_sha, rolling_base_tree_sha
+
+    @staticmethod
+    def _validate_merged_landing_entry(
+        *,
+        planned: MergeTrainBatchLandingEntry,
+        landed: MergeTrainBatchLandingEntry,
+        rolling_base_sha: str,
+        rolling_base_tree_sha: str,
+    ) -> None:
+        immutable_fields = (
+            "pull_request_number",
+            "position",
+            "expected_head_sha",
+            "expected_head_tree_sha",
+            "expected_base_sha",
+            "merge_method",
+            "recorded_candidate_parent_sha",
+            "recorded_candidate_parent_tree_sha",
+            "recorded_candidate_result_sha",
+            "recorded_candidate_result_tree_sha",
+        )
+        if (
+            landed.status != "merged"
+            or any(getattr(landed, name) != getattr(planned, name) for name in immutable_fields)
+            or landed.recorded_rolling_base_sha != rolling_base_sha
+            or landed.recorded_rolling_base_tree_sha != rolling_base_tree_sha
+            or landed.landed_head_sha != planned.expected_head_sha
+            or landed.landed_head_tree_sha != planned.expected_head_tree_sha
+            or not landed.merge_commit_sha
+            or not landed.merge_commit_tree_sha
+            or landed.merge_commit_sha == rolling_base_sha
+        ):
+            raise MergeTrainGitHubStaleHeadError(
+                "ordinary landing callback returned incomplete or mismatched merge proof",
+                status_code=409,
+            )

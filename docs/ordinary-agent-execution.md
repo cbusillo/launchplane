@@ -793,3 +793,22 @@ Actionable readiness uses the current controller's exact binding; parked progres
 remains visible in history. These storage and projection changes do not assemble
 or activate the ordinary worker, renew a finite admission, or resolve changed-base
 landing evidence.
+
+Provider quota observation preparation remains inactive until the worker and
+credential transports are assembled. The observation helper reads typed HTTP
+headers or GraphQL quota evidence without consuming response bodies or changing
+the provider outcome. Best-effort persistence cannot replace that outcome.
+Secondary waits share the secondary resource key; valid provider deadlines are
+never shortened. The existing quota guards report the latest applicable deadline
+through `retry_not_before`, including all known App and installation keys. The
+worker must persist that deadline as its next due time; adding the exception
+field alone does not implement scheduling. Installation identity must be known
+before custody reservation to avoid charging an attempt for an existing wait.
+
+The ordinary controller client has an optional one-entry landing callback. Each
+call persists the exact successor before returning, retains the proven rolling
+base across completed entries, and refuses unassembled, no-op, stack-collapse,
+or recovery paths. The callback owns joined admission and durable dispatch intent;
+the legacy provider checkpoint hook does not establish ordinary-agent authority.
+Production worker assembly, joined no-op finalization, recovery routing, and
+activation qualification remain prerequisites.

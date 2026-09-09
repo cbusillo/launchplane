@@ -732,6 +732,40 @@ class OrdinaryAgentEffectStorageTests(unittest.TestCase):
             self.store.claim_due_ordinary_agent_job(worker_id="third", lease_seconds=10)
         )
 
+    def test_custody_wait_reports_latest_deadline_without_consuming_an_attempt(self) -> None:
+        effect, _, _ = self.prepare_refresh()
+        for resource, delay in (("core", 30), ("secondary", 600)):
+            self.store.record_provider_wait(
+                quota_key=OrdinaryAgentProviderQuotaKey.model_validate(
+                    {
+                        "authority_kind": "app",
+                        "authority_id": 123456,
+                        "resource_class": resource,
+                    }
+                ),
+                observation=OrdinaryAgentProviderWaitObservation(
+                    retry_not_before=self.fixture.now + delay, classification="primary_rate_limit"
+                ),
+            )
+        with self.assertRaises(OrdinaryAgentSessionAdmissionDenied) as raised:
+            self.store.reserve_ordinary_custody_attempt(
+                effect_id=effect.effect_id,
+                expected_effect_revision=effect.revision,
+            )
+        self.assertEqual(raised.exception.reason_code, "provider_wait")
+        self.assertEqual(raised.exception.retry_not_before, self.fixture.now + 600)
+        # Remove fixture waits to verify that the denied call consumed no custody attempt.
+        from control_plane.storage.postgres import LaunchplaneOrdinaryAgentProviderWaitRow
+
+        with self.store._session_factory() as session:
+            session.query(LaunchplaneOrdinaryAgentProviderWaitRow).delete()
+            session.commit()
+        permit = self.store.reserve_ordinary_custody_attempt(
+            effect_id=effect.effect_id,
+            expected_effect_revision=effect.revision,
+        )
+        self.assertEqual(permit.custody_ordinal, 1)
+
     def test_provider_wait_keeps_later_shared_deadline_and_isolates_quota_identity(self) -> None:
         key = OrdinaryAgentProviderQuotaKey(
             provider="github",

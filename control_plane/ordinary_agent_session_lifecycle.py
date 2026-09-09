@@ -41,7 +41,8 @@ from control_plane.ordinary_agent_eligibility import (
 
 
 class OrdinaryAgentSessionAdmissionDenied(ValueError):
-    def __init__(self, reason_code: str) -> None:
+    def __init__(self, reason_code: str, *, retry_not_before: int | None = None) -> None:
+        self.retry_not_before = retry_not_before
         self.reason_code = reason_code
         super().__init__(reason_code)
 
