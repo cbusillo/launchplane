@@ -61,12 +61,11 @@ class DeadlineMergeTrainGitHubTransport:
         remaining = min(self._work_deadline, self._token_deadline) - self._monotonic()
         if remaining < ORDINARY_PROVIDER_TRANSPORT_ALLOWANCE_SECONDS:
             raise OrdinaryAgentProviderDeferred()
-        response = self._transport.request(method=method, path=path, body=body)
         if path == "/graphql":
             self.graphql_requests += 1
         else:
             self.rest_core_requests += 1
-        return response
+        return self._transport.request(method=method, path=path, body=body)
 
     def record_graphql_points(self, points: int) -> None:
         if points < 0:
