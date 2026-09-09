@@ -36,6 +36,7 @@ from sqlalchemy import (
     text,
     select,
 )
+from sqlalchemy import cast as sql_cast
 from sqlalchemy.dialects.postgresql import JSONB, insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Engine, make_url
@@ -154,6 +155,10 @@ from control_plane.contracts.idempotency_record import (
     parse_launchplane_mutation_timestamp,
 )
 from control_plane.contracts.ordinary_agent_lifecycle import (
+    OrdinaryAgentEnrollmentApprovalReference,
+    OrdinaryAgentEnrollmentIntent,
+    OrdinaryAgentApprovedEnrollmentIntent,
+    OrdinaryAgentAdministratorAuthorizationBinding,
     OrdinaryAgentAuthenticationCredentialCandidate,
     lifecycle_record_sha256,
     ORDINARY_AGENT_ENROLLMENT_MUTATION_ROUTE,
@@ -420,7 +425,32 @@ from control_plane.repository_inventory import (
     RepositoryInventorySequenceError,
     plan_repository_inventory_append,
 )
+from control_plane.contracts.ordinary_agent_enrollment import OrdinaryAgentPrincipalPreState
 from control_plane.ordinary_agent_enrollment import derive_ordinary_agent_execution_profile
+from control_plane.contracts.canonical_json import canonical_json_sha256
+from control_plane.contracts.ordinary_agent import OrdinaryAgentPullRequest, OrdinaryAgentTarget
+from control_plane.contracts.ordinary_agent_lifecycle import (
+    ordinary_agent_session_enrollment_intent_sha256,
+)
+from control_plane.service_human_auth import SESSION_AUTHORIZATION_CLAIMS_TTL_SECONDS
+from control_plane.contracts.ordinary_agent_session_lifecycle import (
+    OrdinaryAgentSessionAttenuation,
+    OrdinaryAgentSessionOperationView,
+    OrdinaryAgentConnectionView,
+    OrdinaryAgentSessionDelegation,
+    OrdinaryAgentSessionRecord,
+    OrdinaryAgentLeaseRecord,
+    OrdinaryAgentFiniteRequestRecord,
+)
+from control_plane.ordinary_agent_session_lifecycle import (
+    OrdinaryAgentSessionAdmissionDenied,
+    OrdinaryAgentSessionWriteSet,
+    build_ordinary_agent_session_write_set,
+    build_ordinary_agent_request_admission_write_set,
+    require_ordinary_agent_finite_job_authority,
+    rebind_ordinary_agent_finite_request,
+    cancel_ordinary_agent_finite_request,
+)
 from control_plane.ordinary_agent_authentication import (
     OrdinaryAgentIdentity,
     OrdinaryAgentIssuanceBundle,
@@ -475,7 +505,7 @@ from control_plane.contracts.verireel_prod_backup_gate_operation import (
     VeriReelProdBackupGateOperationRecord,
     build_cancelled_verireel_prod_backup_gate_record,
 )
-from control_plane.service_auth import GitHubHumanIdentity
+from control_plane.service_auth import GitHubHumanIdentity, TerminalAgentIdentity
 from control_plane.service_human_auth import HumanSessionStore, LaunchplaneHumanSession
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.product_authority_bundle import (
@@ -2178,6 +2208,64 @@ class OrdinaryAgentDeliverySnapshot:
     ciphertext: str
     ciphertext_sha256: str
     key_id: str
+
+
+class LaunchplaneOrdinaryAgentSessionOperationRow(Base):
+    """Private authenticated intent and historical approval, scoped by principal."""
+
+    __tablename__ = "launchplane_ordinary_agent_session_operations"
+    principal_id: Mapped[str] = mapped_column(String, primary_key=True)
+    operation_id: Mapped[str] = mapped_column(String, primary_key=True)
+    kind: Mapped[str] = mapped_column(String, nullable=False)
+    intent_sha256: Mapped[str] = mapped_column(String, nullable=False)
+    approval_sha256: Mapped[str | None] = mapped_column(String, nullable=True)
+    administrator_github_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    terminal_session_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    cancelled_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneOrdinaryAgentSessionRow(Base):
+    __tablename__ = "launchplane_ordinary_agent_sessions"
+    __table_args__ = (
+        UniqueConstraint(
+            "operation_id",
+            "principal_id",
+            "credential_id",
+            "credential_version",
+            name="ordinary_session_operation_uq",
+        ),
+    )
+    session_id: Mapped[str] = mapped_column(String, primary_key=True)
+    operation_id: Mapped[str] = mapped_column(String, nullable=False)
+    principal_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    credential_id: Mapped[str] = mapped_column(String, nullable=False)
+    credential_version: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneOrdinaryAgentLeaseRow(Base):
+    __tablename__ = "launchplane_ordinary_agent_leases"
+    lease_id: Mapped[str] = mapped_column(String, primary_key=True)
+    session_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneOrdinaryAgentFiniteRequestRow(Base):
+    __tablename__ = "launchplane_ordinary_agent_finite_requests"
+    __table_args__ = (
+        UniqueConstraint(
+            "principal_id", "idempotency_key", name="ordinary_finite_request_idempotency_uq"
+        ),
+    )
+    request_id: Mapped[str] = mapped_column(String, primary_key=True)
+    principal_id: Mapped[str] = mapped_column(String, nullable=False)
+    session_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    lease_id: Mapped[str] = mapped_column(String, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String, nullable=False)
+    intent_sha256: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
 class LaunchplaneOrdinaryAgentDeliveryRow(Base):
@@ -18679,6 +18767,25 @@ class PostgresRecordStore(HumanSessionStore):
             current_principal=current_principal,
         )
 
+    def apply_approved_ordinary_agent_enrollment(
+        self,
+        *,
+        envelope: OrdinaryAgentEnrollmentApplyEnvelope,
+        mutation: DbOnlyMutationRequest,
+        issuance: OrdinaryAgentIssuanceBundle | None = None,
+    ) -> OrdinaryAgentEnrollmentCompareWriteResult:
+        """Activated adapters must use domain-backed apply, not the issuer foundation primitive."""
+        if isinstance(envelope, OrdinaryAgentRevokePrincipalApplyEnvelope):
+            raise OrdinaryAgentSessionAdmissionDenied("enrollment_operation_required")
+        return self.compare_and_apply_ordinary_agent_enrollment(
+            envelope=envelope,
+            mutation=mutation,
+            issuance=issuance,
+            approved_operation=OrdinaryAgentEnrollmentApprovalReference(
+                principal_id=envelope.principal_id, operation_id=envelope.operation_id
+            ),
+        )
+
     @_private_ordinary_agent_operation
     def compare_and_apply_ordinary_agent_enrollment(
         self,
@@ -18686,7 +18793,20 @@ class PostgresRecordStore(HumanSessionStore):
         envelope: OrdinaryAgentEnrollmentApplyEnvelope,
         mutation: DbOnlyMutationRequest,
         issuance: OrdinaryAgentIssuanceBundle | None = None,
+        approved_operation: OrdinaryAgentEnrollmentApprovalReference | None = None,
+        _authenticated_disconnect_human: LaunchplaneHumanSession | None = None,
     ) -> OrdinaryAgentEnrollmentCompareWriteResult:
+        if _authenticated_disconnect_human is not None and (
+            not isinstance(envelope, OrdinaryAgentRevokePrincipalApplyEnvelope)
+            or envelope.administrator.administrator_github_id
+            != _authenticated_disconnect_human.identity.github_id
+        ):
+            raise OrdinaryAgentSessionAdmissionDenied("disconnect_identity_mismatch")
+        if approved_operation is not None and (
+            approved_operation.principal_id != envelope.principal_id
+            or approved_operation.operation_id != envelope.operation_id
+        ):
+            raise OrdinaryAgentSessionAdmissionDenied("delegation_approval_binding_mismatch")
         if mutation.scope != ORDINARY_AGENT_ENROLLMENT_MUTATION_SCOPE:
             raise ValueError("ordinary-agent enrollment mutation scope does not match")
         if mutation.route_path != ORDINARY_AGENT_ENROLLMENT_MUTATION_ROUTE:
@@ -18706,9 +18826,15 @@ class PostgresRecordStore(HumanSessionStore):
 
         with self._session_factory() as session:
             self._begin_serialized_write(session)
+            if _authenticated_disconnect_human is not None:
+                self._lock_ordinary_agent_human(session, _authenticated_disconnect_human)
             reservation_status, reservation_row, reservation = (
                 self._reserve_db_only_mutation_in_session(session=session, mutation=mutation)
             )
+            if _authenticated_disconnect_human is not None:
+                self._lock_ordinary_agent_session_administrator(
+                    session, _authenticated_disconnect_human
+                )
             if reservation_status != "acquired":
                 if reservation_status == "replayed":
                     receipt_payload = reservation.response_payload.get("receipt")
@@ -19107,13 +19233,16 @@ class PostgresRecordStore(HumanSessionStore):
                     )
 
             recorded_at = self._database_mutation_timestamp(session)
-            if not isinstance(envelope, OrdinaryAgentRevokePrincipalApplyEnvelope):
-                recorded_epoch = int(
-                    parse_launchplane_mutation_timestamp(
-                        recorded_at,
-                        field_name="ordinary_agent_enrollment_recorded_at",
-                    ).timestamp()
+            recorded_epoch = int(
+                parse_launchplane_mutation_timestamp(
+                    recorded_at, field_name="ordinary_agent_enrollment_recorded_at"
+                ).timestamp()
+            )
+            if _authenticated_disconnect_human is not None:
+                self._require_ordinary_agent_human_current(
+                    _authenticated_disconnect_human, recorded_epoch
                 )
+            if not isinstance(envelope, OrdinaryAgentRevokePrincipalApplyEnvelope):
                 authentication_candidate = envelope.authentication_credential
                 if not (
                     recorded_epoch < envelope.delivery.expires_at <= recorded_epoch + 900
@@ -19150,6 +19279,44 @@ class PostgresRecordStore(HumanSessionStore):
                 execution_profile=execution_profile,
                 recorded_at=recorded_at,
             )
+            session_write_set = None
+            if not isinstance(envelope, OrdinaryAgentRevokePrincipalApplyEnvelope) and (
+                envelope.session_attenuation is not None or approved_operation is not None
+            ):
+                approved = session.get(
+                    LaunchplaneOrdinaryAgentSessionOperationRow,
+                    (envelope.principal_id, envelope.operation_id),
+                )
+                if (
+                    approved is None
+                    or approved.kind != "initial"
+                    or approved.cancelled_at is not None
+                    or approved.intent_sha256
+                    != ordinary_agent_session_enrollment_intent_sha256(envelope)
+                    or approved.approval_sha256 != envelope.approval_sha256
+                    or approved.administrator_github_id
+                    != envelope.administrator.administrator_github_id
+                    or approved.terminal_session_id is not None
+                ):
+                    raise OrdinaryAgentSessionAdmissionDenied(
+                        "delegation_approval_binding_mismatch"
+                    )
+                if envelope.session_attenuation is not None:
+                    if write_set.credential is None:
+                        raise RuntimeError("Session issuance lacks its credential")
+                    delegation = OrdinaryAgentSessionDelegation(
+                        **envelope.session_attenuation.model_dump(),
+                        operation_id=envelope.operation_id,
+                        approval_sha256=envelope.approval_sha256,
+                        receiver_sha256=envelope.delivery.receiver_claim_sha256,
+                    )
+                    session_write_set = build_ordinary_agent_session_write_set(
+                        policy=policy_record,
+                        principal=write_set.principal,
+                        credential=write_set.credential,
+                        delegation=delegation,
+                        now=recorded_epoch,
+                    )
             if principal_row is not None:
                 principal_row.is_current = False
                 self._after_ordinary_agent_enrollment_write_step("supersede_principal")
@@ -19216,6 +19383,20 @@ class PostgresRecordStore(HumanSessionStore):
                 )
                 session.flush()
                 self._after_ordinary_agent_enrollment_write_step("insert_delivery")
+            self._retire_ordinary_agent_sessions(
+                session, principal_id=envelope.principal_id, now=recorded_epoch
+            )
+            if session_write_set is not None:
+                approved = session.get(
+                    LaunchplaneOrdinaryAgentSessionOperationRow,
+                    (envelope.principal_id, envelope.operation_id),
+                    with_for_update=True,
+                )
+                if approved is None or approved.terminal_session_id is not None:
+                    raise OrdinaryAgentSessionAdmissionDenied("idempotency_conflict")
+                approved.terminal_session_id = session_write_set.session.session_id
+                self._persist_ordinary_agent_session(session, session_write_set)
+                self._after_ordinary_agent_enrollment_write_step("insert_session")
             session.add(self._ordinary_agent_lifecycle_audit_row(write_set.audit))
             session.flush()
             self._after_ordinary_agent_enrollment_write_step("insert_audit")
@@ -19238,6 +19419,1224 @@ class PostgresRecordStore(HumanSessionStore):
                 if isinstance(envelope, OrdinaryAgentRevokePrincipalApplyEnvelope)
                 else "never_attempted",
             )
+
+    @_private_ordinary_agent_operation
+    def propose_ordinary_agent_enrollment(
+        self, *, intent: OrdinaryAgentEnrollmentIntent, requester: TerminalAgentIdentity
+    ) -> str:
+        """Persist proposed scope only; the ingress authenticates its terminal/ordinary caller."""
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_active_authz_policy(session)
+            self._lock_ordinary_agent_principal(session, principal_id=intent.principal_id)
+            if intent.delivery.expires_at <= self._ordinary_agent_database_epoch(session):
+                raise OrdinaryAgentSessionAdmissionDenied("session_intent_expired")
+            row = session.get(
+                LaunchplaneOrdinaryAgentSessionOperationRow,
+                (intent.principal_id, intent.operation_id),
+                with_for_update=True,
+            )
+            if row is not None:
+                if (
+                    row.kind != "initial"
+                    or row.intent_sha256 != intent.intent_sha256
+                    or row.payload.get("requester_subject") != requester.subject
+                    or row.payload.get("requester_token_label") != requester.token_label
+                ):
+                    raise OrdinaryAgentSessionAdmissionDenied("idempotency_conflict")
+                return intent.operation_id
+            session.add(
+                LaunchplaneOrdinaryAgentSessionOperationRow(
+                    principal_id=intent.principal_id,
+                    operation_id=intent.operation_id,
+                    kind="initial",
+                    intent_sha256=intent.intent_sha256,
+                    approval_sha256=None,
+                    administrator_github_id=None,
+                    terminal_session_id=None,
+                    payload={
+                        "intent": intent.model_dump(mode="json"),
+                        "requester_subject": requester.subject,
+                        "requester_token_label": requester.token_label,
+                    },
+                )
+            )
+            session.commit()
+            return intent.operation_id
+
+    @staticmethod
+    def _ordinary_agent_initial_intent(
+        row: LaunchplaneOrdinaryAgentSessionOperationRow,
+    ) -> OrdinaryAgentEnrollmentIntent:
+        intent = OrdinaryAgentEnrollmentIntent.model_validate(row.payload.get("intent"))
+        if (
+            intent.principal_id != row.principal_id
+            or intent.operation_id != row.operation_id
+            or intent.intent_sha256 != row.intent_sha256
+        ):
+            raise OrdinaryAgentSessionAdmissionDenied("session_proposal_drift")
+        return intent
+
+    def _read_ordinary_agent_enrollment_proposal(
+        self, *, principal_id: str, operation_id: str
+    ) -> OrdinaryAgentEnrollmentIntent:
+        with self._session_factory() as session:
+            row = session.get(
+                LaunchplaneOrdinaryAgentSessionOperationRow, (principal_id, operation_id)
+            )
+            if row is None or row.kind != "initial":
+                raise OrdinaryAgentSessionAdmissionDenied("session_proposal_unavailable")
+            return self._ordinary_agent_initial_intent(row)
+
+    @_private_ordinary_agent_operation
+    def list_pending_approved_ordinary_agent_enrollments(
+        self,
+        *,
+        limit: int = 100,
+        after: OrdinaryAgentEnrollmentApprovalReference | None = None,
+    ) -> tuple[OrdinaryAgentEnrollmentApprovalReference, ...]:
+        """Private worker discovery only; read/apply must recheck the authoritative row."""
+        if not 1 <= limit <= 1000:
+            raise ValueError("enrollment recovery limit must be between 1 and 1000")
+        operation = LaunchplaneOrdinaryAgentSessionOperationRow
+        applied = (
+            select(LaunchplaneOrdinaryAgentLifecycleAuditRow.event_id)
+            .where(
+                LaunchplaneOrdinaryAgentLifecycleAuditRow.principal_id == operation.principal_id,
+                LaunchplaneOrdinaryAgentLifecycleAuditRow.operation_id == operation.operation_id,
+                LaunchplaneOrdinaryAgentLifecycleAuditRow.action.in_(
+                    ("enroll", "rotate_credential")
+                ),
+            )
+            .exists()
+        )
+        delivery_deadline = sql_cast(
+            operation.payload["intent"]["delivery"]["expires_at"].as_string(), BigInteger
+        )
+        session_deadline = sql_cast(
+            operation.payload["intent"]["session_attenuation"]["session_expires_at"].as_string(),
+            BigInteger,
+        )
+        statement = select(operation)
+        if after is not None:
+            statement = statement.where(
+                or_(
+                    operation.principal_id > after.principal_id,
+                    (operation.principal_id == after.principal_id)
+                    & (operation.operation_id > after.operation_id),
+                )
+            )
+        with self._session_factory() as session:
+            now = self._ordinary_agent_database_epoch(session)
+            rows = session.scalars(
+                statement.where(
+                    operation.kind == "initial",
+                    operation.approval_sha256.is_not(None),
+                    operation.cancelled_at.is_(None),
+                    operation.terminal_session_id.is_(None),
+                    ~applied,
+                    delivery_deadline > now,
+                    func.coalesce(session_deadline, delivery_deadline) > now,
+                )
+                .order_by(operation.principal_id, operation.operation_id)
+                .limit(limit)
+            )
+            return tuple(
+                OrdinaryAgentEnrollmentApprovalReference(
+                    principal_id=row.principal_id, operation_id=row.operation_id
+                )
+                for row in rows
+            )
+
+    @_private_ordinary_agent_operation
+    def read_approved_ordinary_agent_enrollment(
+        self, *, principal_id: str, operation_id: str
+    ) -> OrdinaryAgentApprovedEnrollmentIntent:
+        """Private worker input; final apply verifies persisted approval in its transaction."""
+        with self._session_factory() as session:
+            row = session.get(
+                LaunchplaneOrdinaryAgentSessionOperationRow, (principal_id, operation_id)
+            )
+            if row is None or row.kind != "initial" or row.approval_sha256 is None:
+                raise OrdinaryAgentSessionAdmissionDenied("enrollment_not_approved")
+            if row.cancelled_at is not None:
+                raise OrdinaryAgentSessionAdmissionDenied("operation_cancelled")
+            intent = self._ordinary_agent_initial_intent(row)
+            now = self._ordinary_agent_database_epoch(session)
+            deadline = min(
+                intent.delivery.expires_at,
+                intent.session_attenuation.session_expires_at
+                if intent.session_attenuation is not None
+                else intent.delivery.expires_at,
+            )
+            if deadline <= now:
+                raise OrdinaryAgentSessionAdmissionDenied("session_intent_expired")
+            administrator = OrdinaryAgentAdministratorAuthorizationBinding.model_validate(
+                row.payload.get("administrator")
+            )
+            return OrdinaryAgentApprovedEnrollmentIntent(
+                intent=intent, administrator=administrator, approval_sha256=row.approval_sha256
+            )
+
+    def _lock_ordinary_agent_human(self, session: Any, human: LaunchplaneHumanSession) -> None:
+        row = session.scalar(
+            select(LaunchplaneHumanSessionRow)
+            .where(LaunchplaneHumanSessionRow.session_id == human.session_id)
+            .with_for_update()
+        )
+        now = self._ordinary_agent_database_epoch(session)
+        if row is None:
+            raise OrdinaryAgentSessionAdmissionDenied("administrator_session_unavailable")
+        current = _human_session_from_payload(row.payload)
+        if current != human or row.github_id != human.identity.github_id:
+            raise OrdinaryAgentSessionAdmissionDenied("administrator_session_changed")
+        self._require_ordinary_agent_human_current(current, now)
+
+    def _lock_ordinary_agent_session_administrator(
+        self, session: Any, human: LaunchplaneHumanSession
+    ) -> tuple[LaunchplaneAuthzPolicyRecord, int]:
+        self._lock_ordinary_agent_human(session, human)
+        now = self._ordinary_agent_database_epoch(session)
+        self._lock_active_authz_policy(session)
+        rows = tuple(
+            session.scalars(
+                select(LaunchplaneAuthzPolicyRow)
+                .where(LaunchplaneAuthzPolicyRow.status == "active")
+                .with_for_update()
+            )
+        )
+        if len(rows) != 1:
+            raise OrdinaryAgentSessionAdmissionDenied("policy_unavailable")
+        policy = self._read_authz_policy_row(rows[0])
+        rules = tuple(
+            rule
+            for rule in policy.policy.github_humans
+            if rule.managed_set_id is not None
+            and rule.managed_rule_id is not None
+            and human.identity.github_id in rule.github_ids
+            and "admin" in rule.roles
+            and "authz_policy_grant.write" in rule.actions
+            and rule.products == ("launchplane",)
+            and rule.contexts == ("launchplane",)
+            and not rule.logins
+            and not rule.organizations
+            and not rule.teams
+            and not rule.instances
+        )
+        if len(rules) != 1:
+            raise OrdinaryAgentSessionAdmissionDenied("administrator_denied")
+        return policy, now
+
+    @staticmethod
+    def _ordinary_agent_human_binding(
+        policy: LaunchplaneAuthzPolicyRecord,
+        human: LaunchplaneHumanSession,
+    ) -> OrdinaryAgentAdministratorAuthorizationBinding:
+        rules = tuple(
+            rule
+            for rule in policy.policy.github_humans
+            if rule.managed_set_id is not None
+            and rule.managed_rule_id is not None
+            and human.identity.github_id in rule.github_ids
+            and "admin" in rule.roles
+            and "authz_policy_grant.write" in rule.actions
+            and rule.products == ("launchplane",)
+            and rule.contexts == ("launchplane",)
+            and not rule.logins
+            and not rule.organizations
+            and not rule.teams
+            and not rule.instances
+        )
+        rule = rules[0]  # The locked administrator check already required exactly one.
+        if rule.managed_set_id is None or rule.managed_rule_id is None:
+            raise OrdinaryAgentSessionAdmissionDenied("administrator_denied")
+        return OrdinaryAgentAdministratorAuthorizationBinding(
+            policy_record_id=policy.record_id,
+            policy_revision=policy.revision,
+            policy_schema_version=policy.policy.schema_version,
+            policy_sha256=policy.policy_sha256,
+            policy_source=policy.source,
+            managed_set_id=rule.managed_set_id,
+            managed_rule_id=rule.managed_rule_id,
+            administrator_github_id=human.identity.github_id,
+        )
+
+    @staticmethod
+    def _require_ordinary_agent_human_current(human: LaunchplaneHumanSession, now: int) -> None:
+        if not (
+            int(human.created_at.timestamp()) <= now < int(human.expires_at.timestamp())
+            and now < int(human.created_at.timestamp()) + SESSION_AUTHORIZATION_CLAIMS_TTL_SECONDS
+        ):
+            raise OrdinaryAgentSessionAdmissionDenied("administrator_session_changed")
+
+    @staticmethod
+    def _ordinary_agent_session_approval_digest(
+        *, intent_sha256: str, administrator_github_id: int, policy: LaunchplaneAuthzPolicyRecord
+    ) -> str:
+        return canonical_json_sha256(
+            {
+                "domain": "ordinary-agent-session-approval-v1",
+                "intent_sha256": intent_sha256,
+                "administrator_github_id": administrator_github_id,
+                "policy_record_id": policy.record_id,
+                "policy_revision": policy.revision,
+                "policy_sha256": policy.policy_sha256,
+            }
+        )
+
+    @_private_ordinary_agent_operation
+    def _approve_initial_ordinary_agent_session(
+        self,
+        *,
+        human: LaunchplaneHumanSession,
+        intent: OrdinaryAgentEnrollmentIntent,
+    ) -> OrdinaryAgentApprovedEnrollmentIntent:
+        """Private target of authenticated service adapter; no caller-asserted identity ingress."""
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            policy, now = self._lock_ordinary_agent_session_administrator(session, human)
+            if (
+                intent.policy.record_id != policy.record_id
+                or intent.policy.revision != policy.revision
+                or intent.policy.policy_sha256 != policy.policy_sha256
+            ):
+                raise OrdinaryAgentSessionAdmissionDenied("policy_drift")
+            administrator = self._ordinary_agent_human_binding(policy, human)
+            deadline = min(
+                intent.delivery.expires_at,
+                intent.session_attenuation.session_expires_at
+                if intent.session_attenuation is not None
+                else intent.delivery.expires_at,
+            )
+            if deadline <= now:
+                raise OrdinaryAgentSessionAdmissionDenied("session_intent_expired")
+            self._lock_ordinary_agent_principal(session, principal_id=intent.principal_id)
+            now = self._ordinary_agent_database_epoch(session)
+            self._require_ordinary_agent_human_current(human, now)
+            if deadline <= now:
+                raise OrdinaryAgentSessionAdmissionDenied("session_intent_expired")
+            key = (intent.principal_id, intent.operation_id)
+            row = session.get(
+                LaunchplaneOrdinaryAgentSessionOperationRow, key, with_for_update=True
+            )
+            digest = self._ordinary_agent_session_approval_digest(
+                intent_sha256=intent.intent_sha256,
+                administrator_github_id=human.identity.github_id,
+                policy=policy,
+            )
+            if row is None or row.kind != "initial":
+                raise OrdinaryAgentSessionAdmissionDenied("session_proposal_unavailable")
+            if row.cancelled_at is not None:
+                raise OrdinaryAgentSessionAdmissionDenied("operation_cancelled")
+            if row.intent_sha256 != intent.intent_sha256 or (
+                row.approval_sha256 is not None and row.approval_sha256 != digest
+            ):
+                raise OrdinaryAgentSessionAdmissionDenied("idempotency_conflict")
+            row.approval_sha256 = digest
+            row.administrator_github_id = human.identity.github_id
+            row.payload = {**row.payload, "administrator": administrator.model_dump(mode="json")}
+            session.commit()
+            return OrdinaryAgentApprovedEnrollmentIntent(
+                intent=intent, administrator=administrator, approval_sha256=digest
+            )
+
+    @_private_ordinary_agent_operation
+    def propose_ordinary_agent_session(
+        self,
+        *,
+        proof: OrdinaryAgentTokenProof,
+        operation_id: str,
+        attenuation: OrdinaryAgentSessionAttenuation,
+    ) -> OrdinaryAgentSessionOperationView:
+        """Ordinary-only client proposal. Raw bearer never crosses into browser approval."""
+        if not operation_id or len(operation_id) > 256:
+            raise ValueError("session operation identifier must be bounded")
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            policy, principal, credential, delivery, now = self._ordinary_agent_session_context(
+                session, proof
+            )
+            payload = {
+                "target": principal.policy.target.model_dump(mode="json"),
+                "managed_set_id": principal.policy.managed_set_id,
+                "managed_rule_id": principal.policy.managed_rule_id,
+                "principal_record_sha256": principal.record_sha256,
+                "credential_id": credential.credential_id,
+                "credential_version": credential.credential_version,
+                "credential_digest": credential.credential_digest,
+                "credential_expires_at": credential.expires_at,
+                "receiver_sha256": delivery.receiver_claim_sha256,
+                "attenuation": attenuation.model_dump(mode="json"),
+                "policy_record_id": policy.record_id,
+                "policy_revision": policy.revision,
+                "policy_sha256": policy.policy_sha256,
+            }
+            intent = canonical_json_sha256(
+                {"principal_id": principal.principal_id, "operation_id": operation_id, **payload}
+            )
+            # Policy and finite bounds are checked before recording any proposal.
+            delegation = OrdinaryAgentSessionDelegation(
+                **attenuation.model_dump(),
+                operation_id=operation_id,
+                approval_sha256=intent,
+                receiver_sha256=delivery.receiver_claim_sha256,
+            )
+            build_ordinary_agent_session_write_set(
+                policy=policy,
+                principal=principal,
+                credential=credential,
+                delegation=delegation,
+                now=now,
+            )
+            row = session.get(
+                LaunchplaneOrdinaryAgentSessionOperationRow,
+                (principal.principal_id, operation_id),
+                with_for_update=True,
+            )
+            if row is not None:
+                if row.kind != "existing" or row.intent_sha256 != intent:
+                    raise OrdinaryAgentSessionAdmissionDenied("idempotency_conflict")
+                return self._ordinary_agent_operation_view(
+                    session, row=row, policy=policy, now=now, human_read=False
+                )
+            row = LaunchplaneOrdinaryAgentSessionOperationRow(
+                principal_id=principal.principal_id,
+                operation_id=operation_id,
+                kind="existing",
+                intent_sha256=intent,
+                approval_sha256=None,
+                administrator_github_id=None,
+                terminal_session_id=None,
+                payload=payload,
+            )
+            session.add(row)
+            session.flush()
+            view = self._ordinary_agent_operation_view(
+                session, row=row, policy=policy, now=now, human_read=False
+            )
+            session.commit()
+            return view
+
+    @_private_ordinary_agent_operation
+    def _approve_existing_ordinary_agent_session(
+        self,
+        *,
+        human: LaunchplaneHumanSession,
+        principal_id: str,
+        operation_id: str,
+    ) -> OrdinaryAgentSessionWriteSet:
+        """Private target of signed-cookie/CSRF service adapter; caller supplies no bearer."""
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            policy, _ = self._lock_ordinary_agent_session_administrator(session, human)
+            locator = session.get(
+                LaunchplaneOrdinaryAgentSessionOperationRow, (principal_id, operation_id)
+            )
+            if locator is None or locator.kind != "existing":
+                raise OrdinaryAgentSessionAdmissionDenied("session_proposal_unavailable")
+            payload = locator.payload
+            proof = OrdinaryAgentTokenProof(
+                credential_id=str(payload["credential_id"]),
+                credential_version=int(str(payload["credential_version"])),
+                credential_digest=str(payload["credential_digest"]),
+            )
+            current_policy, principal, credential, _, now = self._ordinary_agent_session_context(
+                session, proof
+            )
+            row = session.get(
+                LaunchplaneOrdinaryAgentSessionOperationRow,
+                (principal_id, operation_id),
+                with_for_update=True,
+                populate_existing=True,
+            )
+            if row is None or principal.principal_id != principal_id:
+                raise OrdinaryAgentSessionAdmissionDenied("session_proposal_unavailable")
+            self._require_ordinary_agent_human_current(human, now)
+            payload = row.payload
+            if row.cancelled_at is not None:
+                raise OrdinaryAgentSessionAdmissionDenied("operation_cancelled")
+            if row.intent_sha256 != canonical_json_sha256(
+                {"principal_id": principal_id, "operation_id": operation_id, **payload}
+            ):
+                raise OrdinaryAgentSessionAdmissionDenied("session_proposal_drift")
+            if (
+                current_policy != policy
+                or payload["policy_record_id"] != policy.record_id
+                or payload["policy_revision"] != policy.revision
+                or payload["policy_sha256"] != policy.policy_sha256
+                or payload["principal_record_sha256"] != principal.record_sha256
+            ):
+                raise OrdinaryAgentSessionAdmissionDenied("session_proposal_drift")
+            digest = self._ordinary_agent_session_approval_digest(
+                intent_sha256=row.intent_sha256,
+                administrator_github_id=human.identity.github_id,
+                policy=policy,
+            )
+            if row.approval_sha256 is not None:
+                if row.approval_sha256 != digest or row.terminal_session_id is None:
+                    raise OrdinaryAgentSessionAdmissionDenied("idempotency_conflict")
+                record, leases = self._ordinary_agent_session_rows(
+                    session, session_id=row.terminal_session_id, principal_id=principal_id
+                )
+                return OrdinaryAgentSessionWriteSet(
+                    session=record,
+                    leases=tuple(
+                        OrdinaryAgentLeaseRecord.model_validate(item.payload) for item in leases
+                    ),
+                )
+            attenuation = OrdinaryAgentSessionAttenuation.model_validate(payload["attenuation"])
+            delegation = OrdinaryAgentSessionDelegation(
+                **attenuation.model_dump(),
+                operation_id=operation_id,
+                approval_sha256=digest,
+                receiver_sha256=str(payload["receiver_sha256"]),
+            )
+            issued = build_ordinary_agent_session_write_set(
+                policy=policy,
+                principal=principal,
+                credential=credential,
+                delegation=delegation,
+                now=now,
+            )
+            self._persist_ordinary_agent_session(session, issued)
+            row.approval_sha256, row.administrator_github_id = digest, human.identity.github_id
+            row.terminal_session_id = issued.session.session_id
+            self._after_ordinary_agent_enrollment_write_step("approve_session")
+            session.commit()
+            return issued
+
+    def _ordinary_agent_operation_view(
+        self,
+        session: Any,
+        *,
+        row: LaunchplaneOrdinaryAgentSessionOperationRow,
+        policy: LaunchplaneAuthzPolicyRecord,
+        now: int,
+        human_read: bool,
+    ) -> OrdinaryAgentSessionOperationView:
+        if row.kind == "initial":
+            envelope = self._ordinary_agent_initial_intent(row)
+            attenuation = envelope.session_attenuation
+            target = envelope.policy.target
+            credential_id = envelope.authentication_credential.credential_id
+            credential_version = (
+                1 if envelope.action == "enroll" else (envelope.credential_version or 0) + 1
+            )
+            managed_set_id, managed_rule_id = (
+                envelope.policy.managed_set_id,
+                envelope.policy.managed_rule_id,
+            )
+            original_policy_sha256 = envelope.policy.policy_sha256
+            deadline = min(
+                envelope.delivery.expires_at,
+                attenuation.session_expires_at
+                if attenuation is not None
+                else envelope.delivery.expires_at,
+            )
+        elif row.kind == "existing":
+            attenuation = OrdinaryAgentSessionAttenuation.model_validate(row.payload["attenuation"])
+            target = OrdinaryAgentTarget.model_validate(row.payload["target"])
+            credential_id, credential_version = (
+                str(row.payload["credential_id"]),
+                int(str(row.payload["credential_version"])),
+            )
+            managed_set_id, managed_rule_id = (
+                str(row.payload["managed_set_id"]),
+                str(row.payload["managed_rule_id"]),
+            )
+            original_policy_sha256 = str(row.payload["policy_sha256"])
+            deadline = attenuation.session_expires_at
+        else:
+            raise OrdinaryAgentSessionAdmissionDenied("session_proposal_drift")
+        session_record = None
+        if row.terminal_session_id is not None:
+            session_row = session.get(LaunchplaneOrdinaryAgentSessionRow, row.terminal_session_id)
+            if session_row is None:
+                raise OrdinaryAgentSessionAdmissionDenied("session_unavailable")
+            session_record = OrdinaryAgentSessionRecord.model_validate(session_row.payload)
+        applied = session_record is not None or (
+            row.kind == "initial"
+            and session.scalar(
+                select(LaunchplaneOrdinaryAgentLifecycleAuditRow.event_id).where(
+                    LaunchplaneOrdinaryAgentLifecycleAuditRow.operation_id == row.operation_id,
+                    LaunchplaneOrdinaryAgentLifecycleAuditRow.principal_id == row.principal_id,
+                    LaunchplaneOrdinaryAgentLifecycleAuditRow.action.in_(
+                        ("enroll", "rotate_credential")
+                    ),
+                )
+            )
+            is not None
+        )
+        current = session.scalar(
+            select(LaunchplaneOrdinaryAgentPrincipalRow).where(
+                LaunchplaneOrdinaryAgentPrincipalRow.principal_id == row.principal_id,
+                LaunchplaneOrdinaryAgentPrincipalRow.is_current.is_(True),
+            )
+        )
+        status: Literal["pending", "approved", "expired", "revoked", "blocked", "cancelled"] = (
+            "pending" if row.approval_sha256 is None else "approved"
+        )
+        reason = None
+        rules = tuple(
+            rule
+            for rule in policy.policy.ordinary_agents
+            if rule.managed_set_id == managed_set_id and rule.managed_rule_id == managed_rule_id
+        )
+        if (
+            len(rules) != 1
+            or rules[0].principal_id != row.principal_id
+            or rules[0].target != target
+            or (attenuation is not None and not set(attenuation.actions).issubset(rules[0].actions))
+            or (not applied and original_policy_sha256 != policy.policy_sha256)
+        ):
+            status, reason = "blocked", "current_policy_changed"
+        if row.kind == "initial" and not applied:
+            if envelope.action == "enroll" and current is not None:
+                status, reason = "blocked", "principal_prestate_changed"
+            elif envelope.action == "rotate_credential" and (
+                current is None
+                or envelope.principal is None
+                or current.record_sha256 != envelope.principal.pre_state_sha256
+            ):
+                status, reason = "blocked", "principal_prestate_changed"
+        if row.kind == "initial" and applied and session_record is None:
+            deadline = envelope.authentication_credential.expires_at
+        if row.kind == "existing" or applied:
+            if (
+                current is None
+                or current.lifecycle_status != "active"
+                or current.credential_id != credential_id
+                or current.credential_version != credential_version
+            ):
+                status, reason = "revoked", "credential_unavailable"
+            credential_row = session.scalar(
+                select(LaunchplaneOrdinaryAgentAuthenticationCredentialRow).where(
+                    LaunchplaneOrdinaryAgentAuthenticationCredentialRow.credential_id
+                    == credential_id,
+                    LaunchplaneOrdinaryAgentAuthenticationCredentialRow.credential_version
+                    == credential_version,
+                )
+            )
+            if credential_row is None or credential_row.lifecycle_status != "active":
+                status, reason = "revoked", "credential_unavailable"
+        if session_record is not None:
+            deadline = session_record.expires_at
+            if session_record.revoked_at is not None and session_record.revoked_at <= now:
+                status, reason = "revoked", "session_revoked"
+        if status != "revoked" and now >= deadline:
+            status, reason = (
+                "expired",
+                "session_expired" if session_record is not None else "proposal_expired",
+            )
+        if row.cancelled_at is not None:
+            status, reason = "cancelled", "operation_cancelled"
+        return OrdinaryAgentSessionOperationView(
+            requester_kind="terminal_agent" if row.kind == "initial" else "ordinary_agent",
+            requester_subject=(
+                str(row.payload["requester_subject"]) if row.kind == "initial" else row.principal_id
+            ),
+            requester_token_label=(
+                str(row.payload["requester_token_label"]) if row.kind == "initial" else None
+            ),
+            credential_expires_at=(
+                envelope.authentication_credential.expires_at
+                if row.kind == "initial"
+                else int(str(row.payload["credential_expires_at"]))
+            ),
+            delivery_expires_at=envelope.delivery.expires_at if row.kind == "initial" else None,
+            principal_id=row.principal_id,
+            operation_id=row.operation_id,
+            kind=cast(Literal["initial", "existing"], row.kind),
+            status=status,
+            reason_code=reason,
+            attenuation=attenuation,
+            credential_id=credential_id,
+            credential_version=credential_version,
+            target=target,
+            session_id=None if session_record is None else session_record.session_id,
+            session_expires_at=None if session_record is None else session_record.expires_at,
+            applied=applied,
+            can_approve=human_read and status == "pending",
+        )
+
+    @_private_ordinary_agent_operation
+    def read_ordinary_agent_session_operation(
+        self, *, proof: OrdinaryAgentTokenProof, operation_id: str
+    ) -> OrdinaryAgentSessionOperationView:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            policy, principal, _, _, now = self._ordinary_agent_session_context(session, proof)
+            row = session.get(
+                LaunchplaneOrdinaryAgentSessionOperationRow, (principal.principal_id, operation_id)
+            )
+            if row is None:
+                raise OrdinaryAgentSessionAdmissionDenied("session_proposal_unavailable")
+            return self._ordinary_agent_operation_view(
+                session, row=row, policy=policy, now=now, human_read=False
+            )
+
+    @_private_ordinary_agent_operation
+    def read_proposed_ordinary_agent_enrollment(
+        self,
+        *,
+        requester: TerminalAgentIdentity,
+        principal_id: str,
+        operation_id: str,
+    ) -> OrdinaryAgentSessionOperationView:
+        """Authenticated terminal ingress may read only its original proposed connection."""
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_active_authz_policy(session)
+            policies = tuple(
+                session.scalars(
+                    select(LaunchplaneAuthzPolicyRow)
+                    .where(LaunchplaneAuthzPolicyRow.status == "active")
+                    .with_for_update()
+                )
+            )
+            if len(policies) != 1:
+                raise OrdinaryAgentSessionAdmissionDenied("policy_unavailable")
+            self._lock_ordinary_agent_principal(session, principal_id=principal_id)
+            row = session.get(
+                LaunchplaneOrdinaryAgentSessionOperationRow, (principal_id, operation_id)
+            )
+            if (
+                row is None
+                or row.kind != "initial"
+                or row.payload.get("requester_subject") != requester.subject
+                or row.payload.get("requester_token_label") != requester.token_label
+            ):
+                raise OrdinaryAgentSessionAdmissionDenied("session_proposal_unavailable")
+            return self._ordinary_agent_operation_view(
+                session,
+                row=row,
+                policy=self._read_authz_policy_row(policies[0]),
+                now=self._ordinary_agent_database_epoch(session),
+                human_read=False,
+            )
+
+    @_private_ordinary_agent_operation
+    def _read_human_ordinary_agent_session_operation(
+        self, *, human: LaunchplaneHumanSession, principal_id: str, operation_id: str
+    ) -> OrdinaryAgentSessionOperationView:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            policy, now = self._lock_ordinary_agent_session_administrator(session, human)
+            self._lock_ordinary_agent_principal(session, principal_id=principal_id)
+            now = self._ordinary_agent_database_epoch(session)
+            self._require_ordinary_agent_human_current(human, now)
+            row = session.get(
+                LaunchplaneOrdinaryAgentSessionOperationRow, (principal_id, operation_id)
+            )
+            if row is None:
+                raise OrdinaryAgentSessionAdmissionDenied("session_proposal_unavailable")
+            return self._ordinary_agent_operation_view(
+                session, row=row, policy=policy, now=now, human_read=True
+            )
+
+    def _persist_ordinary_agent_session(
+        self, session: Any, write_set: OrdinaryAgentSessionWriteSet
+    ) -> None:
+        record = write_set.session
+        session.add(
+            LaunchplaneOrdinaryAgentSessionRow(
+                session_id=record.session_id,
+                operation_id=record.delegation.operation_id,
+                principal_id=record.principal_id,
+                credential_id=record.credential_id,
+                credential_version=record.credential_version,
+                payload=self._payload_dict(record),
+            )
+        )
+        for lease in write_set.leases:
+            session.add(
+                LaunchplaneOrdinaryAgentLeaseRow(
+                    lease_id=lease.lease_id,
+                    session_id=lease.session_id,
+                    revision=lease.revision,
+                    payload=self._payload_dict(lease),
+                )
+            )
+        session.flush()
+
+    def _retire_ordinary_agent_sessions(self, session: Any, *, principal_id: str, now: int) -> None:
+        session_rows = tuple(
+            session.scalars(
+                select(LaunchplaneOrdinaryAgentSessionRow)
+                .where(LaunchplaneOrdinaryAgentSessionRow.principal_id == principal_id)
+                .order_by(LaunchplaneOrdinaryAgentSessionRow.session_id)
+                .with_for_update()
+            )
+        )
+        for row in session_rows:
+            record = OrdinaryAgentSessionRecord.model_validate(row.payload)
+            if record.revoked_at is None:
+                row.payload = self._payload_dict(record.model_copy(update={"revoked_at": now}))
+        ids = tuple(row.session_id for row in session_rows)
+        if not ids:
+            return
+        for row in session.scalars(
+            select(LaunchplaneOrdinaryAgentLeaseRow)
+            .where(LaunchplaneOrdinaryAgentLeaseRow.session_id.in_(ids))
+            .order_by(LaunchplaneOrdinaryAgentLeaseRow.lease_id)
+            .with_for_update()
+        ):
+            lease = OrdinaryAgentLeaseRecord.model_validate(row.payload)
+            if lease.revoked_at is None:
+                lease = lease.model_copy(update={"revoked_at": now, "revision": lease.revision + 1})
+                row.revision, row.payload = lease.revision, self._payload_dict(lease)
+        for row in session.scalars(
+            select(LaunchplaneOrdinaryAgentFiniteRequestRow)
+            .where(LaunchplaneOrdinaryAgentFiniteRequestRow.session_id.in_(ids))
+            .order_by(LaunchplaneOrdinaryAgentFiniteRequestRow.request_id)
+            .with_for_update()
+        ):
+            request = OrdinaryAgentFiniteRequestRecord.model_validate(row.payload)
+            row.payload = self._payload_dict(
+                cancel_ordinary_agent_finite_request(request=request, now=now)
+            )
+        self._after_ordinary_agent_enrollment_write_step("retire_sessions")
+
+    def _ordinary_agent_session_context(
+        self, session: Any, proof: OrdinaryAgentTokenProof
+    ) -> tuple[
+        LaunchplaneAuthzPolicyRecord,
+        OrdinaryAgentPrincipalRecord,
+        OrdinaryAgentAuthenticationCredentialRecord,
+        LaunchplaneOrdinaryAgentDeliveryRow,
+        int,
+    ]:
+        self._lock_active_authz_policy(session)
+        policies = tuple(
+            session.scalars(
+                select(LaunchplaneAuthzPolicyRow)
+                .where(LaunchplaneAuthzPolicyRow.status == "active")
+                .with_for_update()
+            )
+        )
+        if len(policies) != 1:
+            raise OrdinaryAgentSessionAdmissionDenied("policy_unavailable")
+        locator = session.scalar(
+            select(LaunchplaneOrdinaryAgentDeliveryRow).where(
+                LaunchplaneOrdinaryAgentDeliveryRow.credential_id == proof.credential_id,
+                LaunchplaneOrdinaryAgentDeliveryRow.credential_version == proof.credential_version,
+            )
+        )
+        if locator is None:
+            raise OrdinaryAgentSessionAdmissionDenied("credential_unavailable")
+        self._lock_ordinary_agent_delivery_claim(session, operation_id=locator.operation_id)
+        now = self._ordinary_agent_database_epoch(session)
+        verified = self._ordinary_agent_verified_rows(
+            session,
+            credential_id=proof.credential_id,
+            credential_version=proof.credential_version,
+            credential_digest=proof.credential_digest,
+            evaluated_at=now,
+        )
+        if verified is None:
+            raise OrdinaryAgentSessionAdmissionDenied("credential_unavailable")
+        principal, credential, delivery = verified
+        return self._read_authz_policy_row(policies[0]), principal, credential, delivery, now
+
+    def _ordinary_agent_session_rows(
+        self, session: Any, *, session_id: str, principal_id: str
+    ) -> tuple[OrdinaryAgentSessionRecord, tuple[LaunchplaneOrdinaryAgentLeaseRow, ...]]:
+        row = session.scalar(
+            select(LaunchplaneOrdinaryAgentSessionRow)
+            .where(LaunchplaneOrdinaryAgentSessionRow.session_id == session_id)
+            .with_for_update()
+        )
+        if row is None or row.principal_id != principal_id:
+            raise OrdinaryAgentSessionAdmissionDenied("session_unavailable")
+        record = OrdinaryAgentSessionRecord.model_validate(row.payload)
+        if record.session_id != row.session_id or record.principal_id != row.principal_id:
+            raise OrdinaryAgentSessionAdmissionDenied("session_binding_mismatch")
+        leases = tuple(
+            session.scalars(
+                select(LaunchplaneOrdinaryAgentLeaseRow)
+                .where(LaunchplaneOrdinaryAgentLeaseRow.session_id == session_id)
+                .order_by(LaunchplaneOrdinaryAgentLeaseRow.lease_id)
+                .with_for_update()
+            )
+        )
+        return record, leases
+
+    @_private_ordinary_agent_operation
+    def reconnect_ordinary_agent_session(
+        self, *, proof: OrdinaryAgentTokenProof, operation_id: str
+    ) -> OrdinaryAgentSessionWriteSet:
+        """Return the original persisted session, never renew it on reconnect."""
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            _, principal, credential, _, _ = self._ordinary_agent_session_context(session, proof)
+            row = session.scalar(
+                select(LaunchplaneOrdinaryAgentSessionRow).where(
+                    LaunchplaneOrdinaryAgentSessionRow.operation_id == operation_id,
+                    LaunchplaneOrdinaryAgentSessionRow.principal_id == principal.principal_id,
+                    LaunchplaneOrdinaryAgentSessionRow.credential_id == credential.credential_id,
+                    LaunchplaneOrdinaryAgentSessionRow.credential_version
+                    == credential.credential_version,
+                )
+            )
+            if row is None:
+                raise OrdinaryAgentSessionAdmissionDenied("session_unavailable")
+            record, leases = self._ordinary_agent_session_rows(
+                session, session_id=row.session_id, principal_id=principal.principal_id
+            )
+            return OrdinaryAgentSessionWriteSet(
+                session=record,
+                leases=tuple(
+                    OrdinaryAgentLeaseRecord.model_validate(item.payload) for item in leases
+                ),
+            )
+
+    @_private_ordinary_agent_operation
+    def admit_ordinary_agent_finite_request(
+        self, *, proof: OrdinaryAgentTokenProof, request: OrdinaryAgentFiniteRequestRecord
+    ) -> OrdinaryAgentFiniteRequestRecord:
+        """Authenticate, check current authority and charge first admission atomically."""
+        intent = canonical_json_sha256(request.model_dump(mode="json", exclude={"admitted_at"}))
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            policy, principal, credential, _, now = self._ordinary_agent_session_context(
+                session, proof
+            )
+            record, lease_rows = self._ordinary_agent_session_rows(
+                session, session_id=request.session_id, principal_id=principal.principal_id
+            )
+            lease_row = next((row for row in lease_rows if row.lease_id == request.lease_id), None)
+            if lease_row is None:
+                raise OrdinaryAgentSessionAdmissionDenied("lease_unavailable")
+            existing = session.scalar(
+                select(LaunchplaneOrdinaryAgentFiniteRequestRow)
+                .where(
+                    LaunchplaneOrdinaryAgentFiniteRequestRow.principal_id == principal.principal_id,
+                    LaunchplaneOrdinaryAgentFiniteRequestRow.idempotency_key
+                    == request.idempotency_key,
+                )
+                .with_for_update()
+            )
+            if existing is not None:
+                if existing.intent_sha256 != intent:
+                    raise OrdinaryAgentSessionAdmissionDenied("idempotency_conflict")
+                return OrdinaryAgentFiniteRequestRecord.model_validate(existing.payload)
+            collision = session.get(LaunchplaneOrdinaryAgentFiniteRequestRow, request.request_id)
+            if collision is not None:
+                raise OrdinaryAgentSessionAdmissionDenied("request_id_conflict")
+            if request.expires_at <= now:
+                raise OrdinaryAgentSessionAdmissionDenied("request_expired")
+            request = OrdinaryAgentFiniteRequestRecord.model_validate(
+                {**request.model_dump(), "admitted_at": now}
+            )
+            admitted = build_ordinary_agent_request_admission_write_set(
+                policy=policy,
+                principal=principal,
+                credential=credential,
+                session=record,
+                lease=OrdinaryAgentLeaseRecord.model_validate(lease_row.payload),
+                request=request,
+                now=now,
+            )
+            lease_row.revision, lease_row.payload = (
+                admitted.lease.revision,
+                self._payload_dict(admitted.lease),
+            )
+            session.add(
+                LaunchplaneOrdinaryAgentFiniteRequestRow(
+                    request_id=request.request_id,
+                    principal_id=principal.principal_id,
+                    session_id=record.session_id,
+                    lease_id=admitted.lease.lease_id,
+                    idempotency_key=request.idempotency_key,
+                    intent_sha256=intent,
+                    payload=self._payload_dict(request),
+                )
+            )
+            session.flush()
+            self._after_ordinary_agent_enrollment_write_step("admit_finite_request")
+            session.commit()
+            return request
+
+    def _ordinary_agent_job_context(
+        self, session: Any, *, request_id: str
+    ) -> tuple[
+        OrdinaryAgentFiniteRequestRecord,
+        LaunchplaneOrdinaryAgentFiniteRequestRow,
+        OrdinaryAgentSessionRecord,
+        OrdinaryAgentLeaseRecord,
+        int,
+    ]:
+        """Internal dispatcher authority: original stored grant, never caller-selected continuation."""
+        locator = session.get(LaunchplaneOrdinaryAgentFiniteRequestRow, request_id)
+        if locator is None:
+            raise OrdinaryAgentSessionAdmissionDenied("job_unavailable")
+        session_locator = session.get(LaunchplaneOrdinaryAgentSessionRow, locator.session_id)
+        if session_locator is None:
+            raise OrdinaryAgentSessionAdmissionDenied("session_unavailable")
+        stored_session = OrdinaryAgentSessionRecord.model_validate(session_locator.payload)
+        # Internal stored identity proof is not exposed as an ordinary HTTP credential.
+        proof = OrdinaryAgentTokenProof(
+            credential_id=stored_session.credential_id,
+            credential_version=stored_session.credential_version,
+            credential_digest=stored_session.credential_digest,
+        )
+        policy, principal, credential, _, now = self._ordinary_agent_session_context(session, proof)
+        record, leases = self._ordinary_agent_session_rows(
+            session, session_id=locator.session_id, principal_id=principal.principal_id
+        )
+        row = session.scalar(
+            select(LaunchplaneOrdinaryAgentFiniteRequestRow)
+            .where(LaunchplaneOrdinaryAgentFiniteRequestRow.request_id == request_id)
+            .execution_options(populate_existing=True)
+            .with_for_update()
+        )
+        if row is None:
+            raise OrdinaryAgentSessionAdmissionDenied("job_unavailable")
+        request = OrdinaryAgentFiniteRequestRecord.model_validate(row.payload)
+        lease_row = next((item for item in leases if item.lease_id == request.lease_id), None)
+        if lease_row is None:
+            raise OrdinaryAgentSessionAdmissionDenied("lease_unavailable")
+        lease = OrdinaryAgentLeaseRecord.model_validate(lease_row.payload)
+        require_ordinary_agent_finite_job_authority(
+            policy=policy,
+            principal=principal,
+            credential=credential,
+            session=record,
+            lease=lease,
+            request=request,
+            now=now,
+        )
+        return request, row, record, lease, now
+
+    @_private_ordinary_agent_operation
+    def reauthorize_ordinary_agent_finite_job(
+        self, *, request_id: str
+    ) -> OrdinaryAgentFiniteRequestRecord:
+        """Internal check only; effect dispatch must reauthorize within its reservation transaction."""
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            request, _, _, _, _ = self._ordinary_agent_job_context(session, request_id=request_id)
+            return request
+
+    @_private_ordinary_agent_operation
+    def refresh_ordinary_agent_finite_job(
+        self,
+        *,
+        request_id: str,
+        expected_binding_revision: int,
+        base_sha: str,
+        pull_requests: tuple[OrdinaryAgentPullRequest, ...],
+    ) -> OrdinaryAgentFiniteRequestRecord:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            request, row, _, _, _ = self._ordinary_agent_job_context(session, request_id=request_id)
+            updated = rebind_ordinary_agent_finite_request(
+                request=request,
+                base_sha=base_sha,
+                pull_requests=pull_requests,
+                expected_binding_revision=expected_binding_revision,
+            )
+            row.payload = self._payload_dict(updated)
+            session.commit()
+            return updated
+
+    @_private_ordinary_agent_operation
+    def cancel_ordinary_agent_session(
+        self, *, proof: OrdinaryAgentTokenProof, session_id: str
+    ) -> OrdinaryAgentSessionRecord:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            _, principal, _, _, now = self._ordinary_agent_session_context(session, proof)
+            record, leases = self._ordinary_agent_session_rows(
+                session, session_id=session_id, principal_id=principal.principal_id
+            )
+            updated = self._cancel_ordinary_agent_session_in_session(
+                session, record=record, leases=leases, now=now
+            )
+            session.commit()
+            return updated
+
+    def _cancel_ordinary_agent_session_in_session(
+        self,
+        session: Any,
+        *,
+        record: OrdinaryAgentSessionRecord,
+        leases: tuple[LaunchplaneOrdinaryAgentLeaseRow, ...],
+        now: int,
+    ) -> OrdinaryAgentSessionRecord:
+        session_id = record.session_id
+        if record.revoked_at is not None:
+            return record
+        updated = record.model_copy(update={"revoked_at": now})
+        row = session.get(LaunchplaneOrdinaryAgentSessionRow, session_id)
+        assert row is not None
+        row.payload = self._payload_dict(updated)
+        for lease_row in leases:
+            lease = OrdinaryAgentLeaseRecord.model_validate(lease_row.payload)
+            lease = lease.model_copy(update={"revoked_at": now, "revision": lease.revision + 1})
+            lease_row.revision, lease_row.payload = lease.revision, self._payload_dict(lease)
+        for job in session.scalars(
+            select(LaunchplaneOrdinaryAgentFiniteRequestRow)
+            .where(LaunchplaneOrdinaryAgentFiniteRequestRow.session_id == session_id)
+            .order_by(LaunchplaneOrdinaryAgentFiniteRequestRow.request_id)
+            .with_for_update()
+        ):
+            request = OrdinaryAgentFiniteRequestRecord.model_validate(job.payload)
+            job.payload = self._payload_dict(
+                cancel_ordinary_agent_finite_request(request=request, now=now)
+            )
+        return updated
+
+    @_private_ordinary_agent_operation
+    def _disconnect_ordinary_agent_principal(
+        self,
+        *,
+        human: LaunchplaneHumanSession,
+        principal_id: str,
+        source_event_id: str,
+    ) -> OrdinaryAgentConnectionView:
+        if not source_event_id or len(source_event_id) > 256:
+            raise OrdinaryAgentSessionAdmissionDenied("invalid_source_event_id")
+        # Preparation derives exact scope only. The mutation below joins actual human
+        # authentication, current policy and principal CAS again in its own transaction.
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            policy, _ = self._lock_ordinary_agent_session_administrator(session, human)
+            self._lock_ordinary_agent_principal(session, principal_id=principal_id)
+            row = session.scalar(
+                select(LaunchplaneOrdinaryAgentPrincipalRow)
+                .where(
+                    LaunchplaneOrdinaryAgentPrincipalRow.principal_id == principal_id,
+                    LaunchplaneOrdinaryAgentPrincipalRow.is_current.is_(True),
+                )
+                .with_for_update()
+            )
+            now = self._ordinary_agent_database_epoch(session)
+            self._require_ordinary_agent_human_current(human, now)
+            if row is None:
+                raise OrdinaryAgentSessionAdmissionDenied("principal_unavailable")
+            principal = OrdinaryAgentPrincipalRecord.model_validate(row.payload)
+            if principal.status == "revoked":
+                return OrdinaryAgentConnectionView(principal_id=principal_id, status="revoked")
+            administrator = self._ordinary_agent_human_binding(policy, human)
+            prestate = OrdinaryAgentPrincipalPreState(
+                record_id=principal.record_id,
+                revision=principal.principal_revision,
+                pre_state_sha256=principal.record_sha256,
+            )
+            request = canonical_json_sha256(
+                {
+                    "action": "disconnect_ordinary_agent",
+                    "principal_id": principal_id,
+                    "source_event_id": source_event_id,
+                    "principal": prestate.model_dump(mode="json"),
+                }
+            )
+            evidence = canonical_json_sha256(
+                {
+                    "administrator": administrator.model_dump(mode="json"),
+                    "human_session_id": human.session_id,
+                    "request_sha256": request,
+                }
+            )
+            # These are audit bindings derived from the actual authenticated request;
+            # the joined human verifier below, never this digest, authorizes revocation.
+            operation_id = f"disconnect:{request}"
+            envelope = OrdinaryAgentRevokePrincipalApplyEnvelope(
+                action="revoke_principal",
+                operation_id=operation_id,
+                principal_id=principal_id,
+                principal=prestate,
+                administrator=administrator,
+                request_sha256=request,
+                evidence_sha256=evidence,
+                approval_sha256=evidence,
+                plan_sha256=request,
+            )
+        result = self.compare_and_apply_ordinary_agent_enrollment(
+            envelope=envelope,
+            mutation=DbOnlyMutationRequest(
+                scope=ORDINARY_AGENT_ENROLLMENT_MUTATION_SCOPE,
+                route_path=ORDINARY_AGENT_ENROLLMENT_MUTATION_ROUTE,
+                idempotency_key=operation_id,
+                request_fingerprint=ordinary_agent_enrollment_envelope_sha256(envelope),
+                lease_owner=f"human-disconnect:{operation_id}",
+                response_status_code=200,
+                response_trace_id=source_event_id,
+                response_payload={},
+            ),
+            _authenticated_disconnect_human=human,
+        )
+        if result.status not in {"written", "replayed"}:
+            raise OrdinaryAgentSessionAdmissionDenied(result.status)
+        return OrdinaryAgentConnectionView(principal_id=principal_id, status="revoked")
+
+    @_private_ordinary_agent_operation
+    def _revoke_human_ordinary_agent_session(
+        self,
+        *,
+        human: LaunchplaneHumanSession,
+        principal_id: str,
+        session_id: str,
+    ) -> OrdinaryAgentSessionOperationView:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            policy, _ = self._lock_ordinary_agent_session_administrator(session, human)
+            self._lock_ordinary_agent_principal(session, principal_id=principal_id)
+            record, leases = self._ordinary_agent_session_rows(
+                session, session_id=session_id, principal_id=principal_id
+            )
+            now = self._ordinary_agent_database_epoch(session)
+            self._require_ordinary_agent_human_current(human, now)
+            self._cancel_ordinary_agent_session_in_session(
+                session, record=record, leases=leases, now=now
+            )
+            row = session.get(
+                LaunchplaneOrdinaryAgentSessionOperationRow,
+                (principal_id, record.delegation.operation_id),
+            )
+            if row is None:
+                raise OrdinaryAgentSessionAdmissionDenied("session_proposal_unavailable")
+            session.flush()
+            view = self._ordinary_agent_operation_view(
+                session, row=row, policy=policy, now=now, human_read=True
+            )
+            session.commit()
+            return view
+
+    @_private_ordinary_agent_operation
+    def _cancel_pending_ordinary_agent_operation(
+        self,
+        *,
+        human: LaunchplaneHumanSession,
+        principal_id: str,
+        operation_id: str,
+    ) -> OrdinaryAgentSessionOperationView:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            policy, _ = self._lock_ordinary_agent_session_administrator(session, human)
+            self._lock_ordinary_agent_principal(session, principal_id=principal_id)
+            row = session.get(
+                LaunchplaneOrdinaryAgentSessionOperationRow,
+                (principal_id, operation_id),
+                with_for_update=True,
+            )
+            if row is None:
+                raise OrdinaryAgentSessionAdmissionDenied("session_proposal_unavailable")
+            now = self._ordinary_agent_database_epoch(session)
+            self._require_ordinary_agent_human_current(human, now)
+            view = self._ordinary_agent_operation_view(
+                session, row=row, policy=policy, now=now, human_read=True
+            )
+            if view.applied:
+                raise OrdinaryAgentSessionAdmissionDenied("operation_already_applied")
+            if row.cancelled_at is None:
+                row.cancelled_at = now
+            view = self._ordinary_agent_operation_view(
+                session, row=row, policy=policy, now=now, human_read=True
+            )
+            session.commit()
+            return view
 
     def _ordinary_agent_database_epoch(self, session: Any) -> int:
         return int(
@@ -19300,6 +20699,7 @@ class PostgresRecordStore(HumanSessionStore):
         credential_id: str,
         credential_version: int,
         credential_digest: str | None = None,
+        evaluated_at: int | None = None,
     ) -> (
         tuple[
             OrdinaryAgentPrincipalRecord,
@@ -19350,7 +20750,7 @@ class PostgresRecordStore(HumanSessionStore):
             )
         except ValueError:
             return None
-        now = self._ordinary_agent_database_epoch(session)
+        now = self._ordinary_agent_database_epoch(session) if evaluated_at is None else evaluated_at
         if not (
             principal.status == principal_row.lifecycle_status == "active"
             and credential.status == credential_row.lifecycle_status == "active"
@@ -19635,6 +21035,9 @@ class PostgresRecordStore(HumanSessionStore):
                             credential_row.lifecycle_status = "revoked"
                             credential_row.record_sha256 = revoked.record_sha256
                             credential_row.payload = self._payload_dict(revoked)
+                            self._retire_ordinary_agent_sessions(
+                                session, principal_id=row.principal_id, now=now
+                            )
                 row.ciphertext = None
                 row.delivery_status = status or "delivery_expired_unclaimed"
                 self._ordinary_agent_delivery_audit(

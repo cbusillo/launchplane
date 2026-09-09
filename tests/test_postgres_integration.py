@@ -7523,3 +7523,150 @@ class RealPostgresFeedbackIntentMintTests(unittest.TestCase):
                     ),
                     1,
                 )
+
+
+class RealPostgresOrdinaryAgentSessionTests(unittest.TestCase):
+    def test_concurrent_admission_charges_one_budget_and_replay_is_free(self) -> None:
+        from tests import test_ordinary_agent_session_storage as session_tests
+        from control_plane.ordinary_agent_session_lifecycle import (
+            OrdinaryAgentSessionAdmissionDenied,
+        )
+
+        with _store_for_fresh_head_database() as store:
+            fixture = session_tests.OrdinaryAgentSessionStorageTests()
+            self.addCleanup(fixture.doCleanups)
+            fixture.prepare_store(store)
+            fixture.enroll()
+            barrier = threading.Barrier(2)
+
+            def admit(number: int) -> str:
+                barrier.wait(timeout=10)
+                request = fixture.request.model_copy(
+                    update={
+                        "request_id": f"request-{number}",
+                        "idempotency_key": f"request-{number}",
+                    }
+                )
+                try:
+                    return store.admit_ordinary_agent_finite_request(
+                        proof=fixture.proof, request=request
+                    ).request_id
+                except OrdinaryAgentSessionAdmissionDenied as error:
+                    return error.reason_code
+
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                outcomes = tuple(pool.map(admit, (1, 2)))
+            self.assertEqual(outcomes.count("budget_exhausted"), 1)
+            winner = next(item for item in outcomes if item != "budget_exhausted")
+            request = fixture.request.model_copy(
+                update={"request_id": winner, "idempotency_key": winner}
+            )
+            self.assertEqual(
+                store.admit_ordinary_agent_finite_request(
+                    proof=fixture.proof, request=request
+                ).request_id,
+                winner,
+            )
+            lease = store.reconnect_ordinary_agent_session(
+                proof=fixture.proof, operation_id=fixture.envelope.operation_id
+            ).leases[0]
+            self.assertEqual(lease.budget.pull_requests_used, 1)
+
+    def test_approval_racing_logout_rechecks_locked_human_session(self) -> None:
+        from tests import test_ordinary_agent_session_storage as session_tests
+        from control_plane.ordinary_agent_session_approval import (
+            approve_existing_ordinary_agent_session,
+        )
+        from control_plane.ordinary_agent_session_lifecycle import (
+            OrdinaryAgentSessionAdmissionDenied,
+        )
+
+        with _store_for_fresh_head_database() as store:
+            fixture = session_tests.OrdinaryAgentSessionStorageTests()
+            self.addCleanup(fixture.doCleanups)
+            fixture.prepare_store(store)
+            fixture.enroll()
+            operation = (
+                store.propose_ordinary_agent_session(
+                    proof=fixture.proof,
+                    operation_id="fresh-session-one",
+                    attenuation=fixture.attenuation,
+                )
+            ).operation_id
+            reached = threading.Event()
+
+            def before_statement(
+                _connection: object, _cursor: object, statement: str, *_: object
+            ) -> None:
+                if "launchplane_human_sessions" in statement and "FOR UPDATE" in statement:
+                    reached.set()
+
+            with store._engine.connect() as blocker:
+                transaction = blocker.begin()
+                blocker.execute(
+                    text(
+                        "SELECT session_id FROM launchplane_human_sessions WHERE session_id=:id FOR UPDATE"
+                    ),
+                    {"id": fixture.human.session_id},
+                )
+                event.listen(store._engine, "before_cursor_execute", before_statement)
+                try:
+                    with ThreadPoolExecutor(max_workers=1) as pool:
+                        pending = pool.submit(
+                            approve_existing_ordinary_agent_session,
+                            store=store,
+                            manager=fixture.manager,
+                            cookie_header=fixture.manager.session_cookie_header(fixture.human),
+                            csrf_token=fixture.manager.csrf_token(fixture.human),
+                            principal_id="agent_one",
+                            operation_id=operation,
+                        )
+                        self.assertTrue(reached.wait(timeout=10))
+                        blocker.execute(
+                            text("DELETE FROM launchplane_human_sessions WHERE session_id=:id"),
+                            {"id": fixture.human.session_id},
+                        )
+                        transaction.commit()
+                        with self.assertRaisesRegex(
+                            OrdinaryAgentSessionAdmissionDenied, "administrator_session_unavailable"
+                        ):
+                            pending.result(timeout=10)
+                finally:
+                    if transaction.is_active:
+                        transaction.rollback()
+                    event.remove(store._engine, "before_cursor_execute", before_statement)
+
+    def test_recovery_scan_supports_bigint_deadlines_and_keyset(self) -> None:
+        from tests import test_ordinary_agent_session_storage as session_tests
+        from control_plane.contracts.ordinary_agent_lifecycle import OrdinaryAgentEnrollmentIntent
+        from control_plane.ordinary_agent_session_approval import approve_ordinary_agent_enrollment
+        from control_plane.service_auth import TerminalAgentIdentity
+
+        with _store_for_fresh_head_database() as store:
+            fixture = session_tests.OrdinaryAgentSessionStorageTests()
+            self.addCleanup(fixture.doCleanups)
+            fixture.prepare_store(store)
+            intent = OrdinaryAgentEnrollmentIntent.from_envelope(fixture.envelope).model_copy(
+                update={
+                    "operation_id": "z-bigint-recovery",
+                    "session_attenuation": None,
+                    "delivery": fixture.envelope.delivery.model_copy(
+                        update={"expires_at": 2**31 + 100}
+                    ),
+                }
+            )
+            store.propose_ordinary_agent_enrollment(
+                intent=intent,
+                requester=TerminalAgentIdentity(subject="test-cli", token_label="test"),
+            )
+            approve_ordinary_agent_enrollment(
+                store=store,
+                manager=fixture.manager,
+                cookie_header=fixture.manager.session_cookie_header(fixture.human),
+                csrf_token=fixture.manager.csrf_token(fixture.human),
+                principal_id=intent.principal_id,
+                operation_id=intent.operation_id,
+            )
+            first = store.list_pending_approved_ordinary_agent_enrollments(limit=1)
+            page = store.list_pending_approved_ordinary_agent_enrollments(after=first[0])
+            self.assertEqual([reference.operation_id for reference in page], [intent.operation_id])
