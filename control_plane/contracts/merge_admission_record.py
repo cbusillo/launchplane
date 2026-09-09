@@ -240,6 +240,14 @@ class MergeAdmissionRecord(BaseModel):
         return self
 
 
+class MergeAdmissionProposal(BaseModel):
+    """Inert evaluated admission; only a guarded store transaction grants authority."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    record: MergeAdmissionRecord
+
+
 class MergeLandingOutcomeRecord(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
