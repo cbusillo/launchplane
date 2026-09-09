@@ -259,6 +259,13 @@ than resetting the ref. It has no ambient provider transport; provider evidence
 and mutations must come through the scoped callbacks and executor. Candidate
 step coverage alone is not proof of landing, stack execution, or worker activation.
 
+The ordinary job status API returns a typed, non-secret view to the current
+ordinary identity for its own work or to a signed, current managed administrator.
+The engineering UI accepts the exact principal/request link and shows waiting,
+partial completion, cancellation and uncertain results without offering a second
+execution action. Recorded effect counts are historical actions, not a forecast
+or percentage of the remaining work. These read routes do not activate dispatch.
+
 ## Validation boundary
 
 Tests use synthetic principals and targets. Canonical JSON round trips and

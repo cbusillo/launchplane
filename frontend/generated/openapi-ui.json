@@ -755,6 +755,69 @@
         ]
       }
     },
+    "/v1/ordinary-agent-jobs/{principal_id}/{request_id}": {
+      "get": {
+        "operationId": "read_human_ordinary_agent_job",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "principal_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[a-z][a-z0-9_-]{2,127}$",
+              "title": "Principal Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "request_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[a-z][a-z0-9_-]{2,127}$",
+              "title": "Request Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrdinaryAgentJobView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Human Read Job",
+        "tags": [
+          "ordinary-agent"
+        ]
+      }
+    },
     "/v1/ordinary-agent-operations/{principal_id}/{operation_id}": {
       "get": {
         "operationId": "read_human_ordinary_agent_operation",
@@ -11790,6 +11853,16 @@
             "title": "Lease Owner",
             "type": "string"
           },
+          "ordinary_job_binding": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OrdinaryAgentJobBinding"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "policy_key": {
             "title": "Policy Key",
             "type": "string"
@@ -11860,6 +11933,7 @@
           "lease_acquired_at",
           "lease_expires_at",
           "lease_owner",
+          "ordinary_job_binding",
           "policy_key",
           "policy_sha256",
           "reconciliation_detail",
@@ -13052,6 +13126,171 @@
           "source_event_id"
         ],
         "title": "OrdinaryAgentDisconnectRequest",
+        "type": "object"
+      },
+      "OrdinaryAgentJobBinding": {
+        "additionalProperties": false,
+        "description": "Immutable attribution of controller history to one finite job revision.",
+        "properties": {
+          "binding_revision": {
+            "maximum": 9223372036854776000,
+            "minimum": 1,
+            "title": "Binding Revision",
+            "type": "integer"
+          },
+          "request_id": {
+            "pattern": "^[a-z][a-z0-9_-]{2,127}$",
+            "title": "Request Id",
+            "type": "string"
+          },
+          "scope_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Scope Sha256",
+            "type": "string"
+          }
+        },
+        "required": [
+          "binding_revision",
+          "request_id",
+          "scope_sha256"
+        ],
+        "title": "OrdinaryAgentJobBinding",
+        "type": "object"
+      },
+      "OrdinaryAgentJobView": {
+        "additionalProperties": false,
+        "properties": {
+          "cancellation_requested": {
+            "default": false,
+            "title": "Cancellation Requested",
+            "type": "boolean"
+          },
+          "completed_effects": {
+            "minimum": 0,
+            "title": "Completed Effects",
+            "type": "integer"
+          },
+          "continuation_expires_at": {
+            "anyOf": [
+              {
+                "maximum": 9223372036854776000,
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Continuation Expires At"
+          },
+          "expires_at": {
+            "maximum": 9223372036854776000,
+            "minimum": 0,
+            "title": "Expires At",
+            "type": "integer"
+          },
+          "next_due_at": {
+            "anyOf": [
+              {
+                "maximum": 9223372036854776000,
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Due At"
+          },
+          "principal_id": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Principal Id",
+            "type": "string"
+          },
+          "pull_request_numbers": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Pull Request Numbers",
+            "type": "array"
+          },
+          "reason_code": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason Code"
+          },
+          "request_id": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Request Id",
+            "type": "string"
+          },
+          "schema_version": {
+            "const": 1,
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "session_id": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Session Id",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "pending",
+              "running",
+              "waiting",
+              "blocked",
+              "cancelled",
+              "partially_completed",
+              "completed",
+              "reconciliation_required"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "target": {
+            "$ref": "#/components/schemas/OrdinaryAgentTarget"
+          },
+          "total_effects": {
+            "minimum": 0,
+            "title": "Total Effects",
+            "type": "integer"
+          },
+          "unresolved_effects": {
+            "minimum": 0,
+            "title": "Unresolved Effects",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "cancellation_requested",
+          "completed_effects",
+          "continuation_expires_at",
+          "expires_at",
+          "next_due_at",
+          "principal_id",
+          "pull_request_numbers",
+          "reason_code",
+          "request_id",
+          "schema_version",
+          "session_id",
+          "status",
+          "target",
+          "total_effects",
+          "unresolved_effects"
+        ],
+        "title": "OrdinaryAgentJobView",
         "type": "object"
       },
       "OrdinaryAgentOperationClientResponse": {
