@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from uuid import uuid4
+
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
@@ -36,7 +38,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB, insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Engine, make_url
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 from sqlalchemy.pool import NullPool
 
@@ -111,11 +113,17 @@ from control_plane.contracts.engineering_review_decision import (
     EngineeringReviewDecisionRecord,
 )
 from control_plane.contracts.every_code_pr_feedback_record import EveryCodePrFeedbackRecord
+from control_plane.every_code_feedback_authorization import resolve_every_code_feedback_resume_actor
+from control_plane.every_code_feedback_resume_intent import (
+    EveryCodeFeedbackIntentMintResult,
+    decide_every_code_feedback_resume_intent,
+)
 from control_plane.contracts.every_code_feedback_resume import (
     EveryCodeFeedbackAcceptanceRecord,
     EveryCodeFeedbackHandoffReceiptRecord,
     EveryCodeFeedbackRecoveryDispositionRecord,
     EveryCodeFeedbackResumeIntentRecord,
+    EveryCodeFeedbackPullRequestOpenObservation,
     EveryCodeFeedbackResumeOperationRecord,
     EveryCodeFeedbackStartupReceiptRecord,
     EveryCodeLinkedPullRequestClosureRecord,
@@ -3618,6 +3626,13 @@ class LaunchplaneEveryCodeFeedbackResumeIntentRow(Base):
         ),
         UniqueConstraint(
             "intent_digest", name="launchplane_every_code_feedback_resume_intent_digest_uidx"
+        ),
+        Index(
+            "launchplane_every_code_feedback_resume_intent_snapshot_uidx",
+            "acceptance_id",
+            "expected_lifecycle_id",
+            "expected_fencing_token",
+            unique=True,
         ),
         Index(
             "launchplane_every_code_feedback_resume_intent_request_idx",
@@ -15063,10 +15078,220 @@ class PostgresRecordStore(HumanSessionStore):
             session.commit()
             return record
 
-    def write_every_code_feedback_resume_intent_record(
+    def mint_every_code_feedback_resume_intent(
+        self,
+        *,
+        acceptance_id: str,
+        open_observation: EveryCodeFeedbackPullRequestOpenObservation | None,
+    ) -> EveryCodeFeedbackIntentMintResult:
+        """Mint evidence only, with post-lock DB time and current exact authority.
+
+        Provider reads must finish before this call. The observation is supplied
+        by trusted service code, never by an HTTP request schema. A replay does
+        not prove current GitHub state or authorize execution.
+        """
+        if open_observation is not None:
+            open_observation = EveryCodeFeedbackPullRequestOpenObservation.model_validate(
+                open_observation.model_dump()
+            )
+        hint = self.read_every_code_feedback_acceptance_record(acceptance_id)
+        if hint is None:
+            return EveryCodeFeedbackIntentMintResult("missing")
+        try:
+            with self._session_factory() as session:
+                self._begin_serialized_write(session)
+                if not self.database_url.startswith("sqlite"):
+                    session.execute(text("SET LOCAL lock_timeout = '5s'"))
+                    session.execute(text("SET LOCAL statement_timeout = '15s'"))
+                self._lock_active_authz_policy(session)
+                policies = tuple(
+                    session.scalars(
+                        select(LaunchplaneAuthzPolicyRow)
+                        .where(LaunchplaneAuthzPolicyRow.status == "active")
+                        .with_for_update()
+                    )
+                )
+                if len(policies) != 1:
+                    return EveryCodeFeedbackIntentMintResult("authority_denied")
+                policy = self._read_authz_policy_row(policies[0])
+                request_row = session.scalar(
+                    select(LaunchplaneEveryCodeWorkRequestRow)
+                    .where(LaunchplaneEveryCodeWorkRequestRow.request_id == hint.request_id)
+                    .with_for_update()
+                )
+                if request_row is None:
+                    return EveryCodeFeedbackIntentMintResult("missing")
+                request = EveryCodeWorkRequestRecord.model_validate(request_row.payload)
+                # The request lock also serializes closure insertion and revision
+                # acceptance. An absent closure row alone has no lockable object.
+                closed = (
+                    session.scalar(
+                        select(LaunchplaneEveryCodePullRequestClosureRow.closure_id)
+                        .where(
+                            LaunchplaneEveryCodePullRequestClosureRow.request_id
+                            == request.request_id
+                        )
+                        .limit(1)
+                    )
+                    is not None
+                )
+                acceptance_row = session.scalar(
+                    select(LaunchplaneEveryCodeFeedbackAcceptanceRow)
+                    .where(LaunchplaneEveryCodeFeedbackAcceptanceRow.acceptance_id == acceptance_id)
+                    .with_for_update()
+                )
+                if acceptance_row is None:
+                    return EveryCodeFeedbackIntentMintResult("missing")
+                acceptance = EveryCodeFeedbackAcceptanceRecord.model_validate(
+                    acceptance_row.payload
+                )
+                revision = acceptance.revision
+                current_row = session.scalar(
+                    select(LaunchplaneEveryCodeFeedbackAcceptanceRow)
+                    .where(
+                        LaunchplaneEveryCodeFeedbackAcceptanceRow.repository_id
+                        == revision.repository_id,
+                        LaunchplaneEveryCodeFeedbackAcceptanceRow.feedback_kind
+                        == revision.feedback_kind,
+                        LaunchplaneEveryCodeFeedbackAcceptanceRow.feedback_object_id
+                        == str(revision.object_id),
+                    )
+                    .order_by(LaunchplaneEveryCodeFeedbackAcceptanceRow.provider_updated_at.desc())
+                    .limit(1)
+                    .with_for_update()
+                )
+                if current_row is None:
+                    return EveryCodeFeedbackIntentMintResult("missing")
+                current = EveryCodeFeedbackAcceptanceRecord.model_validate(current_row.payload)
+                intent_query = (
+                    select(LaunchplaneEveryCodeFeedbackResumeIntentRow)
+                    .where(
+                        LaunchplaneEveryCodeFeedbackResumeIntentRow.acceptance_id == acceptance_id,
+                        LaunchplaneEveryCodeFeedbackResumeIntentRow.expected_lifecycle_id
+                        == request.lifecycle_id,
+                        LaunchplaneEveryCodeFeedbackResumeIntentRow.expected_fencing_token
+                        == request.fencing_token,
+                    )
+                    .with_for_update()
+                )
+                existing_row = session.scalar(intent_query)
+                existing = (
+                    EveryCodeFeedbackResumeIntentRecord.model_validate(existing_row.payload)
+                    if existing_row is not None
+                    else None
+                )
+                provenance = resolve_every_code_feedback_resume_actor(
+                    policy_record=policy,
+                    github_id=revision.actor_github_id,
+                    repository_id=revision.repository_id,
+                )
+                # clock_timestamp(), not transaction start time; waits consume
+                # freshness and expiry budgets. No time supplied by the caller.
+                if self.database_url.startswith("sqlite"):
+                    now = (
+                        parse_every_code_feedback_timestamp(
+                            self._database_mutation_timestamp(session)
+                        )
+                        .isoformat(timespec="microseconds")
+                        .replace("+00:00", "Z")
+                    )
+                else:
+                    # The generic mutation formatter truncates fractional seconds.
+                    # Preserve them here so the 30-second bound is exact.
+                    clock_value = session.scalar(select(func.clock_timestamp()))
+                    if not isinstance(clock_value, datetime) or clock_value.tzinfo is None:
+                        raise ValueError("database clock must return an aware timestamp")
+                    now = (
+                        clock_value.astimezone(timezone.utc)
+                        .isoformat(timespec="microseconds")
+                        .replace("+00:00", "Z")
+                    )
+                decision = decide_every_code_feedback_resume_intent(
+                    acceptance=acceptance,
+                    request=request,
+                    current_acceptance=current,
+                    closure_present=closed,
+                    open_observation=open_observation,
+                    current_policy_provenance=provenance,
+                    database_now=now,
+                    existing_intent=existing,
+                )
+                if decision.status != "mint":
+                    return decision
+                if provenance is None or open_observation is None:
+                    raise ValueError("mint decision lacks verified issuance evidence")
+                record = EveryCodeFeedbackResumeIntentRecord(
+                    schema_version=2,
+                    intent_id=str(uuid4()),
+                    request_id=request.request_id,
+                    acceptance_id=acceptance.acceptance_id,
+                    acceptance_digest=acceptance.acceptance_digest,
+                    expected_lifecycle_id=request.lifecycle_id,
+                    expected_terminal_state=cast(Literal["done", "blocked"], request.state),
+                    expected_fencing_token=request.fencing_token,
+                    retained_host=request.claimed_by_host,
+                    retained_pull_request_url=request.result_pr_url,
+                    issued_at=now,
+                    eligible_until=acceptance.eligible_until,
+                    worker_idempotency_key=str(uuid4()),
+                    issuance_policy=provenance,
+                    open_observation=open_observation,
+                )
+                try:
+                    with session.begin_nested():
+                        session.add(self._feedback_resume_intent_row(record))
+                        session.flush()
+                except IntegrityError as error:
+                    # Composite uniqueness is a backstop; retain the request and
+                    # policy locks while resolving a competing immutable record.
+                    replay_row = session.scalar(
+                        intent_query.execution_options(populate_existing=True)
+                    )
+                    if replay_row is None:
+                        raise EveryCodeFeedbackResumeStorageConflictError(
+                            "resume intent identity conflicts outside terminal snapshot"
+                        ) from error
+                    replay = EveryCodeFeedbackResumeIntentRecord.model_validate(replay_row.payload)
+                    return decide_every_code_feedback_resume_intent(
+                        acceptance=acceptance,
+                        request=request,
+                        current_acceptance=current,
+                        closure_present=closed,
+                        open_observation=None,
+                        current_policy_provenance=provenance,
+                        database_now=now,
+                        existing_intent=replay,
+                    )
+                session.commit()
+                return EveryCodeFeedbackIntentMintResult("mint", record)
+        except DBAPIError as error:
+            if getattr(error.orig, "sqlstate", None) in {"55P03", "57014"}:
+                return EveryCodeFeedbackIntentMintResult("contention")
+            raise
+
+    @classmethod
+    def _feedback_resume_intent_row(
+        cls, record: EveryCodeFeedbackResumeIntentRecord
+    ) -> LaunchplaneEveryCodeFeedbackResumeIntentRow:
+        return LaunchplaneEveryCodeFeedbackResumeIntentRow(
+            intent_id=record.intent_id,
+            request_id=record.request_id,
+            acceptance_id=record.acceptance_id,
+            expected_lifecycle_id=record.expected_lifecycle_id,
+            expected_fencing_token=record.expected_fencing_token,
+            intent_digest=record.intent_digest,
+            issued_at=record.issued_at,
+            eligible_until=record.eligible_until,
+            status="pending",
+            payload=cls._payload_dict(record),
+        )
+
+    def _write_every_code_feedback_resume_intent_fixture_record(
         self, record: EveryCodeFeedbackResumeIntentRecord
     ) -> None:
         record = EveryCodeFeedbackResumeIntentRecord.model_validate(record.model_dump())
+        if record.schema_version != 1:
+            raise ValueError("fixture writer cannot create verified v2 intents")
         acceptance = self.read_every_code_feedback_acceptance_record(record.acceptance_id)
         if acceptance is None:
             raise ValueError("resume intent acceptance does not exist")
@@ -15074,6 +15299,7 @@ class PostgresRecordStore(HumanSessionStore):
             acceptance.request_id != record.request_id
             or acceptance.acceptance_digest != record.acceptance_digest
             or acceptance.eligible_until != record.eligible_until
+            or acceptance.retained_pull_request_url != record.retained_pull_request_url
         ):
             raise ValueError("resume intent does not match immutable acceptance binding")
         self._insert_immutable_resume_row(
@@ -15108,6 +15334,7 @@ class PostgresRecordStore(HumanSessionStore):
             intent.acceptance_id != record.acceptance_id
             or intent.request_id != binding.request_id
             or acceptance.request_id != binding.request_id
+            or binding.host != intent.retained_host
             or record.execution_policy.instance
             != f"github-repository:{acceptance.revision.repository_id}"
         ):
