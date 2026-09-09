@@ -16,7 +16,14 @@ ORDINARY_AGENT_ENROLLMENT_PROPOSE_ACTION = "ordinary_agent_enrollment.propose"
 
 class OrdinaryAgentEnrollmentClientRequest(StrictFrozenModel):
     descriptor_id: Literal["ordinary-agent-enrollment"] = "ordinary-agent-enrollment"
-    operation_id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{2,127}$")
+    operation_id: str = Field(
+        pattern=r"^[a-z0-9][a-z0-9._-]{2,127}$",
+        description=(
+            "Client retry key scoped to the requested principal. Launchplane returns its "
+            "canonical operation ID for review, status and private delivery. Repeating the "
+            "exact proposal recovers that operation without preparing another credential."
+        ),
+    )
     action: Literal["enroll", "rotate_credential"]
     principal_id: str = Field(pattern=r"^[a-z][a-z0-9_-]{2,127}$")
     target: OrdinaryAgentTarget

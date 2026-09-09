@@ -38,8 +38,9 @@ after v3 activation.
 
 The earlier dormant enrollment request/review API remains a compatibility
 surface. The new compiled client requests use the persisted enrollment domain
-instead. Its authoritative lifecycle store is reachable only through the
-service-owned approved-operation worker and the signed administrator controls.
+instead. Clients may propose, read their own operation, and cancel their own
+issued session; no client route can approve or apply enrollment. Signed
+administrator controls approve, and the service-owned worker applies enrollment.
 Its internal apply envelope separates an agent-to-Launchplane authentication
 credential candidate from Launchplane-held provider App custody. The first
 contains a service-derived authentication digest and no bearer value. The second
@@ -442,6 +443,14 @@ receipt.
 
 ## Private client HTTP delivery
 
+An initial proposal's client `operation_id` is a retry key scoped to its principal.
+The service derives a globally scoped enrollment ID from that pair and returns
+it for review, status and private delivery. Clients retain the original request
+and retry it unchanged if the response was lost: exact authenticated replay
+returns the committed operation before provider inspection or credential
+preparation, including after apply or expiry. A changed request using the same
+key is rejected. No client must compute a hash or search for an operation.
+
 `POST /v1/agent/ordinary-agent-enrollments/{operation_id}/claim` accepts the
 receiver capability in the Authorization header using the Bearer scheme. This
 route does not run legacy terminal, operator, human-cookie, or Actions identity
@@ -458,6 +467,10 @@ privately before reporting redacted readiness, reject authorization redirects,
 and reuse the same operation/receiver proof for delivery retries. Request logging,
 tracing, ingress rate limits, installed private client support and qualification
 of the deployed cleanup/worker image remain activation prerequisites.
+Run schema adoption through the session migration before starting the new worker
+image. Its startup probe requires the enrollment, delivery, session and inventory
+relations; a worker started against older schema refuses all privileged polls
+until schema adoption completes.
 The route creates no principal, session, policy, or grant on its own.
 
 An exact operation review link can include `operation_id` on the existing

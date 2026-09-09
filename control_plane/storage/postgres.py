@@ -20097,6 +20097,23 @@ class PostgresRecordStore(HumanSessionStore):
         operation_id: str,
     ) -> OrdinaryAgentSessionOperationView:
         """Authenticated terminal ingress may read only its original proposed connection."""
+        view = self.replay_proposed_ordinary_agent_enrollment(
+            requester=requester, principal_id=principal_id, operation_id=operation_id
+        )
+        if view is None:
+            raise OrdinaryAgentSessionAdmissionDenied("session_proposal_unavailable")
+        return view
+
+    @_private_ordinary_agent_operation
+    def replay_proposed_ordinary_agent_enrollment(
+        self,
+        *,
+        requester: TerminalAgentIdentity,
+        principal_id: str,
+        operation_id: str,
+        request_sha256: str | None = None,
+    ) -> OrdinaryAgentSessionOperationView | None:
+        """Recover an exact authenticated proposal without regenerating its prepared scope."""
         with self._session_factory() as session:
             self._begin_serialized_write(session)
             self._lock_active_authz_policy(session)
@@ -20113,13 +20130,19 @@ class PostgresRecordStore(HumanSessionStore):
             row = session.get(
                 LaunchplaneOrdinaryAgentSessionOperationRow, (principal_id, operation_id)
             )
+            if row is None:
+                return None
             if (
-                row is None
-                or row.kind != "initial"
+                row.kind != "initial"
                 or row.payload.get("requester_subject") != requester.subject
                 or row.payload.get("requester_token_label") != requester.token_label
             ):
                 raise OrdinaryAgentSessionAdmissionDenied("session_proposal_unavailable")
+            if (
+                request_sha256 is not None
+                and self._ordinary_agent_initial_intent(row).request_sha256 != request_sha256
+            ):
+                raise OrdinaryAgentSessionAdmissionDenied("idempotency_conflict")
             return self._ordinary_agent_operation_view(
                 session,
                 row=row,

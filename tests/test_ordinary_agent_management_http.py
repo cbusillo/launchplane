@@ -201,6 +201,15 @@ class OrdinaryAgentManagementHTTPTests(unittest.IsolatedAsyncioTestCase):
                 updated_at=original.updated_at,
                 policy=original.policy.model_copy(
                     update={
+                        "ordinary_agents": (
+                            *original.policy.ordinary_agents,
+                            original.policy.ordinary_agents[0].model_copy(
+                                update={
+                                    "principal_id": "agent_two",
+                                    "managed_rule_id": "agent_two.launchplane.main",
+                                }
+                            ),
+                        ),
                         "terminal_agents": (
                             TerminalAgentPolicyRule(
                                 managed_set_id="terminal-client",
@@ -211,7 +220,7 @@ class OrdinaryAgentManagementHTTPTests(unittest.IsolatedAsyncioTestCase):
                                 contexts=("launchplane",),
                                 actions=(ORDINARY_AGENT_ENROLLMENT_PROPOSE_ACTION,),
                             ),
-                        )
+                        ),
                     }
                 ),
             )
@@ -223,6 +232,18 @@ class OrdinaryAgentManagementHTTPTests(unittest.IsolatedAsyncioTestCase):
             scope = PreparedOrdinaryAgentEnrollmentScope(
                 policy=fixture.policy,
                 custody=fixture.custody,
+                principal=None,
+                credential_id=None,
+                credential_version=None,
+            )
+            second_binding = scope.policy.model_copy(
+                update={"managed_rule_id": "agent_two.launchplane.main"}
+            )
+            second_scope = PreparedOrdinaryAgentEnrollmentScope(
+                policy=second_binding,
+                custody=scope.custody.model_copy(
+                    update={"principal_id": "agent_two", "policy": second_binding}
+                ),
                 principal=None,
                 credential_id=None,
                 credential_version=None,
@@ -253,7 +274,9 @@ class OrdinaryAgentManagementHTTPTests(unittest.IsolatedAsyncioTestCase):
             }
             with patch(
                 "control_plane.ordinary_agent_enrollment_preparation.prepare_ordinary_agent_enrollment_scope",
-                return_value=scope,
+                side_effect=lambda **kwargs: (
+                    scope if kwargs["principal_id"] == "agent_one" else second_scope
+                ),
             ) as prepare:
                 async with lifespan_client(app) as client:
                     path = "/v1/agent/ordinary-agent-enrollments"
@@ -291,3 +314,120 @@ class OrdinaryAgentManagementHTTPTests(unittest.IsolatedAsyncioTestCase):
                         json=request,
                     )
                     self.assertEqual(replay.json(), accepted.json())
+                    self.assertEqual(prepare.call_count, 1)
+                    conflicting = await client.post(
+                        path,
+                        headers={"Authorization": "Bearer terminal-client-private"},
+                        json={
+                            **request,
+                            "credential_expires_at": fixture.authentication_credential.expires_at
+                            + 1,
+                        },
+                    )
+                    self.assertEqual(conflicting.status_code, 403)
+                    self.assertEqual(prepare.call_count, 1)
+                    second = await client.post(
+                        path,
+                        headers={"Authorization": "Bearer terminal-client-private"},
+                        json={**request, "principal_id": "agent_two"},
+                    )
+                    self.assertEqual(second.status_code, 200, second.text)
+                    first_operation = accepted.json()["operation"]["operation_id"]
+                    second_operation = second.json()["operation"]["operation_id"]
+                    self.assertNotEqual(first_operation, second_operation)
+                    manager = HumanSessionManager(
+                        config=GitHubOAuthConfig(
+                            client_id="test",
+                            client_secret="test",
+                            public_url="https://example.test",
+                            session_secret="test-session-secret",
+                        ),
+                        session_store=store,
+                    )
+                    human = manager.issue(
+                        GitHubHumanIdentity(
+                            login="test-admin",
+                            github_id=ADMIN_GITHUB_ID,
+                            name="Test",
+                            email="test@example.test",
+                            organizations=frozenset(),
+                            teams=frozenset(),
+                            role="admin",
+                        )
+                    )
+                    bundles = {}
+                    for principal_id, operation_id in (
+                        ("agent_one", first_operation),
+                        ("agent_two", second_operation),
+                    ):
+                        approved = approve_ordinary_agent_enrollment(
+                            store=store,
+                            manager=manager,
+                            cookie_header=manager.session_cookie_header(human),
+                            csrf_token=manager.csrf_token(human),
+                            principal_id=principal_id,
+                            operation_id=operation_id,
+                        )
+                        bundles[principal_id] = prepare_approved_test_issuance(approved)[1]
+                    with patch(
+                        "control_plane.ordinary_agent_enrollment_worker.issue_ordinary_agent_credential",
+                        side_effect=lambda **kwargs: bundles[kwargs["principal_id"]],
+                    ):
+                        recovered = recover_ordinary_agent_enrollments_once(
+                            record_store=store,
+                            state=OrdinaryAgentEnrollmentRecoveryState(),
+                            lease_owner="two-principal-worker",
+                            limit=20,
+                        )
+                    self.assertEqual(recovered.applied, 2)
+                    self.assertEqual(recovered.failed, 0)
+                    for principal_id in bundles:
+                        self.assertIsNotNone(
+                            store.read_current_ordinary_agent_principal(principal_id=principal_id)
+                        )
+                    prepare.reset_mock()
+                    after_apply = await client.post(
+                        path,
+                        headers={"Authorization": "Bearer terminal-client-private"},
+                        json=request,
+                    )
+                    self.assertEqual(after_apply.status_code, 200, after_apply.text)
+                    self.assertTrue(after_apply.json()["operation"]["applied"])
+                    self.assertEqual(
+                        after_apply.json()["operation"]["operation_id"], first_operation
+                    )
+                    prepare.assert_not_called()
+                    # A concurrent winner can commit after the early read;
+                    # newly inspected evidence must not replace its intent.
+                    original_replay = store.replay_proposed_ordinary_agent_enrollment
+                    prepare.side_effect = None
+                    prepare.return_value = PreparedOrdinaryAgentEnrollmentScope(
+                        policy=scope.policy,
+                        custody=scope.custody.model_copy(
+                            update={"provider_inspection_sha256": "9" * 64}
+                        ),
+                        principal=None,
+                        credential_id=None,
+                        credential_version=None,
+                    )
+                    with patch.object(
+                        store,
+                        "replay_proposed_ordinary_agent_enrollment",
+                        side_effect=[
+                            None,
+                            original_replay(
+                                requester=TerminalAgentIdentity(
+                                    subject="cli-client", token_label="client"
+                                ),
+                                principal_id="agent_one",
+                                operation_id=first_operation,
+                            ),
+                        ],
+                    ):
+                        raced = await client.post(
+                            path,
+                            headers={"Authorization": "Bearer terminal-client-private"},
+                            json=request,
+                        )
+                    self.assertEqual(raced.status_code, 200, raced.text)
+                    self.assertEqual(raced.json(), after_apply.json())

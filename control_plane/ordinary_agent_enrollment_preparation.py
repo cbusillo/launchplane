@@ -37,6 +37,19 @@ class PreparedOrdinaryAgentEnrollmentScope:
     credential_version: int | None
 
 
+def ordinary_agent_client_enrollment_operation_id(
+    *, principal_id: str, request_operation_id: str
+) -> str:
+    """Scope a client retry key to one principal in the global issuer namespace."""
+    return "enrollment-" + canonical_json_sha256(
+        {
+            "domain": "ordinary-agent-client-enrollment-v1",
+            "principal_id": principal_id,
+            "request_operation_id": request_operation_id,
+        }
+    )
+
+
 def prepare_ordinary_agent_enrollment_scope(
     *,
     store: PostgresRecordStore,
@@ -184,7 +197,9 @@ def prepare_ordinary_agent_enrollment_intent(
     )
     return OrdinaryAgentEnrollmentIntent(
         action=request.action,
-        operation_id=request.operation_id,
+        operation_id=ordinary_agent_client_enrollment_operation_id(
+            principal_id=request.principal_id, request_operation_id=request.operation_id
+        ),
         principal_id=request.principal_id,
         request_sha256=request_sha256,
         evidence_sha256=evidence_sha256,

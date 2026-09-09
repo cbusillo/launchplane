@@ -1241,7 +1241,11 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
         self.assertIn("privileged_operation_worker_threshold_exit", str(telemetry))
         self.assertNotIn("privileged_operation_worker_poll_succeeded", str(telemetry))
 
-    def test_delivery_cleanup_failure_does_not_stop_privileged_polls(self) -> None:
+    def test_ordinary_maintenance_failures_do_not_stop_privileged_polls(self) -> None:
+        from control_plane.ordinary_agent_enrollment_worker import (
+            OrdinaryAgentEnrollmentRecoveryResult,
+        )
+
         class TestStopEvent:
             waits = 0
 
@@ -1272,6 +1276,10 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
             ),
             patch("control_plane.cli_service.signal.signal", return_value=object()),
             patch("control_plane.cli_service.time.monotonic", side_effect=[10.0, 11.0]),
+            patch(
+                "control_plane.cli_service.recover_ordinary_agent_enrollments_once",
+                return_value=OrdinaryAgentEnrollmentRecoveryResult(failed=1),
+            ) as recover_once,
         ):
             result = runner.invoke(
                 main,
@@ -1292,6 +1300,11 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
 
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertEqual(execute_once.call_count, 2)
+        self.assertEqual(recover_once.call_count, 2)
+        self.assertIs(
+            recover_once.call_args_list[0].kwargs["state"],
+            recover_once.call_args_list[1].kwargs["state"],
+        )
         self.assertEqual(len(store.heartbeat_records), 2)
         self.assertNotIn("private delivery ciphertext", result.output)
         telemetry = [
@@ -1302,6 +1315,14 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
             for entry in telemetry
             if entry["event"] == "ordinary_agent_delivery_cleanup_failed"
         ]
+        self.assertEqual(
+            [
+                entry["failed"]
+                for entry in telemetry
+                if entry["event"] == "ordinary_agent_enrollment_recovery"
+            ],
+            [1, 1],
+        )
         self.assertEqual(
             cleanup_failures,
             [

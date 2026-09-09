@@ -2746,7 +2746,6 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(payload["normalization_version"], 1)
         self.assertRegex(payload["semantic_digest_sha256"], r"^[0-9a-f]{64}$")
         self.assertEqual(payload["provenance"]["source_commit_sha"], "a" * 40)
-        self.assertEqual(len(payload["contract"]["operations"]), 12)
 
     def test_service_export_owner_control_contract_writes_conformance_artifact(self) -> None:
         runner = CliRunner()

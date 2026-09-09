@@ -18286,6 +18286,7 @@
             "type": "integer"
           },
           "operation_id": {
+            "description": "Client retry key scoped to the requested principal. Launchplane returns its canonical operation ID for review, status and private delivery. Repeating the exact proposal recovers that operation without preparing another credential.",
             "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$",
             "title": "Operation Id",
             "type": "string"

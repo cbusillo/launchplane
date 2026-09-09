@@ -10,6 +10,7 @@ from urllib.parse import urlencode
 from fastapi import Depends, HTTPException, Path, Request
 
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
+from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.ordinary_agent_client import (
     ORDINARY_AGENT_ENROLLMENT_PROPOSE_ACTION,
     OrdinaryAgentDisconnectRequest,
@@ -27,6 +28,7 @@ from control_plane.ordinary_agent_authentication import (
     parse_ordinary_agent_token,
 )
 from control_plane.ordinary_agent_enrollment_preparation import (
+    ordinary_agent_client_enrollment_operation_id,
     prepare_ordinary_agent_enrollment_intent,
 )
 from control_plane.ordinary_agent_session_approval import (
@@ -174,13 +176,40 @@ def register_ordinary_agent_management_routes(
         store: Annotated[PostgresRecordStore, Depends(get_record_store)],
     ) -> OrdinaryAgentOperationClientResponse:
         with _operation_errors():
+            existing = store.replay_proposed_ordinary_agent_enrollment(
+                requester=requester,
+                principal_id=envelope.principal_id,
+                operation_id=ordinary_agent_client_enrollment_operation_id(
+                    principal_id=envelope.principal_id,
+                    request_operation_id=envelope.operation_id,
+                ),
+                request_sha256=canonical_json_sha256(envelope.model_dump(mode="json")),
+            )
+            if existing is not None:
+                return _client_response(existing)
             policy = LaunchplaneAuthzPolicyRecord.model_validate(
                 dependencies.policy_record_reader()
             )
             intent = prepare_ordinary_agent_enrollment_intent(
                 store=store, policy_record=policy, request=envelope, now=int(time())
             )
-            store.propose_ordinary_agent_enrollment(intent=intent, requester=requester)
+            try:
+                store.propose_ordinary_agent_enrollment(intent=intent, requester=requester)
+            except OrdinaryAgentSessionAdmissionDenied as exc:
+                if exc.reason_code != "idempotency_conflict":
+                    raise
+                # A concurrent identical request may have committed different
+                # fresh inspection evidence. Recover only its exact original
+                # client intent; never replace the winner's prepared scope.
+                winner = store.replay_proposed_ordinary_agent_enrollment(
+                    requester=requester,
+                    principal_id=intent.principal_id,
+                    operation_id=intent.operation_id,
+                    request_sha256=intent.request_sha256,
+                )
+                if winner is None:
+                    raise
+                return _client_response(winner)
             return _client_response(
                 store.read_proposed_ordinary_agent_enrollment(
                     requester=requester,
