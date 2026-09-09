@@ -58,7 +58,6 @@ from control_plane.merge_train_batch_landing import (
 )
 from control_plane.merge_train_github import (
     GitHubMergeTrainClient,
-    GitHubMergeTrainSnapshotReader,
     MergeTrainGitHubError,
     MergeTrainGitHubStaleHeadError,
     MergeTrainGitHubTransport,
@@ -1318,6 +1317,7 @@ def _advance_active_candidate_record(
                 },
             )
         reflow_result = try_reflow_failed_merge_train_candidate(
+            github_client=github_client,
             candidate_store=candidate_store,
             active_candidate_record=active_candidate_record,
             policy=policy,
@@ -1520,7 +1520,7 @@ def _advance_passed_candidate_record(
             "merge_train_batch_landing_plan_record_id": completed_landing_record.record_id,
             "landing_plan": completed_landing_record.landing_plan.model_dump(mode="json"),
         }
-    snapshot = GitHubMergeTrainSnapshotReader(transport=transport).read_merge_train_snapshot(
+    snapshot = github_client.read_merge_train_snapshot(
         repository=request.repository,
         base_branch=request.base_branch,
     )
@@ -1657,6 +1657,7 @@ def _advance_without_candidate_record(
     )
     if waiting_collapse_record is not None:
         waiting_result = _advance_waiting_stack_collapse_record(
+            github_client=github_client,
             request=request,
             policy=policy,
             policy_sha256=policy_sha256,
@@ -1700,6 +1701,7 @@ def _advance_without_candidate_record(
             return planned_result
 
     return _advance_from_live_snapshot(
+        github_client=github_client,
         request=request,
         policy=policy,
         policy_sha256=policy_sha256,
@@ -1719,6 +1721,7 @@ def _advance_waiting_stack_collapse_record(
     policy_sha256: str,
     repository_policy: MergeTrainRepositoryPolicy,
     transport: MergeTrainGitHubTransport,
+    github_client: GitHubMergeTrainClient,
     candidate_store: MergeTrainBatchCandidateRecordStore,
     stack_collapse_store: MergeTrainStackCollapsePlanRecordStore,
     waiting_collapse_record: MergeTrainStackCollapsePlanRecord,
@@ -1726,7 +1729,7 @@ def _advance_waiting_stack_collapse_record(
     recorded_at: str,
     lease: MergeTrainControllerLeaseContext,
 ) -> dict[str, object] | None:
-    snapshot = GitHubMergeTrainSnapshotReader(transport=transport).read_merge_train_snapshot(
+    snapshot = github_client.read_merge_train_snapshot(
         repository=request.repository,
         base_branch=request.base_branch,
     )
@@ -1841,7 +1844,7 @@ def _advance_planned_stack_collapse_record(
     recorded_at: str,
     lease: MergeTrainControllerLeaseContext,
 ) -> dict[str, object] | None:
-    snapshot = GitHubMergeTrainSnapshotReader(transport=transport).read_merge_train_snapshot(
+    snapshot = github_client.read_merge_train_snapshot(
         repository=request.repository,
         base_branch=request.base_branch,
     )
@@ -1977,13 +1980,14 @@ def _advance_from_live_snapshot(
     policy: MergeTrainPolicy,
     policy_sha256: str,
     transport: MergeTrainGitHubTransport,
+    github_client: GitHubMergeTrainClient,
     candidate_store: MergeTrainBatchCandidateRecordStore,
     stack_collapse_store: MergeTrainStackCollapsePlanRecordStore,
     trace_id: str,
     recorded_at: str,
     lease: MergeTrainControllerLeaseContext,
 ) -> dict[str, object]:
-    snapshot = GitHubMergeTrainSnapshotReader(transport=transport).read_merge_train_snapshot(
+    snapshot = github_client.read_merge_train_snapshot(
         repository=request.repository,
         base_branch=request.base_branch,
     )
@@ -2137,6 +2141,7 @@ def try_reflow_failed_merge_train_candidate(
     policy: MergeTrainPolicy,
     policy_sha256: str,
     transport: MergeTrainGitHubTransport,
+    github_client: GitHubMergeTrainClient,
     repository: str,
     base_branch: str,
     recorded_at: str,
@@ -2144,7 +2149,7 @@ def try_reflow_failed_merge_train_candidate(
     mutate: bool,
 ) -> dict[str, object] | None:
     try:
-        snapshot = GitHubMergeTrainSnapshotReader(transport=transport).read_merge_train_snapshot(
+        snapshot = github_client.read_merge_train_snapshot(
             repository=repository,
             base_branch=base_branch,
         )
