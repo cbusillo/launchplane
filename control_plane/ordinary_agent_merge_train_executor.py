@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
 import time
 from urllib.parse import quote
@@ -92,10 +92,33 @@ class OrdinaryAgentMergeTrainEffectExecutor:
         self._require_command("candidate_ref_prepare", effect)
 
         def call(client: GitHubMergeTrainClient) -> OrdinaryAgentCompletedOutcome:
-            LegacyMergeTrainEffectExecutor(client=client).prepare_candidate_ref(effect)
-            proof = _read_ref_proof(client.transport, effect.lineage.repository, effect.candidate_ref)
-            if proof.sha != effect.base_sha:
+            try:
+                response = client.transport.request(
+                    method="POST",
+                    path=f"/repos/{effect.lineage.repository}/git/refs",
+                    body={"ref": effect.candidate_ref, "sha": effect.base_sha},
+                )
+            except MergeTrainGitHubError as error:
+                if error.status_code not in {409, 422}:
+                    raise
+                response = client.transport.request(
+                    method="PATCH",
+                    path=(
+                        f"/repos/{effect.lineage.repository}/git/refs/"
+                        f"{quote(effect.candidate_ref.removeprefix('refs/'), safe='/')}"
+                    ),
+                    body={"sha": effect.base_sha, "force": True},
+                )
+            if not isinstance(response, Mapping) or response.get("ref") != effect.candidate_ref:
                 raise MergeTrainGitHubError("candidate_ref_prepare_evidence_mismatch")
+            target = response.get("object")
+            if not isinstance(target, Mapping) or target.get("sha") != effect.base_sha:
+                raise MergeTrainGitHubError("candidate_ref_prepare_evidence_mismatch")
+            proof = OrdinaryAgentRefObservation(
+                repository=effect.lineage.repository,
+                ref=effect.candidate_ref,
+                sha=effect.base_sha,
+            )
             return OrdinaryAgentCompletedOutcome(proof=proof)
 
         self._dispatch(call)
