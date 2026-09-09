@@ -1787,6 +1787,7 @@ def _advance_waiting_stack_collapse_record(
         },
     )
     candidate = build_merge_train_batch_candidate(
+        ordinary_job_binding=lease.record.ordinary_job_binding,
         dry_run_result=dry_run_result,
         base_sha=root_snapshot.base_sha,
         policy_sha256=policy_sha256,
@@ -2074,6 +2075,7 @@ def _advance_from_live_snapshot(
 
     controller_action = "plan_candidate"
     candidate = build_merge_train_batch_candidate(
+        ordinary_job_binding=lease.record.ordinary_job_binding,
         dry_run_result=dry_run_result,
         base_sha=snapshot.base_sha,
         policy_sha256=policy_sha256,
@@ -2166,6 +2168,7 @@ def try_reflow_failed_merge_train_candidate(
     if queue_unchanged and active_candidate_record.candidate.candidate_sha:
         return None
     candidate = build_merge_train_batch_candidate(
+        ordinary_job_binding=active_candidate_record.ordinary_job_binding,
         dry_run_result=dry_run_result,
         base_sha=snapshot.base_sha,
         policy_sha256=policy_sha256,

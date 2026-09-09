@@ -252,6 +252,13 @@ Release uses a history-only fence operation, including terminal cleanup after a
 worker crash, so cancellation does not require reacquiring execution authority.
 This adapter alone does not register an executor or activate the worker stage.
 
+The scoped candidate client consumes durable snapshot and check callbacks. It
+prepares a job/revision-specific ref, then returns one completed merge step with
+full structural progress at a time. Restart uses that persisted progress rather
+than resetting the ref. It has no ambient provider transport; provider evidence
+and mutations must come through the scoped callbacks and executor. Candidate
+step coverage alone is not proof of landing, stack execution, or worker activation.
+
 ## Validation boundary
 
 Tests use synthetic principals and targets. Canonical JSON round trips and

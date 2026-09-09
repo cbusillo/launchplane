@@ -353,6 +353,7 @@ def build_merge_train_batch_candidate(
     policy_sha256: str,
     created_at: str,
     stack_collapse_root: MergeTrainStackCollapseRootProof | None = None,
+    ordinary_job_binding: OrdinaryAgentJobBinding | None = None,
 ) -> MergeTrainBatchCandidate:
     if dry_run_result.intended_next_action not in ("merge", "idle"):
         raise ValueError("merge train batch candidate requires a queue without blocking actions")
@@ -389,10 +390,16 @@ def build_merge_train_batch_candidate(
         base_sha=normalized_base_sha,
         policy_key=dry_run_result.policy_key,
         policy_sha256=policy_sha256,
-        candidate_ref=build_merge_train_batch_candidate_ref(
-            repository=dry_run_result.repository,
-            base_branch=dry_run_result.base_branch,
-            batch_id=batch_id,
+        candidate_ref=(
+            build_ordinary_merge_train_candidate_ref(
+                binding=ordinary_job_binding, batch_id=batch_id
+            )
+            if ordinary_job_binding is not None
+            else build_merge_train_batch_candidate_ref(
+                repository=dry_run_result.repository,
+                base_branch=dry_run_result.base_branch,
+                batch_id=batch_id,
+            )
         ),
         status="planned",
         entries=tuple(entries),
@@ -639,3 +646,14 @@ def _normalize_required_value(value: str, error_message: str) -> str:
     if not normalized_value:
         raise ValueError(error_message)
     return normalized_value
+
+
+def build_ordinary_merge_train_candidate_ref(
+    *, binding: OrdinaryAgentJobBinding, batch_id: str
+) -> str:
+    """A finite job revision owns a separate bounded ref, even for identical heads."""
+    payload = {"binding": binding.model_dump(mode="json"), "batch_id": batch_id}
+    digest = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return f"refs/heads/launchplane/train/ordinary/{digest}"
