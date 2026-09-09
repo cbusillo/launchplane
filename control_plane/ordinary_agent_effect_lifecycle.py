@@ -53,12 +53,17 @@ def require_completed_effect_proof(
         ):
             _deny()
     elif command.kind == "pull_request_landing":
+        landing_parents = (
+            (command.effect.rolling_base_sha, command.effect.head_sha)
+            if command.effect.merge_method == "merge"
+            else (command.effect.rolling_base_sha,)
+        )
         if isinstance(proof, effects.OrdinaryAgentRefObservation):
             if (
                 proof.ref != "refs/heads/" + record.target.base_branch
                 or proof.sha != outcome.result_sha
                 or not proof.tree_sha
-                or proof.parents != (command.effect.rolling_base_sha, command.effect.head_sha)
+                or proof.parents != landing_parents
             ):
                 _deny()
         elif isinstance(proof, effects.OrdinaryAgentPullRequestObservation):
@@ -69,8 +74,7 @@ def require_completed_effect_proof(
                 or proof.base_ref != record.target.base_branch
                 or proof.merge_commit_sha != outcome.result_sha
                 or not proof.merge_commit_tree_sha
-                or proof.merge_commit_parents
-                != (command.effect.rolling_base_sha, command.effect.head_sha)
+                or proof.merge_commit_parents != landing_parents
             ):
                 _deny()
         else:
