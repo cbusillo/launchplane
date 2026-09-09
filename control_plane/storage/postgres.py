@@ -70,6 +70,14 @@ from control_plane.contracts.authz_policy_record import (
     require_authz_policy_schema_write_activated,
 )
 from control_plane.contracts.backup_gate_record import BackupGateRecord
+from control_plane.contracts.ordinary_agent_custody import (
+    CustodyCloseReason,
+    GITHUB_TOKEN_MAXIMUM_LIFETIME_SECONDS,
+    KNOWN_TOKEN_CLOCK_SKEW_SECONDS,
+    OrdinaryAgentCustodyCandidate,
+    OrdinaryAgentCustodyConflictError,
+    OrdinaryAgentCustodyIssueAttempt,
+)
 from control_plane.contracts.change_impact import ChangeImpactPolicyRecord
 from control_plane.contracts.change_impact_audit import (
     ChangeImpactPolicyAuditRecord,
@@ -1365,6 +1373,51 @@ class LaunchplaneOwnerControlEnrollmentProvenanceRow(Base):
         nullable=False,
         server_default=false(),
     )
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneOrdinaryAgentCustodyIssueAttemptRow(Base):
+    __tablename__ = "launchplane_ordinary_agent_custody_issue_attempts"
+    __table_args__ = (
+        CheckConstraint(
+            "state IN ('minting', 'issued', 'issue_unknown', 'cleanup_unknown', 'closed')",
+            name="launchplane_ordinary_agent_custody_issue_state_ck",
+        ),
+        CheckConstraint(
+            "repository_id > 0",
+            name="launchplane_ordinary_agent_custody_issue_repository_id_ck",
+        ),
+        UniqueConstraint(
+            "idempotency_key_sha256",
+            name="launchplane_ordinary_agent_custody_issue_idempotency_uq",
+        ),
+        Index(
+            "launchplane_ordinary_agent_custody_active_fence_uidx",
+            "principal_id",
+            "repository_id",
+            unique=True,
+            postgresql_where=text(
+                "state IN ('minting', 'issued', 'issue_unknown', 'cleanup_unknown')"
+            ),
+            sqlite_where=text("state IN ('minting', 'issued', 'issue_unknown', 'cleanup_unknown')"),
+        ),
+        Index(
+            "launchplane_ordinary_agent_custody_state_residual_idx",
+            "state",
+            "residual_expires_at",
+        ),
+    )
+
+    attempt_id: Mapped[str] = mapped_column(String, primary_key=True)
+    idempotency_key_sha256: Mapped[str] = mapped_column(String, nullable=False)
+    request_sha256: Mapped[str] = mapped_column(String, nullable=False)
+    principal_id: Mapped[str] = mapped_column(String, nullable=False)
+    repository_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    state: Mapped[str] = mapped_column(String, nullable=False)
+    mint_started_at: Mapped[str] = mapped_column(String, nullable=False)
+    dispatch_deadline: Mapped[str] = mapped_column(String, nullable=False)
+    residual_expires_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -10991,6 +11044,284 @@ class PostgresRecordStore(HumanSessionStore):
             orm_model=LaunchplaneOwnerControlIssuedChallengeRow,
             filters=(LaunchplaneOwnerControlIssuedChallengeRow.challenge_nonce == challenge_nonce,),
         )
+
+    @classmethod
+    def _ordinary_agent_custody_issue_attempt_row(
+        cls, record: OrdinaryAgentCustodyIssueAttempt
+    ) -> LaunchplaneOrdinaryAgentCustodyIssueAttemptRow:
+        return LaunchplaneOrdinaryAgentCustodyIssueAttemptRow(
+            attempt_id=record.attempt_id,
+            idempotency_key_sha256=record.idempotency_key_sha256,
+            request_sha256=record.request_sha256,
+            principal_id=record.principal_id,
+            repository_id=record.repository_id,
+            state=record.state,
+            mint_started_at=record.mint_started_at,
+            dispatch_deadline=record.dispatch_deadline,
+            residual_expires_at=record.residual_expires_at,
+            updated_at=record.updated_at,
+            payload=cls._payload_dict(record),
+        )
+
+    @classmethod
+    def _sync_ordinary_agent_custody_issue_attempt_row(
+        cls,
+        row: LaunchplaneOrdinaryAgentCustodyIssueAttemptRow,
+        record: OrdinaryAgentCustodyIssueAttempt,
+    ) -> None:
+        row.state = record.state
+        row.residual_expires_at = record.residual_expires_at
+        row.updated_at = record.updated_at
+        row.payload = cls._payload_dict(record)
+
+    def acquire_ordinary_agent_custody_issue_attempt(
+        self,
+        *,
+        attempt_id: str,
+        idempotency_key_sha256: str,
+        request_sha256: str,
+        candidate: OrdinaryAgentCustodyCandidate,
+        requested_permissions: tuple[str, ...],
+        dispatch_window_seconds: int,
+    ) -> tuple[Literal["acquired", "replay", "fenced"], OrdinaryAgentCustodyIssueAttempt]:
+        if dispatch_window_seconds < 1 or dispatch_window_seconds > 300:
+            raise ValueError("custody dispatch window must be between 1 and 300 seconds")
+        with self._session_factory() as session:
+            observed_at = self._database_mutation_timestamp(session)
+            dispatch_deadline = self._mutation_lease_expiry(
+                observed_at=observed_at,
+                lease_seconds=dispatch_window_seconds,
+            )
+            record = OrdinaryAgentCustodyIssueAttempt(
+                attempt_id=attempt_id,
+                idempotency_key_sha256=idempotency_key_sha256,
+                request_sha256=request_sha256,
+                principal_id=candidate.principal_id,
+                repository_id=candidate.repository_id,
+                repository=candidate.repository,
+                base_branch=candidate.base_branch,
+                credential_id=candidate.credential_id,
+                credential_version=candidate.credential_version,
+                secret_id=candidate.secret_id,
+                secret_binding_id=candidate.secret_binding_id,
+                secret_version_id=candidate.secret_version_id,
+                expected_app_id=candidate.expected_app_id,
+                effect_profile=candidate.effect_profile,
+                requested_permissions=requested_permissions,
+                state="minting",
+                mint_started_at=observed_at,
+                dispatch_deadline=dispatch_deadline,
+                updated_at=observed_at,
+            )
+            session.add(self._ordinary_agent_custody_issue_attempt_row(record))
+            try:
+                session.commit()
+                return "acquired", record
+            except IntegrityError as error:
+                session.rollback()
+                existing_row = session.get(
+                    LaunchplaneOrdinaryAgentCustodyIssueAttemptRow, attempt_id
+                )
+                if existing_row is not None:
+                    existing = OrdinaryAgentCustodyIssueAttempt.model_validate(existing_row.payload)
+                    if (
+                        existing.idempotency_key_sha256 != idempotency_key_sha256
+                        or existing.request_sha256 != request_sha256
+                    ):
+                        raise OrdinaryAgentCustodyConflictError(
+                            "custody idempotency identity conflicts with persisted request"
+                        ) from error
+                    return "replay", existing
+                fence_row = session.scalar(
+                    select(LaunchplaneOrdinaryAgentCustodyIssueAttemptRow)
+                    .where(
+                        LaunchplaneOrdinaryAgentCustodyIssueAttemptRow.principal_id
+                        == candidate.principal_id,
+                        LaunchplaneOrdinaryAgentCustodyIssueAttemptRow.repository_id
+                        == candidate.repository_id,
+                        LaunchplaneOrdinaryAgentCustodyIssueAttemptRow.state.in_(
+                            ("minting", "issued", "issue_unknown", "cleanup_unknown")
+                        ),
+                    )
+                    .limit(1)
+                )
+                if fence_row is None:
+                    raise
+                return (
+                    "fenced",
+                    OrdinaryAgentCustodyIssueAttempt.model_validate(fence_row.payload),
+                )
+
+    def read_ordinary_agent_custody_issue_attempt(
+        self, attempt_id: str
+    ) -> OrdinaryAgentCustodyIssueAttempt:
+        return self._read_model(
+            model_type=OrdinaryAgentCustodyIssueAttempt,
+            orm_model=LaunchplaneOrdinaryAgentCustodyIssueAttemptRow,
+            filters=(LaunchplaneOrdinaryAgentCustodyIssueAttemptRow.attempt_id == attempt_id,),
+        )
+
+    def _transition_ordinary_agent_custody_issue_attempt(
+        self,
+        attempt_id: str,
+        transition: Callable[
+            [OrdinaryAgentCustodyIssueAttempt, str], OrdinaryAgentCustodyIssueAttempt
+        ],
+    ) -> OrdinaryAgentCustodyIssueAttempt:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            statement = (
+                select(LaunchplaneOrdinaryAgentCustodyIssueAttemptRow)
+                .where(LaunchplaneOrdinaryAgentCustodyIssueAttemptRow.attempt_id == attempt_id)
+                .limit(1)
+            )
+            if not self.database_url.startswith("sqlite"):
+                statement = statement.with_for_update()
+            row = session.scalar(statement)
+            if row is None:
+                raise FileNotFoundError(attempt_id)
+            current = OrdinaryAgentCustodyIssueAttempt.model_validate(row.payload)
+            updated = transition(current, self._database_mutation_timestamp(session))
+            if updated != current:
+                self._sync_ordinary_agent_custody_issue_attempt_row(row, updated)
+                session.commit()
+            return updated
+
+    def mark_ordinary_agent_custody_issue_unknown(
+        self, *, attempt_id: str
+    ) -> OrdinaryAgentCustodyIssueAttempt:
+        def transition(
+            current: OrdinaryAgentCustodyIssueAttempt, observed_at: str
+        ) -> OrdinaryAgentCustodyIssueAttempt:
+            if current.state == "issue_unknown":
+                return current
+            if current.state != "minting":
+                raise OrdinaryAgentCustodyConflictError(
+                    "only a minting custody attempt can become issue-unknown"
+                )
+            return OrdinaryAgentCustodyIssueAttempt.model_validate(
+                current.model_copy(
+                    update={"state": "issue_unknown", "updated_at": observed_at}
+                ).model_dump()
+            )
+
+        return self._transition_ordinary_agent_custody_issue_attempt(attempt_id, transition)
+
+    def mark_ordinary_agent_custody_issued(
+        self,
+        *,
+        attempt_id: str,
+        app_id: int,
+        installation_id: int,
+        token_expires_at: str,
+        residual_expires_at: str,
+    ) -> OrdinaryAgentCustodyIssueAttempt:
+        def transition(
+            current: OrdinaryAgentCustodyIssueAttempt, observed_at: str
+        ) -> OrdinaryAgentCustodyIssueAttempt:
+            if current.state != "minting":
+                raise OrdinaryAgentCustodyConflictError(
+                    "only a minting custody attempt can become issued"
+                )
+            observed = parse_launchplane_mutation_timestamp(observed_at, field_name="observed_at")
+            token_expiry = parse_launchplane_mutation_timestamp(
+                token_expires_at, field_name="token_expires_at"
+            )
+            residual_expiry = parse_launchplane_mutation_timestamp(
+                residual_expires_at, field_name="residual_expires_at"
+            )
+            if (
+                token_expiry <= observed
+                or token_expiry
+                > observed + timedelta(seconds=GITHUB_TOKEN_MAXIMUM_LIFETIME_SECONDS)
+                or residual_expiry
+                != token_expiry + timedelta(seconds=KNOWN_TOKEN_CLOCK_SKEW_SECONDS)
+            ):
+                raise OrdinaryAgentCustodyConflictError(
+                    "custody token expiry evidence is outside the supported provider bound"
+                )
+            return OrdinaryAgentCustodyIssueAttempt.model_validate(
+                current.model_copy(
+                    update={
+                        "state": "issued",
+                        "app_id": app_id,
+                        "installation_id": installation_id,
+                        "token_expires_at": token_expires_at,
+                        "residual_expires_at": residual_expires_at,
+                        "updated_at": observed_at,
+                    }
+                ).model_dump()
+            )
+
+        return self._transition_ordinary_agent_custody_issue_attempt(attempt_id, transition)
+
+    def mark_ordinary_agent_custody_cleanup_unknown(
+        self, *, attempt_id: str
+    ) -> OrdinaryAgentCustodyIssueAttempt:
+        def transition(
+            current: OrdinaryAgentCustodyIssueAttempt, observed_at: str
+        ) -> OrdinaryAgentCustodyIssueAttempt:
+            if current.state == "cleanup_unknown":
+                return current
+            if current.state != "issued":
+                raise OrdinaryAgentCustodyConflictError(
+                    "only an issued custody attempt can become cleanup-unknown"
+                )
+            return OrdinaryAgentCustodyIssueAttempt.model_validate(
+                current.model_copy(
+                    update={"state": "cleanup_unknown", "updated_at": observed_at}
+                ).model_dump()
+            )
+
+        return self._transition_ordinary_agent_custody_issue_attempt(attempt_id, transition)
+
+    def close_ordinary_agent_custody_issue_attempt(
+        self,
+        *,
+        attempt_id: str,
+        reason: CustodyCloseReason,
+    ) -> OrdinaryAgentCustodyIssueAttempt:
+        def transition(
+            current: OrdinaryAgentCustodyIssueAttempt, observed_at: str
+        ) -> OrdinaryAgentCustodyIssueAttempt:
+            if current.state == "closed":
+                if current.close_reason != reason:
+                    raise OrdinaryAgentCustodyConflictError(
+                        "custody attempt is already closed for another reason"
+                    )
+                return current
+            allowed_states = {
+                "not_dispatched": {"minting"},
+                "confirmed_revoked": {"minting", "issued", "cleanup_unknown"},
+                "known_expired": {"issued", "cleanup_unknown"},
+            }[reason]
+            if current.state not in allowed_states:
+                raise OrdinaryAgentCustodyConflictError(
+                    "custody attempt cannot close from its current state"
+                )
+            if reason == "known_expired":
+                if current.residual_expires_at is None or (
+                    parse_launchplane_mutation_timestamp(observed_at, field_name="observed_at")
+                    < parse_launchplane_mutation_timestamp(
+                        current.residual_expires_at,
+                        field_name="residual_expires_at",
+                    )
+                ):
+                    raise OrdinaryAgentCustodyConflictError(
+                        "custody attempt has not reached its known residual expiry"
+                    )
+            return OrdinaryAgentCustodyIssueAttempt.model_validate(
+                current.model_copy(
+                    update={
+                        "state": "closed",
+                        "closed_at": observed_at,
+                        "close_reason": reason,
+                        "updated_at": observed_at,
+                    }
+                ).model_dump()
+            )
+
+        return self._transition_ordinary_agent_custody_issue_attempt(attempt_id, transition)
 
     @staticmethod
     def _administrator_enrollment_row(
