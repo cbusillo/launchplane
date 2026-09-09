@@ -57,7 +57,6 @@ MAX_CUSTODY_MINT_ATTEMPTS_PER_EFFECT = 9
 MAX_SEMANTIC_DISPATCH_ATTEMPTS_PER_EFFECT = 3
 MIN_PROVIDER_TOKEN_TTL_AT_DISPATCH_SECONDS = 120
 EFFECT_DISPATCH_DB_LOCK_TIMEOUT_SECONDS = 5
-ASYNC_PROVIDER_OBSERVATION_WINDOW_SECONDS = 120
 MAX_ASYNC_PROVIDER_OBSERVATIONS = 3
 MIN_RECONCILIATION_BACKOFF_SECONDS = 15
 MAX_RECONCILIATION_OBSERVATIONS_PER_EFFECT = 3
@@ -402,11 +401,22 @@ class OrdinaryAgentLabelObservation(StrictFrozenModel):
     present: bool
 
 
+class OrdinaryAgentIncompleteReadObservation(StrictFrozenModel):
+    """A completed read attempt supplied no usable provider state evidence."""
+
+    kind: Literal["incomplete_read"] = "incomplete_read"
+    repository: Identifier
+    reason: Literal[
+        "provider_transport", "provider_incomplete", "provider_wait", "provider_attempt_deadline"
+    ]
+
+
 OrdinaryAgentProviderObservation: TypeAlias = Annotated[
     OrdinaryAgentRefObservation
     | OrdinaryAgentPullRequestObservation
     | OrdinaryAgentCommentObservation
-    | OrdinaryAgentLabelObservation,
+    | OrdinaryAgentLabelObservation
+    | OrdinaryAgentIncompleteReadObservation,
     Field(discriminator="kind"),
 ]
 

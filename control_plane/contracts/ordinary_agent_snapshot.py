@@ -77,10 +77,22 @@ class OrdinaryAgentMergeTrainSnapshotResult(StrictFrozenModel):
 
     @property
     def awaits_source_observation(self) -> bool:
-        return any(
-            item.mergeable == "unknown" or item.required_checks_status in {"pending", "unknown"}
-            for item in self.snapshot.pull_requests
+        return self.awaits_source_observation_for(
+            tuple(item.number for item in self.snapshot.pull_requests)
         )
+
+    def awaits_source_observation_for(self, pull_request_numbers: tuple[int, ...]) -> bool:
+        pull_requests = {item.number: item for item in self.snapshot.pull_requests}
+        for number in pull_request_numbers:
+            item = pull_requests.get(number)
+            if item is None:
+                return True
+            if item.mergeable == "unknown" or item.required_checks_status in {
+                "pending",
+                "unknown",
+            }:
+                return True
+        return False
 
     @field_validator("head_identities", mode="before")
     @classmethod

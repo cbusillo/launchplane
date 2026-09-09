@@ -754,3 +754,21 @@ exact commit proof. Uncertain label/close results require typed read observation
 recovery does not invent missing responses. Missing or inconsistent completion
 proof produces a terminal recovery decision. Child/effect binding mismatches
 remain explicit reader failures.
+
+The reconciliation reader uses only GET requests through a custody-scoped read-only
+transport and an installation token attenuated to contents and pull-request reads.
+It reads the latest dispatch history before minting and appends one
+observation before revoking the token. Completed history replays without another
+mint. Recovery uses a currently authorized scoped read credential, including after the
+original session/request expires. New mutations retain their original expiry gates.
+Each read remains bounded by token expiry, per-attempt work allowance, the existing
+observation/backoff limits and custody-mint caps.
+A failed read appends a typed incomplete-read observation and retains uncertainty;
+a later attempt may observe but cannot resend. It consumes the existing three-read
+observation budget and backoff, so failed reads cannot create an unbounded mint loop.
+If a read token is confirmed closed but its observation append was lost, the store
+records an incomplete read before permitting another attempt. Unknown token cleanup
+continues to fence new issuance.
+Ref/commit/containment evidence uses the captured immutable SHA, comment scans stop
+at three pages, and a full label page cannot prove a missing label. The actual
+worker factory and fleet qualification are still required before activation.

@@ -49,6 +49,7 @@ from control_plane.ordinary_agent_github_transport import (
     ORDINARY_MUTATION_WORK_SECONDS,
     require_installation_provider_ready,
 )
+from control_plane.ordinary_agent_effect_lifecycle import ordinary_agent_comment_body
 from control_plane.github_app_identity import GitHubApiRequest
 from control_plane.workflows.launchplane import github_api_request
 
@@ -137,17 +138,26 @@ class OrdinaryAgentMergeTrainEffectExecutor:
                 proof = _read_ref_proof(
                     client.transport, effect.lineage.repository, effect.candidate_ref
                 ).model_copy(update={"contained_head_sha": effect.head_sha})
-                if proof.sha != effect.rolling_parent_sha or not client.branch_contains_commit(
-                    repository=effect.lineage.repository,
-                    branch_ref=effect.candidate_ref.removeprefix("refs/heads/"),
-                    commit_sha=effect.head_sha,
+                if proof.sha != effect.rolling_parent_sha:
+                    raise MergeTrainGitHubError("candidate_merge_no_op_unproven")
+                comparison = client.transport.request(
+                    method="GET",
+                    path=f"/repos/{effect.lineage.repository}/compare/{effect.head_sha}...{effect.rolling_parent_sha}",
+                )
+                if (
+                    not isinstance(comparison, Mapping)
+                    or comparison.get("status") not in {"ahead", "identical"}
+                    or not isinstance(comparison.get("base_commit"), Mapping)
+                    or comparison["base_commit"].get("sha") != effect.head_sha
+                    or not isinstance(comparison.get("merge_base_commit"), Mapping)
+                    or comparison["merge_base_commit"].get("sha") != effect.head_sha
                 ):
                     raise MergeTrainGitHubError("candidate_merge_no_op_unproven")
                 returned = CandidateHeadMergeOutcome(
                     result_sha=None,
                     result_tree_sha=proof.tree_sha,
                 )
-                return OrdinaryAgentCompletedOutcome(no_op=True, proof=proof)
+                return OrdinaryAgentCompletedOutcome(result_sha=proof.sha, no_op=True, proof=proof)
             if not returned.result_tree_sha or returned.parent_shas != (
                 effect.rolling_parent_sha,
                 effect.head_sha,
@@ -204,7 +214,13 @@ class OrdinaryAgentMergeTrainEffectExecutor:
 
         def call(client: GitHubMergeTrainClient) -> OrdinaryAgentCompletedOutcome:
             nonlocal result
-            result = LegacyMergeTrainEffectExecutor(client=client).comment_stack_child(effect)
+            result = client.comment_pull_request(
+                repository=effect.lineage.repository,
+                pull_request_number=effect.pull_request_number,
+                body=ordinary_agent_comment_body(
+                    body=effect.body, effect_id=self._record.effect_id
+                ),
+            )
             return OrdinaryAgentCompletedOutcome(result_id=result)
 
         self._dispatch(call)

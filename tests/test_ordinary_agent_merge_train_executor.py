@@ -14,11 +14,16 @@ from control_plane.contracts.merge_train_effect import (
     CandidateRefPrepareEffect,
     MergeTrainEffectLineage,
     StackChildLabelEffect,
+    StackChildCommentEffect,
 )
 from control_plane.contracts.ordinary_agent_custody import OrdinaryAgentCustodyCandidate
 from control_plane.github_app_identity import GitHubAppInstallationToken
 from control_plane.merge_train_github import RecordingMergeTrainGitHubTransport
 from control_plane.ordinary_agent_custody import OrdinaryAgentProviderTokenLease
+from control_plane.ordinary_agent_effect_lifecycle import require_completed_effect_proof
+from control_plane.ordinary_agent_effect_lifecycle import classify_effect_reconciliation
+from control_plane.ordinary_agent_reconciliation_reader import read_ordinary_effect_observation
+from control_plane.ordinary_agent_github_transport import DeadlineMergeTrainGitHubTransport
 from control_plane.ordinary_agent_merge_train_executor import (
     OrdinaryAgentMergeTrainEffectExecutor,
 )
@@ -26,6 +31,49 @@ from tests.test_ordinary_agent_effect_lifecycle import effect_record
 
 
 class OrdinaryAgentMergeTrainEffectExecutorTests(unittest.TestCase):
+    def test_comment_dispatch_body_can_be_reconciled_after_response_loss(self) -> None:
+        effect = StackChildCommentEffect(
+            lineage=MergeTrainEffectLineage(
+                repository="example/repo", base_branch="main", collapse_id="collapse-one"
+            ),
+            pull_request_number=7,
+            body="Collapsed child",
+        )
+        record = effect_record(effects.StackChildCommentCommand(effect=effect))
+        store = _dispatch_store(record)
+        transport = RecordingMergeTrainGitHubTransport(responses=({"id": 81},))
+        executor = OrdinaryAgentMergeTrainEffectExecutor(
+            record=record,
+            controller_fence=record.controller_fence,
+            effect_store=store,
+            custody_store=Mock(),
+            secret_store=Mock(),
+            transport_factory=lambda _: transport,
+            monotonic=lambda: 0,
+        )
+        with patch(
+            "control_plane.ordinary_agent_merge_train_executor.ordinary_agent_provider_token_lease",
+            _provider_lease,
+        ):
+            executor.comment_stack_child(effect)
+        sent = transport.requests[0].body
+        assert sent is not None
+        observed_transport = RecordingMergeTrainGitHubTransport(
+            responses=([{"id": 81, "body": sent["body"]}],)
+        )
+        observed = read_ordinary_effect_observation(
+            DeadlineMergeTrainGitHubTransport(
+                transport=observed_transport,
+                work_deadline=45,
+                token_deadline=300,
+                monotonic=lambda: 0,
+            ),
+            record,
+        )
+        self.assertEqual(classify_effect_reconciliation(record, observed), "completed_observed")
+        self.assertEqual([request.method for request in transport.requests], ["POST"])
+        self.assertEqual([request.method for request in observed_transport.requests], ["GET"])
+
     def test_candidate_prepare_uses_write_response_as_exact_proof(self) -> None:
         effect = CandidateRefPrepareEffect(
             lineage=MergeTrainEffectLineage(
@@ -60,6 +108,62 @@ class OrdinaryAgentMergeTrainEffectExecutorTests(unittest.TestCase):
             "typed_outcome"
         ].proof
         self.assertEqual((proof.ref, proof.sha), (effect.candidate_ref, effect.base_sha))
+
+    def test_candidate_noop_keeps_the_observed_sha_in_its_durable_completion(self) -> None:
+        effect = CandidateHeadMergeEffect(
+            lineage=MergeTrainEffectLineage(
+                repository="example/repo", base_branch="main", batch_id="batch-one"
+            ),
+            candidate_ref="refs/heads/candidate-one",
+            rolling_parent_sha="a" * 40,
+            pull_request_number=7,
+            head_sha="b" * 40,
+        )
+        record = effect_record(effects.CandidateHeadMergeCommand(effect=effect))
+        store = _dispatch_store(record)
+        store.record_ordinary_semantic_outcome.side_effect = lambda **kwargs: (
+            require_completed_effect_proof(record, kwargs["typed_outcome"])
+        )
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                None,
+                {"object": {"sha": effect.rolling_parent_sha}},
+                {
+                    "sha": effect.rolling_parent_sha,
+                    "tree": {"sha": "c" * 40},
+                    "parents": [{"sha": effect.head_sha}],
+                },
+                {
+                    "status": "ahead",
+                    "base_commit": {"sha": effect.head_sha},
+                    "merge_base_commit": {"sha": effect.head_sha},
+                },
+            )
+        )
+        executor = OrdinaryAgentMergeTrainEffectExecutor(
+            record=record,
+            controller_fence=record.controller_fence,
+            effect_store=store,
+            custody_store=Mock(),
+            secret_store=Mock(),
+            transport_factory=lambda _: transport,
+            monotonic=lambda: 0,
+        )
+        with patch(
+            "control_plane.ordinary_agent_merge_train_executor.ordinary_agent_provider_token_lease",
+            _provider_lease,
+        ):
+            result = executor.merge_candidate_head(effect)
+        self.assertIsNone(result.result_sha)
+        self.assertEqual(result.result_tree_sha, "c" * 40)
+        durable = store.record_ordinary_semantic_outcome.call_args.kwargs["typed_outcome"]
+        self.assertEqual(durable.result_sha, effect.rolling_parent_sha)
+        self.assertTrue(durable.no_op)
+        self.assertEqual(
+            transport.requests[-1].path,
+            f"/repos/example/repo/compare/{effect.head_sha}...{effect.rolling_parent_sha}",
+        )
+        self.assertEqual(sum(request.method == "POST" for request in transport.requests), 1)
 
     def test_candidate_merge_persists_exact_response_proof_before_returning(self) -> None:
         effect = CandidateHeadMergeEffect(

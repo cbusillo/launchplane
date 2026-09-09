@@ -13,6 +13,7 @@ CustodyEffectProfile = Literal[
     "head_refresh",
     "merge_train_landing",
     "merge_train_snapshot",
+    "effect_reconciliation",
     "close_pull_request",
     "comment_pull_request",
     "label_pull_request",

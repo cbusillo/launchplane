@@ -105,12 +105,18 @@ def require_completed_effect_proof(
     return "completed"
 
 
+def ordinary_agent_comment_body(*, body: str, effect_id: str) -> str:
+    return body + "\n\n" + f"<!-- launchplane-effect:{effect_id} -->"
+
+
 def classify_effect_reconciliation(
     record: effects.OrdinaryAgentEffectRecord,
     observation: effects.OrdinaryAgentProviderObservation,
 ) -> effects.EffectState:
     if observation.repository.lower() != record.target.repository.lower():
         _deny()
+    if isinstance(observation, effects.OrdinaryAgentIncompleteReadObservation):
+        return "reconciliation_required"
     command = record.command
     if command.kind == "candidate_ref_prepare" and isinstance(
         observation, effects.OrdinaryAgentRefObservation
@@ -206,7 +212,7 @@ def classify_effect_reconciliation(
     ):
         if observation.number != command.effect.pull_request_number:
             _deny()
-        body = command.effect.body + "\n\n" + f"<!-- launchplane-effect:{record.effect_id} -->"
+        body = ordinary_agent_comment_body(body=command.effect.body, effect_id=record.effect_id)
         return (
             "completed_observed"
             if observation.matching_comment_id and observation.matching_body == body

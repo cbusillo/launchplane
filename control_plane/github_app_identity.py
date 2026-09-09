@@ -42,6 +42,11 @@ _ORDINARY_AGENT_EFFECT_PERMISSION_CEILINGS: dict[str, dict[str, str]] = {
         "pull_requests": "read",
         "statuses": "read",
     },
+    "effect_reconciliation": {
+        "contents": "read",
+        "metadata": "read",
+        "pull_requests": "read",
+    },
     "merge_train_landing": {
         "administration": "read",
         "checks": "read",

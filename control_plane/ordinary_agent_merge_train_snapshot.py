@@ -254,7 +254,8 @@ def _acquire_read(
         raise OrdinaryAgentSessionAdmissionDenied(recorded.reason_code or "read_attempts_exhausted")
     if (
         isinstance(result, OrdinaryAgentMergeTrainSnapshotResult)
-        and result.awaits_source_observation
+        and recorded is not None
+        and recorded.reason_code == "source_checks_undecided"
     ):
         raise OrdinaryAgentSessionAdmissionDenied("source_check_wait")
     if result is None:

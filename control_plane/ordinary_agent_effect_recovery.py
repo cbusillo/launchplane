@@ -45,7 +45,10 @@ def _recover_ordinary_effect(history: effects.OrdinaryAgentEffectHistory) -> Ord
         item.observed_at < child.dispatch_checkpoint_at for item in history.reconciliations
     ):
         return OrdinaryEffectRecovery("terminal", reason_code="effect_history_observation_stale")
-    if record.state in {"terminal_conflict", "exhausted"}:
+    if record.state in {"terminal_conflict", "exhausted"} or record.reason_code in {
+        "reconciliation_exhausted",
+        "custody_attempts_exhausted",
+    }:
         return OrdinaryEffectRecovery("terminal", reason_code=record.reason_code or record.state)
     if record.state == "not_dispatched":
         # An explicit rejection is final even if inconsistent later history

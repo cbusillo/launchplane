@@ -255,3 +255,80 @@ class OrdinaryAgentReadObservationTests(unittest.TestCase):
                     expected_binding_revision=1,
                     controller_fence=self.fixture.fence,
                 )
+
+    def test_unlisted_pending_pull_request_does_not_block_requested_ready_set(self) -> None:
+        ready = self.fixture.fixture.snapshot_result()
+        requested_numbers = tuple(item.number for item in self.request.pull_requests)
+        requested_pending = ready.model_copy(
+            update={
+                "snapshot": ready.snapshot.model_copy(
+                    update={
+                        "pull_requests": tuple(
+                            item.model_copy(update={"required_checks_status": "pending"})
+                            for item in ready.snapshot.pull_requests
+                        )
+                    }
+                )
+            }
+        )
+        pending = self.observe(requested_pending)
+        self.assertEqual(pending.reason_code, "source_checks_undecided")
+        with self.assertRaisesRegex(OrdinaryAgentSessionAdmissionDenied, "source_check_wait"):
+            self.store.reserve_ordinary_agent_snapshot_attempt(
+                request_id=self.request.request_id,
+                expected_binding_revision=1,
+                controller_fence=self.fixture.fence,
+            )
+        self.advance()
+
+        extra_number = max(requested_numbers) + 1
+        extra_head_sha = "e" * 40
+        extra_pull_request = ready.snapshot.pull_requests[0].model_copy(
+            update={
+                "number": extra_number,
+                "head_sha": extra_head_sha,
+                "required_checks_status": "pending",
+            }
+        )
+        scoped_ready = snapshots.OrdinaryAgentMergeTrainSnapshotResult.model_validate(
+            ready.model_copy(
+                update={
+                    "snapshot": ready.snapshot.model_copy(
+                        update={
+                            "pull_requests": (*ready.snapshot.pull_requests, extra_pull_request),
+                        }
+                    ),
+                    "head_identities": (
+                        *ready.head_identities,
+                        snapshots.OrdinaryAgentPullRequestHeadIdentity(
+                            pull_request_number=extra_number,
+                            identity=snapshots.OrdinaryAgentCommitIdentity(
+                                sha=extra_head_sha,
+                                tree_sha="f" * 40,
+                            ),
+                        ),
+                    ),
+                }
+            ).model_dump(mode="json")
+        )
+        self.assertTrue(scoped_ready.awaits_source_observation)
+        self.assertFalse(scoped_ready.awaits_source_observation_for(requested_numbers))
+        self.assertTrue(
+            scoped_ready.awaits_source_observation_for((*requested_numbers, extra_number + 1))
+        )
+
+        completed = self.observe(scoped_ready)
+        self.assertEqual(completed.state, "completed")
+        self.assertIsNone(completed.reason_code)
+        self.assertEqual(completed.result, scoped_ready)
+        replay = self.store.reserve_ordinary_agent_snapshot_attempt(
+            request_id=self.request.request_id,
+            expected_binding_revision=1,
+            controller_fence=self.fixture.fence,
+        )
+        self.assertEqual(replay, completed)
+        assert isinstance(replay.result, snapshots.OrdinaryAgentMergeTrainSnapshotResult)
+        self.assertEqual(
+            tuple(item.pull_request_number for item in replay.result.head_identities),
+            (*requested_numbers, extra_number),
+        )

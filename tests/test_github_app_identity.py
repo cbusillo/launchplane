@@ -74,6 +74,60 @@ class GitHubAppIdentityTests(unittest.TestCase):
         self.assertEqual(claims["iss"], "42")
         self.assertEqual(claims["exp"] - claims["iat"], 540)
 
+    def test_reconciliation_mint_attenuates_writes_and_rejects_provider_escalation(self) -> None:
+        for returned_access in ("read", "write"):
+            with self.subTest(returned_access=returned_access):
+
+                def api_request(**kwargs: object) -> object:
+                    if kwargs["path"] == "/repos/example/repo/installation":
+                        return {
+                            "id": 77,
+                            "app_id": 42,
+                            "permissions": {
+                                "administration": "read",
+                                "checks": "read",
+                                "contents": "write",
+                                "metadata": "read",
+                                "pull_requests": "write",
+                                "statuses": "read",
+                            },
+                        }
+                    self.assertEqual(
+                        kwargs["body"],
+                        {
+                            "repository_ids": [123],
+                            "permissions": {"contents": "read", "pull_requests": "read"},
+                        },
+                    )
+                    return {
+                        "token": "test-recovery-token",
+                        "expires_at": "2026-08-07T15:00:00Z",
+                        "permissions": {
+                            "contents": returned_access,
+                            "metadata": "read",
+                            "pull_requests": "read",
+                        },
+                        "repositories": [{"id": 123, "full_name": "example/repo"}],
+                    }
+
+                def mint() -> GitHubAppInstallationToken:
+                    return mint_ordinary_agent_installation_token(
+                        identity=GitHubAppIdentity(app_id=42, private_key=self.private_key),
+                        repository="example/repo",
+                        repository_id="123",
+                        effect_profile="effect_reconciliation",
+                        api_request=api_request,
+                        now=datetime(2026, 8, 7, 14, 0, tzinfo=timezone.utc),
+                    )
+
+                if returned_access == "write":
+                    with self.assertRaises(GitHubAppIdentityError):
+                        mint()
+                else:
+                    self.assertTrue(
+                        all(permission.endswith(":read") for permission in mint().permissions)
+                    )
+
     def test_head_refresh_uses_its_closed_permission_profile(self) -> None:
         observed_body: dict[str, object] = {}
 

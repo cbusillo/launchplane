@@ -23385,13 +23385,10 @@ class PostgresRecordStore(HumanSessionStore):
             child = effect_contracts.OrdinaryAgentSemanticDispatchAttemptRecord.model_validate(
                 child_row.payload
             )
-            request = OrdinaryAgentFiniteRequestRecord.model_validate(request_row.payload)
-            if now > min(
-                child.dispatch_checkpoint_at
-                + effect_contracts.ASYNC_PROVIDER_OBSERVATION_WINDOW_SECONDS,
-                request.continuation_expires_at or request.expires_at,
-            ):
-                raise OrdinaryAgentSessionAdmissionDenied("reconciliation_window_exhausted")
+            # Current scoped read authority governs reconciliation of an old
+            # dispatch. Original request expiry still bars new mutations, but
+            # must not strand unknown history. Observation/backoff/mint caps
+            # remain finite and are enforced independently above and below.
             reservations = sorted(
                 (
                     effect_contracts.OrdinaryAgentCustodyAttemptReservation.model_validate(
@@ -23423,11 +23420,60 @@ class PostgresRecordStore(HumanSessionStore):
                     ):
                         raise OrdinaryAgentSessionAdmissionDenied("custody_cleanup_required")
                     return latest
-                if (
-                    OrdinaryAgentCustodyIssueAttempt.model_validate(actual.payload).close_reason
-                    != "not_dispatched"
+                issued = OrdinaryAgentCustodyIssueAttempt.model_validate(actual.payload)
+                if issued.request_sha256 != canonical_json_sha256(
+                    {
+                        "candidate": latest.candidate.model_dump(mode="json"),
+                        "request": latest.request_payload,
+                    }
                 ):
-                    raise OrdinaryAgentSessionAdmissionDenied("reconciliation_observation_required")
+                    raise OrdinaryAgentSessionAdmissionDenied("reconciliation_provenance_conflict")
+                if issued.token_expires_at is not None and issued.close_reason != "not_dispatched":
+                    # The read token is confirmed closed, but the process may
+                    # have died after GET and before its durable append. There
+                    # is no evidence to replay. Record the lost read as an
+                    # incomplete observation before scheduling another bounded
+                    # read; never infer an outcome for the original mutation.
+                    if now < child.dispatch_checkpoint_at:
+                        raise OrdinaryAgentSessionAdmissionDenied(
+                            "reconciliation_provenance_conflict"
+                        )
+                    observation = effect_contracts.OrdinaryAgentReconciliationObservation(
+                        observation_id="observation-" + latest.attempt_id,
+                        custody_attempt_id=latest.attempt_id,
+                        observed_at=now,
+                        observation=effect_contracts.OrdinaryAgentIncompleteReadObservation(
+                            repository=record.target.repository, reason="provider_incomplete"
+                        ),
+                    )
+                    count = record.reconciliation_count + 1
+                    exhausted = count >= effect_contracts.MAX_RECONCILIATION_OBSERVATIONS_PER_EFFECT
+                    session.add(
+                        LaunchplaneOrdinaryAgentEffectReconciliationRow(
+                            observation_id=observation.observation_id,
+                            child_id=child.child_id,
+                            payload=self._payload_dict(observation),
+                        )
+                    )
+                    self._ordinary_agent_save_effect(
+                        row,
+                        record.model_copy(
+                            update={
+                                "state": "reconciliation_required",
+                                "revision": record.revision + 1,
+                                "reconciliation_count": count,
+                                "updated_at": now,
+                                "next_observation_at": None
+                                if exhausted
+                                else now + (15, 45, 120)[count],
+                                "reason_code": "reconciliation_exhausted" if exhausted else None,
+                            }
+                        ),
+                    )
+                    session.commit()
+                    raise OrdinaryAgentSessionAdmissionDenied(
+                        "reconciliation_exhausted" if exhausted else "observation_not_due"
+                    )
             if record.revision != expected_effect_revision:
                 raise OrdinaryAgentSessionAdmissionDenied("effect_revision_conflict")
             if (
@@ -23437,6 +23483,17 @@ class PostgresRecordStore(HumanSessionStore):
                 or record.dispatch_custody_count + record.reconciliation_custody_count
                 >= effect_contracts.MAX_TOTAL_CUSTODY_MINT_ATTEMPTS_PER_EFFECT
             ):
+                self._ordinary_agent_save_effect(
+                    row,
+                    record.model_copy(
+                        update={
+                            "reason_code": "custody_attempts_exhausted",
+                            "revision": record.revision + 1,
+                            "updated_at": now,
+                        }
+                    ),
+                )
+                session.commit()
                 raise OrdinaryAgentSessionAdmissionDenied("custody_attempts_exhausted")
             ordinal = record.reconciliation_custody_count + 1
             key = f"ordinary-effect:{effect_id}:reconciliation:{record.reconciliation_count + 1}:{ordinal}"
@@ -23450,7 +23507,7 @@ class PostgresRecordStore(HumanSessionStore):
                 idempotency_key=key,
                 candidate=self._ordinary_agent_effect_candidate_from_chain(
                     session, principal=principal, credential=credential, now=now, record=record
-                ),
+                ).model_copy(update={"effect_profile": "effect_reconciliation"}),
             )
             session.add(
                 LaunchplaneOrdinaryAgentEffectCustodyRow(
@@ -24022,7 +24079,9 @@ class PostgresRecordStore(HumanSessionStore):
                     result = latest.result
                     if (
                         isinstance(result, snapshot_contracts.OrdinaryAgentMergeTrainSnapshotResult)
-                        and not result.awaits_source_observation
+                        and not result.awaits_source_observation_for(
+                            tuple(item.number for item in context.request.pull_requests)
+                        )
                     ) or (
                         isinstance(result, snapshot_contracts.OrdinaryAgentCandidateCheckResult)
                         and result.status not in {"pending", "unknown"}
@@ -24350,7 +24409,9 @@ class PostgresRecordStore(HumanSessionStore):
                     raise OrdinaryAgentSessionAdmissionDenied("snapshot_scope_conflict")
                 if not result.protection.required_checks:
                     exhausted, reason = True, "required_checks_unconfigured"
-                elif result.awaits_source_observation:
+                elif result.awaits_source_observation_for(
+                    tuple(item.number for item in request.pull_requests)
+                ):
                     previous = (
                         session.scalar(
                             select(func.count())
@@ -24409,7 +24470,9 @@ class PostgresRecordStore(HumanSessionStore):
                     and isinstance(
                         item.result, snapshot_contracts.OrdinaryAgentMergeTrainSnapshotResult
                     )
-                    and not item.result.awaits_source_observation
+                    and not item.result.awaits_source_observation_for(
+                        tuple(expected.number for expected in request.pull_requests)
+                    )
                     and item.result.protection.required_checks
                 ]
                 if len(snapshots) != 1:
