@@ -919,6 +919,12 @@ viewer grant. Owner candidate rules use only `read_only` and may grant that read
 action plus `owner_acceptance_event.write`. Both shapes remain limited to
 product `launchplane` and context `owner-acceptance`. Product Owner membership
 remains a separate server-side requirement for event writes.
+
+The manager-preview set above is current compatibility authority, not the issue
+`#2240` target. Preserve it only until Owner-acceptance replacement coverage and
+rollback are proved; do not extend it for the delegated-delivery pilot or treat
+it as merge, deploy, configuration, secret, or policy authority.
+
 `LAUNCHPLANE_AUTHZ_PRODUCT_OWNER_POLICY_ADMIN_MANAGED_SET_JSON` owns the
 dedicated local-operator policy administration boundary and must declare the
 exact `operator.product-owner-policy-admin` managed-set identity. Each rule

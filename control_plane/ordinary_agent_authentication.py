@@ -15,7 +15,8 @@ from control_plane.contracts.ordinary_agent_lifecycle import (
     OrdinaryAgentRotateCredentialApplyEnvelope,
 )
 
-_TOKEN_PREFIX = "lp_ordinary_v1"
+# Public wire-format version; the secret is a separate randomly generated component.
+_WIRE_PREFIX = "lp_ordinary_v1"
 _TOKEN_SECRET_BYTES = 32
 _MAX_TOKEN_LENGTH = 512
 _MAX_CIPHERTEXT_LENGTH = 64 * 1024
@@ -138,7 +139,7 @@ def parse_ordinary_agent_token(token: str) -> OrdinaryAgentTokenProof:
     if not isinstance(token, str) or not token or len(token) > _MAX_TOKEN_LENGTH:
         raise ValueError("ordinary-agent credential is malformed")
     parts = token.split(".")
-    if len(parts) != 4 or parts[0] != _TOKEN_PREFIX:
+    if len(parts) != 4 or parts[0] != _WIRE_PREFIX:
         raise ValueError("ordinary-agent credential is malformed")
     _, credential_id, version_text, secret_text = parts
     if _IDENTIFIER_PATTERN.fullmatch(credential_id) is None:
@@ -215,9 +216,7 @@ def issue_ordinary_agent_credential(
     _validate_digest(intent_sha256, label="ordinary-agent issuance intent")
 
     secret_text = _encoded_random(random_bytes)
-    token = OrdinaryAgentToken(
-        f"{_TOKEN_PREFIX}.{credential_id}.{credential_version}.{secret_text}"
-    )
+    token = OrdinaryAgentToken(f"{_WIRE_PREFIX}.{credential_id}.{credential_version}.{secret_text}")
     proof = parse_ordinary_agent_token(token.value)
     candidate_fields: dict[str, object] = {
         "candidate_kind": "service_issued",

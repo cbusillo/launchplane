@@ -1,4 +1,5 @@
 import unittest
+from types import SimpleNamespace
 from email.message import Message
 from unittest.mock import patch
 from urllib.error import HTTPError
@@ -11,6 +12,18 @@ from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingPlan
 from control_plane.contracts.merge_train_batch import build_merge_train_batch_candidate_ref
 from control_plane.contracts.merge_train_batch import build_merge_train_batch_id
 from control_plane.contracts.merge_train_batch import build_merge_train_batch_landing_plan
+from control_plane.contracts.merge_train_effect import (
+    CandidateHeadMergeEffect,
+    CandidateHeadMergeOutcome,
+    CandidateRefDeleteEffect,
+    CandidateRefPrepareEffect,
+    PullRequestHeadRefreshEffect,
+    PullRequestLandingEffect,
+    StackChildCloseEffect,
+    StackChildCommentEffect,
+    StackChildLabelEffect,
+    StackChildMergeEffect,
+)
 from control_plane.contracts.merge_train_structural_provenance import (
     MergeTrainStructuralDeltaFingerprint,
     MergeTrainStructuralEntryObservation,
@@ -27,6 +40,59 @@ from control_plane.merge_train_structural_provenance import (
 )
 
 
+class _ReadOnlyMergeTrainTransport(RecordingMergeTrainGitHubTransport):
+    def request(self, *, method: str, path: str, body: dict[str, object] | None = None) -> object:
+        if method != "GET":
+            raise AssertionError(
+                f"raw provider mutation escaped semantic executor: {method} {path}"
+            )
+        return super().request(method=method, path=path, body=body)
+
+
+class _RecordingSemanticEffectExecutor:
+    def __init__(
+        self,
+        *,
+        candidate_result_shas: tuple[str | None, ...] = (),
+        landing_result_shas: tuple[str, ...] = (),
+    ) -> None:
+        self.candidate_result_shas = list(candidate_result_shas)
+        self.landing_result_shas = list(landing_result_shas)
+        self.effects: list[object] = []
+
+    def prepare_candidate_ref(self, effect: CandidateRefPrepareEffect) -> None:
+        self.effects.append(effect)
+
+    def merge_candidate_head(self, effect: CandidateHeadMergeEffect) -> CandidateHeadMergeOutcome:
+        self.effects.append(effect)
+        return CandidateHeadMergeOutcome(result_sha=self.candidate_result_shas.pop(0))
+
+    def refresh_pull_request_head(self, effect: PullRequestHeadRefreshEffect) -> None:
+        self.effects.append(effect)
+
+    def merge_stack_child(self, effect: StackChildMergeEffect) -> str:
+        self.effects.append(effect)
+        return "stack-merge"
+
+    def land_pull_request(self, effect: PullRequestLandingEffect) -> str:
+        self.effects.append(effect)
+        return self.landing_result_shas.pop(0)
+
+    def comment_stack_child(self, effect: StackChildCommentEffect) -> str:
+        self.effects.append(effect)
+        return "https://example.invalid/comment"
+
+    def label_stack_child(self, effect: StackChildLabelEffect) -> None:
+        self.effects.append(effect)
+
+    def close_stack_child(self, effect: StackChildCloseEffect) -> None:
+        self.effects.append(effect)
+
+    def delete_candidate_ref(self, effect: CandidateRefDeleteEffect) -> bool:
+        self.effects.append(effect)
+        return True
+
+
 class _PermissiveMergeAdmissionGuard:
     def __init__(self) -> None:
         self.admit_calls: list[dict[str, object]] = []
@@ -35,7 +101,7 @@ class _PermissiveMergeAdmissionGuard:
 
     def admit(self, **kwargs: object) -> object:
         self.admit_calls.append(kwargs)
-        return object()
+        return SimpleNamespace(admission_id=f"admission-{len(self.admit_calls)}")
 
     def record_landed(self, **kwargs: object) -> None:
         self.landed_calls.append(kwargs)
@@ -64,6 +130,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
             client: GitHubMergeTrainClient,
             *,
             landing_plan: MergeTrainBatchLandingPlan,
+            effect_executor: object | None = None,
             admission_guard: object | None = None,
             recorded_at: str = "",
             provider_checkpoint: object | None = None,
@@ -72,6 +139,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
             return original(
                 client,
                 landing_plan=landing_plan,
+                effect_executor=effect_executor,  # type: ignore[arg-type]
                 admission_guard=(
                     admission_guard or _PermissiveMergeAdmissionGuard()  # type: ignore[arg-type]
                 ),
@@ -612,6 +680,54 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                 ),
             ],
         )
+
+    def test_build_batch_candidate_routes_writes_through_injected_semantic_executor(
+        self,
+    ) -> None:
+        candidate = _batch_candidate()
+        executor = _RecordingSemanticEffectExecutor(
+            candidate_result_shas=("candidate-after-1", "candidate-after-2")
+        )
+        transport = _ReadOnlyMergeTrainTransport(
+            responses=(
+                _git_commit("base-main", "tree-base"),
+                _git_commit("head-1", "tree-head-1"),
+                _git_commit("head-2", "tree-head-2"),
+                _github_branch(sha="candidate-after-1", tree_sha="tree-candidate-1"),
+                _git_commit(
+                    "candidate-after-1",
+                    "tree-candidate-1",
+                    parents=("base-main", "head-1"),
+                ),
+                _github_branch(sha="candidate-after-2", tree_sha="tree-candidate-2"),
+                _git_commit(
+                    "candidate-after-2",
+                    "tree-candidate-2",
+                    parents=("candidate-after-1", "head-2"),
+                ),
+            )
+        )
+
+        built = GitHubMergeTrainClient(
+            transport=transport, effect_executor=executor
+        ).build_batch_candidate(
+            candidate=candidate,
+        )
+
+        self.assertEqual(built.candidate_sha, "candidate-after-2")
+        self.assertTrue(all(request.method == "GET" for request in transport.requests))
+        self.assertEqual(
+            [type(effect) for effect in executor.effects],
+            [CandidateRefPrepareEffect, CandidateHeadMergeEffect, CandidateHeadMergeEffect],
+        )
+        first_merge = executor.effects[1]
+        assert isinstance(first_merge, CandidateHeadMergeEffect)
+        self.assertEqual(first_merge.lineage.batch_id, candidate.batch_id)
+        self.assertEqual(first_merge.rolling_parent_sha, "base-main")
+        self.assertEqual(first_merge.pull_request_number, 1)
+        second_merge = executor.effects[2]
+        assert isinstance(second_merge, CandidateHeadMergeEffect)
+        self.assertEqual(second_merge.rolling_parent_sha, "candidate-after-1")
 
     def test_build_batch_candidate_resets_existing_ref(self) -> None:
         candidate = _batch_candidate()
@@ -1222,6 +1338,88 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
 
         self.assertEqual(observed_candidate, baseline_candidate)
 
+    def test_landing_uses_rolling_branch_when_pr_base_projection_is_older(self) -> None:
+        for single_entry in (False, True):
+            with self.subTest(single_entry=single_entry):
+                plan = _landing_plan()
+                if single_entry:
+                    plan = type(plan).model_validate(
+                        {
+                            **plan.model_dump(mode="python"),
+                            "entries": plan.entries[:1],
+                            "landing_plan_sha256": "",
+                        }
+                    )
+                first = list(_normal_landing_responses(1, "base-main", "merge-sha-1"))
+                if single_entry:
+                    first[1] = _landing_pull_request(1, base_sha="older-projection")
+                    first.insert(2, _github_branch(sha="base-main"))
+                responses = [_github_branch(sha="base-main"), *first]
+                if not single_entry:
+                    second = list(_normal_landing_responses(2, "merge-sha-1", "merge-sha-2"))
+                    second[1] = _landing_pull_request(2, base_sha="base-main")
+                    second.insert(2, _github_branch(sha="merge-sha-1"))
+                    responses.extend([_github_branch(sha="merge-sha-1"), *second])
+                responses.append(
+                    _github_branch(sha="merge-sha-1" if single_entry else "merge-sha-2")
+                )
+                transport = RecordingMergeTrainGitHubTransport(responses=tuple(responses))
+                landed = GitHubMergeTrainClient(transport=transport).land_batch_candidate(
+                    landing_plan=plan
+                )
+                self.assertTrue(all(entry.status == "merged" for entry in landed.entries))
+                self.assertEqual(
+                    landed.entries[-1].recorded_rolling_base_sha,
+                    "base-main" if single_entry else "merge-sha-1",
+                )
+                self.assertEqual(
+                    [
+                        request.body["sha"]
+                        for request in transport.requests
+                        if request.method == "PUT" and request.body
+                    ],
+                    [entry.expected_head_sha for entry in plan.entries],
+                )
+
+    def test_lagging_projection_confirmation_rejects_foreign_identity_before_second_merge(
+        self,
+    ) -> None:
+        for confirmation in (
+            _github_branch(sha="foreign-base"),
+            _github_branch(sha="merge-sha-1", tree_sha="foreign-tree"),
+            {},
+            MergeTrainGitHubError("Provider identity read unavailable", status_code=503),
+        ):
+            with self.subTest(confirmation=confirmation):
+                transport = RecordingMergeTrainGitHubTransport(
+                    responses=(
+                        _github_branch(sha="base-main"),
+                        *_normal_landing_responses(1, "base-main", "merge-sha-1"),
+                        _github_branch(sha="merge-sha-1"),
+                        _git_commit("head-2", "tree-head-2"),
+                        _landing_pull_request(2, base_sha="base-main"),
+                        confirmation,
+                    )
+                )
+                progress = []
+                with self.assertRaises(MergeTrainGitHubError) as failure:
+                    GitHubMergeTrainClient(transport=transport).land_batch_candidate(
+                        landing_plan=_landing_plan(),
+                        checkpoint=lambda plan, entry, phase: (
+                            progress.append(plan) if phase == "entry_merged" else None
+                        ),
+                    )
+                if not confirmation or isinstance(confirmation, MergeTrainGitHubError):
+                    self.assertNotIsInstance(failure.exception, MergeTrainGitHubStaleHeadError)
+                if isinstance(confirmation, MergeTrainGitHubError):
+                    self.assertIs(failure.exception, confirmation)
+                self.assertEqual(
+                    [request.path for request in transport.requests if request.method == "PUT"],
+                    ["/repos/example/merge-train-repo/pulls/1/merge"],
+                )
+                self.assertEqual(progress[-1].entries[0].status, "merged")
+                self.assertEqual(progress[-1].entries[0].merge_commit_sha, "merge-sha-1")
+
     def test_land_batch_candidate_merges_original_prs_in_order(self) -> None:
         landing_plan = _landing_plan()
         checkpoints: list[tuple[str, int, int]] = []
@@ -1294,6 +1492,59 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
             ],
         )
         self.assertEqual(provider_checkpoints, [(1, 0), (2, 1)])
+
+    def test_land_batch_candidate_routes_merges_through_injected_semantic_executor(
+        self,
+    ) -> None:
+        landing_plan = _landing_plan()
+        executor = _RecordingSemanticEffectExecutor(
+            landing_result_shas=("merge-sha-1", "merge-sha-2")
+        )
+        transport = _ReadOnlyMergeTrainTransport(
+            responses=(
+                _github_branch(sha="base-main"),
+                _git_commit("head-1", "tree-head-1"),
+                _landing_pull_request(1, base_sha="base-main"),
+                _git_commit(
+                    "merge-sha-1",
+                    "tree-candidate-1",
+                    parents=("base-main", "head-1"),
+                ),
+                _github_branch(sha="merge-sha-1"),
+                _github_branch(sha="merge-sha-1"),
+                _git_commit("head-2", "tree-head-2"),
+                _landing_pull_request(2, base_sha="merge-sha-1"),
+                _git_commit(
+                    "merge-sha-2",
+                    "tree-candidate-2",
+                    parents=("merge-sha-1", "head-2"),
+                ),
+                _github_branch(sha="merge-sha-2"),
+                _github_branch(sha="merge-sha-2"),
+            )
+        )
+
+        landed = GitHubMergeTrainClient(
+            transport=transport, effect_executor=executor
+        ).land_batch_candidate(
+            landing_plan=landing_plan,
+        )
+
+        self.assertEqual([entry.status for entry in landed.entries], ["merged", "merged"])
+        self.assertTrue(all(request.method == "GET" for request in transport.requests))
+        self.assertEqual(
+            [type(effect) for effect in executor.effects],
+            [PullRequestLandingEffect, PullRequestLandingEffect],
+        )
+        first_landing = executor.effects[0]
+        assert isinstance(first_landing, PullRequestLandingEffect)
+        self.assertEqual(first_landing.lineage.landing_plan_id, landing_plan.plan_id)
+        self.assertEqual(first_landing.rolling_base_sha, "base-main")
+        self.assertEqual(first_landing.admission_id, "admission-1")
+        second_landing = executor.effects[1]
+        assert isinstance(second_landing, PullRequestLandingEffect)
+        self.assertEqual(second_landing.rolling_base_sha, "merge-sha-1")
+        self.assertEqual(second_landing.admission_id, "admission-2")
 
     def test_land_batch_candidate_records_candidate_no_op_as_skipped(self) -> None:
         landing_plan = _landing_plan()
@@ -1567,15 +1818,18 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                 _github_branch(sha="base-main"),
                 _git_commit("head-1", "tree-head-1"),
                 _landing_pull_request(1, base_sha="unexpected-base"),
+                _github_branch(sha="foreign-base"),
             )
         )
 
-        with self.assertRaisesRegex(MergeTrainGitHubStaleHeadError, "base moved"):
+        with self.assertRaisesRegex(MergeTrainGitHubStaleHeadError, "base branch moved"):
             GitHubMergeTrainClient(transport=transport).land_batch_candidate(
                 landing_plan=landing_plan
             )
 
-        self.assertEqual([request.method for request in transport.requests], ["GET", "GET", "GET"])
+        self.assertEqual(
+            [request.method for request in transport.requests], ["GET", "GET", "GET", "GET"]
+        )
 
     def test_land_batch_candidate_accepts_descendant_movement_after_final_merge(self) -> None:
         landing_plan = _landing_plan()
@@ -1711,6 +1965,27 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
             (transport.requests[-1].method, transport.requests[-1].path),
             ("DELETE", _candidate_ref_path(landing_plan)),
         )
+
+    def test_cleanup_batch_candidate_ref_routes_delete_through_injected_executor(
+        self,
+    ) -> None:
+        landing_plan = _landing_plan()
+        executor = _RecordingSemanticEffectExecutor()
+        transport = _ReadOnlyMergeTrainTransport()
+
+        deleted = GitHubMergeTrainClient(
+            transport=transport, effect_executor=executor
+        ).cleanup_batch_candidate_ref(
+            landing_plan=landing_plan,
+        )
+
+        self.assertTrue(deleted)
+        self.assertEqual(transport.requests, [])
+        self.assertEqual(len(executor.effects), 1)
+        effect = executor.effects[0]
+        assert isinstance(effect, CandidateRefDeleteEffect)
+        self.assertEqual(effect.lineage.landing_plan_id, landing_plan.plan_id)
+        self.assertEqual(effect.candidate_ref, landing_plan.candidate_ref)
 
     def test_cleanup_batch_candidate_ref_tolerates_already_deleted_candidate_ref(self) -> None:
         landing_plan = _landing_plan()
