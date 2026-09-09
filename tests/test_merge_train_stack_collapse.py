@@ -1,5 +1,13 @@
 import unittest
+from unittest.mock import Mock
 
+from control_plane.contracts.merge_train_effect import (
+    MergeTrainSemanticEffectExecutor,
+    StackChildCloseEffect,
+    StackChildCommentEffect,
+    StackChildLabelEffect,
+    StackChildMergeEffect,
+)
 from control_plane.contracts.merge_train_stack_collapse import (
     MergeTrainStackCollapsePlan,
     build_merge_train_stack_collapse_id,
@@ -207,6 +215,34 @@ class MergeTrainStackCollapseContractTests(unittest.TestCase):
             ],
         )
 
+    def test_execute_plan_routes_mutations_through_injected_semantic_executor(
+        self,
+    ) -> None:
+        plan = _collapse_plan()
+        branch_client = _RecordingStackCollapseBranchClient(merge_commit_shas=())
+        executor = Mock(spec=MergeTrainSemanticEffectExecutor)
+        executor.merge_stack_child.side_effect = ("merge-32-31", "merge-31-30")
+
+        executed_plan = execute_merge_train_stack_collapse_plan(
+            plan=plan,
+            branch_client=branch_client,
+            effect_executor=executor,
+            updated_at="2026-05-14T13:45:00Z",
+        )
+
+        self.assertEqual(executed_plan.status, "waiting_for_root_checks")
+        self.assertEqual(branch_client.requests, [])
+        effects = [call.args[0] for call in executor.merge_stack_child.call_args_list]
+        self.assertTrue(all(isinstance(effect, StackChildMergeEffect) for effect in effects))
+        self.assertEqual(
+            [effect.lineage.collapse_id for effect in effects],
+            [plan.collapse_id, plan.collapse_id],
+        )
+        self.assertEqual(
+            [effect.expected_parent_head_sha for effect in effects],
+            ["head-31", "head-30"],
+        )
+
     def test_execute_plan_rejects_mutation_of_configured_base_branch(self) -> None:
         plan = _collapse_plan()
         unsafe_mutation = plan.mutations[0].model_copy(update={"parent_head_ref": plan.base_branch})
@@ -333,6 +369,49 @@ class MergeTrainStackCollapseContractTests(unittest.TestCase):
         )
         self.assertEqual(disposition_client.labels, [(31, "stack-landed"), (32, "stack-landed")])
         self.assertIn("root PR #30", disposition_client.comments[0][1])
+
+    def test_reconcile_children_routes_writes_through_injected_semantic_executor(
+        self,
+    ) -> None:
+        plan = execute_merge_train_stack_collapse_plan(
+            plan=_collapse_plan(),
+            branch_client=_RecordingStackCollapseBranchClient(
+                merge_commit_shas=("merge-32-31", "merge-31-30")
+            ),
+            updated_at="2026-05-14T13:45:00Z",
+        )
+        disposition_client = _RecordingStackChildDispositionClient()
+        executor = Mock(spec=MergeTrainSemanticEffectExecutor)
+        executor.comment_stack_child.side_effect = (
+            "https://example.invalid/comment/31",
+            "https://example.invalid/comment/32",
+        )
+
+        reconciled_plan = reconcile_merge_train_stack_children_after_root_landing(
+            plan=plan,
+            disposition_client=disposition_client,
+            effect_executor=executor,
+            root_merge_commit_sha="root-merge-sha",
+            label="stack-landed",
+            updated_at="2026-05-14T13:50:00Z",
+        )
+
+        self.assertEqual(reconciled_plan.status, "ready_for_train")
+        self.assertEqual(disposition_client.comments, [])
+        self.assertEqual(disposition_client.labels, [])
+        self.assertEqual(disposition_client.closed, [])
+        comment_effects = [call.args[0] for call in executor.comment_stack_child.call_args_list]
+        label_effects = [call.args[0] for call in executor.label_stack_child.call_args_list]
+        close_effects = [call.args[0] for call in executor.close_stack_child.call_args_list]
+        self.assertTrue(
+            all(isinstance(effect, StackChildCommentEffect) for effect in comment_effects)
+        )
+        self.assertTrue(all(isinstance(effect, StackChildLabelEffect) for effect in label_effects))
+        self.assertTrue(all(isinstance(effect, StackChildCloseEffect) for effect in close_effects))
+        self.assertEqual(
+            [effect.lineage.collapse_id for effect in comment_effects],
+            [plan.collapse_id, plan.collapse_id],
+        )
 
     def test_reconcile_children_leaves_plan_resumable_after_failed_close(self) -> None:
         plan = execute_merge_train_stack_collapse_plan(

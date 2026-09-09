@@ -24,6 +24,7 @@ from control_plane.contracts.merge_train_controller_state import (
     MergeTrainControllerStateRecord,
     build_merge_train_controller_state_record,
 )
+from control_plane.contracts.merge_train_effect import MergeTrainSemanticEffectExecutor
 from control_plane.contracts.merge_train_policy import MergeTrainPolicy, MergeTrainRepositoryPolicy
 from control_plane.contracts.merge_train_stack_collapse import (
     MergeTrainStackCollapsePlan,
@@ -309,12 +310,16 @@ def execute_merge_train_controller_run_once(
     admission_store: MergeAdmissionRecordStore,
     admission_evaluator: MergeAdmissionEvaluator,
     before_release: Callable[[MergeTrainControllerRunOnceResult], None] | None = None,
+    effect_executor: MergeTrainSemanticEffectExecutor | None = None,
 ) -> MergeTrainControllerRunOnceResult:
     transport = UrllibMergeTrainGitHubTransport(
         token=token,
         api_base_url=request.github_api_base_url,
     )
-    github_client = GitHubMergeTrainClient(transport=transport)
+    github_client = GitHubMergeTrainClient(
+        transport=transport,
+        effect_executor=effect_executor,
+    )
     lease_owner = merge_train_controller_lease_owner(trace_id=trace_id)
     if request.mutate:
         controller_state = controller_state_store.acquire_merge_train_controller_state_record(
@@ -1132,6 +1137,7 @@ def _finish_landed_merge_train_batch(
     reconciled_collapse_plan = reconcile_merge_train_stack_children_after_root_landing(
         plan=collapse_record.plan,
         disposition_client=github_client,
+        effect_executor=github_client.semantic_effect_executor,
         root_merge_commit_sha=root_entry.merge_commit_sha,
         label=repository_policy.stack_child_disposition_label,
         updated_at=recorded_at,
@@ -1887,6 +1893,7 @@ def _advance_planned_stack_collapse_record(
         executed_plan = execute_merge_train_stack_collapse_plan(
             plan=planned_collapse_record.plan,
             branch_client=github_client,
+            effect_executor=github_client.semantic_effect_executor,
             updated_at=recorded_at,
             checkpoint=checkpoint_collapse_progress,
         )
