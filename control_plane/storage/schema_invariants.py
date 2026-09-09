@@ -10,7 +10,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
 AUTHZ_COMPATIBILITY_FLOOR_REVISION = "f3b5d7e9a1c2"
-EXPECTED_ALEMBIC_HEAD_REVISION = "f3c8e1a2d5b7"
+EXPECTED_ALEMBIC_HEAD_REVISION = "a4d9e2f6b8c1"
 RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS = (EXPECTED_ALEMBIC_HEAD_REVISION,)
 _AUTHZ_POLICY_TABLE = "launchplane_authz_policies"
 _AUTHZ_POLICY_WRITE_FENCE_TRIGGER = "launchplane_authz_policy_write_fence"
@@ -59,6 +59,42 @@ class CriticalPrimaryKey:
 
 
 CRITICAL_POSTGRES_COLUMN_TYPES: tuple[CriticalColumnType, ...] = (
+    CriticalColumnType("launchplane_ordinary_agent_effects", "binding_revision", ("bigint",)),
+    CriticalColumnType("launchplane_ordinary_agent_effects", "action_ordinal", ("bigint",)),
+    CriticalColumnType("launchplane_ordinary_agent_effects", "revision", ("bigint",)),
+    CriticalColumnType("launchplane_ordinary_agent_effects", "payload", ("jsonb",)),
+    CriticalColumnType(
+        "launchplane_ordinary_agent_semantic_dispatches", "semantic_ordinal", ("bigint",)
+    ),
+    CriticalColumnType("launchplane_ordinary_agent_semantic_dispatches", "payload", ("jsonb",)),
+    CriticalColumnType("launchplane_ordinary_agent_semantic_outcomes", "payload", ("jsonb",)),
+    CriticalColumnType("launchplane_ordinary_agent_effect_reconciliations", "payload", ("jsonb",)),
+    CriticalColumnType("launchplane_ordinary_agent_effect_completions", "payload", ("jsonb",)),
+    CriticalColumnType("launchplane_ordinary_agent_effect_custody", "payload", ("jsonb",)),
+    CriticalColumnType(
+        "launchplane_ordinary_agent_provider_waits", "retry_not_before", ("bigint",)
+    ),
+    CriticalColumnType("launchplane_ordinary_agent_provider_waits", "payload", ("jsonb",)),
+    CriticalColumnType("launchplane_ordinary_agent_job_claims", "generation", ("bigint",)),
+    CriticalColumnType("launchplane_ordinary_agent_job_claims", "claim_expires_at", ("bigint",)),
+    CriticalColumnType("launchplane_ordinary_agent_job_claims", "next_due_at", ("bigint",)),
+    CriticalColumnType("launchplane_ordinary_agent_read_attempts", "binding_revision", ("bigint",)),
+    CriticalColumnType("launchplane_ordinary_agent_read_attempts", "attempt_ordinal", ("bigint",)),
+    CriticalColumnType("launchplane_ordinary_agent_read_attempts", "revision", ("bigint",)),
+    CriticalColumnType("launchplane_ordinary_agent_read_attempts", "payload", ("jsonb",)),
+    CriticalColumnType("launchplane_ordinary_agent_read_custody", "payload", ("jsonb",)),
+    CriticalColumnType("launchplane_ordinary_agent_read_outcomes", "payload", ("jsonb",)),
+    CriticalColumnType(
+        "launchplane_ordinary_agent_candidate_check_observations", "binding_revision", ("bigint",)
+    ),
+    CriticalColumnType(
+        "launchplane_ordinary_agent_candidate_check_observations",
+        "observation_ordinal",
+        ("bigint",),
+    ),
+    CriticalColumnType(
+        "launchplane_ordinary_agent_candidate_check_observations", "payload", ("jsonb",)
+    ),
     CriticalColumnType("launchplane_ordinary_agent_sessions", "credential_version", ("bigint",)),
     CriticalColumnType("launchplane_ordinary_agent_leases", "revision", ("bigint",)),
     CriticalColumnType("launchplane_ordinary_agent_sessions", "payload", ("jsonb",)),
@@ -663,6 +699,43 @@ _ODOO_STABLE_ACTIVE_OPERATION_PREDICATE_TOKENS = (
 )
 
 CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
+    CriticalIndex(
+        "launchplane_ordinary_agent_effects",
+        "ordinary_effect_charge_uq",
+        ("lease_id", "action_ordinal"),
+        unique=True,
+    ),
+    CriticalIndex(
+        "launchplane_ordinary_agent_effects",
+        "ordinary_effect_semantic_uq",
+        ("request_id", "binding_revision", "semantic_key"),
+        unique=True,
+    ),
+    CriticalIndex(
+        "launchplane_ordinary_agent_semantic_dispatches",
+        "ordinary_dispatch_ordinal_uq",
+        ("effect_id", "semantic_ordinal"),
+        unique=True,
+    ),
+    CriticalIndex(
+        "launchplane_ordinary_agent_read_attempts",
+        "ordinary_read_attempt_ordinal_uq",
+        ("request_id", "binding_revision", "purpose", "candidate_sha", "attempt_ordinal"),
+        unique=True,
+    ),
+    CriticalIndex(
+        "launchplane_ordinary_agent_read_attempts",
+        "ordinary_read_active_uq",
+        ("request_id", "binding_revision", "purpose"),
+        unique=True,
+        predicate_tokens=("reserved", "reading"),
+    ),
+    CriticalIndex(
+        "launchplane_ordinary_agent_candidate_check_observations",
+        "ordinary_candidate_observation_uq",
+        ("request_id", "binding_revision", "candidate_sha", "observation_ordinal"),
+        unique=True,
+    ),
     CriticalIndex(
         "launchplane_ordinary_agent_finite_requests",
         "ordinary_finite_request_idempotency_uq",
@@ -1411,6 +1484,20 @@ CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
 )
 
 CRITICAL_PRIMARY_KEYS: tuple[CriticalPrimaryKey, ...] = (
+    CriticalPrimaryKey("launchplane_ordinary_agent_effects", ("effect_id",)),
+    CriticalPrimaryKey("launchplane_ordinary_agent_semantic_dispatches", ("child_id",)),
+    CriticalPrimaryKey("launchplane_ordinary_agent_semantic_outcomes", ("child_id",)),
+    CriticalPrimaryKey("launchplane_ordinary_agent_effect_reconciliations", ("observation_id",)),
+    CriticalPrimaryKey("launchplane_ordinary_agent_effect_completions", ("effect_id",)),
+    CriticalPrimaryKey("launchplane_ordinary_agent_effect_custody", ("attempt_id",)),
+    CriticalPrimaryKey("launchplane_ordinary_agent_provider_waits", ("quota_key_sha256",)),
+    CriticalPrimaryKey("launchplane_ordinary_agent_job_claims", ("request_id",)),
+    CriticalPrimaryKey("launchplane_ordinary_agent_read_attempts", ("attempt_id",)),
+    CriticalPrimaryKey("launchplane_ordinary_agent_read_custody", ("custody_attempt_id",)),
+    CriticalPrimaryKey("launchplane_ordinary_agent_read_outcomes", ("attempt_id",)),
+    CriticalPrimaryKey(
+        "launchplane_ordinary_agent_candidate_check_observations", ("observation_id",)
+    ),
     CriticalPrimaryKey(
         "launchplane_ordinary_agent_session_operations", ("principal_id", "operation_id")
     ),
@@ -1592,6 +1679,7 @@ def verify_postgres_schema_invariants(engine: Engine) -> None:
         ),
         *authz_policy_write_fence_errors(engine),
         *merge_train_policy_write_fence_errors(engine),
+        *ordinary_effect_write_fence_errors(engine),
     ]
     if errors:
         joined_errors = "; ".join(errors)
@@ -1782,6 +1870,43 @@ def merge_train_policy_write_fence_errors(engine: Engine) -> list[str]:
             "jsonb_set",
         ),
     )
+
+
+def ordinary_effect_write_fence_errors(engine: Engine) -> list[str]:
+    errors = _postgres_write_fence_errors(
+        engine=engine,
+        table_name="launchplane_ordinary_agent_effects",
+        trigger_name="ordinary_effect_identity",
+        function_name="launchplane_ordinary_effect_identity_guard",
+        trigger_fragments=("before insert or delete or update",),
+        function_fragments=(
+            "new.action_ordinal",
+            "old.action_ordinal",
+            "ordinary effect identity is immutable",
+            "ordinary effect payload identity mismatch",
+        ),
+    )
+    for suffix in (
+        "semantic_dispatches",
+        "semantic_outcomes",
+        "effect_reconciliations",
+        "effect_completions",
+        "effect_custody",
+        "read_custody",
+        "read_outcomes",
+        "candidate_check_observations",
+    ):
+        errors.extend(
+            _postgres_write_fence_errors(
+                engine=engine,
+                table_name="launchplane_ordinary_agent_" + suffix,
+                trigger_name="ordinary_append_only",
+                function_name="launchplane_ordinary_append_only_guard",
+                trigger_fragments=("before delete or update",),
+                function_fragments=("raise exception", "append-only"),
+            )
+        )
+    return errors
 
 
 def _postgres_write_fence_errors(

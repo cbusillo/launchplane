@@ -20,6 +20,7 @@ from control_plane.contracts.ordinary_agent import (
     OrdinaryAgentPullRequest,
     OrdinaryAgentRequest,
     OrdinaryAgentSession,
+    OrdinaryAgentTarget,
 )
 from control_plane.contracts.ordinary_agent_lifecycle import (
     OrdinaryAgentAuthenticationCredentialRecord,
@@ -102,6 +103,29 @@ def _require_current_credential(
         raise OrdinaryAgentSessionAdmissionDenied("credential_binding_mismatch")
     if credential.status != "active" or not credential.valid_from <= now < credential.expires_at:
         raise OrdinaryAgentSessionAdmissionDenied("credential_unavailable")
+
+
+def require_ordinary_agent_reconciliation_authority(
+    *,
+    policy: LaunchplaneAuthzPolicyRecord,
+    principal: OrdinaryAgentPrincipalRecord,
+    credential: OrdinaryAgentAuthenticationCredentialRecord,
+    target: OrdinaryAgentTarget,
+    now: int,
+) -> None:
+    """Current preflight ceiling only; never renew an old session or authorize a write."""
+    _require_current_credential(principal, credential, now)
+    snapshot, subject = _policy_inputs(policy, principal)
+    result = evaluate_ordinary_agent_policy(
+        snapshot=snapshot,
+        principal=subject,
+        target=target,
+        action="preflight",
+        managed_set_id=principal.policy.managed_set_id,
+        managed_rule_id=principal.policy.managed_rule_id,
+    )
+    if result.decision != "allow":
+        raise OrdinaryAgentSessionAdmissionDenied(result.reason_code)
 
 
 def build_ordinary_agent_session_write_set(
