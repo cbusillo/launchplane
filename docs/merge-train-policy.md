@@ -763,7 +763,9 @@ stack-collapse, or batch-landing phases render conservative PR feedback payloads
 from their worker responses and post them through the managed feedback endpoint,
 so queued PRs get one evolving Launchplane status comment as the train builds,
 waits, blocks, or completes. Controller-mode dry-runs do not deliver feedback
-comments.
+comments. Manual-phase feedback binds repository and base-branch identity to the
+phase response's candidate, landing-plan, or stack-collapse-plan record and fails
+closed if another identity-bearing phase result disagrees.
 
 ## Scheduler rollout runbook
 
