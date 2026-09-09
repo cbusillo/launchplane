@@ -42,6 +42,7 @@ from control_plane.contracts.merge_train_stack_collapse import (
 from control_plane.contracts.merge_train_structural_provenance import (
     MergeTrainCombinedCandidateOwnerReview,
     MergeTrainOwnerEvidenceBinding,
+    MergeTrainStructuralChangeImpactModel,
     MergeTrainStructuralDeltaFingerprint,
     MergeTrainStructuralEntryObservation,
     MergeTrainStructuralEvaluationInput,
@@ -99,6 +100,18 @@ def _canonical_sha256(payload: object) -> str:
             ensure_ascii=True,
         ).encode("utf-8")
     ).hexdigest()
+
+
+def _structural_change_impact_model(
+    impact: ChangeImpactEvaluation,
+) -> MergeTrainStructuralChangeImpactModel | None:
+    if impact.schema_version != 1 or not impact.policy_digest:
+        return None
+    if impact.classification_model is None:
+        return "legacy_v1"
+    if impact.classification_model == "v2":
+        return "v2"
+    return None
 
 
 @dataclass(frozen=True)
@@ -372,6 +385,7 @@ class LiveMergeAdmissionEvaluator:
     ) -> MergeTrainStructuralDeltaFingerprint | None:
         if impact.status != "success":
             return None
+        change_impact_model = _structural_change_impact_model(impact)
         return MergeTrainStructuralDeltaFingerprint(
             head_sha=repository_evidence.target.head_sha,
             head_tree_sha=repository_evidence.target.tree_sha,
@@ -379,6 +393,10 @@ class LiveMergeAdmissionEvaluator:
             affected_subjects=tuple(
                 MergeTrainStructuralSubject(product=item.product, system=item.system)
                 for item in impact.affected_products
+            ),
+            change_impact_model=change_impact_model,
+            change_impact_policy_digest=(
+                impact.policy_digest if change_impact_model is not None else None
             ),
         )
 
