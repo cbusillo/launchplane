@@ -84,9 +84,12 @@ class GitHubAppIdentityTests(unittest.TestCase):
                     "id": 77,
                     "app_id": 42,
                     "permissions": {
+                        "administration": "read",
+                        "checks": "read",
                         "contents": "write",
                         "metadata": "read",
                         "pull_requests": "write",
+                        "statuses": "read",
                     },
                 }
             observed_body.update(kwargs["body"])
@@ -119,6 +122,70 @@ class GitHubAppIdentityTests(unittest.TestCase):
         )
         self.assertEqual(result.permissions, ("contents:write", "pull_requests:write"))
 
+    def test_snapshot_uses_only_the_read_profile_under_the_full_app_ceiling(self) -> None:
+        observed_body: dict[str, object] = {}
+
+        def api_request(**kwargs: object) -> object:
+            if kwargs["path"] == "/app":
+                return {"id": 42}
+            if kwargs["path"] == "/repos/example/repo/installation":
+                return {
+                    "id": 77,
+                    "app_id": 42,
+                    "permissions": {
+                        "administration": "read",
+                        "checks": "read",
+                        "contents": "write",
+                        "metadata": "read",
+                        "pull_requests": "write",
+                        "statuses": "read",
+                    },
+                }
+            observed_body.update(kwargs["body"])  # type: ignore[arg-type]
+            return {
+                "token": "snapshot-token-secret",
+                "expires_at": "2026-08-07T15:00:00Z",
+                "permissions": {
+                    "administration": "read",
+                    "checks": "read",
+                    "contents": "read",
+                    "metadata": "read",
+                    "pull_requests": "read",
+                    "statuses": "read",
+                },
+                "repositories": [{"id": 123, "full_name": "example/repo"}],
+            }
+
+        result = mint_ordinary_agent_installation_token(
+            identity=GitHubAppIdentity(app_id=42, private_key=self.private_key),
+            repository="example/repo",
+            repository_id="123",
+            effect_profile="merge_train_snapshot",
+            api_request=api_request,
+            now=datetime(2026, 8, 7, 14, 0, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(
+            observed_body["permissions"],
+            {
+                "administration": "read",
+                "checks": "read",
+                "contents": "read",
+                "pull_requests": "read",
+                "statuses": "read",
+            },
+        )
+        self.assertEqual(
+            result.permissions,
+            (
+                "administration:read",
+                "checks:read",
+                "contents:read",
+                "pull_requests:read",
+                "statuses:read",
+            ),
+        )
+
     def test_inspects_ordinary_agent_installation_without_minting(self) -> None:
         calls: list[dict[str, object]] = []
 
@@ -132,9 +199,12 @@ class GitHubAppIdentityTests(unittest.TestCase):
                     "app_id": 42,
                     "account": {"id": 456, "login": "example"},
                     "permissions": {
+                        "administration": "read",
+                        "checks": "read",
                         "contents": "write",
                         "metadata": "read",
                         "pull_requests": "write",
+                        "statuses": "read",
                     },
                 }
             raise AssertionError(kwargs["path"])
@@ -155,7 +225,14 @@ class GitHubAppIdentityTests(unittest.TestCase):
         self.assertEqual(result.repository, "example/repo")
         self.assertEqual(
             result.permissions,
-            ("contents:write", "metadata:read", "pull_requests:write"),
+            (
+                "administration:read",
+                "checks:read",
+                "contents:write",
+                "metadata:read",
+                "pull_requests:write",
+                "statuses:read",
+            ),
         )
         self.assertEqual(
             tuple(call["path"] for call in calls),
@@ -199,9 +276,12 @@ class GitHubAppIdentityTests(unittest.TestCase):
             inspect(
                 account={"id": 456, "login": "example"},
                 permissions={
+                    "administration": "read",
+                    "checks": "read",
                     "contents": "write",
                     "metadata": "read",
                     "pull_requests": "write",
+                    "statuses": "read",
                     "workflows": "write",
                 },
             )

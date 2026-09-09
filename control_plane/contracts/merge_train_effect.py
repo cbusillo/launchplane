@@ -34,6 +34,8 @@ class CandidateHeadMergeEffect:
 @dataclass(frozen=True)
 class CandidateHeadMergeOutcome:
     result_sha: str | None
+    result_tree_sha: str | None = None
+    parent_shas: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -41,6 +43,7 @@ class PullRequestHeadRefreshEffect:
     lineage: MergeTrainEffectLineage
     pull_request_number: int
     expected_head_sha: str
+    expected_base_sha: str = ""
 
 
 @dataclass(frozen=True)
@@ -89,6 +92,7 @@ class StackChildCloseEffect:
 class CandidateRefDeleteEffect:
     lineage: MergeTrainEffectLineage
     candidate_ref: str
+    expected_ref_sha: str = ""
 
 
 class MergeTrainSemanticEffectExecutor(Protocol):
