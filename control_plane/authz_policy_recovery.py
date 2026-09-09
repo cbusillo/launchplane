@@ -24,6 +24,9 @@ from control_plane.contracts.privileged_operation import (
     AUTHZ_POLICY_OPERATION_READ_ACTION,
     AUTHZ_POLICY_OPERATION_REVOKE_ACTION,
 )
+from control_plane.contracts.authz_policy_record import (
+    require_authz_policy_schema_write_activated,
+)
 from control_plane.service_auth import (
     GitHubHumanPolicyRule,
     LaunchplaneAuthzPolicy,
@@ -243,6 +246,7 @@ def build_authz_policy_recovery_candidate_reconcile_request(
 ) -> AuthzManagedPolicyReconcileEnvelope:
     """Compile one audited recovery candidate without accepting raw policy input."""
 
+    require_authz_policy_schema_write_activated(policy)
     if github_id < 1:
         raise ValueError("Recovery candidate requires an immutable GitHub ID.")
     activation_state = authz_policy_operation_activation_state(policy)

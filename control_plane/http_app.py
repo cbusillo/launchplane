@@ -1599,7 +1599,7 @@ class LaunchplaneRuntimeStatus(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     authz_policy_sha256: str
-    authz_policy_schema_version: Literal[1, 2]
+    authz_policy_schema_version: Literal[1, 2, 3]
     authz_policy_source: str
     bootstrap_authz_policy_sha256: str
     compatible_database_schema_revisions: tuple[str, ...]

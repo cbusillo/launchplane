@@ -946,7 +946,9 @@ def _advance_active_landing_record(
             "landing_plan": blocked_landing_record.landing_plan.model_dump(mode="json"),
         }
     except MergeTrainGitHubStaleHeadError as error:
-        stale_plan = stale_merge_train_landing_plan(active_landing_record.landing_plan)
+        stale_plan = stale_merge_train_landing_plan(
+            admission_guard.landing_plan_record.landing_plan
+        )
         stale_record = build_merge_train_batch_landing_plan_record(
             landing_plan=stale_plan,
             source=f"service:controller:stale-landing:{trace_id}",
