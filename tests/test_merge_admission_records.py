@@ -489,6 +489,29 @@ class GuardedMergeAdmissionScenarioTests(unittest.TestCase):
         )
         self.assertEqual(admission.readiness.state, "ready")
 
+    def test_proposal_does_not_write_and_intervening_fence_change_denies_persistence(self) -> None:
+        guard = self._guard()
+        proposal = guard.build_proposal(
+            entry=self.landing_record.landing_plan.entries[0],
+            observed_base_sha=BASE_SHA,
+            observed_base_tree_sha=OTHER_SHA,
+            observed_head_sha=HEAD_SHA,
+            observed_head_tree_sha=TREE_SHA,
+        )
+        self.assertEqual(self.store.list_merge_admission_records(), ())
+        changed = self.controller_state.model_copy(update={"lease_owner": "replacement-worker"})
+        self.store.write_merge_train_controller_state_record(changed)
+        with self.assertRaises(MergeAdmissionDeniedError) as denied:
+            guard.persist_proposal(proposal)
+        self.assertEqual(denied.exception.reason_code, "controller_fence_rejected")
+        self.assertEqual(self.store.list_merge_admission_records(), ())
+        self.store.write_merge_train_controller_state_record(self.controller_state)
+        persisted = guard.persist_proposal(proposal)
+        self.assertEqual(persisted, proposal.record)
+        self.assertEqual(self.store.read_merge_admission_record(persisted.admission_id), persisted)
+        with self.assertRaises(MergeAdmissionReconciliationRequiredError):
+            guard.persist_proposal(proposal)
+
     def test_refresh_before_evaluation_preserves_acquired_lease_owner(self) -> None:
         observed_controller_state = self.controller_state.model_copy(
             update={

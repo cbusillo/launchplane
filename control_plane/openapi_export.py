@@ -151,6 +151,7 @@ def write_canonical_openapi(output_path: Path) -> Path:
 
 
 UI_OPENAPI_READ_OPERATIONS: dict[str, str] = {
+    "/v1/ordinary-agent-jobs/{principal_id}/{request_id}": "read_human_ordinary_agent_job",
     "/v1/ordinary-agent-operations/{principal_id}/{operation_id}": "read_human_ordinary_agent_operation",
     "/v1/auth/session": "read_human_auth_session",
     "/v1/drivers": "read_driver_descriptors",
