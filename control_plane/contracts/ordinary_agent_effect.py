@@ -26,8 +26,14 @@ from control_plane.contracts.merge_train_effect import (
     CandidateRefDeleteEffect,
 )
 
+from control_plane.contracts.merge_admission_record import (
+    MergeAdmissionProposal,
+    MergeAdmissionRecord,
+    MergeLandingOutcomeRecord,
+)
 from control_plane.contracts.merge_train_controller_state import MergeTrainControllerStateRecord
 from control_plane.contracts.merge_train_batch import (
+    MergeTrainBatchLandingEntry,
     MergeTrainBatchCandidateRecord,
     MergeTrainBatchLandingPlanRecord,
 )
@@ -37,6 +43,7 @@ from control_plane.contracts.ordinary_agent_snapshot import (
     OrdinaryAgentMergeTrainSnapshotResult,
     OrdinaryAgentCandidateCheckResult,
     OrdinaryAgentProviderRequestCounts,
+    OrdinaryAgentLandingEvidence,
 )
 
 OrdinaryAgentProgressRecord: TypeAlias = (
@@ -59,6 +66,9 @@ MAX_TOTAL_CUSTODY_MINT_ATTEMPTS_PER_EFFECT = 18
 MAX_SNAPSHOT_PROVIDER_ATTEMPTS = 3
 MAX_CANDIDATE_CHECK_OBSERVATIONS = 9
 CANDIDATE_CHECK_DELAYS_SECONDS = (60, 120, 240, 480, 900)
+LANDING_WORK_SECONDS = 75
+LANDING_MIN_DISPATCH_SECONDS = 30
+LANDING_EVIDENCE_MAX_AGE_SECONDS = 45
 
 Identifier = Annotated[str, Field(min_length=1, max_length=256)]
 Digest = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
@@ -149,6 +159,68 @@ class OrdinaryAgentControllerFence(StrictFrozenModel):
     controller_key: Identifier
     lease_owner: Identifier
     lease_acquired_at: Identifier
+
+
+class OrdinaryAgentLandingAuthorityReference(StrictFrozenModel):
+    """Server-captured exact scoped DB evidence, never caller authorization."""
+
+    kind: Identifier
+    key: Identifier
+    sha256: Digest
+
+
+class OrdinaryAgentLandingPreparation(StrictFrozenModel):
+    preparation_id: Identifier
+    request_id: Identifier
+    session_id: Identifier
+    lease_id: Identifier
+    principal_id: Identifier
+    scope_sha256: Digest
+    binding_revision: int = Field(ge=1)
+    semantic_ordinal: int = Field(ge=1)
+    action_ordinal: int = Field(ge=1)
+    target: OrdinaryAgentTarget
+    controller_fence: OrdinaryAgentControllerFence
+    landing_plan_record_id: Identifier
+    landing_plan_sha256: Digest
+    candidate_record_id: Identifier
+    entry: MergeTrainBatchLandingEntry
+    expected_base_sha: Identifier
+    expected_base_tree_sha: Identifier
+    expected_merge_tree_sha: Identifier
+    policy_record_id: Identifier
+    policy_revision: int = Field(ge=1)
+    policy_sha256: Digest
+    credential_id: Identifier
+    credential_version: int = Field(ge=1)
+    credential_digest: Digest = Field(repr=False)
+    custody_attempt_id: Identifier
+    idempotency_key: Identifier
+    candidate: OrdinaryAgentCustodyCandidate = Field(repr=False)
+    revision: int = Field(default=1, ge=1)
+    state: Literal["reserved", "observed", "consumed", "terminal"] = "reserved"
+    reserved_at: Epoch
+    work_expires_at: Epoch | None = None
+    evidence: OrdinaryAgentLandingEvidence | None = None
+    authority: tuple[OrdinaryAgentLandingAuthorityReference, ...] = ()
+    effect_id: Identifier | None = None
+    reason_code: Identifier | None = None
+
+    @property
+    def request_payload(self) -> dict[str, object]:
+        return {
+            "purpose": "landing_preparation",
+            "preparation_id": self.preparation_id,
+            "request_id": self.request_id,
+            "binding_revision": self.binding_revision,
+            "landing_plan_record_id": self.landing_plan_record_id,
+            "landing_plan_sha256": self.landing_plan_sha256,
+            "pull_request_number": self.entry.pull_request_number,
+            "head_sha": self.entry.expected_head_sha,
+            "expected_base_sha": self.expected_base_sha,
+            "expected_merge_tree_sha": self.expected_merge_tree_sha,
+            "action_ordinal": self.action_ordinal,
+        }
 
 
 EffectState = Literal[
@@ -242,7 +314,13 @@ class OrdinaryAgentCompletedOutcome(StrictFrozenModel):
 
 class OrdinaryAgentKnownNotDispatchedOutcome(StrictFrozenModel):
     kind: Literal["known_not_dispatched"] = "known_not_dispatched"
-    reason: Literal["local_ttl", "transport_not_sent", "provider_rejected", "non_mergeable"]
+    reason: Literal[
+        "local_ttl",
+        "transport_not_sent",
+        "provider_rejected",
+        "non_mergeable",
+        "provider_attempt_deadline",
+    ]
 
 
 class OrdinaryAgentUnknownOutcome(StrictFrozenModel):
@@ -531,6 +609,34 @@ class OrdinaryAgentJobWorkerStore(Protocol):
 
 
 class OrdinaryAgentControllerStore(Protocol):
+    def create_ordinary_merge_landing_outcome_record_if_absent(
+        self,
+        *,
+        request_id: str,
+        expected_binding_revision: int,
+        record: MergeLandingOutcomeRecord,
+    ) -> tuple[MergeLandingOutcomeRecord, bool]: ...
+    def retire_ordinary_agent_job_history(
+        self, *, claim_fence: OrdinaryAgentJobClaimFence
+    ) -> OrdinaryAgentJobView: ...
+
+    def create_ordinary_merge_admission_record_if_absent(
+        self,
+        *,
+        request_id: str,
+        expected_binding_revision: int,
+        controller_fence: OrdinaryAgentControllerFence,
+        record: MergeAdmissionRecord,
+    ) -> tuple[MergeAdmissionRecord, bool]: ...
+
+    def rebind_ordinary_agent_after_head_refresh(
+        self,
+        *,
+        effect_id: str,
+        expected_effect_revision: int,
+        controller_fence: OrdinaryAgentControllerFence,
+    ) -> OrdinaryAgentFiniteRequestRecord: ...
+
     def acquire_ordinary_merge_train_controller_state_record(
         self,
         *,
@@ -574,6 +680,15 @@ class OrdinaryAgentControllerStore(Protocol):
 
 
 class OrdinaryAgentEffectStore(Protocol):
+    def reserve_ordinary_agent_effect(
+        self,
+        *,
+        request_id: str,
+        expected_binding_revision: int,
+        controller_fence: OrdinaryAgentControllerFence,
+        command: OrdinaryAgentSemanticCommand,
+        semantic_ordinal: int,
+    ) -> OrdinaryAgentEffectRecord: ...
     def reserve_ordinary_custody_attempt(
         self, *, effect_id: str, expected_effect_revision: int
     ) -> OrdinaryAgentCustodyAttemptReservation: ...
@@ -616,6 +731,60 @@ class OrdinaryAgentEffectStore(Protocol):
         *,
         quota_key: OrdinaryAgentProviderQuotaKey,
     ) -> OrdinaryAgentProviderWaitRecord | None: ...
+
+
+class OrdinaryAgentLandingReservation(StrictFrozenModel):
+    disposition: Literal["created", "replay"]
+    preparation: OrdinaryAgentLandingPreparation
+
+
+class OrdinaryAgentLandingFinalization(StrictFrozenModel):
+    disposition: Literal["created", "replay"]
+    preparation: OrdinaryAgentLandingPreparation
+    admission: MergeAdmissionRecord
+    effect: OrdinaryAgentEffectRecord
+    child: OrdinaryAgentSemanticDispatchAttemptRecord
+
+
+class OrdinaryAgentLandingStore(Protocol):
+    def reserve_ordinary_landing_preparation(
+        self,
+        *,
+        request_id: str,
+        expected_binding_revision: int,
+        controller_fence: OrdinaryAgentControllerFence,
+        pull_request_number: int,
+        semantic_ordinal: int,
+    ) -> OrdinaryAgentLandingReservation: ...
+    def record_ordinary_landing_evidence(
+        self,
+        *,
+        preparation_id: str,
+        expected_revision: int,
+        controller_fence: OrdinaryAgentControllerFence,
+        evidence: OrdinaryAgentLandingEvidence,
+    ) -> OrdinaryAgentLandingPreparation: ...
+    def finalize_ordinary_landing_preparation(
+        self,
+        *,
+        preparation_id: str,
+        expected_revision: int,
+        controller_fence: OrdinaryAgentControllerFence,
+        proposal: MergeAdmissionProposal,
+        custody_attempt_id: str,
+    ) -> OrdinaryAgentLandingFinalization: ...
+    def read_ordinary_landing_finalization(
+        self,
+        *,
+        preparation_id: str,
+    ) -> OrdinaryAgentLandingFinalization | None: ...
+    def close_ordinary_landing_preparation(
+        self,
+        *,
+        preparation_id: str,
+        expected_revision: int,
+        reason_code: Literal["evidence_denied", "provider_attempt_deadline", "process_interrupted"],
+    ) -> OrdinaryAgentLandingPreparation: ...
 
 
 OrdinaryAgentCompletedOutcome.model_rebuild()
