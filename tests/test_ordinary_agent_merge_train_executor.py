@@ -11,6 +11,7 @@ from control_plane.contracts import ordinary_agent_effect as effects
 from control_plane.contracts.merge_train_effect import (
     CandidateHeadMergeEffect,
     CandidateRefDeleteEffect,
+    CandidateRefPrepareEffect,
     MergeTrainEffectLineage,
 )
 from control_plane.contracts.ordinary_agent_custody import OrdinaryAgentCustodyCandidate
@@ -24,6 +25,41 @@ from tests.test_ordinary_agent_effect_lifecycle import effect_record
 
 
 class OrdinaryAgentMergeTrainEffectExecutorTests(unittest.TestCase):
+    def test_candidate_prepare_uses_write_response_as_exact_proof(self) -> None:
+        effect = CandidateRefPrepareEffect(
+            lineage=MergeTrainEffectLineage(
+                repository="example/repo", base_branch="main", batch_id="batch-one"
+            ),
+            candidate_ref="refs/heads/launchplane/train/jobs/request-one/1/batch-one",
+            base_sha="a" * 40,
+        )
+        record = effect_record(effects.CandidateRefPrepareCommand(effect=effect))
+        effect_store = _dispatch_store(record)
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=({"ref": effect.candidate_ref, "object": {"sha": effect.base_sha}},)
+        )
+        executor = OrdinaryAgentMergeTrainEffectExecutor(
+            record=record,
+            controller_fence=record.controller_fence,
+            effect_store=effect_store,
+            custody_store=Mock(),
+            secret_store=Mock(),
+            transport_factory=lambda _: transport,
+            monotonic=lambda: 0,
+        )
+
+        with patch(
+            "control_plane.ordinary_agent_merge_train_executor.ordinary_agent_provider_token_lease",
+            _provider_lease,
+        ):
+            executor.prepare_candidate_ref(effect)
+
+        self.assertEqual(len(transport.requests), 1)
+        proof = effect_store.record_ordinary_semantic_outcome.call_args.kwargs[
+            "typed_outcome"
+        ].proof
+        self.assertEqual((proof.ref, proof.sha), (effect.candidate_ref, effect.base_sha))
+
     def test_candidate_merge_persists_exact_response_proof_before_returning(self) -> None:
         effect = CandidateHeadMergeEffect(
             lineage=MergeTrainEffectLineage(
@@ -166,6 +202,35 @@ def _custody_candidate() -> OrdinaryAgentCustodyCandidate:
         expected_app_id=42,
         effect_profile="guarded_merge",
     )
+
+
+def _dispatch_store(record: effects.OrdinaryAgentEffectRecord) -> Mock:
+    store = Mock()
+    store.reserve_ordinary_custody_attempt.return_value = (
+        effects.OrdinaryAgentCustodyAttemptReservation(
+            effect_id=record.effect_id,
+            effect_revision=record.revision + 1,
+            purpose="dispatch",
+            semantic_ordinal=1,
+            custody_ordinal=1,
+            attempt_id="custody_one",
+            idempotency_key="effect-one-one",
+            candidate=_custody_candidate(),
+        )
+    )
+    store.checkpoint_ordinary_semantic_dispatch.return_value = (
+        effects.OrdinaryAgentSemanticDispatchAttemptRecord(
+            child_id="child_one",
+            effect_id=record.effect_id,
+            command_sha256=record.command_sha256,
+            controller_fence=record.controller_fence,
+            semantic_ordinal=1,
+            custody_attempt_id="custody_one",
+            dispatch_checkpoint_at=1,
+            fixed_token_expires_at=2_000_000_000,
+        )
+    )
+    return store
 
 
 @contextmanager

@@ -3,6 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import datetime, timezone
+from typing import Literal
+
+from control_plane.contracts.ordinary_agent_effect import (
+    OrdinaryAgentProviderQuotaKey,
+    OrdinaryAgentProviderWaitRecord,
+)
 
 from control_plane.github_payload import json_object
 from control_plane.merge_train_github import MergeTrainGitHubTransport
@@ -110,3 +117,32 @@ def require_complete_connection(value: object, *, label: str) -> tuple[dict[str,
     if any(not isinstance(node, dict) for node in nodes):
         raise OrdinaryAgentProviderEvidenceError(f"{label}_malformed")
     return tuple(node for node in nodes if isinstance(node, dict))
+ProviderWaitReader = Callable[..., OrdinaryAgentProviderWaitRecord | None]
+ProviderResourceClass = Literal["core", "search", "graphql", "secondary"]
+
+
+def require_installation_provider_ready(
+    *,
+    app_id: int,
+    installation_id: int,
+    resource_classes: tuple[ProviderResourceClass, ...],
+    read_provider_wait: ProviderWaitReader,
+    utc_now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+) -> None:
+    """Refuse mint while any discovered installation quota wait is active."""
+    now_epoch = int(utc_now().astimezone(timezone.utc).timestamp())
+    authorities: tuple[tuple[Literal["app", "installation"], int], ...] = (
+        ("app", app_id),
+        ("installation", installation_id),
+    )
+    for authority_kind, authority_id in authorities:
+        for resource_class in resource_classes:
+            wait = read_provider_wait(
+                quota_key=OrdinaryAgentProviderQuotaKey(
+                    authority_kind=authority_kind,
+                    authority_id=authority_id,
+                    resource_class=resource_class,
+                )
+            )
+            if wait is not None and wait.retry_not_before > now_epoch:
+                raise OrdinaryAgentProviderDeferred("provider_wait")

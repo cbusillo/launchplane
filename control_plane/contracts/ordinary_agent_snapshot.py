@@ -8,6 +8,8 @@ from pydantic import Field, field_validator, model_validator
 
 from control_plane.contracts.ordinary_agent import StrictFrozenModel
 from control_plane.merge_train import MergeTrainCheckStatus, MergeTrainDryRunSnapshot
+from control_plane.contracts.change_impact import ChangeImpactRepositoryEvidence
+from control_plane.tenant_admission_controller import TenantAdmissionTechnicalChecks
 
 
 Digest = str
@@ -99,3 +101,35 @@ class OrdinaryAgentCandidateCheckResult(StrictFrozenModel):
     counts: OrdinaryAgentProviderRequestCounts
     observation_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
+
+class OrdinaryAgentLandingEvidence(StrictFrozenModel):
+    """Complete normalized provider evidence for one prepared merge landing."""
+
+    repository_id: int = Field(gt=0, le=2**63 - 1)
+    repository_owner_id: int = Field(gt=0, le=2**63 - 1)
+    repository: str = Field(min_length=3, max_length=512)
+    base_ref: str = Field(min_length=1, max_length=255)
+    base_identity: OrdinaryAgentCommitIdentity
+    repository_evidence: ChangeImpactRepositoryEvidence
+    technical_checks: TenantAdmissionTechnicalChecks
+    protection: OrdinaryAgentProtectionEvidence
+    expected_merge_tree_sha: str = Field(min_length=1, max_length=64)
+    observed_at: int = Field(ge=0)
+    counts: OrdinaryAgentProviderRequestCounts
+    evidence_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def validate_exact_target(self) -> OrdinaryAgentLandingEvidence:
+        target = self.repository_evidence.target
+        if (
+            target.repository_id != str(self.repository_id)
+            or target.repository_owner_id != str(self.repository_owner_id)
+            or target.repository != self.repository
+            or self.repository_evidence.base is None
+            or self.repository_evidence.base.base_ref != self.base_ref
+            or self.repository_evidence.base.base_sha != self.base_identity.sha
+            or self.technical_checks.head_sha != target.head_sha
+            or self.technical_checks.base_sha != self.base_identity.sha
+        ):
+            raise ValueError("landing evidence identities must be exact and internally consistent")
+        return self

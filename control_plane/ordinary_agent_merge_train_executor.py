@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from datetime import datetime
+from collections.abc import Callable, Mapping
+from datetime import datetime, timezone
 import time
 from urllib.parse import quote
 
@@ -44,6 +44,7 @@ from control_plane.ordinary_agent_custody import (
 from control_plane.ordinary_agent_github_transport import (
     DeadlineMergeTrainGitHubTransport,
     ORDINARY_MUTATION_WORK_SECONDS,
+    require_installation_provider_ready,
 )
 from control_plane.github_app_identity import GitHubApiRequest
 from control_plane.workflows.launchplane import github_api_request
@@ -73,6 +74,7 @@ class OrdinaryAgentMergeTrainEffectExecutor:
         api_request: GitHubApiRequest = github_api_request,
         transport_factory: TransportFactory | None = None,
         monotonic: Callable[[], float] = time.monotonic,
+        utc_now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     ) -> None:
         self._record = record
         self._controller_fence = controller_fence
@@ -84,15 +86,39 @@ class OrdinaryAgentMergeTrainEffectExecutor:
             lambda token: UrllibMergeTrainGitHubTransport(token=token)
         )
         self._monotonic = monotonic
+        self._utc_now = utc_now
 
     def prepare_candidate_ref(self, effect: CandidateRefPrepareEffect) -> None:
         self._require_command("candidate_ref_prepare", effect)
 
         def call(client: GitHubMergeTrainClient) -> OrdinaryAgentCompletedOutcome:
-            LegacyMergeTrainEffectExecutor(client=client).prepare_candidate_ref(effect)
-            proof = _read_ref_proof(client.transport, effect.lineage.repository, effect.candidate_ref)
-            if proof.sha != effect.base_sha:
+            try:
+                response = client.transport.request(
+                    method="POST",
+                    path=f"/repos/{effect.lineage.repository}/git/refs",
+                    body={"ref": effect.candidate_ref, "sha": effect.base_sha},
+                )
+            except MergeTrainGitHubError as error:
+                if error.status_code not in {409, 422}:
+                    raise
+                response = client.transport.request(
+                    method="PATCH",
+                    path=(
+                        f"/repos/{effect.lineage.repository}/git/refs/"
+                        f"{quote(effect.candidate_ref.removeprefix('refs/'), safe='/')}"
+                    ),
+                    body={"sha": effect.base_sha, "force": True},
+                )
+            if not isinstance(response, Mapping) or response.get("ref") != effect.candidate_ref:
                 raise MergeTrainGitHubError("candidate_ref_prepare_evidence_mismatch")
+            target = response.get("object")
+            if not isinstance(target, Mapping) or target.get("sha") != effect.base_sha:
+                raise MergeTrainGitHubError("candidate_ref_prepare_evidence_mismatch")
+            proof = OrdinaryAgentRefObservation(
+                repository=effect.lineage.repository,
+                ref=effect.candidate_ref,
+                sha=effect.base_sha,
+            )
             return OrdinaryAgentCompletedOutcome(proof=proof)
 
         self._dispatch(call)
@@ -278,6 +304,14 @@ class OrdinaryAgentMergeTrainEffectExecutor:
                 request_payload=reservation.request_payload,
                 api_request=self._api_request,
                 monotonic=self._monotonic,
+                utc_now=self._utc_now,
+                before_token_mint=lambda app_id, installation_id: require_installation_provider_ready(
+                    app_id=app_id,
+                    installation_id=installation_id,
+                    resource_classes=("core", "secondary"),
+                    read_provider_wait=self._effect_store.read_provider_wait,
+                    utc_now=self._utc_now,
+                ),
             ) as lease:
                 expiry = datetime.fromisoformat(
                     lease.installation_token.expires_at.replace("Z", "+00:00")
@@ -293,7 +327,7 @@ class OrdinaryAgentMergeTrainEffectExecutor:
                     transport=self._transport_factory(lease.installation_token.token),
                     work_deadline=started + ORDINARY_MUTATION_WORK_SECONDS,
                     token_deadline=self._monotonic()
-                    + max(0, expiry.timestamp() - datetime.now(expiry.tzinfo).timestamp()),
+                    + max(0, expiry.timestamp() - self._utc_now().timestamp()),
                     monotonic=self._monotonic,
                 )
                 client = GitHubMergeTrainClient(transport=transport)
