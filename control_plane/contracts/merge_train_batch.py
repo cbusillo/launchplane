@@ -6,6 +6,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from control_plane.contracts.ordinary_agent_session_lifecycle import OrdinaryAgentJobBinding
+
 from control_plane.contracts.merge_train_policy import MergeTrainMergeMethod
 from control_plane.contracts.merge_train_structural_provenance import (
     MergeTrainStackCollapseRootProof,
@@ -293,6 +295,8 @@ class MergeTrainBatchLandingPlan(BaseModel):
 class MergeTrainBatchCandidateRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    ordinary_job_binding: OrdinaryAgentJobBinding | None = None
+
     schema_version: int = Field(default=1, ge=1)
     record_id: str
     status: MergeTrainBatchRecordStatus = "active"
@@ -317,6 +321,8 @@ class MergeTrainBatchCandidateRecord(BaseModel):
 
 class MergeTrainBatchLandingPlanRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+    ordinary_job_binding: OrdinaryAgentJobBinding | None = None
 
     schema_version: int = Field(default=1, ge=1)
     record_id: str
@@ -420,6 +426,8 @@ def build_merge_train_batch_candidate_record_id(
     record: MergeTrainBatchCandidateRecord,
 ) -> str:
     digest_payload = record.model_dump(mode="json", exclude={"record_id"})
+    if record.ordinary_job_binding is None:
+        digest_payload.pop("ordinary_job_binding")
     digest = hashlib.sha256(
         json.dumps(digest_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()[:16]
@@ -451,6 +459,8 @@ def build_merge_train_batch_landing_plan_record_id(
     record: MergeTrainBatchLandingPlanRecord,
 ) -> str:
     digest_payload = record.model_dump(mode="json", exclude={"record_id"})
+    if record.ordinary_job_binding is None:
+        digest_payload.pop("ordinary_job_binding")
     digest = hashlib.sha256(
         json.dumps(digest_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()[:16]

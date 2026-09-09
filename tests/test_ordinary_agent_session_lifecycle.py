@@ -13,6 +13,7 @@ from control_plane.ordinary_agent_session_lifecycle import (
     build_ordinary_agent_request_admission_write_set,
     build_ordinary_agent_session_write_set,
     require_ordinary_agent_finite_job_authority,
+    require_ordinary_agent_current_job_authority,
     rebind_ordinary_agent_finite_request,
     cancel_ordinary_agent_finite_request,
 )
@@ -75,6 +76,40 @@ class OrdinaryAgentSessionLifecycleTests(unittest.TestCase):
             expires_at=self.now + 100,
             continuation_expires_at=self.now + 200,
         )
+
+    def test_last_charged_action_keeps_current_authority_but_cannot_spend_again(self) -> None:
+        lease = self.lease.model_copy(
+            update={"budget": self.lease.budget.model_copy(update={"actions_used": 3})}
+        )
+        require_ordinary_agent_current_job_authority(
+            policy=self.policy,
+            principal=self.principal,
+            credential=self.credential,
+            session=self.session,
+            lease=lease,
+            request=self.request,
+            now=self.now + 1,
+        )
+        with self.assertRaisesRegex(OrdinaryAgentSessionAdmissionDenied, "budget_exhausted"):
+            require_ordinary_agent_finite_job_authority(
+                policy=self.policy,
+                principal=self.principal,
+                credential=self.credential,
+                session=self.session,
+                lease=lease,
+                request=self.request,
+                now=self.now + 1,
+            )
+        with self.assertRaisesRegex(OrdinaryAgentSessionAdmissionDenied, "session_revoked"):
+            require_ordinary_agent_current_job_authority(
+                policy=self.policy,
+                principal=self.principal,
+                credential=self.credential,
+                session=self.session.model_copy(update={"revoked_at": self.now}),
+                lease=lease,
+                request=self.request,
+                now=self.now + 1,
+            )
 
     def test_admission_spends_once_and_existing_job_retains_original_grant(self) -> None:
         admitted = build_ordinary_agent_request_admission_write_set(
