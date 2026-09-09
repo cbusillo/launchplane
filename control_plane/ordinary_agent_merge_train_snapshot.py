@@ -158,6 +158,7 @@ def _acquire_read(
             request_payload=reservation.request_payload,
             api_request=api_request,
             monotonic=monotonic,
+            utc_now=utc_now,
         ) as lease:
             token_expiry = datetime.fromisoformat(
                 lease.installation_token.expires_at.replace("Z", "+00:00")
