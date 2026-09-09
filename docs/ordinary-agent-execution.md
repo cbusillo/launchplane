@@ -734,8 +734,9 @@ source head without repeating its rules request. Initial queue checks and base
 freshness remain separate: passing CI on a stale strict branch requests a refresh,
 while unavailable source checks remain unknown and cannot start planning.
 Candidate checks bind to the candidate SHA and never reuse source-head results.
-These readers supply the existing custody acquisition adapters; full worker
-assembly and pending-observation recovery remain required before activation.
+These readers supply the existing custody acquisition adapters, including bounded
+pending-observation recovery. Full worker assembly and fleet qualification remain
+required before activation.
 
 Restart recovery interprets the latest durable dispatch and its immutable outcome
 before selecting more work. Completed or reconciled proof is replayed without a
@@ -763,7 +764,10 @@ mint. Recovery uses a currently authorized scoped read credential, including aft
 original session/request expires. New mutations retain their original expiry gates.
 Each read remains bounded by token expiry, per-attempt work allowance, the existing
 observation/backoff limits and custody-mint caps.
-A failed read appends a typed incomplete-read observation and retains uncertainty;
+A proof read failure after a mutation also retains uncertainty: its HTTP status
+is not a rejection of the preceding write. Existing controller error handling
+keeps this provider failure eligible for recovery; it cannot resend the mutation.
+A failed reconciliation read appends a typed incomplete-read observation and retains uncertainty;
 a later attempt may observe but cannot resend. It consumes the existing three-read
 observation budget and backoff, so failed reads cannot create an unbounded mint loop.
 If a read token is confirmed closed but its observation append was lost, the store

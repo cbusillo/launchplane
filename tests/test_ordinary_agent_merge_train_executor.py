@@ -18,19 +18,92 @@ from control_plane.contracts.merge_train_effect import (
 )
 from control_plane.contracts.ordinary_agent_custody import OrdinaryAgentCustodyCandidate
 from control_plane.github_app_identity import GitHubAppInstallationToken
-from control_plane.merge_train_github import RecordingMergeTrainGitHubTransport
+from control_plane.merge_train_github import (
+    RecordingMergeTrainGitHubTransport,
+    MergeTrainGitHubError,
+)
 from control_plane.ordinary_agent_custody import OrdinaryAgentProviderTokenLease
 from control_plane.ordinary_agent_effect_lifecycle import require_completed_effect_proof
 from control_plane.ordinary_agent_effect_lifecycle import classify_effect_reconciliation
+from control_plane.ordinary_agent_effect_recovery import recover_ordinary_effect
 from control_plane.ordinary_agent_reconciliation_reader import read_ordinary_effect_observation
 from control_plane.ordinary_agent_github_transport import DeadlineMergeTrainGitHubTransport
 from control_plane.ordinary_agent_merge_train_executor import (
     OrdinaryAgentMergeTrainEffectExecutor,
+    OrdinaryAgentEffectProofUnavailable,
+    OrdinaryAgentEffectTerminal,
 )
 from tests.test_ordinary_agent_effect_lifecycle import effect_record
 
 
 class OrdinaryAgentMergeTrainEffectExecutorTests(unittest.TestCase):
+    def test_post_merge_proof_read_failure_stays_unknown_while_write_rejection_is_terminal(
+        self,
+    ) -> None:
+        effect = CandidateHeadMergeEffect(
+            lineage=MergeTrainEffectLineage(
+                repository="example/repo", base_branch="main", batch_id="batch-one"
+            ),
+            candidate_ref="refs/heads/candidate",
+            rolling_parent_sha="a" * 40,
+            pull_request_number=7,
+            head_sha="b" * 40,
+        )
+        for proof_read, status in (
+            (True, 403),
+            (True, 404),
+            (True, 409),
+            (False, 409),
+            (False, 403),
+        ):
+            with self.subTest(proof_read=proof_read, status=status):
+                record = effect_record(effects.CandidateHeadMergeCommand(effect=effect))
+                store = _dispatch_store(record)
+                error = MergeTrainGitHubError("provider error", status_code=status)
+                transport = RecordingMergeTrainGitHubTransport(
+                    responses=(None, error) if proof_read else (error,)
+                )
+                executor = OrdinaryAgentMergeTrainEffectExecutor(
+                    record=record,
+                    controller_fence=record.controller_fence,
+                    effect_store=store,
+                    custody_store=Mock(),
+                    secret_store=Mock(),
+                    transport_factory=lambda _: transport,
+                    monotonic=lambda: 0,
+                )
+                with patch(
+                    "control_plane.ordinary_agent_merge_train_executor.ordinary_agent_provider_token_lease",
+                    _provider_lease,
+                ):
+                    with self.assertRaises(
+                        OrdinaryAgentEffectProofUnavailable
+                        if proof_read
+                        else OrdinaryAgentEffectTerminal
+                    ):
+                        executor.merge_candidate_head(effect)
+                outcome = store.record_ordinary_semantic_outcome.call_args.kwargs["typed_outcome"]
+                history = effects.OrdinaryAgentEffectHistory(
+                    effect=record.model_copy(
+                        update={
+                            "state": "reconciliation_required" if proof_read else "not_dispatched",
+                            "dispatch_count": 1,
+                        }
+                    ),
+                    child=store.checkpoint_ordinary_semantic_dispatch.return_value,
+                    outcome=outcome,
+                )
+                self.assertEqual(outcome.kind, "unknown" if proof_read else "known_not_dispatched")
+                if not proof_read:
+                    self.assertEqual(
+                        outcome.reason, "non_mergeable" if status == 409 else "provider_rejected"
+                    )
+                self.assertEqual(
+                    recover_ordinary_effect(history).disposition,
+                    "observe" if proof_read else "terminal",
+                )
+                self.assertEqual(sum(request.method == "POST" for request in transport.requests), 1)
+
     def test_comment_dispatch_body_can_be_reconciled_after_response_loss(self) -> None:
         effect = StackChildCommentEffect(
             lineage=MergeTrainEffectLineage(

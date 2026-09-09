@@ -3,11 +3,16 @@ from __future__ import annotations
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import Mock
 
 from control_plane.contracts.change_impact import ChangeImpactTargetReference
 from control_plane.contracts.governance_projection import GovernanceMergeReadinessFacet
 from control_plane.contracts.merge_admission_record import MergeLandingOutcomeRecord
 from control_plane.contracts.merge_admission_record import build_merge_effect_attempt_id
+from control_plane.contracts.merge_train_structural_provenance import (
+    MergeTrainStackCollapseRootProof,
+)
+from control_plane.contracts.ordinary_agent_session_lifecycle import OrdinaryAgentJobBinding
 from control_plane.governance_projection import build_governance_projection
 from control_plane.governance_projection import LiveGovernanceCurrentReadinessProvider
 from control_plane.merge_admission import MergeAdmissionEvaluation
@@ -152,6 +157,213 @@ class GovernanceProjectionTests(unittest.TestCase):
 
         self.assertEqual(result.availability, "unavailable")
         self.assertEqual(result.reason_code, "current_evidence_unavailable")
+
+    def test_live_readiness_provider_rejects_mixed_ordinary_job_bindings_before_token(self) -> None:
+        candidate_record, landing_record, controller_state, _structural_result = _guard_records()
+        first_binding = OrdinaryAgentJobBinding(
+            request_id="request_one",
+            scope_sha256="a" * 64,
+            binding_revision=1,
+        )
+        second_binding = first_binding.model_copy(update={"request_id": "request_two"})
+        evidence = _repository_evidence(
+            head=candidate_record.candidate.entries[0].head_sha,
+            base_sha=candidate_record.candidate.base_sha,
+        ).model_copy(
+            update={
+                "target": _repository_evidence().target.model_copy(
+                    update={
+                        "repository": candidate_record.candidate.repository,
+                        "pull_request_number": candidate_record.candidate.entries[
+                            0
+                        ].pull_request_number,
+                        "head_sha": candidate_record.candidate.entries[0].head_sha,
+                        "tree_sha": candidate_record.candidate.entries[0].head_tree_sha,
+                    }
+                )
+            }
+        )
+        cases = (
+            (
+                "landing",
+                candidate_record.model_copy(update={"ordinary_job_binding": first_binding}),
+                landing_record.model_copy(update={"ordinary_job_binding": second_binding}),
+                controller_state.model_copy(update={"ordinary_job_binding": first_binding}),
+            ),
+            (
+                "controller",
+                candidate_record.model_copy(update={"ordinary_job_binding": first_binding}),
+                landing_record.model_copy(update={"ordinary_job_binding": first_binding}),
+                controller_state.model_copy(update={"ordinary_job_binding": second_binding}),
+            ),
+            (
+                "mixed_legacy",
+                candidate_record.model_copy(update={"ordinary_job_binding": first_binding}),
+                landing_record.model_copy(update={"ordinary_job_binding": first_binding}),
+                controller_state,
+            ),
+        )
+        for name, candidate, landing, controller in cases:
+            with self.subTest(name=name):
+                store = Mock()
+                store.list_merge_train_batch_landing_plan_records.return_value = (landing,)
+                store.list_merge_train_batch_candidate_records.return_value = (candidate,)
+                store.list_merge_train_controller_state_records.return_value = (controller,)
+                token = Mock(return_value="test-token")
+                evaluator_factory = Mock()
+                provider = LiveGovernanceCurrentReadinessProvider(
+                    github_token=token,
+                    evaluator_factory=evaluator_factory,
+                )
+
+                result = provider(
+                    store=store,
+                    repository_evidence=evidence,
+                    base_branch="main",
+                    evaluated_at=NOW,
+                    github_token_env_var="GH_TOKEN",
+                )
+
+                self.assertEqual(result.availability, "unavailable")
+                self.assertEqual(result.reason_code, "current_evidence_unavailable")
+                token.assert_not_called()
+                evaluator_factory.assert_not_called()
+
+    def test_live_readiness_provider_accepts_independently_equal_job_bindings(self) -> None:
+        candidate_record, landing_record, controller_state, structural_result = _guard_records()
+
+        def binding() -> OrdinaryAgentJobBinding:
+            return OrdinaryAgentJobBinding(
+                request_id="request_one",
+                scope_sha256="a" * 64,
+                binding_revision=1,
+            )
+
+        candidate_record = candidate_record.model_copy(update={"ordinary_job_binding": binding()})
+        landing_record = landing_record.model_copy(update={"ordinary_job_binding": binding()})
+        controller_state = controller_state.model_copy(update={"ordinary_job_binding": binding()})
+        evidence = _repository_evidence(
+            head=candidate_record.candidate.entries[0].head_sha,
+            base_sha=candidate_record.candidate.base_sha,
+        ).model_copy(
+            update={
+                "target": _repository_evidence().target.model_copy(
+                    update={
+                        "repository": candidate_record.candidate.repository,
+                        "pull_request_number": candidate_record.candidate.entries[
+                            0
+                        ].pull_request_number,
+                        "head_sha": candidate_record.candidate.entries[0].head_sha,
+                        "tree_sha": candidate_record.candidate.entries[0].head_tree_sha,
+                    }
+                )
+            }
+        )
+        store = Mock()
+        store.list_merge_train_batch_landing_plan_records.return_value = (landing_record,)
+        store.list_merge_train_batch_candidate_records.return_value = (candidate_record,)
+        store.list_merge_train_controller_state_records.return_value = (controller_state,)
+        token = Mock(return_value="test-token")
+        evaluator = Mock()
+        evaluator.evaluate.return_value = MergeAdmissionEvaluation(
+            readiness=_merge_readiness(),
+            structural_result=structural_result,
+        )
+        evaluator_factory = Mock(return_value=evaluator)
+        provider = LiveGovernanceCurrentReadinessProvider(
+            github_token=token,
+            evaluator_factory=evaluator_factory,
+        )
+
+        result = provider(
+            store=store,
+            repository_evidence=evidence,
+            base_branch="main",
+            evaluated_at=NOW,
+            github_token_env_var="GH_TOKEN",
+        )
+
+        self.assertEqual(result.availability, "available")
+        token.assert_called_once_with("GH_TOKEN")
+        evaluator_factory.assert_called_once()
+        evaluator.evaluate.assert_called_once()
+
+    def test_live_readiness_provider_rejects_mixed_collapse_binding_before_token(self) -> None:
+        candidate_record, landing_record, controller_state, _structural_result = _guard_records()
+        first_binding = OrdinaryAgentJobBinding(
+            request_id="request_one",
+            scope_sha256="a" * 64,
+            binding_revision=1,
+        )
+        second_binding = first_binding.model_copy(update={"request_id": "request_two"})
+        entry = candidate_record.candidate.entries[0]
+        stack_collapse_root = MergeTrainStackCollapseRootProof(
+            collapse_record_id="collapse-record-one",
+            collapse_id="collapse-one",
+            root_pull_request_number=entry.pull_request_number,
+            original_root_head_sha=entry.head_sha,
+            collapsed_root_head_sha=entry.head_sha,
+            collapsed_root_tree_sha=entry.head_tree_sha,
+        )
+        structural_provenance = candidate_record.candidate.structural_provenance
+        assert structural_provenance is not None
+        candidate = candidate_record.candidate.model_copy(
+            update={
+                "stack_collapse_root": stack_collapse_root,
+                "structural_provenance": structural_provenance.model_copy(
+                    update={"stack_collapse_root": stack_collapse_root}
+                ),
+            }
+        )
+        candidate_record = candidate_record.model_copy(
+            update={"ordinary_job_binding": first_binding, "candidate": candidate}
+        )
+        landing_record = landing_record.model_copy(update={"ordinary_job_binding": first_binding})
+        controller_state = controller_state.model_copy(
+            update={"ordinary_job_binding": first_binding}
+        )
+        collapse_record = Mock()
+        collapse_record.record_id = stack_collapse_root.collapse_record_id
+        collapse_record.ordinary_job_binding = second_binding
+        store = Mock()
+        store.list_merge_train_batch_landing_plan_records.return_value = (landing_record,)
+        store.list_merge_train_batch_candidate_records.return_value = (candidate_record,)
+        store.list_merge_train_controller_state_records.return_value = (controller_state,)
+        store.list_merge_train_stack_collapse_plan_records.return_value = (collapse_record,)
+        token = Mock(return_value="test-token")
+        evaluator_factory = Mock()
+        provider = LiveGovernanceCurrentReadinessProvider(
+            github_token=token,
+            evaluator_factory=evaluator_factory,
+        )
+        evidence = _repository_evidence(
+            head=entry.head_sha,
+            base_sha=candidate_record.candidate.base_sha,
+        ).model_copy(
+            update={
+                "target": _repository_evidence().target.model_copy(
+                    update={
+                        "repository": candidate_record.candidate.repository,
+                        "pull_request_number": entry.pull_request_number,
+                        "head_sha": entry.head_sha,
+                        "tree_sha": entry.head_tree_sha,
+                    }
+                )
+            }
+        )
+
+        result = provider(
+            store=store,
+            repository_evidence=evidence,
+            base_branch="main",
+            evaluated_at=NOW,
+            github_token_env_var="GH_TOKEN",
+        )
+
+        self.assertEqual(result.availability, "unavailable")
+        self.assertEqual(result.reason_code, "current_evidence_unavailable")
+        token.assert_not_called()
+        evaluator_factory.assert_not_called()
 
     def test_live_readiness_provider_treats_terminal_lineage_as_inactive(self) -> None:
         candidate_record, landing_record, controller_state, _structural_result = _guard_records()

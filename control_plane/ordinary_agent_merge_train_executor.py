@@ -64,6 +64,23 @@ class OrdinaryAgentEffectTerminal(RuntimeError):
         self.reason_code = reason_code
 
 
+class OrdinaryAgentEffectProofUnavailable(MergeTrainGitHubError):
+    """Unreadable proof has no mutation rejection status and remains retryable."""
+
+
+class _EffectTransport:
+    def __init__(self, transport: MergeTrainGitHubTransport) -> None:
+        self._transport = transport
+
+    def request(self, *, method: str, path: str, body: dict[str, object] | None = None) -> object:
+        try:
+            return self._transport.request(method=method, path=path, body=body)
+        except MergeTrainGitHubError as error:
+            if method == "GET":
+                raise OrdinaryAgentEffectProofUnavailable("effect_proof_read_failed") from error
+            raise
+
+
 class OrdinaryAgentMergeTrainEffectExecutor:
     """Execute exactly the command in one already-reserved effect record."""
 
@@ -319,7 +336,9 @@ class OrdinaryAgentMergeTrainEffectExecutor:
                     lease.installation_token.expires_at.replace("Z", "+00:00")
                 )
                 transport = DeadlineMergeTrainGitHubTransport(
-                    transport=self._transport_factory(lease.installation_token.token),
+                    transport=_EffectTransport(
+                        self._transport_factory(lease.installation_token.token)
+                    ),
                     work_deadline=started + ORDINARY_MUTATION_WORK_SECONDS,
                     token_deadline=self._monotonic()
                     + max(0, expiry.timestamp() - self._utc_now().timestamp()),
