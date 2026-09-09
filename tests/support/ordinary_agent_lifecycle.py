@@ -249,6 +249,7 @@ def enrollment_envelope(
                 "guarded_merge",
                 "head_refresh",
                 "merge_train_snapshot",
+                "merge_train_landing",
                 "pr_disposition",
             ),
             permissions=(

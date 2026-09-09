@@ -6,7 +6,13 @@ ORDINARY_AGENT_GITHUB_APP_PRIVATE_KEY_BINDING = "private_key"
 
 
 def ordinary_agent_enrollment_effect_profiles() -> tuple[str, ...]:
-    return ("guarded_merge", "head_refresh", "merge_train_snapshot", "pr_disposition")
+    return (
+        "guarded_merge",
+        "head_refresh",
+        "merge_train_landing",
+        "merge_train_snapshot",
+        "pr_disposition",
+    )
 
 
 def ordinary_agent_enrollment_permissions() -> tuple[str, ...]:
