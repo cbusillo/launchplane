@@ -25,6 +25,7 @@ from control_plane.ordinary_agent_github_transport import (
     DeadlineMergeTrainGitHubTransport,
     ORDINARY_CANDIDATE_CHECK_WORK_SECONDS,
     ORDINARY_SNAPSHOT_WORK_SECONDS,
+    OrdinaryAgentProviderDeferred,
     OrdinaryAgentProviderEvidenceError,
 )
 from control_plane.workflows.launchplane import github_api_request
@@ -184,11 +185,12 @@ def _acquire_read(
             result = reader(transport)
     except Exception as error:
         counts = _request_counts(transport)
-        reason = (
-            error.reason_code
-            if isinstance(error, OrdinaryAgentProviderEvidenceError)
-            else "provider_transport"
-        )
+        if isinstance(error, OrdinaryAgentProviderDeferred):
+            reason = "provider_wait"
+        elif isinstance(error, OrdinaryAgentProviderEvidenceError):
+            reason = error.reason_code
+        else:
+            reason = "provider_transport"
         if reason not in {
             "provider_wait",
             "provider_incomplete",
