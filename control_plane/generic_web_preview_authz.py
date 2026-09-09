@@ -9,6 +9,9 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.authz_grant_service import AuthzManagedPolicyReconcileEnvelope
+from control_plane.contracts.authz_policy_record import (
+    require_authz_policy_schema_write_activated,
+)
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.service_auth import GitHubActionsPolicyRule, LaunchplaneAuthzPolicy
 
@@ -155,6 +158,7 @@ def plan_generic_web_preview_authz_reconcile(
     request: GenericWebPreviewAuthzPlanRequest,
     profile: LaunchplaneProductProfileRecord | None = None,
 ) -> GenericWebPreviewAuthzReconcilePlan:
+    require_authz_policy_schema_write_activated(current_policy)
     retained_github_rules = tuple(
         rule
         for rule in current_policy.github_actions

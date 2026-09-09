@@ -909,6 +909,7 @@ def _advance_active_landing_record(
         )
     except MergeAdmissionDeniedError as error:
         readiness = error.readiness
+        structural_result = error.structural_result
         blocked_landing_record = admission_guard.landing_plan_record
         return {
             "merge_train_batch_landing_plan_record_id": blocked_landing_record.record_id,
@@ -934,10 +935,25 @@ def _advance_active_landing_record(
                 if readiness is not None
                 else None
             ),
+            "structural_provenance": (
+                {
+                    "status": structural_result.status,
+                    "reason_codes": list(structural_result.reason_codes),
+                    "effective_base_sha": structural_result.effective_base_sha,
+                    "effective_base_tree_sha": structural_result.effective_base_tree_sha,
+                    "candidate_sha256": structural_result.candidate_sha256,
+                    "landing_plan_sha256": structural_result.landing_plan_sha256,
+                    "provenance_sha256": structural_result.provenance_sha256,
+                }
+                if structural_result is not None
+                else None
+            ),
             "landing_plan": blocked_landing_record.landing_plan.model_dump(mode="json"),
         }
     except MergeTrainGitHubStaleHeadError as error:
-        stale_plan = stale_merge_train_landing_plan(active_landing_record.landing_plan)
+        stale_plan = stale_merge_train_landing_plan(
+            admission_guard.landing_plan_record.landing_plan
+        )
         stale_record = build_merge_train_batch_landing_plan_record(
             landing_plan=stale_plan,
             source=f"service:controller:stale-landing:{trace_id}",

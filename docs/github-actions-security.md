@@ -39,12 +39,17 @@ before those operations and are pinned to the same immutable standard. Artifact,
 cache, GitHub API, and CodeQL actions remain fully pinned because they execute
 remote code or move workflow data across trust boundaries.
 
-Manager preview approval is not emitted by pull-request Actions. Launchplane
-validates signed webhook input against its durable preview and policy records,
-then writes the `manager-preview-approval` status with a Launchplane-owned
-credential resolved outside PR code. Tenant workflows may request preview
-lifecycle operations, but they cannot mint a passing manager status or provide
-the status-writer token.
+The current compatibility manager-preview approval is not emitted by pull-request
+Actions. Launchplane validates signed webhook input against its durable preview
+and policy records, then writes the `manager-preview-approval` status with a
+Launchplane-owned credential resolved outside PR code. Tenant workflows may
+request preview lifecycle operations, but they cannot mint a passing manager
+status or provide the status-writer token.
+
+Issue `#2240` replaces this as the target admission path with trusted Launchplane
+Owner acceptance. The legacy credential boundary remains enforced until that
+migration and rollback are implemented; neither path grants an Owner operational
+authority.
 
 The runner-host hygiene workflow's GitHub App token action receives a private
 key and can mint installation credentials, so its reviewed commit pin and input

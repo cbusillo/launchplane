@@ -8,6 +8,13 @@ Launchplane UI work must read as a product environment control plane, not a
 generic dashboard and not a preview-only queue. The first screen should make the
 operator's current product, lane state, and next safe action obvious.
 
+The Owner-review surface must be a separate product view. It must show a plain-
+language change, isolated preview, current decision, and observed live/delivery
+state, and must offer only accept, request-changes, revoke, and feedback controls.
+It must not expose source, configuration, deploy, merge, secret, policy, or
+access-admin actions, and trusted controls must remain outside untrusted preview
+content.
+
 Use [operator-experience.md](operator-experience.md) for the API-first product
 and environment contract. Do not polish the transitional context-picker UI as if
 it were the target model.
