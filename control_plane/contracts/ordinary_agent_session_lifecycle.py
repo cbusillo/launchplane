@@ -15,6 +15,14 @@ from control_plane.contracts.ordinary_agent import (
 )
 
 
+class OrdinaryAgentJobBinding(StrictFrozenModel):
+    """Immutable attribution of controller history to one finite job revision."""
+
+    request_id: str = Field(pattern=r"^[a-z][a-z0-9_-]{2,127}$")
+    scope_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    binding_revision: int = Field(ge=1, le=2**63 - 1)
+
+
 class OrdinaryAgentSessionAttenuation(StrictFrozenModel):
     """Requested finite bounds; no caller-supplied approval provenance."""
 

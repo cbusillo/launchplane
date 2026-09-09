@@ -112,6 +112,14 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         self.transport = transport
         self._effect_executor = effect_executor
 
+    def read_merge_train_snapshot(
+        self, *, repository: str, base_branch: str
+    ) -> MergeTrainDryRunSnapshot:
+        """Read planning evidence through the client-owned provider boundary."""
+        return GitHubMergeTrainSnapshotReader(transport=self.transport).read_merge_train_snapshot(
+            repository=repository, base_branch=base_branch
+        )
+
     @property
     def semantic_effect_executor(self) -> MergeTrainSemanticEffectExecutor:
         if self._effect_executor is None:
@@ -1293,8 +1301,24 @@ class LegacyMergeTrainEffectExecutor:
             return CandidateHeadMergeOutcome(result_sha=None)
         if not isinstance(payload, dict):
             raise MergeTrainGitHubError("GitHub merge response must be a JSON object.")
+        tree = payload.get("tree")
+        parents = payload.get("parents")
+        result_tree_sha = (
+            str(tree.get("sha") or "").strip() if isinstance(tree, dict) else ""
+        )
+        parent_shas = (
+            tuple(
+                str(parent.get("sha") or "").strip()
+                for parent in parents
+                if isinstance(parent, dict) and str(parent.get("sha") or "").strip()
+            )
+            if isinstance(parents, list)
+            else ()
+        )
         return CandidateHeadMergeOutcome(
-            result_sha=_required_text(payload.get("sha"), "GitHub merge response requires sha.")
+            result_sha=_required_text(payload.get("sha"), "GitHub merge response requires sha."),
+            result_tree_sha=result_tree_sha or None,
+            parent_shas=parent_shas,
         )
 
     def refresh_pull_request_head(self, effect: PullRequestHeadRefreshEffect) -> None:

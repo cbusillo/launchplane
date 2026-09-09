@@ -45,6 +45,13 @@ class OrdinaryAgentCustodyUnavailable(OrdinaryAgentCustodyError):
         self.attempt = attempt
 
 
+class OrdinaryAgentCustodyCleanupUnknown(OrdinaryAgentCustodyError):
+    """A token may remain usable after a redacted revoke failure."""
+
+    def __init__(self) -> None:
+        super().__init__("Ordinary-agent provider credential cleanup outcome is unknown.")
+
+
 @dataclass(frozen=True, slots=True)
 class ResolvedOrdinaryAgentGitHubAppIdentity:
     identity: GitHubAppIdentity = field(repr=False)
@@ -175,6 +182,7 @@ def ordinary_agent_provider_token_lease(
     api_request: GitHubApiRequest = github_api_request,
     monotonic: Callable[[], float] = time.monotonic,
     utc_now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+    before_token_mint: Callable[[int, int], None] | None = None,
 ) -> Iterator[OrdinaryAgentProviderTokenLease]:
     idempotency_digest = _sha256_text(idempotency_key)
     request_digest = _sha256_text(
@@ -239,6 +247,7 @@ def ordinary_agent_provider_token_lease(
                 effect_profile=candidate.effect_profile,
                 api_request=bounded_request,
                 now=utc_now(),
+                before_token_mint=before_token_mint,
             )
         except Exception:
             if dispatch_attempted:
@@ -278,9 +287,10 @@ def ordinary_agent_provider_token_lease(
         if token is not None:
             try:
                 revoke_installation_token(installation_token=token, api_request=api_request)
-            except Exception:
+            except Exception as error:
                 if issued:
                     record_store.mark_ordinary_agent_custody_cleanup_unknown(attempt_id=attempt_id)
+                    raise OrdinaryAgentCustodyCleanupUnknown() from error
                 else:
                     record_store.mark_ordinary_agent_custody_issue_unknown(attempt_id=attempt_id)
                 raise

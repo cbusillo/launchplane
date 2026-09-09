@@ -59,6 +59,7 @@ import type {
 } from "./generated/openapi.ts";
 import type {
   OrdinaryAgentOperationClientResponse,
+  OrdinaryAgentJobView,
   OrdinaryAgentConnectionView,
 } from "./generated/openapi.ts";
 export type { OrdinaryAgentOperationClientResponse } from "./generated/openapi.ts";
@@ -732,4 +733,8 @@ export function revokeOrdinaryAgentSession(principalId: string, sessionId: strin
 
 export function disconnectOrdinaryAgent(principalId: string, sourceEventId: string): Promise<OrdinaryAgentConnectionView> {
   return requestJson(`/v1/ordinary-agent-connections/${encodeURIComponent(principalId)}/disconnect`, "POST", { source_event_id: sourceEventId });
+}
+
+export function readOrdinaryAgentJob(principalId: string, requestId: string, signal?: AbortSignal): Promise<OrdinaryAgentJobView> {
+  return requestJson(`/v1/ordinary-agent-jobs/${encodeURIComponent(principalId)}/${encodeURIComponent(requestId)}`, "GET", undefined, signal);
 }

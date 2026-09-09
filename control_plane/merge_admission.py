@@ -8,6 +8,7 @@ from typing import Protocol, cast
 from control_plane.contracts.merge_admission_record import (
     MergeAdmissionFenceRejectedError,
     MergeAdmissionRecord,
+    MergeAdmissionProposal,
     MergeLandingOutcomeReason,
     MergeLandingOutcomeRecord,
     build_merge_effect_attempt_id,
@@ -175,6 +176,30 @@ class GuardedMergeAdmission:
         observed_head_sha: str,
         observed_head_tree_sha: str,
     ) -> MergeAdmissionRecord:
+        proposal = self.build_proposal(
+            entry=entry,
+            observed_base_sha=observed_base_sha,
+            observed_base_tree_sha=observed_base_tree_sha,
+            observed_head_sha=observed_head_sha,
+            observed_head_tree_sha=observed_head_tree_sha,
+        )
+        return self.persist_proposal(proposal)
+
+    def build_proposal(
+        self,
+        *,
+        entry: MergeTrainBatchLandingEntry,
+        observed_base_sha: str,
+        observed_base_tree_sha: str,
+        observed_head_sha: str,
+        observed_head_tree_sha: str,
+    ) -> MergeAdmissionProposal:
+        """Evaluate current evidence without persisting an admission or dispatching.
+
+        This reads the configured evaluator and record store. Ordinary callers
+        supply scoped evidence adapters and finalize the proposal in their joined
+        effect transaction instead of calling legacy persistence.
+        """
         if not self.expected_lease_owner:
             raise MergeAdmissionDeniedError(
                 "Merge admission requires an acquired controller lease.",
@@ -284,10 +309,14 @@ class GuardedMergeAdmission:
                 "Persisted controller authority changed after live merge evaluation.",
                 reason_code="controller_authority_changed",
             ) from error
+        return MergeAdmissionProposal(record=admission)
+
+    def persist_proposal(self, proposal: MergeAdmissionProposal) -> MergeAdmissionRecord:
+        """Persist through the existing legacy fence; the proposal is not authority."""
         try:
             stored, created = self.record_store.create_guarded_merge_admission_record_if_absent(
-                admission,
-                admitted_at=admitted_at,
+                proposal.record,
+                admitted_at=proposal.record.created_at,
             )
         except MergeAdmissionFenceRejectedError as error:
             raise MergeAdmissionDeniedError(

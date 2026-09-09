@@ -7,6 +7,8 @@ from typing import Callable, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from control_plane.contracts.ordinary_agent_session_lifecycle import OrdinaryAgentJobBinding
+
 from control_plane.contracts.merge_train_effect import (
     MergeTrainEffectLineage,
     MergeTrainSemanticEffectExecutor,
@@ -158,6 +160,8 @@ class MergeTrainStackCollapsePlan(BaseModel):
 
 class MergeTrainStackCollapsePlanRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+    ordinary_job_binding: OrdinaryAgentJobBinding | None = None
 
     schema_version: int = Field(default=1, ge=1)
     record_id: str
@@ -558,9 +562,11 @@ def build_merge_train_stack_collapse_plan_record(
     plan: MergeTrainStackCollapsePlan,
     source: str,
     updated_at: str,
+    ordinary_job_binding: OrdinaryAgentJobBinding | None = None,
 ) -> MergeTrainStackCollapsePlanRecord:
     record_without_id = MergeTrainStackCollapsePlanRecord(
         record_id="pending",
+        ordinary_job_binding=ordinary_job_binding,
         source=source,
         updated_at=updated_at,
         plan=plan,
@@ -575,6 +581,8 @@ def build_merge_train_stack_collapse_plan_record_id(
 ) -> str:
     canonical_updated_at = _canonical_utc_timestamp(record.updated_at)
     digest_payload = record.model_dump(mode="json", exclude={"record_id"})
+    if record.ordinary_job_binding is None:
+        digest_payload.pop("ordinary_job_binding")
     digest_payload["updated_at"] = canonical_updated_at
     digest = hashlib.sha256(
         json.dumps(digest_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")

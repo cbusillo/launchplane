@@ -20,6 +20,7 @@ from control_plane.contracts.ordinary_agent import (
     OrdinaryAgentPullRequest,
     OrdinaryAgentRequest,
     OrdinaryAgentSession,
+    OrdinaryAgentTarget,
 )
 from control_plane.contracts.ordinary_agent_lifecycle import (
     OrdinaryAgentAuthenticationCredentialRecord,
@@ -102,6 +103,29 @@ def _require_current_credential(
         raise OrdinaryAgentSessionAdmissionDenied("credential_binding_mismatch")
     if credential.status != "active" or not credential.valid_from <= now < credential.expires_at:
         raise OrdinaryAgentSessionAdmissionDenied("credential_unavailable")
+
+
+def require_ordinary_agent_reconciliation_authority(
+    *,
+    policy: LaunchplaneAuthzPolicyRecord,
+    principal: OrdinaryAgentPrincipalRecord,
+    credential: OrdinaryAgentAuthenticationCredentialRecord,
+    target: OrdinaryAgentTarget,
+    now: int,
+) -> None:
+    """Current preflight ceiling only; never renew an old session or authorize a write."""
+    _require_current_credential(principal, credential, now)
+    snapshot, subject = _policy_inputs(policy, principal)
+    result = evaluate_ordinary_agent_policy(
+        snapshot=snapshot,
+        principal=subject,
+        target=target,
+        action="preflight",
+        managed_set_id=principal.policy.managed_set_id,
+        managed_rule_id=principal.policy.managed_rule_id,
+    )
+    if result.decision != "allow":
+        raise OrdinaryAgentSessionAdmissionDenied(result.reason_code)
 
 
 def build_ordinary_agent_session_write_set(
@@ -311,7 +335,7 @@ def _eligibility_evidence(
     return credential_evidence, session_evidence, lease_evidence, request_evidence
 
 
-def require_ordinary_agent_finite_job_authority(
+def require_ordinary_agent_current_job_authority(
     *,
     policy: LaunchplaneAuthzPolicyRecord,
     principal: OrdinaryAgentPrincipalRecord,
@@ -377,8 +401,36 @@ def require_ordinary_agent_finite_job_authority(
     # Admission already charged the request's PRs; effect reservation spends actions.
     if (
         lease.budget.pull_requests_used > lease.budget.pull_request_limit
-        or lease.budget.actions_used >= lease.budget.action_limit
+        or lease.budget.actions_used > lease.budget.action_limit
     ):
+        raise OrdinaryAgentSessionAdmissionDenied("budget_exhausted")
+
+
+def require_ordinary_agent_finite_job_authority(
+    *,
+    policy: LaunchplaneAuthzPolicyRecord,
+    principal: OrdinaryAgentPrincipalRecord,
+    credential: OrdinaryAgentAuthenticationCredentialRecord,
+    session: OrdinaryAgentSessionRecord,
+    lease: OrdinaryAgentLeaseRecord,
+    request: OrdinaryAgentFiniteRequestRecord,
+    now: int,
+) -> None:
+    """Require current job authority and capacity for a new semantic action.
+
+    Already charged effects use current authority plus their stored unique charge;
+    they must not acquire a second action merely to finish their first attempt.
+    """
+    require_ordinary_agent_current_job_authority(
+        policy=policy,
+        principal=principal,
+        credential=credential,
+        session=session,
+        lease=lease,
+        request=request,
+        now=now,
+    )
+    if lease.budget.actions_used >= lease.budget.action_limit:
         raise OrdinaryAgentSessionAdmissionDenied("budget_exhausted")
 
 

@@ -4,6 +4,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from control_plane.contracts.ordinary_agent_session_lifecycle import OrdinaryAgentJobBinding
+
 
 MergeTrainControllerStateStatus = Literal["idle", "running", "reconcile_required"]
 MergeTrainControllerReconciliationStatus = Literal["clean", "adopted", "required"]
@@ -27,6 +29,8 @@ class MergeTrainControllerReconciliationRequiredError(RuntimeError):
 
 class MergeTrainControllerStateRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+    ordinary_job_binding: OrdinaryAgentJobBinding | None = None
 
     schema_version: int = Field(default=1, ge=1)
     controller_key: str

@@ -18,6 +18,7 @@ from control_plane.contracts.ordinary_agent_client import (
     OrdinaryAgentOperationClientResponse,
     OrdinaryAgentSessionClientRequest,
 )
+from control_plane.contracts.ordinary_agent_effect import OrdinaryAgentJobView
 from control_plane.contracts.ordinary_agent_session_lifecycle import (
     OrdinaryAgentConnectionView,
     OrdinaryAgentSessionOperationView,
@@ -37,6 +38,7 @@ from control_plane.ordinary_agent_session_approval import (
     cancel_pending_ordinary_agent_operation,
     disconnect_ordinary_agent_principal,
     read_human_ordinary_agent_session_operation,
+    read_human_ordinary_agent_job,
     revoke_ordinary_agent_session,
 )
 from control_plane.ordinary_agent_session_lifecycle import OrdinaryAgentSessionAdmissionDenied
@@ -271,6 +273,30 @@ def register_ordinary_agent_management_routes(
                 store.read_ordinary_agent_session_operation(proof=proof, operation_id=operation_id)
             )
 
+    def read_job(
+        request_id: PrincipalId,
+        proof: Annotated[OrdinaryAgentTokenProof, Depends(read_ordinary_agent_proof)],
+        store: Annotated[PostgresRecordStore, Depends(get_record_store)],
+    ) -> OrdinaryAgentJobView:
+        with _operation_errors():
+            return store.read_ordinary_agent_job(proof=proof, request_id=request_id)
+
+    def human_read_job(
+        principal_id: PrincipalId,
+        request_id: PrincipalId,
+        request: Request,
+        manager: Annotated[HumanSessionManager, Depends(manager_dependency)],
+        store: Annotated[PostgresRecordStore, Depends(get_record_store)],
+    ) -> OrdinaryAgentJobView:
+        with _operation_errors():
+            return read_human_ordinary_agent_job(
+                store=store,
+                manager=manager,
+                cookie_header=request.headers.get("cookie", ""),
+                principal_id=principal_id,
+                request_id=request_id,
+            )
+
     def human_read(
         principal_id: PrincipalId,
         operation_id: OperationId,
@@ -455,5 +481,21 @@ def register_ordinary_agent_management_routes(
         methods=["POST"],
         operation_id="disconnect_ordinary_agent_principal",
         response_model=OrdinaryAgentConnectionView,
+        tags=["ordinary-agent"],
+    )
+    app.add_api_route(
+        "/v1/agent/ordinary-agent-jobs/{request_id}",
+        read_job,
+        methods=["GET"],
+        operation_id="read_ordinary_agent_job",
+        response_model=OrdinaryAgentJobView,
+        tags=["ordinary-agent"],
+    )
+    app.add_api_route(
+        "/v1/ordinary-agent-jobs/{principal_id}/{request_id}",
+        human_read_job,
+        methods=["GET"],
+        operation_id="read_human_ordinary_agent_job",
+        response_model=OrdinaryAgentJobView,
         tags=["ordinary-agent"],
     )

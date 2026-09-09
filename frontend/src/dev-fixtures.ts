@@ -1651,6 +1651,7 @@ export function mergeTrainStatusForFixture(
         },
       ],
       controller_state: {
+        ordinary_job_binding: null,
         active_action: reconciliationRequired ? "reconcile_required" : "observe_candidate",
         active_phase: reconciliationRequired ? "candidate_reconcile" : "candidate_observe",
         active_pull_request_number: 418,

@@ -14,6 +14,7 @@ from control_plane.contracts.ordinary_agent_custody import (
 )
 from control_plane.contracts.secret_record import SecretBinding, SecretRecord, SecretVersion
 from control_plane.ordinary_agent_custody import (
+    OrdinaryAgentCustodyCleanupUnknown,
     OrdinaryAgentCustodyError,
     OrdinaryAgentCustodyUnavailable,
     ordinary_agent_provider_token_lease,
@@ -126,9 +127,12 @@ class OrdinaryAgentCustodyTests(unittest.TestCase):
                     "id": 77,
                     "app_id": 42,
                     "permissions": {
+                        "administration": "read",
+                        "checks": "read",
                         "contents": "write",
                         "metadata": "read",
                         "pull_requests": "write",
+                        "statuses": "read",
                     },
                 }
             if path == "/app/installations/77/access_tokens":
@@ -188,9 +192,12 @@ class OrdinaryAgentCustodyTests(unittest.TestCase):
                     "id": 77,
                     "app_id": 42,
                     "permissions": {
+                        "administration": "read",
+                        "checks": "read",
                         "contents": "write",
                         "metadata": "read",
                         "pull_requests": "write",
+                        "statuses": "read",
                     },
                 }
             mint_calls += 1
@@ -245,9 +252,12 @@ class OrdinaryAgentCustodyTests(unittest.TestCase):
                     "id": 77,
                     "app_id": 42,
                     "permissions": {
+                        "administration": "read",
+                        "checks": "read",
                         "contents": "write",
                         "metadata": "read",
                         "pull_requests": "write",
+                        "statuses": "read",
                     },
                 }
             if path == "/app/installations/77/access_tokens":
@@ -294,9 +304,12 @@ class OrdinaryAgentCustodyTests(unittest.TestCase):
                     "id": 77,
                     "app_id": 42,
                     "permissions": {
+                        "administration": "read",
+                        "checks": "read",
                         "contents": "write",
                         "metadata": "read",
                         "pull_requests": "write",
+                        "statuses": "read",
                     },
                 }
             if path == "/app/installations/77/access_tokens":
@@ -312,7 +325,7 @@ class OrdinaryAgentCustodyTests(unittest.TestCase):
                 }
             raise OSError("revoke outcome unknown")
 
-        with self.assertRaises(OSError):
+        with self.assertRaisesRegex(OrdinaryAgentCustodyCleanupUnknown, "cleanup outcome"):
             with ordinary_agent_provider_token_lease(
                 record_store=self.store,
                 secret_store=self.store,

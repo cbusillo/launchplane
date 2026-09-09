@@ -1275,7 +1275,7 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
                 "control_plane.cli_service._consume_privileged_operation_worker_schema_probe_evidence"
             ),
             patch("control_plane.cli_service.signal.signal", return_value=object()),
-            patch("control_plane.cli_service.time.monotonic", side_effect=[10.0, 11.0]),
+            patch("control_plane.cli_service.time.monotonic", side_effect=[10.0, 11.0, 11.0, 12.0]),
             patch(
                 "control_plane.cli_service.recover_ordinary_agent_enrollments_once",
                 return_value=OrdinaryAgentEnrollmentRecoveryResult(failed=1),
@@ -1343,6 +1343,7 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
         )
 
     def test_worker_loop_stops_cleanly_after_sigterm(self) -> None:
+        waits: list[float] = []
         signal_handlers: dict[int, object] = {}
         signal_calls: list[tuple[int, object]] = []
         previous_handlers: dict[int, object] = {
@@ -1359,7 +1360,8 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
             def set(self) -> None:
                 self.stopped = True
 
-            def wait(self, _timeout: int) -> bool:
+            def wait(self, timeout: float) -> bool:
+                waits.append(timeout)
                 handler = signal_handlers[signal.SIGTERM]
                 assert callable(handler)
                 handler(signal.SIGTERM, None)
@@ -1389,6 +1391,7 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
                 "control_plane.cli_service._consume_privileged_operation_worker_schema_probe_evidence"
             ),
             patch("control_plane.cli_service.signal.signal", side_effect=record_signal),
+            patch("control_plane.cli_service.time.monotonic", side_effect=[10.0, 120.0]),
         ):
             result = runner.invoke(
                 main,
@@ -1404,6 +1407,7 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
             )
 
         self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(waits, [0.0], "An overdue successful cycle must not add a poll sleep")
         self.assertNotIn("operation-secret-id", result.output)
         telemetry = [
             json.loads(line) for line in result.output.splitlines() if line.startswith("{")
