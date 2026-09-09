@@ -33,6 +33,12 @@ from control_plane.contracts.merge_train_batch import (
 )
 from control_plane.contracts.merge_train_stack_collapse import MergeTrainStackCollapsePlanRecord
 
+from control_plane.contracts.ordinary_agent_snapshot import (
+    OrdinaryAgentMergeTrainSnapshotResult,
+    OrdinaryAgentCandidateCheckResult,
+    OrdinaryAgentProviderRequestCounts,
+)
+
 OrdinaryAgentProgressRecord: TypeAlias = (
     MergeTrainBatchCandidateRecord
     | MergeTrainBatchLandingPlanRecord
@@ -219,6 +225,8 @@ class OrdinaryAgentSemanticDispatchAttemptRecord(StrictFrozenModel):
     custody_attempt_id: Identifier
     dispatch_checkpoint_at: Epoch
     fixed_token_expires_at: Epoch
+    controller_fence: OrdinaryAgentControllerFence
+    command_sha256: Digest
 
 
 class OrdinaryAgentCompletedOutcome(StrictFrozenModel):
@@ -393,6 +401,112 @@ class OrdinaryAgentJobView(StrictFrozenModel):
     @classmethod
     def read_numbers(cls, value: object) -> object:
         return tuple(value) if isinstance(value, list) else value
+
+
+class OrdinaryAgentSnapshotAttemptRecord(StrictFrozenModel):
+    schema_version: Literal[1] = 1
+    attempt_id: Identifier
+    request_id: Identifier
+    binding_revision: int = Field(ge=1)
+    scope_sha256: Digest
+    principal_id: Identifier
+    credential_id: Identifier
+    credential_version: int = Field(ge=1)
+    purpose: Literal["snapshot", "candidate_check"]
+    attempt_ordinal: int = Field(ge=1)
+    candidate_sha: str = Field(default="", max_length=64)
+    controller_fence: OrdinaryAgentControllerFence
+    state: Literal["reserved", "reading", "completed", "incomplete", "fenced", "exhausted"] = (
+        "reserved"
+    )
+    revision: int = Field(default=1, ge=1)
+    created_at: Epoch
+    updated_at: Epoch
+    custody_attempt_ids: tuple[str, ...] = ()
+    result: OrdinaryAgentMergeTrainSnapshotResult | OrdinaryAgentCandidateCheckResult | None = None
+    failure_counts: OrdinaryAgentProviderRequestCounts | None = None
+    reason_code: str | None = Field(default=None, max_length=128)
+    next_due_at: Epoch | None = None
+
+    @field_validator("custody_attempt_ids", mode="before")
+    @classmethod
+    def read_ids(cls, value: object) -> object:
+        return tuple(value) if isinstance(value, list) else value
+
+
+class OrdinaryAgentReadCustodyReservation(StrictFrozenModel):
+    read_attempt_id: Identifier
+    attempt_revision: int = Field(ge=1)
+    custody_attempt_id: Identifier
+    custody_ordinal: int = Field(ge=1)
+    purpose: Literal["snapshot", "candidate_check"]
+    idempotency_key: Identifier
+    candidate: OrdinaryAgentCustodyCandidate = Field(repr=False)
+
+    @property
+    def request_payload(self) -> dict[str, object]:
+        return {
+            "read_attempt_id": self.read_attempt_id,
+            "purpose": self.purpose,
+            "custody_ordinal": self.custody_ordinal,
+        }
+
+
+class OrdinaryAgentSnapshotStore(Protocol):
+    def reserve_ordinary_agent_snapshot_attempt(
+        self,
+        *,
+        request_id: str,
+        expected_binding_revision: int,
+        controller_fence: OrdinaryAgentControllerFence,
+    ) -> OrdinaryAgentSnapshotAttemptRecord: ...
+
+    def reserve_ordinary_agent_candidate_check_attempt(
+        self,
+        *,
+        request_id: str,
+        expected_binding_revision: int,
+        controller_fence: OrdinaryAgentControllerFence,
+        candidate_sha: str,
+    ) -> OrdinaryAgentSnapshotAttemptRecord: ...
+
+    def reserve_ordinary_agent_read_custody_attempt(
+        self,
+        *,
+        attempt_id: str,
+        expected_attempt_revision: int,
+    ) -> OrdinaryAgentReadCustodyReservation: ...
+
+    def record_ordinary_agent_snapshot_success(
+        self,
+        *,
+        attempt_id: str,
+        custody_attempt_id: str,
+        result: OrdinaryAgentMergeTrainSnapshotResult,
+    ) -> OrdinaryAgentSnapshotAttemptRecord: ...
+
+    def record_ordinary_agent_candidate_check_success(
+        self,
+        *,
+        attempt_id: str,
+        custody_attempt_id: str,
+        result: OrdinaryAgentCandidateCheckResult,
+    ) -> OrdinaryAgentSnapshotAttemptRecord: ...
+
+    def record_ordinary_agent_read_failure(
+        self,
+        *,
+        attempt_id: str,
+        custody_attempt_id: str,
+        reason_code: Literal[
+            "provider_wait",
+            "provider_incomplete",
+            "provider_transport",
+            "snapshot_query_cost_exceeded",
+            "cleanup_unknown",
+        ],
+        counts: OrdinaryAgentProviderRequestCounts,
+    ) -> OrdinaryAgentSnapshotAttemptRecord: ...
 
 
 class OrdinaryAgentJobWorkerStore(Protocol):
