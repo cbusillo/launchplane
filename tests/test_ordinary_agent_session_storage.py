@@ -52,7 +52,7 @@ from tests.support.ordinary_agent_lifecycle import (
 
 
 class OrdinaryAgentSessionStorageTests(unittest.TestCase):
-    def setUp(self, *, pull_request_limit: int = 1) -> None:
+    def setUp(self, *, pull_request_limit: int = 1, installation_id: int | None = None) -> None:
         directory = TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.store = PostgresRecordStore(
@@ -60,9 +60,17 @@ class OrdinaryAgentSessionStorageTests(unittest.TestCase):
         )
         self.addCleanup(self.store.close)
         self.store.ensure_schema()
-        self.prepare_store(self.store, pull_request_limit=pull_request_limit)
+        self.prepare_store(
+            self.store, pull_request_limit=pull_request_limit, installation_id=installation_id
+        )
 
-    def prepare_store(self, store: PostgresRecordStore, *, pull_request_limit: int = 1) -> None:
+    def prepare_store(
+        self,
+        store: PostgresRecordStore,
+        *,
+        pull_request_limit: int = 1,
+        installation_id: int | None = None,
+    ) -> None:
         self.store = store
         self.now = int(datetime.now(timezone.utc).timestamp())
         self.clock = self.enterContext(
@@ -74,6 +82,14 @@ class OrdinaryAgentSessionStorageTests(unittest.TestCase):
         )
         self.policy, inventory = setup_ordinary_agent_authority(self.store)
         envelope = enrollment_envelope(policy_record=self.policy, inventory=inventory)
+        if installation_id is not None:
+            envelope = envelope.model_copy(
+                update={
+                    "custody": envelope.custody.model_copy(
+                        update={"github_installation_id": installation_id}
+                    )
+                }
+            )
         self.manager = HumanSessionManager(
             config=GitHubOAuthConfig(
                 client_id="test",

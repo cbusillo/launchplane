@@ -236,6 +236,17 @@ def ordinary_agent_provider_token_lease(
             dispatch_attempted = True
         return api_request(**kwargs)
 
+    def validate_before_mint(app_id: int, installation_id: int) -> None:
+        if (
+            candidate.expected_installation_id is not None
+            and installation_id != candidate.expected_installation_id
+        ):
+            raise OrdinaryAgentCustodyError(
+                "Ordinary-agent provider installation differs from inspected custody."
+            )
+        if before_token_mint is not None:
+            before_token_mint(app_id, installation_id)
+
     token: GitHubAppInstallationToken | None = None
     issued = False
     try:
@@ -247,7 +258,7 @@ def ordinary_agent_provider_token_lease(
                 effect_profile=candidate.effect_profile,
                 api_request=bounded_request,
                 now=utc_now(),
-                before_token_mint=before_token_mint,
+                before_token_mint=validate_before_mint,
             )
         except Exception:
             if dispatch_attempted:

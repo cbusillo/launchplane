@@ -732,6 +732,36 @@ class OrdinaryAgentEffectStorageTests(unittest.TestCase):
             self.store.claim_due_ordinary_agent_job(worker_id="third", lease_seconds=10)
         )
 
+    def test_inspected_installation_wait_blocks_first_custody_reservation(self) -> None:
+        fixture = session_support.OrdinaryAgentSessionStorageTests()
+        fixture.setUp(installation_id=77)
+        self.addCleanup(fixture.doCleanups)
+        self.prepare_effect_fixture(fixture)
+        effect, _, _ = self.prepare_refresh()
+        self.store.record_provider_wait(
+            quota_key=OrdinaryAgentProviderQuotaKey(
+                authority_kind="installation", authority_id=77, resource_class="secondary"
+            ),
+            observation=OrdinaryAgentProviderWaitObservation(
+                retry_not_before=fixture.now + 600, classification="secondary_rate_limit"
+            ),
+        )
+        with self.assertRaises(OrdinaryAgentSessionAdmissionDenied) as raised:
+            self.store.reserve_ordinary_custody_attempt(
+                effect_id=effect.effect_id, expected_effect_revision=effect.revision
+            )
+        self.assertEqual(raised.exception.retry_not_before, fixture.now + 600)
+        from control_plane.storage.postgres import LaunchplaneOrdinaryAgentProviderWaitRow
+
+        with self.store._session_factory() as session:
+            session.query(LaunchplaneOrdinaryAgentProviderWaitRow).delete()
+            session.commit()
+        permit = self.store.reserve_ordinary_custody_attempt(
+            effect_id=effect.effect_id, expected_effect_revision=effect.revision
+        )
+        self.assertEqual(permit.custody_ordinal, 1)
+        self.assertEqual(permit.candidate.expected_installation_id, 77)
+
     def test_custody_wait_reports_latest_deadline_without_consuming_an_attempt(self) -> None:
         effect, _, _ = self.prepare_refresh()
         for resource, delay in (("core", 30), ("secondary", 600)):

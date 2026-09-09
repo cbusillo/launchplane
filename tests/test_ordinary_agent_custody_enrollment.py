@@ -112,6 +112,7 @@ class OrdinaryAgentCustodyEnrollmentTests(unittest.TestCase):
         self.assertEqual(candidate.repository_inventory.record_id, self._inventory().record_id)
         self.assertEqual(candidate.github_app_id, 42)
         self.assertEqual(result.installation_id, 77)
+        self.assertEqual(candidate.github_installation_id, result.installation_id)
         self.assertEqual(candidate.provider_inspection_sha256, result.provider_inspection_sha256)
         self.assertEqual(
             candidate.effect_profiles,

@@ -11745,6 +11745,7 @@ class PostgresRecordStore(HumanSessionStore):
                 secret_binding_id=candidate.secret_binding_id,
                 secret_version_id=candidate.secret_version_id,
                 expected_app_id=candidate.expected_app_id,
+                expected_installation_id=candidate.expected_installation_id,
                 effect_profile=candidate.effect_profile,
                 requested_permissions=requested_permissions,
                 state="minting",
@@ -23054,6 +23055,7 @@ class PostgresRecordStore(HumanSessionStore):
                 secret_binding_id=secret.binding_id,
                 secret_version_id=secret.secret_version_id,
                 expected_app_id=custody.github_app_id,
+                expected_installation_id=custody.github_installation_id,
                 effect_profile="merge_train_landing",
             )
             budget = context.lease.budget
@@ -23248,6 +23250,8 @@ class PostgresRecordStore(HumanSessionStore):
         identities: list[tuple[Literal["app", "installation"], int]] = [
             ("app", custody.github_app_id)
         ]
+        if custody.github_installation_id is not None:
+            identities.append(("installation", custody.github_installation_id))
         if custody_attempt_id is not None:
             actual_row = session.get(
                 LaunchplaneOrdinaryAgentCustodyIssueAttemptRow, custody_attempt_id
@@ -23257,7 +23261,13 @@ class PostgresRecordStore(HumanSessionStore):
             actual = OrdinaryAgentCustodyIssueAttempt.model_validate(actual_row.payload)
             if actual.app_id != custody.github_app_id or actual.installation_id is None:
                 raise OrdinaryAgentSessionAdmissionDenied("custody_binding_conflict")
-            identities.append(("installation", actual.installation_id))
+            if (
+                custody.github_installation_id is not None
+                and actual.installation_id != custody.github_installation_id
+            ):
+                raise OrdinaryAgentSessionAdmissionDenied("custody_binding_conflict")
+            if ("installation", actual.installation_id) not in identities:
+                identities.append(("installation", actual.installation_id))
         keys = sorted(
             canonical_json_sha256(
                 OrdinaryAgentProviderQuotaKey(
@@ -23443,6 +23453,7 @@ class PostgresRecordStore(HumanSessionStore):
             secret_binding_id=secret.binding_id,
             secret_version_id=secret.secret_version_id,
             expected_app_id=custody.github_app_id,
+            expected_installation_id=custody.github_installation_id,
             effect_profile=profile,
         )
 
@@ -24495,6 +24506,7 @@ class PostgresRecordStore(HumanSessionStore):
                 secret_binding_id=secret.binding_id,
                 secret_version_id=secret.secret_version_id,
                 expected_app_id=custody.github_app_id,
+                expected_installation_id=custody.github_installation_id,
                 effect_profile="merge_train_snapshot",
             )
             ordinal = len(record.custody_attempt_ids) + 1

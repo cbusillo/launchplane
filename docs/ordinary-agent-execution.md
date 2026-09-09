@@ -812,3 +812,20 @@ or recovery paths. The callback owns joined admission and durable dispatch inten
 the legacy provider checkpoint hook does not establish ordinary-agent authority.
 Production worker assembly, joined no-op finalization, recovery routing, and
 activation qualification remain prerequisites.
+
+New provider-inspected enrollment carries the discovered installation ID into
+the target-specific custody record. Absent IDs are omitted when serializing old
+records, preserving their existing digests. A known installation quota wait is
+checked before custody reservation charges an attempt. Discovery must still
+match that expected ID before token minting; a mismatch closes the unissued
+attempt and requires fresh supported enrollment or rotation. Expected identity
+is separate from actual token evidence and never proves a token was issued.
+The new worker must require an inspected installation binding before activation;
+legacy decoding alone does not qualify an older principal for that worker.
+
+The shared controller returns `landing_progress` for ordinary `mode=land`
+results: `partial`, `cleanup_pending`, then `complete` after semantic cleanup.
+Blocked admission or recovery results use their explicit blocked reason instead.
+A terminal active landing remains selectable until cleanup; job completion then
+yields its controller and supersedes its own progress through the joined store.
+This result contract does not itself assemble the production worker.

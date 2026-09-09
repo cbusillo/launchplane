@@ -88,6 +88,7 @@ def build_provider_inspected_custody_candidate(
         ),
         target=policy.target,
         github_app_id=inspection.app_id,
+        github_installation_id=inspection.installation_id,
         managed_secret=managed_secret,
         effect_profiles=effect_profiles,
         permissions=permissions,

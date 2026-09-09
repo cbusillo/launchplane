@@ -113,6 +113,43 @@ class OrdinaryAgentCustodyTests(unittest.TestCase):
                 candidate=stale,
             )
 
+    def test_installation_drift_closes_unissued_attempt_without_minting(self) -> None:
+        candidate = _candidate().model_copy(update={"expected_installation_id": 76})
+        calls: list[dict[str, object]] = []
+
+        def api_request(**kwargs: object) -> object:
+            calls.append(kwargs)
+            return {
+                "id": 77,
+                "app_id": 42,
+                "permissions": {
+                    "administration": "read",
+                    "checks": "read",
+                    "contents": "write",
+                    "metadata": "read",
+                    "pull_requests": "write",
+                    "statuses": "read",
+                },
+            }
+
+        with self.assertRaisesRegex(OrdinaryAgentCustodyError, "differs from inspected"):
+            with ordinary_agent_provider_token_lease(
+                record_store=self.store,
+                secret_store=self.store,
+                candidate=candidate,
+                idempotency_key="installation-drift",
+                request_payload={},
+                api_request=api_request,
+            ):
+                self.fail("mismatched installation yielded a credential")
+        self.assertEqual([item.get("method", "GET") for item in calls], ["GET"])
+        attempt = self.store.read_ordinary_agent_custody_issue_attempt(
+            "custody_" + hashlib.sha256(b"installation-drift").hexdigest()
+        )
+        self.assertEqual((attempt.state, attempt.close_reason), ("closed", "not_dispatched"))
+        self.assertIsNone(attempt.installation_id)
+        self.assertEqual(attempt.expected_installation_id, 76)
+
     def test_token_stays_in_memory_and_confirmed_revoke_releases_fence(self) -> None:
         calls: list[dict[str, object]] = []
         now = datetime.now(timezone.utc)
@@ -161,7 +198,7 @@ class OrdinaryAgentCustodyTests(unittest.TestCase):
         with ordinary_agent_provider_token_lease(
             record_store=self.store,
             secret_store=self.store,
-            candidate=_candidate(),
+            candidate=_candidate().model_copy(update={"expected_installation_id": 77}),
             idempotency_key="request-one",
             request_payload={"action": "guarded_merge", "sha": "a" * 40},
             api_request=api_request,
