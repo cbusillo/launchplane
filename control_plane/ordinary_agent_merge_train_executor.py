@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
 import time
+from uuid import uuid4
 from urllib.parse import quote
 
 from control_plane.contracts.merge_train_effect import (
@@ -26,6 +27,8 @@ from control_plane.contracts.ordinary_agent_effect import (
     OrdinaryAgentEffectRecord,
     OrdinaryAgentEffectStore,
     OrdinaryAgentKnownNotDispatchedOutcome,
+    OrdinaryAgentLabelObservation,
+    OrdinaryAgentReconciliationObservation,
     OrdinaryAgentRefObservation,
     OrdinaryAgentUnknownOutcome,
 )
@@ -210,7 +213,7 @@ class OrdinaryAgentMergeTrainEffectExecutor:
     def label_stack_child(self, effect: StackChildLabelEffect) -> None:
         self._require_command("stack_child_label", effect)
 
-        def already_present(client: GitHubMergeTrainClient) -> bool:
+        def already_present(client: GitHubMergeTrainClient) -> OrdinaryAgentLabelObservation | None:
             payload = client.transport.request(
                 method="GET",
                 path=(
@@ -220,10 +223,21 @@ class OrdinaryAgentMergeTrainEffectExecutor:
             )
             if not isinstance(payload, list):
                 raise MergeTrainGitHubError("ordinary_label_observation_malformed")
-            names = {
-                str(item.get("name") or "").strip() for item in payload if isinstance(item, dict)
-            }
-            return effect.label in names
+            if any(
+                not isinstance(item, dict) or not isinstance(item.get("name"), str)
+                for item in payload
+            ):
+                raise MergeTrainGitHubError("ordinary_label_observation_malformed")
+            if any(item["name"] == effect.label for item in payload):
+                return OrdinaryAgentLabelObservation(
+                    repository=effect.lineage.repository,
+                    number=effect.pull_request_number,
+                    label=effect.label,
+                    present=True,
+                )
+            if len(payload) >= 100:
+                raise MergeTrainGitHubError("ordinary_label_observation_incomplete")
+            return None
 
         def call(client: GitHubMergeTrainClient) -> OrdinaryAgentCompletedOutcome:
             LegacyMergeTrainEffectExecutor(client=client).label_stack_child(effect)
@@ -253,7 +267,10 @@ class OrdinaryAgentMergeTrainEffectExecutor:
         self,
         call: Callable[[GitHubMergeTrainClient], DispatchOutcome],
         *,
-        no_dispatch_preflight: Callable[[GitHubMergeTrainClient], bool] | None = None,
+        no_dispatch_preflight: Callable[
+            [GitHubMergeTrainClient], OrdinaryAgentLabelObservation | None
+        ]
+        | None = None,
     ) -> None:
         reservation = self._effect_store.reserve_ordinary_custody_attempt(
             effect_id=self._record.effect_id,
@@ -285,13 +302,6 @@ class OrdinaryAgentMergeTrainEffectExecutor:
                 expiry = datetime.fromisoformat(
                     lease.installation_token.expires_at.replace("Z", "+00:00")
                 )
-                child = self._effect_store.checkpoint_ordinary_semantic_dispatch(
-                    effect_id=self._record.effect_id,
-                    controller_fence=self._controller_fence,
-                    custody_attempt_id=reservation.attempt_id,
-                    fixed_token_expires_at=int(expiry.timestamp()),
-                )
-                child_id = child.child_id
                 transport = DeadlineMergeTrainGitHubTransport(
                     transport=self._transport_factory(lease.installation_token.token),
                     work_deadline=started + ORDINARY_MUTATION_WORK_SECONDS,
@@ -300,14 +310,28 @@ class OrdinaryAgentMergeTrainEffectExecutor:
                     monotonic=self._monotonic,
                 )
                 client = GitHubMergeTrainClient(transport=transport)
-                if no_dispatch_preflight is not None and no_dispatch_preflight(client):
+                observed_label = no_dispatch_preflight(client) if no_dispatch_preflight else None
+                if observed_label is not None:
                     self._effect_store.complete_ordinary_effect_without_dispatch(
                         effect_id=self._record.effect_id,
                         expected_effect_revision=reservation.effect_revision,
                         disposition="label_already_present",
+                        typed_observation=OrdinaryAgentReconciliationObservation(
+                            observation_id="label-" + uuid4().hex,
+                            custody_attempt_id=reservation.attempt_id,
+                            observed_at=int(self._utc_now().timestamp()),
+                            observation=observed_label,
+                        ),
                     )
                     outcome_recorded = True
                     return
+                child = self._effect_store.checkpoint_ordinary_semantic_dispatch(
+                    effect_id=self._record.effect_id,
+                    controller_fence=self._controller_fence,
+                    custody_attempt_id=reservation.attempt_id,
+                    fixed_token_expires_at=int(expiry.timestamp()),
+                )
+                child_id = child.child_id
                 try:
                     outcome = call(client)
                 except MergeTrainGitHubError as error:

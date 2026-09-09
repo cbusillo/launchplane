@@ -1,8 +1,10 @@
 """Bounded identity acquisition rejects changes before a landing can finalize."""
 
-from copy import deepcopy
 import json
 import unittest
+from collections.abc import Sequence
+from copy import deepcopy
+from typing import Any
 
 from control_plane.contracts.merge_train_batch import MergeTrainBatchCandidate, MergeTrainBatchEntry
 from control_plane.merge_train_github import RecordingMergeTrainGitHubTransport
@@ -12,8 +14,9 @@ from control_plane.ordinary_agent_github_transport import (
     OrdinaryAgentProviderEvidenceError,
 )
 from control_plane.ordinary_agent_landing_graphql import (
-    read_landing_graphql,
+    OrdinaryLandingGraphQLObservation,
     confirm_landing_graphql,
+    read_landing_graphql,
 )
 
 
@@ -42,7 +45,7 @@ class LandingGraphQLTests(unittest.TestCase):
             ),
         )
         identity = {"databaseId": 123, "nameWithOwner": "example/project"}
-        repository = {
+        repository: dict[str, Any] = {
             **identity,
             "owner": {"databaseId": 456},
             "ref": {"name": "main", "target": {"oid": "base", "tree": {"oid": "base-tree"}}},
@@ -62,10 +65,14 @@ class LandingGraphQLTests(unittest.TestCase):
                 "headRepository": identity,
                 "baseRepository": identity,
             }
-        self.response = {"data": {"rateLimit": {"cost": 1}, "repository": repository}}
+        self.response: dict[str, Any] = {
+            "data": {"rateLimit": {"cost": 1}, "repository": repository}
+        }
         self.now = 0.0
 
-    def transport(self, responses):
+    def transport(
+        self, responses: Sequence[object]
+    ) -> tuple[RecordingMergeTrainGitHubTransport, DeadlineMergeTrainGitHubTransport]:
         inner = RecordingMergeTrainGitHubTransport(responses=tuple(responses))
         return inner, DeadlineMergeTrainGitHubTransport(
             transport=inner,
@@ -74,7 +81,9 @@ class LandingGraphQLTests(unittest.TestCase):
             monotonic=lambda: self.now,
         )
 
-    def read(self, transport):
+    def read(
+        self, transport: DeadlineMergeTrainGitHubTransport
+    ) -> OrdinaryLandingGraphQLObservation:
         return read_landing_graphql(
             transport=transport,
             candidate=self.candidate,
@@ -85,7 +94,11 @@ class LandingGraphQLTests(unittest.TestCase):
             utc_seconds=lambda: 1000,
         )
 
-    def confirm(self, transport, observation):
+    def confirm(
+        self,
+        transport: DeadlineMergeTrainGitHubTransport,
+        observation: OrdinaryLandingGraphQLObservation,
+    ) -> None:
         confirm_landing_graphql(
             transport=transport,
             candidate=self.candidate,
@@ -96,7 +109,7 @@ class LandingGraphQLTests(unittest.TestCase):
             observation=observation,
         )
 
-    def test_deleted_terminal_branch_still_requires_immutable_head_and_preserves_age(self):
+    def test_deleted_terminal_branch_still_requires_immutable_head_and_preserves_age(self) -> None:
         inner, transport = self.transport([self.response, deepcopy(self.response)])
         observation = self.read(transport)
         self.now = 20
@@ -113,7 +126,7 @@ class LandingGraphQLTests(unittest.TestCase):
         with self.assertRaises(OrdinaryAgentProviderEvidenceError):
             self.read(missing)
 
-    def test_final_confirmation_rejects_pr_or_base_drift(self):
+    def test_final_confirmation_rejects_pr_or_base_drift(self) -> None:
         for field, value in (
             ("headRefOid", "different-head"),
             ("baseRefOid", "different-base"),
@@ -136,7 +149,7 @@ class LandingGraphQLTests(unittest.TestCase):
         with self.assertRaises(OrdinaryAgentProviderEvidenceError):
             self.confirm(transport, observation)
 
-    def test_confirmation_stops_before_spending_dispatch_time(self):
+    def test_confirmation_stops_before_spending_dispatch_time(self) -> None:
         inner, transport = self.transport([self.response])
         observation = self.read(transport)
         self.now = 30
@@ -144,14 +157,14 @@ class LandingGraphQLTests(unittest.TestCase):
             self.confirm(transport, observation)
         self.assertEqual(len(inner.requests), 1)
 
-    def test_late_initial_read_does_not_spend_quota_on_an_unconfirmable_observation(self):
+    def test_late_initial_read_does_not_spend_quota_on_an_unconfirmable_observation(self) -> None:
         inner, transport = self.transport([self.response])
         self.now = 20
         with self.assertRaises(OrdinaryAgentProviderDeferred):
             self.read(transport)
         self.assertEqual(inner.requests, [])
 
-    def test_confirmation_does_not_require_detailed_only_fields(self):
+    def test_confirmation_does_not_require_detailed_only_fields(self) -> None:
         detailed = deepcopy(self.response)
         repository = detailed["data"]["repository"]
         repository["ref"]["branchProtectionRule"] = {"requiresStatusChecks": True}
@@ -161,7 +174,7 @@ class LandingGraphQLTests(unittest.TestCase):
         _, transport = self.transport([detailed, self.response])
         self.confirm(transport, self.read(transport))
 
-    def test_active_deleted_branch_and_incomplete_final_response_fail_closed(self):
+    def test_active_deleted_branch_and_incomplete_final_response_fail_closed(self) -> None:
         changed = deepcopy(self.response)
         changed["data"]["repository"]["pr1"]["headRef"] = None
         _, transport = self.transport([changed])

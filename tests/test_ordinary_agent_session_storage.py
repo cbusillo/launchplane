@@ -52,7 +52,7 @@ from tests.support.ordinary_agent_lifecycle import (
 
 
 class OrdinaryAgentSessionStorageTests(unittest.TestCase):
-    def setUp(self) -> None:
+    def setUp(self, *, pull_request_limit: int = 1) -> None:
         directory = TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.store = PostgresRecordStore(
@@ -60,9 +60,9 @@ class OrdinaryAgentSessionStorageTests(unittest.TestCase):
         )
         self.addCleanup(self.store.close)
         self.store.ensure_schema()
-        self.prepare_store(self.store)
+        self.prepare_store(self.store, pull_request_limit=pull_request_limit)
 
-    def prepare_store(self, store: PostgresRecordStore) -> None:
+    def prepare_store(self, store: PostgresRecordStore, *, pull_request_limit: int = 1) -> None:
         self.store = store
         self.now = int(datetime.now(timezone.utc).timestamp())
         self.clock = self.enterContext(
@@ -103,7 +103,7 @@ class OrdinaryAgentSessionStorageTests(unittest.TestCase):
             session_expires_at=self.now + 100,
             lease_expires_at=self.now + 100,
             action_limit=4,
-            pull_request_limit=1,
+            pull_request_limit=pull_request_limit,
             refresh_allowance=1,
             continuation_expires_at=self.now + 200,
         )

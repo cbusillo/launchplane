@@ -208,7 +208,9 @@ class OrdinaryAgentLandingStorageTests(unittest.TestCase):
         )
         return observed, proposal
 
-    def evidence(self, preparation, *, check_age_seconds=0):
+    def evidence(
+        self, preparation: OrdinaryAgentLandingPreparation, *, check_age_seconds: int = 0
+    ) -> OrdinaryAgentLandingEvidence:
         now = self.fixture.fixture.now
         timestamp = datetime.fromtimestamp(now, timezone.utc).isoformat()
         checks = TenantAdmissionTechnicalChecks(
@@ -277,7 +279,7 @@ class OrdinaryAgentLandingStorageTests(unittest.TestCase):
         )
         return evidence
 
-    def guard(self, preparation):
+    def guard(self, preparation: OrdinaryAgentLandingPreparation) -> GuardedMergeAdmission:
         timestamp = datetime.fromtimestamp(self.fixture.fixture.now, timezone.utc).isoformat()
         with self.store._session_factory() as session:
             row = session.get(LaunchplaneMergeTrainControllerStateRow, self.fence.controller_key)

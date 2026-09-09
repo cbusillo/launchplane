@@ -1,58 +1,63 @@
 """Fresh landing joins real storage and the supported custody lifecycle."""
 
+import unittest
 from datetime import datetime, timezone
 from types import SimpleNamespace
-import unittest
+from typing import Any
 from unittest.mock import patch
 
-from control_plane.github_app_identity import GitHubAppInstallationToken
+from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingEntry
 from control_plane.contracts.ordinary_agent_effect import (
+    OrdinaryAgentCompletedOutcome,
+    OrdinaryAgentLandingPreparation,
     OrdinaryAgentProviderQuotaKey,
     OrdinaryAgentProviderWaitObservation,
 )
-from control_plane.ordinary_agent_custody import OrdinaryAgentCustodyCleanupUnknown
+from control_plane.contracts.ordinary_agent_snapshot import OrdinaryAgentLandingEvidence
+from control_plane.github_app_identity import GitHubAppInstallationToken
+from control_plane.merge_admission import GuardedMergeAdmission, MergeAdmissionDeniedError
+from control_plane.merge_train_github import (
+    MergeTrainGitHubError,
+    RecordingMergeTrainGitHubTransport,
+)
 from control_plane.ordinary_agent_admission_store import OrdinaryAgentAdmissionAdapter
 from control_plane.ordinary_agent_controller_store import (
     OrdinaryAgentControllerAdapter,
     OrdinaryAgentProgressAdapter,
 )
-from control_plane.merge_train_github import (
-    RecordingMergeTrainGitHubTransport,
-    MergeTrainGitHubError,
-)
+from control_plane.ordinary_agent_custody import OrdinaryAgentCustodyCleanupUnknown
 from control_plane.ordinary_agent_github_transport import (
     OrdinaryAgentProviderDeferred,
     OrdinaryAgentProviderEvidenceError,
 )
-from control_plane.merge_admission import MergeAdmissionDeniedError
 from control_plane.ordinary_agent_landing_execution import (
-    execute_fresh_ordinary_landing,
     OrdinaryLandingRecoveryRequired,
+    execute_fresh_ordinary_landing,
 )
 from tests import test_ordinary_agent_landing_storage as landing_support
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy
 
 
 class OrdinaryAgentLandingExecutionTests(unittest.TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         self.fixture = landing_support.OrdinaryAgentLandingStorageTests()
         self.fixture.setUp()
         self.addCleanup(self.fixture.doCleanups)
         self.store = self.fixture.store
         self.now = self.fixture.fixture.fixture.now
         self.inner = RecordingMergeTrainGitHubTransport()
-        self.preparation = None
-        self.read_error = None
-        self.merge_error = None
-        self.checkpoint_error = None
-        self.guard_error = None
-        self.checkpoints = []
+        self.preparation: OrdinaryAgentLandingPreparation | None = None
+        self.read_error: Exception | None = None
+        self.merge_error: Exception | None = None
+        self.checkpoint_error: Exception | None = None
+        self.guard_error: Exception | None = None
+        self.checkpoints: list[MergeTrainBatchLandingEntry] = []
         self.mints = 0
         self.elapsed = 0.0
         self.result_sha = "9" * 40
-        self.revoke_error = None
+        self.revoke_error: Exception | None = None
 
-    def mint(self, **kwargs):
+    def mint(self, **kwargs: Any) -> GitHubAppInstallationToken:
         kwargs["before_token_mint"](kwargs["identity"].app_id, 77)
         self.mints += 1
         return GitHubAppInstallationToken(
@@ -64,7 +69,7 @@ class OrdinaryAgentLandingExecutionTests(unittest.TestCase):
             expires_at=datetime.fromtimestamp(self.now + 300, timezone.utc).isoformat(),
         )
 
-    def evidence(self, **kwargs):
+    def evidence(self, **kwargs: Any) -> OrdinaryAgentLandingEvidence:
         p = kwargs["preparation"]
         self.preparation = p
         kwargs["transport"].require_remaining(61)
@@ -97,10 +102,12 @@ class OrdinaryAgentLandingExecutionTests(unittest.TestCase):
         ]
         return self.fixture.evidence(p)
 
-    def checkpoint(self, entry):
+    def checkpoint(self, entry: MergeTrainBatchLandingEntry) -> None:
+        assert self.preparation is not None
         finalization = self.store.read_ordinary_landing_finalization(
             preparation_id=self.preparation.preparation_id
         )
+        assert finalization is not None
         history = self.store.read_ordinary_agent_effect_history(
             effect_id=finalization.effect.effect_id
         )
@@ -115,7 +122,9 @@ class OrdinaryAgentLandingExecutionTests(unittest.TestCase):
             raise self.checkpoint_error
         self.checkpoints.append(entry)
 
-    def guard(self, preparation, evidence):
+    def guard(
+        self, preparation: OrdinaryAgentLandingPreparation, evidence: OrdinaryAgentLandingEvidence
+    ) -> GuardedMergeAdmission:
         if self.guard_error:
             raise self.guard_error
         guard = self.fixture.guard(preparation)
@@ -129,12 +138,12 @@ class OrdinaryAgentLandingExecutionTests(unittest.TestCase):
         )
         return guard
 
-    def provider_request(self, **kwargs):
+    def provider_request(self, **kwargs: object) -> object:
         if kwargs.get("path") == "/installation/token" and self.revoke_error:
             raise self.revoke_error
         return None
 
-    def run_landing(self):
+    def run_landing(self) -> MergeTrainBatchLandingEntry:
         target = self.fixture.request.target
         with (
             patch(
@@ -175,10 +184,13 @@ class OrdinaryAgentLandingExecutionTests(unittest.TestCase):
                 utc_now=lambda: datetime.fromtimestamp(self.now + self.elapsed, timezone.utc),
             )
 
-    def test_success_records_outcome_and_progress_before_revoke_and_replay_never_mints(self):
+    def test_success_records_outcome_and_progress_before_revoke_and_replay_never_mints(
+        self,
+    ) -> None:
         result = self.run_landing()
         self.assertEqual((result.status, result.merge_commit_sha), ("merged", self.result_sha))
         self.assertEqual(self.checkpoints, [result])
+        assert self.preparation is not None
         self.assertEqual(
             self.store.read_ordinary_agent_custody_issue_attempt(
                 self.preparation.custody_attempt_id
@@ -190,10 +202,11 @@ class OrdinaryAgentLandingExecutionTests(unittest.TestCase):
         self.assertEqual(self.mints, 1)
         self.assertEqual([item.method for item in self.inner.requests], ["PUT", "POST"])
 
-    def test_evidence_deadline_closes_preparation_without_dispatch(self):
+    def test_evidence_deadline_closes_preparation_without_dispatch(self) -> None:
         self.read_error = OrdinaryAgentProviderDeferred()
         with self.assertRaises(OrdinaryAgentProviderDeferred):
             self.run_landing()
+        assert self.preparation is not None
         result = self.store.read_ordinary_landing_preparation(
             preparation_id=self.preparation.preparation_id
         )
@@ -203,33 +216,40 @@ class OrdinaryAgentLandingExecutionTests(unittest.TestCase):
         self.assertEqual(self.inner.requests, [])
         self.assertEqual(self.checkpoints, [])
 
-    def test_ambiguous_provider_response_preserves_consumed_preparation_and_unknown(self):
+    def test_ambiguous_provider_response_preserves_consumed_preparation_and_unknown(self) -> None:
         self.merge_error = MergeTrainGitHubError("transport response lost")
         with self.assertRaises(MergeTrainGitHubError):
             self.run_landing()
+        assert self.preparation is not None
         finalization = self.store.read_ordinary_landing_finalization(
             preparation_id=self.preparation.preparation_id
         )
+        assert finalization is not None
         self.assertEqual(finalization.preparation.state, "consumed")
+        assert finalization is not None
         history = self.store.read_ordinary_agent_effect_history(
             effect_id=finalization.effect.effect_id
         )
+        assert history.outcome is not None
         self.assertEqual(
             (history.effect.state, history.outcome.kind), ("reconciliation_required", "unknown")
         )
         self.assertEqual(len(self.inner.requests), 1)
         self.assertEqual(self.checkpoints, [])
 
-    def test_progress_failure_retains_success_for_read_only_recovery(self):
+    def test_progress_failure_retains_success_for_read_only_recovery(self) -> None:
         self.checkpoint_error = RuntimeError("checkpoint interrupted")
         with self.assertRaisesRegex(RuntimeError, "checkpoint interrupted"):
             self.run_landing()
+        assert self.preparation is not None
         finalization = self.store.read_ordinary_landing_finalization(
             preparation_id=self.preparation.preparation_id
         )
+        assert finalization is not None
         history = self.store.read_ordinary_agent_effect_history(
             effect_id=finalization.effect.effect_id
         )
+        assert isinstance(history.outcome, OrdinaryAgentCompletedOutcome)
         self.assertEqual(
             (history.effect.state, history.outcome.result_sha), ("completed", self.result_sha)
         )
@@ -237,10 +257,10 @@ class OrdinaryAgentLandingExecutionTests(unittest.TestCase):
             self.run_landing()
         self.assertEqual(self.mints, 1)
 
-    def test_preparation_read_latency_is_charged_once(self):
+    def test_preparation_read_latency_is_charged_once(self) -> None:
         read = self.store.read_ordinary_landing_preparation
 
-        def delayed_read(**kwargs):
+        def delayed_read(**kwargs: Any) -> OrdinaryAgentLandingPreparation:
             result = read(**kwargs)
             self.elapsed += 8
             self.fixture.fixture.fixture.clock.return_value = datetime.fromtimestamp(
@@ -254,7 +274,7 @@ class OrdinaryAgentLandingExecutionTests(unittest.TestCase):
             result = self.run_landing()
         self.assertEqual(result.status, "merged")
 
-    def test_failed_preparation_cleanup_preserves_both_failures(self):
+    def test_failed_preparation_cleanup_preserves_both_failures(self) -> None:
         self.read_error = OrdinaryAgentProviderDeferred()
         cleanup_error = RuntimeError("database unavailable during cleanup")
         with patch.object(
@@ -265,7 +285,7 @@ class OrdinaryAgentLandingExecutionTests(unittest.TestCase):
         self.assertEqual(raised.exception.exceptions, (self.read_error, cleanup_error))
         self.assertEqual(self.inner.requests, [])
 
-    def test_provider_wait_before_mint_preserves_its_reason(self):
+    def test_provider_wait_before_mint_preserves_its_reason(self) -> None:
         self.store.record_provider_wait(
             quota_key=OrdinaryAgentProviderQuotaKey(
                 authority_kind="installation", authority_id=77, resource_class="core"
@@ -282,13 +302,15 @@ class OrdinaryAgentLandingExecutionTests(unittest.TestCase):
         self.assertEqual(self.mints, 0)
         self.assertEqual(self.inner.requests, [])
 
-    def test_revoke_failure_keeps_completed_landing_available_for_recovery(self):
+    def test_revoke_failure_keeps_completed_landing_available_for_recovery(self) -> None:
         self.revoke_error = RuntimeError("revoke transport lost")
         with self.assertRaises(OrdinaryAgentCustodyCleanupUnknown):
             self.run_landing()
+        assert self.preparation is not None
         finalization = self.store.read_ordinary_landing_finalization(
             preparation_id=self.preparation.preparation_id
         )
+        assert finalization is not None
         history = self.store.read_ordinary_agent_effect_history(
             effect_id=finalization.effect.effect_id
         )
@@ -301,14 +323,14 @@ class OrdinaryAgentLandingExecutionTests(unittest.TestCase):
             "cleanup_unknown",
         )
 
-    def test_invalid_provider_evidence_is_a_denial_not_an_interruption(self):
+    def test_invalid_provider_evidence_is_a_denial_not_an_interruption(self) -> None:
         self.read_error = OrdinaryAgentProviderEvidenceError("landing_base_tree_mismatch")
         with self.assertRaises(OrdinaryAgentProviderEvidenceError):
             self.run_landing()
         self.assertEqual(self.fixture.reserve().preparation.reason_code, "evidence_denied")
         self.assertEqual(self.inner.requests, [])
 
-    def test_guard_denial_is_retained_before_any_merge_dispatch(self):
+    def test_guard_denial_is_retained_before_any_merge_dispatch(self) -> None:
         self.guard_error = MergeAdmissionDeniedError("owner evidence no longer current")
         with self.assertRaises(MergeAdmissionDeniedError):
             self.run_landing()

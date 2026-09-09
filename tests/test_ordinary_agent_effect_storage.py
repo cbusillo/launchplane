@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.ordinary_agent_custody import OrdinaryAgentCustodyCandidate
+from control_plane.contracts.ordinary_agent import OrdinaryAgentPullRequest
 from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
 from control_plane.contracts import ordinary_agent_snapshot as snapshots
 from control_plane.merge_train import MergeTrainDryRunSnapshot, MergeTrainPullRequestSnapshot
@@ -46,10 +47,21 @@ class OrdinaryAgentEffectStorageTests(unittest.TestCase):
         self.prepare_effect_fixture(self.fixture)
 
     def prepare_effect_fixture(
-        self, fixture: session_support.OrdinaryAgentSessionStorageTests
+        self,
+        fixture: session_support.OrdinaryAgentSessionStorageTests,
+        *,
+        stack_child_number: int | None = None,
     ) -> None:
         self.fixture = fixture
         self.fixture.enroll()
+        if stack_child_number is not None:
+            self.fixture.request = self.fixture.request.model_copy(
+                update={
+                    "pull_requests": self.fixture.request.pull_requests
+                    + (OrdinaryAgentPullRequest(number=stack_child_number, head_sha="c" * 40),),
+                    "permitted_stack_edit_pull_requests": (stack_child_number,),
+                }
+            )
         self.store = self.fixture.store
         self.merge_policy = MergeTrainPolicyRecord.model_validate(
             {

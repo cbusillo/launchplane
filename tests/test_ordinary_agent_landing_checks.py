@@ -1,9 +1,12 @@
 """Candidate checks retain provider policy, integration and base bindings."""
 
-from copy import deepcopy
 import json
 import unittest
+from collections.abc import Sequence
+from copy import deepcopy
+from typing import Any
 
+from control_plane.contracts.ordinary_agent_snapshot import OrdinaryAgentProtectionEvidence
 from control_plane.merge_train_github import RecordingMergeTrainGitHubTransport
 from control_plane.ordinary_agent_github_transport import (
     DeadlineMergeTrainGitHubTransport,
@@ -11,11 +14,12 @@ from control_plane.ordinary_agent_github_transport import (
 )
 from control_plane.ordinary_agent_landing_checks import read_landing_checks
 from control_plane.ordinary_agent_landing_graphql import OrdinaryLandingGraphQLObservation
+from control_plane.tenant_admission_controller import TenantAdmissionTechnicalChecks
 
 
 class LandingChecksTests(unittest.TestCase):
-    def setUp(self):
-        self.payload = {
+    def setUp(self) -> None:
+        self.payload: dict[str, Any] = {
             "ref": {
                 "name": "main",
                 "branchProtectionRule": {
@@ -49,7 +53,9 @@ class LandingChecksTests(unittest.TestCase):
             },
         }
 
-    def read(self, payload, rules=()):
+    def read(
+        self, payload: dict[str, Any], rules: Sequence[object] = ()
+    ) -> tuple[TenantAdmissionTechnicalChecks, OrdinaryAgentProtectionEvidence]:
         transport = DeadlineMergeTrainGitHubTransport(
             transport=RecordingMergeTrainGitHubTransport(responses=(list(rules),)),
             work_deadline=75,
@@ -69,7 +75,7 @@ class LandingChecksTests(unittest.TestCase):
             candidate_sha="candidate",
         )
 
-    def test_required_app_and_actual_base_control_candidate_readiness(self):
+    def test_required_app_and_actual_base_control_candidate_readiness(self) -> None:
         checks, evidence = self.read(self.payload)
         self.assertEqual(checks.status, "pass")
         self.assertEqual(
@@ -84,7 +90,7 @@ class LandingChecksTests(unittest.TestCase):
         changed["ref"]["compare"]["status"] = "DIVERGED"
         self.assertEqual(self.read(changed)[0].status, "fail")
 
-    def test_rules_add_required_checks_instead_of_replacing_classic_policy(self):
+    def test_rules_add_required_checks_instead_of_replacing_classic_policy(self) -> None:
         rules = [
             {
                 "type": "required_status_checks",
@@ -99,7 +105,7 @@ class LandingChecksTests(unittest.TestCase):
         self.assertTrue(checks.strict)
         self.assertEqual({c.name for c in checks.required_checks}, {"ci", "security"})
 
-    def test_missing_required_signals_and_unreadable_policy_never_pass(self):
+    def test_missing_required_signals_and_unreadable_policy_never_pass(self) -> None:
         for field in ("missing_context", "truncated", "missing_policy", "wrong_candidate"):
             with self.subTest(field=field):
                 changed = deepcopy(self.payload)
@@ -120,7 +126,7 @@ class LandingChecksTests(unittest.TestCase):
                 with self.assertRaises(OrdinaryAgentProviderEvidenceError):
                     self.read(changed)
 
-    def test_rules_only_policy_still_binds_integration(self):
+    def test_rules_only_policy_still_binds_integration(self) -> None:
         changed = deepcopy(self.payload)
         changed["ref"]["branchProtectionRule"] = None
         rules = [
@@ -138,7 +144,7 @@ class LandingChecksTests(unittest.TestCase):
         self.assertIsNone(evidence.classic_sha256)
         self.assertEqual(self.read(changed)[0].status, "unavailable")
 
-    def test_present_but_unreadable_required_app_cannot_become_any_app(self):
+    def test_present_but_unreadable_required_app_cannot_become_any_app(self) -> None:
         for app in ({}, {"databaseId": None}):
             with self.subTest(app=app):
                 changed = deepcopy(self.payload)
@@ -146,7 +152,7 @@ class LandingChecksTests(unittest.TestCase):
                 with self.assertRaises(OrdinaryAgentProviderEvidenceError):
                     self.read(changed)
 
-    def test_explicit_null_rollup_is_unavailable_but_missing_field_is_malformed(self):
+    def test_explicit_null_rollup_is_unavailable_but_missing_field_is_malformed(self) -> None:
         changed = deepcopy(self.payload)
         changed["candidate"]["statusCheckRollup"] = None
         self.assertEqual(self.read(changed)[0].status, "unavailable")
@@ -154,7 +160,7 @@ class LandingChecksTests(unittest.TestCase):
         with self.assertRaises(OrdinaryAgentProviderEvidenceError):
             self.read(changed)
 
-    def test_documented_optional_rules_integration_id_allows_any_app(self):
+    def test_documented_optional_rules_integration_id_allows_any_app(self) -> None:
         changed = deepcopy(self.payload)
         changed["ref"]["branchProtectionRule"] = None
         rules = [
@@ -168,7 +174,7 @@ class LandingChecksTests(unittest.TestCase):
         ]
         self.assertEqual(self.read(changed, rules)[0].status, "pass")
 
-    def test_any_app_rule_does_not_weaken_same_context_classic_app_binding(self):
+    def test_any_app_rule_does_not_weaken_same_context_classic_app_binding(self) -> None:
         changed = deepcopy(self.payload)
         changed["candidate"]["statusCheckRollup"]["contexts"]["nodes"][0]["checkSuite"]["app"][
             "databaseId"

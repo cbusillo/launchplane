@@ -40,6 +40,8 @@ class OrdinaryAgentLandingPostgresTests(unittest.TestCase):
             self.assertEqual(fixture.finalize(preparation, proposal).disposition, "replay")
             history = store.read_ordinary_agent_effect_history(effect_id=finalized.effect.effect_id)
             self.assertEqual(history.effect.state, "reconciliation_required")
+            assert history.outcome is not None
+            assert history.child is not None
             self.assertEqual(history.outcome.kind, "unknown")
             self.assertEqual(history.child.child_id, finalized.child.child_id)
             for model, identity in (

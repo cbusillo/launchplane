@@ -141,7 +141,9 @@ class GitHubAppIdentityTests(unittest.TestCase):
                         "statuses": "read",
                     },
                 }
-            observed_body.update(kwargs["body"])  # type: ignore[arg-type]
+            body = kwargs["body"]
+            assert isinstance(body, dict)
+            observed_body.update(body)
             return {
                 "token": "snapshot-token-secret",
                 "expires_at": "2026-08-07T15:00:00Z",

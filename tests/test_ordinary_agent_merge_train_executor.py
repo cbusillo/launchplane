@@ -13,6 +13,7 @@ from control_plane.contracts.merge_train_effect import (
     CandidateRefDeleteEffect,
     CandidateRefPrepareEffect,
     MergeTrainEffectLineage,
+    StackChildLabelEffect,
 )
 from control_plane.contracts.ordinary_agent_custody import OrdinaryAgentCustodyCandidate
 from control_plane.github_app_identity import GitHubAppInstallationToken
@@ -156,6 +157,85 @@ class OrdinaryAgentMergeTrainEffectExecutorTests(unittest.TestCase):
             disposition="candidate_ref_retained_no_conditional_delete",
         )
         effect_store.reserve_ordinary_custody_attempt.assert_not_called()
+
+    def test_existing_label_completes_with_observation_before_dispatch_checkpoint(self) -> None:
+        effect = StackChildLabelEffect(
+            lineage=MergeTrainEffectLineage(
+                repository="example/repo", base_branch="main", collapse_id="collapse-one"
+            ),
+            pull_request_number=7,
+            label="collapsed",
+        )
+        record = effect_record(effects.StackChildLabelCommand(effect=effect))
+        effect_store = _dispatch_store(record)
+        effect_store.checkpoint_ordinary_semantic_dispatch.side_effect = AssertionError(
+            "an existing label must not create a dispatch child"
+        )
+        transport = RecordingMergeTrainGitHubTransport(responses=([{"name": "collapsed"}],))
+        executor = OrdinaryAgentMergeTrainEffectExecutor(
+            record=record,
+            controller_fence=record.controller_fence,
+            effect_store=effect_store,
+            custody_store=Mock(),
+            secret_store=Mock(),
+            transport_factory=lambda _: transport,
+            monotonic=lambda: 0,
+        )
+        with patch(
+            "control_plane.ordinary_agent_merge_train_executor.ordinary_agent_provider_token_lease",
+            _provider_lease,
+        ):
+            executor.label_stack_child(effect)
+        self.assertEqual([r.method for r in transport.requests], ["GET"])
+        completed = effect_store.complete_ordinary_effect_without_dispatch.call_args.kwargs
+        observation = completed["typed_observation"]
+        self.assertEqual(observation.custody_attempt_id, "custody_one")
+        self.assertEqual(
+            observation.observation,
+            effects.OrdinaryAgentLabelObservation(
+                repository="example/repo", number=7, label="collapsed", present=True
+            ),
+        )
+        effect_store.record_ordinary_semantic_outcome.assert_not_called()
+
+    def test_absent_label_checkpoints_before_write_and_incomplete_read_does_not_write(self) -> None:
+        payloads: tuple[list[dict[str, str]], ...] = ([], [{"name": "unrelated"}] * 100, [{}])
+        for labels in payloads:
+            with self.subTest(label_count=len(labels)):
+                effect = StackChildLabelEffect(
+                    lineage=MergeTrainEffectLineage(
+                        repository="example/repo", base_branch="main", collapse_id="collapse-one"
+                    ),
+                    pull_request_number=7,
+                    label="collapsed",
+                )
+                record = effect_record(effects.StackChildLabelCommand(effect=effect))
+                effect_store = _dispatch_store(record)
+                transport = RecordingMergeTrainGitHubTransport(responses=(labels, []))
+                executor = OrdinaryAgentMergeTrainEffectExecutor(
+                    record=record,
+                    controller_fence=record.controller_fence,
+                    effect_store=effect_store,
+                    custody_store=Mock(),
+                    secret_store=Mock(),
+                    transport_factory=lambda _: transport,
+                    monotonic=lambda: 0,
+                )
+                with patch(
+                    "control_plane.ordinary_agent_merge_train_executor.ordinary_agent_provider_token_lease",
+                    _provider_lease,
+                ):
+                    if labels:
+                        with self.assertRaisesRegex(RuntimeError, "ordinary_label_observation"):
+                            executor.label_stack_child(effect)
+                        effect_store.checkpoint_ordinary_semantic_dispatch.assert_not_called()
+                        self.assertEqual([r.method for r in transport.requests], ["GET"])
+                    else:
+                        executor.label_stack_child(effect)
+                        effect_store.checkpoint_ordinary_semantic_dispatch.assert_called_once()
+                        effect_store.record_ordinary_semantic_outcome.assert_called_once()
+                        self.assertEqual([r.method for r in transport.requests], ["GET", "POST"])
+                effect_store.complete_ordinary_effect_without_dispatch.assert_not_called()
 
     def test_executor_rejects_a_command_other_than_the_reserved_effect(self) -> None:
         effect = CandidateRefDeleteEffect(

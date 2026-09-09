@@ -675,3 +675,11 @@ progress before token revocation. A completed landing with uncertain cleanup is
 recovered through that history; it is never sent again to recover a return value.
 Quota waits retain their own reason. If preparation cleanup also fails, both
 errors remain visible rather than reporting a clean deferral.
+
+
+Internal effect history includes both dispatch outcomes and completions that
+required no dispatch. For an already-present stack label, the scoped executor
+records its typed provider observation before creating any dispatch child.
+Candidate references retained because conditional deletion is unavailable also
+have a durable completion. Recovery reads these records without minting another
+token or sending the semantic operation again.

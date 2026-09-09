@@ -24671,11 +24671,16 @@ class PostgresRecordStore(HumanSessionStore):
         children = LaunchplaneOrdinaryAgentSemanticDispatchRow
         outcomes = LaunchplaneOrdinaryAgentSemanticOutcomeRow
         observations = LaunchplaneOrdinaryAgentEffectReconciliationRow
+        completions = LaunchplaneOrdinaryAgentEffectCompletionRow
         with self._session_factory() as session:
             rows = tuple(
                 session.execute(
                     select(
-                        effects.payload, children.payload, outcomes.payload, observations.payload
+                        effects.payload,
+                        children.payload,
+                        outcomes.payload,
+                        observations.payload,
+                        completions.payload,
                     )
                     .select_from(effects)
                     .outerjoin(
@@ -24686,6 +24691,7 @@ class PostgresRecordStore(HumanSessionStore):
                             == effects.payload["dispatch_count"].as_integer()
                         ),
                     )
+                    .outerjoin(completions, completions.effect_id == effects.effect_id)
                     .outerjoin(outcomes, outcomes.child_id == children.child_id)
                     .outerjoin(observations, observations.child_id == children.child_id)
                     .where(effects.effect_id == effect_id)
@@ -24696,12 +24702,13 @@ class PostgresRecordStore(HumanSessionStore):
                 raise OrdinaryAgentSessionAdmissionDenied("effect_unavailable")
             if len(rows) > effect_contracts.MAX_RECONCILIATION_OBSERVATIONS_PER_EFFECT:
                 raise OrdinaryAgentSessionAdmissionDenied("effect_history_conflict")
-            effect, child, outcome, _ = rows[0]
+            effect, child, outcome, _, completion = rows[0]
             history = effect_contracts.OrdinaryAgentEffectHistory.model_validate(
                 {
                     "effect": effect,
                     "child": child,
                     "outcome": outcome,
+                    "undispatched_completion": completion,
                     "reconciliations": sorted(
                         (row[3] for row in rows if row[3] is not None),
                         key=lambda item: (item["observed_at"], item["observation_id"]),

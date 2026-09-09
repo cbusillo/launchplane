@@ -417,12 +417,18 @@ class OrdinaryAgentReconciliationObservation(StrictFrozenModel):
     observation: OrdinaryAgentProviderObservation
 
 
+class OrdinaryAgentUndispatchedCompletion(StrictFrozenModel):
+    disposition: Literal["label_already_present", "candidate_ref_retained_no_conditional_delete"]
+    observation: OrdinaryAgentReconciliationObservation | None = None
+
+
 class OrdinaryAgentEffectHistory(StrictFrozenModel):
     """Internal consistent history read; this record grants no dispatch authority."""
 
     effect: OrdinaryAgentEffectRecord
     child: OrdinaryAgentSemanticDispatchAttemptRecord | None = None
     outcome: OrdinaryAgentSemanticOutcome | None = None
+    undispatched_completion: OrdinaryAgentUndispatchedCompletion | None = None
     reconciliations: tuple[OrdinaryAgentReconciliationObservation, ...] = Field(
         default=(), max_length=MAX_RECONCILIATION_OBSERVATIONS_PER_EFFECT
     )

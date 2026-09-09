@@ -1,8 +1,10 @@
 """Prepared landing reads compose exact identities, policy, diff and authorship."""
 
-from copy import deepcopy
 import unittest
+from copy import deepcopy
+from typing import Any
 
+from control_plane.contracts.ordinary_agent_snapshot import OrdinaryAgentLandingEvidence
 from control_plane.merge_train_github import RecordingMergeTrainGitHubTransport
 from control_plane.ordinary_agent_github_transport import (
     DeadlineMergeTrainGitHubTransport,
@@ -14,7 +16,7 @@ from tests.merge_train_policy_fixtures import build_test_merge_train_policy
 
 
 class LandingReaderTests(unittest.TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         self.fixture = landing_support.OrdinaryAgentLandingStorageTests()
         self.fixture.setUp()
         self.addCleanup(self.fixture.doCleanups)
@@ -27,7 +29,7 @@ class LandingReaderTests(unittest.TestCase):
         )
         identity = {"databaseId": p.target.repository_id, "nameWithOwner": c.repository}
         self.user = {"id": 202, "login": "operator", "type": "User"}
-        self.response = {
+        self.response: dict[str, Any] = {
             "data": {
                 "rateLimit": {"cost": 1},
                 "repository": {
@@ -102,7 +104,9 @@ class LandingReaderTests(unittest.TestCase):
             }
         }
 
-    def read(self, final):
+    def read(
+        self, final: object
+    ) -> tuple[OrdinaryAgentLandingEvidence, RecordingMergeTrainGitHubTransport]:
         inner = RecordingMergeTrainGitHubTransport(
             responses=(
                 self.response,
@@ -139,9 +143,12 @@ class LandingReaderTests(unittest.TestCase):
         )
         return result, inner
 
-    def test_prepared_reader_preserves_rename_and_authorship_without_source_check_invention(self):
+    def test_prepared_reader_preserves_rename_and_authorship_without_source_check_invention(
+        self,
+    ) -> None:
         evidence, inner = self.read(deepcopy(self.response))
         repository = evidence.repository_evidence
+        assert repository.authorship is not None
         self.assertEqual(repository.authorship.resolution, "resolved")
         self.assertEqual(repository.authorship.contributor_github_ids, (202,))
         self.assertEqual(repository.changed_files[0].previous_path, "control_plane/old.py")
@@ -155,13 +162,13 @@ class LandingReaderTests(unittest.TestCase):
         self.assertEqual(len(inner.requests), 5)
         self.assertEqual(evidence.observed_at, self.preparation.reserved_at)
 
-    def test_changed_base_during_diff_acquisition_never_returns_evidence(self):
+    def test_changed_base_during_diff_acquisition_never_returns_evidence(self) -> None:
         changed = deepcopy(self.response)
         changed["data"]["repository"]["pr0"]["baseRefOid"] = "f" * 40
         with self.assertRaises(OrdinaryAgentProviderEvidenceError):
             self.read(changed)
 
-    def test_mismatched_preparation_head_is_rejected_before_provider_io(self):
+    def test_mismatched_preparation_head_is_rejected_before_provider_io(self) -> None:
         self.preparation = self.preparation.model_copy(
             update={
                 "entry": self.preparation.entry.model_copy(update={"expected_head_sha": "f" * 40})
@@ -172,7 +179,7 @@ class LandingReaderTests(unittest.TestCase):
         ):
             self.read(deepcopy(self.response))
 
-    def test_deleted_author_stays_unknown_without_permission_lookup(self):
+    def test_deleted_author_stays_unknown_without_permission_lookup(self) -> None:
         self.response["data"]["repository"]["pr0"]["author"] = None
         evidence, inner = self.read(deepcopy(self.response))
         entry = evidence.snapshot.pull_requests[0]
