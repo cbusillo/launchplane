@@ -4,8 +4,10 @@ from datetime import datetime, timezone
 from dataclasses import replace
 import unittest
 import hashlib
+from unittest.mock import patch
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
+from control_plane.contracts.ordinary_agent_custody import OrdinaryAgentCustodyCandidate
 from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
 from control_plane.contracts import ordinary_agent_snapshot as snapshots
 from control_plane.merge_train import MergeTrainDryRunSnapshot, MergeTrainPullRequestSnapshot
@@ -484,6 +486,34 @@ class OrdinaryAgentEffectStorageTests(unittest.TestCase):
         )
         self.assertEqual(recovered.result, result)
         self.assertEqual(recovered.state, "completed")
+
+    def test_expiry_during_dispatch_validation_does_not_checkpoint(self) -> None:
+        effect, fence, _ = self.prepare_refresh()
+        reservation = self.store.reserve_ordinary_custody_attempt(
+            effect_id=effect.effect_id, expected_effect_revision=effect.revision
+        )
+        self.issue(reservation)
+
+        def advance_clock(*args: object, **kwargs: object) -> OrdinaryAgentCustodyCandidate:
+            self.fixture.clock.return_value = datetime.fromtimestamp(
+                self.fixture.now + 31, timezone.utc
+            ).isoformat()
+            return reservation.candidate
+
+        with patch.object(
+            self.store, "_ordinary_agent_effect_custody_candidate", side_effect=advance_clock
+        ):
+            with self.assertRaisesRegex(OrdinaryAgentSessionAdmissionDenied, "job_claim_lost"):
+                self.store.checkpoint_ordinary_semantic_dispatch(
+                    effect_id=effect.effect_id,
+                    controller_fence=fence,
+                    custody_attempt_id=reservation.attempt_id,
+                    fixed_token_expires_at=self.fixture.now + 300,
+                )
+        stored = self.store.read_ordinary_agent_effect(effect_id=effect.effect_id)
+        assert stored is not None
+        self.assertEqual(stored.dispatch_count, 0)
+        self.assertEqual(stored.state, "reserved")
 
     def test_completion_requires_current_claim_and_persists_terminal_request(self) -> None:
         fence, _ = self.prepare_controller()

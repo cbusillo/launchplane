@@ -22476,6 +22476,42 @@ class PostgresRecordStore(HumanSessionStore):
                 request=context.request,
                 now=now,
             )
+            # Time can pass while quota/authority rows are locked. Recheck the
+            # already-locked controller and current claim immediately before
+            # recording permission to send the provider request.
+            controller_row = session.get(
+                LaunchplaneMergeTrainControllerStateRow, controller_fence.controller_key
+            )
+            assert controller_row is not None
+            controller = MergeTrainControllerStateRecord.model_validate(controller_row.payload)
+            current_claim = session.get(
+                LaunchplaneOrdinaryAgentJobClaimRow,
+                context.request.request_id,
+                populate_existing=True,
+            )
+            if (
+                current_claim is None
+                or current_claim.status != "running"
+                or current_claim.claim_expires_at <= now
+                or controller.lease_owner
+                != "ordinary-job-"
+                + canonical_json_sha256(
+                    OrdinaryAgentJobClaimFence(
+                        request_id=context.request.request_id,
+                        worker_id=current_claim.worker_id,
+                        generation=current_claim.generation,
+                    ).model_dump()
+                )
+            ):
+                raise OrdinaryAgentSessionAdmissionDenied("job_claim_lost")
+            if (
+                not controller.lease_expires_at
+                or parse_launchplane_mutation_timestamp(
+                    controller.lease_expires_at, field_name="lease_expires_at"
+                ).timestamp()
+                <= now
+            ):
+                raise OrdinaryAgentSessionAdmissionDenied("controller_binding_conflict")
             if (
                 expiry != fixed_token_expires_at
                 or expiry - now < effect_contracts.MIN_PROVIDER_TOKEN_TTL_AT_DISPATCH_SECONDS
