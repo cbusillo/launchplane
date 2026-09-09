@@ -112,6 +112,14 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         self.transport = transport
         self._effect_executor = effect_executor
 
+    def read_merge_train_snapshot(
+        self, *, repository: str, base_branch: str
+    ) -> MergeTrainDryRunSnapshot:
+        """Read planning evidence through the client-owned provider boundary."""
+        return GitHubMergeTrainSnapshotReader(transport=self.transport).read_merge_train_snapshot(
+            repository=repository, base_branch=base_branch
+        )
+
     @property
     def semantic_effect_executor(self) -> MergeTrainSemanticEffectExecutor:
         if self._effect_executor is None:

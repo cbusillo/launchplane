@@ -238,6 +238,27 @@ action, credential custody, or execution authority. Those integrations require
 the authoritative lifecycle and custody contracts before they can be designed
 against stable identities and state transitions.
 
+The shared controller core accepts an explicit provider client and constructs no
+credential or transport. The legacy entry point still constructs its established
+token-backed client before invoking that core. Ordinary integration must provide
+its scoped client and joined bound-record adapters; passing an ordinary bearer
+to the privileged controller route is not an integration path.
+
+The ordinary controller adapter filters planning reads to the exact job binding
+and target. Acquisitions and checkpoints use joined storage operations; after a
+progress successor is stored, a checkpoint rereads its authoritative record ID.
+Ordinary wrapper builders include the binding before calculating their IDs.
+Release uses a history-only fence operation, including terminal cleanup after a
+worker crash, so cancellation does not require reacquiring execution authority.
+This adapter alone does not register an executor or activate the worker stage.
+
+The scoped candidate client consumes durable snapshot and check callbacks. It
+prepares a job/revision-specific ref, then returns one completed merge step with
+full structural progress at a time. Restart uses that persisted progress rather
+than resetting the ref. It has no ambient provider transport; provider evidence
+and mutations must come through the scoped callbacks and executor. Candidate
+step coverage alone is not proof of landing, stack execution, or worker activation.
+
 ## Validation boundary
 
 Tests use synthetic principals and targets. Canonical JSON round trips and
