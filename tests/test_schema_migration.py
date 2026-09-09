@@ -43,6 +43,74 @@ from control_plane.storage.schema_migration import (
 
 
 class SchemaMigrationTests(unittest.TestCase):
+    def test_released_controller_checkpoint_migration_preserves_existing_claims(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = (
+                f"sqlite+pysqlite:///{Path(temporary_directory_name) / 'records.sqlite3'}"
+            )
+            config = alembic_config(database_url)
+            command.upgrade(config, "a4d9e2f6b8c1")
+            engine = create_engine(database_url)
+            try:
+                with engine.begin() as connection:
+                    connection.execute(
+                        text(
+                            "INSERT INTO launchplane_ordinary_agent_job_claims "
+                            "(request_id, worker_id, generation, claim_expires_at, "
+                            "next_due_at, status, reason_code) VALUES "
+                            "('request_one', '', 0, 0, 0, 'pending', NULL)"
+                        )
+                    )
+                self.assertNotIn(
+                    "released_controller",
+                    {
+                        str(column["name"])
+                        for column in inspect(engine).get_columns(
+                            "launchplane_ordinary_agent_job_claims"
+                        )
+                    },
+                )
+            finally:
+                engine.dispose()
+
+            command.upgrade(config, EXPECTED_ALEMBIC_HEAD_REVISION)
+            engine = create_engine(database_url)
+            try:
+                columns = {
+                    str(column["name"]): column
+                    for column in inspect(engine).get_columns(
+                        "launchplane_ordinary_agent_job_claims"
+                    )
+                }
+                with engine.connect() as connection:
+                    checkpoint = connection.scalar(
+                        text(
+                            "SELECT released_controller FROM "
+                            "launchplane_ordinary_agent_job_claims "
+                            "WHERE request_id = 'request_one'"
+                        )
+                    )
+                self.assertIn("released_controller", columns)
+                self.assertTrue(columns["released_controller"]["nullable"])
+                self.assertIsNone(checkpoint)
+            finally:
+                engine.dispose()
+
+            command.downgrade(config, "a4d9e2f6b8c1")
+            engine = create_engine(database_url)
+            try:
+                self.assertNotIn(
+                    "released_controller",
+                    {
+                        str(column["name"])
+                        for column in inspect(engine).get_columns(
+                            "launchplane_ordinary_agent_job_claims"
+                        )
+                    },
+                )
+            finally:
+                engine.dispose()
+
     def test_ordinary_agent_custody_migration_fences_stable_authority_scope(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             database_url = (

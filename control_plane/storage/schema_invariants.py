@@ -10,7 +10,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
 AUTHZ_COMPATIBILITY_FLOOR_REVISION = "f3b5d7e9a1c2"
-EXPECTED_ALEMBIC_HEAD_REVISION = "a4d9e2f6b8c1"
+EXPECTED_ALEMBIC_HEAD_REVISION = "b6e8f0a2c4d7"
 RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS = (EXPECTED_ALEMBIC_HEAD_REVISION,)
 _AUTHZ_POLICY_TABLE = "launchplane_authz_policies"
 _AUTHZ_POLICY_WRITE_FENCE_TRIGGER = "launchplane_authz_policy_write_fence"
@@ -78,6 +78,7 @@ CRITICAL_POSTGRES_COLUMN_TYPES: tuple[CriticalColumnType, ...] = (
     CriticalColumnType("launchplane_ordinary_agent_job_claims", "generation", ("bigint",)),
     CriticalColumnType("launchplane_ordinary_agent_job_claims", "claim_expires_at", ("bigint",)),
     CriticalColumnType("launchplane_ordinary_agent_job_claims", "next_due_at", ("bigint",)),
+    CriticalColumnType("launchplane_ordinary_agent_job_claims", "released_controller", ("jsonb",)),
     CriticalColumnType("launchplane_ordinary_agent_read_attempts", "binding_revision", ("bigint",)),
     CriticalColumnType("launchplane_ordinary_agent_read_attempts", "attempt_ordinal", ("bigint",)),
     CriticalColumnType("launchplane_ordinary_agent_read_attempts", "revision", ("bigint",)),

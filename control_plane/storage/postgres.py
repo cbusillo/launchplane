@@ -2406,6 +2406,7 @@ class LaunchplaneOrdinaryAgentJobClaimRow(Base):
     next_due_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False)
     reason_code: Mapped[str | None] = mapped_column(String, nullable=True)
+    released_controller: Mapped[PayloadDict | None] = mapped_column(PayloadJsonType, nullable=True)
 
 
 class LaunchplaneOrdinaryAgentReadAttemptRow(Base):
@@ -17625,6 +17626,132 @@ class PostgresRecordStore(HumanSessionStore):
             )
         return payloads
 
+    @staticmethod
+    def _ordinary_agent_progress_record(
+        payload: PayloadDict,
+    ) -> effect_contracts.OrdinaryAgentProgressRecord | None:
+        try:
+            if "candidate" in payload:
+                return MergeTrainBatchCandidateRecord.model_validate(payload)
+            if "landing_plan" in payload:
+                return MergeTrainBatchLandingPlanRecord.model_validate(payload)
+            if "plan" in payload:
+                return MergeTrainStackCollapsePlanRecord.model_validate(payload)
+        except ValueError:
+            return None
+        return None
+
+    @classmethod
+    def _ordinary_agent_matching_released_controller(
+        cls,
+        *,
+        claim: LaunchplaneOrdinaryAgentJobClaimRow | None,
+        request: OrdinaryAgentFiniteRequestRecord,
+        target: OrdinaryAgentTarget,
+        progress_payload: PayloadDict,
+    ) -> MergeTrainControllerStateRecord | None:
+        if claim is None or claim.released_controller is None:
+            return None
+        progress = cls._ordinary_agent_progress_record(progress_payload)
+        if progress is None or progress.status != "active":
+            return None
+        binding = progress.ordinary_job_binding
+        if binding is None:
+            return None
+        current_binding = OrdinaryAgentJobBinding(
+            request_id=request.request_id,
+            scope_sha256=request.scope_sha256,
+            binding_revision=request.binding_revision,
+        )
+        try:
+            checkpoint = MergeTrainControllerStateRecord.model_validate(claim.released_controller)
+        except ValueError:
+            return None
+        inner = (
+            progress.candidate
+            if isinstance(progress, MergeTrainBatchCandidateRecord)
+            else progress.landing_plan
+            if isinstance(progress, MergeTrainBatchLandingPlanRecord)
+            else progress.plan
+        )
+        if (
+            binding != current_binding
+            or checkpoint.status != "running"
+            or checkpoint.ordinary_job_binding != binding
+            or checkpoint.active_record_id != progress.record_id
+            or not checkpoint.active_action
+            or not checkpoint.active_phase
+            or checkpoint.repository.lower() != target.repository.lower()
+            or checkpoint.base_branch != target.base_branch
+            or request.target.repository_id != target.repository_id
+            or request.target.repository.lower() != target.repository.lower()
+            or request.target.base_branch != target.base_branch
+            or inner.repository.lower() != target.repository.lower()
+            or inner.base_branch != target.base_branch
+            or inner.policy_key != checkpoint.policy_key
+            or inner.policy_sha256 != checkpoint.policy_sha256
+        ):
+            return None
+        return checkpoint
+
+    def _ordinary_agent_foreign_progress_is_released(
+        self,
+        session: Any,
+        *,
+        target: OrdinaryAgentTarget,
+        progress_payload: PayloadDict,
+    ) -> bool:
+        progress = self._ordinary_agent_progress_record(progress_payload)
+        if progress is None or progress.ordinary_job_binding is None:
+            return False
+        binding = progress.ordinary_job_binding
+        request_row = session.get(LaunchplaneOrdinaryAgentFiniteRequestRow, binding.request_id)
+        claim = session.get(LaunchplaneOrdinaryAgentJobClaimRow, binding.request_id)
+        if request_row is None:
+            return False
+        try:
+            request = OrdinaryAgentFiniteRequestRecord.model_validate(request_row.payload)
+        except ValueError:
+            return False
+        if self._ordinary_agent_matching_released_controller(
+            claim=claim,
+            request=request,
+            target=target,
+            progress_payload=progress_payload,
+        ) is None or self._ordinary_agent_job_custody_uncertainty(session, binding.request_id):
+            return False
+        for effect_row in session.scalars(
+            select(LaunchplaneOrdinaryAgentEffectRow).where(
+                LaunchplaneOrdinaryAgentEffectRow.request_id == binding.request_id
+            )
+        ):
+            try:
+                effect = OrdinaryAgentEffectRecord.model_validate(effect_row.payload)
+            except ValueError:
+                return False
+            if effect.state in {
+                "reserved",
+                "dispatching",
+                "waiting_provider",
+                "reconciliation_required",
+                "rebind_pending",
+            }:
+                return False
+        for preparation_row in session.scalars(
+            select(LaunchplaneOrdinaryAgentLandingPreparationRow).where(
+                LaunchplaneOrdinaryAgentLandingPreparationRow.request_id == binding.request_id
+            )
+        ):
+            try:
+                preparation = effect_contracts.OrdinaryAgentLandingPreparation.model_validate(
+                    preparation_row.payload
+                )
+            except ValueError:
+                return False
+            if preparation.state in {"reserved", "observed"}:
+                return False
+        return True
+
     def _require_legacy_merge_train_target_unbound(
         self, session: Any, *, repository: str, base_branch: str
     ) -> None:
@@ -20905,6 +21032,7 @@ class PostgresRecordStore(HumanSessionStore):
                     next_due_at=now,
                     status="pending",
                     reason_code=None,
+                    released_controller=None,
                 )
             )
             self._after_ordinary_agent_enrollment_write_step("admit_finite_request")
@@ -20945,7 +21073,12 @@ class PostgresRecordStore(HumanSessionStore):
             context = self._ordinary_agent_current_chain_context(
                 session, request_id=claim_fence.request_id
             )
-            self._require_ordinary_agent_claim(session, claim_fence=claim_fence, now=context.now)
+            claim = self._require_ordinary_agent_claim(
+                session,
+                claim_fence=claim_fence,
+                now=context.now,
+                for_update=True,
+            )
             self._require_ordinary_agent_merge_policy(
                 session, request=context.request, policy_key=policy_key, policy_sha256=policy_sha256
             )
@@ -20960,33 +21093,53 @@ class PostgresRecordStore(HumanSessionStore):
             for effect_row in session.scalars(
                 select(LaunchplaneOrdinaryAgentEffectRow).where(
                     LaunchplaneOrdinaryAgentEffectRow.request_id != context.request.request_id,
-                    LaunchplaneOrdinaryAgentEffectRow.payload["target"]["repository"].as_string()
-                    == target.repository,
+                    func.lower(
+                        LaunchplaneOrdinaryAgentEffectRow.payload["target"][
+                            "repository"
+                        ].as_string()
+                    )
+                    == target.repository.lower(),
                     LaunchplaneOrdinaryAgentEffectRow.payload["target"]["base_branch"].as_string()
                     == target.base_branch,
                 )
             ):
                 other = OrdinaryAgentEffectRecord.model_validate(effect_row.payload)
-                if other.target == target and other.state in {
-                    "reserved",
-                    "dispatching",
-                    "waiting_provider",
-                    "reconciliation_required",
-                    "rebind_pending",
-                }:
+                if (
+                    other.target.repository_id == target.repository_id
+                    and other.target.repository.lower() == target.repository.lower()
+                    and other.target.base_branch == target.base_branch
+                    and other.state
+                    in {
+                        "reserved",
+                        "dispatching",
+                        "waiting_provider",
+                        "reconciliation_required",
+                        "rebind_pending",
+                    }
+                ):
                     raise OrdinaryAgentSessionAdmissionDenied("target_busy")
             active_progress = self._ordinary_agent_active_progress(
                 session, repository=target.repository, base_branch=target.base_branch
             )
-            if (
-                any(
-                    item.get("ordinary_job_binding") != binding.model_dump(mode="json")
-                    for item in active_progress
+            binding_payload = binding.model_dump(mode="json")
+            own_progress = [
+                item
+                for item in active_progress
+                if item.get("ordinary_job_binding") == binding_payload
+            ]
+            foreign_progress = [
+                item
+                for item in active_progress
+                if item.get("ordinary_job_binding") != binding_payload
+            ]
+            if len(own_progress) > 1 or any(
+                not self._ordinary_agent_foreign_progress_is_released(
+                    session, target=target, progress_payload=item
                 )
-                or len(active_progress) > 1
+                for item in foreign_progress
             ):
                 raise OrdinaryAgentSessionAdmissionDenied("target_busy")
-            if row is None and active_progress:
+            if row is None and own_progress:
                 raise OrdinaryAgentSessionAdmissionDenied("target_busy")
             if row is None:
                 record = build_merge_train_controller_state_record(
@@ -21012,16 +21165,38 @@ class PostgresRecordStore(HumanSessionStore):
                     record.policy_key != policy_key or record.policy_sha256 != policy_sha256
                 ):
                     raise OrdinaryAgentSessionAdmissionDenied("controller_policy_changed")
-            if record.status == "idle" and active_progress:
-                if record.last_record_id != active_progress[0]["record_id"]:
-                    raise OrdinaryAgentSessionAdmissionDenied("record_predecessor_conflict")
-                record = record.model_copy(
-                    update={
-                        "active_record_id": record.last_record_id,
-                        "active_action": record.last_action,
-                        "active_phase": record.last_phase,
-                    }
+            if record.status == "idle" and own_progress:
+                checkpoint = self._ordinary_agent_matching_released_controller(
+                    claim=claim,
+                    request=context.request,
+                    target=target,
+                    progress_payload=own_progress[0],
                 )
+                if checkpoint is not None:
+                    if (
+                        checkpoint.policy_key != policy_key
+                        or checkpoint.policy_sha256 != policy_sha256
+                    ):
+                        raise OrdinaryAgentSessionAdmissionDenied("controller_policy_changed")
+                    record = checkpoint
+                elif (
+                    claim.released_controller is None
+                    and record.last_record_id == own_progress[0]["record_id"]
+                ):
+                    record = record.model_copy(
+                        update={
+                            "active_record_id": record.last_record_id,
+                            "active_action": record.last_action,
+                            "active_phase": record.last_phase,
+                            "step_payload": {},
+                            "reconciliation_status": "clean",
+                            "reconciliation_detail": "",
+                        }
+                    )
+                else:
+                    raise OrdinaryAgentSessionAdmissionDenied("record_predecessor_conflict")
+            elif record.status == "idle" and claim.released_controller is not None:
+                raise OrdinaryAgentSessionAdmissionDenied("record_predecessor_conflict")
             updated = MergeTrainControllerStateRecord.model_validate(
                 {
                     **record.model_dump(),
@@ -21039,12 +21214,18 @@ class PostgresRecordStore(HumanSessionStore):
                     "updated_at": observed_at,
                     "active_action": record.active_action or initial_active_action,
                     "active_phase": record.active_phase or initial_active_phase,
+                    "step_payload": record.step_payload if own_progress else {},
+                    "reconciliation_status": (
+                        record.reconciliation_status if own_progress else "clean"
+                    ),
+                    "reconciliation_detail": (record.reconciliation_detail if own_progress else ""),
                 }
             )
             if row is None:
                 row = LaunchplaneMergeTrainControllerStateRow(controller_key=key)
                 session.add(row)
             self._sync_merge_train_controller_state_row(row, updated)
+            claim.released_controller = None
             session.commit()
             return updated
 
@@ -21119,6 +21300,14 @@ class PostgresRecordStore(HumanSessionStore):
             request_row = session.get(LaunchplaneOrdinaryAgentFiniteRequestRow, request_id)
             if row is None or request_row is None:
                 raise OrdinaryAgentSessionAdmissionDenied("controller_unavailable")
+            claim = session.get(
+                LaunchplaneOrdinaryAgentJobClaimRow,
+                request_id,
+                with_for_update=True,
+                populate_existing=True,
+            )
+            if claim is None:
+                raise OrdinaryAgentSessionAdmissionDenied("controller_unavailable")
             controller = MergeTrainControllerStateRecord.model_validate(row.payload)
             request = OrdinaryAgentFiniteRequestRecord.model_validate(request_row.payload)
             binding = OrdinaryAgentJobBinding(
@@ -21127,7 +21316,8 @@ class PostgresRecordStore(HumanSessionStore):
                 binding_revision=expected_binding_revision,
             )
             if (
-                controller.ordinary_job_binding != binding
+                request.binding_revision != expected_binding_revision
+                or controller.ordinary_job_binding != binding
                 or controller.lease_owner != controller_fence.lease_owner
                 or controller.lease_acquired_at != controller_fence.lease_acquired_at
             ):
@@ -21164,6 +21354,30 @@ class PostgresRecordStore(HumanSessionStore):
                     ):
                         progress.status = "superseded"
                         progress.payload = {**progress.payload, "status": "superseded"}
+            checkpoint_rows = []
+            if controller.active_record_id:
+                for model in (
+                    LaunchplaneMergeTrainBatchCandidateRow,
+                    LaunchplaneMergeTrainBatchLandingPlanRow,
+                    LaunchplaneMergeTrainStackCollapsePlanRow,
+                ):
+                    checkpoint_progress = cast(
+                        LaunchplaneMergeTrainBatchCandidateRow
+                        | LaunchplaneMergeTrainBatchLandingPlanRow
+                        | LaunchplaneMergeTrainStackCollapsePlanRow
+                        | None,
+                        session.get(model, controller.active_record_id, with_for_update=True),
+                    )
+                    if (
+                        checkpoint_progress is not None
+                        and checkpoint_progress.status == "active"
+                        and checkpoint_progress.payload.get("ordinary_job_binding")
+                        == binding.model_dump(mode="json")
+                    ):
+                        checkpoint_rows.append(checkpoint_progress)
+            claim.released_controller = (
+                self._payload_dict(controller) if len(checkpoint_rows) == 1 else None
+            )
             now = self._database_mutation_timestamp(session)
             updated = controller.model_copy(
                 update={
@@ -21182,8 +21396,11 @@ class PostgresRecordStore(HumanSessionStore):
                     "active_phase": "",
                     "active_record_id": "",
                     "active_pull_request_number": None,
+                    "step_payload": {},
                     "updated_at": now,
                     "last_transition_at": now,
+                    "reconciliation_status": "clean",
+                    "reconciliation_detail": "",
                 }
             )
             self._sync_merge_train_controller_state_row(row, updated)
@@ -25084,7 +25301,9 @@ class PostgresRecordStore(HumanSessionStore):
                 LaunchplaneMergeTrainControllerStateRow, key, with_for_update=True
             )
             now = self._ordinary_agent_database_epoch(session)
-            claim = self._require_ordinary_agent_claim(session, claim_fence=claim_fence, now=now)
+            claim = self._require_ordinary_agent_claim(
+                session, claim_fence=claim_fence, now=now, for_update=True
+            )
             terminal = (
                 request.cancellation_requested_at is not None
                 or request.status in {"cancelled", "completed"}
@@ -25155,11 +25374,15 @@ class PostgresRecordStore(HumanSessionStore):
                             "active_phase": "",
                             "active_record_id": "",
                             "active_pull_request_number": None,
+                            "step_payload": {},
                             "updated_at": stamp,
                             "last_transition_at": stamp,
+                            "reconciliation_status": "clean",
+                            "reconciliation_detail": "",
                         }
                     )
                     self._sync_merge_train_controller_state_row(controller_row, updated)
+            claim.released_controller = None
             session.commit()
             return view
 
@@ -25278,11 +25501,16 @@ class PostgresRecordStore(HumanSessionStore):
         *,
         claim_fence: OrdinaryAgentJobClaimFence,
         now: int,
+        for_update: bool = False,
     ) -> LaunchplaneOrdinaryAgentJobClaimRow:
-        # Controller transactions read the opaque claim; they never invert lock order by
-        # acquiring a claim row lock after controller/policy/session locks.
+        # Claim scheduling never locks a controller row, while every joined writer
+        # that needs both rows takes the target controller before the claim. This
+        # preserves one lock order when checkpoint capture/consumption needs a write.
         row = session.get(
-            LaunchplaneOrdinaryAgentJobClaimRow, claim_fence.request_id, populate_existing=True
+            LaunchplaneOrdinaryAgentJobClaimRow,
+            claim_fence.request_id,
+            populate_existing=True,
+            with_for_update=for_update,
         )
         if (
             row is None
@@ -25380,11 +25608,19 @@ class PostgresRecordStore(HumanSessionStore):
                             mode="json"
                         ):
                             continue
-                        if (
-                            controller is None
-                            or controller.status != "idle"
-                            or controller.last_record_id != progress.record_id
-                        ):
+                        checkpoint = self._ordinary_agent_matching_released_controller(
+                            claim=row,
+                            request=request,
+                            target=request.target,
+                            progress_payload=progress.payload,
+                        )
+                        legacy_last_record_proves_progress = (
+                            row.released_controller is None
+                            and controller is not None
+                            and controller.status == "idle"
+                            and controller.last_record_id == progress.record_id
+                        )
+                        if checkpoint is None and not legacy_last_record_proves_progress:
                             raise OrdinaryAgentSessionAdmissionDenied(
                                 "progress_completion_fence_conflict"
                             )
@@ -25399,6 +25635,7 @@ class PostgresRecordStore(HumanSessionStore):
                     raise OrdinaryAgentSessionAdmissionDenied("unresolved_effects")
                 request = request.model_copy(update={"status": "completed"})
                 request_row.payload = self._payload_dict(request)
+                row.released_controller = None
             row.status, row.reason_code = disposition.status, disposition.reason_code
             row.claim_expires_at = 0
             row.next_due_at = max(now, disposition.next_due_at or now)
@@ -25678,6 +25915,20 @@ class PostgresRecordStore(HumanSessionStore):
     ) -> OrdinaryAgentFiniteRequestRecord:
         with self._session_factory() as session:
             self._begin_serialized_write(session)
+            locator = session.get(LaunchplaneOrdinaryAgentFiniteRequestRow, request_id)
+            if locator is None:
+                raise OrdinaryAgentSessionAdmissionDenied("job_unavailable")
+            located = OrdinaryAgentFiniteRequestRecord.model_validate(locator.payload)
+            controller_key = build_merge_train_controller_key(
+                repository=located.target.repository,
+                base_branch=located.target.base_branch,
+            )
+            self._advisory_lock_merge_train_controller(session, controller_key)
+            controller_row = session.get(
+                LaunchplaneMergeTrainControllerStateRow,
+                controller_key,
+                with_for_update=True,
+            )
             request, row, _, _, _ = self._ordinary_agent_job_context(session, request_id=request_id)
             if (
                 session.scalar(
@@ -25688,6 +25939,31 @@ class PostgresRecordStore(HumanSessionStore):
                 is not None
             ):
                 raise OrdinaryAgentSessionAdmissionDenied("effect_linked_refresh_required")
+            binding = OrdinaryAgentJobBinding(
+                request_id=request.request_id,
+                scope_sha256=request.scope_sha256,
+                binding_revision=request.binding_revision,
+            )
+            controller = (
+                MergeTrainControllerStateRecord.model_validate(controller_row.payload)
+                if controller_row is not None
+                else None
+            )
+            claim = session.get(LaunchplaneOrdinaryAgentJobClaimRow, request_id)
+            own_active_progress = any(
+                payload.get("ordinary_job_binding") == binding.model_dump(mode="json")
+                for payload in self._ordinary_agent_active_progress(
+                    session,
+                    repository=request.target.repository,
+                    base_branch=request.target.base_branch,
+                )
+            )
+            if (
+                own_active_progress
+                or (claim is not None and claim.released_controller is not None)
+                or (controller is not None and controller.ordinary_job_binding == binding)
+            ):
+                raise OrdinaryAgentSessionAdmissionDenied("refresh_progress_must_be_retired")
             updated = rebind_ordinary_agent_finite_request(
                 request=request,
                 base_sha=base_sha,

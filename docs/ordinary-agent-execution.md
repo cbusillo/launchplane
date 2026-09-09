@@ -776,3 +776,20 @@ continues to fence new issuance.
 Ref/commit/containment evidence uses the captured immutable SHA, comment scans stop
 at three pages, and a full label page cannot prove a missing label. The actual
 worker factory and fleet qualification are still required before activation.
+
+
+A yielded ordinary job keeps a private controller checkpoint on its existing claim
+row. The store captures only an active tip with the exact current job binding,
+then clears shared step and reconciliation data. Another job may use the target
+only when every foreign tip has a matching released checkpoint and its provider
+effects, preparations and custody are settled. Expiry does not grant new mutation
+authority; resumed work still passes the current chain and lease checks.
+
+Resume restores that job's saved progress under a fresh controller lease. Completion
+uses its own checkpoint even if another job now owns the controller, and retires
+only its own progress. Invalid or old-revision checkpoints remain blocking evidence.
+Generic request refresh refuses parked or active progress until it is retired.
+Actionable readiness uses the current controller's exact binding; parked progress
+remains visible in history. These storage and projection changes do not assemble
+or activate the ordinary worker, renew a finite admission, or resolve changed-base
+landing evidence.
