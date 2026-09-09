@@ -186,6 +186,46 @@ class GitHubAppIdentityTests(unittest.TestCase):
             ),
         )
 
+    def test_ordinary_mint_checks_discovered_installation_wait_before_post(self) -> None:
+        calls: list[str] = []
+
+        def api_request(**kwargs: object) -> object:
+            path = str(kwargs["path"])
+            calls.append(path)
+            if path == "/app":
+                return {"id": 42}
+            if path == "/repos/example/repo/installation":
+                return {
+                    "id": 77,
+                    "app_id": 42,
+                    "permissions": {
+                        "administration": "read",
+                        "checks": "read",
+                        "contents": "write",
+                        "metadata": "read",
+                        "pull_requests": "write",
+                        "statuses": "read",
+                    },
+                }
+            self.fail("token POST must remain undispatched")
+
+        def block_mint(app_id: int, installation_id: int) -> None:
+            self.assertEqual((app_id, installation_id), (42, 77))
+            raise RuntimeError("provider_wait")
+
+        with self.assertRaisesRegex(RuntimeError, "provider_wait"):
+            mint_ordinary_agent_installation_token(
+                identity=GitHubAppIdentity(app_id=42, private_key=self.private_key),
+                repository="example/repo",
+                repository_id="123",
+                effect_profile="merge_train_snapshot",
+                api_request=api_request,
+                now=datetime(2026, 8, 7, 14, 0, tzinfo=timezone.utc),
+                before_token_mint=block_mint,
+            )
+
+        self.assertEqual(calls, ["/app", "/repos/example/repo/installation"])
+
     def test_inspects_ordinary_agent_installation_without_minting(self) -> None:
         calls: list[dict[str, object]] = []
 
