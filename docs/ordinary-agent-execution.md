@@ -580,3 +580,36 @@ and retain receiver proof privately, save the claimed credential atomically
 before reporting readiness, reuse finite approved sessions, and handle bounded
 status retries without GitHub polling. No installed-consumer or live usability
 claim follows from these source and controlled browser/HTTP checks alone.
+
+## Durable ordinary execution records
+
+The private ordinary storage boundary separates a finite job claim from authority
+to call a provider. Claims coordinate workers; controller acquisition, progress
+successors and each effect checkpoint independently join current policy,
+credential, session, lease and finite request. An already reserved last action
+remains usable while its original authority remains current; reserving another
+action requires remaining capacity. Terminal effects retain their action ordinal.
+
+A semantic effect owns append-only dispatch attempts and response or reconciliation
+history. A repeated checkpoint cannot authorize another provider call. Unknown
+responses remain visible after cancellation. Reconciliation uses current preflight
+authority and bounded observations; it cannot revive the old session. Only exact
+stored head-refresh evidence may update the request binding, without resetting
+its deadline or spending a second action.
+
+Normalized provider snapshots and candidate-check observations have durable read
+attempts. Successful replay uses the stored result. Token cleanup uncertainty
+fences subsequent work while retaining that result; confirmed cleanup permits
+recovery without another snapshot call. Candidate observations keep the original
+protection evidence and finite backoff budget. Provider quota waits are shared
+monotonic deadlines for their actual quota identity, independent of job expiry.
+
+Ordinary controller and candidate/landing/collapse records carry an explicit job
+binding. Generic writers cannot adopt them. Joined progress successors preserve
+history; terminal history cleanup retires only that job's database lineage and
+retains unresolved provider fences. Candidate refs are job-and-binding scoped and
+are retained when the provider offers no conditional delete.
+
+These internal records and tests do not activate ordinary execution or establish
+installed-client or production usability. Service wiring and the guarded landing
+admission integration must use the same joined boundaries before publication.

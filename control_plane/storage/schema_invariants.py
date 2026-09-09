@@ -1906,6 +1906,30 @@ def ordinary_effect_write_fence_errors(engine: Engine) -> list[str]:
                 function_fragments=("raise exception", "append-only"),
             )
         )
+    for suffix, trigger_name, function_name, fragment in (
+        (
+            "read_attempts",
+            "ordinary_read_identity",
+            "launchplane_ordinary_read_identity_guard",
+            "ordinary read identity is immutable",
+        ),
+        (
+            "provider_waits",
+            "ordinary_provider_wait",
+            "launchplane_ordinary_provider_wait_guard",
+            "ordinary provider wait cannot move backwards",
+        ),
+    ):
+        errors.extend(
+            _postgres_write_fence_errors(
+                engine=engine,
+                table_name="launchplane_ordinary_agent_" + suffix,
+                trigger_name=trigger_name,
+                function_name=function_name,
+                trigger_fragments=("before insert or delete or update",),
+                function_fragments=(fragment,),
+            )
+        )
     return errors
 
 

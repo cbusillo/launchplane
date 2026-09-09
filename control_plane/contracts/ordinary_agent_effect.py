@@ -26,7 +26,10 @@ from control_plane.contracts.merge_train_effect import (
     CandidateRefDeleteEffect,
 )
 
-from control_plane.contracts.merge_admission_record import MergeAdmissionRecord
+from control_plane.contracts.merge_admission_record import (
+    MergeAdmissionRecord,
+    MergeLandingOutcomeRecord,
+)
 from control_plane.contracts.merge_train_controller_state import MergeTrainControllerStateRecord
 from control_plane.contracts.merge_train_batch import (
     MergeTrainBatchCandidateRecord,
@@ -532,6 +535,13 @@ class OrdinaryAgentJobWorkerStore(Protocol):
 
 
 class OrdinaryAgentControllerStore(Protocol):
+    def create_ordinary_merge_landing_outcome_record_if_absent(
+        self,
+        *,
+        request_id: str,
+        expected_binding_revision: int,
+        record: MergeLandingOutcomeRecord,
+    ) -> tuple[MergeLandingOutcomeRecord, bool]: ...
     def retire_ordinary_agent_job_history(
         self, *, claim_fence: OrdinaryAgentJobClaimFence
     ) -> OrdinaryAgentJobView: ...
@@ -596,6 +606,15 @@ class OrdinaryAgentControllerStore(Protocol):
 
 
 class OrdinaryAgentEffectStore(Protocol):
+    def reserve_ordinary_agent_effect(
+        self,
+        *,
+        request_id: str,
+        expected_binding_revision: int,
+        controller_fence: OrdinaryAgentControllerFence,
+        command: OrdinaryAgentSemanticCommand,
+        semantic_ordinal: int,
+    ) -> OrdinaryAgentEffectRecord: ...
     def reserve_ordinary_custody_attempt(
         self, *, effect_id: str, expected_effect_revision: int
     ) -> OrdinaryAgentCustodyAttemptReservation: ...

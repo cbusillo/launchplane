@@ -237,6 +237,11 @@ def _install_guards() -> None:
                 IS DISTINCT FROM (OLD.effect_id, OLD.lease_id, OLD.request_id, OLD.scope_sha256,
                 OLD.binding_revision, OLD.action_ordinal, OLD.semantic_key, OLD.command_sha256)
             THEN RAISE EXCEPTION 'ordinary effect identity is immutable'; END IF;
+            IF TG_OP = 'UPDATE' AND
+                (NEW.payload - ARRAY['state','revision','updated_at','dispatch_count','dispatch_custody_count','reconciliation_count','reconciliation_custody_count','next_observation_at','reason_code','rebound_revision'])
+                IS DISTINCT FROM
+                (OLD.payload - ARRAY['state','revision','updated_at','dispatch_count','dispatch_custody_count','reconciliation_count','reconciliation_custody_count','next_observation_at','reason_code','rebound_revision'])
+            THEN RAISE EXCEPTION 'ordinary effect command and provenance are immutable'; END IF;
             IF NEW.payload->>'effect_id' IS DISTINCT FROM NEW.effect_id
                 OR NEW.payload->>'lease_id' IS DISTINCT FROM NEW.lease_id
                 OR NEW.payload->>'request_id' IS DISTINCT FROM NEW.request_id
@@ -250,6 +255,46 @@ def _install_guards() -> None:
     """)
     op.execute(
         "CREATE TRIGGER ordinary_effect_identity BEFORE INSERT OR UPDATE OR DELETE ON launchplane_ordinary_agent_effects FOR EACH ROW EXECUTE FUNCTION launchplane_ordinary_effect_identity_guard()"
+    )
+    op.execute("""
+        CREATE OR REPLACE FUNCTION launchplane_ordinary_read_identity_guard() RETURNS trigger AS $$
+        BEGIN
+            IF TG_OP = 'DELETE' THEN RAISE EXCEPTION 'ordinary read history is permanent'; END IF;
+            IF TG_OP = 'UPDATE' AND
+                (NEW.attempt_id,NEW.request_id,NEW.binding_revision,NEW.purpose,NEW.candidate_sha,NEW.attempt_ordinal)
+                IS DISTINCT FROM
+                (OLD.attempt_id,OLD.request_id,OLD.binding_revision,OLD.purpose,OLD.candidate_sha,OLD.attempt_ordinal)
+            THEN RAISE EXCEPTION 'ordinary read identity is immutable'; END IF;
+            IF TG_OP = 'UPDATE' AND OLD.payload ? 'result' AND OLD.payload->'result' IS DISTINCT FROM NEW.payload->'result'
+            THEN RAISE EXCEPTION 'ordinary read result is immutable'; END IF;
+            IF NEW.payload->>'attempt_id' IS DISTINCT FROM NEW.attempt_id
+                OR NEW.payload->>'request_id' IS DISTINCT FROM NEW.request_id
+                OR (NEW.payload->>'binding_revision')::bigint IS DISTINCT FROM NEW.binding_revision
+                OR NEW.payload->>'purpose' IS DISTINCT FROM NEW.purpose
+                OR NEW.payload->>'candidate_sha' IS DISTINCT FROM NEW.candidate_sha
+                OR (NEW.payload->>'attempt_ordinal')::bigint IS DISTINCT FROM NEW.attempt_ordinal
+            THEN RAISE EXCEPTION 'ordinary read payload identity mismatch'; END IF;
+            RETURN NEW;
+        END; $$ LANGUAGE plpgsql;
+    """)
+    op.execute(
+        "CREATE TRIGGER ordinary_read_identity BEFORE INSERT OR UPDATE OR DELETE ON launchplane_ordinary_agent_read_attempts FOR EACH ROW EXECUTE FUNCTION launchplane_ordinary_read_identity_guard()"
+    )
+    op.execute("""
+        CREATE OR REPLACE FUNCTION launchplane_ordinary_provider_wait_guard() RETURNS trigger AS $$
+        BEGIN
+            IF TG_OP = 'DELETE' THEN RAISE EXCEPTION 'ordinary provider wait history is permanent'; END IF;
+            IF TG_OP = 'UPDATE' AND (NEW.quota_key_sha256 IS DISTINCT FROM OLD.quota_key_sha256
+                OR NEW.payload->'quota_key' IS DISTINCT FROM OLD.payload->'quota_key'
+                OR NEW.retry_not_before < OLD.retry_not_before)
+            THEN RAISE EXCEPTION 'ordinary provider wait cannot move backwards'; END IF;
+            IF (NEW.payload->>'retry_not_before')::bigint IS DISTINCT FROM NEW.retry_not_before
+            THEN RAISE EXCEPTION 'ordinary provider wait payload mismatch'; END IF;
+            RETURN NEW;
+        END; $$ LANGUAGE plpgsql;
+    """)
+    op.execute(
+        "CREATE TRIGGER ordinary_provider_wait BEFORE INSERT OR UPDATE OR DELETE ON launchplane_ordinary_agent_provider_waits FOR EACH ROW EXECUTE FUNCTION launchplane_ordinary_provider_wait_guard()"
     )
     op.execute("""
         CREATE OR REPLACE FUNCTION launchplane_ordinary_append_only_guard() RETURNS trigger AS $$
@@ -297,3 +342,5 @@ def downgrade() -> None:
     if op.get_bind().dialect.name == "postgresql":
         op.execute("DROP FUNCTION IF EXISTS launchplane_ordinary_effect_identity_guard()")
         op.execute("DROP FUNCTION IF EXISTS launchplane_ordinary_append_only_guard()")
+        op.execute("DROP FUNCTION IF EXISTS launchplane_ordinary_read_identity_guard()")
+        op.execute("DROP FUNCTION IF EXISTS launchplane_ordinary_provider_wait_guard()")
