@@ -1230,7 +1230,7 @@ class LaunchplaneAuthzPolicyCompatibilityTests(unittest.TestCase):
 
     def test_unknown_policy_schema_version_fails_closed(self) -> None:
         with self.assertRaises(ValidationError):
-            LaunchplaneAuthzPolicy.model_validate({"schema_version": 3})
+            LaunchplaneAuthzPolicy.model_validate({"schema_version": 4})
 
     def test_schema_v1_preserves_implicit_instance_wildcard(self) -> None:
         policy = LaunchplaneAuthzPolicy(
