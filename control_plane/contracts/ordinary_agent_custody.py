@@ -11,6 +11,7 @@ from control_plane.contracts.ordinary_agent import OrdinaryAgentTarget
 CustodyEffectProfile = Literal[
     "guarded_merge",
     "head_refresh",
+    "merge_train_snapshot",
     "close_pull_request",
     "comment_pull_request",
     "label_pull_request",
