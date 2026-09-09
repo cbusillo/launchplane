@@ -66,9 +66,12 @@ principal, authentication credential, custody reference, audit, and store-built
 receipt together. No callback, provider request, secret decryption, or token mint
 runs under those locks. Revoke requires current immutable administrator authority
 and the principal CAS but deliberately does not require an ordinary rule,
-inventory, secret, or readable custody. A missing authentication credential does
-not block principal revocation: the receipt and audit explicitly omit credential
-record evidence while retaining the principal's last known credential reference.
+inventory, secret, or readable custody. A missing, invalid, or misbound authentication credential does not block
+principal revocation. Unusable credential rows remain untouched; the receipt and
+audit omit credential record evidence while retaining the principal's last known
+credential reference. The store also requires the code-owned App integration,
+private-key binding, full installation permission ceiling, and enrollment
+capability set, even when a caller constructs an internal candidate directly.
 
 These storage records do not grant execution. Their only callable entry point is
 the internal store method used by tests; production policy schema-v3 writes stay

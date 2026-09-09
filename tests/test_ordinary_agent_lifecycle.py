@@ -10,6 +10,7 @@ from sqlalchemy import select
 from control_plane.contracts.ordinary_agent_lifecycle import (
     OrdinaryAgentEnrollmentReceipt,
 )
+from control_plane.ordinary_agent_lifecycle import lifecycle_record_sha256_from_payload
 from control_plane.storage.postgres import (
     LaunchplaneIdempotencyRow,
     LaunchplaneOrdinaryAgentAuthenticationCredentialRow,
@@ -242,6 +243,115 @@ class OrdinaryAgentLifecycleStorageTests(unittest.TestCase):
             )
             self.assertEqual(replayed.status, "replayed")
             self.assertEqual(replayed.receipt, revoked.receipt)
+            store.close()
+
+    def test_revoke_skips_misbound_credential_without_mutating_it_and_replays(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = PostgresRecordStore(database_url=self._database_url(directory))
+            store.ensure_schema()
+            policy, inventory = setup_ordinary_agent_authority(store)
+            enroll = enrollment_envelope(policy_record=policy, inventory=inventory)
+            enrolled = store.compare_and_apply_ordinary_agent_enrollment(
+                envelope=enroll, mutation=enrollment_mutation(enroll)
+            )
+            assert enrolled.receipt is not None
+            with store._session_factory() as session:
+                row = session.query(LaunchplaneOrdinaryAgentAuthenticationCredentialRow).one()
+                # A valid but misbound record must not be treated as this principal's credential.
+                drifted_payload = dict(row.payload)
+                drifted_payload["principal_id"] = "another_agent"
+                drifted_payload["credential_digest"] = "9" * 64
+                drifted_payload["record_sha256"] = lifecycle_record_sha256_from_payload(
+                    {key: value for key, value in drifted_payload.items() if key != "record_sha256"}
+                )
+                row.principal_id = "another_agent"
+                row.credential_digest = "9" * 64
+                row.record_sha256 = drifted_payload["record_sha256"]
+                row.payload = drifted_payload
+                session.commit()
+            revoke = revocation_envelope(
+                enrolled=enroll,
+                principal_record_id=enrolled.receipt.principal_record_id,
+                principal_revision=enrolled.receipt.principal_revision,
+                principal_sha256=enrolled.receipt.principal_sha256,
+            )
+            revoked = store.compare_and_apply_ordinary_agent_enrollment(
+                envelope=revoke, mutation=enrollment_mutation(revoke)
+            )
+            self.assertEqual(revoked.status, "written")
+            assert revoked.current_principal is not None
+            assert revoked.receipt is not None
+            self.assertEqual(revoked.current_principal.status, "revoked")
+            self.assertIsNone(revoked.receipt.credential_sha256)
+            with store._session_factory() as session:
+                retained = session.query(LaunchplaneOrdinaryAgentAuthenticationCredentialRow).one()
+                self.assertEqual(retained.payload, drifted_payload)
+                self.assertEqual(retained.lifecycle_status, "active")
+            audit = store.read_ordinary_agent_lifecycle_audit(operation_id=revoke.operation_id)
+            assert audit is not None
+            self.assertIsNone(audit.previous_credential_record_id)
+            self.assertIsNone(audit.resulting_credential_record_id)
+            replayed = store.compare_and_apply_ordinary_agent_enrollment(
+                envelope=revoke, mutation=enrollment_mutation(revoke)
+            )
+            self.assertEqual(replayed.status, "replayed")
+            self.assertEqual(replayed.receipt, revoked.receipt)
+            store.close()
+
+    def test_inconsistent_provider_candidate_cannot_write_authoritative_records(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = PostgresRecordStore(database_url=self._database_url(directory))
+            store.ensure_schema()
+            policy, inventory = setup_ordinary_agent_authority(store)
+            enroll = enrollment_envelope(policy_record=policy, inventory=inventory)
+            custody = enroll.custody
+            candidates = (
+                custody.model_copy(
+                    update={
+                        "managed_secret": custody.managed_secret.model_copy(
+                            update={"integration": "different_app"}
+                        )
+                    }
+                ),
+                custody.model_copy(
+                    update={
+                        "managed_secret": custody.managed_secret.model_copy(
+                            update={"binding_key": "different_key"}
+                        )
+                    }
+                ),
+                custody.model_copy(update={"effect_profiles": ("guarded_merge",)}),
+                custody.model_copy(
+                    update={
+                        "permissions": tuple(
+                            p for p in custody.permissions if p.name != "pull_requests"
+                        )
+                    }
+                ),
+            )
+            for candidate in candidates:
+                with self.subTest(candidate=candidate):
+                    envelope = enroll.model_copy(update={"custody": candidate})
+                    result = store.compare_and_apply_ordinary_agent_enrollment(
+                        envelope=envelope, mutation=enrollment_mutation(envelope)
+                    )
+                    self.assertEqual(result.status, "custody_drift")
+                    self.assertIsNone(result.idempotency_record)
+                    self.assertIsNone(
+                        store.read_current_ordinary_agent_principal(
+                            principal_id=envelope.principal_id
+                        )
+                    )
+                    self.assertIsNone(
+                        store.read_ordinary_agent_lifecycle_audit(
+                            operation_id=envelope.operation_id
+                        )
+                    )
+            # Rejections release their reservation; the real candidate can then commit once.
+            written = store.compare_and_apply_ordinary_agent_enrollment(
+                envelope=enroll, mutation=enrollment_mutation(enroll)
+            )
+            self.assertEqual(written.status, "written")
             store.close()
 
     def test_exact_route_scope_and_store_derived_response_are_required(self) -> None:

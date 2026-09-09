@@ -70,6 +70,12 @@ from control_plane.contracts.authz_policy_record import (
     require_authz_policy_schema_write_activated,
 )
 from control_plane.contracts.backup_gate_record import BackupGateRecord
+from control_plane.contracts.ordinary_agent_provider import (
+    ORDINARY_AGENT_GITHUB_APP_INTEGRATION,
+    ORDINARY_AGENT_GITHUB_APP_PRIVATE_KEY_BINDING,
+    ordinary_agent_enrollment_effect_profiles,
+    ordinary_agent_enrollment_permissions,
+)
 from control_plane.contracts.ordinary_agent_custody import (
     CustodyCloseReason,
     GITHUB_TOKEN_MAXIMUM_LIFETIME_SECONDS,
@@ -18818,6 +18824,23 @@ class PostgresRecordStore(HumanSessionStore):
                     )
 
                 secret_binding = envelope.custody.managed_secret
+                if (
+                    secret_binding.integration != ORDINARY_AGENT_GITHUB_APP_INTEGRATION
+                    or secret_binding.binding_key != ORDINARY_AGENT_GITHUB_APP_PRIVATE_KEY_BINDING
+                    or sorted(envelope.custody.effect_profiles)
+                    != sorted(ordinary_agent_enrollment_effect_profiles())
+                    or sorted(
+                        f"{permission.name}:{permission.access}"
+                        for permission in envelope.custody.permissions
+                    )
+                    != sorted(ordinary_agent_enrollment_permissions())
+                ):
+                    return self._ordinary_agent_enrollment_rejection(
+                        session=session,
+                        reservation_row=reservation_row,
+                        status="custody_drift",
+                        current_principal=current_principal,
+                    )
                 binding_statement = select(LaunchplaneSecretBindingRow).where(
                     LaunchplaneSecretBindingRow.binding_id == secret_binding.binding_id
                 )
@@ -18893,25 +18916,42 @@ class PostgresRecordStore(HumanSessionStore):
                         status="principal_drift",
                         current_principal=current_principal,
                     )
-                current_credential = (
-                    self._read_payload(
-                        model_type=OrdinaryAgentAuthenticationCredentialRecord,
-                        payload=credential_row.payload,
+                try:
+                    current_credential = (
+                        self._read_payload(
+                            model_type=OrdinaryAgentAuthenticationCredentialRecord,
+                            payload=credential_row.payload,
+                        )
+                        if credential_row is not None
+                        else None
                     )
-                    if credential_row is not None
-                    else None
-                )
+                except ValueError:
+                    if not isinstance(envelope, OrdinaryAgentRevokePrincipalApplyEnvelope):
+                        raise
+                    current_credential = None
                 if current_credential is not None and (
-                    current_credential.credential_id != current_principal.credential_id
+                    current_credential.principal_id != current_principal.principal_id
+                    or current_credential.credential_id != current_principal.credential_id
                     or current_credential.credential_version != current_principal.credential_version
                     or current_credential.credential_digest != current_principal.credential_digest
+                    or credential_row is None
+                    or current_credential.record_id != credential_row.record_id
+                    or current_credential.record_sha256 != credential_row.record_sha256
+                    or current_credential.status != credential_row.lifecycle_status
+                    or credential_row.principal_id != current_principal.principal_id
+                    or credential_row.credential_id != current_principal.credential_id
+                    or credential_row.credential_version != current_principal.credential_version
+                    or credential_row.credential_digest != current_principal.credential_digest
+                    or not credential_row.is_current
                 ):
-                    return self._ordinary_agent_enrollment_rejection(
-                        session=session,
-                        reservation_row=reservation_row,
-                        status="principal_drift",
-                        current_principal=current_principal,
-                    )
+                    if not isinstance(envelope, OrdinaryAgentRevokePrincipalApplyEnvelope):
+                        return self._ordinary_agent_enrollment_rejection(
+                            session=session,
+                            reservation_row=reservation_row,
+                            status="principal_drift",
+                            current_principal=current_principal,
+                        )
+                    current_credential = None
                 if isinstance(envelope, OrdinaryAgentRotateCredentialApplyEnvelope) and (
                     current_credential is None
                     or envelope.credential_id != current_credential.credential_id
