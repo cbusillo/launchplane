@@ -683,3 +683,38 @@ records its typed provider observation before creating any dispatch child.
 Candidate references retained because conditional deletion is unavailable also
 have a durable completion. Recovery reads these records without minting another
 token or sending the semantic operation again.
+
+
+Ordinary installation-token minting authenticates the managed App key with the
+mandatory JWT-authenticated repository installation lookup. Its required positive
+`app_id` must match the locally configured JWT issuer before minting; a failed
+lookup never falls back to a cached installation or another identity. The extra
+`GET /app` is omitted only for ordinary minting. Enrollment inspection and legacy
+token paths retain their own identity checks.
+
+Within each landing observation, unresolved queue-author roles share one bounded
+`collaborators?permission=admin&per_page=100&page=1` read. An exact numeric user ID
+and case-insensitive login match with boolean `permissions.admin == true` supplies
+positive admin evidence. Missing users and malformed individual items remain
+unknown; no second page, per-user fallback or cross-observation role cache is used.
+The actual ordinary installation/profile must qualify this endpoint during the
+existing activation package; source tests do not establish deployed capability.
+
+The normal six-repository request ledger is still an acceptance requirement,
+not a readiness claim. The source audit counted 318 immediate-success requests
+before role lookups because seven custody leases each included `GET /app`.
+Removing those redundant identity reads and batching roles projects 294 requests
+for one two-PR job per repository with one successful candidate-check observation.
+Retries and reconciliation remain separately bounded and counted. Required-check
+repolls, cleanup behavior, actual GraphQL point costs and the assembled worker
+must be measured before claiming the unchanged 300-request/120-point gate passes.
+
+
+The projection decomposes per repository as 28 custody requests (seven leases,
+four calls each), five semantic writes, two initial snapshot reads, two candidate
+check reads and sixteen landing evidence/proof reads: 53 before role lookups.
+Ordinary minting removes seven App reads, and three observations each add at most
+one admin-list read: `6 × (53 - 7 + 3) = 294`. This immediate-success projection
+includes no extra candidate-check repoll or unknown-write reconciliation. Those
+paths must appear in the measured ledger when exercised. Retained candidate-ref
+cleanup has no provider request or token lease.

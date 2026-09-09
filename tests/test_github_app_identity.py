@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import datetime, timezone
 import unittest
+import click
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
@@ -124,8 +125,10 @@ class GitHubAppIdentityTests(unittest.TestCase):
 
     def test_snapshot_uses_only_the_read_profile_under_the_full_app_ceiling(self) -> None:
         observed_body: dict[str, object] = {}
+        paths: list[str] = []
 
         def api_request(**kwargs: object) -> object:
+            paths.append(str(kwargs["path"]))
             if kwargs["path"] == "/app":
                 return {"id": 42}
             if kwargs["path"] == "/repos/example/repo/installation":
@@ -167,6 +170,9 @@ class GitHubAppIdentityTests(unittest.TestCase):
             now=datetime(2026, 8, 7, 14, 0, tzinfo=timezone.utc),
         )
 
+        self.assertEqual(
+            paths, ["/repos/example/repo/installation", "/app/installations/77/access_tokens"]
+        )
         self.assertEqual(
             observed_body["permissions"],
             {
@@ -226,7 +232,45 @@ class GitHubAppIdentityTests(unittest.TestCase):
                 before_token_mint=block_mint,
             )
 
-        self.assertEqual(calls, ["/app", "/repos/example/repo/installation"])
+        self.assertEqual(calls, ["/repos/example/repo/installation"])
+
+    def test_ordinary_installation_identity_is_required_before_mint(self) -> None:
+        for app_id in (99, None, True, 0, "42"):
+            with self.subTest(app_id=app_id):
+                calls: list[str] = []
+
+                def api_request(**kwargs: object) -> object:
+                    calls.append(str(kwargs["path"]))
+                    return {"id": 77, "app_id": app_id}
+
+                with self.assertRaises(GitHubAppIdentityError):
+                    mint_ordinary_agent_installation_token(
+                        identity=GitHubAppIdentity(
+                            app_id=1 if app_id is True else 42, private_key=self.private_key
+                        ),
+                        repository="example/repo",
+                        repository_id="123",
+                        effect_profile="merge_train_snapshot",
+                        api_request=api_request,
+                    )
+                self.assertEqual(calls, ["/repos/example/repo/installation"])
+
+    def test_ordinary_authentication_failure_never_mints_or_falls_back(self) -> None:
+        calls: list[str] = []
+
+        def api_request(**kwargs: object) -> object:
+            calls.append(str(kwargs["path"]))
+            raise click.ClickException("GitHub App JWT authentication failed: HTTP 401")
+
+        with self.assertRaisesRegex(GitHubAppIdentityError, "authentication.*401"):
+            mint_ordinary_agent_installation_token(
+                identity=GitHubAppIdentity(app_id=42, private_key=self.private_key),
+                repository="example/repo",
+                repository_id="123",
+                effect_profile="merge_train_snapshot",
+                api_request=api_request,
+            )
+        self.assertEqual(calls, ["/repos/example/repo/installation"])
 
     def test_inspects_ordinary_agent_installation_without_minting(self) -> None:
         calls: list[dict[str, object]] = []

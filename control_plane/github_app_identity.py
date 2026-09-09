@@ -168,6 +168,10 @@ def mint_ordinary_agent_installation_token(
         api_request=api_request,
         now=now,
         before_token_mint=before_token_mint,
+        # The mandatory JWT-authenticated installation lookup verifies this
+        # managed key against identity.app_id and requires the same app_id in
+        # its response. A separate /app request supplies no additional proof.
+        confirm_app_identity_endpoint=False,
     )
 
 
@@ -318,6 +322,7 @@ def _mint_repository_installation_token(
     api_request: GitHubApiRequest,
     now: datetime | None,
     before_token_mint: Callable[[int, int], None] | None = None,
+    confirm_app_identity_endpoint: bool = True,
 ) -> GitHubAppInstallationToken:
     normalized_repository = repository.strip()
     if normalized_repository.count("/") != 1:
@@ -338,20 +343,21 @@ def _mint_repository_installation_token(
         )
     except jwt.PyJWTError as error:
         raise GitHubAppIdentityError(f"{identity_label} private key is invalid.") from error
-    app_payload = json_object(
-        _github_api_request(api_request, path="/app", token=app_jwt),
-        "GitHub App identity response",
-        error_type=GitHubAppIdentityError,
-    )
-    if (
-        required_positive_int(
-            app_payload.get("id"),
-            "GitHub App identity response requires id.",
+    if confirm_app_identity_endpoint:
+        app_payload = json_object(
+            _github_api_request(api_request, path="/app", token=app_jwt),
+            "GitHub App identity response",
             error_type=GitHubAppIdentityError,
         )
-        != identity.app_id
-    ):
-        raise GitHubAppIdentityError("GitHub App identity does not match configured app id.")
+        if (
+            required_positive_int(
+                app_payload.get("id"),
+                "GitHub App identity response requires id.",
+                error_type=GitHubAppIdentityError,
+            )
+            != identity.app_id
+        ):
+            raise GitHubAppIdentityError("GitHub App identity does not match configured app id.")
     installation_payload = json_object(
         _github_api_request(
             api_request,

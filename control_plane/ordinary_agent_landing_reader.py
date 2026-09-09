@@ -7,6 +7,7 @@ import json
 import time
 from urllib.parse import quote
 
+from control_plane.ordinary_agent_repository_roles import OrdinaryRepositoryAdminObservation
 from control_plane.change_impact_github import (
     ChangeImpactRepositoryEvidenceError,
     read_github_authorship,
@@ -30,7 +31,6 @@ from control_plane.contracts.ordinary_agent_snapshot import (
     OrdinaryAgentProviderRequestCounts,
 )
 from control_plane.merge_train import MergeTrainDryRunSnapshot, MergeTrainPullRequestSnapshot
-from control_plane.merge_train_github import MergeTrainGitHubError
 from control_plane.ordinary_agent_github_transport import (
     DeadlineMergeTrainGitHubTransport,
     OrdinaryAgentProviderEvidenceError,
@@ -111,6 +111,9 @@ def read_ordinary_agent_landing_evidence(
             minimum_remaining_seconds=LANDING_ENTRY_READ_RESERVE_SECONDS,
         )
 
+    admin_observation = OrdinaryRepositoryAdminObservation(
+        request=entry_request, repository_path=repository_path
+    )
     entries = []
     queue = []
     try:
@@ -165,8 +168,7 @@ def read_ordinary_agent_landing_evidence(
                 queue.append(
                     _queue_entry(
                         pr=pr,
-                        request=entry_request,
-                        repository_path=repository_path,
+                        is_repository_admin=admin_observation.is_admin,
                         repository_policy=repository_policy,
                     )
                 )
@@ -232,8 +234,7 @@ def read_ordinary_agent_landing_evidence(
 def _queue_entry(
     *,
     pr: dict[str, object],
-    request: Callable[[str], object],
-    repository_path: str,
+    is_repository_admin: Callable[[int, str], bool],
     repository_policy: MergeTrainRepositoryPolicy,
 ) -> MergeTrainPullRequestSnapshot:
     if "author" not in pr:
@@ -255,17 +256,8 @@ def _queue_entry(
         and role == "unknown"
         and actor_id not in repository_policy.enqueue.trusted_automation_github_user_ids
     ):
-        try:
-            permission = _object(
-                request(
-                    f"/repos/{repository_path}/collaborators/{quote(_text(author.get('login')), safe='')}/permission"
-                )
-            )
-            if permission.get("permission") == "admin":
-                role = "repo_admin"
-        except MergeTrainGitHubError as error:
-            if error.status_code != 404:
-                raise
+        if is_repository_admin(actor_id, _text(author.get("login"))):
+            role = "repo_admin"
     labels = require_complete_connection(pr.get("labels"), label="landing_labels")
     draft = pr.get("isDraft")
     number = pr.get("number")
