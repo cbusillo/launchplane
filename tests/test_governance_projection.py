@@ -26,6 +26,7 @@ from tests.test_merge_readiness import _engineering_decision as _merge_engineeri
 from tests.test_merge_readiness import _engineering_evidence as _merge_engineering_evidence
 from tests.test_merge_readiness import _fence as _merge_fence
 from tests.test_merge_admission_records import _guard_records
+from tests.test_merge_train_admission import _stack_collapse_record
 from tests.test_owner_acceptance import (
     REPOSITORY,
     _EvidenceProvider,
@@ -322,9 +323,14 @@ class GovernanceProjectionTests(unittest.TestCase):
         controller_state = controller_state.model_copy(
             update={"ordinary_job_binding": first_binding}
         )
-        collapse_record = Mock()
-        collapse_record.record_id = stack_collapse_root.collapse_record_id
-        collapse_record.ordinary_job_binding = second_binding
+        collapse_template = _stack_collapse_record(status="planned")
+        collapse_record = type(collapse_template).model_validate(
+            {
+                **collapse_template.model_dump(),
+                "record_id": stack_collapse_root.collapse_record_id,
+                "ordinary_job_binding": second_binding.model_dump(),
+            }
+        )
         store = Mock()
         store.list_merge_train_batch_landing_plan_records.return_value = (landing_record,)
         store.list_merge_train_batch_candidate_records.return_value = (candidate_record,)

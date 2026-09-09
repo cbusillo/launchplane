@@ -69,6 +69,13 @@ class OrdinaryAgentEffectProofUnavailable(MergeTrainGitHubError):
 
 
 class _EffectTransport:
+    """GET failures never prove a write was rejected.
+
+    Post-write GETs are proof reads. The label preflight runs before the
+    dispatch checkpoint, so its failure cannot create an unknown child.
+    A future pre-write GET after that checkpoint conservatively reconciles.
+    """
+
     def __init__(self, transport: MergeTrainGitHubTransport) -> None:
         self._transport = transport
 
