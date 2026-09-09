@@ -270,3 +270,29 @@ This foundation adds no route, worker, grant, policy write or live App binding.
 It does not activate enrollment or execution. The fence is principal-scoped, so
 it does not serialize two distinct principals operating on one repository;
 guarded execution must supply its own cross-principal effect fence.
+
+
+## Session and finite-job storage integration
+
+The session lifecycle calculations consume current principal, credential and
+policy records. They do not authenticate a caller or authorize provider writes
+on their own. The storage transaction must verify the issuer proof and the
+receiver-bound approved delegation, resolve operation replay before calculating
+issuance, and serialize session, lease and finite-request records. Reconnecting
+to the same approved operation returns the stored session, including terminal
+state; it does not renew its lifetime. Separate approved operations can coexist.
+
+One finite request is one job. Admission charges its PR count once against the
+lease; effect reservations spend the action allowance. Existing-job checks do
+not spend admission capacity again. A bounded refresh preserves the original
+PR and stack-edit scope and consumes the original refresh allowance with a
+binding-revision compare-and-swap. Cancellation does not refund capacity.
+
+The internal dispatcher can continue an already admitted job only under its
+original explicit finite continuation grant. The interactive session and lease
+remain expired; this path cannot create new requests or renew either record.
+Current policy, current credential version, revocation, the original budget
+window and the finite deadline still apply. Cancellation of an unknown provider
+effect retains its durable reconciliation fence and execution-record links.
+These calculations remain inactive until joined storage integration and the
+separate semantic-effect gateway are complete.
