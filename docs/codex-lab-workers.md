@@ -1,6 +1,6 @@
 # Codex Lab worker runtime
 
-Launchplane's interactive work-request and PR-feedback sessions launch
+The current Launchplane interactive work-request and PR-feedback worker launches
 `codex-lab` from the worker's executable search path. There is no automatic
 fallback to the retired Every Code `code` executable. A missing Codex Lab binary
 fails the session and follows the existing fenced completion reporting path.
@@ -13,6 +13,13 @@ remove a legacy override or replace it with the intended Codex Lab command.
 Changing the default does not rewrite an already-running worker's arguments.
 Feedback sessions use the built-in Codex Lab command, independently of the
 initial work-request shell override.
+
+This current worker choice does not make Codex Lab the only engineering client.
+The reconciled target in issue `#2240` gives Codex CLI and Codex Lab
+the same scoped Launchplane service path. Codex Lab release/runtime work remains
+separate and is not an ordinary Codex CLI pilot prerequisite unless a
+concrete dependency is demonstrated. Nothing in this target statement changes
+the deployed worker command or grants a client new authority.
 
 ## Session provenance
 
@@ -89,7 +96,7 @@ wire the deployed worker or prove positive service-backed restart. A distinct
 exact session handoff receipt and supported operator recovery remain mandatory
 before production enablement.
 
-Codex Lab's session client maps this provenance into the Discord Blue
+The current Codex Lab session client maps this provenance into the Discord Blue
 [remote agent session contract](https://github.com/cbusillo/discord-blue/blob/main/docs/agent-session-protocol.md).
 It connects to `/agent-session/connect`; Launchplane does not implement the
 WebSocket client. The worker executable cutover alone does not establish DUI
@@ -111,6 +118,10 @@ operator surface. Do not substitute the review binary in code, bypass its hash
 check, or treat a repository change as proof that live authority was updated.
 
 ## Cutover verification
+
+These checks qualify the Codex Lab-hosted worker lane. They do not gate an
+ordinary Codex CLI delegated-delivery pilot unless that pilot actually uses
+this worker runtime or another concrete dependency is recorded.
 
 1. Inspect the current worker arguments and queued/claimed requests through
    the supported operational surfaces. Drain or reconcile existing leases;
