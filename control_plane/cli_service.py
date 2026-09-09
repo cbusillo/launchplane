@@ -6,6 +6,7 @@ from pathlib import Path
 import signal
 import socket
 from threading import Event
+import time
 from typing import cast
 import uuid
 
@@ -25,9 +26,11 @@ from control_plane.outbox_worker import (
 )
 from control_plane.openapi_export import write_canonical_openapi
 from control_plane.privileged_operation_worker import (
+    OrdinaryAgentDeliveryCleanupState,
     PrivilegedOperationExecutionStore,
     execute_approved_privileged_operations_once,
     record_privileged_operation_worker_poll_heartbeat,
+    run_ordinary_agent_delivery_cleanup_once,
 )
 from control_plane.contracts.driver_descriptor import DriverContextView
 from control_plane.drivers.registry import build_driver_context_view
@@ -490,11 +493,19 @@ def service_privileged_operation_workers_run_once(
     generated_lease_owner = (
         f"{socket.gethostname()}:{uuid.uuid4()}" if not lease_owner.strip() else lease_owner
     )
+    store = cast(
+        PrivilegedOperationExecutionStore,
+        _store(state_dir=state_dir, database_url=database_url),
+    )
+    cleanup = run_ordinary_agent_delivery_cleanup_once(
+        record_store=store,
+        limit=limit,
+        state=OrdinaryAgentDeliveryCleanupState(),
+        now_monotonic=time.monotonic(),
+        error_backoff_seconds=15,
+    )
     records = execute_approved_privileged_operations_once(
-        record_store=cast(
-            PrivilegedOperationExecutionStore,
-            _store(state_dir=state_dir, database_url=database_url),
-        ),
+        record_store=store,
         lease_owner=generated_lease_owner,
         limit=limit,
     )
@@ -503,6 +514,11 @@ def service_privileged_operation_workers_run_once(
             {
                 "processed": len(records),
                 "statuses": [record.status for record in records],
+                "delivery_cleanup": {
+                    "status": cleanup.status,
+                    "expired_deliveries": cleanup.expired_deliveries,
+                    "error_type": cleanup.error_type,
+                },
             },
             indent=2,
             sort_keys=True,
@@ -589,6 +605,7 @@ def service_privileged_operation_workers_run(
         store_initialized = False
         first_poll_attempted = False
         consecutive_errors = 0
+        cleanup_state = OrdinaryAgentDeliveryCleanupState()
 
         def report_schema_probe_succeeded() -> None:
             nonlocal schema_probe_succeeded
@@ -629,6 +646,35 @@ def service_privileged_operation_workers_run(
                         )
                     )
                     first_poll_attempted = True
+                cleanup = run_ordinary_agent_delivery_cleanup_once(
+                    record_store=store,
+                    limit=limit,
+                    state=cleanup_state,
+                    now_monotonic=time.monotonic(),
+                    error_backoff_seconds=error_backoff_seconds,
+                )
+                if cleanup.status == "succeeded":
+                    click.echo(
+                        json.dumps(
+                            {
+                                "event": "ordinary_agent_delivery_cleanup_succeeded",
+                                "expired_deliveries": cleanup.expired_deliveries,
+                            },
+                            sort_keys=True,
+                        )
+                    )
+                elif cleanup.status == "failed":
+                    click.echo(
+                        json.dumps(
+                            {
+                                "event": "ordinary_agent_delivery_cleanup_failed",
+                                "error_type": cleanup.error_type,
+                                "consecutive_failures": cleanup.consecutive_failures,
+                                "retry_seconds": cleanup.retry_seconds,
+                            },
+                            sort_keys=True,
+                        )
+                    )
                 records = execute_approved_privileged_operations_once(
                     record_store=store,
                     lease_owner=generated_lease_owner,
