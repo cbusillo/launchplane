@@ -568,7 +568,29 @@ class GuardedMergeAdmissionScenarioTests(unittest.TestCase):
 
         self.assertEqual(context.exception.reason_code, "merge_readiness_not_ready")
         self.assertEqual(context.exception.readiness, readiness)
+        self.assertEqual(context.exception.structural_result, self.structural_result)
         self.assertEqual(self.store.list_merge_admission_records(), ())
+
+    def test_structural_refusal_retains_evaluated_diagnostics_without_records(self) -> None:
+        structural_result = self.structural_result.model_copy(
+            update={
+                "status": "mismatch",
+                "reason_codes": ("structural_changed_path_overlap",),
+            }
+        )
+        evaluation = MergeAdmissionEvaluation(
+            readiness=self._readiness(),
+            structural_result=structural_result,
+        )
+
+        with self.assertRaises(MergeAdmissionDeniedError) as context:
+            self._admit(self._guard(evaluator=_StaticEvaluator(evaluation)))
+
+        self.assertEqual(context.exception.reason_code, "structural_provenance_not_admitted")
+        self.assertIsNone(context.exception.readiness)
+        self.assertEqual(context.exception.structural_result, structural_result)
+        self.assertEqual(self.store.list_merge_admission_records(), ())
+        self.assertEqual(self.store.list_merge_landing_outcome_records(), ())
 
     def test_scenario_22_lost_lease_refuses_admission(self) -> None:
         readiness = self._readiness(
