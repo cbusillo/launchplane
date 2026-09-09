@@ -47,7 +47,7 @@ _ORDINARY_AGENT_EFFECT_PERMISSION_CEILINGS: dict[str, dict[str, str]] = {
         "checks": "read",
         "contents": "write",
         "metadata": "read",
-        "pull_requests": "write",
+        "pull_requests": "read",
         "statuses": "read",
     },
     "close_pull_request": {"metadata": "read", "pull_requests": "write"},
