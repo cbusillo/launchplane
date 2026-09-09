@@ -42,6 +42,55 @@ from control_plane.storage.schema_migration import (
 
 
 class SchemaMigrationTests(unittest.TestCase):
+    def test_ordinary_agent_custody_migration_fences_stable_authority_scope(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = (
+                f"sqlite+pysqlite:///{Path(temporary_directory_name) / 'records.sqlite3'}"
+            )
+            config = alembic_config(database_url)
+            command.upgrade(config, EXPECTED_ALEMBIC_HEAD_REVISION)
+            engine = create_engine(database_url)
+            insert_sql = text(
+                "INSERT INTO launchplane_ordinary_agent_custody_issue_attempts "
+                "(attempt_id, idempotency_key_sha256, request_sha256, principal_id, "
+                "repository_id, state, mint_started_at, dispatch_deadline, updated_at, payload) "
+                "VALUES (:attempt_id, :idempotency_key_sha256, :request_sha256, "
+                "'agent_one', 123, 'minting', '2026-09-08T12:00:00Z', "
+                "'2026-09-08T12:00:30Z', '2026-09-08T12:00:00Z', '{}')"
+            )
+            try:
+                indexes = {
+                    str(index["name"]): index
+                    for index in inspect(engine).get_indexes(
+                        "launchplane_ordinary_agent_custody_issue_attempts"
+                    )
+                }
+                with engine.begin() as connection:
+                    connection.execute(
+                        insert_sql,
+                        {
+                            "attempt_id": "custody_first",
+                            "idempotency_key_sha256": "1" * 64,
+                            "request_sha256": "3" * 64,
+                        },
+                    )
+                with self.assertRaises(IntegrityError):
+                    with engine.begin() as connection:
+                        connection.execute(
+                            insert_sql,
+                            {
+                                "attempt_id": "custody_second",
+                                "idempotency_key_sha256": "2" * 64,
+                                "request_sha256": "4" * 64,
+                            },
+                        )
+            finally:
+                engine.dispose()
+
+        active_index = indexes["launchplane_ordinary_agent_custody_active_fence_uidx"]
+        self.assertTrue(active_index["unique"])
+        self.assertEqual(active_index["column_names"], ["principal_id", "repository_id"])
+
     def test_merge_train_policy_migration_fences_plain_active_inserts(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
@@ -1673,7 +1722,7 @@ class SchemaMigrationTests(unittest.TestCase):
             for primary_key in CRITICAL_PRIMARY_KEYS
         }
 
-        self.assertEqual(EXPECTED_ALEMBIC_HEAD_REVISION, "f3a5b7c9d1e4")
+        self.assertEqual(EXPECTED_ALEMBIC_HEAD_REVISION, "c8f2a6d4e9b1")
         self.assertFalse(
             [index.index_name for index in CRITICAL_SCHEMA_INDEXES if len(index.index_name) > 63]
         )
