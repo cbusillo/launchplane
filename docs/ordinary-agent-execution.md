@@ -214,3 +214,37 @@ contract: full-policy evaluator conformance, database transactions and revocatio
 races, credential custody, exact-request guarded execution, bounded read-only
 projections, and exact-scope live qualification. Third-party self-read does not
 imply private provider access or permission to push, enqueue or merge.
+
+## Provider credential custody foundation
+
+The internal custody foundation can resolve one exact, current DB managed-secret
+binding and mint a repository-scoped GitHub App installation token for one closed
+effect profile. The provider token remains in service memory and is revoked when
+the internal lease exits. Durable issue-attempt records contain redacted scope,
+permission, App, installation and expiry evidence only; they never contain the
+private key or installation-token value.
+
+Enrollment can separately bind the exact current repository-inventory identity
+and inspect the configured App installation, immutable owner account and closed
+permission ceiling without minting a token. The inventory record supplies the
+repository ID and name; the App-JWT provider read proves the installation at that
+repository path and the same numeric owner. The resulting non-secret evidence
+feeds the later atomic enrollment candidate builder, and provider reads complete
+before any enrollment write transaction begins. At effect time, the downscoped
+token response must still return the exact repository ID and name before the token
+can be used, so stale name reuse cannot direct an effect to another repository.
+
+A partial unique fence covers `(principal_id, repository_id)` while an attempt is
+minting, issued or unresolved. Repository name, base branch, request identity,
+credential version, secret version and App ID are evidence rather than fence-key
+components, so rename, branch changes and rotation cannot bypass an outstanding
+repository-scoped token hazard. A provider-authored, validated token expiry can
+bound cleanup after that expiry plus clock skew. A lost mint response or crashed
+mint has no inferred expiry and remains fenced until a later supported provider
+reconciliation supplies affirmative evidence; no timeout or local administrative
+clear releases it.
+
+This foundation adds no route, worker, grant, policy write or live App binding.
+It does not activate enrollment or execution. The fence is principal-scoped, so
+it does not serialize two distinct principals operating on one repository;
+guarded execution must supply its own cross-principal effect fence.

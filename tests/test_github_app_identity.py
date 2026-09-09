@@ -12,6 +12,8 @@ from control_plane.github_app_identity import (
     GitHubAppIdentity,
     GitHubAppIdentityError,
     GitHubAppInstallationToken,
+    inspect_ordinary_agent_github_app_installation,
+    mint_ordinary_agent_installation_token,
     mint_repository_installation_token,
     revoke_installation_token,
 )
@@ -70,6 +72,139 @@ class GitHubAppIdentityTests(unittest.TestCase):
         claims = jwt.decode(observed_jwts[0], options={"verify_signature": False})
         self.assertEqual(claims["iss"], "42")
         self.assertEqual(claims["exp"] - claims["iat"], 540)
+
+    def test_head_refresh_uses_its_closed_permission_profile(self) -> None:
+        observed_body: dict[str, object] = {}
+
+        def api_request(**kwargs):  # type: ignore[no-untyped-def]
+            if kwargs["path"] == "/app":
+                return {"id": 42}
+            if kwargs["path"] == "/repos/example/repo/installation":
+                return {
+                    "id": 77,
+                    "app_id": 42,
+                    "permissions": {
+                        "contents": "write",
+                        "metadata": "read",
+                        "pull_requests": "write",
+                    },
+                }
+            observed_body.update(kwargs["body"])
+            return {
+                "token": "installation-token-secret",
+                "expires_at": "2026-08-07T15:00:00Z",
+                "permissions": {
+                    "contents": "write",
+                    "metadata": "read",
+                    "pull_requests": "write",
+                },
+                "repositories": [{"id": 123, "full_name": "example/repo"}],
+            }
+
+        result = mint_ordinary_agent_installation_token(
+            identity=GitHubAppIdentity(app_id=42, private_key=self.private_key),
+            repository="example/repo",
+            repository_id="123",
+            effect_profile="head_refresh",
+            api_request=api_request,
+            now=datetime(2026, 8, 7, 14, 0, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(
+            observed_body,
+            {
+                "repository_ids": [123],
+                "permissions": {"contents": "write", "pull_requests": "write"},
+            },
+        )
+        self.assertEqual(result.permissions, ("contents:write", "pull_requests:write"))
+
+    def test_inspects_ordinary_agent_installation_without_minting(self) -> None:
+        calls: list[dict[str, object]] = []
+
+        def api_request(**kwargs: object) -> object:
+            calls.append(dict(kwargs))
+            if kwargs["path"] == "/app":
+                return {"id": 42}
+            if kwargs["path"] == "/repos/example/repo/installation":
+                return {
+                    "id": 77,
+                    "app_id": 42,
+                    "account": {"id": 456, "login": "example"},
+                    "permissions": {
+                        "contents": "write",
+                        "metadata": "read",
+                        "pull_requests": "write",
+                    },
+                }
+            raise AssertionError(kwargs["path"])
+
+        result = inspect_ordinary_agent_github_app_installation(
+            identity=GitHubAppIdentity(app_id=42, private_key=self.private_key),
+            repository="example/repo",
+            repository_id="123",
+            repository_owner_id="456",
+            api_request=api_request,
+            now=datetime(2026, 8, 7, 14, 0, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(result.app_id, 42)
+        self.assertEqual(result.installation_id, 77)
+        self.assertEqual(result.repository_id, 123)
+        self.assertEqual(result.repository_owner_id, 456)
+        self.assertEqual(result.repository, "example/repo")
+        self.assertEqual(
+            result.permissions,
+            ("contents:write", "metadata:read", "pull_requests:write"),
+        )
+        self.assertEqual(
+            tuple(call["path"] for call in calls),
+            (
+                "/app",
+                "/repos/example/repo/installation",
+            ),
+        )
+        self.assertTrue(all("method" not in call for call in calls))
+
+    def test_inspection_rejects_owner_or_permission_drift(self) -> None:
+        def inspect(*, account: object, permissions: object) -> None:
+            def api_request(**kwargs: object) -> object:
+                if kwargs["path"] == "/app":
+                    return {"id": 42}
+                return {
+                    "id": 77,
+                    "app_id": 42,
+                    "account": account,
+                    "permissions": permissions,
+                }
+
+            inspect_ordinary_agent_github_app_installation(
+                identity=GitHubAppIdentity(app_id=42, private_key=self.private_key),
+                repository="example/repo",
+                repository_id="123",
+                repository_owner_id="456",
+                api_request=api_request,
+            )
+
+        with self.assertRaisesRegex(GitHubAppIdentityError, "inventory owner"):
+            inspect(
+                account={"id": 999, "login": "example"},
+                permissions={
+                    "contents": "write",
+                    "metadata": "read",
+                    "pull_requests": "write",
+                },
+            )
+        with self.assertRaisesRegex(GitHubAppIdentityError, "beyond"):
+            inspect(
+                account={"id": 456, "login": "example"},
+                permissions={
+                    "contents": "write",
+                    "metadata": "read",
+                    "pull_requests": "write",
+                    "workflows": "write",
+                },
+            )
 
     def test_revokes_installation_token_without_exposing_secret(self) -> None:
         calls: list[dict[str, object]] = []
