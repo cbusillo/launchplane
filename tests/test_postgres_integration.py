@@ -6892,6 +6892,37 @@ class RealPostgresOrdinaryAgentLifecycleTests(unittest.TestCase):
             assert principal is not None
             self.assertEqual(principal.status, "active")
 
+    def test_private_delivery_persistence_error_hides_parameters_and_postgres_detail(self) -> None:
+        import traceback
+        from control_plane.storage.postgres import OrdinaryAgentPersistenceError
+
+        with _store_for_fresh_head_database() as store:
+            policy, inventory = setup_ordinary_agent_authority(store)
+            envelope = enrollment_envelope(policy_record=policy, inventory=inventory)
+            prepared, bundle = prepare_test_issuance(envelope)
+            with store._engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "alter table launchplane_ordinary_agent_deliveries add constraint test_reject_capsule check (delivery_status <> 'never_attempted')"
+                    )
+                )
+            with self.assertRaises(OrdinaryAgentPersistenceError) as raised:
+                store.compare_and_apply_ordinary_agent_enrollment(
+                    envelope=prepared, mutation=enrollment_mutation(prepared), issuance=bundle
+                )
+            rendered = "".join(traceback.format_exception(raised.exception))
+            for private in (
+                bundle.token.value,
+                bundle.ciphertext,
+                bundle.receiver_claim_sha256,
+                bundle.candidate.credential_digest,
+            ):
+                self.assertNotIn(private, rendered)
+            self.assertEqual(raised.exception.sqlstate, "23514")
+            self.assertIsNone(
+                store.read_current_ordinary_agent_principal(principal_id=envelope.principal_id)
+            )
+
 
 class RealPostgresFeedbackIntentMintTests(unittest.TestCase):
     @staticmethod

@@ -316,7 +316,10 @@ existing authorized rotation operation. Rotate and revoke erase outstanding
 capsules even when ordinary-agent policy denies work. A response already emitted
 can race cancellation, but its credential fails subsequent current-state checks.
 Retained capsules participate in key-usage and rotation-plan accounting, blocking
-retirement of their encryption key until cleanup.
+retirement of their encryption key until cleanup. Replayed secret-root rotations
+retain their historical operation evidence while reporting current retirement
+safety. Private persistence failures expose a safe error category, SQLSTATE and
+trace ID, suppressing SQL parameters and PostgreSQL failing-row detail.
 
 These are internal source primitives and transaction proofs, not an activated
 client connection flow. Authenticated proposal/approval descriptors, client

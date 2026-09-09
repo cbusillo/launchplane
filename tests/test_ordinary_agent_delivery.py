@@ -343,3 +343,83 @@ class OrdinaryAgentDeliveryTests(unittest.TestCase):
                     credential_version=1,
                 ),
             )
+
+    def test_completed_key_rotation_replay_rechecks_new_capsule_retirement_usage(self) -> None:
+        from control_plane.contracts.secret_record import SecretRecord, SecretVersion
+        from control_plane.secrets import KeyRing, reencrypt_secrets
+
+        new_cipher = Fernet(Fernet.generate_key())
+        legacy_cipher = Fernet(Fernet.generate_key())
+        ring = KeyRing(
+            active_key_id="new-key",
+            keys={
+                "new-key": new_cipher,
+                "legacy-key": legacy_cipher,
+                "test-issuer": Fernet(TEST_ISSUER_KEY),
+            },
+            active_hmac_key=b"h" * 32,
+        )
+        # Custody's existing version already uses the new root, so rotating an
+        # unrelated secret does not invalidate the pending enrollment CAS.
+        current = self.store.read_secret_version("ordinary-agent-app-key-v1")
+        self.store.write_secret_version(
+            current.model_copy(
+                update={
+                    "key_id": "new-key",
+                    "ciphertext": new_cipher.encrypt(b"test app key").decode(),
+                }
+            )
+        )
+        self.store.write_secret_version(
+            SecretVersion(
+                version_id="other-v1",
+                secret_id="other",
+                created_at="2026-09-09T00:00:00Z",
+                created_by="test",
+                ciphertext=legacy_cipher.encrypt(b"other value").decode(),
+                key_id="legacy-key",
+            )
+        )
+        self.store.write_secret_record(
+            SecretRecord(
+                secret_id="other",
+                scope="global",
+                integration="test",
+                name="other",
+                current_version_id="other-v1",
+                created_at="2026-09-09T00:00:00Z",
+                updated_at="2026-09-09T00:00:00Z",
+                updated_by="test",
+            )
+        )
+        with (
+            patch("control_plane.secrets._get_key_ring", return_value=ring),
+            patch(
+                "control_plane.secrets._decrypt_secret_value",
+                side_effect=lambda ciphertext, key_id: (
+                    ring.keys[key_id].decrypt(ciphertext.encode()).decode()
+                ),
+            ),
+        ):
+            plan = reencrypt_secrets(record_store=self.store)
+            self.assertIn("test-issuer", cast(list[str], plan["retirement_ready_key_ids"]))
+
+            def replay_rotation() -> dict[str, object]:
+                return reencrypt_secrets(
+                    record_store=self.store,
+                    apply=True,
+                    expected_plan_digest=cast(str, plan["plan_digest"]),
+                    operation_token="test-completed-rotation",
+                    actor="test",
+                    reason="Rotate test secret root",
+                )
+
+            applied = replay_rotation()
+            self.assertEqual(applied["status"], "ok")
+            self.enroll()  # Capsule was prepared under the still-loaded old key.
+            replay = replay_rotation()
+            self.assertTrue(replay["recovered"])
+            self.assertEqual(replay["rotated_count"], applied["rotated_count"])
+            self.assertEqual(replay["plan_digest"], applied["plan_digest"])
+            self.assertIn("test-issuer", cast(list[str], replay["retirement_blocked_key_ids"]))
+            self.assertNotIn("test-issuer", cast(list[str], replay["retirement_ready_key_ids"]))

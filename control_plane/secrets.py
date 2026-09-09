@@ -915,6 +915,7 @@ def reencrypt_secrets(
         "active_key_id": active_key_id,
         "retirement_blocked_key_ids": retirement_blocked_key_ids,
         "retirement_ready_key_ids": retirement_ready_key_ids,
+        "retirement_assessment": "current_key_usage",
         "legacy_compatibility_key_loaded": key_ring.legacy_compatibility_key_loaded,
         "recovered": False,
     }
@@ -936,7 +937,14 @@ def reencrypt_secrets(
             active_key_id=active_key_id,
         )
         if recovered_result is not None:
-            return recovered_result
+            # Replay preserves the completed operation's historical counts, but
+            # key retirement must reflect capsules retained after that operation.
+            return {
+                **recovered_result,
+                "retirement_blocked_key_ids": retirement_blocked_key_ids,
+                "retirement_ready_key_ids": retirement_ready_key_ids,
+                "retirement_assessment": "current_key_usage",
+            }
         return {
             **result,
             "status": "error",

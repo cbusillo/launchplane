@@ -6,13 +6,14 @@ from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from functools import wraps
 import fcntl
 import hashlib
 from pathlib import Path
 import secrets
 from threading import Lock
 import time
-from typing import Any, Literal, NamedTuple, Protocol, TypeVar, cast, overload
+from typing import Any, Literal, NamedTuple, ParamSpec, Protocol, TypeVar, cast, overload
 
 from pydantic import BaseModel
 from sqlalchemy import (
@@ -2120,6 +2121,50 @@ class LaunchplaneOrdinaryAgentPrincipalRow(Base):
     recorded_at: Mapped[str] = mapped_column(String, nullable=False)
     record_sha256: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+_PrivateOperationParameters = ParamSpec("_PrivateOperationParameters")
+_PrivateOperationResult = TypeVar("_PrivateOperationResult")
+
+
+class OrdinaryAgentPersistenceError(RuntimeError):
+    """Safe boundary error: never retain SQL parameters or provider error detail in output."""
+
+    def __init__(self, *, operation: str, sqlstate: str | None) -> None:
+        self.trace_id = str(uuid4())
+        self.sqlstate = sqlstate
+        super().__init__(
+            f"Ordinary-agent persistence failed during {operation}; "
+            f"SQLSTATE {sqlstate or 'unavailable'}; trace {self.trace_id}."
+        )
+
+
+def _private_ordinary_agent_operation(
+    function: Callable[_PrivateOperationParameters, _PrivateOperationResult],
+) -> Callable[_PrivateOperationParameters, _PrivateOperationResult]:
+    @wraps(function)
+    def wrapped(
+        *args: _PrivateOperationParameters.args, **kwargs: _PrivateOperationParameters.kwargs
+    ) -> _PrivateOperationResult:
+        try:
+            return function(*args, **kwargs)
+        except DBAPIError as error:
+            state = getattr(error.orig, "sqlstate", None)
+            safe_state = (
+                state
+                if isinstance(state, str)
+                and len(state) == 5
+                and state.isascii()
+                and state.isalnum()
+                else None
+            )
+            # PostgreSQL DETAIL can include the entire failing row, even when
+            # SQLAlchemy hides bound parameters. Suppress both parts and chaining.
+            raise OrdinaryAgentPersistenceError(
+                operation=function.__name__, sqlstate=safe_state
+            ) from None
+
+    return wrapped
 
 
 @dataclass(frozen=True, repr=False)
@@ -18634,6 +18679,7 @@ class PostgresRecordStore(HumanSessionStore):
             current_principal=current_principal,
         )
 
+    @_private_ordinary_agent_operation
     def compare_and_apply_ordinary_agent_enrollment(
         self,
         *,
@@ -19366,6 +19412,7 @@ class PostgresRecordStore(HumanSessionStore):
             credential_version=credential.credential_version,
         )
 
+    @_private_ordinary_agent_operation
     def verify_ordinary_agent_token(
         self, proof: OrdinaryAgentTokenProof
     ) -> OrdinaryAgentIdentity | None:
@@ -19485,6 +19532,7 @@ class PostgresRecordStore(HumanSessionStore):
                 session.commit()
             return snapshot
 
+    @_private_ordinary_agent_operation
     def claim_ordinary_agent_credential(
         self, *, operation_id: str, claim_secret: OrdinaryAgentClaimSecret
     ) -> OrdinaryAgentToken | None:
@@ -19515,6 +19563,7 @@ class PostgresRecordStore(HumanSessionStore):
             return None
         return token
 
+    @_private_ordinary_agent_operation
     def expire_ordinary_agent_deliveries(self, *, limit: int = 100) -> int:
         if not 1 <= limit <= 1000:
             raise ValueError("Delivery expiry batch limit must be between 1 and 1000.")
