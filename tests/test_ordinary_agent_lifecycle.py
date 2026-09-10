@@ -4,11 +4,14 @@ from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+import json
 
 from sqlalchemy import select
 
 from control_plane.contracts.ordinary_agent_lifecycle import (
     OrdinaryAgentEnrollmentReceipt,
+    OrdinaryAgentCredentialCustodyRecord,
+    OrdinaryAgentEnrollmentIntent,
 )
 from control_plane.ordinary_agent_lifecycle import lifecycle_record_sha256_from_payload
 from control_plane.storage.postgres import (
@@ -44,6 +47,41 @@ class FailingOrdinaryAgentStore(PostgresRecordStore):
 class OrdinaryAgentLifecycleStorageTests(unittest.TestCase):
     def _database_url(self, directory: str) -> str:
         return f"sqlite+pysqlite:///{Path(directory) / 'launchplane.sqlite3'}"
+
+    def test_pre_installation_records_still_load_with_their_original_digests(self) -> None:
+        # Regenerate only with the fixture's source commit, never the current writer.
+        # Frozen delivery expiry is historical; model parsing does not consult a clock.
+        fixture = json.loads(
+            (Path(__file__).parent / "fixtures" / "ordinary-agent-legacy-custody.json").read_text()
+        )
+        custody = OrdinaryAgentCredentialCustodyRecord.model_validate(fixture["custody_record"])
+        intent = OrdinaryAgentEnrollmentIntent.model_validate(fixture["enrollment_intent"])
+        self.assertEqual(custody.model_dump(mode="json"), fixture["custody_record"])
+        self.assertEqual(intent.intent_sha256, fixture["intent_sha256"])
+
+    def test_inspected_installation_survives_enrollment_and_is_digest_bound(self) -> None:
+        store = PostgresRecordStore(database_url="sqlite+pysqlite:///:memory:")
+        self.addCleanup(store.close)
+        store.ensure_schema()
+        policy, inventory = setup_ordinary_agent_authority(store)
+        envelope = enrollment_envelope(policy_record=policy, inventory=inventory)
+        envelope = envelope.model_copy(
+            update={"custody": envelope.custody.model_copy(update={"github_installation_id": 77})}
+        )
+        result = apply_test_enrollment(
+            store, envelope=envelope, mutation=enrollment_mutation(envelope)
+        )
+        self.assertEqual(result.status, "written")
+        assert result.receipt is not None
+        record = store.read_ordinary_agent_credential_custody(
+            record_id=result.receipt.custody_record_id or ""
+        )
+        assert record is not None
+        self.assertEqual(record.github_installation_id, 77)
+        payload = record.model_dump(mode="json")
+        payload["github_installation_id"] = 78
+        with self.assertRaisesRegex(ValueError, "digest does not match"):
+            OrdinaryAgentCredentialCustodyRecord.model_validate(payload)
 
     def test_enroll_replays_exact_receipt_and_changed_payload_conflicts(self) -> None:
         with TemporaryDirectory() as directory:

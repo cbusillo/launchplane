@@ -58,7 +58,6 @@ from control_plane.merge_train_batch_landing import (
 )
 from control_plane.merge_train_github import (
     GitHubMergeTrainClient,
-    GitHubMergeTrainSnapshotReader,
     MergeTrainGitHubError,
     MergeTrainGitHubStaleHeadError,
     MergeTrainGitHubTransport,
@@ -67,6 +66,9 @@ from control_plane.merge_train_github import (
 from control_plane.merge_train_stack_collapse import (
     MergeTrainStackCollapsePlanRecordStore,
     stack_collapse_expected_root_head_sha,
+)
+from control_plane.merge_train_structural_provenance import (
+    ordinary_candidate_is_exact_landing_dependency,
 )
 from control_plane.workflows.merge_train_controller import (
     latest_completed_merge_train_batch_landing_plan_record as latest_completed_merge_train_batch_landing_progress_record,
@@ -152,6 +154,14 @@ class MergeTrainControllerStateRecordStore(Protocol):
         expected_lease_acquired_at: str,
         lease_seconds: int,
     ) -> MergeTrainControllerStateRecord: ...
+
+
+class _OrdinaryCandidateDependencyStore(Protocol):
+    def list_ordinary_merge_train_batch_candidate_dependencies(
+        self,
+        *,
+        landing_plan_record: MergeTrainBatchLandingPlanRecord,
+    ) -> tuple[MergeTrainBatchCandidateRecord, ...]: ...
 
 
 @dataclass(frozen=True)
@@ -320,6 +330,48 @@ def execute_merge_train_controller_run_once(
         transport=transport,
         effect_executor=effect_executor,
     )
+    return execute_merge_train_controller_with_client(
+        request=request,
+        policy=policy,
+        policy_sha256=policy_sha256,
+        repository_policy=repository_policy,
+        github_client=github_client,
+        trace_id=trace_id,
+        recorded_at=recorded_at,
+        candidate_store=candidate_store,
+        landing_store=landing_store,
+        stack_collapse_store=stack_collapse_store,
+        controller_state_store=controller_state_store,
+        admission_store=admission_store,
+        admission_evaluator=admission_evaluator,
+        before_release=before_release,
+    )
+
+
+def execute_merge_train_controller_with_client(
+    *,
+    request: MergeTrainControllerRunOnceEnvelope,
+    policy: MergeTrainPolicy,
+    policy_sha256: str,
+    repository_policy: MergeTrainRepositoryPolicy,
+    github_client: GitHubMergeTrainClient,
+    trace_id: str,
+    recorded_at: str,
+    candidate_store: MergeTrainBatchCandidateRecordStore,
+    landing_store: MergeTrainBatchLandingPlanRecordStore,
+    stack_collapse_store: MergeTrainStackCollapsePlanRecordStore,
+    controller_state_store: MergeTrainControllerStateRecordStore,
+    admission_store: MergeAdmissionRecordStore,
+    admission_evaluator: MergeAdmissionEvaluator,
+    before_release: Callable[[MergeTrainControllerRunOnceResult], None] | None = None,
+) -> MergeTrainControllerRunOnceResult:
+    """Internal controller core with an explicit caller-owned scoped provider client.
+
+    This constructs no transport or credentials. Ordinary callers must supply
+    joined bound-record adapters and their scoped semantic executor; the legacy
+    entry point above retains its established token and transport behavior.
+    """
+    transport = github_client.transport
     lease_owner = merge_train_controller_lease_owner(trace_id=trace_id)
     if request.mutate:
         controller_state = controller_state_store.acquire_merge_train_controller_state_record(
@@ -630,8 +682,27 @@ def latest_passed_merge_train_batch_candidate_record(
 def _candidate_record_for_landing_plan(
     *,
     record_store: MergeTrainBatchCandidateRecordStore,
-    landing_plan: MergeTrainBatchLandingPlan,
+    landing_plan_record: MergeTrainBatchLandingPlanRecord,
 ) -> MergeTrainBatchCandidateRecord | None:
+    landing_plan = landing_plan_record.landing_plan
+    if landing_plan_record.ordinary_job_binding is not None:
+        if not hasattr(record_store, "list_ordinary_merge_train_batch_candidate_dependencies"):
+            return None
+        dependencies = cast(
+            _OrdinaryCandidateDependencyStore,
+            record_store,
+        ).list_ordinary_merge_train_batch_candidate_dependencies(
+            landing_plan_record=landing_plan_record,
+        )
+        matches = tuple(
+            record
+            for record in dependencies
+            if ordinary_candidate_is_exact_landing_dependency(
+                candidate_record=record,
+                landing_plan_record=landing_plan_record,
+            )
+        )
+        return matches[0] if len(matches) == 1 else None
     matches = tuple(
         record
         for record in record_store.list_merge_train_batch_candidate_records(
@@ -662,9 +733,28 @@ def latest_merge_train_batch_landing_plan_record(
     latest_record = latest_merge_train_batch_landing_progress_record(records)
     if latest_record is None:
         return None
-    if not any(entry.status == "planned" for entry in latest_record.landing_plan.entries):
+    if not any(
+        entry.status == "planned" for entry in latest_record.landing_plan.entries
+    ) and not _ordinary_landing_terminal_success(latest_record):
         return None
     return latest_record
+
+
+def _ordinary_landing_terminal_success(record: MergeTrainBatchLandingPlanRecord) -> bool:
+    return (
+        record.ordinary_job_binding is not None
+        and bool(record.landing_plan.entries)
+        and all(entry.status in {"merged", "skipped"} for entry in record.landing_plan.entries)
+    )
+
+
+def _landing_cleanup_allowed(record: MergeTrainBatchLandingPlanRecord) -> bool:
+    allowed_statuses = (
+        {"merged", "skipped"} if record.ordinary_job_binding is not None else {"merged"}
+    )
+    return bool(record.landing_plan.entries) and all(
+        entry.status in allowed_statuses for entry in record.landing_plan.entries
+    )
 
 
 def latest_completed_merge_train_batch_landing_plan_record(
@@ -806,11 +896,19 @@ def _advance_active_landing_record(
             )
     candidate_record = _candidate_record_for_landing_plan(
         record_store=candidate_store,
-        landing_plan=active_landing_record.landing_plan,
+        landing_plan_record=active_landing_record,
     )
     if candidate_record is None:
         raise MergeTrainControllerRequestError(
-            "merge train landing requires its exact active candidate record"
+            (
+                "ordinary merge train landing requires its exact candidate dependency"
+                if active_landing_record.ordinary_job_binding is not None
+                else "merge train landing requires its exact active candidate record"
+            )
+        )
+    if active_landing_record.ordinary_job_binding is not None and collapse_record is not None:
+        raise MergeTrainControllerRequestError(
+            "ordinary merge train landing does not support stack collapse"
         )
     admission_guard = GuardedMergeAdmission(
         record_store=admission_store,
@@ -830,9 +928,24 @@ def _advance_active_landing_record(
             "controller_action": "land_batch",
             "merge_train_batch_landing_plan_record_id": active_landing_record.record_id,
         }
+        if _ordinary_landing_terminal_success(active_landing_record):
+            result["landing_progress"] = "cleanup_pending"
         if collapse_record is not None:
             result["merge_train_stack_collapse_plan_record_id"] = collapse_record.record_id
         return result
+
+    if _ordinary_landing_terminal_success(active_landing_record):
+        return _finish_landed_merge_train_batch(
+            request=request,
+            policy_sha256=policy_sha256,
+            repository_policy=repository_policy,
+            trace_id=trace_id,
+            recorded_at=recorded_at,
+            github_client=github_client,
+            stack_collapse_store=stack_collapse_store,
+            landed_record=active_landing_record,
+            lease=lease,
+        )
 
     lease.checkpoint(
         active_action="land_batch",
@@ -846,11 +959,14 @@ def _advance_active_landing_record(
         },
     )
 
+    checkpointed_progress_record: MergeTrainBatchLandingPlanRecord | None = None
+
     def checkpoint_landing_progress(
         progress_plan: MergeTrainBatchLandingPlan,
         entry: MergeTrainBatchLandingEntry,
         phase: str,
     ) -> MergeTrainBatchLandingPlanRecord | None:
+        nonlocal checkpointed_progress_record
         state_phase = "admit_pull_request" if phase == "merge_entry" else "landing_entry_merged"
         lease.checkpoint(
             active_action="land_batch",
@@ -864,18 +980,34 @@ def _advance_active_landing_record(
                 "candidate_ref": progress_plan.candidate_ref,
                 "expected_effect_sha": progress_plan.candidate_sha,
                 "completed_entry_count": sum(
-                    progress_entry.status == "merged" for progress_entry in progress_plan.entries
+                    progress_entry.status == "merged"
+                    or (
+                        active_landing_record.ordinary_job_binding is not None
+                        and progress_entry.status == "skipped"
+                    )
+                    for progress_entry in progress_plan.entries
                 ),
             },
         )
         if phase not in {"entry_merged", "entry_skipped"}:
             return None
         progress_record = build_merge_train_batch_landing_plan_record(
+            ordinary_job_binding=lease.record.ordinary_job_binding,
             landing_plan=progress_plan,
             source=f"service:controller:landing-progress:{trace_id}",
             updated_at=lease.record.updated_at,
         )
-        landing_store.write_merge_train_batch_landing_plan_record(progress_record)
+        persisted = landing_store.write_merge_train_batch_landing_plan_record(progress_record)
+        if active_landing_record.ordinary_job_binding is not None:
+            if (
+                not isinstance(persisted, MergeTrainBatchLandingPlanRecord)
+                or persisted != progress_record
+            ):
+                raise MergeTrainControllerRequestError(
+                    "ordinary landing checkpoint did not persist the exact progress record"
+                )
+            checkpointed_progress_record = persisted
+            return persisted
         return progress_record
 
     def checkpoint_provider_merge(
@@ -894,7 +1026,12 @@ def _advance_active_landing_record(
                 "candidate_ref": progress_plan.candidate_ref,
                 "expected_effect_sha": progress_plan.candidate_sha,
                 "completed_entry_count": sum(
-                    progress_entry.status == "merged" for progress_entry in progress_plan.entries
+                    progress_entry.status == "merged"
+                    or (
+                        active_landing_record.ordinary_job_binding is not None
+                        and progress_entry.status == "skipped"
+                    )
+                    for progress_entry in progress_plan.entries
                 ),
             },
         )
@@ -951,10 +1088,33 @@ def _advance_active_landing_record(
             "landing_plan": blocked_landing_record.landing_plan.model_dump(mode="json"),
         }
     except MergeTrainGitHubStaleHeadError as error:
+        if active_landing_record.ordinary_job_binding is not None:
+            preserved_record = admission_guard.landing_plan_record
+            message = str(error).strip() or (
+                "Ordinary merge train landing requires explicit recovery."
+            )
+            return {
+                "merge_train_batch_landing_plan_record_id": preserved_record.record_id,
+                "repository": preserved_record.landing_plan.repository,
+                "base_branch": preserved_record.landing_plan.base_branch,
+                "mode": "blocked",
+                "controller_action": "land_batch",
+                "controller_reconciliation_status": "required",
+                "controller_reconciliation_detail": "ordinary_landing_recovery_required",
+                "landing_plan": preserved_record.landing_plan.model_dump(mode="json"),
+                "error": {
+                    "code": "ordinary_landing_recovery_required",
+                    "message": message,
+                },
+                "details": {
+                    "github_status_code": error.status_code,
+                },
+            }
         stale_plan = stale_merge_train_landing_plan(
             admission_guard.landing_plan_record.landing_plan
         )
         stale_record = build_merge_train_batch_landing_plan_record(
+            ordinary_job_binding=lease.record.ordinary_job_binding,
             landing_plan=stale_plan,
             source=f"service:controller:stale-landing:{trace_id}",
             updated_at=recorded_at,
@@ -977,7 +1137,34 @@ def _advance_active_landing_record(
             },
         }
 
+    if active_landing_record.ordinary_job_binding is not None:
+        if (
+            checkpointed_progress_record is None
+            or checkpointed_progress_record.landing_plan != landed_plan
+        ):
+            raise MergeTrainControllerRequestError(
+                "ordinary landing did not return its exact persisted successor"
+            )
+        ordinary_result: dict[str, object] = {
+            "merge_train_batch_landing_plan_record_id": checkpointed_progress_record.record_id,
+            "repository": landed_plan.repository,
+            "base_branch": landed_plan.base_branch,
+            "mode": "land",
+            "controller_action": "land_batch",
+            "landing_plan": landed_plan.model_dump(mode="json"),
+        }
+        if any(entry.status in {"planned", "merging"} for entry in landed_plan.entries):
+            ordinary_result["landing_progress"] = "partial"
+            return ordinary_result
+        if _ordinary_landing_terminal_success(checkpointed_progress_record):
+            ordinary_result["landing_progress"] = "cleanup_pending"
+            return ordinary_result
+        raise MergeTrainControllerRequestError(
+            "ordinary landing returned unsupported terminal progress"
+        )
+
     landed_record = build_merge_train_batch_landing_plan_record(
+        ordinary_job_binding=lease.record.ordinary_job_binding,
         landing_plan=landed_plan,
         source=f"service:controller:land:{trace_id}",
         updated_at=recorded_at,
@@ -1017,7 +1204,7 @@ def _finish_landed_merge_train_batch(
         )
     except ValueError as error:
         raise MergeTrainControllerRequestError(str(error)) from error
-    if any(entry.status != "merged" for entry in landed_plan.entries):
+    if not _landing_cleanup_allowed(landed_record):
         raise MergeTrainControllerRequestError(
             "merge train cleanup requires a fully landed batch record"
         )
@@ -1028,6 +1215,10 @@ def _finish_landed_merge_train_batch(
         landing_plan=landed_plan,
         policy_sha256=policy_sha256,
     )
+    if landed_record.ordinary_job_binding is not None and collapse_record is not None:
+        raise MergeTrainControllerRequestError(
+            "ordinary merge train landing does not support stack collapse"
+        )
     if collapse_record is not None and not repository_policy.stack_child_disposition_label:
         raise MergeTrainControllerRequestError(
             "merge train stack child disposition requires stack_child_disposition_label policy"
@@ -1058,8 +1249,12 @@ def _finish_landed_merge_train_batch(
         "landing_plan": landed_plan.model_dump(mode="json"),
         **candidate_ref_cleanup_result,
     }
+    if landed_record.ordinary_job_binding is not None:
+        result["landing_progress"] = "cleanup_pending"
     if candidate_ref_cleanup_result.get("candidate_ref_cleanup_status") == "failed":
         return result
+    if landed_record.ordinary_job_binding is not None:
+        result["landing_progress"] = "complete"
     if collapse_record is None:
         if lease.record.step_payload.get("stack_collapse_plan_record_id"):
             raise MergeTrainControllerRequestError(
@@ -1128,6 +1323,7 @@ def _finish_landed_merge_train_batch(
             },
         )
         progress_record = build_merge_train_stack_collapse_plan_record(
+            ordinary_job_binding=lease.record.ordinary_job_binding,
             plan=progress_plan.model_copy(update={"updated_at": lease.record.updated_at}),
             source=f"service:controller:child-disposition-progress:{trace_id}",
             updated_at=lease.record.updated_at,
@@ -1144,6 +1340,7 @@ def _finish_landed_merge_train_batch(
         checkpoint=checkpoint_child_disposition,
     )
     reconciled_record = build_merge_train_stack_collapse_plan_record(
+        ordinary_job_binding=lease.record.ordinary_job_binding,
         plan=reconciled_collapse_plan,
         source=f"service:controller:child-disposition:{trace_id}",
         updated_at=recorded_at,
@@ -1273,6 +1470,7 @@ def _advance_active_candidate_record(
                 },
             )
         reflow_result = try_reflow_failed_merge_train_candidate(
+            github_client=github_client,
             candidate_store=candidate_store,
             active_candidate_record=active_candidate_record,
             policy=policy,
@@ -1403,6 +1601,7 @@ def _advance_active_candidate_record(
         }
     if request.mutate:
         updated_candidate_record = build_merge_train_batch_candidate_record(
+            ordinary_job_binding=lease.record.ordinary_job_binding,
             candidate=candidate,
             source=f"service:controller:{controller_action}:{trace_id}",
             updated_at=recorded_at,
@@ -1474,7 +1673,7 @@ def _advance_passed_candidate_record(
             "merge_train_batch_landing_plan_record_id": completed_landing_record.record_id,
             "landing_plan": completed_landing_record.landing_plan.model_dump(mode="json"),
         }
-    snapshot = GitHubMergeTrainSnapshotReader(transport=transport).read_merge_train_snapshot(
+    snapshot = github_client.read_merge_train_snapshot(
         repository=request.repository,
         base_branch=request.base_branch,
     )
@@ -1561,6 +1760,7 @@ def _advance_passed_candidate_record(
         created_at=recorded_at,
     )
     landing_record = build_merge_train_batch_landing_plan_record(
+        ordinary_job_binding=lease.record.ordinary_job_binding,
         landing_plan=landing_plan,
         source=f"service:controller:landing-plan:{trace_id}",
         updated_at=recorded_at,
@@ -1610,6 +1810,7 @@ def _advance_without_candidate_record(
     )
     if waiting_collapse_record is not None:
         waiting_result = _advance_waiting_stack_collapse_record(
+            github_client=github_client,
             request=request,
             policy=policy,
             policy_sha256=policy_sha256,
@@ -1653,6 +1854,7 @@ def _advance_without_candidate_record(
             return planned_result
 
     return _advance_from_live_snapshot(
+        github_client=github_client,
         request=request,
         policy=policy,
         policy_sha256=policy_sha256,
@@ -1672,6 +1874,7 @@ def _advance_waiting_stack_collapse_record(
     policy_sha256: str,
     repository_policy: MergeTrainRepositoryPolicy,
     transport: MergeTrainGitHubTransport,
+    github_client: GitHubMergeTrainClient,
     candidate_store: MergeTrainBatchCandidateRecordStore,
     stack_collapse_store: MergeTrainStackCollapsePlanRecordStore,
     waiting_collapse_record: MergeTrainStackCollapsePlanRecord,
@@ -1679,7 +1882,7 @@ def _advance_waiting_stack_collapse_record(
     recorded_at: str,
     lease: MergeTrainControllerLeaseContext,
 ) -> dict[str, object] | None:
-    snapshot = GitHubMergeTrainSnapshotReader(transport=transport).read_merge_train_snapshot(
+    snapshot = github_client.read_merge_train_snapshot(
         repository=request.repository,
         base_branch=request.base_branch,
     )
@@ -1737,6 +1940,7 @@ def _advance_waiting_stack_collapse_record(
         },
     )
     candidate = build_merge_train_batch_candidate(
+        ordinary_job_binding=lease.record.ordinary_job_binding,
         dry_run_result=dry_run_result,
         base_sha=root_snapshot.base_sha,
         policy_sha256=policy_sha256,
@@ -1752,6 +1956,7 @@ def _advance_waiting_stack_collapse_record(
         ),
     )
     candidate_record = build_merge_train_batch_candidate_record(
+        ordinary_job_binding=lease.record.ordinary_job_binding,
         candidate=candidate,
         source=f"service:controller:stack-collapse-admit:{trace_id}",
         updated_at=recorded_at,
@@ -1793,7 +1998,7 @@ def _advance_planned_stack_collapse_record(
     recorded_at: str,
     lease: MergeTrainControllerLeaseContext,
 ) -> dict[str, object] | None:
-    snapshot = GitHubMergeTrainSnapshotReader(transport=transport).read_merge_train_snapshot(
+    snapshot = github_client.read_merge_train_snapshot(
         repository=request.repository,
         base_branch=request.base_branch,
     )
@@ -1884,6 +2089,7 @@ def _advance_planned_stack_collapse_record(
                 },
             )
             progress_record = build_merge_train_stack_collapse_plan_record(
+                ordinary_job_binding=lease.record.ordinary_job_binding,
                 plan=progress_plan.model_copy(update={"updated_at": lease.record.updated_at}),
                 source=f"service:controller:stack-collapse-progress:{trace_id}",
                 updated_at=lease.record.updated_at,
@@ -1898,6 +2104,7 @@ def _advance_planned_stack_collapse_record(
             checkpoint=checkpoint_collapse_progress,
         )
         executed_record = build_merge_train_stack_collapse_plan_record(
+            ordinary_job_binding=lease.record.ordinary_job_binding,
             plan=executed_plan,
             source=f"service:controller:stack-collapse-execute:{trace_id}",
             updated_at=recorded_at,
@@ -1927,13 +2134,14 @@ def _advance_from_live_snapshot(
     policy: MergeTrainPolicy,
     policy_sha256: str,
     transport: MergeTrainGitHubTransport,
+    github_client: GitHubMergeTrainClient,
     candidate_store: MergeTrainBatchCandidateRecordStore,
     stack_collapse_store: MergeTrainStackCollapsePlanRecordStore,
     trace_id: str,
     recorded_at: str,
     lease: MergeTrainControllerLeaseContext,
 ) -> dict[str, object]:
-    snapshot = GitHubMergeTrainSnapshotReader(transport=transport).read_merge_train_snapshot(
+    snapshot = github_client.read_merge_train_snapshot(
         repository=request.repository,
         base_branch=request.base_branch,
     )
@@ -1974,6 +2182,7 @@ def _advance_from_live_snapshot(
                 step_payload={"collapse_id": stack_collapse_plan.collapse_id},
             )
             stack_collapse_record = build_merge_train_stack_collapse_plan_record(
+                ordinary_job_binding=lease.record.ordinary_job_binding,
                 plan=stack_collapse_plan,
                 source=f"service:controller:stack-collapse-plan:{trace_id}",
                 updated_at=recorded_at,
@@ -2019,6 +2228,7 @@ def _advance_from_live_snapshot(
 
     controller_action = "plan_candidate"
     candidate = build_merge_train_batch_candidate(
+        ordinary_job_binding=lease.record.ordinary_job_binding,
         dry_run_result=dry_run_result,
         base_sha=snapshot.base_sha,
         policy_sha256=policy_sha256,
@@ -2044,6 +2254,7 @@ def _advance_from_live_snapshot(
             },
         )
         candidate_record = build_merge_train_batch_candidate_record(
+            ordinary_job_binding=lease.record.ordinary_job_binding,
             candidate=candidate,
             source=f"service:controller:candidate-plan:{trace_id}",
             updated_at=recorded_at,
@@ -2085,6 +2296,7 @@ def try_reflow_failed_merge_train_candidate(
     policy: MergeTrainPolicy,
     policy_sha256: str,
     transport: MergeTrainGitHubTransport,
+    github_client: GitHubMergeTrainClient,
     repository: str,
     base_branch: str,
     recorded_at: str,
@@ -2092,7 +2304,7 @@ def try_reflow_failed_merge_train_candidate(
     mutate: bool,
 ) -> dict[str, object] | None:
     try:
-        snapshot = GitHubMergeTrainSnapshotReader(transport=transport).read_merge_train_snapshot(
+        snapshot = github_client.read_merge_train_snapshot(
             repository=repository,
             base_branch=base_branch,
         )
@@ -2109,6 +2321,7 @@ def try_reflow_failed_merge_train_candidate(
     if queue_unchanged and active_candidate_record.candidate.candidate_sha:
         return None
     candidate = build_merge_train_batch_candidate(
+        ordinary_job_binding=active_candidate_record.ordinary_job_binding,
         dry_run_result=dry_run_result,
         base_sha=snapshot.base_sha,
         policy_sha256=policy_sha256,
@@ -2125,6 +2338,7 @@ def try_reflow_failed_merge_train_candidate(
     }
     if mutate:
         candidate_record = build_merge_train_batch_candidate_record(
+            ordinary_job_binding=active_candidate_record.ordinary_job_binding,
             candidate=candidate,
             source=f"service:controller:candidate-reflow:{trace_id}",
             updated_at=recorded_at,
@@ -2194,6 +2408,27 @@ def cleanup_merge_train_batch_candidate_ref(
     candidate_ref = str(
         lease.record.step_payload.get("candidate_ref") or landing_plan.candidate_ref
     )
+    if lease.record.ordinary_job_binding is not None:
+        cleanup_status = str(lease.record.step_payload.get("cleanup_status") or "")
+        if cleanup_status in {"deleted", "already_missing", "retained"}:
+            return {"candidate_ref_cleanup_status": cleanup_status}
+        try:
+            deleted = github_client.cleanup_batch_candidate_ref(landing_plan=landing_plan)
+        except MergeTrainGitHubError as error:
+            return _candidate_ref_cleanup_failed_result(
+                error=error,
+                trace_id=trace_id,
+                landing_plan=landing_plan,
+            )
+        cleanup_status = "deleted" if deleted else "retained"
+        lease.checkpoint(
+            step_payload={
+                **lease.record.step_payload,
+                "candidate_ref": candidate_ref,
+                "cleanup_status": cleanup_status,
+            },
+        )
+        return {"candidate_ref_cleanup_status": cleanup_status}
     if lease.record.step_payload.get("cleanup_status") == "deleted":
         return {"candidate_ref_cleanup_status": "deleted"}
     if not github_client.candidate_ref_exists(
@@ -2211,24 +2446,11 @@ def cleanup_merge_train_batch_candidate_ref(
     try:
         deleted = github_client.cleanup_batch_candidate_ref(landing_plan=landing_plan)
     except MergeTrainGitHubError as error:
-        message = str(error).strip() or "GitHub candidate ref cleanup failed."
-        _LOGGER.warning(
-            "Merge train candidate ref cleanup failed after landing persistence",
-            extra={
-                "trace_id": trace_id,
-                "repository": landing_plan.repository,
-                "base_branch": landing_plan.base_branch,
-                "candidate_ref": landing_plan.candidate_ref,
-                "github_status_code": error.status_code,
-            },
+        return _candidate_ref_cleanup_failed_result(
+            error=error,
+            trace_id=trace_id,
+            landing_plan=landing_plan,
         )
-        result: dict[str, object] = {
-            "candidate_ref_cleanup_status": "failed",
-            "candidate_ref_cleanup_message": message,
-        }
-        if error.status_code is not None:
-            result["candidate_ref_cleanup_github_status_code"] = error.status_code
-        return result
     cleanup_status = "deleted" if deleted else "already_missing"
     lease.checkpoint(
         step_payload={
@@ -2240,6 +2462,32 @@ def cleanup_merge_train_batch_candidate_ref(
     return {
         "candidate_ref_cleanup_status": cleanup_status,
     }
+
+
+def _candidate_ref_cleanup_failed_result(
+    *,
+    error: MergeTrainGitHubError,
+    trace_id: str,
+    landing_plan: MergeTrainBatchLandingPlan,
+) -> dict[str, object]:
+    message = str(error).strip() or "GitHub candidate ref cleanup failed."
+    _LOGGER.warning(
+        "Merge train candidate ref cleanup failed after landing persistence",
+        extra={
+            "trace_id": trace_id,
+            "repository": landing_plan.repository,
+            "base_branch": landing_plan.base_branch,
+            "candidate_ref": landing_plan.candidate_ref,
+            "github_status_code": error.status_code,
+        },
+    )
+    result: dict[str, object] = {
+        "candidate_ref_cleanup_status": "failed",
+        "candidate_ref_cleanup_message": message,
+    }
+    if error.status_code is not None:
+        result["candidate_ref_cleanup_github_status_code"] = error.status_code
+    return result
 
 
 def _merge_train_stack_collapse_record_matches_landing_plan(
@@ -2344,6 +2592,9 @@ def _controller_result_reconciliation_detail(
     current_detail: str,
 ) -> str:
     if result.get("controller_reconciliation_status") == "required":
+        result_detail = result.get("controller_reconciliation_detail")
+        if isinstance(result_detail, str) and result_detail.strip():
+            return result_detail.strip()
         return current_detail
     if result.get("candidate_ref_cleanup_status") == "failed":
         return "retryable:candidate_ref_cleanup_failed"

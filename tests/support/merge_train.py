@@ -75,6 +75,13 @@ class _FakeMergeTrainGitHubClient:
             else LegacyMergeTrainEffectExecutor(client=cast(GitHubMergeTrainClient, self))
         )
 
+    def read_merge_train_snapshot(
+        self, *, repository: str, base_branch: str
+    ) -> MergeTrainDryRunSnapshot:
+        return GitHubMergeTrainClient.read_merge_train_snapshot(
+            cast(GitHubMergeTrainClient, self), repository=repository, base_branch=base_branch
+        )
+
     def add_pull_request_label(
         self, *, repository: str, pull_request_number: int, label: str
     ) -> None:

@@ -148,3 +148,43 @@ for (const withSession of [false, true]) {
     await expect(page.getByText("Agent disconnected. All of its sessions are revoked.", { exact: true })).toBeVisible();
   });
 }
+
+
+test("ordinary job link shows uncertain partial work without offering a repeat action", async ({ page }) => {
+  let refreshed = false;
+  const mutations: string[] = [];
+  await page.route("**/v1/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (route.request().method() !== "GET") mutations.push(path);
+    if (path === "/v1/auth/session") {
+      await route.fulfill({ json: { status: "ok", csrf_token: "test-csrf", identity: {
+        provider: "github", login: "operator", github_id: 1001, name: "Operator",
+        email: "operator@example.invalid", organizations: [], teams: [], role: "admin",
+      } } });
+    } else if (path === "/v1/ordinary-agent-jobs/browser-agent/browser-job") {
+      await route.fulfill({ json: {
+        schema_version: 1, request_id: "browser-job", principal_id: "browser-agent", session_id: "browser-session",
+        target: { repository_id: 123, repository: "example/project", base_branch: "main" },
+        pull_request_numbers: [12, 13], expires_at: 1790000000, continuation_expires_at: null,
+        cancellation_requested: true, unresolved_effects: refreshed ? 0 : 1,
+        status: refreshed ? "partially_completed" : "reconciliation_required",
+        next_due_at: null, reason_code: null, completed_effects: 1, total_effects: 2,
+      } });
+    } else if (path === "/v1/products") {
+      await route.fulfill({ json: { status: "ok", products: [] } });
+    } else {
+      await route.fulfill({ status: 404, json: { error: { message: "Unexpected request" } } });
+    }
+  });
+  await page.goto("/ui/engineering/privileged-operations?principal_id=browser-agent&request_id=browser-job");
+  await expect(page.getByRole("heading", { name: "Checking an uncertain result" })).toBeVisible();
+  await expect(page.getByText("1 action result still needs verification.", { exact: false })).toBeVisible();
+  await expect(page.getByText("Cancellation requested.", { exact: false })).toBeVisible();
+  await expect(page.getByRole("button", { name: /approve|merge|retry|repeat/i })).toHaveCount(0);
+  refreshed = true;
+  await page.getByRole("button", { name: "Refresh work" }).click();
+  await expect(page.getByRole("heading", { name: "Partly completed" })).toBeVisible();
+  expect(mutations).toEqual([]);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth)).toBe(false);
+  await page.screenshot({ path: `../tmp/browser-smoke/ordinary-job-${test.info().project.name}.png`, fullPage: true });
+});

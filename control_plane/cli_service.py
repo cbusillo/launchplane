@@ -637,6 +637,7 @@ def service_privileged_operation_workers_run(
             schema_probe_succeeded = True
 
         while not stop_event.is_set():
+            cycle_started = time.monotonic()
             try:
                 if store is None:
                     store = cast(
@@ -667,7 +668,7 @@ def service_privileged_operation_workers_run(
                     record_store=store,
                     limit=limit,
                     state=cleanup_state,
-                    now_monotonic=time.monotonic(),
+                    now_monotonic=cycle_started,
                     error_backoff_seconds=error_backoff_seconds,
                 )
                 if cleanup.status == "succeeded":
@@ -761,7 +762,9 @@ def service_privileged_operation_workers_run(
                     sort_keys=True,
                 )
             )
-            stop_event.wait(poll_seconds)
+            # Work time consumes the poll interval; a long bounded stage must
+            # not add another full sleep before the next heartbeat-producing poll.
+            stop_event.wait(max(0.0, poll_seconds - (time.monotonic() - cycle_started)))
         stopped_cleanly = True
     finally:
         signal.signal(signal.SIGTERM, previous_sigterm)

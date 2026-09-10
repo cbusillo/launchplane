@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from control_plane.contracts.ordinary_agent_effect import OrdinaryAgentProviderQuotaKey
+from control_plane.ordinary_agent_provider_wait import OrdinaryAgentProviderWaitWriter
+from control_plane.ordinary_agent_quota_transport import observed_ordinary_api_request
+
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -43,6 +47,13 @@ class OrdinaryAgentCustodyUnavailable(OrdinaryAgentCustodyError):
     def __init__(self, message: str, *, attempt: OrdinaryAgentCustodyIssueAttempt) -> None:
         super().__init__(message)
         self.attempt = attempt
+
+
+class OrdinaryAgentCustodyCleanupUnknown(OrdinaryAgentCustodyError):
+    """A token may remain usable after a redacted revoke failure."""
+
+    def __init__(self) -> None:
+        super().__init__("Ordinary-agent provider credential cleanup outcome is unknown.")
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,6 +186,8 @@ def ordinary_agent_provider_token_lease(
     api_request: GitHubApiRequest = github_api_request,
     monotonic: Callable[[], float] = time.monotonic,
     utc_now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+    before_token_mint: Callable[[int, int], None] | None = None,
+    quota_writer: OrdinaryAgentProviderWaitWriter | None = None,
 ) -> Iterator[OrdinaryAgentProviderTokenLease]:
     idempotency_digest = _sha256_text(idempotency_key)
     request_digest = _sha256_text(
@@ -226,7 +239,28 @@ def ordinary_agent_provider_token_lease(
         method = kwargs.get("method", "GET")
         if method == "POST" and isinstance(path, str) and path.endswith("/access_tokens"):
             dispatch_attempted = True
-        return api_request(**kwargs)
+        if quota_writer is None:
+            return api_request(**kwargs)
+        return observed_ordinary_api_request(
+            api_request=api_request,
+            quota_key=OrdinaryAgentProviderQuotaKey(
+                authority_kind="app", authority_id=candidate.expected_app_id, resource_class="core"
+            ),
+            writer=quota_writer,
+            utc_now=utc_now,
+            **kwargs,
+        )
+
+    def validate_before_mint(app_id: int, installation_id: int) -> None:
+        if (
+            candidate.expected_installation_id is not None
+            and installation_id != candidate.expected_installation_id
+        ):
+            raise OrdinaryAgentCustodyError(
+                "Ordinary-agent provider installation differs from inspected custody."
+            )
+        if before_token_mint is not None:
+            before_token_mint(app_id, installation_id)
 
     token: GitHubAppInstallationToken | None = None
     issued = False
@@ -239,6 +273,7 @@ def ordinary_agent_provider_token_lease(
                 effect_profile=candidate.effect_profile,
                 api_request=bounded_request,
                 now=utc_now(),
+                before_token_mint=validate_before_mint,
             )
         except Exception:
             if dispatch_attempted:
@@ -277,10 +312,27 @@ def ordinary_agent_provider_token_lease(
     finally:
         if token is not None:
             try:
-                revoke_installation_token(installation_token=token, api_request=api_request)
-            except Exception:
+
+                def revoke_request(**kwargs: object) -> object:
+                    if quota_writer is None:
+                        return api_request(**kwargs)
+                    return observed_ordinary_api_request(
+                        api_request=api_request,
+                        quota_key=OrdinaryAgentProviderQuotaKey(
+                            authority_kind="installation",
+                            authority_id=token.installation_id,
+                            resource_class="core",
+                        ),
+                        writer=quota_writer,
+                        utc_now=utc_now,
+                        **kwargs,
+                    )
+
+                revoke_installation_token(installation_token=token, api_request=revoke_request)
+            except Exception as error:
                 if issued:
                     record_store.mark_ordinary_agent_custody_cleanup_unknown(attempt_id=attempt_id)
+                    raise OrdinaryAgentCustodyCleanupUnknown() from error
                 else:
                     record_store.mark_ordinary_agent_custody_issue_unknown(attempt_id=attempt_id)
                 raise

@@ -7,6 +7,7 @@ ordinary proposals; they never accept an ordinary bearer or an asserted admin ID
 
 from __future__ import annotations
 
+from control_plane.contracts.ordinary_agent_effect import OrdinaryAgentJobView
 from control_plane.contracts.ordinary_agent_lifecycle import (
     OrdinaryAgentApprovedEnrollmentIntent,
 )
@@ -135,4 +136,20 @@ def disconnect_ordinary_agent_principal(
     )
     return store._disconnect_ordinary_agent_principal(
         human=human, principal_id=principal_id, source_event_id=source_event_id
+    )
+
+
+def read_human_ordinary_agent_job(
+    *,
+    store: PostgresRecordStore,
+    manager: HumanSessionManager,
+    cookie_header: str,
+    principal_id: str,
+    request_id: str,
+) -> OrdinaryAgentJobView:
+    human = manager.read_cookie_without_renewal(cookie_header)
+    if human is None or not manager.authorization_claims_are_current(human):
+        raise OrdinaryAgentSessionAdmissionDenied("administrator_authentication_failed")
+    return store._read_human_ordinary_agent_job(
+        human=human, principal_id=principal_id, request_id=request_id
     )

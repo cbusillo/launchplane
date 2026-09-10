@@ -1,0 +1,319 @@
+"""Recover proven landing progress without issuing another provider operation."""
+
+from collections.abc import Callable
+from datetime import datetime, timezone
+from typing import Protocol
+
+from control_plane.contracts.merge_train_batch import (
+    MergeTrainBatchCandidateRecord,
+    MergeTrainBatchLandingEntry,
+    MergeTrainBatchLandingPlanRecord,
+)
+from control_plane.contracts.ordinary_agent_effect import (
+    OrdinaryAgentEffectStore,
+    OrdinaryAgentEffectHistory,
+    OrdinaryAgentKnownNotDispatchedOutcome,
+    MAX_ORDINARY_LANDING_ATTEMPTS_PER_ENTRY,
+    MAX_SEMANTIC_DISPATCH_ATTEMPTS_PER_EFFECT,
+    MAX_CUSTODY_MINT_ATTEMPTS_PER_EFFECT,
+    MAX_TOTAL_CUSTODY_MINT_ATTEMPTS_PER_EFFECT,
+    OrdinaryAgentLandingPreparation,
+    OrdinaryAgentLandingStore,
+    OrdinaryAgentPullRequestObservation,
+    OrdinaryAgentRefObservation,
+)
+from control_plane.contracts.ordinary_agent_session_lifecycle import (
+    OrdinaryAgentFiniteRequestRecord,
+    OrdinaryAgentJobBinding,
+)
+from control_plane.contracts.ordinary_agent_noop import OrdinaryAgentNoOpLandingStore
+from control_plane.contracts.ordinary_agent_snapshot import OrdinaryAgentLandingEvidence
+from control_plane.merge_admission import GuardedMergeAdmission, MergeAdmissionDeniedError
+from control_plane.ordinary_agent_effect_recovery import recover_ordinary_effect
+from control_plane.ordinary_agent_landing_execution import OrdinaryLandingRecoveryRequired
+from control_plane.ordinary_agent_session_lifecycle import OrdinaryAgentSessionAdmissionDenied
+
+
+class OrdinaryLandingRecoveryStore(
+    OrdinaryAgentLandingStore, OrdinaryAgentNoOpLandingStore, OrdinaryAgentEffectStore, Protocol
+):
+    pass
+
+
+class OrdinaryLandingProgressReloadRequired(RuntimeError):
+    """The no-op transaction already committed progress; reload it next poll."""
+
+
+class OrdinaryLandingRetryRequired(RuntimeError):
+    """Exact history permits requesting a fresh, fully gated preparation."""
+
+    def __init__(self, predecessor_preparation_id: str):
+        self.predecessor_preparation_id = predecessor_preparation_id
+        super().__init__("Landing requires a fresh admission before another dispatch")
+
+
+def ordinary_landing_history_allows_retry(history: OrdinaryAgentEffectHistory) -> bool:
+    """A pre-request deadline is the only landing outcome that permits retry."""
+    record = history.effect
+    return (
+        record.command.kind == "pull_request_landing"
+        and record.state == "not_dispatched"
+        and history.child is not None
+        and history.child.semantic_ordinal == record.dispatch_count
+        and isinstance(history.outcome, OrdinaryAgentKnownNotDispatchedOutcome)
+        and history.outcome.reason == "provider_attempt_deadline"
+        and not history.reconciliations
+        and record.dispatch_count < MAX_SEMANTIC_DISPATCH_ATTEMPTS_PER_EFFECT
+        and record.dispatch_custody_count < MAX_CUSTODY_MINT_ATTEMPTS_PER_EFFECT
+        and record.dispatch_custody_count + record.reconciliation_custody_count
+        < MAX_TOTAL_CUSTODY_MINT_ATTEMPTS_PER_EFFECT
+    )
+
+
+def recover_ordinary_landing_entry(
+    *,
+    store: OrdinaryLandingRecoveryStore,
+    request: OrdinaryAgentFiniteRequestRecord,
+    preparation_id: str,
+    candidate_record: MergeTrainBatchCandidateRecord,
+    landing_plan_record: MergeTrainBatchLandingPlanRecord,
+    guard_factory: Callable[
+        [OrdinaryAgentLandingPreparation, OrdinaryAgentLandingEvidence], GuardedMergeAdmission
+    ],
+    checkpoint: Callable[[MergeTrainBatchLandingEntry], None],
+) -> MergeTrainBatchLandingEntry:
+    """Historical proof may finish progress; it never renews admission or dispatch.
+
+    The supplied checkpoint owns current controller authority and exact successor
+    persistence, just as in fresh landing. Uncertain history is left to a separate
+    reconciliation poll. The retry directive grants no dispatch: its caller must
+    reserve a fresh preparation and repeat the joined admission gates.
+    """
+    preparation = store.resolve_latest_ordinary_landing_preparation(
+        root_preparation_id=preparation_id
+    )
+    preparation_id = preparation.preparation_id
+    binding = OrdinaryAgentJobBinding(
+        request_id=request.request_id,
+        binding_revision=request.binding_revision,
+        scope_sha256=request.scope_sha256,
+    )
+    if (
+        preparation.request_id != request.request_id
+        or preparation.binding_revision != request.binding_revision
+        or preparation.scope_sha256 != request.scope_sha256
+        or preparation.target != request.target
+        or candidate_record.ordinary_job_binding != binding
+        or landing_plan_record.ordinary_job_binding != binding
+        or preparation.candidate_record_id != candidate_record.record_id
+    ):
+        raise OrdinaryAgentSessionAdmissionDenied("landing_history_binding_conflict")
+    finalization = store.read_ordinary_landing_finalization(preparation_id=preparation_id)
+    if finalization is None:
+        no_op = store.read_ordinary_no_op_landing_finalization(preparation_id=preparation_id)
+        if no_op is not None:
+            binding = OrdinaryAgentJobBinding(
+                request_id=request.request_id,
+                binding_revision=request.binding_revision,
+                scope_sha256=request.scope_sha256,
+            )
+            preparation = no_op.preparation
+            if (
+                preparation.preparation_id != preparation_id
+                or preparation.request_id != request.request_id
+                or preparation.binding_revision != request.binding_revision
+                or preparation.scope_sha256 != request.scope_sha256
+                or preparation.target != request.target
+                or preparation.state != "consumed"
+                or preparation.effect_id is not None
+                or preparation.candidate_record_id != candidate_record.record_id
+                or candidate_record.ordinary_job_binding != binding
+                or landing_plan_record.ordinary_job_binding != binding
+                or no_op.successor.ordinary_job_binding != binding
+                or landing_plan_record.record_id
+                not in {preparation.landing_plan_record_id, no_op.successor.record_id}
+                or no_op.outcome.reason != "already_contained_no_provider_effect"
+            ):
+                raise OrdinaryAgentSessionAdmissionDenied("landing_history_binding_conflict")
+            # No callback: the exact successor, admission and outcome committed
+            # together. Constructing another checkpoint would duplicate progress.
+            raise OrdinaryLandingProgressReloadRequired()
+        if (
+            preparation.state == "terminal"
+            and preparation.reason_code
+            in {"provider_wait", "provider_attempt_deadline", "evidence_denied"}
+            and preparation.effect_id is None
+            and preparation.attempt_ordinal < MAX_ORDINARY_LANDING_ATTEMPTS_PER_ENTRY
+            and preparation.landing_plan_record_id == landing_plan_record.record_id
+            and preparation.landing_plan_sha256
+            == landing_plan_record.landing_plan.landing_plan_sha256
+            and preparation.entry in landing_plan_record.landing_plan.entries
+            and store.read_ordinary_agent_custody_issue_attempt(
+                preparation.custody_attempt_id
+            ).state
+            == "closed"
+        ):
+            raise OrdinaryLandingRetryRequired(preparation_id)
+        raise OrdinaryLandingRecoveryRequired(preparation_id)
+    preparation = finalization.preparation
+    binding = OrdinaryAgentJobBinding(
+        request_id=request.request_id,
+        binding_revision=request.binding_revision,
+        scope_sha256=request.scope_sha256,
+    )
+    plan = landing_plan_record.landing_plan
+    if (
+        preparation.preparation_id != preparation_id
+        or preparation.state != "consumed"
+        or preparation.request_id != request.request_id
+        or preparation.binding_revision != request.binding_revision
+        or preparation.scope_sha256 != request.scope_sha256
+        or preparation.target != request.target
+        or candidate_record.ordinary_job_binding != binding
+        or landing_plan_record.ordinary_job_binding != binding
+        or preparation.candidate_record_id != candidate_record.record_id
+        or preparation.landing_plan_record_id != landing_plan_record.record_id
+        or preparation.landing_plan_sha256 != plan.landing_plan_sha256
+        or candidate_record.candidate.candidate_sha256 != plan.candidate_sha256
+        or preparation.entry not in plan.entries
+    ):
+        raise OrdinaryAgentSessionAdmissionDenied("landing_history_binding_conflict")
+    history = store.read_ordinary_agent_effect_history(effect_id=finalization.effect.effect_id)
+    if (
+        history.effect.request_id != request.request_id
+        or history.effect.binding_revision != request.binding_revision
+        or history.effect.scope_sha256 != request.scope_sha256
+        or history.effect.target != request.target
+        or history.effect.command != finalization.effect.command
+        or history.effect.command_sha256 != finalization.effect.command_sha256
+        or history.child != finalization.child
+        or history.effect.command.kind != "pull_request_landing"
+    ):
+        raise OrdinaryAgentSessionAdmissionDenied("landing_history_binding_conflict")
+    command = history.effect.command.effect
+    if (
+        command.pull_request_number != preparation.entry.pull_request_number
+        or command.head_sha != preparation.entry.expected_head_sha
+        or command.rolling_base_sha != preparation.expected_base_sha
+    ):
+        raise OrdinaryAgentSessionAdmissionDenied("landing_history_binding_conflict")
+    child = history.child
+    if child is None or child.semantic_ordinal != history.effect.dispatch_count:
+        raise OrdinaryAgentSessionAdmissionDenied("landing_history_binding_conflict")
+    if child.admission_id is None:
+        if (
+            child.semantic_ordinal != 1
+            or command.admission_id != finalization.admission.admission_id
+        ):
+            raise OrdinaryAgentSessionAdmissionDenied("landing_history_binding_conflict")
+    elif (
+        child.admission_id != finalization.admission.admission_id
+        or child.admission_binding_sha256 != finalization.admission.admission_binding_sha256
+    ):
+        raise OrdinaryAgentSessionAdmissionDenied("landing_history_binding_conflict")
+    if (
+        ordinary_landing_history_allows_retry(history)
+        and store.read_ordinary_agent_custody_issue_attempt(preparation.custody_attempt_id).state
+        == "closed"
+    ):
+        if preparation.attempt_ordinal >= MAX_ORDINARY_LANDING_ATTEMPTS_PER_ENTRY:
+            raise OrdinaryAgentSessionAdmissionDenied("effect_attempts_exhausted")
+        raise OrdinaryLandingRetryRequired(preparation_id)
+    recovery = recover_ordinary_effect(history)
+    if (
+        recovery.disposition != "replay"
+        or recovery.completed is None
+        or history.effect.state not in {"completed", "completed_observed"}
+    ):
+        raise OrdinaryLandingRecoveryRequired(preparation_id)
+    completed = recovery.completed
+    proof = completed.proof
+    proof_tree = (
+        proof.tree_sha
+        if isinstance(proof, OrdinaryAgentRefObservation)
+        else proof.merge_commit_tree_sha
+        if isinstance(proof, OrdinaryAgentPullRequestObservation)
+        else None
+    )
+    if (
+        not isinstance(proof, (OrdinaryAgentPullRequestObservation, OrdinaryAgentRefObservation))
+        or not completed.result_sha
+        or completed.no_op
+        or history.effect.dispatch_count < 1
+        or preparation.evidence is None
+        or proof_tree != preparation.expected_merge_tree_sha
+    ):
+        raise OrdinaryAgentSessionAdmissionDenied("landing_response_unproven")
+    entry = preparation.entry.model_copy(
+        update={
+            "status": "merged",
+            "landed_head_sha": preparation.entry.expected_head_sha,
+            "landed_head_tree_sha": preparation.entry.expected_head_tree_sha,
+            "merge_commit_sha": completed.result_sha,
+            "merge_commit_tree_sha": preparation.expected_merge_tree_sha,
+            "recorded_rolling_base_sha": preparation.expected_base_sha,
+            "recorded_rolling_base_tree_sha": preparation.expected_base_tree_sha,
+        }
+    )
+    guard = guard_factory(preparation, preparation.evidence)
+    # Resolve the adapter's current history scope before interpreting an empty
+    # outcome list. A filtered-out historical admission is not an absent outcome.
+    try:
+        admission = guard.record_store.read_merge_admission_record(
+            finalization.admission.admission_id
+        )
+    except MergeAdmissionDeniedError as error:
+        raise OrdinaryAgentSessionAdmissionDenied("landing_history_binding_conflict") from error
+    if admission != finalization.admission:
+        raise OrdinaryAgentSessionAdmissionDenied("landing_history_binding_conflict")
+    # The outcome reader orders by descending observation_sequence; the adapter
+    # preserves that order while applying scope and limit.
+    prior = guard.record_store.list_merge_landing_outcome_records(
+        admission_id=finalization.admission.admission_id,
+        limit=1,
+    )
+    if prior and prior[0].status == "landed":
+        outcome = prior[0]
+        if (
+            outcome.admission_binding_sha256 != finalization.admission.admission_binding_sha256
+            or outcome.merge_commit_sha != entry.merge_commit_sha
+            or outcome.merge_commit_tree_sha != entry.merge_commit_tree_sha
+            or outcome.observed_pull_request_head_sha != entry.landed_head_sha
+            or outcome.observed_pull_request_head_tree_sha != entry.landed_head_tree_sha
+            or not outcome.provider_effect_attempted
+            or not outcome.exact_landing_confirmed
+        ):
+            raise OrdinaryAgentSessionAdmissionDenied("landing_response_conflict")
+    elif prior and prior[0].status != "reconcile_required":
+        raise OrdinaryAgentSessionAdmissionDenied("landing_response_conflict")
+    else:
+        # Fresh dispatch observes the base at the merge commit. Reconciliation
+        # may observe it farther ahead and must retain that exact base witness.
+        if isinstance(proof, OrdinaryAgentRefObservation):
+            observed_base_sha = completed.result_sha
+            observed_base_tree_sha = preparation.expected_merge_tree_sha
+        elif (
+            proof.base_contains_merge_commit is True
+            and proof.observed_base_sha
+            and proof.observed_base_tree_sha
+        ):
+            observed_base_sha = proof.observed_base_sha
+            observed_base_tree_sha = proof.observed_base_tree_sha
+        else:
+            raise OrdinaryLandingRecoveryRequired(preparation_id)
+        observed_at = (
+            history.reconciliations[-1].observed_at
+            if history.reconciliations
+            else finalization.child.dispatch_checkpoint_at
+        )
+        guard.record_landed(
+            admission=finalization.admission,
+            entry=entry,
+            observed_base_sha=observed_base_sha,
+            observed_base_tree_sha=observed_base_tree_sha,
+            base_contains_merge_commit=True,
+            provider_effect_attempted=True,
+            observed_at=datetime.fromtimestamp(observed_at, timezone.utc).isoformat(),
+        )
+    checkpoint(entry)
+    return entry

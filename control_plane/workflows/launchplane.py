@@ -44,6 +44,8 @@ from control_plane.contracts.product_profile_record import (
 )
 from control_plane.contracts.promotion_record import ReleaseStatus
 from control_plane.contracts.runtime_identity import RuntimeIdentity
+from control_plane.github_response_headers import GitHubResponseHeadersObserver
+from control_plane.github_response_headers import notify_github_quota_response_headers
 from control_plane.workflows.ship import utc_now_timestamp
 
 RECENT_GENERATION_LIMIT = 3
@@ -979,7 +981,12 @@ def delete_github_issue_comment(*, owner: str, repo: str, comment_id: int, token
 
 
 def github_api_request(
-    *, path: str, token: str, method: str = "GET", body: dict[str, object] | None = None
+    *,
+    path: str,
+    token: str,
+    method: str = "GET",
+    body: dict[str, object] | None = None,
+    response_headers_observer: GitHubResponseHeadersObserver | None = None,
 ) -> object:
     request_body = None
     headers = {
@@ -999,6 +1006,10 @@ def github_api_request(
     try:
         with urlopen(request, timeout=15) as response:
             response_text = response.read().decode("utf-8")
+            notify_github_quota_response_headers(
+                response_headers_observer,
+                getattr(response, "headers", None),
+            )
             return json.loads(response_text) if response_text.strip() else None
     except (HTTPError, URLError, OSError, json.JSONDecodeError) as exc:
         raise click.ClickException(f"GitHub API request failed for {path}: {exc}") from exc

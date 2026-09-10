@@ -22,12 +22,17 @@ ORDINARY_AGENT_ENROLLMENT_MUTATION_ROUTE = (
 )
 
 LifecycleRecordStatus = Literal["active", "superseded", "revoked"]
-OrdinaryAgentEffectProfile = Literal["guarded_merge", "head_refresh", "pr_disposition"]
+OrdinaryAgentEffectProfile = Literal[
+    "guarded_merge", "head_refresh", "merge_train_landing", "merge_train_snapshot", "pr_disposition"
+]
 OrdinaryAgentProviderPermissionName = Literal[
+    "administration",
+    "checks",
     "metadata",
     "contents",
     "pull_requests",
     "issues",
+    "statuses",
 ]
 OrdinaryAgentProviderPermissionAccess = Literal["read", "write"]
 OrdinaryAgentEnrollmentCompareWriteStatus = Literal[
@@ -111,6 +116,10 @@ class OrdinaryAgentCredentialCustodyCandidate(StrictFrozenModel):
     target: OrdinaryAgentTarget
     purpose: Literal["guarded_merge"] = "guarded_merge"
     github_app_id: int = Field(gt=0, le=2**63 - 1)
+    # Omit absent legacy identity so existing canonical custody digests stay valid.
+    github_installation_id: int | None = Field(
+        default=None, gt=0, le=2**63 - 1, exclude_if=lambda value: value is None
+    )
     managed_secret: OrdinaryAgentManagedSecretBinding
     effect_profiles: tuple[OrdinaryAgentEffectProfile, ...] = Field(min_length=1)
     permissions: tuple[OrdinaryAgentProviderPermission, ...] = Field(min_length=1)
@@ -305,6 +314,10 @@ class OrdinaryAgentCredentialCustodyRecord(StrictFrozenModel):
     target: OrdinaryAgentTarget
     purpose: Literal["guarded_merge"]
     github_app_id: int = Field(gt=0, le=2**63 - 1)
+    # Omit absent legacy identity so existing canonical custody digests stay valid.
+    github_installation_id: int | None = Field(
+        default=None, gt=0, le=2**63 - 1, exclude_if=lambda value: value is None
+    )
     managed_secret: OrdinaryAgentManagedSecretBinding
     effect_profiles: tuple[OrdinaryAgentEffectProfile, ...]
     permissions: tuple[OrdinaryAgentProviderPermission, ...]

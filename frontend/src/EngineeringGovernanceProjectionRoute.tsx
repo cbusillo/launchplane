@@ -399,23 +399,25 @@ function GovernanceAdmissionFacet({ projection }: { projection: GovernanceProjec
 
 function GovernanceLandingFacet({ projection }: { projection: GovernanceProjection }) {
   const landing = projection.landing_outcome;
+  const alreadyContained = landing.record?.reason === "already_contained_no_provider_effect";
   return (
     <section className="governance-facet" aria-label="Separate landing outcome">
       <GovernanceFacetHeader
         eyebrow="Provider observation · durable"
         label="Landing outcome"
         status={landingTone(landing.status)}
-        value={`${humanize(landing.status)} · ${humanize(landing.target_status)} target`}
+        value={`${alreadyContained ? "Already contained" : humanize(landing.status)} · ${humanize(landing.target_status)} target`}
       />
       <p className="governance-authority-note">
         Landed, rejected, and reconcile required are independent observations. Missing
         outcome evidence is never interpreted as landed.
+        {alreadyContained ? " The change was already contained in the base; Launchplane performed no merge for this step." : null}
       </p>
       {landing.record ? (
         <dl className="governance-meta-grid">
           <div><dt>Reason</dt><dd><code>{landing.record.reason}</code></dd></div>
           <div><dt>Observed</dt><dd>{formatTime(landing.record.observed_at)}</dd></div>
-          <div><dt>Merge commit</dt><dd><code>{shortSha(landing.record.merge_commit_sha)}</code></dd></div>
+          <div><dt>{alreadyContained ? "Unchanged base" : "Merge commit"}</dt><dd><code>{shortSha(landing.record.merge_commit_sha)}</code></dd></div>
         </dl>
       ) : null}
     </section>

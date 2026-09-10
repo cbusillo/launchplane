@@ -37,6 +37,8 @@ from control_plane.contracts.merge_train_structural_provenance import (
 from control_plane.github_payload import json_object
 from control_plane.github_payload import required_positive_int
 from control_plane.github_payload import required_string_text
+from control_plane.github_response_headers import GitHubResponseHeadersObserver
+from control_plane.github_response_headers import notify_github_quota_response_headers
 from control_plane.merge_train import MergeTrainCheckStatus
 from control_plane.merge_train import MergeTrainDryRunSnapshot
 from control_plane.merge_train import MergeTrainMergeableState
@@ -66,11 +68,18 @@ class MergeTrainGitHubTransport(Protocol):
 
 
 class UrllibMergeTrainGitHubTransport:
-    def __init__(self, *, token: str, api_base_url: str = "https://api.github.com") -> None:
+    def __init__(
+        self,
+        *,
+        token: str,
+        api_base_url: str = "https://api.github.com",
+        response_headers_observer: GitHubResponseHeadersObserver | None = None,
+    ) -> None:
         self.token = _required_value(token, "GitHub token is required.")
         self.api_base_url = _required_value(
             api_base_url, "GitHub API base URL is required."
         ).rstrip("/")
+        self.response_headers_observer = response_headers_observer
 
     def request(self, *, method: str, path: str, body: dict[str, object] | None = None) -> object:
         request_body = None
@@ -91,6 +100,10 @@ class UrllibMergeTrainGitHubTransport:
         try:
             with urlopen(request, timeout=15) as response:
                 response_text = response.read().decode("utf-8")
+                notify_github_quota_response_headers(
+                    self.response_headers_observer,
+                    getattr(response, "headers", None),
+                )
                 return json.loads(response_text) if response_text.strip() else None
         except HTTPError as error:
             raise _github_http_error(path=path, status_code=error.code, error=error) from error
@@ -111,6 +124,14 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
     ) -> None:
         self.transport = transport
         self._effect_executor = effect_executor
+
+    def read_merge_train_snapshot(
+        self, *, repository: str, base_branch: str
+    ) -> MergeTrainDryRunSnapshot:
+        """Read planning evidence through the client-owned provider boundary."""
+        return GitHubMergeTrainSnapshotReader(transport=self.transport).read_merge_train_snapshot(
+            repository=repository, base_branch=base_branch
+        )
 
     @property
     def semantic_effect_executor(self) -> MergeTrainSemanticEffectExecutor:
@@ -1307,8 +1328,22 @@ class LegacyMergeTrainEffectExecutor:
             return CandidateHeadMergeOutcome(result_sha=None)
         if not isinstance(payload, dict):
             raise MergeTrainGitHubError("GitHub merge response must be a JSON object.")
+        tree = payload.get("tree")
+        parents = payload.get("parents")
+        result_tree_sha = str(tree.get("sha") or "").strip() if isinstance(tree, dict) else ""
+        parent_shas = (
+            tuple(
+                str(parent.get("sha") or "").strip()
+                for parent in parents
+                if isinstance(parent, dict) and str(parent.get("sha") or "").strip()
+            )
+            if isinstance(parents, list)
+            else ()
+        )
         return CandidateHeadMergeOutcome(
-            result_sha=_required_text(payload.get("sha"), "GitHub merge response requires sha.")
+            result_sha=_required_text(payload.get("sha"), "GitHub merge response requires sha."),
+            result_tree_sha=result_tree_sha or None,
+            parent_shas=parent_shas,
         )
 
     def refresh_pull_request_head(self, effect: PullRequestHeadRefreshEffect) -> None:

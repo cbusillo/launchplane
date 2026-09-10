@@ -11,6 +11,9 @@ from control_plane.contracts.ordinary_agent import OrdinaryAgentTarget
 CustodyEffectProfile = Literal[
     "guarded_merge",
     "head_refresh",
+    "merge_train_landing",
+    "merge_train_snapshot",
+    "effect_reconciliation",
     "close_pull_request",
     "comment_pull_request",
     "label_pull_request",
@@ -46,6 +49,10 @@ class OrdinaryAgentCustodyCandidate(StrictCustodyModel):
     secret_binding_id: str = Field(min_length=1, max_length=256)
     secret_version_id: str = Field(min_length=1, max_length=256)
     expected_app_id: int = Field(gt=0, le=2**63 - 1)
+    # Expected identity is not evidence of an issued token; omit for legacy digests.
+    expected_installation_id: int | None = Field(
+        default=None, gt=0, le=2**63 - 1, exclude_if=lambda value: value is None
+    )
     effect_profile: CustodyEffectProfile
 
     @model_validator(mode="after")
@@ -73,6 +80,10 @@ class OrdinaryAgentCustodyIssueAttempt(StrictCustodyModel):
     secret_binding_id: str = Field(min_length=1, max_length=256)
     secret_version_id: str = Field(min_length=1, max_length=256)
     expected_app_id: int = Field(gt=0, le=2**63 - 1)
+    # Expected identity is not evidence of an issued token; omit for legacy digests.
+    expected_installation_id: int | None = Field(
+        default=None, gt=0, le=2**63 - 1, exclude_if=lambda value: value is None
+    )
     effect_profile: CustodyEffectProfile
     requested_permissions: tuple[str, ...] = Field(min_length=1)
     state: CustodyIssueState

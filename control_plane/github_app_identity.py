@@ -34,6 +34,27 @@ _ORDINARY_AGENT_EFFECT_PERMISSION_CEILINGS: dict[str, dict[str, str]] = {
         "metadata": "read",
         "pull_requests": "write",
     },
+    "merge_train_snapshot": {
+        "administration": "read",
+        "checks": "read",
+        "contents": "read",
+        "metadata": "read",
+        "pull_requests": "read",
+        "statuses": "read",
+    },
+    "effect_reconciliation": {
+        "contents": "read",
+        "metadata": "read",
+        "pull_requests": "read",
+    },
+    "merge_train_landing": {
+        "administration": "read",
+        "checks": "read",
+        "contents": "write",
+        "metadata": "read",
+        "pull_requests": "read",
+        "statuses": "read",
+    },
     "close_pull_request": {"metadata": "read", "pull_requests": "write"},
     "comment_pull_request": {"metadata": "read", "pull_requests": "write"},
     "label_pull_request": {"metadata": "read", "pull_requests": "write"},
@@ -133,6 +154,7 @@ def mint_ordinary_agent_installation_token(
     effect_profile: str,
     api_request: GitHubApiRequest = github_api_request,
     now: datetime | None = None,
+    before_token_mint: Callable[[int, int], None] | None = None,
 ) -> GitHubAppInstallationToken:
     ceiling = _ORDINARY_AGENT_EFFECT_PERMISSION_CEILINGS.get(effect_profile)
     if ceiling is None:
@@ -150,6 +172,11 @@ def mint_ordinary_agent_installation_token(
         permission_boundary_label="selected profile",
         api_request=api_request,
         now=now,
+        before_token_mint=before_token_mint,
+        # The mandatory JWT-authenticated installation lookup verifies this
+        # managed key against identity.app_id and requires the same app_id in
+        # its response. A separate /app request supplies no additional proof.
+        confirm_app_identity_endpoint=False,
     )
 
 
@@ -299,6 +326,8 @@ def _mint_repository_installation_token(
     permission_boundary_label: str,
     api_request: GitHubApiRequest,
     now: datetime | None,
+    before_token_mint: Callable[[int, int], None] | None = None,
+    confirm_app_identity_endpoint: bool = True,
 ) -> GitHubAppInstallationToken:
     normalized_repository = repository.strip()
     if normalized_repository.count("/") != 1:
@@ -319,20 +348,21 @@ def _mint_repository_installation_token(
         )
     except jwt.PyJWTError as error:
         raise GitHubAppIdentityError(f"{identity_label} private key is invalid.") from error
-    app_payload = json_object(
-        _github_api_request(api_request, path="/app", token=app_jwt),
-        "GitHub App identity response",
-        error_type=GitHubAppIdentityError,
-    )
-    if (
-        required_positive_int(
-            app_payload.get("id"),
-            "GitHub App identity response requires id.",
+    if confirm_app_identity_endpoint:
+        app_payload = json_object(
+            _github_api_request(api_request, path="/app", token=app_jwt),
+            "GitHub App identity response",
             error_type=GitHubAppIdentityError,
         )
-        != identity.app_id
-    ):
-        raise GitHubAppIdentityError("GitHub App identity does not match configured app id.")
+        if (
+            required_positive_int(
+                app_payload.get("id"),
+                "GitHub App identity response requires id.",
+                error_type=GitHubAppIdentityError,
+            )
+            != identity.app_id
+        ):
+            raise GitHubAppIdentityError("GitHub App identity does not match configured app id.")
     installation_payload = json_object(
         _github_api_request(
             api_request,
@@ -363,6 +393,8 @@ def _mint_repository_installation_token(
         allowed_permissions=allowed_installation_permissions,
         permission_boundary_label=permission_boundary_label,
     )
+    if before_token_mint is not None:
+        before_token_mint(identity.app_id, installation_id)
     token_payload = json_object(
         _github_api_request(
             api_request,

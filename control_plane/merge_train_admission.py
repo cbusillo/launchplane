@@ -163,6 +163,11 @@ def evaluate_merge_train_admission_from_store(
     controller_records = _list_active_controller_records(
         store=store, repository=repository, base_branch=base_branch
     )
+    controller_state = _latest_controller_state(
+        store=store,
+        repository=repository,
+        base_branch=base_branch,
+    )
     latest_run = store.latest_merge_train_run_record(
         repository=repository,
         base_branch=base_branch,
@@ -172,6 +177,7 @@ def evaluate_merge_train_admission_from_store(
         latest_run=latest_run,
         current_policy_key=current_policy_key,
         current_policy_sha256=current_policy_sha256,
+        controller_state=controller_state,
     )
     controller_decision = build_merge_train_controller_admission_decision(
         candidate_records=actionable_records.candidate_records,
@@ -203,6 +209,11 @@ def build_merge_train_controller_status_read_model(
     controller_records = _list_active_controller_records(
         store=store, repository=repository, base_branch=base_branch
     )
+    controller_state = _latest_controller_state(
+        store=store,
+        repository=repository,
+        base_branch=base_branch,
+    )
     latest_run = store.latest_merge_train_run_record(
         repository=repository,
         base_branch=base_branch,
@@ -212,6 +223,7 @@ def build_merge_train_controller_status_read_model(
         latest_run=latest_run,
         current_policy_key=current_policy_key,
         current_policy_sha256=current_policy_sha256,
+        controller_state=controller_state,
     )
     controller_decision = build_merge_train_controller_admission_decision(
         candidate_records=actionable_records.candidate_records,
@@ -226,11 +238,6 @@ def build_merge_train_controller_status_read_model(
         controller_decision=controller_decision,
         poll_interval_seconds=poll_interval_seconds,
         backoff_seconds=backoff_seconds,
-    )
-    controller_state = _latest_controller_state(
-        store=store,
-        repository=repository,
-        base_branch=base_branch,
     )
     return MergeTrainControllerStatusReadModel(
         repository=repository,
@@ -548,7 +555,12 @@ def _filter_actionable_controller_records(
     latest_run: MergeTrainRunRecord | None,
     current_policy_key: str,
     current_policy_sha256: str,
+    controller_state: MergeTrainControllerStateRecord | None,
 ) -> MergeTrainControllerRecords:
+    controller_records = _filter_ordinary_job_binding_records(
+        controller_records=controller_records,
+        controller_state=controller_state,
+    )
     if _latest_idle_run_supersedes_controller_records(
         latest_run=latest_run,
         controller_records=controller_records,
@@ -593,6 +605,35 @@ def _filter_actionable_controller_records(
         ),
     )
     return _filter_terminal_candidate_stop_records(policy_current_records)
+
+
+def _filter_ordinary_job_binding_records(
+    *,
+    controller_records: MergeTrainControllerRecords,
+    controller_state: MergeTrainControllerStateRecord | None,
+) -> MergeTrainControllerRecords:
+    active_binding = (
+        controller_state.ordinary_job_binding
+        if controller_state is not None and controller_state.status == "running"
+        else None
+    )
+    return MergeTrainControllerRecords(
+        candidate_records=tuple(
+            record
+            for record in controller_records.candidate_records
+            if record.ordinary_job_binding == active_binding
+        ),
+        landing_plan_records=tuple(
+            record
+            for record in controller_records.landing_plan_records
+            if record.ordinary_job_binding == active_binding
+        ),
+        stack_collapse_plan_records=tuple(
+            record
+            for record in controller_records.stack_collapse_plan_records
+            if record.ordinary_job_binding == active_binding
+        ),
+    )
 
 
 def _latest_idle_run_supersedes_controller_records(

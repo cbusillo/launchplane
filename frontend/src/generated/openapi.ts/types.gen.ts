@@ -930,7 +930,7 @@ export type MergeLandingOutcomeRecord = {
     provider_request_id: string;
     provider_status_code: number | null;
     pull_request_number: number;
-    reason: 'provider_and_git_confirmed' | 'provider_rejected' | 'reconciliation_confirmed_no_effect' | 'provider_transport_ambiguous' | 'process_interrupted' | 'lease_lost_after_admission' | 'landing_evidence_incomplete' | 'landing_evidence_contradicted';
+    reason: 'provider_and_git_confirmed' | 'already_contained_no_provider_effect' | 'provider_rejected' | 'dispatch_not_attempted' | 'reconciliation_confirmed_no_effect' | 'provider_transport_ambiguous' | 'process_interrupted' | 'lease_lost_after_admission' | 'landing_evidence_incomplete' | 'landing_evidence_contradicted';
     repository: string;
     schema_version: 1;
     source: string;
@@ -1140,6 +1140,7 @@ export type MergeTrainControllerStateRecord = {
     lease_acquired_at: string;
     lease_expires_at: string;
     lease_owner: string;
+    ordinary_job_binding: OrdinaryAgentJobBinding | null;
     policy_key: string;
     policy_sha256: string;
     reconciliation_detail: string;
@@ -1380,6 +1381,30 @@ export type OrdinaryAgentConnectionView = {
 
 export type OrdinaryAgentDisconnectRequest = {
     source_event_id: string;
+};
+
+export type OrdinaryAgentJobBinding = {
+    binding_revision: number;
+    request_id: string;
+    scope_sha256: string;
+};
+
+export type OrdinaryAgentJobView = {
+    cancellation_requested: boolean;
+    completed_effects: number;
+    continuation_expires_at: number | null;
+    expires_at: number;
+    next_due_at: number | null;
+    principal_id: string;
+    pull_request_numbers: Array<number>;
+    reason_code: string | null;
+    request_id: string;
+    schema_version: 1;
+    session_id: string;
+    status: 'pending' | 'running' | 'waiting' | 'blocked' | 'cancelled' | 'partially_completed' | 'completed' | 'reconciliation_required';
+    target: OrdinaryAgentTarget;
+    total_effects: number;
+    unresolved_effects: number;
 };
 
 export type OrdinaryAgentOperationClientResponse = {
@@ -3727,6 +3752,29 @@ export type ReadGovernanceProjectionResponses = {
 };
 
 export type ReadGovernanceProjectionResponse = ReadGovernanceProjectionResponses[keyof ReadGovernanceProjectionResponses];
+
+export type ReadHumanOrdinaryAgentJobData = {
+    body?: never;
+    path: {
+        principal_id: string;
+        request_id: string;
+    };
+    query?: never;
+    url: '/v1/ordinary-agent-jobs/{principal_id}/{request_id}';
+};
+
+export type ReadHumanOrdinaryAgentJobErrors = {
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type ReadHumanOrdinaryAgentJobError = ReadHumanOrdinaryAgentJobErrors[keyof ReadHumanOrdinaryAgentJobErrors];
+
+export type ReadHumanOrdinaryAgentJobResponses = {
+    200: OrdinaryAgentJobView;
+};
+
+export type ReadHumanOrdinaryAgentJobResponse = ReadHumanOrdinaryAgentJobResponses[keyof ReadHumanOrdinaryAgentJobResponses];
 
 export type ReadHumanOrdinaryAgentOperationData = {
     body?: never;

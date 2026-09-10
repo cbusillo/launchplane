@@ -14,6 +14,7 @@ from control_plane.contracts.ordinary_agent_custody import (
 )
 from control_plane.contracts.secret_record import SecretBinding, SecretRecord, SecretVersion
 from control_plane.ordinary_agent_custody import (
+    OrdinaryAgentCustodyCleanupUnknown,
     OrdinaryAgentCustodyError,
     OrdinaryAgentCustodyUnavailable,
     ordinary_agent_provider_token_lease,
@@ -112,6 +113,43 @@ class OrdinaryAgentCustodyTests(unittest.TestCase):
                 candidate=stale,
             )
 
+    def test_installation_drift_closes_unissued_attempt_without_minting(self) -> None:
+        candidate = _candidate().model_copy(update={"expected_installation_id": 76})
+        calls: list[dict[str, object]] = []
+
+        def api_request(**kwargs: object) -> object:
+            calls.append(kwargs)
+            return {
+                "id": 77,
+                "app_id": 42,
+                "permissions": {
+                    "administration": "read",
+                    "checks": "read",
+                    "contents": "write",
+                    "metadata": "read",
+                    "pull_requests": "write",
+                    "statuses": "read",
+                },
+            }
+
+        with self.assertRaisesRegex(OrdinaryAgentCustodyError, "differs from inspected"):
+            with ordinary_agent_provider_token_lease(
+                record_store=self.store,
+                secret_store=self.store,
+                candidate=candidate,
+                idempotency_key="installation-drift",
+                request_payload={},
+                api_request=api_request,
+            ):
+                self.fail("mismatched installation yielded a credential")
+        self.assertEqual([item.get("method", "GET") for item in calls], ["GET"])
+        attempt = self.store.read_ordinary_agent_custody_issue_attempt(
+            "custody_" + hashlib.sha256(b"installation-drift").hexdigest()
+        )
+        self.assertEqual((attempt.state, attempt.close_reason), ("closed", "not_dispatched"))
+        self.assertIsNone(attempt.installation_id)
+        self.assertEqual(attempt.expected_installation_id, 76)
+
     def test_token_stays_in_memory_and_confirmed_revoke_releases_fence(self) -> None:
         calls: list[dict[str, object]] = []
         now = datetime.now(timezone.utc)
@@ -119,16 +157,17 @@ class OrdinaryAgentCustodyTests(unittest.TestCase):
         def api_request(**kwargs: object) -> object:
             calls.append(kwargs)
             path = kwargs["path"]
-            if path == "/app":
-                return {"id": 42}
             if path == "/repos/example/repo/installation":
                 return {
                     "id": 77,
                     "app_id": 42,
                     "permissions": {
+                        "administration": "read",
+                        "checks": "read",
                         "contents": "write",
                         "metadata": "read",
                         "pull_requests": "write",
+                        "statuses": "read",
                     },
                 }
             if path == "/app/installations/77/access_tokens":
@@ -159,7 +198,7 @@ class OrdinaryAgentCustodyTests(unittest.TestCase):
         with ordinary_agent_provider_token_lease(
             record_store=self.store,
             secret_store=self.store,
-            candidate=_candidate(),
+            candidate=_candidate().model_copy(update={"expected_installation_id": 77}),
             idempotency_key="request-one",
             request_payload={"action": "guarded_merge", "sha": "a" * 40},
             api_request=api_request,
@@ -173,7 +212,14 @@ class OrdinaryAgentCustodyTests(unittest.TestCase):
 
         closed = self.store.read_ordinary_agent_custody_issue_attempt(lease.attempt_id)
         self.assertEqual((closed.state, closed.close_reason), ("closed", "confirmed_revoked"))
-        self.assertEqual(calls[-1]["path"], "/installation/token")
+        self.assertEqual(
+            [item["path"] for item in calls],
+            [
+                "/repos/example/repo/installation",
+                "/app/installations/77/access_tokens",
+                "/installation/token",
+            ],
+        )
 
     def test_lost_mint_response_stays_fenced_across_rotation_and_retry(self) -> None:
         mint_calls = 0
@@ -181,16 +227,17 @@ class OrdinaryAgentCustodyTests(unittest.TestCase):
         def api_request(**kwargs: object) -> object:
             nonlocal mint_calls
             path = kwargs["path"]
-            if path == "/app":
-                return {"id": 42}
             if path == "/repos/example/repo/installation":
                 return {
                     "id": 77,
                     "app_id": 42,
                     "permissions": {
+                        "administration": "read",
+                        "checks": "read",
                         "contents": "write",
                         "metadata": "read",
                         "pull_requests": "write",
+                        "statuses": "read",
                     },
                 }
             mint_calls += 1
@@ -234,23 +281,26 @@ class OrdinaryAgentCustodyTests(unittest.TestCase):
 
     def test_late_valid_token_is_revoked_without_being_yielded(self) -> None:
         now = datetime.now(timezone.utc)
-        clock_values = iter((0.0, 0.0, 0.0, 0.0, 31.0))
+        elapsed = 0.0
 
         def api_request(**kwargs: object) -> object:
+            nonlocal elapsed
             path = kwargs["path"]
-            if path == "/app":
-                return {"id": 42}
             if path == "/repos/example/repo/installation":
                 return {
                     "id": 77,
                     "app_id": 42,
                     "permissions": {
+                        "administration": "read",
+                        "checks": "read",
                         "contents": "write",
                         "metadata": "read",
                         "pull_requests": "write",
+                        "statuses": "read",
                     },
                 }
             if path == "/app/installations/77/access_tokens":
+                elapsed = 31.0
                 return {
                     "token": "late-token",
                     "expires_at": (now + timedelta(minutes=45)).isoformat(),
@@ -273,7 +323,7 @@ class OrdinaryAgentCustodyTests(unittest.TestCase):
                 idempotency_key="late-response",
                 request_payload={"action": "guarded_merge"},
                 api_request=api_request,
-                monotonic=lambda: next(clock_values),
+                monotonic=lambda: elapsed,
                 utc_now=lambda: now,
             ):
                 self.fail("late token must never be yielded")
@@ -287,16 +337,17 @@ class OrdinaryAgentCustodyTests(unittest.TestCase):
 
         def api_request(**kwargs: object) -> object:
             path = kwargs["path"]
-            if path == "/app":
-                return {"id": 42}
             if path == "/repos/example/repo/installation":
                 return {
                     "id": 77,
                     "app_id": 42,
                     "permissions": {
+                        "administration": "read",
+                        "checks": "read",
                         "contents": "write",
                         "metadata": "read",
                         "pull_requests": "write",
+                        "statuses": "read",
                     },
                 }
             if path == "/app/installations/77/access_tokens":
@@ -312,7 +363,7 @@ class OrdinaryAgentCustodyTests(unittest.TestCase):
                 }
             raise OSError("revoke outcome unknown")
 
-        with self.assertRaises(OSError):
+        with self.assertRaisesRegex(OrdinaryAgentCustodyCleanupUnknown, "cleanup outcome"):
             with ordinary_agent_provider_token_lease(
                 record_store=self.store,
                 secret_store=self.store,

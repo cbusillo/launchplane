@@ -242,6 +242,8 @@ def _build_custody_record(
         "predecessor_sha256": candidate.predecessor_sha256,
         "recorded_at": recorded_at,
     }
+    if candidate.github_installation_id is not None:
+        payload["github_installation_id"] = candidate.github_installation_id
     return OrdinaryAgentCredentialCustodyRecord.model_validate(
         {**payload, "custody_sha256": lifecycle_record_sha256_from_payload(payload)}
     )
