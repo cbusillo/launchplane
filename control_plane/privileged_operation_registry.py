@@ -35,6 +35,11 @@ from control_plane.contracts.privileged_operation import (
     ManagedMergeTrainPolicyImportProposalInput,
     ManagedSecretReencryptionHumanEvidence,
     ManagedSecretReencryptionPlanInput,
+    ORDINARY_AGENT_DELIVERY_ACTIVATION_APPROVE_ACTION,
+    ORDINARY_AGENT_DELIVERY_ACTIVATION_CANCEL_ACTION,
+    ORDINARY_AGENT_DELIVERY_ACTIVATION_PLAN_ACTION,
+    ORDINARY_AGENT_DELIVERY_ACTIVATION_READ_ACTION,
+    ORDINARY_AGENT_DELIVERY_ACTIVATION_REVOKE_ACTION,
     PRIVILEGED_OPERATION_SUMMARY_READ_ACTION,
     PRIVILEGED_POLICY_OPERATION_SUMMARY_READ_ACTION,
     PRIVILEGED_SECRET_OPERATION_APPROVE_ACTION,
@@ -46,6 +51,14 @@ from control_plane.contracts.privileged_operation import (
     PrivilegedOperationHumanEvidence,
     PrivilegedOperationRequest,
     PrivilegedOperationSafetyClass,
+)
+from control_plane.contracts.ordinary_agent_activation import (
+    OrdinaryAgentDeliveryActivationRevokeRequest,
+    OrdinaryAgentDeliveryActivationSetupRequest,
+)
+from control_plane.ordinary_agent_activation import (
+    OrdinaryAgentDeliveryActivationPlanningError,
+    plan_ordinary_agent_delivery_activation,
 )
 from control_plane.service_auth import AgentConsumerActionSafety, action_safety
 
@@ -61,19 +74,23 @@ class PrivilegedOperationDescriptor(BaseModel):
     cancel_action: str
     approve_action: str
     revoke_action: str
-    agent_summary_read_action: str
+    agent_summary_read_action: str | None = None
 
     @model_validator(mode="after")
     def _validate_descriptor(self) -> "PrivilegedOperationDescriptor":
         if self.descriptor_version != 1:
             raise ValueError("Unsupported privileged-operation descriptor version.")
-        actions = (
+        required_actions = (
             self.plan_action,
             self.human_read_action,
             self.cancel_action,
             self.approve_action,
             self.revoke_action,
-            self.agent_summary_read_action,
+        )
+        actions = (
+            (*required_actions, self.agent_summary_read_action)
+            if self.agent_summary_read_action is not None
+            else required_actions
         )
         if any(not action.strip() for action in actions):
             raise ValueError("Privileged-operation descriptor actions must be non-empty")
@@ -85,8 +102,9 @@ class PrivilegedOperationDescriptor(BaseModel):
             self.safety_class,
             self.safety_class,
             self.safety_class,
-            "read",
         )
+        if self.agent_summary_read_action is not None:
+            expected_safety = (*expected_safety, "read")
         actual_safety = tuple(action_safety(action) for action in actions)
         if actual_safety != expected_safety:
             raise ValueError(
@@ -150,6 +168,17 @@ MANAGED_MERGE_TRAIN_POLICY_IMPORT_DESCRIPTOR = PrivilegedOperationDescriptor(
     approve_action=MERGE_TRAIN_POLICY_OPERATION_APPROVE_ACTION,
     revoke_action=MERGE_TRAIN_POLICY_OPERATION_REVOKE_ACTION,
     agent_summary_read_action=MERGE_TRAIN_POLICY_OPERATION_SUMMARY_READ_ACTION,
+)
+
+ORDINARY_AGENT_DELIVERY_ACTIVATION_DESCRIPTOR = PrivilegedOperationDescriptor(
+    descriptor_id="ordinary-agent-delivery-activation",
+    descriptor_version=1,
+    safety_class="policy_admin",
+    plan_action=ORDINARY_AGENT_DELIVERY_ACTIVATION_PLAN_ACTION,
+    human_read_action=ORDINARY_AGENT_DELIVERY_ACTIVATION_READ_ACTION,
+    cancel_action=ORDINARY_AGENT_DELIVERY_ACTIVATION_CANCEL_ACTION,
+    approve_action=ORDINARY_AGENT_DELIVERY_ACTIVATION_APPROVE_ACTION,
+    revoke_action=ORDINARY_AGENT_DELIVERY_ACTIVATION_REVOKE_ACTION,
 )
 
 
@@ -396,6 +425,28 @@ def plan_managed_merge_train_policy_import(
     )
 
 
+def plan_ordinary_agent_delivery_activation_operation(
+    record_store: object,
+    request: PrivilegedOperationRequest,
+) -> PrivilegedOperationHumanEvidence:
+    if not isinstance(
+        request,
+        (
+            OrdinaryAgentDeliveryActivationSetupRequest,
+            OrdinaryAgentDeliveryActivationRevokeRequest,
+        ),
+    ):
+        raise PrivilegedOperationPlannerError(
+            "Ordinary-agent activation planner received an invalid request type."
+        )
+    try:
+        return plan_ordinary_agent_delivery_activation(record_store, request)
+    except OrdinaryAgentDeliveryActivationPlanningError as error:
+        raise PrivilegedOperationPlannerError(
+            "Ordinary-agent activation planning failed before evidence was produced."
+        ) from error
+
+
 _REGISTRY: dict[PrivilegedOperationDescriptorId, RegisteredPrivilegedOperationDescriptor] = {
     "managed-secret-reencryption": RegisteredPrivilegedOperationDescriptor(
         descriptor=MANAGED_SECRET_REENCRYPTION_DESCRIPTOR,
@@ -408,6 +459,10 @@ _REGISTRY: dict[PrivilegedOperationDescriptorId, RegisteredPrivilegedOperationDe
     "managed-merge-train-policy-import": RegisteredPrivilegedOperationDescriptor(
         descriptor=MANAGED_MERGE_TRAIN_POLICY_IMPORT_DESCRIPTOR,
         planner=plan_managed_merge_train_policy_import,
+    ),
+    "ordinary-agent-delivery-activation": RegisteredPrivilegedOperationDescriptor(
+        descriptor=ORDINARY_AGENT_DELIVERY_ACTIVATION_DESCRIPTOR,
+        planner=plan_ordinary_agent_delivery_activation_operation,
     ),
 }
 

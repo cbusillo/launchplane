@@ -1916,6 +1916,24 @@ test.describe("operator journeys", () => {
       page.getByRole("button", { name: "Approve plan" }),
     ).toBeVisible();
     await expect(page.getByRole("button", { name: /execute/i })).toHaveCount(0);
+    await page.getByRole("button", { name: "Agent delivery" }).click();
+    await expect(
+      page.getByRole("heading", { name: "Plan a bounded delivery change" }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("combobox", { name: "Reviewed target" }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("combobox", { name: "Delivery intent duration" }),
+    ).toBeVisible();
+    await expect(page.getByRole("textbox")).toHaveCount(0);
+    await page.getByRole("button", { name: "Stop delivery" }).click();
+    await expect(
+      page.getByRole("button", { name: "Review stop plan" }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("combobox", { name: "Delivery intent duration" }),
+    ).toHaveCount(0);
     await assertDocumentBasics(page);
     await captureScreenshot(
       page,

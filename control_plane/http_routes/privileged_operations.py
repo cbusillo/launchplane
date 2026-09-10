@@ -26,14 +26,26 @@ from control_plane.contracts.privileged_operation import (
     privileged_operation_pre_state_digest,
     terminal_agent_principal_sha256,
 )
+from control_plane.contracts.ordinary_agent_activation import (
+    OrdinaryAgentDeliveryActivationRevokeOption,
+    OrdinaryAgentDeliveryActivationRevokeRequest,
+    OrdinaryAgentDeliveryActivationSetupOption,
+    OrdinaryAgentDeliveryActivationSetupRequest,
+)
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.durable_operation_authorization import (
     ManagedRuleAuthorizationError,
     managed_github_id_action_allows,
+    require_single_explicit_action_managed_github_id_rule_identity,
+    require_single_explicit_action_managed_rule_identity,
     require_single_managed_github_id_rule_identity,
     require_single_managed_rule_identity,
 )
 from control_plane.http_routes.support import ApiRouteRegistrar, ReadRouteDependencies
+from control_plane.ordinary_agent_activation import (
+    OrdinaryAgentDeliveryActivationPlanningError,
+    list_ordinary_agent_delivery_activation_options,
+)
 from control_plane.privileged_operation_registry import (
     PrivilegedOperationPlannerError,
     PrivilegedOperationPlanningStoreError,
@@ -73,6 +85,12 @@ PRIVILEGED_OPERATION_APPROVE_ROUTE = "/v1/privileged-operations/plans/{operation
 PRIVILEGED_OPERATION_REVOKE_ROUTE = "/v1/privileged-operations/plans/{operation_id}/revoke"
 PRIVILEGED_OPERATION_AGENT_SUMMARY_ROUTE = "/v1/agent/privileged-operations/plans/{operation_id}"
 PRIVILEGED_OPERATION_AGENT_PLANS_ROUTE = "/v1/agent/privileged-operations/plans"
+ORDINARY_AGENT_DELIVERY_ACTIVATION_OPTIONS_ROUTE = (
+    "/v1/privileged-operations/ordinary-agent-delivery-activation/options"
+)
+ORDINARY_AGENT_DELIVERY_ACTIVATION_PLANS_ROUTE = (
+    "/v1/privileged-operations/ordinary-agent-delivery-activation/plans"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,6 +133,35 @@ class PrivilegedOperationPlanEnvelope(BaseModel):
             self.request, ManagedMergeTrainPolicyImportProposalInput
         ):
             raise ValueError("Merge-train policy descriptor requires a merge-train policy request.")
+        if self.descriptor_id == "ordinary-agent-delivery-activation" and not isinstance(
+            self.request,
+            (
+                OrdinaryAgentDeliveryActivationSetupRequest,
+                OrdinaryAgentDeliveryActivationRevokeRequest,
+            ),
+        ):
+            raise ValueError("Ordinary-agent activation descriptor requires an activation request.")
+        return self
+
+
+class OrdinaryAgentDeliveryActivationPlanEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = 1
+    source_event_id: str = Field(min_length=1, max_length=128)
+    expires_in_seconds: int = Field(
+        default=DEFAULT_PRIVILEGED_OPERATION_TTL_SECONDS,
+        ge=MIN_PRIVILEGED_OPERATION_TTL_SECONDS,
+        le=MAX_PRIVILEGED_OPERATION_TTL_SECONDS,
+    )
+    request: Annotated[
+        OrdinaryAgentDeliveryActivationSetupRequest | OrdinaryAgentDeliveryActivationRevokeRequest,
+        Field(discriminator="action"),
+    ]
+
+    @model_validator(mode="after")
+    def _validate_envelope(self) -> "OrdinaryAgentDeliveryActivationPlanEnvelope":
+        self.source_event_id = normalize_privileged_operation_source_event_id(self.source_event_id)
         return self
 
 
@@ -211,6 +258,15 @@ class PrivilegedOperationListResponse(BaseModel):
     reviews: tuple[PrivilegedOperationSemanticReview, ...]
 
 
+class OrdinaryAgentDeliveryActivationOptionsResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    setup_options: tuple[OrdinaryAgentDeliveryActivationSetupOption, ...]
+    revoke_options: tuple[OrdinaryAgentDeliveryActivationRevokeOption, ...]
+
+
 class PrivilegedOperationSemanticReviewResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -241,9 +297,15 @@ def register_privileged_operation_routes(
         identity: LaunchplaneIdentity,
         action: str,
         trace_id: str,
+        descriptor_id: PrivilegedOperationDescriptorId,
     ) -> None:
         try:
-            require_single_managed_rule_identity(
+            rule_reader = (
+                require_single_explicit_action_managed_rule_identity
+                if descriptor_id == "ordinary-agent-delivery-activation"
+                else require_single_managed_rule_identity
+            )
+            rule_reader(
                 policy=dependencies.policy_reader(),
                 identity=identity,
                 action=action,
@@ -282,11 +344,17 @@ def register_privileged_operation_routes(
         identity: GitHubHumanIdentity,
         action: str,
         trace_id: str,
+        descriptor_id: PrivilegedOperationDescriptorId,
         policy_record: LaunchplaneAuthzPolicyRecord | None = None,
     ) -> tuple[LaunchplaneAuthzPolicyRecord, str, str]:
         resolved_policy_record = policy_record or read_active_policy_record(trace_id=trace_id)
         try:
-            managed_identity = require_single_managed_github_id_rule_identity(
+            rule_reader = (
+                require_single_explicit_action_managed_github_id_rule_identity
+                if descriptor_id == "ordinary-agent-delivery-activation"
+                else require_single_managed_github_id_rule_identity
+            )
+            managed_identity = rule_reader(
                 policy=resolved_policy_record.policy,
                 identity=identity,
                 action=action,
@@ -429,7 +497,42 @@ def register_privileged_operation_routes(
 
     def descriptor_action(descriptor_id: PrivilegedOperationDescriptorId, field_name: str) -> str:
         descriptor = read_privileged_operation_descriptor(descriptor_id).descriptor
-        return str(getattr(descriptor, field_name))
+        action = getattr(descriptor, field_name)
+        if not isinstance(action, str) or not action:
+            raise ValueError("Privileged-operation descriptor does not expose this action.")
+        return action
+
+    def read_ordinary_agent_delivery_activation_options(
+        identity: Annotated[
+            GitHubHumanIdentity,
+            Depends(dependencies.read_github_human_identity),
+        ],
+        record_store: Annotated[object, Depends(dependencies.common.get_record_store)],
+    ) -> OrdinaryAgentDeliveryActivationOptionsResponse:
+        trace_id = dependencies.common.next_trace_id()
+        descriptor_id: PrivilegedOperationDescriptorId = "ordinary-agent-delivery-activation"
+        require_managed_rule(
+            identity=identity,
+            action=descriptor_action(descriptor_id, "human_read_action"),
+            trace_id=trace_id,
+            descriptor_id=descriptor_id,
+        )
+        try:
+            setup_options, revoke_options = list_ordinary_agent_delivery_activation_options(
+                record_store
+            )
+        except OrdinaryAgentDeliveryActivationPlanningError as error:
+            raise dependencies.common.http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="privileged_operation_planning_unavailable",
+                message="Ordinary-agent activation options are unavailable.",
+            ) from error
+        return OrdinaryAgentDeliveryActivationOptionsResponse(
+            trace_id=trace_id,
+            setup_options=setup_options,
+            revoke_options=revoke_options,
+        )
 
     def plan_privileged_operation(
         envelope: PrivilegedOperationPlanEnvelope,
@@ -444,6 +547,7 @@ def register_privileged_operation_routes(
             identity=identity,
             action=descriptor_action(envelope.descriptor_id, "plan_action"),
             trace_id=trace_id,
+            descriptor_id=envelope.descriptor_id,
         )
         try:
             result = create_typed_privileged_operation_plan(
@@ -493,6 +597,25 @@ def register_privileged_operation_routes(
             events=events,
         )
 
+    def plan_ordinary_agent_delivery_activation(
+        envelope: OrdinaryAgentDeliveryActivationPlanEnvelope,
+        identity: Annotated[
+            GitHubHumanIdentity,
+            Depends(dependencies.read_github_human_mutation_identity),
+        ],
+        record_store: Annotated[object, Depends(dependencies.common.get_record_store)],
+    ) -> PrivilegedOperationHumanResponse:
+        return plan_privileged_operation(
+            PrivilegedOperationPlanEnvelope(
+                descriptor_id="ordinary-agent-delivery-activation",
+                source_event_id=envelope.source_event_id,
+                expires_in_seconds=envelope.expires_in_seconds,
+                request=envelope.request,
+            ),
+            identity,
+            record_store,
+        )
+
     def list_human_privileged_operations(
         identity: Annotated[
             GitHubHumanIdentity,
@@ -511,6 +634,7 @@ def register_privileged_operation_routes(
             identity=identity,
             action=descriptor_action(descriptor_id, "human_read_action"),
             trace_id=trace_id,
+            descriptor_id=descriptor_id,
         )
         try:
             store = require_privileged_operation_store(record_store)
@@ -562,6 +686,7 @@ def register_privileged_operation_routes(
             identity=identity,
             action=descriptor_action(record.descriptor_id, "human_read_action"),
             trace_id=trace_id,
+            descriptor_id=record.descriptor_id,
         )
         try:
             events = operation_events(record_store, record.operation_id)
@@ -596,6 +721,7 @@ def register_privileged_operation_routes(
             identity=identity,
             action=descriptor_action(record.descriptor_id, "human_read_action"),
             trace_id=trace_id,
+            descriptor_id=record.descriptor_id,
         )
         try:
             events = operation_events(record_store, record.operation_id)
@@ -633,6 +759,7 @@ def register_privileged_operation_routes(
                 identity=identity,
                 action=descriptor_action(record.descriptor_id, "approve_action"),
                 trace_id=trace_id,
+                descriptor_id=record.descriptor_id,
                 policy_record=policy_record,
             )
             if record.descriptor_id == "managed-authz-policy-set" and (
@@ -687,7 +814,11 @@ def register_privileged_operation_routes(
                 expires_at=record.expires_at,
                 reason=envelope.reason,
                 rollback_class=(
-                    "policy_cas" if record.safety_class == "policy_admin" else "key_retained"
+                    "activation_revoke"
+                    if record.descriptor_id == "ordinary-agent-delivery-activation"
+                    else "policy_cas"
+                    if record.safety_class == "policy_admin"
+                    else "key_retained"
                 ),
             )
             result = approve_privileged_operation(
@@ -741,6 +872,7 @@ def register_privileged_operation_routes(
                 identity=identity,
                 action=descriptor_action(record.descriptor_id, "revoke_action"),
                 trace_id=trace_id,
+                descriptor_id=record.descriptor_id,
             )
             result = revoke_privileged_operation(
                 record_store=record_store,
@@ -795,6 +927,7 @@ def register_privileged_operation_routes(
                 identity=identity,
                 action=descriptor_action(record.descriptor_id, "cancel_action"),
                 trace_id=trace_id,
+                descriptor_id=record.descriptor_id,
             )
             result = cancel_privileged_operation(
                 record_store=record_store,
@@ -866,10 +999,23 @@ def register_privileged_operation_routes(
             operation_id=operation_id,
             trace_id=trace_id,
         )
+        if (
+            read_privileged_operation_descriptor(
+                record.descriptor_id
+            ).descriptor.agent_summary_read_action
+            is None
+        ):
+            raise dependencies.common.http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="privileged_operation_agent_summary_unavailable",
+                message="This privileged-operation descriptor has no agent summary capability.",
+            )
         require_managed_rule(
             identity=identity,
             action=descriptor_action(record.descriptor_id, "agent_summary_read_action"),
             trace_id=trace_id,
+            descriptor_id=record.descriptor_id,
         )
         if record.descriptor_id in {
             "managed-authz-policy-set",
@@ -911,6 +1057,7 @@ def register_privileged_operation_routes(
             identity=identity,
             action=descriptor_action(envelope.descriptor_id, "plan_action"),
             trace_id=trace_id,
+            descriptor_id=envelope.descriptor_id,
         )
         actor = PrivilegedOperationAgentActor(
             principal_sha256=terminal_agent_principal_sha256(
@@ -952,6 +1099,33 @@ def register_privileged_operation_routes(
             summary=privileged_operation_agent_summary(result.record),
         )
 
+    app.add_api_route(
+        ORDINARY_AGENT_DELIVERY_ACTIVATION_PLANS_ROUTE,
+        plan_ordinary_agent_delivery_activation,
+        methods=["POST"],
+        response_model=PrivilegedOperationHumanResponse,
+        responses={
+            403: {"model": dependencies.common.error_response_model},
+            409: {"model": dependencies.common.error_response_model},
+            503: {"model": dependencies.common.error_response_model},
+        },
+        summary="Plan ordinary-agent delivery activation setup or revocation",
+        operation_id="plan_ordinary_agent_delivery_activation",
+        tags=["privileged-operations"],
+    )
+    app.add_api_route(
+        ORDINARY_AGENT_DELIVERY_ACTIVATION_OPTIONS_ROUTE,
+        read_ordinary_agent_delivery_activation_options,
+        methods=["GET"],
+        response_model=OrdinaryAgentDeliveryActivationOptionsResponse,
+        responses={
+            403: {"model": dependencies.common.error_response_model},
+            503: {"model": dependencies.common.error_response_model},
+        },
+        summary="List server-resolved ordinary-agent activation choices",
+        operation_id="read_ordinary_agent_delivery_activation_options",
+        tags=["privileged-operations"],
+    )
     app.add_api_route(
         PRIVILEGED_OPERATION_PLANS_ROUTE,
         plan_privileged_operation,

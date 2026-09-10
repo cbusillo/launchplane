@@ -38,6 +38,7 @@ test("browser write routes are the generated UI write allowlist", () => {
     "/v1/owner-acceptance/events",
     "/v1/privileged-operations/plans/{operation_id}/approve",
     "/v1/privileged-operations/plans/{operation_id}/revoke",
+    "/v1/privileged-operations/ordinary-agent-delivery-activation/plans",
   ]));
 });
 

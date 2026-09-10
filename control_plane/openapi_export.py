@@ -200,10 +200,16 @@ UI_OPENAPI_READ_OPERATIONS: dict[str, str] = {
     "/v1/privileged-operations/plans/{operation_id}/review": (
         "read_human_privileged_operation_review"
     ),
+    "/v1/privileged-operations/ordinary-agent-delivery-activation/options": (
+        "read_ordinary_agent_delivery_activation_options"
+    ),
 }
 
 
 UI_OPENAPI_WRITE_OPERATIONS: dict[str, str] = {
+    "/v1/privileged-operations/ordinary-agent-delivery-activation/plans": (
+        "plan_ordinary_agent_delivery_activation"
+    ),
     "/v1/ordinary-agent-operations/{principal_id}/{operation_id}/approve": "approve_ordinary_agent_operation",
     "/v1/ordinary-agent-operations/{principal_id}/{operation_id}/cancel": "cancel_ordinary_agent_operation",
     "/v1/ordinary-agent-sessions/{principal_id}/{session_id}/revoke": "revoke_ordinary_agent_session",

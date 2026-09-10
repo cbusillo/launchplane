@@ -50,7 +50,7 @@ class SchemaMigrationTests(unittest.TestCase):
         }
         indexes = {(index.table_name, index.index_name): index for index in CRITICAL_SCHEMA_INDEXES}
 
-        self.assertEqual(EXPECTED_ALEMBIC_HEAD_REVISION, "d8a0b2c4e6f9")
+        self.assertEqual(EXPECTED_ALEMBIC_HEAD_REVISION, "e0f2a4c6d8b1")
         self.assertEqual(
             column_types[("launchplane_ordinary_agent_landing_preparations", "attempt_ordinal")],
             ("bigint",),
@@ -300,7 +300,7 @@ class SchemaMigrationTests(unittest.TestCase):
                         connection.execute(
                             text("SELECT version_num FROM alembic_version")
                         ).scalar_one(),
-                        EXPECTED_ALEMBIC_HEAD_REVISION,
+                        "d8a0b2c4e6f9",
                     )
                     self.assertEqual(
                         connection.execute(

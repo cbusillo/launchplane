@@ -31,6 +31,35 @@ the active schema in their desired set. The common apply path and storage still
 reject schema-v3 persistence. This fence remains until a later activation slice
 enforces verified schema/protocol compatibility and a rollback boundary.
 
+The typed activation source slice persists a separate long-lived administration
+record without enabling delivery. A human selects a server-resolved reviewed
+policy package and current repository inventory through Engineering Ops. Setup
+accepts either an explicit schema-v2-to-v3 proposal or, after a future migration,
+an ordinary schema-v3-to-v3 reconcile. It recomputes the stored proposal and full
+candidate digests, derives one ordinary-agent rule and target, and records the
+installed schema and compiled handler/version support. The browser never asks the
+operator to search for or type policy, inventory, activation, rule, digest,
+issue, or pull-request IDs, and it derives the bounded audit reason from the
+selected intent.
+
+The first setup state is always desired `guarded` and effective
+`qualification_only`. That record has `authorizes_execution = false`; it creates
+no principal, credential, session, grant, provider request, worker registration,
+or policy write. The schema-v3 write fence above remains unchanged. A later
+readiness implementation must still join current policy authority, qualification,
+protection and merge identity, protocol/schema compatibility, and cleanup
+evidence before deriving effective guarded state.
+
+Activation revocation is a new reviewed `revoke_activation` operation rather
+than the generic pre-execution approval revoke. It writes terminal desired and
+effective `revoked` states by exact revision/digest CAS. A later setup receives a
+new activation ID and binds the exact predecessor. Expired guarded replacement
+supersedes the old record and appends both changes atomically; revoked predecessors
+never revive. Append-only operation-bound install/revoke events provide recovery
+evidence even after later revocation or supersession changes the current
+projection. Known custody cleanup and history remain maintainable, while this
+slice still has no guarded execution consumer.
+
 Ordinary rules participate only in structural policy normalization, managed-set
 replacement and reporting. Their managed set and rule IDs remain semantic
 because eligibility binds those exact IDs; changing either produces a missing

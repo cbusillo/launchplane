@@ -4,6 +4,8 @@ import { useCallback, useState } from "react";
 import {
   LaunchplaneApiError,
   approvePrivilegedOperation,
+  planOrdinaryAgentDeliveryActivation,
+  readOrdinaryAgentDeliveryActivationOptions,
   readPrivilegedOperationPlans,
   readPrivilegedOperationReview,
   readPrivilegedOperationRawDetail,
@@ -11,6 +13,7 @@ import {
   type PrivilegedOperationDescriptorId,
   type PrivilegedOperationListResponse,
   type PrivilegedOperationSemanticReview,
+  type OrdinaryAgentDeliveryActivationOptionsResponse,
 } from "./api";
 import type { DevFixtureMode } from "./dev-fixture-loader";
 import {
@@ -112,6 +115,17 @@ function DefaultPrivilegedOperationsRoute({
             >
               Merge-train policy
             </button>
+            <button
+              aria-pressed={
+                descriptorId === "ordinary-agent-delivery-activation"
+              }
+              onClick={() =>
+                setDescriptorId("ordinary-agent-delivery-activation")
+              }
+              type="button"
+            >
+              Agent delivery
+            </button>
           </div>
           )}
           <EngineeringResourceControls
@@ -141,7 +155,16 @@ function DefaultPrivilegedOperationsRoute({
         state={resource.state}
       >
         {(data) => (
-          <PrivilegedOperationPlanList data={data} refresh={resource.refresh} />
+          <>
+            {descriptorId === "ordinary-agent-delivery-activation" &&
+            operationId === null ? (
+              <OrdinaryAgentDeliveryActivationComposer
+                fixtureMode={fixtureMode}
+                refresh={resource.refresh}
+              />
+            ) : null}
+            <PrivilegedOperationPlanList data={data} refresh={resource.refresh} />
+          </>
         )}
       </EngineeringResourceGate>
     </EngineeringRouteFrame>
@@ -180,6 +203,197 @@ function PrivilegedOperationPlanList({
   );
 }
 
+function OrdinaryAgentDeliveryActivationComposer({
+  fixtureMode,
+  refresh,
+}: {
+  fixtureMode: DevFixtureMode;
+  refresh: () => void;
+}) {
+  const [intent, setIntent] = useState<"setup" | "revoke_activation">(
+    "setup",
+  );
+  const [selection, setSelection] = useState("");
+  const [durationSeconds, setDurationSeconds] = useState(24 * 60 * 60);
+  const [message, setMessage] = useState("");
+  const loader = useCallback(
+    async (signal: AbortSignal): Promise<OrdinaryAgentDeliveryActivationOptionsResponse> => {
+      if (fixtureMode) {
+        await fixtureDelay(signal);
+        return activationOptionsFixture();
+      }
+      return readOrdinaryAgentDeliveryActivationOptions(signal);
+    },
+    [fixtureMode],
+  );
+  const options = useEngineeringResource(
+    loader,
+    `ordinary-agent-delivery-activation-options:${fixtureMode}`,
+  );
+
+  async function submit(data: OrdinaryAgentDeliveryActivationOptionsResponse) {
+    setMessage("");
+    try {
+      if (intent === "setup") {
+        const option = data.setup_options.find(
+          (candidate) => candidate.policy_operation_id === selection,
+        );
+        if (!option) return;
+        await planOrdinaryAgentDeliveryActivation({
+          schema_version: 1,
+          action: "setup",
+          policy_operation_id: option.policy_operation_id,
+          repository_inventory_record_id:
+            option.repository_inventory_record_id,
+          predecessor: option.predecessor,
+          activation_expires_at: new Date(
+            Date.now() + durationSeconds * 1000,
+          ).toISOString(),
+          reason: `Prepare qualification-only delivery for ${option.label}.`,
+        });
+        setMessage(
+          "Setup plan recorded. Review its qualification-only behavior and stop boundary below.",
+        );
+      } else {
+        const option = data.revoke_options.find(
+          (candidate) => candidate.activation.activation_id === selection,
+        );
+        if (!option) return;
+        await planOrdinaryAgentDeliveryActivation({
+          schema_version: 1,
+          action: "revoke_activation",
+          activation_id: option.activation.activation_id,
+          expected_revision: option.activation.revision,
+          expected_activation_sha256: option.activation.activation_sha256,
+          reason: `Stop ordinary-agent delivery for ${option.label}.`,
+        });
+        setMessage(
+          "Stop plan recorded. Review the permanent revocation behavior below.",
+        );
+      }
+      setSelection("");
+      refresh();
+      options.refresh();
+    } catch (error) {
+      setMessage(
+        error instanceof LaunchplaneApiError
+          ? error.message
+          : "The activation plan could not be recorded.",
+      );
+    }
+  }
+
+  return (
+    <section className="privileged-operation-card">
+      <header>
+        <div>
+          <span className="engineering-kicker">Agent delivery</span>
+          <h2>Plan a bounded delivery change</h2>
+          <p>
+            Select a reviewed target and intent. Launchplane carries the stored
+            policy, inventory, activation, and digest references.
+          </p>
+        </div>
+      </header>
+      <div
+        className="privileged-operation-kind-switch"
+        aria-label="Activation intent"
+      >
+        <button
+          aria-pressed={intent === "setup"}
+          onClick={() => {
+            setIntent("setup");
+            setSelection("");
+          }}
+          type="button"
+        >
+          Prepare delivery
+        </button>
+        <button
+          aria-pressed={intent === "revoke_activation"}
+          onClick={() => {
+            setIntent("revoke_activation");
+            setSelection("");
+          }}
+          type="button"
+        >
+          Stop delivery
+        </button>
+      </div>
+      <EngineeringResourceGate
+        noun="Activation choices"
+        refresh={options.refresh}
+        state={options.state}
+      >
+        {(data) => {
+          const choices =
+            intent === "setup" ? data.setup_options : data.revoke_options;
+          return choices.length ? (
+            <div className="privileged-operation-actions">
+              <label>
+                Reviewed target
+                <select
+                  value={selection}
+                  onChange={(event) => setSelection(event.target.value)}
+                >
+                  <option value="">Choose a target</option>
+                  {choices.map((option) => {
+                    const value =
+                      "policy_operation_id" in option
+                        ? option.policy_operation_id
+                        : option.activation.activation_id;
+                    return (
+                      <option key={value} value={value}>
+                        {option.label}
+                      </option>
+                    );
+                  })}
+                </select>
+              </label>
+              {intent === "setup" ? (
+                <label>
+                  Delivery intent duration
+                  <select
+                    value={durationSeconds}
+                    onChange={(event) =>
+                      setDurationSeconds(Number(event.target.value))
+                    }
+                  >
+                    <option value={60 * 60}>1 hour</option>
+                    <option value={24 * 60 * 60}>1 day</option>
+                    <option value={7 * 24 * 60 * 60}>7 days</option>
+                    <option value={30 * 24 * 60 * 60}>30 days</option>
+                  </select>
+                </label>
+              ) : null}
+              <button
+                type="button"
+                disabled={!selection}
+                onClick={() => void submit(data)}
+              >
+                {intent === "setup" ? "Review setup plan" : "Review stop plan"}
+              </button>
+            </div>
+          ) : (
+            <EngineeringEmpty
+              detail={
+                intent === "setup"
+                  ? "No reviewed policy and current inventory pair is eligible for setup."
+                  : "No current activation is eligible for a reviewed stop operation."
+              }
+              icon={ShieldAlert}
+              title="No eligible activation choice"
+            />
+          );
+        }}
+      </EngineeringResourceGate>
+      {message ? (
+        <p className="privileged-operation-terminal-reason">{message}</p>
+      ) : null}
+    </section>
+  );
+}
+
 function PrivilegedOperationPlanCard({
   review,
   refresh,
@@ -192,10 +406,10 @@ function PrivilegedOperationPlanCard({
   const [rawDetail, setRawDetail] = useState("");
 
   async function mutate(action: "approve" | "revoke") {
-    const reason = window
-      .prompt(action === "approve" ? "Approval reason" : "Revocation reason")
-      ?.trim();
-    if (!reason) return;
+    const reason =
+      action === "approve"
+        ? `Approved ${review.title} after reviewing the server-computed evidence.`
+        : `Revoked approval for ${review.title}.`;
     setMutationMessage("");
     try {
       if (action === "approve") {
@@ -239,6 +453,7 @@ function PrivilegedOperationPlanCard({
     managed_secret_reencryption: "Managed-secret re-encryption",
     managed_authz_policy_set: "Managed authorization policy",
     managed_merge_train_policy_import: "Managed merge-train policy",
+    ordinary_agent_delivery_activation: "Ordinary-agent delivery activation",
   }[review.operation_class];
 
   return (
@@ -280,6 +495,8 @@ function PrivilegedOperationPlanCard({
           </div>
         ))}
       </dl>
+
+      <p>{review.change.summary}</p>
 
       <dl className="privileged-operation-details">
         <div>
@@ -435,7 +652,47 @@ function privilegedOperationFixture(
         ? [policyFixtureReview()]
         : descriptorId === "managed-merge-train-policy-import"
           ? [mergeTrainPolicyFixtureReview()]
+          : descriptorId === "ordinary-agent-delivery-activation"
+            ? [activationFixtureReview()]
           : [secretFixtureReview()],
+  };
+}
+
+function activationOptionsFixture(): OrdinaryAgentDeliveryActivationOptionsResponse {
+  const scope = {
+    target: {
+      repository_id: 1001,
+      repository: "example/launchplane",
+      base_branch: "main",
+    },
+    managed_set_id: "ordinary-agent.pilot",
+    managed_rule_id: "delivery-agent",
+  };
+  return {
+    status: "ok",
+    trace_id: "fixture-activation-options",
+    setup_options: [
+      {
+        policy_operation_id:
+          "privileged-operation-11111111111111111111111111111111",
+        repository_inventory_record_id: "repository-inventory-1001-r3",
+        scope,
+        predecessor: null,
+        label: "example/launchplane · main",
+      },
+    ],
+    revoke_options: [
+      {
+        activation: {
+          activation_id:
+            "ordinary-agent-delivery-activation-22222222222222222222222222222222",
+          revision: 1,
+          activation_sha256: "3".repeat(64),
+        },
+        scope,
+        label: "example/launchplane · main",
+      },
+    ],
   };
 }
 
@@ -508,6 +765,36 @@ function mergeTrainPolicyFixtureReview(): PrivilegedOperationSemanticReview {
       },
       { kind: "policy_targets_added", label: "Added", value: 1 },
       { kind: "policy_targets_changed", label: "Changed", value: 0 },
+    ],
+  });
+}
+
+function activationFixtureReview(): PrivilegedOperationSemanticReview {
+  return semanticReviewFixture({
+    operationClass: "ordinary_agent_delivery_activation",
+    descriptorId: "ordinary-agent-delivery-activation",
+    safetyClass: "policy_admin",
+    title: "Ordinary-agent delivery activation review",
+    requestedByKind: "github_human",
+    createdAt: "2026-09-03T10:03:00+00:00",
+    expiresAt: "2026-09-03T10:33:00+00:00",
+    scope: "ordinary_agent_delivery_activation",
+    blastRadius:
+      "Bounded to one repository, branch, managed set, and managed rule.",
+    rollbackClass: "activation_revoke",
+    rollback:
+      "Rollback requires a separate reviewed activation revocation operation.",
+    metrics: [
+      {
+        kind: "activation_scope_targets",
+        label: "Activation targets",
+        value: 1,
+      },
+      {
+        kind: "activation_setup_blockers",
+        label: "Setup blockers",
+        value: 0,
+      },
     ],
   });
 }

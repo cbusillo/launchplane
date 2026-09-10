@@ -44,6 +44,10 @@ from control_plane.contracts.privileged_operation import (
     privileged_operation_request_digest,
     privileged_operation_request_digest_candidates,
 )
+from control_plane.contracts.ordinary_agent_activation import (
+    OrdinaryAgentDeliveryActivationRevokeHumanEvidence,
+    OrdinaryAgentDeliveryActivationSetupHumanEvidence,
+)
 from control_plane.privileged_operation_registry import (
     list_privileged_operation_descriptors,
     read_privileged_operation_descriptor,
@@ -121,6 +125,7 @@ _SEMANTIC_REVIEW_DESCRIPTOR_IDS = frozenset(
         "managed-secret-reencryption",
         "managed-authz-policy-set",
         "managed-merge-train-policy-import",
+        "ordinary-agent-delivery-activation",
     }
 )
 _SEMANTIC_REVIEW_BLOCKER_CODES = frozenset(
@@ -633,6 +638,118 @@ def _build_privileged_operation_semantic_review(
             can_approve=record.status == "planned" and not merge_train_blocker_codes,
             can_revoke=record.status == "approved" and lifecycle.expiry_state == "active",
         )
+    if record.descriptor_id == "ordinary-agent-delivery-activation":
+        if not isinstance(
+            record.evidence,
+            (
+                OrdinaryAgentDeliveryActivationSetupHumanEvidence,
+                OrdinaryAgentDeliveryActivationRevokeHumanEvidence,
+            ),
+        ):
+            raise PrivilegedOperationSemanticReviewError(
+                "Ordinary-agent activation semantic review payload variant drifted."
+            )
+        lifecycle = _semantic_review_lifecycle(record, generated_at=observed_at)
+        activation_blocker_codes = _semantic_review_lifecycle_blocker_codes(
+            record,
+            expiry_state=lifecycle.expiry_state,
+        )
+        extra_digests: tuple[PrivilegedOperationSemanticReviewDigest, ...]
+        metrics: tuple[PrivilegedOperationSemanticReviewMetric, ...]
+        change_summary: str
+        if isinstance(record.evidence, OrdinaryAgentDeliveryActivationSetupHumanEvidence):
+            activation_blocker_codes += tuple(
+                _semantic_review_blocker_code(code) for code in record.evidence.blocker_codes
+            )
+            metrics = (
+                PrivilegedOperationSemanticReviewMetric(
+                    kind="activation_scope_targets",
+                    label="Activation targets",
+                    value=1,
+                ),
+                PrivilegedOperationSemanticReviewMetric(
+                    kind="activation_setup_blockers",
+                    label="Setup blockers",
+                    value=len(record.evidence.blocker_codes),
+                ),
+            )
+            change_summary = f"{record.evidence.initial_behavior} {record.evidence.stop_behavior}"
+            extra_digests = (
+                PrivilegedOperationSemanticReviewDigest(
+                    kind="activation_policy_package",
+                    label="Reviewed policy package digest",
+                    sha256=record.evidence.policy_package.candidate_policy_sha256,
+                ),
+                PrivilegedOperationSemanticReviewDigest(
+                    kind="activation_inventory",
+                    label="Repository inventory digest",
+                    sha256=record.evidence.inventory.inventory_sha256,
+                ),
+                PrivilegedOperationSemanticReviewDigest(
+                    kind="activation_schema_invariants",
+                    label="Installed activation schema digest",
+                    sha256=(record.evidence.runtime_capability.activation_schema_invariants_sha256),
+                ),
+            )
+        else:
+            metrics = (
+                PrivilegedOperationSemanticReviewMetric(
+                    kind="activation_scope_targets",
+                    label="Activation targets",
+                    value=1,
+                ),
+            )
+            change_summary = record.evidence.stop_behavior
+            extra_digests = (
+                PrivilegedOperationSemanticReviewDigest(
+                    kind="activation_record",
+                    label="Activation record digest",
+                    sha256=record.evidence.activation.activation_sha256,
+                ),
+            )
+        activation_blocker_codes = tuple(sorted(set(activation_blocker_codes)))
+        return PrivilegedOperationSemanticReview(
+            operation_id=record.operation_id,
+            descriptor_id=record.descriptor_id,
+            descriptor_version=record.descriptor_version,
+            operation_class="ordinary_agent_delivery_activation",
+            safety_class=record.safety_class,
+            title="Ordinary-agent delivery activation review",
+            requested_by_kind=_semantic_review_requester_kind(record),
+            lifecycle=lifecycle,
+            blockers=PrivilegedOperationSemanticReviewBlocker(
+                state=(
+                    "error"
+                    if "execution_failed" in activation_blocker_codes
+                    or "reconciliation_required" in activation_blocker_codes
+                    else "blocked"
+                    if activation_blocker_codes
+                    else "clear"
+                ),
+                codes=activation_blocker_codes,
+            ),
+            change=PrivilegedOperationSemanticReviewChange(
+                summary=change_summary,
+                changed=True,
+                metrics=metrics,
+            ),
+            blast_radius=PrivilegedOperationSemanticReviewBlastRadius(
+                scope="ordinary_agent_delivery_activation",
+                summary="Bounded to one repository, branch, managed set, and managed rule.",
+                affected_count=1,
+            ),
+            rollback=PrivilegedOperationSemanticReviewRollback(
+                rollback_class="activation_revoke",
+                summary="Rollback requires a separate reviewed activation revocation operation.",
+            ),
+            evidence=PrivilegedOperationSemanticReviewEvidence(
+                result_status=_semantic_review_result_status(record),
+                digests=_semantic_review_digests(record, extra_digests),
+            ),
+            activity=_semantic_review_activity(record.operation_id, events),
+            can_approve=record.status == "planned" and not activation_blocker_codes,
+            can_revoke=record.status == "approved" and lifecycle.expiry_state == "active",
+        )
     raise PrivilegedOperationSemanticReviewError(
         "Privileged-operation semantic review descriptor is unsupported."
     )
@@ -1110,11 +1227,17 @@ def approve_privileged_operation(
             f"Privileged-operation plan is already {record.status}."
         )
     if (
-        isinstance(record.evidence, ManagedAuthzPolicySetHumanEvidence)
+        isinstance(
+            record.evidence,
+            (
+                ManagedAuthzPolicySetHumanEvidence,
+                OrdinaryAgentDeliveryActivationSetupHumanEvidence,
+            ),
+        )
         and record.evidence.result_status == "blocked"
     ):
         raise PrivilegedOperationNotApprovableError(
-            "Managed authz policy operations with blockers cannot be approved."
+            "Privileged policy operations with blockers cannot be approved."
         )
     occurred_at = _timestamp(now().astimezone(timezone.utc))
     approved = record.model_copy(

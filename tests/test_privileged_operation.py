@@ -49,6 +49,15 @@ from control_plane.authz_grant_service import (
     AuthzOperationalReadinessBlockerCode,
 )
 from control_plane.contracts.canonical_json import canonical_json_sha256
+from control_plane.contracts.ordinary_agent import OrdinaryAgentTarget
+from control_plane.contracts.ordinary_agent_activation import (
+    OrdinaryAgentDeliveryActivationScope,
+    OrdinaryAgentDeliveryActivationSetupHumanEvidence,
+    OrdinaryAgentDeliveryActivationSetupRequest,
+    OrdinaryAgentDeliveryInventoryReference,
+    OrdinaryAgentDeliveryPolicyPackageReference,
+    OrdinaryAgentDeliveryRuntimeCapabilityEvidence,
+)
 from control_plane.privileged_operation_registry import (
     MANAGED_MERGE_TRAIN_POLICY_IMPORT_DESCRIPTOR,
     MANAGED_SECRET_REENCRYPTION_DESCRIPTOR,
@@ -408,6 +417,7 @@ class PrivilegedOperationContractTests(unittest.TestCase):
             _record(),
             _failed_authz_policy_record(),
             self._merge_train_policy_import_record(),
+            self._ordinary_agent_activation_record(),
         )
         generated_at = datetime(2026, 8, 22, 20, 10, tzinfo=timezone.utc)
         reviews = tuple(
@@ -422,12 +432,98 @@ class PrivilegedOperationContractTests(unittest.TestCase):
                 "managed_secret_reencryption",
                 "managed_authz_policy_set",
                 "managed_merge_train_policy_import",
+                "ordinary_agent_delivery_activation",
             },
         )
         self.assertFalse(any(review.authorizes_execution for review in reviews))
         self.assertFalse(any(review.authorizes_approval for review in reviews))
         self.assertFalse(any(review.persists_state for review in reviews))
         self.assertTrue(all(review.schema_version == 1 for review in reviews))
+
+    def _ordinary_agent_activation_record(self) -> PrivilegedOperationRecord:
+        scope = OrdinaryAgentDeliveryActivationScope(
+            target=OrdinaryAgentTarget(
+                repository_id=1001,
+                repository="example/launchplane",
+                base_branch="main",
+            ),
+            managed_set_id="ordinary-agent.pilot",
+            managed_rule_id="agent-one",
+        )
+        request = OrdinaryAgentDeliveryActivationSetupRequest(
+            policy_operation_id="privileged-operation-policy-package",
+            repository_inventory_record_id="repository-inventory-1001-r1",
+            activation_expires_at="2026-08-23T20:00:00Z",
+            reason="Prepare qualification-only activation.",
+        )
+        capability = OrdinaryAgentDeliveryRuntimeCapabilityEvidence(
+            observed_database_revision="activation-head",
+            database_revision_compatible=True,
+            activation_schema_invariants_sha256="a" * 64,
+            activation_schema_invariants_valid=True,
+            finite_request_versions=(1, 2),
+            read_attempt_versions=(1,),
+            custody_reservation_versions=(1,),
+            qualification_attestation_versions=(),
+            activation_record_versions=(1,),
+            activation_event_versions=(1,),
+            recovery_versions=(1,),
+            authz_policy_read_versions=(2, 3),
+            variant_parsers_registered=True,
+            activation_storage_registered=True,
+            activation_cas_registered=True,
+            activation_recovery_registered=True,
+            bounded_cleanup_registered=True,
+            rollback_reader_registered=True,
+            qualification_advancer_registered=False,
+            guarded_worker_registered=False,
+            policy_v3_write_supported=False,
+            observed_at="2026-08-22T19:55:00Z",
+        )
+        evidence = OrdinaryAgentDeliveryActivationSetupHumanEvidence(
+            result_status="ok",
+            scope=scope,
+            policy_package=OrdinaryAgentDeliveryPolicyPackageReference(
+                policy_operation_id=request.policy_operation_id,
+                request_sha256="b" * 64,
+                evidence_sha256="c" * 64,
+                plan_sha256="d" * 64,
+                desired_set_sha256="e" * 64,
+                candidate_policy_sha256="f" * 64,
+            ),
+            inventory=OrdinaryAgentDeliveryInventoryReference(
+                record_id=request.repository_inventory_record_id,
+                revision=1,
+                inventory_sha256="1" * 64,
+            ),
+            activation_expires_at=request.activation_expires_at,
+            runtime_capability=capability,
+            plan_digest="2" * 64,
+        )
+        actor = PrivilegedOperationActor(
+            identity_type="github_human",
+            github_id=123,
+            login="operator",
+        )
+        return PrivilegedOperationRecord(
+            operation_id=build_privileged_operation_id_for_actor(
+                descriptor_id="ordinary-agent-delivery-activation",
+                actor=actor,
+                source_event_id="activation-plan-1",
+            ),
+            descriptor_id="ordinary-agent-delivery-activation",
+            safety_class="policy_admin",
+            status="planned",
+            source_event_id="activation-plan-1",
+            requested_by=actor,
+            request=request,
+            request_digest=privileged_operation_request_digest(request),
+            evidence=evidence,
+            evidence_digest=privileged_operation_evidence_digest(evidence),
+            created_at="2026-08-22T20:00:00Z",
+            updated_at="2026-08-22T20:00:00Z",
+            expires_at="2026-08-22T20:30:00Z",
+        )
 
     def test_semantic_review_registry_coverage_fails_closed_on_descriptor_drift(self) -> None:
         with patch(

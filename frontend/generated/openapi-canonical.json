@@ -18293,6 +18293,577 @@
         "title": "OrdinaryAgentCredentialClaimResponse",
         "type": "object"
       },
+      "OrdinaryAgentDeliveryActivationExecutionEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "setup",
+              "revoke_activation"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "activation_id": {
+            "default": "",
+            "title": "Activation Id",
+            "type": "string"
+          },
+          "activation_revision": {
+            "default": 0,
+            "maximum": 9.223372036854776e+18,
+            "minimum": 0.0,
+            "title": "Activation Revision",
+            "type": "integer"
+          },
+          "activation_sha256": {
+            "default": "",
+            "title": "Activation Sha256",
+            "type": "string"
+          },
+          "changed": {
+            "title": "Changed",
+            "type": "boolean"
+          },
+          "desired_state": {
+            "anyOf": [
+              {
+                "enum": [
+                  "guarded",
+                  "revoked"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Desired State"
+          },
+          "effective_state": {
+            "anyOf": [
+              {
+                "enum": [
+                  "qualification_only",
+                  "guarded",
+                  "revoked"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Effective State"
+          },
+          "failure_code": {
+            "default": "",
+            "maxLength": 160,
+            "title": "Failure Code",
+            "type": "string"
+          },
+          "reconciliation_required": {
+            "title": "Reconciliation Required",
+            "type": "boolean"
+          },
+          "result_digest": {
+            "title": "Result Digest",
+            "type": "string"
+          },
+          "result_status": {
+            "enum": [
+              "ok",
+              "error"
+            ],
+            "title": "Result Status",
+            "type": "string"
+          },
+          "schema_version": {
+            "const": 1,
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "source_operation_id": {
+            "default": "",
+            "title": "Source Operation Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action",
+          "result_status",
+          "result_digest",
+          "changed",
+          "reconciliation_required"
+        ],
+        "title": "OrdinaryAgentDeliveryActivationExecutionEvidence",
+        "type": "object"
+      },
+      "OrdinaryAgentDeliveryActivationOptionsResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "revoke_options": {
+            "items": {
+              "$ref": "#/components/schemas/OrdinaryAgentDeliveryActivationRevokeOption"
+            },
+            "title": "Revoke Options",
+            "type": "array"
+          },
+          "setup_options": {
+            "items": {
+              "$ref": "#/components/schemas/OrdinaryAgentDeliveryActivationSetupOption"
+            },
+            "title": "Setup Options",
+            "type": "array"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "setup_options",
+          "revoke_options"
+        ],
+        "title": "OrdinaryAgentDeliveryActivationOptionsResponse",
+        "type": "object"
+      },
+      "OrdinaryAgentDeliveryActivationPlanEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "expires_in_seconds": {
+            "default": 1800,
+            "maximum": 86400.0,
+            "minimum": 300.0,
+            "title": "Expires In Seconds",
+            "type": "integer"
+          },
+          "request": {
+            "discriminator": {
+              "mapping": {
+                "revoke_activation": "#/components/schemas/OrdinaryAgentDeliveryActivationRevokeRequest",
+                "setup": "#/components/schemas/OrdinaryAgentDeliveryActivationSetupRequest"
+              },
+              "propertyName": "action"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/OrdinaryAgentDeliveryActivationSetupRequest"
+              },
+              {
+                "$ref": "#/components/schemas/OrdinaryAgentDeliveryActivationRevokeRequest"
+              }
+            ],
+            "title": "Request"
+          },
+          "schema_version": {
+            "const": 1,
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "source_event_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Source Event Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_event_id",
+          "request"
+        ],
+        "title": "OrdinaryAgentDeliveryActivationPlanEnvelope",
+        "type": "object"
+      },
+      "OrdinaryAgentDeliveryActivationReference": {
+        "additionalProperties": false,
+        "properties": {
+          "activation_id": {
+            "title": "Activation Id",
+            "type": "string"
+          },
+          "activation_sha256": {
+            "title": "Activation Sha256",
+            "type": "string"
+          },
+          "revision": {
+            "maximum": 9.223372036854776e+18,
+            "minimum": 1.0,
+            "title": "Revision",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "activation_id",
+          "revision",
+          "activation_sha256"
+        ],
+        "title": "OrdinaryAgentDeliveryActivationReference",
+        "type": "object"
+      },
+      "OrdinaryAgentDeliveryActivationRevokeHumanEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "const": "revoke_activation",
+            "default": "revoke_activation",
+            "title": "Action",
+            "type": "string"
+          },
+          "activation": {
+            "$ref": "#/components/schemas/OrdinaryAgentDeliveryActivationReference"
+          },
+          "authorizes_execution": {
+            "const": false,
+            "default": false,
+            "title": "Authorizes Execution",
+            "type": "boolean"
+          },
+          "persists_state": {
+            "const": false,
+            "default": false,
+            "title": "Persists State",
+            "type": "boolean"
+          },
+          "plan_digest": {
+            "title": "Plan Digest",
+            "type": "string"
+          },
+          "result_status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Result Status",
+            "type": "string"
+          },
+          "schema_version": {
+            "const": 1,
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/OrdinaryAgentDeliveryActivationScope"
+          },
+          "source_setup_operation_id": {
+            "title": "Source Setup Operation Id",
+            "type": "string"
+          },
+          "stop_behavior": {
+            "const": "Revocation permanently blocks fresh work for this activation intent.",
+            "default": "Revocation permanently blocks fresh work for this activation intent.",
+            "title": "Stop Behavior",
+            "type": "string"
+          }
+        },
+        "required": [
+          "scope",
+          "activation",
+          "source_setup_operation_id",
+          "plan_digest"
+        ],
+        "title": "OrdinaryAgentDeliveryActivationRevokeHumanEvidence",
+        "type": "object"
+      },
+      "OrdinaryAgentDeliveryActivationRevokeOption": {
+        "additionalProperties": false,
+        "properties": {
+          "activation": {
+            "$ref": "#/components/schemas/OrdinaryAgentDeliveryActivationReference"
+          },
+          "label": {
+            "maxLength": 400,
+            "minLength": 1,
+            "title": "Label",
+            "type": "string"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/OrdinaryAgentDeliveryActivationScope"
+          }
+        },
+        "required": [
+          "activation",
+          "scope",
+          "label"
+        ],
+        "title": "OrdinaryAgentDeliveryActivationRevokeOption",
+        "type": "object"
+      },
+      "OrdinaryAgentDeliveryActivationRevokeRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "const": "revoke_activation",
+            "default": "revoke_activation",
+            "title": "Action",
+            "type": "string"
+          },
+          "activation_id": {
+            "title": "Activation Id",
+            "type": "string"
+          },
+          "expected_activation_sha256": {
+            "title": "Expected Activation Sha256",
+            "type": "string"
+          },
+          "expected_revision": {
+            "maximum": 9.223372036854776e+18,
+            "minimum": 1.0,
+            "title": "Expected Revision",
+            "type": "integer"
+          },
+          "reason": {
+            "maxLength": 240,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          },
+          "schema_version": {
+            "const": 1,
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "activation_id",
+          "expected_revision",
+          "expected_activation_sha256",
+          "reason"
+        ],
+        "title": "OrdinaryAgentDeliveryActivationRevokeRequest",
+        "type": "object"
+      },
+      "OrdinaryAgentDeliveryActivationScope": {
+        "additionalProperties": false,
+        "properties": {
+          "managed_rule_id": {
+            "title": "Managed Rule Id",
+            "type": "string"
+          },
+          "managed_set_id": {
+            "title": "Managed Set Id",
+            "type": "string"
+          },
+          "target": {
+            "$ref": "#/components/schemas/OrdinaryAgentTarget"
+          }
+        },
+        "required": [
+          "target",
+          "managed_set_id",
+          "managed_rule_id"
+        ],
+        "title": "OrdinaryAgentDeliveryActivationScope",
+        "type": "object"
+      },
+      "OrdinaryAgentDeliveryActivationSetupHumanEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "const": "setup",
+            "default": "setup",
+            "title": "Action",
+            "type": "string"
+          },
+          "activation_expires_at": {
+            "title": "Activation Expires At",
+            "type": "string"
+          },
+          "authorizes_execution": {
+            "const": false,
+            "default": false,
+            "title": "Authorizes Execution",
+            "type": "boolean"
+          },
+          "blocker_codes": {
+            "default": [],
+            "items": {
+              "enum": [
+                "database_revision_incompatible",
+                "activation_schema_incompatible",
+                "activation_storage_unavailable",
+                "activation_cas_unavailable",
+                "activation_recovery_unavailable",
+                "activation_rollback_reader_unavailable"
+              ],
+              "type": "string"
+            },
+            "title": "Blocker Codes",
+            "type": "array"
+          },
+          "initial_behavior": {
+            "const": "Guarded delivery remains qualification-only until current readiness passes.",
+            "default": "Guarded delivery remains qualification-only until current readiness passes.",
+            "title": "Initial Behavior",
+            "type": "string"
+          },
+          "inventory": {
+            "$ref": "#/components/schemas/OrdinaryAgentDeliveryInventoryReference"
+          },
+          "persists_state": {
+            "const": false,
+            "default": false,
+            "title": "Persists State",
+            "type": "boolean"
+          },
+          "plan_digest": {
+            "title": "Plan Digest",
+            "type": "string"
+          },
+          "policy_package": {
+            "$ref": "#/components/schemas/OrdinaryAgentDeliveryPolicyPackageReference"
+          },
+          "predecessor": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OrdinaryAgentDeliveryActivationReference"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "result_status": {
+            "enum": [
+              "ok",
+              "blocked"
+            ],
+            "title": "Result Status",
+            "type": "string"
+          },
+          "runtime_capability": {
+            "$ref": "#/components/schemas/OrdinaryAgentDeliveryRuntimeCapabilityEvidence"
+          },
+          "schema_version": {
+            "const": 1,
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/OrdinaryAgentDeliveryActivationScope"
+          },
+          "stop_behavior": {
+            "const": "Revocation or readiness loss blocks fresh work while preserving bounded custody cleanup.",
+            "default": "Revocation or readiness loss blocks fresh work while preserving bounded custody cleanup.",
+            "title": "Stop Behavior",
+            "type": "string"
+          }
+        },
+        "required": [
+          "result_status",
+          "scope",
+          "policy_package",
+          "inventory",
+          "activation_expires_at",
+          "runtime_capability",
+          "plan_digest"
+        ],
+        "title": "OrdinaryAgentDeliveryActivationSetupHumanEvidence",
+        "type": "object"
+      },
+      "OrdinaryAgentDeliveryActivationSetupOption": {
+        "additionalProperties": false,
+        "properties": {
+          "label": {
+            "maxLength": 400,
+            "minLength": 1,
+            "title": "Label",
+            "type": "string"
+          },
+          "policy_operation_id": {
+            "title": "Policy Operation Id",
+            "type": "string"
+          },
+          "predecessor": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OrdinaryAgentDeliveryActivationReference"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "repository_inventory_record_id": {
+            "title": "Repository Inventory Record Id",
+            "type": "string"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/OrdinaryAgentDeliveryActivationScope"
+          }
+        },
+        "required": [
+          "policy_operation_id",
+          "repository_inventory_record_id",
+          "scope",
+          "label"
+        ],
+        "title": "OrdinaryAgentDeliveryActivationSetupOption",
+        "type": "object"
+      },
+      "OrdinaryAgentDeliveryActivationSetupRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "const": "setup",
+            "default": "setup",
+            "title": "Action",
+            "type": "string"
+          },
+          "activation_expires_at": {
+            "title": "Activation Expires At",
+            "type": "string"
+          },
+          "policy_operation_id": {
+            "title": "Policy Operation Id",
+            "type": "string"
+          },
+          "predecessor": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OrdinaryAgentDeliveryActivationReference"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reason": {
+            "maxLength": 240,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          },
+          "repository_inventory_record_id": {
+            "title": "Repository Inventory Record Id",
+            "type": "string"
+          },
+          "schema_version": {
+            "const": 1,
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "policy_operation_id",
+          "repository_inventory_record_id",
+          "activation_expires_at",
+          "reason"
+        ],
+        "title": "OrdinaryAgentDeliveryActivationSetupRequest",
+        "type": "object"
+      },
       "OrdinaryAgentDeliveryBinding": {
         "additionalProperties": false,
         "properties": {
@@ -18313,6 +18884,244 @@
           "expires_at"
         ],
         "title": "OrdinaryAgentDeliveryBinding",
+        "type": "object"
+      },
+      "OrdinaryAgentDeliveryInventoryReference": {
+        "additionalProperties": false,
+        "properties": {
+          "inventory_sha256": {
+            "title": "Inventory Sha256",
+            "type": "string"
+          },
+          "record_id": {
+            "title": "Record Id",
+            "type": "string"
+          },
+          "revision": {
+            "maximum": 9.223372036854776e+18,
+            "minimum": 1.0,
+            "title": "Revision",
+            "type": "integer"
+          },
+          "state": {
+            "const": "tracked",
+            "default": "tracked",
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "record_id",
+          "revision",
+          "inventory_sha256"
+        ],
+        "title": "OrdinaryAgentDeliveryInventoryReference",
+        "type": "object"
+      },
+      "OrdinaryAgentDeliveryPolicyPackageReference": {
+        "additionalProperties": false,
+        "properties": {
+          "candidate_policy_sha256": {
+            "title": "Candidate Policy Sha256",
+            "type": "string"
+          },
+          "desired_set_sha256": {
+            "title": "Desired Set Sha256",
+            "type": "string"
+          },
+          "evidence_sha256": {
+            "title": "Evidence Sha256",
+            "type": "string"
+          },
+          "plan_sha256": {
+            "title": "Plan Sha256",
+            "type": "string"
+          },
+          "policy_operation_id": {
+            "title": "Policy Operation Id",
+            "type": "string"
+          },
+          "request_sha256": {
+            "title": "Request Sha256",
+            "type": "string"
+          }
+        },
+        "required": [
+          "policy_operation_id",
+          "request_sha256",
+          "evidence_sha256",
+          "plan_sha256",
+          "desired_set_sha256",
+          "candidate_policy_sha256"
+        ],
+        "title": "OrdinaryAgentDeliveryPolicyPackageReference",
+        "type": "object"
+      },
+      "OrdinaryAgentDeliveryRuntimeCapabilityEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "activation_cas_registered": {
+            "title": "Activation Cas Registered",
+            "type": "boolean"
+          },
+          "activation_event_versions": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Activation Event Versions",
+            "type": "array"
+          },
+          "activation_record_versions": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Activation Record Versions",
+            "type": "array"
+          },
+          "activation_recovery_registered": {
+            "title": "Activation Recovery Registered",
+            "type": "boolean"
+          },
+          "activation_schema_invariants_sha256": {
+            "title": "Activation Schema Invariants Sha256",
+            "type": "string"
+          },
+          "activation_schema_invariants_valid": {
+            "title": "Activation Schema Invariants Valid",
+            "type": "boolean"
+          },
+          "activation_storage_registered": {
+            "title": "Activation Storage Registered",
+            "type": "boolean"
+          },
+          "authorizes_execution": {
+            "const": false,
+            "default": false,
+            "title": "Authorizes Execution",
+            "type": "boolean"
+          },
+          "authz_policy_read_versions": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Authz Policy Read Versions",
+            "type": "array"
+          },
+          "bounded_cleanup_registered": {
+            "title": "Bounded Cleanup Registered",
+            "type": "boolean"
+          },
+          "custody_reservation_versions": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Custody Reservation Versions",
+            "type": "array"
+          },
+          "database_revision_compatible": {
+            "title": "Database Revision Compatible",
+            "type": "boolean"
+          },
+          "finite_request_versions": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Finite Request Versions",
+            "type": "array"
+          },
+          "guarded_worker_registered": {
+            "title": "Guarded Worker Registered",
+            "type": "boolean"
+          },
+          "observed_at": {
+            "title": "Observed At",
+            "type": "string"
+          },
+          "observed_database_revision": {
+            "title": "Observed Database Revision",
+            "type": "string"
+          },
+          "policy_v3_write_supported": {
+            "title": "Policy V3 Write Supported",
+            "type": "boolean"
+          },
+          "qualification_advancer_registered": {
+            "title": "Qualification Advancer Registered",
+            "type": "boolean"
+          },
+          "qualification_attestation_versions": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Qualification Attestation Versions",
+            "type": "array"
+          },
+          "read_attempt_versions": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Read Attempt Versions",
+            "type": "array"
+          },
+          "recovery_versions": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Recovery Versions",
+            "type": "array"
+          },
+          "rollback_reader_registered": {
+            "title": "Rollback Reader Registered",
+            "type": "boolean"
+          },
+          "schema_version": {
+            "const": 1,
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "service_image_reference": {
+            "default": "",
+            "maxLength": 512,
+            "title": "Service Image Reference",
+            "type": "string"
+          },
+          "variant_parsers_registered": {
+            "title": "Variant Parsers Registered",
+            "type": "boolean"
+          },
+          "worker_image_reference": {
+            "default": "",
+            "maxLength": 512,
+            "title": "Worker Image Reference",
+            "type": "string"
+          }
+        },
+        "required": [
+          "observed_database_revision",
+          "database_revision_compatible",
+          "activation_schema_invariants_sha256",
+          "activation_schema_invariants_valid",
+          "finite_request_versions",
+          "read_attempt_versions",
+          "custody_reservation_versions",
+          "qualification_attestation_versions",
+          "activation_record_versions",
+          "activation_event_versions",
+          "recovery_versions",
+          "authz_policy_read_versions",
+          "variant_parsers_registered",
+          "activation_storage_registered",
+          "activation_cas_registered",
+          "activation_recovery_registered",
+          "bounded_cleanup_registered",
+          "rollback_reader_registered",
+          "qualification_advancer_registered",
+          "guarded_worker_registered",
+          "policy_v3_write_supported",
+          "observed_at"
+        ],
+        "title": "OrdinaryAgentDeliveryRuntimeCapabilityEvidence",
         "type": "object"
       },
       "OrdinaryAgentDisconnectRequest": {
@@ -22665,7 +23474,8 @@
             "enum": [
               "managed-secret-reencryption",
               "managed-authz-policy-set",
-              "managed-merge-train-policy-import"
+              "managed-merge-train-policy-import",
+              "ordinary-agent-delivery-activation"
             ],
             "title": "Descriptor Id",
             "type": "string"
@@ -22805,7 +23615,8 @@
             "enum": [
               "managed-secret-reencryption",
               "managed-authz-policy-set",
-              "managed-merge-train-policy-import"
+              "managed-merge-train-policy-import",
+              "ordinary-agent-delivery-activation"
             ],
             "title": "Descriptor Id",
             "type": "string"
@@ -22870,7 +23681,8 @@
             "default": "key_retained",
             "enum": [
               "key_retained",
-              "policy_cas"
+              "policy_cas",
+              "activation_revoke"
             ],
             "title": "Rollback Class",
             "type": "string"
@@ -23201,7 +24013,8 @@
             "enum": [
               "managed-secret-reencryption",
               "managed-authz-policy-set",
-              "managed-merge-train-policy-import"
+              "managed-merge-train-policy-import",
+              "ordinary-agent-delivery-activation"
             ],
             "title": "Descriptor Id",
             "type": "string"
@@ -23223,6 +24036,12 @@
               },
               {
                 "$ref": "#/components/schemas/ManagedMergeTrainPolicyImportProposalInput-Input"
+              },
+              {
+                "$ref": "#/components/schemas/OrdinaryAgentDeliveryActivationSetupRequest"
+              },
+              {
+                "$ref": "#/components/schemas/OrdinaryAgentDeliveryActivationRevokeRequest"
               }
             ],
             "title": "Request"
@@ -23268,7 +24087,8 @@
             "enum": [
               "managed-secret-reencryption",
               "managed-authz-policy-set",
-              "managed-merge-train-policy-import"
+              "managed-merge-train-policy-import",
+              "ordinary-agent-delivery-activation"
             ],
             "title": "Descriptor Id",
             "type": "string"
@@ -23289,6 +24109,23 @@
               },
               {
                 "$ref": "#/components/schemas/ManagedMergeTrainPolicyImportHumanEvidence"
+              },
+              {
+                "discriminator": {
+                  "mapping": {
+                    "revoke_activation": "#/components/schemas/OrdinaryAgentDeliveryActivationRevokeHumanEvidence",
+                    "setup": "#/components/schemas/OrdinaryAgentDeliveryActivationSetupHumanEvidence"
+                  },
+                  "propertyName": "action"
+                },
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/OrdinaryAgentDeliveryActivationSetupHumanEvidence"
+                  },
+                  {
+                    "$ref": "#/components/schemas/OrdinaryAgentDeliveryActivationRevokeHumanEvidence"
+                  }
+                ]
               }
             ],
             "title": "Evidence"
@@ -23307,6 +24144,9 @@
               },
               {
                 "$ref": "#/components/schemas/ManagedMergeTrainPolicyImportExecutionEvidence"
+              },
+              {
+                "$ref": "#/components/schemas/OrdinaryAgentDeliveryActivationExecutionEvidence"
               },
               {
                 "type": "null"
@@ -23332,6 +24172,12 @@
               },
               {
                 "$ref": "#/components/schemas/ManagedMergeTrainPolicyImportProposalInput-Output"
+              },
+              {
+                "$ref": "#/components/schemas/OrdinaryAgentDeliveryActivationSetupRequest"
+              },
+              {
+                "$ref": "#/components/schemas/OrdinaryAgentDeliveryActivationRevokeRequest"
               }
             ],
             "title": "Request"
@@ -23493,7 +24339,8 @@
             "enum": [
               "managed-secret-reencryption",
               "managed-authz-policy-set",
-              "managed-merge-train-policy-import"
+              "managed-merge-train-policy-import",
+              "ordinary-agent-delivery-activation"
             ],
             "title": "Descriptor Id",
             "type": "string"
@@ -23512,7 +24359,8 @@
             "enum": [
               "managed_secret_reencryption",
               "managed_authz_policy_set",
-              "managed_merge_train_policy_import"
+              "managed_merge_train_policy_import",
+              "ordinary_agent_delivery_activation"
             ],
             "title": "Operation Class",
             "type": "string"
@@ -23556,7 +24404,8 @@
             "enum": [
               "Managed-secret re-encryption review",
               "Managed authorization policy review",
-              "Managed merge-train policy review"
+              "Managed merge-train policy review",
+              "Ordinary-agent delivery activation review"
             ],
             "title": "Title",
             "type": "string"
@@ -23665,7 +24514,8 @@
             "enum": [
               "managed_secret_store",
               "authorization_policy",
-              "merge_train_policy"
+              "merge_train_policy",
+              "ordinary_agent_delivery_activation"
             ],
             "title": "Scope",
             "type": "string"
@@ -23711,7 +24561,13 @@
                 "operation_past_expiry",
                 "operation_expired",
                 "execution_failed",
-                "reconciliation_required"
+                "reconciliation_required",
+                "database_revision_incompatible",
+                "activation_schema_incompatible",
+                "activation_storage_unavailable",
+                "activation_cas_unavailable",
+                "activation_recovery_unavailable",
+                "activation_rollback_reader_unavailable"
               ],
               "type": "string"
             },
@@ -23793,6 +24649,10 @@
               "candidate_managed_set",
               "active_merge_train_policy",
               "candidate_merge_train_policy",
+              "activation_inventory",
+              "activation_policy_package",
+              "activation_record",
+              "activation_schema_invariants",
               "execution_result"
             ],
             "title": "Kind",
@@ -23948,7 +24808,9 @@
               "policy_targets_added",
               "policy_targets_changed",
               "policy_targets_removed",
-              "policy_targets_unchanged"
+              "policy_targets_unchanged",
+              "activation_scope_targets",
+              "activation_setup_blockers"
             ],
             "title": "Kind",
             "type": "string"
@@ -24001,7 +24863,8 @@
           "rollback_class": {
             "enum": [
               "key_retained",
-              "policy_cas"
+              "policy_cas",
+              "activation_revoke"
             ],
             "title": "Rollback Class",
             "type": "string"
@@ -69403,6 +70266,162 @@
         "summary": "Read one private health endpoint record"
       }
     },
+    "/v1/privileged-operations/ordinary-agent-delivery-activation/options": {
+      "get": {
+        "operationId": "read_ordinary_agent_delivery_activation_options",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrdinaryAgentDeliveryActivationOptionsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "List server-resolved ordinary-agent activation choices",
+        "tags": [
+          "privileged-operations"
+        ]
+      }
+    },
+    "/v1/privileged-operations/ordinary-agent-delivery-activation/plans": {
+      "post": {
+        "operationId": "plan_ordinary_agent_delivery_activation",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OrdinaryAgentDeliveryActivationPlanEnvelope"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PrivilegedOperationHumanResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Plan ordinary-agent delivery activation setup or revocation",
+        "tags": [
+          "privileged-operations"
+        ]
+      }
+    },
     "/v1/privileged-operations/plans": {
       "get": {
         "operationId": "list_human_privileged_operations",
@@ -69442,7 +70461,8 @@
               "enum": [
                 "managed-secret-reencryption",
                 "managed-authz-policy-set",
-                "managed-merge-train-policy-import"
+                "managed-merge-train-policy-import",
+                "ordinary-agent-delivery-activation"
               ],
               "title": "Descriptor Id",
               "type": "string"
@@ -80946,6 +81966,7 @@
     "/v1/owner-acceptance/owner-evaluation": "evaluate_owner_product_review",
     "/v1/owner-acceptance/queue": "list_owner_acceptance_queue",
     "/v1/previews/readiness": "read_preview_readiness",
+    "/v1/privileged-operations/ordinary-agent-delivery-activation/options": "read_ordinary_agent_delivery_activation_options",
     "/v1/privileged-operations/plans": "list_human_privileged_operations",
     "/v1/privileged-operations/plans/{operation_id}": "read_human_privileged_operation",
     "/v1/privileged-operations/plans/{operation_id}/review": "read_human_privileged_operation_review",
@@ -80974,6 +81995,7 @@
     "/v1/ordinary-agent-operations/{principal_id}/{operation_id}/cancel": "cancel_ordinary_agent_operation",
     "/v1/ordinary-agent-sessions/{principal_id}/{session_id}/revoke": "revoke_ordinary_agent_session",
     "/v1/owner-acceptance/events": "write_owner_acceptance_event",
+    "/v1/privileged-operations/ordinary-agent-delivery-activation/plans": "plan_ordinary_agent_delivery_activation",
     "/v1/privileged-operations/plans/{operation_id}/approve": "approve_human_privileged_operation",
     "/v1/privileged-operations/plans/{operation_id}/revoke": "revoke_human_privileged_operation",
     "/v1/products/{product}/environments/{environment}/config/apply": "apply_product_environment_config",

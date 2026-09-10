@@ -9,8 +9,10 @@ from control_plane.contracts.durable_operation_authorization import (
 )
 from control_plane.durable_operation_authorization import (
     DurableOperationAuthorizationCaptureError,
+    capture_explicit_action_durable_operation_authorization,
     capture_durable_operation_authorization,
     durable_operation_authorization_allows,
+    explicit_action_durable_operation_authorization_allows,
     managed_github_id_action_allows,
     managed_github_id_rule_allows,
     require_single_managed_github_id_rule_identity,
@@ -310,6 +312,46 @@ class DurableOperationAuthorizationTests(unittest.TestCase):
                         policy_record=empty_action_record,
                     )
                 )
+
+    def test_explicit_action_capture_and_reauthorization_reject_legacy_wildcards(self) -> None:
+        action = "odoo_stable_bootstrap.execute"
+        explicit_record = self._policy_record(self._policy(actions=(action,)))
+        authorization = capture_explicit_action_durable_operation_authorization(
+            identity=self._identity(),
+            action=action,
+            product="odoo-tenant-cm",
+            context="cm",
+            instances=("testing",),
+            policy_record=explicit_record,
+            authorized_at="2026-07-23T03:31:00Z",
+        )
+
+        self.assertTrue(
+            explicit_action_durable_operation_authorization_allows(
+                authorization=authorization,
+                policy_record=explicit_record,
+            )
+        )
+        wildcard_record = self._policy_record(self._policy(actions=()), revision=42)
+        self.assertFalse(
+            explicit_action_durable_operation_authorization_allows(
+                authorization=authorization,
+                policy_record=wildcard_record,
+            )
+        )
+        with self.assertRaisesRegex(
+            DurableOperationAuthorizationCaptureError,
+            "explicit-action managed authz rule",
+        ):
+            capture_explicit_action_durable_operation_authorization(
+                identity=self._identity(),
+                action=action,
+                product="odoo-tenant-cm",
+                context="cm",
+                instances=("testing",),
+                policy_record=wildcard_record,
+                authorized_at="2026-07-23T03:31:00Z",
+            )
 
     def test_v3_managed_github_id_helpers_preserve_immutable_id_requirements(self) -> None:
         identity = GitHubHumanIdentity(

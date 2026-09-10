@@ -23,6 +23,17 @@ from control_plane.contracts.merge_train_policy import (
     MergeTrainPolicyRecord,
     normalize_merge_train_policy_timestamp,
 )
+from control_plane.contracts.ordinary_agent_activation import (
+    OrdinaryAgentDeliveryActivationEvent,
+    OrdinaryAgentDeliveryActivationExecutionEvidence,
+    OrdinaryAgentDeliveryActivationRecord,
+    OrdinaryAgentDeliveryActivationRevokeHumanEvidence,
+    OrdinaryAgentDeliveryActivationRevokeRequest,
+    OrdinaryAgentDeliveryActivationSetupHumanEvidence,
+    OrdinaryAgentDeliveryActivationSetupRequest,
+    build_ordinary_agent_delivery_activation_event_id,
+    build_ordinary_agent_delivery_activation_id,
+)
 from control_plane.contracts.privileged_operation import (
     ManagedAuthzPolicySetExecutionEvidence,
     ManagedAuthzPolicySetProposalInput,
@@ -47,6 +58,7 @@ from control_plane.contracts.privileged_operation_worker_heartbeat import (
     privileged_operation_worker_identity_sha256,
 )
 from control_plane.durable_operation_authorization import (
+    managed_github_id_explicit_action_rule_allows,
     managed_github_id_action_allows,
     managed_github_id_rule_allows,
     read_active_authz_policy_record,
@@ -367,7 +379,12 @@ def _approver_is_still_authorized(
     authorization: DurableOperationAuthorization,
     policy_record: LaunchplaneAuthzPolicyRecord,
 ) -> bool:
-    return managed_github_id_rule_allows(
+    authorization_reader = (
+        managed_github_id_explicit_action_rule_allows
+        if authorization.action.startswith("ordinary_agent_delivery_activation.")
+        else managed_github_id_rule_allows
+    )
+    return authorization_reader(
         policy=policy_record.policy,
         github_id=authorization.caller.github_id,
         managed_set_id=authorization.managed_set_id,
@@ -603,12 +620,304 @@ def _merge_train_policy_execution_evidence(
     )
 
 
+def _activation_execution_evidence(
+    *,
+    action: Literal["setup", "revoke_activation"],
+    activation_id: str,
+    activation_revision: int,
+    activation_sha256: str,
+    desired_state: Literal["guarded", "revoked"],
+    effective_state: Literal["qualification_only", "guarded", "revoked"],
+    source_operation_id: str,
+    changed: bool,
+) -> OrdinaryAgentDeliveryActivationExecutionEvidence:
+    payload = {
+        "action": action,
+        "activation_id": activation_id,
+        "activation_revision": activation_revision,
+        "activation_sha256": activation_sha256,
+        "desired_state": desired_state,
+        "effective_state": effective_state,
+        "source_operation_id": source_operation_id,
+        "changed": changed,
+    }
+    return OrdinaryAgentDeliveryActivationExecutionEvidence(
+        action=action,
+        result_status="ok",
+        result_digest=_digest(payload),
+        changed=changed,
+        activation_id=activation_id,
+        activation_revision=activation_revision,
+        activation_sha256=activation_sha256,
+        desired_state=desired_state,
+        effective_state=effective_state,
+        source_operation_id=source_operation_id,
+        reconciliation_required=False,
+    )
+
+
+def _execute_ordinary_agent_delivery_activation(
+    *,
+    store: PrivilegedOperationExecutionStore,
+    record: PrivilegedOperationRecord,
+    now: Callable[[], datetime],
+    on_effect_completed: Callable[[], None],
+) -> OrdinaryAgentDeliveryActivationExecutionEvidence:
+    approval = record.approval
+    if approval is None:
+        raise ValueError("approval_provenance_missing")
+    occurred_at = _timestamp(now())
+    if isinstance(record.request, OrdinaryAgentDeliveryActivationSetupRequest) and isinstance(
+        record.evidence,
+        OrdinaryAgentDeliveryActivationSetupHumanEvidence,
+    ):
+        if record.evidence.result_status != "ok" or record.evidence.blocker_codes:
+            raise ValueError("activation_setup_blocked")
+        activation_id = build_ordinary_agent_delivery_activation_id(
+            scope=record.evidence.scope,
+            source_setup_operation_id=record.operation_id,
+        )
+        activation = OrdinaryAgentDeliveryActivationRecord(
+            activation_id=activation_id,
+            scope=record.evidence.scope,
+            source_setup_operation_id=record.operation_id,
+            source_setup_approval_sha256=_digest(approval.model_dump(mode="json")),
+            policy_package=record.evidence.policy_package,
+            inventory=record.evidence.inventory,
+            desired_state="guarded",
+            effective_state="qualification_only",
+            activation_expires_at=record.evidence.activation_expires_at,
+            runtime_capability_at_setup=record.evidence.runtime_capability,
+            revision=1,
+            predecessor=record.evidence.predecessor,
+            installed_at=occurred_at,
+            updated_at=occurred_at,
+        )
+        install_event = OrdinaryAgentDeliveryActivationEvent(
+            event_id=build_ordinary_agent_delivery_activation_event_id(
+                activation_id=activation.activation_id,
+                sequence=1,
+                action="installed",
+                source_operation_id=record.operation_id,
+            ),
+            activation_id=activation.activation_id,
+            sequence=1,
+            action="installed",
+            previous_revision=0,
+            resulting_revision=activation.revision,
+            resulting_activation_sha256=activation.activation_sha256,
+            resulting_desired_state=activation.desired_state,
+            resulting_effective_state=activation.effective_state,
+            occurred_at=occurred_at,
+            source_operation_id=record.operation_id,
+            evidence_ids=tuple(
+                sorted(
+                    (
+                        record.evidence.inventory.record_id,
+                        record.evidence.policy_package.policy_operation_id,
+                    )
+                )
+            ),
+        )
+        predecessor: OrdinaryAgentDeliveryActivationRecord | None = None
+        predecessor_event: OrdinaryAgentDeliveryActivationEvent | None = None
+        if record.evidence.predecessor is not None:
+            reader = getattr(store, "read_ordinary_agent_delivery_activation_record", None)
+            if not callable(reader):
+                raise ValueError("activation_storage_unavailable")
+            predecessor = reader(record.evidence.predecessor.activation_id)
+            if not isinstance(predecessor, OrdinaryAgentDeliveryActivationRecord):
+                predecessor = OrdinaryAgentDeliveryActivationRecord.model_validate(predecessor)
+            if (
+                predecessor.revision != record.evidence.predecessor.revision
+                or predecessor.activation_sha256 != record.evidence.predecessor.activation_sha256
+            ):
+                raise ValueError("activation_predecessor_drift")
+            if predecessor.desired_state != "revoked":
+                predecessor = OrdinaryAgentDeliveryActivationRecord.model_validate(
+                    {
+                        **predecessor.model_dump(mode="json"),
+                        "revision": predecessor.revision + 1,
+                        "updated_at": occurred_at,
+                        "superseded_by_activation_id": activation.activation_id,
+                        "superseded_at": occurred_at,
+                        "activation_sha256": "",
+                    }
+                )
+                predecessor_event = OrdinaryAgentDeliveryActivationEvent(
+                    event_id=build_ordinary_agent_delivery_activation_event_id(
+                        activation_id=predecessor.activation_id,
+                        sequence=predecessor.revision,
+                        action="superseded",
+                        source_operation_id=record.operation_id,
+                    ),
+                    activation_id=predecessor.activation_id,
+                    sequence=predecessor.revision,
+                    action="superseded",
+                    previous_revision=record.evidence.predecessor.revision,
+                    previous_activation_sha256=record.evidence.predecessor.activation_sha256,
+                    resulting_revision=predecessor.revision,
+                    resulting_activation_sha256=predecessor.activation_sha256,
+                    resulting_desired_state=predecessor.desired_state,
+                    resulting_effective_state=predecessor.effective_state,
+                    occurred_at=occurred_at,
+                    source_operation_id=record.operation_id,
+                )
+        installer = getattr(store, "install_ordinary_agent_delivery_activation", None)
+        if not callable(installer):
+            raise ValueError("activation_storage_unavailable")
+        installer(
+            activation,
+            install_event,
+            predecessor=predecessor,
+            predecessor_event=predecessor_event,
+        )
+        on_effect_completed()
+        return _activation_execution_evidence(
+            action="setup",
+            activation_id=activation.activation_id,
+            activation_revision=activation.revision,
+            activation_sha256=activation.activation_sha256,
+            desired_state=activation.desired_state,
+            effective_state=activation.effective_state,
+            source_operation_id=record.operation_id,
+            changed=True,
+        )
+    if isinstance(record.request, OrdinaryAgentDeliveryActivationRevokeRequest) and isinstance(
+        record.evidence,
+        OrdinaryAgentDeliveryActivationRevokeHumanEvidence,
+    ):
+        reader = getattr(store, "read_ordinary_agent_delivery_activation_record", None)
+        revoker = getattr(store, "revoke_ordinary_agent_delivery_activation", None)
+        if not callable(reader) or not callable(revoker):
+            raise ValueError("activation_storage_unavailable")
+        previous = reader(record.request.activation_id)
+        if not isinstance(previous, OrdinaryAgentDeliveryActivationRecord):
+            previous = OrdinaryAgentDeliveryActivationRecord.model_validate(previous)
+        if (
+            previous.revision != record.request.expected_revision
+            or previous.activation_sha256 != record.request.expected_activation_sha256
+        ):
+            raise ValueError("activation_revoke_drift")
+        revoked = OrdinaryAgentDeliveryActivationRecord.model_validate(
+            {
+                **previous.model_dump(mode="json"),
+                "desired_state": "revoked",
+                "effective_state": "revoked",
+                "revision": previous.revision + 1,
+                "updated_at": occurred_at,
+                "revoked_at": occurred_at,
+                "activation_sha256": "",
+            }
+        )
+        revoke_event = OrdinaryAgentDeliveryActivationEvent(
+            event_id=build_ordinary_agent_delivery_activation_event_id(
+                activation_id=revoked.activation_id,
+                sequence=revoked.revision,
+                action="revoked",
+                source_operation_id=record.operation_id,
+            ),
+            activation_id=revoked.activation_id,
+            sequence=revoked.revision,
+            action="revoked",
+            previous_revision=previous.revision,
+            previous_activation_sha256=previous.activation_sha256,
+            resulting_revision=revoked.revision,
+            resulting_activation_sha256=revoked.activation_sha256,
+            resulting_desired_state=revoked.desired_state,
+            resulting_effective_state=revoked.effective_state,
+            occurred_at=occurred_at,
+            source_operation_id=record.operation_id,
+        )
+        revoker(revoked, revoke_event)
+        on_effect_completed()
+        return _activation_execution_evidence(
+            action="revoke_activation",
+            activation_id=revoked.activation_id,
+            activation_revision=revoked.revision,
+            activation_sha256=revoked.activation_sha256,
+            desired_state=revoked.desired_state,
+            effective_state=revoked.effective_state,
+            source_operation_id=record.operation_id,
+            changed=True,
+        )
+    raise ValueError("executor_result_error")
+
+
+def _recover_ordinary_agent_delivery_activation(
+    *,
+    store: PrivilegedOperationExecutionStore,
+    record: PrivilegedOperationRecord,
+) -> OrdinaryAgentDeliveryActivationExecutionEvidence:
+    recovery = getattr(
+        store,
+        "recover_ordinary_agent_delivery_activation_by_source_operation",
+        None,
+    )
+    if not callable(recovery):
+        raise ValueError("activation_recovery_unavailable")
+    recovered = recovery(record.operation_id)
+    if not isinstance(recovered, tuple) or len(recovered) != 2:
+        raise ValueError("activation_recovery_failed")
+    _, event = recovered
+    if not isinstance(event, OrdinaryAgentDeliveryActivationEvent):
+        event = OrdinaryAgentDeliveryActivationEvent.model_validate(event)
+    if event.source_operation_id != record.operation_id:
+        raise ValueError("activation_recovery_failed")
+    if isinstance(record.request, OrdinaryAgentDeliveryActivationSetupRequest):
+        action: Literal["setup", "revoke_activation"] = "setup"
+        expected_event_action = "installed"
+    elif isinstance(record.request, OrdinaryAgentDeliveryActivationRevokeRequest):
+        action = "revoke_activation"
+        expected_event_action = "revoked"
+    else:
+        raise ValueError("activation_recovery_failed")
+    if event.action != expected_event_action:
+        raise ValueError("activation_recovery_failed")
+    return _activation_execution_evidence(
+        action=action,
+        activation_id=event.activation_id,
+        activation_revision=event.resulting_revision,
+        activation_sha256=event.resulting_activation_sha256,
+        desired_state=event.resulting_desired_state,
+        effective_state=event.resulting_effective_state,
+        source_operation_id=event.source_operation_id,
+        changed=True,
+    )
+
+
 def _failed_execution_evidence(
     *,
     record: PrivilegedOperationRecord,
     failure_code: str,
     reconciliation_required: bool,
 ) -> PrivilegedOperationTerminalEvidence:
+    if record.descriptor_id == "ordinary-agent-delivery-activation":
+        action: Literal["setup", "revoke_activation"] = (
+            record.request.action
+            if isinstance(
+                record.request,
+                (
+                    OrdinaryAgentDeliveryActivationSetupRequest,
+                    OrdinaryAgentDeliveryActivationRevokeRequest,
+                ),
+            )
+            else "setup"
+        )
+        return OrdinaryAgentDeliveryActivationExecutionEvidence(
+            action=action,
+            result_status="error",
+            result_digest=_digest(
+                {
+                    "operation_id": record.operation_id,
+                    "failure_code": failure_code,
+                    "reconciliation_required": reconciliation_required,
+                }
+            ),
+            changed=False,
+            reconciliation_required=reconciliation_required,
+            failure_code=failure_code,
+        )
     if record.descriptor_id == "managed-authz-policy-set":
         return ManagedAuthzPolicySetExecutionEvidence(
             result_status="error",
@@ -971,6 +1280,12 @@ def _failure_code(error: Exception) -> str:
         "merge_train_policy_readback_failed",
         "merge_train_policy_write_conflict",
         "mutation_reservation_completion_failed",
+        "activation_setup_blocked",
+        "activation_storage_unavailable",
+        "activation_predecessor_drift",
+        "activation_revoke_drift",
+        "activation_recovery_unavailable",
+        "activation_recovery_failed",
     }
     normalized = str(error).strip()
     return normalized if normalized in known_codes else "privileged_operation_execution_error"
@@ -1024,6 +1339,11 @@ def reconcile_stale_privileged_operations(
                     store=store,
                     record=record,
                     authorization=authorization,
+                )
+            elif record.descriptor_id == "ordinary-agent-delivery-activation":
+                terminal_evidence = _recover_ordinary_agent_delivery_activation(
+                    store=store,
+                    record=record,
                 )
             else:
                 result = control_plane_secrets.reencrypt_secrets(
@@ -1187,6 +1507,18 @@ def execute_approved_privileged_operations_once(
                     store=store,
                     record=claimed,
                     authorization=authorization,
+                    on_effect_completed=mark_effect_completed,
+                )
+            elif claimed.descriptor_id == "ordinary-agent-delivery-activation":
+
+                def mark_effect_completed() -> None:
+                    nonlocal effect_completed
+                    effect_completed = True
+
+                operation_execution = _execute_ordinary_agent_delivery_activation(
+                    store=store,
+                    record=claimed,
+                    now=now,
                     on_effect_completed=mark_effect_completed,
                 )
             else:
