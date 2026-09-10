@@ -514,6 +514,14 @@ are met. It remains diagnostic and does not change the Owner decision, check
 conclusion, binding, or immutable human event. A coverage-only change refreshes
 the projection identity. Existing responses that omit coverage remain readable.
 
+The Engineering Owner-acceptance workbench renders the same nullable diagnostic
+for both Current items and exact lookup. It treats missing coverage as unknown,
+uses the server-reported coverage state without deriving readiness, and reports
+the true unmatched total separately from the bounded sample count and truncation.
+Omitted and explicit-null coverage both remain unknown. Truncated sample evidence
+may omit or shorten paths and never replaces the true unmatched total. The
+display grants no Owner acceptance or action.
+
 This diagnostic uses existing evaluation and projection entrypoints. Automatic
 pull-request lifecycle projection remains tracked separately in #2162 and subject
 to the Owner milestone pause in #2164.

@@ -2997,37 +2997,68 @@ export function ownerAcceptanceEvaluationForFixture(
   fixture: DataFixtureMode,
 ): OwnerAcceptanceDecision {
   assertEngineeringFixtureAvailable(fixture);
+  const fixtureParams = new URLSearchParams(
+    typeof window === "undefined" ? "" : window.location.search,
+  );
+  const coverageScenario = fixtureParams.get("coverage");
+  const unavailableDecision = fixtureParams.get("decision") === "unavailable";
   const binding = _ownerAcceptanceBinding({
     pull_request_number: 308,
     binding_sha256: "a".repeat(64),
     head_sha: "a".repeat(40),
   });
-  return {
+  const decision: OwnerAcceptanceDecision = {
     schema_version: 1,
-    status: "pending",
-    reason_code: "acceptance_missing",
-    change_impact_coverage: null,
-    binding,
+    status: unavailableDecision ? "unavailable" : "pending",
+    reason_code: unavailableDecision ? "change_impact_unavailable" : "acceptance_missing",
+    change_impact_coverage:
+      coverageScenario === "complete"
+        ? {
+            state: "complete",
+            unmatched_path_count: 0,
+            unmatched_path_samples: [],
+            truncated: false,
+          }
+        : coverageScenario === "incomplete" || coverageScenario === "truncated"
+          ? {
+              state: "incomplete",
+              unmatched_path_count: coverageScenario === "truncated" ? 47 : 3,
+              unmatched_path_samples: [
+                "frontend/src/checkout.tsx",
+                "https://example.invalid/not-a-link",
+                "<owner-preview>",
+              ],
+              truncated: coverageScenario === "truncated",
+            }
+          : null,
+    binding: unavailableDecision ? null : binding,
     current_event: null,
     admissible: false,
     human_action_semantics: "none",
-    products: [
-      {
-        schema_version: 1,
-        product: binding.product,
-        system: binding.system,
-        action: binding.action,
-        environment: binding.environment,
-        status: "pending",
-        reason_code: "acceptance_missing",
-        binding,
-        current_event: null,
-        admissible: false,
-        human_action_semantics: "none",
-      },
-    ],
+    products: unavailableDecision
+      ? []
+      : [
+          {
+            schema_version: 1,
+            product: binding.product,
+            system: binding.system,
+            action: binding.action,
+            environment: binding.environment,
+            status: "pending",
+            reason_code: "acceptance_missing",
+            binding,
+            current_event: null,
+            admissible: false,
+            human_action_semantics: "none",
+          },
+        ],
     evaluated_at: OBSERVED_AT,
   };
+  if (coverageScenario === "omitted") {
+    const { change_impact_coverage: _omitted, ...legacyDecision } = decision;
+    return legacyDecision as OwnerAcceptanceDecision;
+  }
+  return decision;
 }
 
 export function governanceProjectionForFixture(
