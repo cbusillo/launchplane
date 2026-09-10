@@ -9,7 +9,7 @@ from datetime import (
 )
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from urllib.parse import (
     parse_qs,
     urlparse,
@@ -19,6 +19,7 @@ from fastapi import FastAPI
 from fastapi.responses import PlainTextResponse
 from fastapi.routing import APIRoute
 
+from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.http_app import (
     LaunchplaneErrorResponse,
     LaunchplaneAuthzPolicyRuntime,
@@ -27,6 +28,11 @@ from control_plane.http_app import (
     create_launchplane_fastapi_app,
 )
 from control_plane.openapi_export import canonical_openapi_document
+from control_plane.ordinary_agent_authentication import (
+    generate_receiver_claim_secret,
+    issue_ordinary_agent_credential,
+    receiver_claim_sha256,
+)
 from control_plane.contracts.verireel_prod_backup_gate import VeriReelProdBackupGateRequest
 from control_plane.contracts.verireel_prod_backup_gate_operation import (
     VeriReelProdBackupGateOperationRecord,
@@ -981,6 +987,123 @@ class FastApiOperatorUiTests(unittest.IsolatedAsyncioTestCase):
 
 
 class FastApiServiceRuntimeReadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_ordinary_bearer_cannot_collide_with_legacy_privileged_proposer(
+        self,
+    ) -> None:
+        claim = generate_receiver_claim_secret()
+        bundle = issue_ordinary_agent_credential(
+            principal_id="agent_one",
+            credential_id="agent_credential",
+            credential_version=1,
+            valid_from=100,
+            expires_at=1_000,
+            operation_id="ordinary-agent-enroll-1",
+            receiver_claim_sha256=receiver_claim_sha256(claim),
+            delivery_expires_at=200,
+            intent_sha256=canonical_json_sha256({"intent": "http collision regression"}),
+            encrypt=lambda plaintext: (f"encrypted:{len(plaintext)}", "test-key"),
+        )
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "schema_version": 2,
+                "terminal_agents": [
+                    {
+                        "managed_set_id": "privileged-operations.policy-agent",
+                        "managed_rule_id": "agent-policy-proposer",
+                        "subjects": ["agent:planner"],
+                        "token_labels": ["planner"],
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": ["authz_policy_operation.propose"],
+                    }
+                ],
+            }
+        )
+        verifier = Mock()
+        with TemporaryDirectory() as directory:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(directory) / "launchplane.sqlite3")
+            )
+            store.ensure_schema()
+            app = create_launchplane_fastapi_app(
+                verifier=verifier,
+                authz_policy=policy,
+                record_store_factory=lambda: store,
+                bearer_identity_config=BearerIdentityConfig(
+                    local_admin_token=bundle.token.value,
+                    local_admin_subject="local-admin",
+                    local_admin_token_label="admin",
+                    terminal_agent_token=bundle.token.value,
+                    terminal_agent_subject="agent:planner",
+                    terminal_agent_token_label="planner",
+                ),
+            )
+            try:
+                response = await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/agent/privileged-operations/plans",
+                    headers={"Authorization": f"Bearer {bundle.token.value}"},
+                    payload={
+                        "descriptor_id": "managed-authz-policy-set",
+                        "source_event_id": "ordinary-token-collision",
+                        "request": {
+                            "managed_set_id": "collision-test",
+                            "reason": "Must never be planned.",
+                            "desired_policy": {"schema_version": 2},
+                        },
+                    },
+                )
+                stored = store.list_privileged_operation_records()
+            finally:
+                store.close()
+
+        self.assertEqual(response.status_code, 401)
+        self.assertNotIn(bundle.token.value, response.text)
+        self.assertEqual(stored, ())
+        verifier.verify.assert_not_called()
+
+    async def test_private_claim_does_not_fall_back_to_configured_administrator(self) -> None:
+        claim = generate_receiver_claim_secret()
+        verifier = Mock()
+        with TemporaryDirectory() as directory:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(directory) / "private-claim.sqlite3")
+            )
+            store.ensure_schema()
+            app = create_launchplane_fastapi_app(
+                verifier=verifier,
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"schema_version": 2}),
+                record_store_factory=lambda: store,
+                bearer_identity_config=BearerIdentityConfig(
+                    local_admin_token=claim.value,
+                    local_admin_subject="local-admin",
+                    local_admin_token_label="admin",
+                ),
+            )
+            try:
+                response = await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/agent/ordinary-agent-enrollments/unknown-operation/claim",
+                    headers={"Authorization": f"Bearer {claim.value}"},
+                )
+                invalid_path = await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/agent/ordinary-agent-enrollments/" + "x" * 257 + "/claim",
+                    headers={"Authorization": f"Bearer {claim.value}"},
+                )
+            finally:
+                store.close()
+        self.assertEqual(invalid_path.status_code, 400)
+        self.assertEqual(invalid_path.headers["cache-control"], "no-store")
+        self.assertNotIn(claim.value, invalid_path.text)
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        self.assertNotIn(claim.value, response.text)
+        verifier.verify.assert_not_called()
+
     def test_runtime_payload_defaults_deployment_marker_to_empty(self) -> None:
         with patch.dict("os.environ", {}, clear=True):
             runtime = launchplane_runtime_payload(

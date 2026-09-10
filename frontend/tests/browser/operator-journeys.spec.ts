@@ -1340,6 +1340,104 @@ test.describe("operator journeys", () => {
     diagnostics.assertClean();
   });
 
+  test("Owner acceptance shows missing change-impact coverage as unknown", async ({
+    page,
+  }) => {
+    const diagnostics = monitorBrowser(page);
+
+    await page.goto("/ui/engineering/owner-acceptance?fixture=products");
+
+    const coverage = page.getByLabel("Change-impact path coverage").first();
+    await expect(coverage).toContainText(
+      "Coverage was not supplied for this evaluation. Its state is unknown.",
+    );
+    await expect(coverage).not.toContainText("Coverage state: complete");
+    await expect(coverage).toContainText(
+      "does not change the Owner decision, grant Owner acceptance, or enable any action",
+    );
+
+    await page.goto(
+      "/ui/engineering/owner-acceptance?fixture=products&coverage=omitted",
+    );
+    await expect(
+      page.getByLabel("Change-impact path coverage").first(),
+    ).toContainText("Coverage was not supplied for this evaluation. Its state is unknown.");
+    diagnostics.assertClean();
+  });
+
+  test("Owner acceptance renders incomplete coverage samples as opaque diagnostics", async ({
+    page,
+  }) => {
+    const diagnostics = monitorBrowser(page);
+
+    await page.goto(
+      "/ui/engineering/owner-acceptance?fixture=products&coverage=incomplete",
+    );
+
+    const coverage = page.getByLabel("Change-impact path coverage").first();
+    await expect(coverage).toContainText("Coverage state: incomplete");
+    await expect(coverage).toContainText("Reported unmatched path count: 3");
+    await expect(coverage.getByRole("listitem")).toHaveCount(3);
+    await expect(coverage).toContainText("frontend/src/checkout.tsx");
+    await expect(coverage).toContainText("https://example.invalid/not-a-link");
+    await expect(coverage).toContainText("<owner-preview>");
+    await expect(coverage.getByRole("link")).toHaveCount(0);
+    await expect(coverage.locator("owner-preview")).toHaveCount(0);
+    await expect(coverage).toContainText("Showing 3 supplied samples from the true total of 3");
+    await expect(coverage).toContainText("sample list is not marked truncated");
+    await expect(coverage).toContainText(
+      "This diagnostic does not establish that coverage is the only unavailable prerequisite",
+    );
+    diagnostics.assertClean();
+  });
+
+  test("exact Owner lookup preserves unavailable decision with truncated coverage", async ({
+    page,
+  }) => {
+    const diagnostics = monitorBrowser(page);
+
+    await page.goto(
+      "/ui/engineering/owner-acceptance?fixture=products&coverage=truncated&decision=unavailable&repository=example%2Fcontrol-plane&pull_request=308",
+    );
+
+    const result = page.getByLabel("Current evaluation result");
+    await expect(result).toContainText("Owner product review: unavailable");
+    await expect(result).toContainText("reason: change impact unavailable");
+    const coverage = result.getByLabel("Change-impact path coverage");
+    await expect(coverage).toContainText("Coverage state: incomplete");
+    await expect(coverage).toContainText("Reported unmatched path count: 47");
+    await expect(coverage.getByRole("listitem")).toHaveCount(3);
+    await expect(coverage).toContainText("Showing 3 supplied samples from the true total of 47");
+    await expect(coverage).toContainText(
+      "bounded sample evidence is truncated; paths may be omitted or shortened",
+    );
+    await expect(
+      result.getByRole("button", { name: "Record product review" }),
+    ).toHaveCount(0);
+    diagnostics.assertClean();
+  });
+
+  test("complete change-impact coverage does not manufacture acceptance", async ({
+    page,
+  }) => {
+    const diagnostics = monitorBrowser(page);
+
+    await page.goto(
+      "/ui/engineering/owner-acceptance?fixture=products&coverage=complete",
+    );
+
+    const currentItem = page.locator(".engineering-owner-current-item").first();
+    const coverage = currentItem.getByLabel("Change-impact path coverage");
+    await expect(coverage).toContainText("Coverage state: complete");
+    await expect(coverage).toContainText("Reported unmatched path count: 0");
+    await expect(coverage).toContainText(
+      "does not change the Owner decision, grant Owner acceptance, or enable any action",
+    );
+    await expect(currentItem).toContainText("Owner product review: pending");
+    await expect(currentItem).not.toContainText("Owner product review: accepted");
+    diagnostics.assertClean();
+  });
+
   test("Owner acceptance exact lookup remains a collapsed fallback", async ({
     page,
   }) => {

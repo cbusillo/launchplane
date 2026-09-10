@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+import math
 from typing import Any, Literal, Protocol, cast
 
 from control_plane import secrets as control_plane_secrets
@@ -68,6 +70,68 @@ PRIVILEGED_MERGE_TRAIN_POLICY_WRITE_ROUTE = (
     "service-internal:privileged-operation-worker:managed-merge-train-policy-import"
 )
 PRIVILEGED_OPERATION_EXECUTION_LEASE_SECONDS = 300
+ORDINARY_AGENT_DELIVERY_CLEANUP_MAX_BACKOFF_SECONDS = 300
+
+
+@dataclass
+class OrdinaryAgentDeliveryCleanupState:
+    consecutive_failures: int = 0
+    retry_not_before: float = 0.0
+
+
+@dataclass(frozen=True)
+class OrdinaryAgentDeliveryCleanupResult:
+    status: Literal["succeeded", "failed", "backing_off"]
+    expired_deliveries: int = 0
+    error_type: str = ""
+    consecutive_failures: int = 0
+    retry_seconds: int = 0
+
+
+def run_ordinary_agent_delivery_cleanup_once(
+    *,
+    record_store: object,
+    limit: int,
+    state: OrdinaryAgentDeliveryCleanupState,
+    now_monotonic: float,
+    error_backoff_seconds: int,
+) -> OrdinaryAgentDeliveryCleanupResult:
+    """Run bounded DB maintenance without coupling failure to operation execution."""
+    if now_monotonic < state.retry_not_before:
+        return OrdinaryAgentDeliveryCleanupResult(
+            status="backing_off",
+            consecutive_failures=state.consecutive_failures,
+            retry_seconds=max(1, math.ceil(state.retry_not_before - now_monotonic)),
+        )
+    try:
+        if not 1 <= limit <= 100:
+            raise ValueError("Ordinary-agent delivery cleanup limit must be between 1 and 100.")
+        if not 1 <= error_backoff_seconds <= ORDINARY_AGENT_DELIVERY_CLEANUP_MAX_BACKOFF_SECONDS:
+            raise ValueError("Ordinary-agent delivery cleanup backoff must be between 1 and 300.")
+        expire = getattr(record_store, "expire_ordinary_agent_deliveries", None)
+        if not callable(expire):
+            raise TypeError("Ordinary-agent delivery cleanup requires PostgreSQL storage.")
+        expired_deliveries = int(expire(limit=limit))
+        if expired_deliveries < 0 or expired_deliveries > limit:
+            raise ValueError("Ordinary-agent delivery cleanup returned an invalid count.")
+    except Exception as error:  # noqa: BLE001 - isolated maintenance failure boundary.
+        state.consecutive_failures += 1
+        retry_seconds = min(
+            ORDINARY_AGENT_DELIVERY_CLEANUP_MAX_BACKOFF_SECONDS,
+            error_backoff_seconds * 2 ** min(state.consecutive_failures - 1, 30),
+        )
+        state.retry_not_before = now_monotonic + retry_seconds
+        return OrdinaryAgentDeliveryCleanupResult(
+            status="failed",
+            error_type=type(error).__name__,
+            consecutive_failures=state.consecutive_failures,
+            retry_seconds=retry_seconds,
+        )
+    state.consecutive_failures = 0
+    state.retry_not_before = 0.0
+    return OrdinaryAgentDeliveryCleanupResult(
+        status="succeeded", expired_deliveries=expired_deliveries
+    )
 
 
 class PrivilegedOperationExecutionStore(PrivilegedOperationStore, Protocol):

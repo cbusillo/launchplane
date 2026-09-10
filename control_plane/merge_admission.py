@@ -8,6 +8,7 @@ from typing import Protocol, cast
 from control_plane.contracts.merge_admission_record import (
     MergeAdmissionFenceRejectedError,
     MergeAdmissionRecord,
+    MergeAdmissionProposal,
     MergeLandingOutcomeReason,
     MergeLandingOutcomeRecord,
     build_merge_effect_attempt_id,
@@ -46,10 +47,12 @@ class MergeAdmissionDeniedError(ValueError):
         *,
         reason_code: str = "merge_admission_denied",
         readiness: MergeReadinessResult | None = None,
+        structural_result: MergeTrainStructuralCandidateResult | None = None,
     ) -> None:
         super().__init__(message)
         self.reason_code = reason_code
         self.readiness = readiness
+        self.structural_result = structural_result
 
 
 class MergeAdmissionReconciliationRequiredError(RuntimeError):
@@ -173,6 +176,30 @@ class GuardedMergeAdmission:
         observed_head_sha: str,
         observed_head_tree_sha: str,
     ) -> MergeAdmissionRecord:
+        proposal = self.build_proposal(
+            entry=entry,
+            observed_base_sha=observed_base_sha,
+            observed_base_tree_sha=observed_base_tree_sha,
+            observed_head_sha=observed_head_sha,
+            observed_head_tree_sha=observed_head_tree_sha,
+        )
+        return self.persist_proposal(proposal)
+
+    def build_proposal(
+        self,
+        *,
+        entry: MergeTrainBatchLandingEntry,
+        observed_base_sha: str,
+        observed_base_tree_sha: str,
+        observed_head_sha: str,
+        observed_head_tree_sha: str,
+    ) -> MergeAdmissionProposal:
+        """Evaluate current evidence without persisting an admission or dispatching.
+
+        This reads the configured evaluator and record store. Ordinary callers
+        supply scoped evidence adapters and finalize the proposal in their joined
+        effect transaction instead of calling legacy persistence.
+        """
         if not self.expected_lease_owner:
             raise MergeAdmissionDeniedError(
                 "Merge admission requires an acquired controller lease.",
@@ -188,8 +215,9 @@ class GuardedMergeAdmission:
             landing_plan_id=self.landing_plan_record.landing_plan.plan_id,
         )
         if existing:
+            latest_admission = max(existing, key=lambda record: record.attempt_sequence)
             latest_outcomes = self.record_store.list_merge_landing_outcome_records(
-                admission_id=existing[0].admission_id,
+                admission_id=latest_admission.admission_id,
                 limit=1,
             )
             if not latest_outcomes or latest_outcomes[0].status == "reconcile_required":
@@ -215,11 +243,13 @@ class GuardedMergeAdmission:
                 "Fresh merge readiness evidence did not admit the provider effect.",
                 reason_code="merge_readiness_not_ready",
                 readiness=evaluation.readiness,
+                structural_result=evaluation.structural_result,
             )
         if evaluation.structural_result.status not in {"exact", "recorded_rolling"}:
             raise MergeAdmissionDeniedError(
                 "Fresh structural provenance did not admit the provider effect.",
                 reason_code="structural_provenance_not_admitted",
+                structural_result=evaluation.structural_result,
             )
         admitted_at = self.admission_time_provider()
         if self.controller_state_provider is not None:
@@ -280,10 +310,14 @@ class GuardedMergeAdmission:
                 "Persisted controller authority changed after live merge evaluation.",
                 reason_code="controller_authority_changed",
             ) from error
+        return MergeAdmissionProposal(record=admission)
+
+    def persist_proposal(self, proposal: MergeAdmissionProposal) -> MergeAdmissionRecord:
+        """Persist through the existing legacy fence; the proposal is not authority."""
         try:
             stored, created = self.record_store.create_guarded_merge_admission_record_if_absent(
-                admission,
-                admitted_at=admitted_at,
+                proposal.record,
+                admitted_at=proposal.record.created_at,
             )
         except MergeAdmissionFenceRejectedError as error:
             raise MergeAdmissionDeniedError(

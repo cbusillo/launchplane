@@ -219,6 +219,14 @@ from control_plane.http_routes import (
     request_fingerprint as build_request_fingerprint,
     require_product_profile_read_store,
 )
+from control_plane.http_routes.ordinary_agent_management import (
+    OrdinaryAgentManagementDependencies,
+    register_ordinary_agent_management_routes,
+)
+from control_plane.http_routes.ordinary_agent import (
+    OrdinaryAgentRouteDependencies,
+    register_ordinary_agent_routes,
+)
 from control_plane.generic_web_deploy_recovery_http import (
     GENERIC_WEB_DEPLOY_RECOVERY_PROVIDER_EVIDENCE_ROUTE,
     GenericWebDeployRecoveryDependencies,
@@ -1599,7 +1607,7 @@ class LaunchplaneRuntimeStatus(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     authz_policy_sha256: str
-    authz_policy_schema_version: Literal[1, 2]
+    authz_policy_schema_version: Literal[1, 2, 3]
     authz_policy_source: str
     bootstrap_authz_policy_sha256: str
     compatible_database_schema_revisions: tuple[str, ...]
@@ -4138,6 +4146,7 @@ def create_launchplane_fastapi_app(
             if request.url.path == _AUTHZ_ACTIVATION_PREFLIGHT_ROUTE or (
                 request.url.path in _AUTHZ_NO_STORE_ROUTES
                 or request.url.path.startswith(_SOLO_ADMINISTRATION_CONFIRMATION_ROUTE)
+                or request.url.path.startswith(("/v1/agent/ordinary-agent-", "/v1/ordinary-agent-"))
             ):
                 response.headers["Cache-Control"] = "no-store"
             return response
@@ -23598,6 +23607,19 @@ def create_launchplane_fastapi_app(
     register_privileged_operation_routes(
         app,
         dependencies=privileged_operation_route_dependencies,
+    )
+    register_ordinary_agent_routes(
+        app,
+        dependencies=OrdinaryAgentRouteDependencies(common=read_route_dependencies),
+    )
+    register_ordinary_agent_management_routes(
+        app,
+        dependencies=OrdinaryAgentManagementDependencies(
+            common=read_route_dependencies,
+            read_bearer_identity=read_bearer_identity,
+            policy_record_reader=lambda: read_active_authz_policy_record(get_record_store()),
+            human_session_manager=human_session_manager,
+        ),
     )
     register_governance_projection_routes(
         app,

@@ -3,8 +3,13 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import cast
 import unittest
+from unittest.mock import patch
 
-from control_plane.contracts.merge_admission_record import MergeLandingOutcomeRecord
+from control_plane.contracts.merge_admission_record import (
+    MergeLandingObservedPullRequestState,
+    MergeLandingOutcomeRecord,
+    validate_merge_landing_outcome_for_admission,
+)
 from control_plane.contracts.merge_readiness import (
     MergeReadinessCandidateEvidence,
     MergeReadinessResult,
@@ -108,6 +113,145 @@ def _landed_outcome(
         exact_landing_confirmed=True,
         observed_at="2026-08-11T03:04:00Z",
     )
+
+
+def _already_contained_outcome(
+    *, observed_pull_request_state: MergeLandingObservedPullRequestState = "open"
+) -> MergeLandingOutcomeRecord:
+    admission = _merge_admission()
+    return MergeLandingOutcomeRecord(
+        admission_id=admission.admission_id,
+        admission_binding_sha256=admission.admission_binding_sha256,
+        attempt_id=admission.attempt_id,
+        observation_sequence=1,
+        source="test:already-contained",
+        repository=admission.repository,
+        base_branch=admission.base_branch,
+        pull_request_number=admission.pull_request_number,
+        status="landed",
+        reason="already_contained_no_provider_effect",
+        provider_effect_attempted=False,
+        observed_pull_request_state=observed_pull_request_state,
+        observed_pull_request_head_sha=admission.pull_request_head_sha,
+        observed_pull_request_head_tree_sha=admission.pull_request_head_tree_sha,
+        observed_base_sha=admission.effective_base_sha,
+        observed_base_tree_sha=admission.effective_base_tree_sha,
+        merge_commit_sha=admission.effective_base_sha,
+        merge_commit_tree_sha=admission.effective_base_tree_sha,
+        base_contains_merge_commit=True,
+        exact_landing_confirmed=True,
+        observed_at="2026-08-11T03:04:00Z",
+    )
+
+
+class MergeLandingOutcomeContractTests(unittest.TestCase):
+    def test_dispatch_not_attempted_is_a_terminal_zero_evidence_outcome(self) -> None:
+        admission = _merge_admission()
+        outcome = MergeLandingOutcomeRecord(
+            admission_id=admission.admission_id,
+            admission_binding_sha256=admission.admission_binding_sha256,
+            attempt_id=admission.attempt_id,
+            observation_sequence=1,
+            source="test:dispatch-not-attempted",
+            repository=admission.repository,
+            base_branch=admission.base_branch,
+            pull_request_number=admission.pull_request_number,
+            status="rejected",
+            reason="dispatch_not_attempted",
+            provider_effect_attempted=False,
+            observed_at="2026-08-11T03:02:00Z",
+        )
+
+        validate_merge_landing_outcome_for_admission(admission=admission, outcome=outcome)
+        for field, value in (
+            ("observation_sequence", 2),
+            ("provider_effect_attempted", True),
+            ("provider_status_code", 503),
+            ("provider_request_id", "request-one"),
+            ("provider_message", "request may have been sent"),
+            ("observed_base_sha", "7" * 40),
+            ("base_contains_merge_commit", False),
+        ):
+            with self.subTest(field=field):
+                payload = outcome.model_dump(mode="json")
+                payload.update(
+                    {
+                        field: value,
+                        "outcome_id": "",
+                        "outcome_binding_sha256": "",
+                    }
+                )
+                if field == "observation_sequence":
+                    payload["prior_outcome_id"] = "ambiguous-outcome"
+                with self.assertRaisesRegex(ValueError, "first zero-evidence observation"):
+                    MergeLandingOutcomeRecord.model_validate(payload)
+
+        with self.assertRaisesRegex(ValueError, "requires an ambiguity reason"):
+            MergeLandingOutcomeRecord.model_validate(
+                {
+                    **outcome.model_dump(
+                        mode="json", exclude={"outcome_id", "outcome_binding_sha256"}
+                    ),
+                    "status": "reconcile_required",
+                }
+            )
+
+    def test_already_contained_outcome_accepts_explicit_lifecycle_and_unchanged_base(self) -> None:
+        admission = _merge_admission()
+
+        for state in ("open", "closed", "merged"):
+            with self.subTest(state=state):
+                outcome = _already_contained_outcome(observed_pull_request_state=state)
+                validate_merge_landing_outcome_for_admission(
+                    admission=admission,
+                    outcome=outcome,
+                )
+                self.assertFalse(outcome.provider_effect_attempted)
+                self.assertEqual(outcome.merge_commit_sha, admission.effective_base_sha)
+                self.assertEqual(outcome.merge_commit_tree_sha, admission.effective_base_tree_sha)
+
+    def test_already_contained_outcome_rejects_effect_or_changed_base_claims(self) -> None:
+        valid = _already_contained_outcome()
+        cases: dict[str, dict[str, object]] = {
+            "provider_attempted": {"provider_effect_attempted": True},
+            "provider_status": {"provider_status_code": 200},
+            "provider_request": {"provider_request_id": "request-1"},
+            "provider_message": {"provider_message": "merged"},
+            "reconciled_sequence": {
+                "observation_sequence": 2,
+                "prior_outcome_id": "prior-outcome",
+            },
+            "missing_state": {"observed_pull_request_state": ""},
+            "changed_sha": {"merge_commit_sha": "7" * 40},
+            "changed_tree": {"merge_commit_tree_sha": "8" * 40},
+        }
+
+        for case, updates in cases.items():
+            with self.subTest(case=case):
+                payload = valid.model_dump(mode="json")
+                payload.update(updates)
+                payload["outcome_id"] = ""
+                payload["outcome_binding_sha256"] = ""
+                with self.assertRaisesRegex(ValueError, "zero-effect base evidence"):
+                    MergeLandingOutcomeRecord.model_validate(payload)
+
+    def test_already_contained_outcome_must_match_admitted_head_and_base(self) -> None:
+        admission = _merge_admission()
+        valid = _already_contained_outcome()
+
+        for field in (
+            "observed_pull_request_head_sha",
+            "observed_pull_request_head_tree_sha",
+            "observed_base_sha",
+            "observed_base_tree_sha",
+        ):
+            with self.subTest(field=field):
+                outcome = valid.model_copy(update={field: "7" * 40})
+                with self.assertRaisesRegex(ValueError, "does not match admission"):
+                    validate_merge_landing_outcome_for_admission(
+                        admission=admission,
+                        outcome=outcome,
+                    )
 
 
 def _guard_records(
@@ -489,6 +633,29 @@ class GuardedMergeAdmissionScenarioTests(unittest.TestCase):
         )
         self.assertEqual(admission.readiness.state, "ready")
 
+    def test_proposal_does_not_write_and_intervening_fence_change_denies_persistence(self) -> None:
+        guard = self._guard()
+        proposal = guard.build_proposal(
+            entry=self.landing_record.landing_plan.entries[0],
+            observed_base_sha=BASE_SHA,
+            observed_base_tree_sha=OTHER_SHA,
+            observed_head_sha=HEAD_SHA,
+            observed_head_tree_sha=TREE_SHA,
+        )
+        self.assertEqual(self.store.list_merge_admission_records(), ())
+        changed = self.controller_state.model_copy(update={"lease_owner": "replacement-worker"})
+        self.store.write_merge_train_controller_state_record(changed)
+        with self.assertRaises(MergeAdmissionDeniedError) as denied:
+            guard.persist_proposal(proposal)
+        self.assertEqual(denied.exception.reason_code, "controller_fence_rejected")
+        self.assertEqual(self.store.list_merge_admission_records(), ())
+        self.store.write_merge_train_controller_state_record(self.controller_state)
+        persisted = guard.persist_proposal(proposal)
+        self.assertEqual(persisted, proposal.record)
+        self.assertEqual(self.store.read_merge_admission_record(persisted.admission_id), persisted)
+        with self.assertRaises(MergeAdmissionReconciliationRequiredError):
+            guard.persist_proposal(proposal)
+
     def test_refresh_before_evaluation_preserves_acquired_lease_owner(self) -> None:
         observed_controller_state = self.controller_state.model_copy(
             update={
@@ -533,6 +700,36 @@ class GuardedMergeAdmissionScenarioTests(unittest.TestCase):
         with self.assertRaises(MergeAdmissionReconciliationRequiredError):
             self._admit(guard)
 
+    def test_highest_attempt_ambiguity_blocks_retry_when_admissions_are_unsorted(self) -> None:
+        guard = self._guard()
+        first = self._admit(guard)
+        guard.record_provider_failure(
+            admission=first,
+            error=_ProviderError(405),
+            observed_at="2026-08-11T03:02:00Z",
+        )
+        second = self._admit(guard)
+        guard.record_provider_failure(
+            admission=second,
+            error=_ProviderError(500),
+            observed_at="2026-08-11T03:03:00Z",
+        )
+
+        with (
+            patch.object(
+                self.store,
+                "list_merge_admission_records",
+                return_value=(first, second),
+            ),
+            self.assertRaises(MergeAdmissionReconciliationRequiredError),
+        ):
+            self._admit(guard)
+
+        self.assertEqual(
+            {record.attempt_sequence for record in self.store.list_merge_admission_records()},
+            {1, 2},
+        )
+
     def test_scenario_11_open_exact_pr_reconciliation_allows_fresh_attempt(self) -> None:
         guard = self._guard()
         first = self._admit(guard)
@@ -568,7 +765,29 @@ class GuardedMergeAdmissionScenarioTests(unittest.TestCase):
 
         self.assertEqual(context.exception.reason_code, "merge_readiness_not_ready")
         self.assertEqual(context.exception.readiness, readiness)
+        self.assertEqual(context.exception.structural_result, self.structural_result)
         self.assertEqual(self.store.list_merge_admission_records(), ())
+
+    def test_structural_refusal_retains_evaluated_diagnostics_without_records(self) -> None:
+        structural_result = self.structural_result.model_copy(
+            update={
+                "status": "mismatch",
+                "reason_codes": ("structural_changed_path_overlap",),
+            }
+        )
+        evaluation = MergeAdmissionEvaluation(
+            readiness=self._readiness(),
+            structural_result=structural_result,
+        )
+
+        with self.assertRaises(MergeAdmissionDeniedError) as context:
+            self._admit(self._guard(evaluator=_StaticEvaluator(evaluation)))
+
+        self.assertEqual(context.exception.reason_code, "structural_provenance_not_admitted")
+        self.assertIsNone(context.exception.readiness)
+        self.assertEqual(context.exception.structural_result, structural_result)
+        self.assertEqual(self.store.list_merge_admission_records(), ())
+        self.assertEqual(self.store.list_merge_landing_outcome_records(), ())
 
     def test_scenario_22_lost_lease_refuses_admission(self) -> None:
         readiness = self._readiness(

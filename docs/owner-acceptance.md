@@ -10,6 +10,12 @@ A current accepted decision is required by merge readiness; it does not replace
 technical checks, engineering review, merge admission, landing, or production
 authorization.
 
+Owner authority on this surface is limited to viewing product change and
+observed runtime state and recording `accepted`, `changes_requested`, `revoked`,
+or feedback for the affected product. It does not permit source/config changes,
+deployment, merge, secret reads, or access administration. Launchplane consumes
+accepted evidence only inside a separately authorized delivery request.
+
 The persisted human action remains `accepted` because the event records the
 Owner's durable product judgment. The workbench presents that action as
 **Owner product review: accepted** and explicitly separates it from technical
@@ -70,6 +76,16 @@ the same verified identity does not stale acceptance, while any identity field
 used to prove the serving artifact remains bound.
 
 ## Versioned Change-Impact Bindings
+
+The initial pilot remains conservative: changed or incomplete preview/delivery
+binding evidence requires fresh Owner review. No scoped digest, frontend hash,
+patch identity, or engineering-only label may carry acceptance across a change
+unless the binding proves the complete accepted experience, including relevant
+backend, configuration, interaction, artifact, and observed runtime inputs. The
+current documentation records both v2 fields below as absent on the v1 evaluator
+path. The pilot must not rely on the v2 mechanism unless current runtime
+verification confirms its state and its proof and invalidation behavior are
+reviewed under issue `#2240`.
 
 Bindings support optional `binding_hash_version` and
 `change_impact_decision_digest` fields. Both remain absent on the current v1
@@ -174,6 +190,12 @@ the subject has no binding and evaluates as `owner_authority_unavailable`. In
 every case the stored event remains readable and unchanged.
 
 ## Self-Review
+
+This section describes current runtime behavior. The reconciled target permits
+the actual current Owner to accept their own product change even when they also
+contributed engineering work; independent technical review remains a separate
+requirement. That target requires an explicit policy/schema amendment and
+reviewed activation. Until then, the rules below remain authoritative.
 
 Self-review is denied by default. Launchplane compares the acting human's
 immutable numeric GitHub ID against the bound contributing identities:
@@ -388,6 +410,12 @@ The route uses the existing read authorization action.
 
 ## Engineering Ops Workbench
 
+This is the current compatibility surface. The target Owner experience is a
+trusted Launchplane page that shows proposed, accepted, waiting, live, and
+failed/unknown states separately and exposes only product acceptance,
+request-changes, revoke, and feedback controls. It must not expose operational
+actions or place trusted controls inside untrusted preview content.
+
 `/ui/engineering/owner-acceptance` combines automatic Current items with a
 read-only recorded ledger surface. It loads
 `GET /v1/owner-acceptance/current-items` on page entry and renders current
@@ -550,6 +578,14 @@ the reported total. Coverage can be available before Owner admission prerequisit
 are met. It remains diagnostic and does not change the Owner decision, check
 conclusion, binding, or immutable human event. A coverage-only change refreshes
 the projection identity. Existing responses that omit coverage remain readable.
+
+The Engineering Owner-acceptance workbench renders the same nullable diagnostic
+for both Current items and exact lookup. It treats missing coverage as unknown,
+uses the server-reported coverage state without deriving readiness, and reports
+the true unmatched total separately from the bounded sample count and truncation.
+Omitted and explicit-null coverage both remain unknown. Truncated sample evidence
+may omit or shorten paths and never replaces the true unmatched total. The
+display grants no Owner acceptance or action.
 
 This diagnostic uses existing evaluation and projection entrypoints. Automatic
 pull-request lifecycle projection remains tracked separately in #2162 and subject

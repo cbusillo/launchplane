@@ -27,6 +27,10 @@ function action(overrides = {}) {
 
 test("browser write routes are the generated UI write allowlist", () => {
   assert.deepEqual(new Set(Object.values(BROWSER_WRITE_ROUTES)), new Set([
+    "/v1/ordinary-agent-operations/{principal_id}/{operation_id}/approve",
+    "/v1/ordinary-agent-operations/{principal_id}/{operation_id}/cancel",
+    "/v1/ordinary-agent-sessions/{principal_id}/{session_id}/revoke",
+    "/v1/ordinary-agent-connections/{principal_id}/disconnect",
     "/v1/products/{product}/environments/{environment}/config/apply",
     "/v1/products/{product}/environments/{environment}/promotion/dry-run",
     "/v1/products/{product}/environments/{environment}/promotion/workflow-dispatch",

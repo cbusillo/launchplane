@@ -36,11 +36,15 @@ admission again never authorizes replay of the provider mutation.
 
 If fresh readiness or structural evidence refuses admission before the provider
 checkpoint, the controller returns an accepted `block` result with a stable
-reason code and the public-safe readiness facets. It releases the controller
-lease cleanly and leaves the landing plan available for a later pass after the
-missing or stale evidence is corrected. A pre-effect policy refusal is not
-durable effect ambiguity and must not be converted into controller
-reconciliation.
+reason code and the public-safe readiness facets. When structural evaluation
+completed, the result also includes its status, reason codes, effective base
+commit and tree, and candidate, landing-plan, and provenance digests. This
+diagnostic is projected from the same evaluation that refused admission; it
+does not re-evaluate, authorize, or persist a rejected admission. The controller
+releases its lease cleanly and leaves the landing plan available for a later
+pass after the missing or stale evidence is corrected. A pre-effect policy
+refusal is not durable effect ambiguity and must not be converted into
+controller reconciliation.
 
 Unavailable or malformed authoritative repository evidence refuses admission
 with `repository_evidence_unavailable`; evidence that changes during resolution
@@ -52,8 +56,8 @@ The denial exposes a bounded message, not raw provider details or file paths.
 
 Outcomes use only three public states:
 
-- `landed`: provider response and exact Git commit/tree evidence confirm the
-  intended landing.
+- `landed`: exact evidence confirms the intended result, either a provider merge
+  or an ordinary job's proven already-contained change.
 - `rejected`: provider evidence, or later exact observation, conclusively proves
   that the attempt produced no landing.
 - `reconcile_required`: transport, process, lease, or observation evidence
@@ -63,6 +67,14 @@ An admission without an outcome is effect-unknown. A `reconcile_required`
 outcome is also effect-unknown. Neither state permits another provider attempt.
 Reconciliation observes GitHub first and appends a successor outcome; it never
 rewrites history or repeats an ambiguous mutation.
+
+The `already_contained_no_provider_effect` landed reason is a successful no-op,
+not evidence of a merge request. It records `provider_effect_attempted=false`,
+the observed PR lifecycle and exact unchanged base/head identities, with no
+provider status, request ID or rejection. Under the existing skipped-entry
+contract, the merge-commit fields carry the unchanged rolling base SHA/tree;
+they do not describe a newly created commit. Projections must use the reason to
+label this result as already contained and display the unchanged base.
 
 A conclusive provider refusal and a conclusive observed no-effect result are
 different evidence. No-effect reconciliation records the exact open PR state,
@@ -119,3 +131,19 @@ attempt and admission bindings are unique. Landing observations are unique and
 ordered authoritatively by admission plus observation sequence, with timestamps
 retained only as metadata. Exact replay is idempotent; conflicting replay fails
 closed.
+
+
+## Rolling branch identity and PR projections
+
+Sequential landing uses the authoritative target branch SHA and tree as its
+rolling base. PR detail must still report an open PR, the exact expected head,
+and the expected target branch. If its base SHA projection differs, Launchplane
+performs one bounded branch-identity confirmation and requires the same rolling
+SHA and tree before admission. The existing identity reader may additionally
+read the commit when the branch response omits its tree. This is not a polling
+loop; unknown or unavailable branch evidence cannot authorize a merge.
+
+A later stale error preserves the latest persisted landing checkpoint, including
+already merged entries. Provider transport or malformed-response errors retain
+their existing error types. Confirmation does not make GitHub observation and
+merge atomic; response commit proof and final containment remain required.

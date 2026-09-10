@@ -1,7 +1,7 @@
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import cast
+from typing import Any, cast
 from unittest.mock import patch
 
 from click import ClickException
@@ -17,8 +17,14 @@ from control_plane.contracts.merge_train_stack_collapse import (
     build_merge_train_stack_collapse_plan_record,
     execute_merge_train_stack_collapse_plan,
 )
+from control_plane.contracts.merge_train_structural_provenance import (
+    MergeTrainStructuralCandidateResult,
+)
 from control_plane.http_app import create_launchplane_fastapi_app
-from control_plane.merge_admission import MergeAdmissionDeniedError
+from control_plane.merge_admission import (
+    MergeAdmissionDeniedError,
+    MergeAdmissionEvaluation,
+)
 from control_plane.merge_train import MergeTrainDryRunSnapshot
 from control_plane.merge_train_controller_run_once import MERGE_TRAIN_CONTROLLER_ACTIVE_ACTION
 from control_plane.service_auth import (
@@ -79,6 +85,7 @@ from tests.support.merge_train import (
     _StaleCandidateMergeTrainGitHubClient,
     _StaleLandingMergeTrainGitHubClient,
 )
+from tests.test_merge_readiness import _candidate, _evaluate
 
 
 class _FenceCapturingAdmissionEvaluator:
@@ -100,6 +107,27 @@ class _FenceCapturingAdmissionEvaluator:
         raise MergeAdmissionDeniedError(
             "test admission fence block",
             reason_code="merge_readiness_not_ready",
+        )
+
+
+class _StructuralDiagnosticAdmissionEvaluator:
+    structural_result = MergeTrainStructuralCandidateResult(
+        status="mismatch",
+        reason_codes=("structural_changed_path_overlap",),
+        effective_base_sha="1" * 40,
+        effective_base_tree_sha="2" * 40,
+        candidate_sha256="3" * 64,
+        landing_plan_sha256="4" * 64,
+        provenance_sha256="5" * 64,
+    )
+
+    def __init__(self, **_: object) -> None:
+        pass
+
+    def evaluate(self, **_: object) -> MergeAdmissionEvaluation:
+        return MergeAdmissionEvaluation(
+            readiness=_evaluate(candidate_evidence=_candidate(structural_status="mismatch")),
+            structural_result=self.structural_result,
         )
 
 
@@ -1723,6 +1751,82 @@ class FastApiMergeTrainRunOnceTests(unittest.IsolatedAsyncioTestCase):
 
 
 class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_blocked_admission_projects_structural_diagnostics_without_effect(
+        self,
+    ) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            with (
+                patch(
+                    "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
+                    _FakeMergeTrainSnapshotReader,
+                ),
+                patch(
+                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                    _AdmissionInvokingMergeTrainGitHubClient,
+                ),
+                patch(
+                    "control_plane.http_app.LiveMergeAdmissionEvaluator",
+                    _StructuralDiagnosticAdmissionEvaluator,
+                ),
+            ):
+                responses = [
+                    await _post_merge_train_controller_run_once(
+                        app,
+                        {
+                            "schema_version": 1,
+                            "repository": "cbusillo/sellyouroutboard",
+                            "base_branch": "main",
+                            "mutate": True,
+                        },
+                    )
+                    for _ in range(5)
+                ]
+            controller_state = store.list_merge_train_controller_state_records(
+                repository="cbusillo/sellyouroutboard",
+                base_branch="main",
+                limit=1,
+            )[0]
+
+        self.assertTrue(all(response.status_code == 202 for response in responses))
+        result = responses[-1].json()["result"]
+        self.assertEqual((result["mode"], result["controller_action"]), ("blocked", "block"))
+        self.assertEqual(result["blocking_reason"]["code"], "merge_readiness_not_ready")
+        self.assertEqual(result["merge_readiness"]["state"], "blocked_candidate_identity")
+        self.assertEqual(
+            result["structural_provenance"],
+            {
+                "status": "mismatch",
+                "reason_codes": ["structural_changed_path_overlap"],
+                "effective_base_sha": "1" * 40,
+                "effective_base_tree_sha": "2" * 40,
+                "candidate_sha256": "3" * 64,
+                "landing_plan_sha256": "4" * 64,
+                "provenance_sha256": "5" * 64,
+            },
+        )
+        self.assertEqual(store.list_merge_admission_records(), ())
+        self.assertEqual(store.list_merge_landing_outcome_records(), ())
+        self.assertEqual(
+            (
+                controller_state.status,
+                controller_state.reconciliation_status,
+                controller_state.lease_owner,
+            ),
+            ("idle", "clean", ""),
+        )
+        self.assertEqual(controller_state.last_phase, "admit_pull_request")
+
     async def test_land_batch_binds_acquired_owner_before_live_observation(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
@@ -1738,7 +1842,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
             )
             with (
                 patch(
-                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainSnapshotReader",
+                    "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
                     _FakeMergeTrainSnapshotReader,
                 ),
                 patch(
@@ -1798,7 +1902,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
             )
             with (
                 patch(
-                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainSnapshotReader",
+                    "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
                     _FakeMergeTrainSnapshotReader,
                 ),
                 patch(
@@ -1848,6 +1952,21 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_stale_landing_returns_accepted_result_and_replays_idempotently(self) -> None:
+        class PartialLandingThenStale(_StaleLandingMergeTrainGitHubClient):
+            def land_batch_candidate(self, **kwargs: Any) -> Any:
+                plan = kwargs["landing_plan"]
+                entry = plan.entries[0].model_copy(
+                    update={
+                        "status": "merged",
+                        "merge_commit_sha": "d" * 40,
+                        "merge_commit_tree_sha": "e" * 40,
+                    }
+                )
+                progress = plan.model_copy(update={"entries": (entry,) + plan.entries[1:]})
+                record = kwargs["checkpoint"](progress, entry, "entry_merged")
+                kwargs["admission_guard"].update_landing_plan_record(record)
+                return super().land_batch_candidate(**kwargs)
+
         with (
             TemporaryDirectory() as temporary_directory_name,
             patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
@@ -1868,7 +1987,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
             }
             with (
                 patch(
-                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainSnapshotReader",
+                    "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
                     _FakeMergeTrainSnapshotReader,
                 ),
                 patch(
@@ -1880,7 +1999,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
                     await _post_merge_train_controller_run_once(app, request_payload)
             with patch(
                 "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
-                _StaleLandingMergeTrainGitHubClient,
+                PartialLandingThenStale,
             ):
                 stale_response = await _post_merge_train_controller_run_once(
                     app, request_payload, idempotency_key="controller-stale-landing"
@@ -1907,7 +2026,8 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
             if record.record_id
             == stale_payload["records"]["merge_train_batch_landing_plan_record_id"]
         )
-        self.assertEqual(stale_record.landing_plan.entries[0].status, "stale")
+        self.assertEqual(stale_record.landing_plan.entries[0].status, "merged")
+        self.assertEqual(stale_record.landing_plan.entries[0].merge_commit_sha, "d" * 40)
         self.assertTrue(stale_record.source.startswith("service:controller:stale-landing:"))
 
     async def test_admission_block_recovers_stuck_pre_provider_reconciliation(self) -> None:
@@ -1931,7 +2051,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
             }
             with (
                 patch(
-                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainSnapshotReader",
+                    "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
                     _FakeMergeTrainSnapshotReader,
                 ),
                 patch(
@@ -2019,7 +2139,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
             }
             with (
                 patch(
-                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainSnapshotReader",
+                    "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
                     _FakeMergeTrainSnapshotReader,
                 ),
                 patch(
@@ -2031,7 +2151,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
                     await _post_merge_train_controller_run_once(app, request_payload)
             with (
                 patch(
-                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainSnapshotReader",
+                    "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
                     _FakeMergeTrainSnapshotReader,
                 ),
                 patch(
@@ -2087,7 +2207,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
             }
             with (
                 patch(
-                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainSnapshotReader",
+                    "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
                     _FakeMergeTrainSnapshotReader,
                 ),
                 patch(
@@ -2104,7 +2224,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
                 await _post_merge_train_controller_run_once(app, request_payload)
             with (
                 patch(
-                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainSnapshotReader",
+                    "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
                     _FakeExpandedMergeTrainSnapshotReader,
                 ),
                 patch(
@@ -2170,7 +2290,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
             }
             with (
                 patch(
-                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainSnapshotReader",
+                    "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
                     _FakeMergeTrainSnapshotReader,
                 ),
                 patch(
@@ -2187,7 +2307,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
             passed_batch_id = passed_payload["result"]["candidate"]["batch_id"]
             with (
                 patch(
-                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainSnapshotReader",
+                    "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
                     MovedHeadMergeTrainSnapshotReader,
                 ),
                 patch(
@@ -2274,7 +2394,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
             }
             with (
                 patch(
-                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainSnapshotReader",
+                    "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
                     _FakeMergeTrainSnapshotReader,
                 ),
                 patch(
@@ -2290,7 +2410,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
                 "merge_train_batch_candidate_record_id"
             ]
             with patch(
-                "control_plane.merge_train_controller_run_once.GitHubMergeTrainSnapshotReader",
+                "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
                 UnknownMergeabilitySnapshotReader,
             ):
                 landing_response = await _post_merge_train_controller_run_once(app, request_payload)
@@ -2332,7 +2452,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
             }
             with (
                 patch(
-                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainSnapshotReader",
+                    "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
                     _FakeMergeTrainSnapshotReader,
                 ),
                 patch(
@@ -2348,7 +2468,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
                 failed_response = await _post_merge_train_controller_run_once(app, request_payload)
             with (
                 patch(
-                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainSnapshotReader",
+                    "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
                     _FakeExpandedMergeTrainSnapshotReader,
                 ),
                 patch(
@@ -2402,7 +2522,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
             }
             with (
                 patch(
-                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainSnapshotReader",
+                    "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
                     _FakeMergeTrainSnapshotReader,
                 ),
                 patch(
@@ -2417,7 +2537,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
             ):
                 failed_response = await _post_merge_train_controller_run_once(app, request_payload)
             with patch(
-                "control_plane.merge_train_controller_run_once.GitHubMergeTrainSnapshotReader",
+                "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
                 _FakeMergeTrainSnapshotReader,
             ):
                 reflow_response = await _post_merge_train_controller_run_once(app, request_payload)
@@ -2453,7 +2573,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
             }
             with (
                 patch(
-                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainSnapshotReader",
+                    "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
                     _FakeMergeTrainSnapshotReader,
                 ),
                 patch(
@@ -2469,7 +2589,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
             ):
                 failed_response = await _post_merge_train_controller_run_once(app, request_payload)
             with patch(
-                "control_plane.merge_train_controller_run_once.GitHubMergeTrainSnapshotReader",
+                "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
                 _FakeMergeTrainSnapshotReader,
             ):
                 terminal_response = await _post_merge_train_controller_run_once(
@@ -2535,7 +2655,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
             }
             with (
                 patch(
-                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainSnapshotReader",
+                    "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
                     _FakeStackedMergeTrainSnapshotReader,
                 ),
                 patch(
@@ -2547,7 +2667,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
                 execute_response = await _post_merge_train_controller_run_once(app, request_payload)
             with (
                 patch(
-                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainSnapshotReader",
+                    "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
                     CollapsedRootWithIndependentPrSnapshotReader,
                 ),
                 patch(
@@ -2609,7 +2729,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
             )
             with (
                 patch(
-                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainSnapshotReader",
+                    "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
                     _FakeMergeTrainSnapshotReader,
                 ),
                 patch(
@@ -2669,7 +2789,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
             }
             with (
                 patch(
-                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainSnapshotReader",
+                    "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
                     _FakeMergeTrainSnapshotReader,
                 ),
                 patch(
@@ -2868,7 +2988,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
             }
             with (
                 patch(
-                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainSnapshotReader",
+                    "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
                     _FakeMergeTrainSnapshotReader,
                 ),
                 patch(
@@ -2922,7 +3042,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
             )
 
             with patch(
-                "control_plane.merge_train_controller_run_once.GitHubMergeTrainSnapshotReader",
+                "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
                 _UnavailableMergeTrainSnapshotReader,
             ):
                 response = await _post_merge_train_controller_run_once(
@@ -3168,7 +3288,7 @@ class FastApiMergeTrainMutationFenceTests(unittest.IsolatedAsyncioTestCase):
                     side_effect=capture_idempotency,
                 ),
                 patch(
-                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainSnapshotReader",
+                    "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
                     _FakeMergeTrainSnapshotReader,
                 ),
             ):

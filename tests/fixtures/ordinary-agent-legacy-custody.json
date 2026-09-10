@@ -1,0 +1,189 @@
+{
+  "source_commit": "6059e0ce4e33de176c6b500918c611ce25e18bae",
+  "custody_record": {
+    "schema_version": 1,
+    "record_id": "ordinary-agent-custody-agent_one_auth-v1",
+    "principal_id": "agent_one",
+    "credential_id": "agent_one_auth",
+    "credential_version": 1,
+    "policy": {
+      "record_id": "launchplane-authz-policy-r00000000000000000001-38c89d1f8d31",
+      "revision": 1,
+      "policy_sha256": "38c89d1f8d31f779b661105959f26f255dc85e113680c29531d53712bd68bc8e",
+      "managed_set_id": "ordinary-agent.pilot",
+      "managed_rule_id": "agent_one.launchplane.main",
+      "target": {
+        "repository_id": 911001,
+        "repository": "example/postgres-inventory",
+        "base_branch": "main"
+      }
+    },
+    "repository_inventory": {
+      "record_id": "repository-inventory-911001-r1",
+      "inventory_revision": 1,
+      "inventory_digest": "38214adfa3dc06027b2320d11eab7b7bf26fe5ac8d7896713d78b25ad01441b2"
+    },
+    "target": {
+      "repository_id": 911001,
+      "repository": "example/postgres-inventory",
+      "base_branch": "main"
+    },
+    "purpose": "guarded_merge",
+    "github_app_id": 123456,
+    "managed_secret": {
+      "binding_id": "ordinary-agent-app-key-binding",
+      "secret_id": "ordinary-agent-app-key",
+      "secret_version_id": "ordinary-agent-app-key-v1",
+      "integration": "ordinary_agent_github_app",
+      "binding_key": "private_key"
+    },
+    "effect_profiles": [
+      "guarded_merge",
+      "head_refresh",
+      "merge_train_snapshot",
+      "merge_train_landing",
+      "pr_disposition"
+    ],
+    "permissions": [
+      {
+        "name": "administration",
+        "access": "read"
+      },
+      {
+        "name": "checks",
+        "access": "read"
+      },
+      {
+        "name": "metadata",
+        "access": "read"
+      },
+      {
+        "name": "contents",
+        "access": "write"
+      },
+      {
+        "name": "pull_requests",
+        "access": "write"
+      },
+      {
+        "name": "statuses",
+        "access": "read"
+      }
+    ],
+    "valid_from": 1700000000,
+    "expires_at": 2000000000,
+    "provider_inspection_sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+    "predecessor_record_id": null,
+    "predecessor_sha256": null,
+    "recorded_at": "2026-09-08T12:00:00Z",
+    "custody_sha256": "7462785f933f8b8f2f8bdcd84c2e3e23fc40c7e024ad4b60bdb0c71b56d74cea"
+  },
+  "enrollment_intent": {
+    "schema_version": 1,
+    "action": "enroll",
+    "operation_id": "ordinary-agent-enroll-1",
+    "principal_id": "agent_one",
+    "request_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+    "evidence_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+    "plan_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+    "policy": {
+      "record_id": "launchplane-authz-policy-r00000000000000000001-38c89d1f8d31",
+      "revision": 1,
+      "policy_sha256": "38c89d1f8d31f779b661105959f26f255dc85e113680c29531d53712bd68bc8e",
+      "managed_set_id": "ordinary-agent.pilot",
+      "managed_rule_id": "agent_one.launchplane.main",
+      "target": {
+        "repository_id": 911001,
+        "repository": "example/postgres-inventory",
+        "base_branch": "main"
+      }
+    },
+    "principal": null,
+    "credential_id": null,
+    "credential_version": null,
+    "authentication_credential": {
+      "credential_id": "agent_one_auth",
+      "valid_from": 1700000000,
+      "expires_at": 2000000000
+    },
+    "delivery": {
+      "receiver_claim_sha256": "dc42ae967a2fbae2c2d6e44c05f9967df159e392a7d0c5455a0e1ef062bd0486",
+      "expires_at": 1788997233
+    },
+    "custody": {
+      "candidate_kind": "provider_inspected",
+      "principal_id": "agent_one",
+      "policy": {
+        "record_id": "launchplane-authz-policy-r00000000000000000001-38c89d1f8d31",
+        "revision": 1,
+        "policy_sha256": "38c89d1f8d31f779b661105959f26f255dc85e113680c29531d53712bd68bc8e",
+        "managed_set_id": "ordinary-agent.pilot",
+        "managed_rule_id": "agent_one.launchplane.main",
+        "target": {
+          "repository_id": 911001,
+          "repository": "example/postgres-inventory",
+          "base_branch": "main"
+        }
+      },
+      "repository_inventory": {
+        "record_id": "repository-inventory-911001-r1",
+        "inventory_revision": 1,
+        "inventory_digest": "38214adfa3dc06027b2320d11eab7b7bf26fe5ac8d7896713d78b25ad01441b2"
+      },
+      "target": {
+        "repository_id": 911001,
+        "repository": "example/postgres-inventory",
+        "base_branch": "main"
+      },
+      "purpose": "guarded_merge",
+      "github_app_id": 123456,
+      "managed_secret": {
+        "binding_id": "ordinary-agent-app-key-binding",
+        "secret_id": "ordinary-agent-app-key",
+        "secret_version_id": "ordinary-agent-app-key-v1",
+        "integration": "ordinary_agent_github_app",
+        "binding_key": "private_key"
+      },
+      "effect_profiles": [
+        "guarded_merge",
+        "head_refresh",
+        "merge_train_snapshot",
+        "merge_train_landing",
+        "pr_disposition"
+      ],
+      "permissions": [
+        {
+          "name": "administration",
+          "access": "read"
+        },
+        {
+          "name": "checks",
+          "access": "read"
+        },
+        {
+          "name": "metadata",
+          "access": "read"
+        },
+        {
+          "name": "contents",
+          "access": "write"
+        },
+        {
+          "name": "pull_requests",
+          "access": "write"
+        },
+        {
+          "name": "statuses",
+          "access": "read"
+        }
+      ],
+      "valid_from": 1700000000,
+      "expires_at": 2000000000,
+      "provider_inspection_sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+      "predecessor_record_id": null,
+      "predecessor_sha256": null
+    },
+    "session_attenuation": null
+  },
+  "intent_sha256": "23fe4b66704fec6da53d97f1ac2bde1b3824dbeeb92ca1a87d8da673846c6655"
+}

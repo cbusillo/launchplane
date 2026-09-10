@@ -923,6 +923,12 @@ three shapes remain limited to product `launchplane` and context
 requirement for the owner-safe read and event writes. Event-write-only source
 compatibility does not alter the current DB policy; use it only in a separately
 reviewed contraction after the supporting service SHA is deployed.
+
+The manager-preview set above is current compatibility authority, not the issue
+`#2240` target. Preserve it only until Owner-acceptance replacement coverage and
+rollback are proved; do not extend it for the delegated-delivery pilot or treat
+it as merge, deploy, configuration, secret, or policy authority.
+
 `LAUNCHPLANE_AUTHZ_PRODUCT_OWNER_POLICY_ADMIN_MANAGED_SET_JSON` owns the
 dedicated local-operator policy administration boundary and must declare the
 exact `operator.product-owner-policy-admin` managed-set identity. Each rule
@@ -3227,6 +3233,20 @@ for diagnosis, never line content. Provider log errors and unavailable log reads
 remain diagnostic and do not block a valid DB heartbeat. Target lookup, service
 selection, container configuration/identity, and image identity failures remain
 hard failures.
+
+The same supervised process performs bounded expiry maintenance for private
+ordinary-agent credential deliveries after its startup schema probe confirms
+the delivery tables and expiry index. Deploying that worker image therefore
+starts the scanner automatically, although an empty table makes it inert and no
+ordinary-agent route, enrollment, or grant is activated. Cleanup emits separate
+`ordinary_agent_delivery_cleanup_succeeded` and
+`ordinary_agent_delivery_cleanup_failed` telemetry. A row-level cleanup failure
+uses process-local exponential backoff and does not increment the privileged
+poll error threshold or prevent otherwise-authorized operations from running.
+The existing poll heartbeat proves only the privileged-operation poll; retain a
+cleanup-success event separately when cleanup readiness is required. A shared
+database or startup-schema failure can still stop the whole worker process.
+
 Because runtime compatibility accepts only the checked-in Alembic head, a code
 rollback across this migration also requires the matching schema downgrade;
 deploying the previous image alone fails closed instead of running against an

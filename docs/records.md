@@ -37,6 +37,47 @@ current record. Shared writes use
 `launchplane_repository_inventory_records`; filesystem storage provides local
 rehearsal parity only.
 
+### Ordinary-Agent Lifecycle
+
+Four DB-backed tables hold the authoritative but currently unreachable
+ordinary-agent lifecycle boundary:
+
+- `launchplane_ordinary_agent_principals` stores linear principal revisions and
+  enforces one current revision per principal.
+- `launchplane_ordinary_agent_authentication_credentials` stores the
+  agent-to-Launchplane authentication digest and lifetime, with one current
+  credential per principal and one row per credential version. It never stores
+  bearer material or a provider App key/token.
+- `launchplane_ordinary_agent_credential_custody` stores the exact redacted
+  Launchplane-held provider App custody reference, including inventory and
+  managed-secret version provenance. It stores no decrypted secret or minted
+  token.
+- `launchplane_ordinary_agent_lifecycle_audits` stores one immutable redacted
+  outcome per privileged operation, including its own version-neutral current
+  administrator-policy provenance.
+
+Enroll and rotation append the principal, authentication credential, custody,
+and audit records in the same transaction as a completed inner idempotency
+receipt. Rotation advances exactly one credential version. Revocation appends a
+revoked principal revision and marks the current authentication credential
+revoked without reading custody or calling a provider. The store derives the
+receipt after DB time and server-allocated revisions are known; callers cannot
+supply response content or run callbacks while locks are held.
+
+The internal mutation requires its exact code-owned scope and route, uses the
+operation ID as its idempotency key, and binds the complete apply envelope in the
+request fingerprint. The entry point has no HTTP route, descriptor registration,
+worker dispatch, or filesystem import path. Schema-v3 policy persistence remains
+fenced, so the tables alone cannot activate an ordinary agent.
+
+The supervised privileged-operation worker performs bounded expiry maintenance
+for private ordinary-agent delivery rows. The database clock and the delivery
+row's current state determine expiry; retries are idempotent and retain the
+audit rows needed for credential and key-retirement custody. Cleanup failure has
+separate redacted telemetry and process-local backoff, so a poisoned delivery
+cannot block unrelated privileged-operation execution. The worker's normal poll
+heartbeat does not assert cleanup success.
+
 ## Schema Migrations
 
 Launchplane uses SQLAlchemy ORM models as the persistence boundary and Alembic as
@@ -2241,6 +2282,15 @@ run` is the foreground loop intended for an external process supervisor, and
 
 ## Manager Preview Approval Event Record
 
+These records describe current compatibility behavior and must remain readable
+as historical evidence through migration and rollback. The reconciled target in
+issue `#2240` uses authoritative Owner-acceptance evidence from the trusted
+Launchplane Owner surface. New delivery admission must consume that Owner
+evidence through a separately authorized Launchplane job; a manager event cannot
+confer merge, deploy, configuration, secret, or policy authority. Retire current
+manager admission only after replacement coverage is proved, without deleting
+the append-only ledger.
+
 - One append-only event per manager decision or lifecycle invalidation for an
   exact rendered preview identity. Events use deterministic ids derived from
   the exact binding, action, and source event so delivery retries replay without
@@ -2289,6 +2339,10 @@ run` is the foreground loop intended for an external process supervisor, and
   promotion evidence fingerprint, and denies before provider mutation unless
   the decision is `approved`. Removing the managed approval rule disables this
   admission requirement without deleting event history.
+
+The preceding promotion join is a current-runtime fact, not the target contract.
+Its replacement must bind the full accepted delivery evidence conservatively and
+use current Owner acceptance plus independent delivery authority.
 
 ## Launchplane Preview Enablement Record
 

@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import Literal
 import unittest
 from unittest.mock import patch
 
@@ -12,9 +13,17 @@ from control_plane.contracts.change_impact import (
     ChangeImpactTarget,
     ChangeImpactTargetReference,
 )
+from control_plane.contracts.merge_train_batch import (
+    MergeTrainBatchCandidateRecord,
+    MergeTrainBatchLandingPlanRecord,
+    build_merge_train_batch_landing_plan,
+)
+from control_plane.contracts.merge_train_controller_state import MergeTrainControllerStateRecord
 from control_plane.contracts.merge_train_structural_provenance import (
+    MergeTrainStructuralCandidateResult,
     MergeTrainStructuralEntryObservation,
 )
+from control_plane.contracts.ordinary_agent_session_lifecycle import OrdinaryAgentJobBinding
 from control_plane.contracts.merge_readiness import MergeReadinessOwnerFacet
 from control_plane.contracts.owner_acceptance import (
     OwnerAcceptanceAction,
@@ -99,6 +108,10 @@ class _UnusedRepositoryEvidenceProvider:
         target: ChangeImpactTargetReference,
     ) -> ChangeImpactRepositoryEvidence:
         raise AssertionError(f"queue drift should fail before repository evidence: {target}")
+
+
+class _QueueAccepted(RuntimeError):
+    pass
 
 
 class _TechnicalCheckClient(TenantAdmissionControllerGitHubClient):
@@ -191,6 +204,69 @@ def _queued_pull_request(
         base_ref="main",
         mergeable="mergeable",
         required_checks_status="pass",
+    )
+
+
+def _ordinary_no_op_records() -> tuple[
+    MergeTrainBatchCandidateRecord,
+    MergeTrainBatchLandingPlanRecord,
+    MergeTrainControllerStateRecord,
+    MergeTrainStructuralCandidateResult,
+    str,
+]:
+    candidate_record, landing_record, controller_state, structural_result = _guard_records()
+    candidate = candidate_record.candidate
+    provenance = candidate.structural_provenance
+    assert provenance is not None
+    step = provenance.steps[0]
+    no_op_step = step.model_copy(
+        update={
+            "result_sha": step.parent_sha,
+            "result_tree_sha": step.parent_tree_sha,
+            "kind": "no_op_already_contained",
+        }
+    )
+    provenance_payload = provenance.model_dump(mode="python")
+    provenance_payload.update(
+        {
+            "steps": (no_op_step,),
+            "candidate_sha": step.parent_sha,
+            "candidate_tree_sha": step.parent_tree_sha,
+            "provenance_sha256": "",
+            "candidate_sha256": "",
+        }
+    )
+    no_op_provenance = type(provenance).model_validate(provenance_payload)
+    candidate_payload = candidate.model_dump(mode="python")
+    candidate_payload.update(
+        {
+            "candidate_sha": step.parent_sha,
+            "candidate_tree_sha": step.parent_tree_sha,
+            "candidate_sha256": "",
+            "structural_provenance": no_op_provenance,
+        }
+    )
+    no_op_candidate = type(candidate).model_validate(candidate_payload)
+    binding = OrdinaryAgentJobBinding(
+        request_id="ordinary-no-op-request",
+        scope_sha256="d" * 64,
+        binding_revision=1,
+    )
+    no_op_plan = build_merge_train_batch_landing_plan(
+        candidate=no_op_candidate,
+        merge_method="merge",
+        created_at=landing_record.landing_plan.created_at,
+    )
+    return (
+        candidate_record.model_copy(
+            update={"ordinary_job_binding": binding, "candidate": no_op_candidate}
+        ),
+        landing_record.model_copy(
+            update={"ordinary_job_binding": binding, "landing_plan": no_op_plan}
+        ),
+        controller_state.model_copy(update={"ordinary_job_binding": binding}),
+        structural_result,
+        step.parent_tree_sha,
     )
 
 
@@ -335,6 +411,37 @@ def _owner_facet(evaluation: MergeAdmissionEvaluation) -> MergeReadinessOwnerFac
 
 
 class LiveMergeAdmissionRealStoreTests(unittest.TestCase):
+    def test_live_engineering_only_delta_attests_active_legacy_policy(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _seed_owner_store(Path(directory))
+            evidence = _repository_evidence(path="control_plane/example.py")
+            evaluator = LiveMergeAdmissionEvaluator(
+                store=store,
+                repository_evidence_provider=_EvidenceProvider(evidence),
+                technical_check_client=_TechnicalCheckClient(),
+            )
+
+            entry_evidence = evaluator._entry_evidence(
+                repository=OWNER_REPOSITORY,
+                pull_request_number=2022,
+                evaluated_at="2026-08-11T03:01:00Z",
+                position=1,
+            )
+
+        reviewed = entry_evidence.observation.reviewed_delta
+        current = entry_evidence.observation.current_delta
+        self.assertEqual(entry_evidence.impact.status, "success")
+        self.assertEqual(entry_evidence.owner_decision.status, "not_required")
+        self.assertIsNotNone(reviewed)
+        self.assertIsNotNone(current)
+        assert reviewed is not None and current is not None
+        self.assertEqual(reviewed.fingerprint_sha256, current.fingerprint_sha256)
+        self.assertEqual(current.change_impact_model, "legacy_v1")
+        self.assertEqual(
+            current.change_impact_policy_digest,
+            entry_evidence.impact.policy_digest,
+        )
+
     def test_pending_changes_requested_revoked_and_stale_owner_states(self) -> None:
         scenarios = ("pending", "changes_requested", "revoked", "stale")
         expected_reasons = {
@@ -594,6 +701,59 @@ class LiveMergeAdmissionRealStoreTests(unittest.TestCase):
 
 
 class LiveMergeAdmissionEvaluatorTests(unittest.TestCase):
+    def test_structural_delta_attests_only_current_supported_change_impact_models(self) -> None:
+        target = ChangeImpactTarget(
+            repository_id="101",
+            repository_owner_id="202",
+            repository=REPOSITORY,
+            pull_request_number=2083,
+            head_sha=HEAD_SHA,
+            tree_sha=TREE_SHA,
+        )
+        evidence = ChangeImpactRepositoryEvidence(
+            target=target,
+            changed_files=(ChangeImpactChangedFileEvidence(path="control_plane/example.py"),),
+        )
+        evaluator = LiveMergeAdmissionEvaluator(
+            store=object(),
+            repository_evidence_provider=_UnusedRepositoryEvidenceProvider(),
+            technical_check_client=_TechnicalCheckClient(),
+        )
+        cases: tuple[tuple[int, Literal["v2"] | None, str, str | None], ...] = (
+            (1, None, POLICY_SHA, "legacy_v1"),
+            (1, "v2", POLICY_SHA, "v2"),
+            (2, "v2", POLICY_SHA, None),
+            (1, None, "", None),
+        )
+
+        for schema_version, classification_model, policy_digest, expected in cases:
+            with self.subTest(
+                schema_version=schema_version,
+                classification_model=classification_model,
+                policy_digest=policy_digest,
+            ):
+                impact = ChangeImpactEvaluation(
+                    schema_version=schema_version,
+                    status="success",
+                    reason_code="change_impact_classified",
+                    target=target,
+                    policy_digest=policy_digest,
+                    classification_model=classification_model,
+                )
+
+                delta = evaluator._current_delta(
+                    repository_evidence=evidence,
+                    impact=impact,
+                )
+
+                self.assertIsNotNone(delta)
+                assert delta is not None
+                self.assertEqual(delta.change_impact_model, expected)
+                self.assertEqual(
+                    delta.change_impact_policy_digest,
+                    policy_digest if expected is not None else None,
+                )
+
     def test_engineering_only_change_binds_current_impact_policy(self) -> None:
         target = ChangeImpactTarget(
             repository_id="101",
@@ -848,6 +1008,176 @@ class LiveMergeAdmissionEvaluatorTests(unittest.TestCase):
 
         self.assertEqual(policy_reads, 2)
         self.assertEqual(snapshot_reader.read_count, 2)
+
+    def test_ordinary_proven_no_op_accepts_closed_or_merged_lifecycle_only(self) -> None:
+        candidate_record, landing_record, controller_state, _, base_tree_sha = (
+            _ordinary_no_op_records()
+        )
+        entry = landing_record.landing_plan.entries[0]
+        for state in ("closed", "merged"):
+            with self.subTest(state=state):
+                snapshot_reader = _StaticSnapshotReader(
+                    MergeTrainDryRunSnapshot(
+                        repository=REPOSITORY,
+                        base_branch="main",
+                        base_sha=BASE_SHA,
+                        pull_requests=(
+                            _queued_pull_request(
+                                number=entry.pull_request_number,
+                                head_sha=entry.expected_head_sha,
+                                created_at="2026-08-11T03:00:00Z",
+                            ).model_copy(update={"state": state}),
+                        ),
+                    )
+                )
+                evaluator = LiveMergeAdmissionEvaluator(
+                    store=object(),
+                    repository_evidence_provider=_UnusedRepositoryEvidenceProvider(),
+                    technical_check_client=_TechnicalCheckClient(),
+                    policy_record_provider=lambda: build_test_merge_train_policy_record(
+                        repository=REPOSITORY
+                    ),
+                    snapshot_reader=snapshot_reader,
+                )
+                with (
+                    patch.object(
+                        LiveMergeAdmissionEvaluator,
+                        "_entry_evidence",
+                        side_effect=_QueueAccepted("queue accepted"),
+                    ),
+                    self.assertRaisesRegex(_QueueAccepted, "queue accepted"),
+                ):
+                    evaluator.evaluate(
+                        candidate_record=candidate_record,
+                        landing_plan_record=landing_record,
+                        entry=entry,
+                        observed_base_sha=BASE_SHA,
+                        observed_base_tree_sha=base_tree_sha,
+                        observed_head_sha=entry.expected_head_sha,
+                        observed_head_tree_sha=entry.expected_head_tree_sha,
+                        controller_state=controller_state,
+                        expected_lease_owner=controller_state.lease_owner,
+                        stack_collapse_record=None,
+                        evaluated_at="2026-08-11T03:01:00Z",
+                    )
+
+    def test_nonordinary_or_ineligible_closed_no_op_cannot_bypass_queue(self) -> None:
+        candidate_record, landing_record, controller_state, _, base_tree_sha = (
+            _ordinary_no_op_records()
+        )
+        entry = landing_record.landing_plan.entries[0]
+        base_pull_request = _queued_pull_request(
+            number=entry.pull_request_number,
+            head_sha=entry.expected_head_sha,
+            created_at="2026-08-11T03:00:00Z",
+        ).model_copy(update={"state": "closed"})
+        merge_candidate, merge_landing, _, _ = _guard_records()
+        cases = {
+            "ordinary_real_merge": (
+                merge_candidate.model_copy(
+                    update={"ordinary_job_binding": candidate_record.ordinary_job_binding}
+                ),
+                merge_landing.model_copy(
+                    update={"ordinary_job_binding": landing_record.ordinary_job_binding}
+                ),
+                base_pull_request,
+            ),
+            "generic": (
+                candidate_record.model_copy(update={"ordinary_job_binding": None}),
+                landing_record.model_copy(update={"ordinary_job_binding": None}),
+                base_pull_request,
+            ),
+            "missing_label": (
+                candidate_record,
+                landing_record,
+                base_pull_request.model_copy(update={"labels": ()}),
+            ),
+            "untrusted_actor": (
+                candidate_record,
+                landing_record,
+                base_pull_request.model_copy(update={"actor_role": "unknown"}),
+            ),
+        }
+        for case, (candidate, landing, pull_request) in cases.items():
+            with self.subTest(case=case):
+                evaluator = LiveMergeAdmissionEvaluator(
+                    store=object(),
+                    repository_evidence_provider=_UnusedRepositoryEvidenceProvider(),
+                    technical_check_client=_TechnicalCheckClient(),
+                    policy_record_provider=lambda: build_test_merge_train_policy_record(
+                        repository=REPOSITORY
+                    ),
+                    snapshot_reader=_StaticSnapshotReader(
+                        MergeTrainDryRunSnapshot(
+                            repository=REPOSITORY,
+                            base_branch="main",
+                            base_sha=BASE_SHA,
+                            pull_requests=(pull_request,),
+                        )
+                    ),
+                )
+                with self.assertRaises(MergeAdmissionDeniedError) as denied:
+                    evaluator.evaluate(
+                        candidate_record=candidate,
+                        landing_plan_record=landing,
+                        entry=landing.landing_plan.entries[0],
+                        observed_base_sha=BASE_SHA,
+                        observed_base_tree_sha=base_tree_sha,
+                        observed_head_sha=entry.expected_head_sha,
+                        observed_head_tree_sha=entry.expected_head_tree_sha,
+                        controller_state=controller_state,
+                        expected_lease_owner=controller_state.lease_owner,
+                        stack_collapse_record=None,
+                        evaluated_at="2026-08-11T03:01:00Z",
+                    )
+                self.assertEqual(denied.exception.reason_code, "landing_lineage_changed")
+
+    def test_closed_ordinary_entry_requires_exact_recorded_no_op_identity(self) -> None:
+        candidate_record, landing_record, controller_state, _, base_tree_sha = (
+            _ordinary_no_op_records()
+        )
+        entry = landing_record.landing_plan.entries[0]
+        changed_entry = entry.model_copy(update={"recorded_candidate_result_tree_sha": "7" * 40})
+        changed_plan = landing_record.landing_plan.model_copy(update={"entries": (changed_entry,)})
+        changed_record = landing_record.model_copy(update={"landing_plan": changed_plan})
+        evaluator = LiveMergeAdmissionEvaluator(
+            store=object(),
+            repository_evidence_provider=_UnusedRepositoryEvidenceProvider(),
+            technical_check_client=_TechnicalCheckClient(),
+            policy_record_provider=lambda: build_test_merge_train_policy_record(
+                repository=REPOSITORY
+            ),
+            snapshot_reader=_StaticSnapshotReader(
+                MergeTrainDryRunSnapshot(
+                    repository=REPOSITORY,
+                    base_branch="main",
+                    base_sha=BASE_SHA,
+                    pull_requests=(
+                        _queued_pull_request(
+                            number=entry.pull_request_number,
+                            head_sha=entry.expected_head_sha,
+                            created_at="2026-08-11T03:00:00Z",
+                        ).model_copy(update={"state": "closed"}),
+                    ),
+                )
+            ),
+        )
+
+        with self.assertRaises(MergeAdmissionDeniedError) as denied:
+            evaluator.evaluate(
+                candidate_record=candidate_record,
+                landing_plan_record=changed_record,
+                entry=changed_entry,
+                observed_base_sha=BASE_SHA,
+                observed_base_tree_sha=base_tree_sha,
+                observed_head_sha=entry.expected_head_sha,
+                observed_head_tree_sha=entry.expected_head_tree_sha,
+                controller_state=controller_state,
+                expected_lease_owner=controller_state.lease_owner,
+                stack_collapse_record=None,
+                evaluated_at="2026-08-11T03:01:00Z",
+            )
+        self.assertEqual(denied.exception.reason_code, "landing_lineage_changed")
 
     def test_active_policy_removal_is_rediscovered_and_refuses_admission(self) -> None:
         candidate_record, landing_record, controller_state, _ = _guard_records()

@@ -3,6 +3,7 @@ from __future__ import annotations
 from control_plane.contracts.merge_train_batch import (
     MergeTrainBatchCandidateRecord,
     MergeTrainBatchLandingPlanRecord,
+    build_ordinary_merge_train_candidate_ref,
 )
 from control_plane.contracts.merge_train_stack_collapse import (
     MergeTrainStackCollapsePlanRecord,
@@ -18,6 +19,43 @@ from control_plane.contracts.merge_train_structural_provenance import (
 from control_plane.merge_train_stack_collapse import stack_collapse_expected_root_head_sha
 
 
+def ordinary_candidate_is_exact_landing_dependency(
+    *,
+    candidate_record: MergeTrainBatchCandidateRecord,
+    landing_plan_record: MergeTrainBatchLandingPlanRecord,
+) -> bool:
+    """Whether a current ordinary landing may use this candidate as provenance."""
+    binding = landing_plan_record.ordinary_job_binding
+    candidate = candidate_record.candidate
+    landing_plan = landing_plan_record.landing_plan
+    provenance = candidate.structural_provenance
+    return (
+        landing_plan_record.status == "active"
+        and binding is not None
+        and candidate_record.status in {"active", "superseded"}
+        and candidate_record.ordinary_job_binding == binding
+        and candidate.status == "passed"
+        and provenance is not None
+        and provenance.complete
+        and candidate.stack_collapse_root is None
+        and candidate.candidate_ref
+        == build_ordinary_merge_train_candidate_ref(
+            binding=binding,
+            batch_id=candidate.batch_id,
+        )
+        and landing_plan.repository == candidate.repository
+        and landing_plan.base_branch == candidate.base_branch
+        and landing_plan.batch_id == candidate.batch_id
+        and landing_plan.candidate_ref == candidate.candidate_ref
+        and landing_plan.candidate_sha == candidate.candidate_sha
+        and landing_plan.candidate_tree_sha == candidate.candidate_tree_sha
+        and landing_plan.candidate_sha256 == candidate.candidate_sha256
+        and landing_plan.structural_provenance_sha256 == provenance.provenance_sha256
+        and landing_plan.policy_key == candidate.policy_key
+        and landing_plan.policy_sha256 == candidate.policy_sha256
+    )
+
+
 def evaluate_merge_train_structural_candidate(
     *,
     evaluation: MergeTrainStructuralEvaluationInput,
@@ -27,7 +65,13 @@ def evaluate_merge_train_structural_candidate(
 ) -> MergeTrainStructuralCandidateResult:
     if candidate_record is None:
         return _result("unknown", "structural_evidence_unavailable")
-    if candidate_record.status == "superseded":
+    if candidate_record.status == "superseded" and (
+        landing_plan_record is None
+        or not ordinary_candidate_is_exact_landing_dependency(
+            candidate_record=candidate_record,
+            landing_plan_record=landing_plan_record,
+        )
+    ):
         return _result("unknown", "structural_record_superseded")
     candidate = candidate_record.candidate
     provenance = candidate.structural_provenance
@@ -390,13 +434,27 @@ def _impact_composition_result(
             subject_positions.setdefault((subject.product, subject.system), set()).add(
                 entry.position
             )
-    if any(len(positions) > 1 for positions in path_positions.values()):
+    if any(len(positions) > 1 for positions in path_positions.values()) and not (
+        _attested_engineering_only_composition(evaluation.entries)
+    ):
         reasons.append("structural_changed_path_overlap")
     if any(len(positions) > 1 for positions in subject_positions.values()):
         reasons.append("structural_same_subject_combined_review_required")
-    if not reasons:
-        return None, False
     review = evaluation.combined_owner_review
+    if not reasons:
+        if review is None:
+            return None, False
+        if not _combined_review_matches(review=review, evaluation=evaluation):
+            return (
+                _bound_result(
+                    evaluation,
+                    candidate_record,
+                    landing_plan_record,
+                    "structural_combined_owner_review_mismatch",
+                ),
+                False,
+            )
+        return None, True
     if review is None:
         return (
             _bound_result_reasons(
@@ -418,6 +476,35 @@ def _impact_composition_result(
             False,
         )
     return None, True
+
+
+def _attested_engineering_only_composition(
+    entries: tuple[MergeTrainStructuralEntryObservation, ...],
+) -> bool:
+    supported_models = {"legacy_v1", "v2"}
+    models: set[str] = set()
+    policy_digests: set[str] = set()
+    for entry in entries:
+        reviewed = entry.reviewed_delta
+        current = entry.current_delta
+        if reviewed is None or current is None:
+            return False
+        if reviewed.fingerprint_sha256 != current.fingerprint_sha256:
+            return False
+        if (
+            reviewed.change_impact_model not in supported_models
+            or current.change_impact_model not in supported_models
+            or reviewed.change_impact_policy_digest is None
+            or current.change_impact_policy_digest is None
+            or reviewed.affected_subjects
+            or current.affected_subjects
+        ):
+            return False
+        models.update((reviewed.change_impact_model, current.change_impact_model))
+        policy_digests.update(
+            (reviewed.change_impact_policy_digest, current.change_impact_policy_digest)
+        )
+    return len(models) == 1 and len(policy_digests) == 1
 
 
 def _combined_review_matches(

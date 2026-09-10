@@ -636,6 +636,7 @@ function OwnerAcceptanceDecisionDetails({
           <span>evaluated {formatTime(decision.evaluated_at)}</span>
         ) : null}
       </div>
+      <OwnerAcceptanceCoverageDiagnostics coverage={decision.change_impact_coverage} />
       {decision.products.length > 0 ? (
         <>
           <OwnerAcceptanceProductList products={decision.products} />
@@ -677,6 +678,65 @@ function OwnerAcceptanceDecisionDetails({
         </>
       ) : null}
     </>
+  );
+}
+
+function OwnerAcceptanceCoverageDiagnostics({
+  coverage,
+}: {
+  coverage: OwnerAcceptanceDecision["change_impact_coverage"] | undefined;
+}) {
+  return (
+    <section
+      className="engineering-owner-coverage"
+      aria-label="Change-impact path coverage"
+    >
+      <header>
+        <strong>Change-impact path coverage</strong>
+        <span>Diagnostic only</span>
+      </header>
+      {coverage == null ? (
+        <p>
+          Coverage was not supplied for this evaluation. Its state is unknown.
+        </p>
+      ) : (
+        <>
+          <p>
+            Coverage state: {coverage.state}. Reported unmatched path count:{" "}
+            <strong>{coverage.unmatched_path_count}</strong>.
+          </p>
+          {coverage.unmatched_path_samples.length > 0 ? (
+            <ul aria-label="Unmatched path samples">
+              {coverage.unmatched_path_samples.map((sample, index) => (
+                <li key={`${index}:${sample}`}>
+                  <code>{sample}</code>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+          <p>
+            Showing {coverage.unmatched_path_samples.length} supplied sample
+            {coverage.unmatched_path_samples.length === 1 ? "" : "s"} from the true
+            total of {coverage.unmatched_path_count} unmatched path
+            {coverage.unmatched_path_count === 1 ? "" : "s"}.
+            {coverage.truncated
+              ? " The bounded sample evidence is truncated; paths may be omitted or shortened."
+              : " The bounded sample list is not marked truncated."}
+          </p>
+          {coverage.state === "incomplete" ? (
+            <p>
+              Engineering next step: inspect current change-impact policy coverage
+              for the unmatched paths. This diagnostic does not establish that
+              coverage is the only unavailable prerequisite.
+            </p>
+          ) : null}
+        </>
+      )}
+      <p>
+        This evidence does not change the Owner decision, grant Owner acceptance,
+        or enable any action.
+      </p>
+    </section>
   );
 }
 
