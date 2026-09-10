@@ -6,9 +6,14 @@ from typing import Literal
 
 from pydantic import Field, field_validator, model_validator
 
-from control_plane.contracts.ordinary_agent import StrictFrozenModel
-from control_plane.merge_train import MergeTrainCheckStatus, MergeTrainDryRunSnapshot
+from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.change_impact import ChangeImpactRepositoryEvidence
+from control_plane.contracts.ordinary_agent import (
+    OrdinaryAgentPullRequest,
+    OrdinaryAgentTarget,
+    StrictFrozenModel,
+)
+from control_plane.merge_train import MergeTrainCheckStatus, MergeTrainDryRunSnapshot
 from control_plane.tenant_admission_controller import TenantAdmissionTechnicalChecks
 
 
@@ -36,6 +41,89 @@ class OrdinaryAgentCommitIdentity(StrictFrozenModel):
 class OrdinaryAgentPullRequestHeadIdentity(StrictFrozenModel):
     pull_request_number: int = Field(gt=0)
     identity: OrdinaryAgentCommitIdentity
+
+
+class OrdinaryAgentReadmissionPullRequestObservation(StrictFrozenModel):
+    """Current provider identity for one position in a captured finite tuple."""
+
+    number: int = Field(gt=0, le=2**63 - 1)
+    head_sha: str = Field(pattern=r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+    base_ref: str = Field(min_length=1, max_length=255)
+    lifecycle: Literal["open", "closed", "merged"]
+    head_repository_id: int = Field(gt=0, le=2**63 - 1)
+    head_repository: str = Field(min_length=3, max_length=512)
+    base_repository_id: int = Field(gt=0, le=2**63 - 1)
+    base_repository: str = Field(min_length=3, max_length=512)
+
+
+class OrdinaryAgentReadmissionObservation(StrictFrozenModel):
+    """Immutable provider evidence of drift from one captured finite tuple."""
+
+    schema_version: Literal[1] = 1
+    observed_at: int = Field(ge=0, le=2**63 - 1)
+    target: OrdinaryAgentTarget
+    repository_owner_id: int = Field(gt=0, le=2**63 - 1)
+    captured_base_sha: str = Field(pattern=r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+    captured_pull_requests: tuple[OrdinaryAgentPullRequest, ...] = Field(
+        min_length=1, max_length=MAX_ORDINARY_LANDING_ENTRIES
+    )
+    base_identity: OrdinaryAgentCommitIdentity
+    pull_requests: tuple[OrdinaryAgentReadmissionPullRequestObservation, ...] = Field(
+        min_length=1, max_length=MAX_ORDINARY_LANDING_ENTRIES
+    )
+    drift: Literal["base", "head", "base_and_head"]
+    counts: OrdinaryAgentProviderRequestCounts
+    observation_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @field_validator("captured_pull_requests", "pull_requests", mode="before")
+    @classmethod
+    def normalize_readmission_pull_requests(cls, value: object) -> object:
+        return tuple(value) if isinstance(value, list) else value
+
+    @model_validator(mode="after")
+    def validate_exact_drift_evidence(self) -> OrdinaryAgentReadmissionObservation:
+        if any(
+            len(value) not in {40, 64}
+            or any(character not in "0123456789abcdef" for character in value)
+            for value in (self.base_identity.sha, self.base_identity.tree_sha)
+        ):
+            raise ValueError("readmission base identity must contain exact commit hashes")
+        captured_numbers = tuple(item.number for item in self.captured_pull_requests)
+        observed_numbers = tuple(item.number for item in self.pull_requests)
+        if (
+            len(set(captured_numbers)) != len(captured_numbers)
+            or observed_numbers != captured_numbers
+        ):
+            raise ValueError("readmission observations must preserve the unique captured order")
+        if any(
+            item.base_ref != self.target.base_branch
+            or item.head_repository_id != self.target.repository_id
+            or item.head_repository != self.target.repository
+            or item.base_repository_id != self.target.repository_id
+            or item.base_repository != self.target.repository
+            for item in self.pull_requests
+        ):
+            raise ValueError("readmission observations must preserve exact target identities")
+        base_changed = self.base_identity.sha != self.captured_base_sha
+        head_changed = any(
+            observed.head_sha != captured.head_sha
+            for captured, observed in zip(
+                self.captured_pull_requests, self.pull_requests, strict=True
+            )
+        )
+        expected_drift = (
+            "base_and_head" if base_changed and head_changed else "base" if base_changed else "head"
+        )
+        if not base_changed and not head_changed:
+            raise ValueError("readmission evidence must contain source drift")
+        if self.drift != expected_drift:
+            raise ValueError("readmission drift classification must match its exact tuple")
+        expected_digest = canonical_json_sha256(
+            self.model_dump(mode="json", exclude={"observation_sha256"})
+        )
+        if self.observation_sha256 != expected_digest:
+            raise ValueError("readmission observation digest does not match its evidence")
+        return self
 
 
 class OrdinaryAgentRequiredCheck(StrictFrozenModel):

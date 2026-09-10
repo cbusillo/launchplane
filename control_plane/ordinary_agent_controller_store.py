@@ -180,6 +180,16 @@ class OrdinaryAgentControllerAdapter:
             lease_seconds=lease_seconds,
         )
 
+    def yield_acquired(self) -> MergeTrainControllerStateRecord:
+        """Yield this acquisition, never the claim's historical controller fence."""
+        yielded = self.store.yield_ordinary_merge_train_controller_state_record(
+            request_id=self.claimed.request.request_id,
+            expected_binding_revision=self.claimed.request.binding_revision,
+            controller_fence=self.acquired_fence,
+        )
+        self._yield_confirmed = True
+        return yielded
+
     def release_terminal_history(self) -> MergeTrainControllerStateRecord | None:
         """Release an expired worker's owned controller without acquiring authority."""
         fence = self.claimed.controller_fence

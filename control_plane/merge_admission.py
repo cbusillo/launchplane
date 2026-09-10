@@ -215,8 +215,9 @@ class GuardedMergeAdmission:
             landing_plan_id=self.landing_plan_record.landing_plan.plan_id,
         )
         if existing:
+            latest_admission = max(existing, key=lambda record: record.attempt_sequence)
             latest_outcomes = self.record_store.list_merge_landing_outcome_records(
-                admission_id=existing[0].admission_id,
+                admission_id=latest_admission.admission_id,
                 limit=1,
             )
             if not latest_outcomes or latest_outcomes[0].status == "reconcile_required":

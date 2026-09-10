@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 from typing import cast
 
 from control_plane.contracts import ordinary_agent_effect as effects
+from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.merge_train_effect import (
     CandidateHeadMergeEffect,
     CandidateRefPrepareEffect,
     MergeTrainEffectLineage,
+    PullRequestHeadRefreshEffect,
 )
 from control_plane.contracts.merge_train_batch import (
     build_merge_train_batch_landing_plan,
@@ -25,8 +28,10 @@ from control_plane.contracts.ordinary_agent_snapshot import (
     OrdinaryAgentProviderRequestCounts,
     OrdinaryAgentPullRequestHeadIdentity,
     OrdinaryAgentRequiredCheck,
+    OrdinaryAgentReadmissionObservation,
 )
 from control_plane.merge_admission import MergeAdmissionDeniedError
+from control_plane.github_app_identity import GitHubAppInstallationToken
 from control_plane.merge_train import MergeTrainDryRunSnapshot, MergeTrainPullRequestSnapshot
 from control_plane.merge_train_github import RecordingMergeTrainGitHubTransport
 from control_plane.merge_train_controller_run_once import (
@@ -35,6 +40,10 @@ from control_plane.merge_train_controller_run_once import (
     MergeTrainControllerRunOnceResult,
 )
 from control_plane.ordinary_agent_github_transport import OrdinaryAgentProviderDeferred
+from control_plane.ordinary_agent_merge_train_snapshot import (
+    OrdinaryAgentReadmissionRequired,
+    acquire_ordinary_agent_merge_train_snapshot,
+)
 from control_plane.ordinary_agent_controller_store import OrdinaryAgentControllerAdapter
 from control_plane.ordinary_agent_merge_train_job import (
     _EvidenceBoundOrdinaryAdmissionEvaluator,
@@ -42,6 +51,7 @@ from control_plane.ordinary_agent_merge_train_job import (
     _result_disposition,
     advance_ordinary_agent_merge_train_job,
 )
+from control_plane.ordinary_agent_session_lifecycle import OrdinaryAgentSessionAdmissionDenied
 from control_plane.storage.postgres import (
     LaunchplaneMergeTrainControllerStateRow,
     LaunchplaneOrdinaryAgentJobClaimRow,
@@ -169,6 +179,337 @@ class OrdinaryAgentMergeTrainJobTests(unittest.TestCase):
             effect_transport_factory=lambda _: self.provider,
             monotonic=lambda: 0,
             utc_now=lambda: datetime.fromtimestamp(self.session.now, timezone.utc),
+        )
+
+    def completed_refresh(self) -> tuple[effects.OrdinaryAgentClaimedJob, str]:
+        claimed = self.claim()
+        fence = self.acquire(claimed)
+        effect = self.store.reserve_ordinary_agent_effect(
+            request_id=self.request.request_id,
+            expected_binding_revision=self.request.binding_revision,
+            controller_fence=fence,
+            command=effects.PullRequestHeadRefreshCommand(
+                effect=PullRequestHeadRefreshEffect(
+                    lineage=MergeTrainEffectLineage(
+                        repository=self.request.target.repository,
+                        base_branch=self.request.target.base_branch,
+                    ),
+                    pull_request_number=self.request.pull_requests[0].number,
+                    expected_head_sha=self.request.pull_requests[0].head_sha,
+                    expected_base_sha=self.request.base_sha,
+                )
+            ),
+            semantic_ordinal=1,
+        )
+        custody = self.store.reserve_ordinary_custody_attempt(
+            effect_id=effect.effect_id, expected_effect_revision=effect.revision
+        )
+        self.fixture.issue(custody)
+        child = self.store.checkpoint_ordinary_semantic_dispatch(
+            effect_id=effect.effect_id,
+            controller_fence=fence,
+            custody_attempt_id=custody.attempt_id,
+            fixed_token_expires_at=self.session.now + 300,
+        )
+        self.store.record_ordinary_semantic_outcome(
+            child_id=child.child_id,
+            typed_outcome=effects.OrdinaryAgentCompletedOutcome(
+                result_sha="d" * 40,
+                proof=effects.OrdinaryAgentPullRequestObservation(
+                    repository=self.request.target.repository,
+                    number=self.request.pull_requests[0].number,
+                    head_sha="d" * 40,
+                    base_ref=self.request.target.base_branch,
+                    base_sha=self.request.base_sha,
+                    state="open",
+                    merged=False,
+                    head_parents=(self.request.pull_requests[0].head_sha, self.request.base_sha),
+                ),
+            ),
+        )
+        self.store.close_ordinary_agent_custody_issue_attempt(
+            attempt_id=custody.attempt_id, reason="confirmed_revoked"
+        )
+        # Restart after the original worker and controller leases expire.
+        self.session.now += 31
+        self.session.clock.return_value = datetime.fromtimestamp(
+            self.session.now, timezone.utc
+        ).isoformat()
+        return self.claim("restarted-worker"), effect.effect_id
+
+    def test_completed_refresh_rebinds_and_next_claim_reads_new_binding(self) -> None:
+        claimed, effect_id = self.completed_refresh()
+        result = self.advance(claimed)
+        self.assertEqual((result.status, result.reason_code), ("waiting", None))
+        history = self.store.read_ordinary_agent_effect_history(effect_id=effect_id)
+        self.assertEqual((history.effect.state, history.effect.rebound_revision), ("completed", 2))
+        self.assertEqual(history.effect.dispatch_count, 1)
+        self.store.finish_ordinary_agent_job_attempt(
+            claim_fence=claimed.claim_fence, disposition=result
+        )
+        assert result.next_due_at is not None
+        self.session.now = result.next_due_at
+        self.session.clock.return_value = datetime.fromtimestamp(
+            self.session.now, timezone.utc
+        ).isoformat()
+        resumed = self.claim("next-worker")
+        self.assertEqual(resumed.request.binding_revision, 2)
+        self.assertEqual(resumed.request.pull_requests[0].head_sha, "d" * 40)
+        self.assertEqual(resumed.request.refresh_used, 1)
+        self.assertIsNone(resumed.controller_fence)
+        self.provider.assert_not_called()
+
+    def test_rebind_failure_yields_new_acquisition_before_mapping_or_raising(self) -> None:
+        claimed, _ = self.completed_refresh()
+        for reason, expected in (
+            ("refresh_allowance_exhausted", "ordinary_readmission_required"),
+            ("record_predecessor_conflict", "prior_effect_unresolved"),
+            ("binding_revision_conflict", None),
+            ("policy_unavailable", "ordinary_readmission_required"),
+        ):
+            with (
+                self.subTest(reason=reason),
+                patch.object(
+                    self.store,
+                    "rebind_ordinary_agent_after_head_refresh",
+                    side_effect=OrdinaryAgentSessionAdmissionDenied(reason),
+                ),
+                patch.object(
+                    self.store,
+                    "yield_ordinary_merge_train_controller_state_record",
+                    wraps=self.store.yield_ordinary_merge_train_controller_state_record,
+                ) as yielded,
+                patch.object(
+                    OrdinaryAgentControllerAdapter,
+                    "release_terminal_history",
+                    side_effect=AssertionError(
+                        "must not release historical fence after acquisition"
+                    ),
+                ),
+            ):
+                if expected is None:
+                    with self.assertRaisesRegex(OrdinaryAgentSessionAdmissionDenied, reason):
+                        self.advance(claimed)
+                else:
+                    self.assertEqual(self.advance(claimed).reason_code, expected)
+                yielded.assert_called_once()
+                controllers = self.store.list_merge_train_controller_state_records(
+                    repository=self.request.target.repository,
+                    base_branch=self.request.target.base_branch,
+                )
+                self.assertEqual(controllers[0].status, "idle")
+        self.provider.assert_not_called()
+
+    def test_rebind_acquire_denial_releases_historical_controller_and_finishes_attempt(
+        self,
+    ) -> None:
+        claimed, _ = self.completed_refresh()
+        assert claimed.controller_fence is not None
+        with self.store._session_factory() as session:
+            row = session.get(
+                LaunchplaneMergeTrainControllerStateRow, claimed.controller_fence.controller_key
+            )
+            assert row is not None
+            record = MergeTrainControllerStateRecord.model_validate(row.payload)
+            row.payload = record.model_copy(update={"policy_sha256": "1" * 64}).model_dump(
+                mode="json"
+            )
+            session.commit()
+        with patch.object(
+            self.store,
+            "yield_ordinary_merge_train_controller_state_record",
+            wraps=self.store.yield_ordinary_merge_train_controller_state_record,
+        ) as yielded:
+            result = self.advance(claimed)
+        self.assertEqual(
+            (result.status, result.reason_code), ("blocked", "ordinary_readmission_required")
+        )
+        self.assertEqual(yielded.call_args.kwargs["controller_fence"], claimed.controller_fence)
+        yielded.assert_called_once()
+        finished = self.store.finish_ordinary_agent_job_attempt(
+            claim_fence=claimed.claim_fence, disposition=result
+        )
+        self.assertEqual(finished.status, "blocked")
+        self.provider.assert_not_called()
+
+    def test_rebind_failed_yield_remains_loud(self) -> None:
+        claimed, _ = self.completed_refresh()
+        with (
+            patch.object(
+                self.store,
+                "rebind_ordinary_agent_after_head_refresh",
+                side_effect=OrdinaryAgentSessionAdmissionDenied("refresh_allowance_exhausted"),
+            ),
+            patch.object(
+                self.store,
+                "yield_ordinary_merge_train_controller_state_record",
+                side_effect=RuntimeError("yield failed"),
+            ),
+            patch.object(
+                OrdinaryAgentControllerAdapter,
+                "release_terminal_history",
+                side_effect=AssertionError("must not retry a historical yield"),
+            ),
+        ):
+            with self.assertRaises(ExceptionGroup) as caught:
+                self.advance(claimed)
+        self.assertEqual(len(caught.exception.exceptions), 2)
+        self.assertIsInstance(caught.exception.exceptions[0], OrdinaryAgentSessionAdmissionDenied)
+        self.assertEqual(str(caught.exception.exceptions[1]), "yield failed")
+        self.provider.assert_not_called()
+
+    def readmission_observation(self) -> OrdinaryAgentReadmissionObservation:
+        request = self.request
+        payload = {
+            "schema_version": 1,
+            "observed_at": self.session.now,
+            "target": request.target.model_dump(mode="json"),
+            "repository_owner_id": 202,
+            "captured_base_sha": request.base_sha,
+            "captured_pull_requests": [
+                item.model_dump(mode="json") for item in request.pull_requests
+            ],
+            "base_identity": {"sha": "e" * 40, "tree_sha": "f" * 40, "parent_shas": []},
+            "pull_requests": [
+                {
+                    "number": item.number,
+                    "head_sha": item.head_sha,
+                    "base_ref": request.target.base_branch,
+                    "lifecycle": "open",
+                    "head_repository_id": request.target.repository_id,
+                    "head_repository": request.target.repository,
+                    "base_repository_id": request.target.repository_id,
+                    "base_repository": request.target.repository,
+                }
+                for item in request.pull_requests
+            ],
+            "drift": "base",
+            "counts": {"rest_core_requests": 0, "graphql_requests": 0, "graphql_points": 0},
+        }
+        return OrdinaryAgentReadmissionObservation.model_validate(
+            {**payload, "observation_sha256": canonical_json_sha256(payload)}
+        )
+
+    def test_readmission_replay_raises_stored_signal_without_provider_or_custody(self) -> None:
+        claimed = self.claim()
+        fence = self.acquire(claimed)
+        attempt = self.store.reserve_ordinary_agent_snapshot_attempt(
+            request_id=self.request.request_id, expected_binding_revision=1, controller_fence=fence
+        )
+        custody = self.store.reserve_ordinary_agent_read_custody_attempt(
+            attempt_id=attempt.attempt_id, expected_attempt_revision=attempt.revision
+        )
+        self.fixture.issue(custody)
+        observation = self.readmission_observation()
+        self.store.record_ordinary_agent_snapshot_success(
+            attempt_id=attempt.attempt_id,
+            custody_attempt_id=custody.custody_attempt_id,
+            result=observation,
+        )
+        self.store.close_ordinary_agent_custody_issue_attempt(
+            attempt_id=custody.custody_attempt_id, reason="confirmed_revoked"
+        )
+        custody_store = Mock()
+        with self.assertRaises(OrdinaryAgentReadmissionRequired) as caught:
+            acquire_ordinary_agent_merge_train_snapshot(
+                store=self.store,
+                custody_store=custody_store,
+                secret_store=Mock(),
+                request_id=self.request.request_id,
+                expected_binding_revision=1,
+                controller_fence=fence,
+                reader=self.provider,
+                api_request=self.provider,
+            )
+        self.assertEqual(caught.exception.attempt_id, attempt.attempt_id)
+        self.assertEqual(caught.exception.observation_sha256, observation.observation_sha256)
+        self.assertEqual(custody_store.mock_calls, [])
+        self.provider.assert_not_called()
+
+    def test_readmission_signal_cannot_finalize_after_failed_core_yield(self) -> None:
+        claimed = self.claim()
+        signal = OrdinaryAgentReadmissionRequired(
+            attempt_id="read-test", observation_sha256="a" * 64
+        )
+        with (
+            patch(
+                "control_plane.ordinary_agent_merge_train_job.acquire_ordinary_agent_merge_train_snapshot",
+                side_effect=signal,
+            ),
+            patch.object(
+                self.store,
+                "yield_ordinary_merge_train_controller_state_record",
+                side_effect=RuntimeError("yield failed"),
+            ),
+            patch.object(self.store, "finalize_ordinary_agent_readmission") as finalize,
+            self.assertLogs("control_plane.merge_train_controller_run_once", level="WARNING"),
+        ):
+            with self.assertRaises(OrdinaryAgentReadmissionRequired):
+                self.advance(claimed)
+        finalize.assert_not_called()
+        self.provider.assert_not_called()
+
+    def test_pristine_drift_commits_after_custody_cleanup_and_core_yield(self) -> None:
+        # Reader tests cover GraphQL parsing and counts; inject its immutable
+        # result here to exercise custody, the real core yield, and joined storage.
+        claimed = self.claim()
+        observation = self.readmission_observation()
+        provider = Mock(return_value=None)
+        mint = Mock(
+            return_value=GitHubAppInstallationToken(
+                token="test-readmission-token",
+                app_id=self.session.envelope.custody.github_app_id,
+                installation_id=77,
+                repository_id=self.request.target.repository_id,
+                repository=self.request.target.repository,
+                expires_at=datetime.fromtimestamp(self.session.now + 300, timezone.utc).isoformat(),
+            )
+        )
+        with (
+            patch(
+                "control_plane.ordinary_agent_custody.resolve_ordinary_agent_github_app_identity",
+                side_effect=lambda **kw: SimpleNamespace(
+                    identity=SimpleNamespace(app_id=kw["candidate"].expected_app_id)
+                ),
+            ),
+            patch(
+                "control_plane.ordinary_agent_custody.mint_ordinary_agent_installation_token",
+                mint,
+            ),
+            patch(
+                "control_plane.ordinary_agent_merge_train_job.read_ordinary_controller_snapshot",
+                return_value=observation,
+            ),
+        ):
+            result = advance_ordinary_agent_merge_train_job(
+                claimed=claimed,
+                store=self.store,
+                api_request=provider,
+                monotonic=lambda: 0,
+                utc_now=lambda: datetime.fromtimestamp(self.session.now, timezone.utc),
+            )
+        self.assertEqual((result.status, result.reason_code), ("waiting", None))
+        refreshed = self.store.read_ordinary_agent_job_recovery_snapshot(
+            claim_fence=claimed.claim_fence
+        )
+        self.assertEqual(refreshed.binding_revision, 2)
+        self.assertEqual(refreshed.total_effects, 0)
+        self.assertFalse(refreshed.custody_uncertain)
+        self.store.finish_ordinary_agent_job_attempt(
+            claim_fence=claimed.claim_fence, disposition=result
+        )
+        assert result.next_due_at is not None
+        self.session.now = result.next_due_at
+        self.session.clock.return_value = datetime.fromtimestamp(
+            self.session.now, timezone.utc
+        ).isoformat()
+        resumed = self.claim("readmitted-worker")
+        self.assertEqual(resumed.request.base_sha, observation.base_identity.sha)
+        self.assertEqual(resumed.request.refresh_used, 1)
+        mint.assert_called_once()
+        self.assertEqual(
+            [(call.kwargs["method"], call.kwargs["path"]) for call in provider.call_args_list],
+            [("DELETE", "/installation/token")],
         )
 
     def landing_fixture(self) -> landing_support.OrdinaryAgentLandingStorageTests:
@@ -570,6 +911,48 @@ class OrdinaryAgentMergeTrainJobTests(unittest.TestCase):
         self.assertEqual(len(controller), 1)
         self.assertEqual(controller[0].status, "idle")
         provider.assert_not_called()
+
+    def test_known_not_dispatched_landing_waits_for_fresh_admission_without_falling_through(
+        self,
+    ) -> None:
+        landing = self.landing_fixture()
+        preparation, proposal = landing.observed_proposal()
+        finalization = landing.finalize(preparation, proposal)
+        landing.store.record_ordinary_semantic_outcome(
+            child_id=finalization.child.child_id,
+            typed_outcome=effects.OrdinaryAgentKnownNotDispatchedOutcome(
+                reason="provider_attempt_deadline"
+            ),
+        )
+        landing.store.close_ordinary_agent_custody_issue_attempt(
+            attempt_id=preparation.custody_attempt_id, reason="confirmed_revoked"
+        )
+        reclaimed = self.reclaim_landing(landing, worker="undispatched-landing-recovery")
+        with patch.object(
+            landing.store,
+            "acquire_ordinary_merge_train_controller_state_record",
+            side_effect=AssertionError("landing retry cannot acquire fresh work yet"),
+        ):
+            result = advance_ordinary_agent_merge_train_job(
+                claimed=reclaimed,
+                store=landing.store,
+                api_request=self.provider,
+                effect_transport_factory=lambda _: self.provider,
+                monotonic=lambda: 0,
+                utc_now=lambda: datetime.fromtimestamp(landing.fixture.fixture.now, timezone.utc),
+            )
+        self.assertEqual(
+            (result.status, result.reason_code), ("blocked", "ordinary_readmission_required")
+        )
+        history = landing.store.read_ordinary_agent_effect_history(
+            effect_id=finalization.effect.effect_id
+        )
+        self.assertEqual(history.effect.dispatch_count, 1)
+        self.assertEqual(history.child, finalization.child)
+        landing.store.finish_ordinary_agent_job_attempt(
+            claim_fence=reclaimed.claim_fence, disposition=result
+        )
+        self.provider.assert_not_called()
 
     def test_completed_landing_restarts_from_superseded_candidate_without_provider_resend(
         self,

@@ -44,6 +44,7 @@ from control_plane.contracts.ordinary_agent_snapshot import (
     OrdinaryAgentCandidateCheckResult,
     OrdinaryAgentProviderRequestCounts,
     OrdinaryAgentLandingEvidence,
+    OrdinaryAgentReadmissionObservation,
 )
 
 OrdinaryAgentProgressRecord: TypeAlias = (
@@ -584,22 +585,38 @@ class OrdinaryAgentSnapshotAttemptRecord(StrictFrozenModel):
     attempt_ordinal: int = Field(ge=1)
     candidate_sha: str = Field(default="", max_length=64)
     controller_fence: OrdinaryAgentControllerFence
-    state: Literal["reserved", "reading", "completed", "incomplete", "fenced", "exhausted"] = (
-        "reserved"
-    )
+    state: Literal[
+        "reserved", "reading", "completed", "consumed", "incomplete", "fenced", "exhausted"
+    ] = "reserved"
     revision: int = Field(default=1, ge=1)
     created_at: Epoch
     updated_at: Epoch
     custody_attempt_ids: tuple[str, ...] = ()
-    result: OrdinaryAgentMergeTrainSnapshotResult | OrdinaryAgentCandidateCheckResult | None = None
+    result: (
+        OrdinaryAgentMergeTrainSnapshotResult
+        | OrdinaryAgentCandidateCheckResult
+        | OrdinaryAgentReadmissionObservation
+        | None
+    ) = None
     failure_counts: OrdinaryAgentProviderRequestCounts | None = None
     reason_code: str | None = Field(default=None, max_length=128)
     next_due_at: Epoch | None = None
+    rebound_revision: int | None = Field(default=None, ge=1)
 
     @field_validator("custody_attempt_ids", mode="before")
     @classmethod
     def read_ids(cls, value: object) -> object:
         return tuple(value) if isinstance(value, list) else value
+
+    @model_validator(mode="after")
+    def validate_readmission_consumption(self) -> Self:
+        if (self.state == "consumed") != (self.rebound_revision is not None):
+            raise ValueError("only consumed readmission evidence may bind a rebound revision")
+        if self.state == "consumed" and not isinstance(
+            self.result, OrdinaryAgentReadmissionObservation
+        ):
+            raise ValueError("consumed read evidence must contain a readmission observation")
+        return self
 
 
 class OrdinaryAgentReadCustodyReservation(StrictFrozenModel):
@@ -650,7 +667,7 @@ class OrdinaryAgentSnapshotStore(Protocol):
         *,
         attempt_id: str,
         custody_attempt_id: str,
-        result: OrdinaryAgentMergeTrainSnapshotResult,
+        result: OrdinaryAgentMergeTrainSnapshotResult | OrdinaryAgentReadmissionObservation,
     ) -> OrdinaryAgentSnapshotAttemptRecord: ...
 
     def record_ordinary_agent_candidate_check_success(
@@ -676,6 +693,19 @@ class OrdinaryAgentSnapshotStore(Protocol):
         ],
         counts: OrdinaryAgentProviderRequestCounts,
     ) -> OrdinaryAgentSnapshotAttemptRecord: ...
+
+
+class OrdinaryAgentReadmissionStore(Protocol):
+    def finalize_ordinary_agent_readmission(
+        self,
+        *,
+        claim_fence: OrdinaryAgentJobClaimFence,
+        expected_binding_revision: int,
+        read_attempt_id: str,
+        expected_observation_sha256: str,
+    ) -> OrdinaryAgentFiniteRequestRecord:
+        """Consume exact drift evidence and advance one finite binding revision."""
+        ...
 
 
 class OrdinaryAgentJobWorkerStore(Protocol):
@@ -722,7 +752,9 @@ class OrdinaryAgentControllerStore(Protocol):
         effect_id: str,
         expected_effect_revision: int,
         controller_fence: OrdinaryAgentControllerFence,
-    ) -> OrdinaryAgentFiniteRequestRecord: ...
+    ) -> OrdinaryAgentFiniteRequestRecord:
+        """Atomically consume exact refresh proof and yield an empty controller."""
+        ...
 
     def acquire_ordinary_merge_train_controller_state_record(
         self,

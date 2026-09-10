@@ -19,6 +19,7 @@ from control_plane.contracts.ordinary_agent_snapshot import (
     OrdinaryAgentCandidateCheckResult,
     OrdinaryAgentMergeTrainSnapshotResult,
     OrdinaryAgentProviderRequestCounts,
+    OrdinaryAgentReadmissionObservation,
 )
 from control_plane.github_app_identity import GitHubApiRequest
 from control_plane.ordinary_agent_custody import (
@@ -43,11 +44,21 @@ from control_plane.ordinary_agent_session_lifecycle import OrdinaryAgentSessionA
 
 
 SnapshotReader = Callable[
-    [DeadlineMergeTrainGitHubTransport], OrdinaryAgentMergeTrainSnapshotResult
+    [DeadlineMergeTrainGitHubTransport],
+    OrdinaryAgentMergeTrainSnapshotResult | OrdinaryAgentReadmissionObservation,
 ]
 CandidateCheckReader = Callable[
     [DeadlineMergeTrainGitHubTransport], OrdinaryAgentCandidateCheckResult
 ]
+
+
+class OrdinaryAgentReadmissionRequired(RuntimeError):
+    """Persisted drift evidence, raised only after its private custody is settled."""
+
+    def __init__(self, *, attempt_id: str, observation_sha256: str) -> None:
+        super().__init__("ordinary source readmission required")
+        self.attempt_id = attempt_id
+        self.observation_sha256 = observation_sha256
 
 
 class _ProviderWaitStore(Protocol):
@@ -120,6 +131,11 @@ def acquire_ordinary_agent_merge_train_snapshot(
     )
     if isinstance(attempt.result, OrdinaryAgentMergeTrainSnapshotResult):
         return attempt.result
+    if isinstance(attempt.result, OrdinaryAgentReadmissionObservation):
+        raise OrdinaryAgentReadmissionRequired(
+            attempt_id=attempt.attempt_id,
+            observation_sha256=attempt.result.observation_sha256,
+        )
     result = _acquire_read(
         store=store,
         custody_store=custody_store,
@@ -133,6 +149,10 @@ def acquire_ordinary_agent_merge_train_snapshot(
         monotonic=monotonic,
         utc_now=utc_now,
     )
+    if isinstance(result, OrdinaryAgentReadmissionObservation):
+        raise OrdinaryAgentReadmissionRequired(
+            attempt_id=attempt.attempt_id, observation_sha256=result.observation_sha256
+        )
     if not isinstance(result, OrdinaryAgentMergeTrainSnapshotResult):
         raise RuntimeError("snapshot reader returned candidate-check evidence")
     return result
@@ -191,7 +211,11 @@ def _acquire_read(
     api_request: GitHubApiRequest,
     monotonic: Callable[[], float],
     utc_now: Callable[[], datetime],
-) -> OrdinaryAgentMergeTrainSnapshotResult | OrdinaryAgentCandidateCheckResult:
+) -> (
+    OrdinaryAgentMergeTrainSnapshotResult
+    | OrdinaryAgentCandidateCheckResult
+    | OrdinaryAgentReadmissionObservation
+):
     reservation = store.reserve_ordinary_agent_read_custody_attempt(
         attempt_id=attempt_id,
         expected_attempt_revision=attempt_revision,
@@ -203,7 +227,12 @@ def _acquire_read(
         raise OrdinaryAgentProviderEvidenceError("read_custody_profile_mismatch")
     started = monotonic()
     transport: DeadlineMergeTrainGitHubTransport | None = None
-    result: OrdinaryAgentMergeTrainSnapshotResult | OrdinaryAgentCandidateCheckResult | None = None
+    result: (
+        OrdinaryAgentMergeTrainSnapshotResult
+        | OrdinaryAgentCandidateCheckResult
+        | OrdinaryAgentReadmissionObservation
+        | None
+    ) = None
     recorded: OrdinaryAgentSnapshotAttemptRecord | None = None
     try:
         with ordinary_agent_provider_token_lease(
@@ -243,7 +272,9 @@ def _acquire_read(
             result = reader(transport)
             if result.counts != _request_counts(transport):
                 raise OrdinaryAgentProviderEvidenceError("provider_request_counts_mismatch")
-            if purpose == "snapshot" and isinstance(result, OrdinaryAgentMergeTrainSnapshotResult):
+            if purpose == "snapshot" and isinstance(
+                result, (OrdinaryAgentMergeTrainSnapshotResult, OrdinaryAgentReadmissionObservation)
+            ):
                 recorded = store.record_ordinary_agent_snapshot_success(
                     attempt_id=attempt_id,
                     custody_attempt_id=reservation.custody_attempt_id,
@@ -297,7 +328,9 @@ def _acquire_read(
         raise OrdinaryAgentSessionAdmissionDenied("source_check_wait")
     if result is None:
         raise RuntimeError("ordinary provider reader returned no result")
-    if isinstance(result, OrdinaryAgentMergeTrainSnapshotResult):
+    if isinstance(
+        result, (OrdinaryAgentMergeTrainSnapshotResult, OrdinaryAgentReadmissionObservation)
+    ):
         return result
     if isinstance(result, OrdinaryAgentCandidateCheckResult):
         return result

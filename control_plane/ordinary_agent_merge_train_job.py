@@ -37,6 +37,9 @@ from control_plane.merge_admission import (
 )
 from control_plane.merge_admission_live import LiveMergeAdmissionEvaluator
 from control_plane.merge_train_controller_run_once import (
+    DEFAULT_MERGE_TRAIN_CONTROLLER_LEASE_SECONDS,
+    MERGE_TRAIN_CONTROLLER_ACTIVE_ACTION,
+    MERGE_TRAIN_CONTROLLER_ADOPTABLE_ACTIVE_ACTIONS,
     MergeTrainControllerRunOnceEnvelope,
     MergeTrainControllerRunOnceResult,
     execute_merge_train_controller_with_client,
@@ -91,6 +94,7 @@ from control_plane.ordinary_agent_merge_train_executor import (
     OrdinaryAgentEffectTerminal,
 )
 from control_plane.ordinary_agent_merge_train_snapshot import (
+    OrdinaryAgentReadmissionRequired,
     acquire_ordinary_agent_candidate_check,
     acquire_ordinary_agent_merge_train_snapshot,
 )
@@ -151,6 +155,7 @@ class OrdinaryAgentMergeTrainJobStore(
     effects.OrdinaryAgentLandingStore,
     OrdinaryAgentNoOpLandingStore,
     effects.OrdinaryAgentSnapshotStore,
+    effects.OrdinaryAgentReadmissionStore,
     OrdinaryAgentControllerReadStore,
     OrdinaryAgentProgressReadStore,
     OrdinaryAgentCustodyAttemptStore,
@@ -270,6 +275,8 @@ def advance_ordinary_agent_merge_train_job(
             utc_now=utc_now,
         )
     except Exception as error:
+        if controller.controller_acquired and not controller.yield_confirmed:
+            raise
         try:
             refreshed = store.read_ordinary_agent_job_recovery_snapshot(
                 claim_fence=claimed.claim_fence
@@ -280,7 +287,7 @@ def advance_ordinary_agent_merge_train_job(
         disposition = _expected_exception_disposition(error=error, snapshot=refreshed)
         if disposition is None:
             raise
-        if not refreshed.custody_uncertain:
+        if not controller.controller_acquired and not refreshed.custody_uncertain:
             controller.release_terminal_history()
         return disposition
     if routed is not None:
@@ -524,6 +531,26 @@ def advance_ordinary_agent_merge_train_job(
             admission_store=admissions,
             admission_evaluator=evaluator,
         )
+    except OrdinaryAgentReadmissionRequired as readmission:
+        if not controller.controller_acquired or not controller.yield_confirmed:
+            raise
+        try:
+            store.finalize_ordinary_agent_readmission(
+                claim_fence=claimed.claim_fence,
+                expected_binding_revision=claimed.request.binding_revision,
+                read_attempt_id=readmission.attempt_id,
+                expected_observation_sha256=readmission.observation_sha256,
+            )
+        except OrdinaryAgentSessionAdmissionDenied as error:
+            if error.reason_code in {
+                "refresh_allowance_exhausted",
+                "refresh_progress_must_be_retired",
+            }:
+                return _blocked(snapshot, reason_code="ordinary_readmission_required")
+            raise
+        # Source evidence and the yielded empty controller were consumed together.
+        # The next claim must reload the new request binding.
+        return _waiting(snapshot)
     except Exception as error:
         if isinstance(error, MergeTrainControllerLeaseLostError):
             raise
@@ -594,12 +621,90 @@ def _route_existing_history(
                 )
         return _waiting(refreshed, reason_code="prior_effect_unresolved")
     if recovery.disposition == "rebind":
+        if (
+            history.effect.command.kind != "pull_request_head_refresh"
+            or history.effect.state != "rebind_pending"
+        ):
+            controller.release_terminal_history()
+            return _blocked(snapshot, reason_code="ordinary_readmission_required")
+        return _rebind_completed_head_refresh(
+            claimed=claimed, store=store, controller=controller, snapshot=snapshot, history=history
+        )
+    if recovery.disposition == "retry" and history.effect.command.kind == "pull_request_landing":
         controller.release_terminal_history()
         return _blocked(snapshot, reason_code="ordinary_readmission_required")
     if recovery.disposition == "terminal":
         controller.release_terminal_history()
         return _blocked(snapshot, reason_code=_terminal_reason(recovery.reason_code))
     return None
+
+
+def _rebind_completed_head_refresh(
+    *,
+    claimed: effects.OrdinaryAgentClaimedJob,
+    store: OrdinaryAgentMergeTrainJobStore,
+    controller: OrdinaryAgentControllerAdapter,
+    snapshot: effects.OrdinaryAgentJobRecoverySnapshot,
+    history: effects.OrdinaryAgentEffectHistory,
+) -> effects.OrdinaryAgentJobAttemptDisposition:
+    target = claimed.request.target
+    try:
+        policy_record = resolve_merge_train_policy_record(store)
+        repository_policy = policy_record.policy.find_repository_policy(
+            repository=target.repository, base_branch=target.base_branch
+        )
+    except (LookupError, ValueError):
+        controller.release_terminal_history()
+        return _blocked(snapshot, reason_code="authority_unavailable")
+    try:
+        controller.acquire_merge_train_controller_state_record(
+            repository=target.repository,
+            base_branch=target.base_branch,
+            policy_key=repository_policy.policy_key,
+            policy_sha256=policy_record.policy_sha256,
+            lease_owner="",
+            lease_seconds=DEFAULT_MERGE_TRAIN_CONTROLLER_LEASE_SECONDS,
+            initial_active_action=MERGE_TRAIN_CONTROLLER_ACTIVE_ACTION,
+            initial_active_phase="select_next_action",
+            adoptable_active_actions=MERGE_TRAIN_CONTROLLER_ADOPTABLE_ACTIVE_ACTIONS,
+        )
+        store.rebind_ordinary_agent_after_head_refresh(
+            effect_id=history.effect.effect_id,
+            expected_effect_revision=history.effect.revision,
+            controller_fence=controller.acquired_fence,
+        )
+    except Exception as error:
+        if controller.controller_acquired:
+            try:
+                controller.yield_acquired()
+            except Exception as yield_error:
+                raise ExceptionGroup(
+                    "head-refresh recovery and controller yield failed", [error, yield_error]
+                ) from None
+        if isinstance(error, OrdinaryAgentSessionAdmissionDenied):
+            disposition = None
+            if error.reason_code in {
+                "controller_busy",
+                "target_busy",
+                "controller_action_conflict",
+            }:
+                disposition = _waiting(snapshot, reason_code="controller_busy")
+            elif error.reason_code in {"record_predecessor_conflict", "prior_effect_unresolved"}:
+                disposition = _waiting(snapshot, reason_code="prior_effect_unresolved")
+            elif error.reason_code in {
+                "controller_policy_changed",
+                "refresh_allowance_exhausted",
+                "refresh_progress_must_be_retired",
+            }:
+                disposition = _blocked(snapshot, reason_code="ordinary_readmission_required")
+            if disposition is not None:
+                if not controller.controller_acquired:
+                    controller.release_terminal_history()
+                return disposition
+        raise
+    # The joined store already committed N+1 and an empty controller yield.
+    # Finish this old-binding attempt without rereading through N's adapters.
+    return _waiting(snapshot)
 
 
 def _result_disposition(

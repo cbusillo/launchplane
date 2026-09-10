@@ -3,6 +3,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import cast
 import unittest
+from unittest.mock import patch
 
 from control_plane.contracts.merge_admission_record import (
     MergeLandingObservedPullRequestState,
@@ -647,6 +648,36 @@ class GuardedMergeAdmissionScenarioTests(unittest.TestCase):
 
         with self.assertRaises(MergeAdmissionReconciliationRequiredError):
             self._admit(guard)
+
+    def test_highest_attempt_ambiguity_blocks_retry_when_admissions_are_unsorted(self) -> None:
+        guard = self._guard()
+        first = self._admit(guard)
+        guard.record_provider_failure(
+            admission=first,
+            error=_ProviderError(405),
+            observed_at="2026-08-11T03:02:00Z",
+        )
+        second = self._admit(guard)
+        guard.record_provider_failure(
+            admission=second,
+            error=_ProviderError(500),
+            observed_at="2026-08-11T03:03:00Z",
+        )
+
+        with (
+            patch.object(
+                self.store,
+                "list_merge_admission_records",
+                return_value=(first, second),
+            ),
+            self.assertRaises(MergeAdmissionReconciliationRequiredError),
+        ):
+            self._admit(guard)
+
+        self.assertEqual(
+            {record.attempt_sequence for record in self.store.list_merge_admission_records()},
+            {1, 2},
+        )
 
     def test_scenario_11_open_exact_pr_reconciliation_allows_fresh_attempt(self) -> None:
         guard = self._guard()

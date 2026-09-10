@@ -1,8 +1,9 @@
 """Concrete bounded provider observations for the ordinary shared controller."""
 
-from collections.abc import Callable
 import json
 import time
+from collections.abc import Callable
+from typing import Literal
 from urllib.parse import quote
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
@@ -17,6 +18,8 @@ from control_plane.contracts.ordinary_agent_snapshot import (
     OrdinaryAgentMergeTrainSnapshotResult,
     OrdinaryAgentProviderRequestCounts,
     OrdinaryAgentPullRequestHeadIdentity,
+    OrdinaryAgentReadmissionObservation,
+    OrdinaryAgentReadmissionPullRequestObservation,
 )
 from control_plane.merge_train import MergeTrainDryRunSnapshot, MergeTrainPullRequestSnapshot
 from control_plane.ordinary_agent_github_transport import (
@@ -44,7 +47,7 @@ def read_ordinary_controller_snapshot(
     repository_owner_id: int,
     repository_policy: MergeTrainRepositoryPolicy,
     utc_seconds: Callable[[], float] = time.time,
-) -> OrdinaryAgentMergeTrainSnapshotResult:
+) -> OrdinaryAgentMergeTrainSnapshotResult | OrdinaryAgentReadmissionObservation:
     target = request.target
     if not 1 <= len(request.pull_requests) <= MAX_ORDINARY_LANDING_ENTRIES:
         raise OrdinaryAgentProviderEvidenceError("snapshot_entry_limit")
@@ -98,8 +101,56 @@ def read_ordinary_controller_snapshot(
     _require_repository(repository, request, repository_owner_id)
     ref = _object(repository.get("ref"))
     base_identity = _identity(ref.get("target"))
-    if ref.get("name") != target.base_branch or base_identity.sha != request.base_sha:
-        raise OrdinaryAgentProviderEvidenceError("snapshot_base_changed")
+    _commit_sha(base_identity.sha)
+    _commit_sha(base_identity.tree_sha)
+    if ref.get("name") != target.base_branch:
+        raise OrdinaryAgentProviderEvidenceError("snapshot_base_ref_mismatch")
+    pull_request_data: list[dict[str, object]] = []
+    observed_pull_requests: list[OrdinaryAgentReadmissionPullRequestObservation] = []
+    for index, expected in enumerate(request.pull_requests):
+        pr = _object(repository.get(f"pr{index}"))
+        if pr.get("number") != expected.number:
+            raise OrdinaryAgentProviderEvidenceError("snapshot_pull_request_mismatch")
+        lifecycle = _pull_request_lifecycle(pr.get("state"))
+        if pr.get("baseRefName") != target.base_branch:
+            raise OrdinaryAgentProviderEvidenceError("snapshot_base_ref_mismatch")
+        repositories = []
+        for field in ("headRepository", "baseRepository"):
+            candidate_repository = _object(pr.get(field))
+            repository_id = _positive_id(candidate_repository.get("databaseId"))
+            repository_name = _text(candidate_repository.get("nameWithOwner"))
+            if repository_id != target.repository_id or repository_name != target.repository:
+                raise OrdinaryAgentProviderEvidenceError("snapshot_repository_mismatch")
+            repositories.append((repository_id, repository_name))
+        if lifecycle == "open" and _object(pr.get("headRef")).get("name") != pr.get("headRefName"):
+            raise OrdinaryAgentProviderEvidenceError("snapshot_head_ref_missing")
+        observed_pull_requests.append(
+            OrdinaryAgentReadmissionPullRequestObservation(
+                number=expected.number,
+                head_sha=_commit_sha(pr.get("headRefOid")),
+                base_ref=target.base_branch,
+                lifecycle=lifecycle,
+                head_repository_id=repositories[0][0],
+                head_repository=repositories[0][1],
+                base_repository_id=repositories[1][0],
+                base_repository=repositories[1][1],
+            )
+        )
+        pull_request_data.append(pr)
+    base_changed = base_identity.sha != request.base_sha
+    head_changed = any(
+        observed.head_sha != captured.head_sha
+        for captured, observed in zip(request.pull_requests, observed_pull_requests, strict=True)
+    )
+    if base_changed or head_changed:
+        return _readmission_observation(
+            request=request,
+            repository_owner_id=repository_owner_id,
+            observed_at=observed_at,
+            base_identity=base_identity,
+            pull_requests=tuple(observed_pull_requests),
+            counts=_counts(transport),
+        )
     repository_path = f"{quote(owner, safe='')}/{quote(name, safe='')}"
     rules = _rules(transport, repository_path, target.base_branch)
     admins = OrdinaryRepositoryAdminObservation(
@@ -110,31 +161,18 @@ def read_ordinary_controller_snapshot(
     heads = []
     protection = None
     for index, expected in enumerate(request.pull_requests):
-        pr = _object(repository.get(f"pr{index}"))
+        pr = pull_request_data[index]
         head = _object(repository.get(f"head{index}"))
         identity = _identity(head)
-        if (
-            pr.get("number") != expected.number
-            or pr.get("headRefOid") != expected.head_sha
-            or identity.sha != expected.head_sha
-        ):
+        if identity.sha != expected.head_sha:
             raise OrdinaryAgentProviderEvidenceError("snapshot_head_changed")
-        for field in ("headRepository", "baseRepository"):
-            candidate_repository = _object(pr.get(field))
-            if (
-                _positive_id(candidate_repository.get("databaseId")) != target.repository_id
-                or candidate_repository.get("nameWithOwner") != target.repository
-            ):
-                raise OrdinaryAgentProviderEvidenceError("snapshot_repository_mismatch")
         state, mergeable = pr.get("state"), pr.get("mergeable")
-        if state not in {"OPEN", "CLOSED", "MERGED"} or mergeable not in {
+        if mergeable not in {
             "MERGEABLE",
             "CONFLICTING",
             "UNKNOWN",
         }:
             raise OrdinaryAgentProviderEvidenceError("snapshot_pr_state_missing")
-        if state == "OPEN" and _object(pr.get("headRef")).get("name") != pr.get("headRefName"):
-            raise OrdinaryAgentProviderEvidenceError("snapshot_head_ref_missing")
         checks, protection = evaluate_observed_commit_checks(
             observation=_observation(
                 {"ref": {**ref, "compare": ref.get(f"compare{index}")}, "candidate": head},
@@ -317,6 +355,58 @@ def _counts(transport: DeadlineMergeTrainGitHubTransport) -> OrdinaryAgentProvid
         graphql_requests=transport.graphql_requests,
         graphql_points=transport.graphql_points,
     )
+
+
+def _readmission_observation(
+    *,
+    request: OrdinaryAgentFiniteRequestRecord,
+    repository_owner_id: int,
+    observed_at: int,
+    base_identity: OrdinaryAgentCommitIdentity,
+    pull_requests: tuple[OrdinaryAgentReadmissionPullRequestObservation, ...],
+    counts: OrdinaryAgentProviderRequestCounts,
+) -> OrdinaryAgentReadmissionObservation:
+    values: dict[str, object] = {
+        "schema_version": 1,
+        "observed_at": observed_at,
+        "target": request.target.model_dump(mode="json"),
+        "repository_owner_id": repository_owner_id,
+        "captured_base_sha": request.base_sha,
+        "captured_pull_requests": [item.model_dump(mode="json") for item in request.pull_requests],
+        "base_identity": base_identity.model_dump(mode="json"),
+        "pull_requests": [item.model_dump(mode="json") for item in pull_requests],
+        "drift": (
+            "base_and_head"
+            if base_identity.sha != request.base_sha
+            and any(
+                observed.head_sha != captured.head_sha
+                for captured, observed in zip(request.pull_requests, pull_requests, strict=True)
+            )
+            else "base"
+            if base_identity.sha != request.base_sha
+            else "head"
+        ),
+        "counts": counts.model_dump(mode="json"),
+    }
+    values["observation_sha256"] = canonical_json_sha256(values)
+    return OrdinaryAgentReadmissionObservation.model_validate(values)
+
+
+def _commit_sha(value: object) -> str:
+    sha = _text(value)
+    if len(sha) not in {40, 64} or any(character not in "0123456789abcdef" for character in sha):
+        raise OrdinaryAgentProviderEvidenceError("snapshot_identity_missing")
+    return sha
+
+
+def _pull_request_lifecycle(value: object) -> Literal["open", "closed", "merged"]:
+    if value == "OPEN":
+        return "open"
+    if value == "CLOSED":
+        return "closed"
+    if value == "MERGED":
+        return "merged"
+    raise OrdinaryAgentProviderEvidenceError("snapshot_pr_state_missing")
 
 
 def _positive_id(value: object) -> int:

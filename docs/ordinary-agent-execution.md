@@ -865,8 +865,29 @@ The ordinary semantic router reserves each invoked command by its kind and its
 stable position in the finite request. It dispatches through the existing bounded
 executor or replays validated completion without provider work. Unknown effects
 and head-refresh rebinding return typed recovery requirements for a separate job
-poll; the router never reconciles and resends in the same call. Landing remains
+poll; the router never reconciles and resends in the same call. A later job poll
+completes an exact proved head refresh by updating the finite request binding,
+completing the effect, and yielding the empty controller in one transaction. It
+spends one existing refresh allowance while preserving action and dispatch charges,
+scope, and deadlines. Active progress or a parked checkpoint blocks this rebind;
+failures release the controller acquired by this attempt before returning. The
+next claim reads the new binding without another delegation approval. Retryable
+landing history is blocked before controller acquisition until a fresh-admission
+retry path is assembled.
+Landing remains
 in the joined landing path, and stack methods are excluded from this router.
+
+If the initial provider snapshot finds changed source heads or a changed base,
+it records the complete ordered tuple as immutable readmission evidence before
+reading rules or repository roles. After custody cleanup and the core's confirmed
+empty-controller yield, a joined finalizer may consume that evidence and rebind
+the request. This path requires no effects, landing preparations, execution links,
+active progress, or parked checkpoint anywhere in the request history. It preserves
+the original scope, budgets, and deadlines and spends one existing refresh allowance.
+A later acquisition must observe the source again; only the same controller fence
+may replay an unconsumed observation. A changed, closed, or merged PR observation
+is evidence only: the fresh-binding normal admission and exact-containment checks
+still decide whether the next step may proceed.
 
 The internal job recovery snapshot checks the exact live job claim and reads the
 current binding, reserved or uncertain effect history, open landing preparation,

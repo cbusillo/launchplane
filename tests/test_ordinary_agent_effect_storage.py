@@ -7,6 +7,10 @@ import hashlib
 from unittest.mock import patch
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
+from control_plane.contracts.merge_train_batch import (
+    MergeTrainBatchCandidateRecord,
+    build_ordinary_merge_train_candidate_ref,
+)
 from control_plane.contracts.ordinary_agent_custody import OrdinaryAgentCustodyCandidate
 from control_plane.contracts.ordinary_agent import OrdinaryAgentPullRequest
 from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
@@ -33,11 +37,21 @@ from control_plane.contracts.merge_train_effect import (
     MergeTrainEffectLineage,
     PullRequestHeadRefreshEffect,
 )
-from control_plane.contracts.ordinary_agent_session_lifecycle import OrdinaryAgentLeaseRecord
-from control_plane.storage.postgres import LaunchplaneOrdinaryAgentLeaseRow
+from control_plane.contracts.ordinary_agent_session_lifecycle import (
+    OrdinaryAgentFiniteRequestRecord,
+    OrdinaryAgentLeaseRecord,
+)
+from control_plane.storage.postgres import (
+    LaunchplaneMergeTrainBatchCandidateRow,
+    LaunchplaneOrdinaryAgentEffectRow,
+    LaunchplaneOrdinaryAgentFiniteRequestRow,
+    LaunchplaneOrdinaryAgentJobClaimRow,
+    LaunchplaneOrdinaryAgentLeaseRow,
+)
 from control_plane.ordinary_agent_session_lifecycle import OrdinaryAgentSessionAdmissionDenied
 from control_plane.ordinary_agent_effect_recovery import recover_ordinary_effect
 from tests import test_ordinary_agent_session_storage as session_support
+from tests.test_merge_admission_records import _guard_records
 
 
 class OrdinaryAgentEffectStorageTests(unittest.TestCase):
@@ -138,6 +152,36 @@ class OrdinaryAgentEffectStorageTests(unittest.TestCase):
             semantic_ordinal=1,
         )
         return effect, fence, command
+
+    def complete_refresh(
+        self,
+    ) -> tuple[OrdinaryAgentEffectRecord, OrdinaryAgentControllerFence, OrdinaryAgentEffectRecord]:
+        effect, fence, _ = self.prepare_refresh()
+        permit = self.store.reserve_ordinary_custody_attempt(
+            effect_id=effect.effect_id, expected_effect_revision=effect.revision
+        )
+        self.issue(permit)
+        child = self.store.checkpoint_ordinary_semantic_dispatch(
+            effect_id=effect.effect_id,
+            controller_fence=fence,
+            custody_attempt_id=permit.attempt_id,
+            fixed_token_expires_at=self.fixture.now + 300,
+        )
+        proof = OrdinaryAgentPullRequestObservation(
+            repository=self.request.target.repository,
+            number=self.request.pull_requests[0].number,
+            head_sha="d" * 40,
+            base_ref=self.request.target.base_branch,
+            base_sha=self.request.base_sha,
+            state="open",
+            merged=False,
+            head_parents=(self.request.pull_requests[0].head_sha, self.request.base_sha),
+        )
+        completed = self.store.record_ordinary_semantic_outcome(
+            child_id=child.child_id,
+            typed_outcome=OrdinaryAgentCompletedOutcome(result_sha="d" * 40, proof=proof),
+        )
+        return effect, fence, completed
 
     def issue(
         self,
@@ -291,31 +335,7 @@ class OrdinaryAgentEffectStorageTests(unittest.TestCase):
         )
 
     def test_completed_refresh_rebinds_only_exact_proof_without_new_charge(self) -> None:
-        effect, fence, _ = self.prepare_refresh()
-        permit = self.store.reserve_ordinary_custody_attempt(
-            effect_id=effect.effect_id, expected_effect_revision=effect.revision
-        )
-        self.issue(permit)
-        child = self.store.checkpoint_ordinary_semantic_dispatch(
-            effect_id=effect.effect_id,
-            controller_fence=fence,
-            custody_attempt_id=permit.attempt_id,
-            fixed_token_expires_at=self.fixture.now + 300,
-        )
-        proof = OrdinaryAgentPullRequestObservation(
-            repository=self.request.target.repository,
-            number=self.request.pull_requests[0].number,
-            head_sha="d" * 40,
-            base_ref=self.request.target.base_branch,
-            base_sha=self.request.base_sha,
-            state="open",
-            merged=False,
-            head_parents=(self.request.pull_requests[0].head_sha, self.request.base_sha),
-        )
-        completed = self.store.record_ordinary_semantic_outcome(
-            child_id=child.child_id,
-            typed_outcome=OrdinaryAgentCompletedOutcome(result_sha="d" * 40, proof=proof),
-        )
+        effect, fence, completed = self.complete_refresh()
         self.assertEqual(completed.state, "rebind_pending")
         self.assertEqual(
             recover_ordinary_effect(
@@ -332,6 +352,12 @@ class OrdinaryAgentEffectStorageTests(unittest.TestCase):
                 base_sha="invented-base",
                 pull_requests=self.request.pull_requests,
             )
+        with self.store._session_factory() as session:
+            request_row = session.get(
+                LaunchplaneOrdinaryAgentFiniteRequestRow, self.request.request_id
+            )
+            assert request_row is not None
+            before_rebind = OrdinaryAgentFiniteRequestRecord.model_validate(request_row.payload)
         rebound = self.store.rebind_ordinary_agent_after_head_refresh(
             effect_id=effect.effect_id,
             expected_effect_revision=completed.revision,
@@ -340,11 +366,45 @@ class OrdinaryAgentEffectStorageTests(unittest.TestCase):
         self.assertEqual(rebound.pull_requests[0].head_sha, "d" * 40)
         self.assertEqual(rebound.expires_at, self.request.expires_at)
         self.assertEqual(rebound.refresh_used, 1)
+        preserved = {
+            "base_sha",
+            "pull_requests",
+            "binding_revision",
+            "refresh_used",
+        }
+        self.assertEqual(
+            before_rebind.model_dump(exclude=preserved),
+            rebound.model_dump(exclude=preserved),
+        )
         self.assertEqual(
             recover_ordinary_effect(
                 self.store.read_ordinary_agent_effect_history(effect_id=effect.effect_id)
             ).disposition,
             "replay",
+        )
+        yielded = self.store.list_merge_train_controller_state_records(
+            repository=self.request.target.repository,
+            base_branch=self.request.target.base_branch,
+            limit=1,
+        )[0]
+        self.assertEqual(yielded.status, "idle")
+        self.assertIsNone(yielded.ordinary_job_binding)
+        self.assertEqual(yielded.lease_owner, "")
+        self.assertEqual(yielded.last_owner, fence.lease_owner)
+        self.assertEqual(yielded.active_action, "")
+        self.assertEqual(yielded.active_record_id, "")
+        current_effect = self.store.read_ordinary_agent_effect(effect_id=effect.effect_id)
+        self.assertEqual(current_effect.state, "completed")
+        self.assertEqual(current_effect.rebound_revision, rebound.binding_revision)
+        later = self.store.acquire_ordinary_merge_train_controller_state_record(
+            claim_fence=self.claim.claim_fence,
+            expected_binding_revision=rebound.binding_revision,
+            policy_key=self.merge_policy.policy.policies[0].policy_key,
+            policy_sha256=self.merge_policy.policy_sha256,
+            lease_seconds=30,
+            initial_active_action="select_next_action",
+            initial_active_phase="prepare",
+            adoptable_active_actions=("select_next_action",),
         )
         self.assertEqual(
             self.store.rebind_ordinary_agent_after_head_refresh(
@@ -354,12 +414,158 @@ class OrdinaryAgentEffectStorageTests(unittest.TestCase):
             ),
             rebound,
         )
+        current_controller = self.store.list_merge_train_controller_state_records(
+            repository=self.request.target.repository,
+            base_branch=self.request.target.base_branch,
+            limit=1,
+        )[0]
+        self.assertEqual(current_controller, later)
         with self.store._session_factory() as session:
             lease = session.get(LaunchplaneOrdinaryAgentLeaseRow, rebound.lease_id)
-            assert lease is not None
+            claim = session.get(LaunchplaneOrdinaryAgentJobClaimRow, self.request.request_id)
+            assert lease is not None and claim is not None
+            self.assertIsNone(claim.released_controller)
             self.assertEqual(
                 OrdinaryAgentLeaseRecord.model_validate(lease.payload).budget.actions_used, 1
             )
+
+    def test_refresh_rebind_rejects_parked_checkpoint_without_partial_writes(self) -> None:
+        effect, fence, completed = self.complete_refresh()
+        controller = self.store.list_merge_train_controller_state_records(
+            repository=self.request.target.repository,
+            base_branch=self.request.target.base_branch,
+            limit=1,
+        )[0]
+        with self.store._session_factory() as session:
+            claim = session.get(LaunchplaneOrdinaryAgentJobClaimRow, self.request.request_id)
+            assert claim is not None
+            claim.released_controller = controller.model_dump(mode="json")
+            session.commit()
+        with self.assertRaisesRegex(
+            OrdinaryAgentSessionAdmissionDenied, "refresh_progress_must_be_retired"
+        ):
+            self.store.rebind_ordinary_agent_after_head_refresh(
+                effect_id=effect.effect_id,
+                expected_effect_revision=completed.revision,
+                controller_fence=fence,
+            )
+        self.assertEqual(
+            self.store.read_ordinary_agent_effect(effect_id=effect.effect_id), completed
+        )
+        with self.store._session_factory() as session:
+            request_row = session.get(
+                LaunchplaneOrdinaryAgentFiniteRequestRow, self.request.request_id
+            )
+            assert request_row is not None
+            self.assertEqual(request_row.payload["binding_revision"], 1)
+        self.assertEqual(
+            self.store.list_merge_train_controller_state_records(
+                repository=self.request.target.repository,
+                base_branch=self.request.target.base_branch,
+                limit=1,
+            )[0],
+            controller,
+        )
+
+    def test_refresh_rebind_rejects_active_bound_progress_without_partial_writes(self) -> None:
+        effect, fence, completed = self.complete_refresh()
+        controller = self.store.list_merge_train_controller_state_records(
+            repository=self.request.target.repository,
+            base_branch=self.request.target.base_branch,
+            limit=1,
+        )[0]
+        binding = controller.ordinary_job_binding
+        assert binding is not None
+        candidate, _, _, _ = _guard_records(
+            repository=self.request.target.repository,
+            pull_request_number=self.request.pull_requests[0].number,
+            base_sha=self.request.base_sha,
+            head_sha=self.request.pull_requests[0].head_sha,
+            policy_sha256=self.merge_policy.policy_sha256,
+        )
+        payload = candidate.model_dump(mode="json")
+        payload["record_id"] = "orphan-active-candidate"
+        payload["ordinary_job_binding"] = binding.model_dump(mode="json")
+        payload["candidate"]["candidate_ref"] = build_ordinary_merge_train_candidate_ref(
+            binding=binding, batch_id=candidate.candidate.batch_id
+        )
+        progress = MergeTrainBatchCandidateRecord.model_validate(payload)
+        with self.store._session_factory() as session:
+            session.add(
+                LaunchplaneMergeTrainBatchCandidateRow(
+                    record_id=progress.record_id,
+                    status=progress.status,
+                    source=progress.source,
+                    updated_at=progress.updated_at,
+                    repository=self.request.target.repository.lower(),
+                    base_branch=self.request.target.base_branch,
+                    batch_id=progress.candidate.batch_id,
+                    candidate_status=progress.candidate.status,
+                    payload=progress.model_dump(mode="json"),
+                )
+            )
+            session.commit()
+        with self.assertRaisesRegex(
+            OrdinaryAgentSessionAdmissionDenied, "refresh_progress_must_be_retired"
+        ):
+            self.store.rebind_ordinary_agent_after_head_refresh(
+                effect_id=effect.effect_id,
+                expected_effect_revision=completed.revision,
+                controller_fence=fence,
+            )
+        self.assertEqual(
+            self.store.read_ordinary_agent_effect(effect_id=effect.effect_id), completed
+        )
+        self.assertEqual(
+            self.store.list_merge_train_controller_state_records(
+                repository=self.request.target.repository,
+                base_branch=self.request.target.base_branch,
+                limit=1,
+            )[0],
+            controller,
+        )
+
+    def test_refresh_rebind_rejects_second_unresolved_effect_atomically(self) -> None:
+        effect, fence, completed = self.complete_refresh()
+        second = effect.model_copy(
+            update={
+                "effect_id": "second-unresolved-effect",
+                "semantic_ordinal": 2,
+                "action_ordinal": 2,
+                "state": "reserved",
+            }
+        )
+        with self.store._session_factory() as session:
+            session.add(
+                LaunchplaneOrdinaryAgentEffectRow(
+                    effect_id=second.effect_id,
+                    lease_id=second.lease_id,
+                    request_id=second.request_id,
+                    scope_sha256=second.scope_sha256,
+                    binding_revision=second.binding_revision,
+                    action_ordinal=second.action_ordinal,
+                    semantic_key="second-unresolved-semantic-key",
+                    command_sha256=second.command_sha256,
+                    revision=second.revision,
+                    payload=second.model_dump(mode="json", exclude_none=True),
+                )
+            )
+            session.commit()
+        with self.assertRaisesRegex(OrdinaryAgentSessionAdmissionDenied, "prior_effect_unresolved"):
+            self.store.rebind_ordinary_agent_after_head_refresh(
+                effect_id=effect.effect_id,
+                expected_effect_revision=completed.revision,
+                controller_fence=fence,
+            )
+        self.assertEqual(
+            self.store.read_ordinary_agent_effect(effect_id=effect.effect_id), completed
+        )
+        with self.store._session_factory() as session:
+            request_row = session.get(
+                LaunchplaneOrdinaryAgentFiniteRequestRow, self.request.request_id
+            )
+            assert request_row is not None
+            self.assertEqual(request_row.payload["binding_revision"], 1)
 
     def test_reconciliation_survives_session_cancel_but_cannot_authorize_rebind(self) -> None:
         effect, fence, _ = self.prepare_refresh()
