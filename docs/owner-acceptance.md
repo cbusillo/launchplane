@@ -143,9 +143,14 @@ caller as an Owner for that immutable repository. Unowned, nonexistent, and
 unavailable targets return the same closed `owner_review_unavailable` response.
 The result contains only owned product labels, environments, Owner-facing review
 states, exact binding digests, validated preview URLs, resolution-reference
-inputs when required, and server-computed action flags. It does not return the
-engineering decision, change-impact diagnostics, repository evidence, policy
-records, other products, Owner rosters, or prior event records.
+inputs when required, server-computed action flags, and the binding's `system`
+and `action`. Those two identifiers are non-authoritative operation-continuity
+inputs: the browser does not render them, and they preserve the same persisted
+operation scope, idempotency identity, and fingerprint when the Owner and
+Engineering routes address the same exact binding. They grant no authority. The
+result does not return the engineering decision, change-impact diagnostics,
+repository evidence, policy records, other products, Owner rosters, or prior
+event records.
 
 When route-level event access is present, `viewer_capabilities.bindings`
 provides viewer-specific advisory eligibility keyed by each exact
@@ -165,6 +170,10 @@ with ambiguous, incomplete, non-serving, or failed verification evidence is
 `unavailable`. If a preview-bound acceptance already exists, preview teardown
 evaluates as `preview_evidence_stale` and cannot be replaced by a weaker
 exact-change-only acceptance.
+
+The Owner-safe projection maps a stale product to `review_required`: the current
+valid binding needs a fresh decision. Evidence or authority that cannot produce
+a current valid binding remains `unavailable`.
 
 ## Admissibility
 

@@ -285,13 +285,11 @@ def get_product_owner_read_model(
     return ProductOwnerReadModel(
         product=product.strip(),
         system=system.strip(),
-        current_policy=_safe_current_scoped_record(
-            policies,
+        current_policy=select_current_product_owner_policy(
+            policies=policies,
             product=product,
             system=system,
-            revision_field="policy_revision",
             evaluated_at=evaluated_at,
-            label="product Owner policy",
         ),
         current_requirement=_safe_current_scoped_record(
             requirements,
@@ -312,6 +310,27 @@ def get_product_owner_read_model(
         policy_history_count=len(policies),
         requirement_history_count=len(requirements),
         routing_history_count=len(routings),
+    )
+
+
+def select_current_product_owner_policy(
+    *,
+    policies: tuple[ProductOwnerPolicyRecord, ...],
+    product: str,
+    system: str,
+    evaluated_at: str,
+) -> ProductOwnerPolicyRecord | None:
+    """Select a valid current policy from an already-loaded policy history."""
+
+    if not evaluated_at.strip():
+        raise ValueError("Product Owner policy selection requires evaluated_at.")
+    return _safe_current_scoped_record(
+        policies,
+        product=product,
+        system=system,
+        revision_field="policy_revision",
+        evaluated_at=_evaluation_timestamp(evaluated_at),
+        label="product Owner policy",
     )
 
 

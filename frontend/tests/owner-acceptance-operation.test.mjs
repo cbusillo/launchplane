@@ -52,6 +52,27 @@ test("Owner acceptance operation scope changes with the binding digest", () => {
   );
 });
 
+test("Owner and Engineering bindings keep the deployed operation scope", () => {
+  const ownerBinding = {
+    repository: binding.repository,
+    pull_request_number: binding.pull_request_number,
+    product: binding.product,
+    system: binding.system,
+    action: binding.action,
+    environment: binding.environment,
+    binding_sha256: binding.binding_sha256,
+  };
+
+  assert.equal(
+    ownerAcceptanceOperationScope(ownerBinding),
+    ownerAcceptanceOperationScope(binding),
+  );
+  assert.equal(
+    ownerAcceptanceOperationScope(ownerBinding),
+    `owner-acceptance:example/site:42:example-product:website:review:preview:${"a".repeat(64)}`,
+  );
+});
+
 test("Owner acceptance keeps post-dispatch server failures uncertain", () => {
   assert.equal(
     ownerAcceptanceFailureCertainty(

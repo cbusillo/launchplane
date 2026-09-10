@@ -14687,6 +14687,10 @@
       "OwnerAcceptanceOwnerProduct": {
         "additionalProperties": false,
         "properties": {
+          "action": {
+            "title": "Action",
+            "type": "string"
+          },
           "binding_sha256": {
             "pattern": "^[0-9a-f]{64}$",
             "title": "Binding Sha256",
@@ -14746,9 +14750,14 @@
             ],
             "title": "Review Status",
             "type": "string"
+          },
+          "system": {
+            "title": "System",
+            "type": "string"
           }
         },
         "required": [
+          "action",
           "binding_sha256",
           "can_accept",
           "can_request_changes",
@@ -14758,7 +14767,8 @@
           "product",
           "resolution_evidence_references",
           "resolution_required",
-          "review_status"
+          "review_status",
+          "system"
         ],
         "title": "OwnerAcceptanceOwnerProduct",
         "type": "object"

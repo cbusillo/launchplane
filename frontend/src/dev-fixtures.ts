@@ -3117,7 +3117,7 @@ export function ownerReviewEvaluationForFixture(
     : scenario === "missing-preview"
       ? [firstBinding]
       : [withPreview(firstBinding, afterBindingChange ? "site-updated" : "site")];
-  const unavailable = scenario === "stale" || scenario === "unavailable";
+  const unavailable = scenario === "unavailable";
   const reviewStatus = scenario === "empty-unavailable" || unavailable
     ? "unavailable" as const
     : scenario === "resolution"
@@ -3136,6 +3136,8 @@ export function ownerReviewEvaluationForFixture(
         return {
           binding_sha256: binding.binding_sha256,
           product: binding.product,
+          system: binding.system,
+          action: binding.action,
           environment: binding.environment,
           review_status: reviewStatus,
           preview_url: binding.preview?.preview_url ?? null,

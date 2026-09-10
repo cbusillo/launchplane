@@ -19803,6 +19803,10 @@
       "OwnerAcceptanceOwnerProduct": {
         "additionalProperties": false,
         "properties": {
+          "action": {
+            "title": "Action",
+            "type": "string"
+          },
           "binding_sha256": {
             "pattern": "^[0-9a-f]{64}$",
             "title": "Binding Sha256",
@@ -19862,10 +19866,16 @@
             ],
             "title": "Review Status",
             "type": "string"
+          },
+          "system": {
+            "title": "System",
+            "type": "string"
           }
         },
         "required": [
           "product",
+          "system",
+          "action",
           "environment",
           "review_status",
           "binding_sha256",

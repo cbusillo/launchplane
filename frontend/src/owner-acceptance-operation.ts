@@ -9,8 +9,14 @@ export type OwnerAcceptanceHumanAction = OwnerAcceptanceEventEnvelope["action"];
 
 export type OwnerAcceptanceOperationBinding = Pick<
   OwnerAcceptanceBinding,
-  "binding_sha256" | "environment" | "product" | "pull_request_number" | "repository"
-> & Partial<Pick<OwnerAcceptanceBinding, "action" | "system">>;
+  | "action"
+  | "binding_sha256"
+  | "environment"
+  | "product"
+  | "pull_request_number"
+  | "repository"
+  | "system"
+>;
 
 export function ownerAcceptanceOperationScope(
   binding: OwnerAcceptanceOperationBinding,
@@ -20,8 +26,8 @@ export function ownerAcceptanceOperationScope(
     binding.repository,
     binding.pull_request_number,
     binding.product,
-    binding.system ?? "owner-review",
-    binding.action ?? "product-review",
+    binding.system,
+    binding.action,
     binding.environment,
     binding.binding_sha256,
   ].join(":");

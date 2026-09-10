@@ -60,8 +60,8 @@ from control_plane.owner_acceptance_projection import (
     OwnerAcceptanceProjectionService,
 )
 from control_plane.product_owner_service import (
-    get_product_owner_read_model,
     require_product_owner_policy_read_store,
+    select_current_product_owner_policy,
 )
 from control_plane.repository_inventory import require_repository_inventory_read_store
 from control_plane.service_auth import AuthorizationTarget, GitHubHumanIdentity, LaunchplaneIdentity
@@ -187,6 +187,8 @@ class OwnerAcceptanceOwnerProduct(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     product: str
+    system: str
+    action: str
     environment: str
     review_status: OwnerReviewStatus
     binding_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -359,13 +361,13 @@ def _owner_review_status(status: OwnerAcceptanceDecisionStatus) -> OwnerReviewSt
     match status:
         case "not_required":
             return "not_required"
-        case "pending" | "revoked":
+        case "pending" | "revoked" | "stale":
             return "review_required"
         case "accepted":
             return "accepted"
         case "changes_requested":
             return "changes_requested"
-        case "stale" | "unavailable":
+        case "unavailable":
             return "unavailable"
         case unhandled:
             assert_never(unhandled)
@@ -376,6 +378,7 @@ def _current_owner_repository_id(
     store: object,
     repository: str,
     identity: GitHubHumanIdentity,
+    evaluated_at: str,
 ) -> str | None:
     inventory_store = require_repository_inventory_read_store(store)
     policy_store = require_product_owner_policy_read_store(store)
@@ -400,15 +403,17 @@ def _current_owner_repository_id(
         return None
     repository_id = matching_repository_ids[0]
 
+    policies = policy_store.list_product_owner_policy_records()
     policy_scopes: set[tuple[str, str]] = set()
-    for policy in policy_store.list_product_owner_policy_records():
+    for policy in policies:
         policy_scopes.add((policy.product, policy.system))
     for product, system in policy_scopes:
-        current_policy = get_product_owner_read_model(
-            store=store,
+        current_policy = select_current_product_owner_policy(
+            policies=policies,
             product=product,
             system=system,
-        ).current_policy
+            evaluated_at=evaluated_at,
+        )
         if current_policy is None:
             continue
         for owner in current_policy.owners:
@@ -555,6 +560,7 @@ def register_owner_acceptance_routes(
                 store=record_store,
                 repository=repository,
                 identity=identity,
+                evaluated_at=evaluated_at,
             )
         except (FileNotFoundError, LookupError, TypeError, ValueError):
             unavailable()
@@ -579,6 +585,7 @@ def register_owner_acceptance_routes(
                     store=record_store,
                     repository=repository,
                     identity=identity,
+                    evaluated_at=evaluated_at,
                 )
                 != repository_id
             ):
@@ -629,6 +636,8 @@ def register_owner_acceptance_routes(
             products.append(
                 OwnerAcceptanceOwnerProduct(
                     product=product.product,
+                    system=binding.system,
+                    action=binding.action,
                     environment=product.environment,
                     review_status=_owner_review_status(product.status),
                     binding_sha256=binding.binding_sha256,
@@ -715,11 +724,15 @@ def register_owner_acceptance_routes(
             target=AuthorizationTarget(scope="context"),
         )
         if not broad_read_authorized:
+            evaluated_at = (
+                datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+            )
             try:
                 owner_repository_id = _current_owner_repository_id(
                     store=record_store,
                     repository=envelope.target.repository,
                     identity=identity,
+                    evaluated_at=evaluated_at,
                 )
             except (FileNotFoundError, LookupError, TypeError, ValueError):
                 owner_repository_id = None

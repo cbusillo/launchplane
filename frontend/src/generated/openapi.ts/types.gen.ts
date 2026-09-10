@@ -1611,6 +1611,7 @@ export type OwnerAcceptanceOwnerEvaluationResponse = {
 };
 
 export type OwnerAcceptanceOwnerProduct = {
+    action: string;
     binding_sha256: string;
     can_accept: boolean;
     can_request_changes: boolean;
@@ -1621,6 +1622,7 @@ export type OwnerAcceptanceOwnerProduct = {
     resolution_evidence_references: Array<string>;
     resolution_required: boolean;
     review_status: 'not_required' | 'review_required' | 'accepted' | 'changes_requested' | 'unavailable';
+    system: string;
 };
 
 export type OwnerAcceptancePolicyFingerprintBinding = {
