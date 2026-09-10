@@ -470,6 +470,14 @@ from control_plane.contracts.ordinary_agent_session_lifecycle import (
 from control_plane.contracts import ordinary_agent_effect as effect_contracts
 from control_plane.contracts import ordinary_agent_noop as noop_contracts
 from control_plane.contracts import ordinary_agent_snapshot as snapshot_contracts
+from control_plane.contracts.ordinary_agent_qualification import (
+    OrdinaryAgentQualificationAttestation,
+    OrdinaryAgentQualificationSetup,
+    OrdinaryRepositoryAdminObservation,
+    qualification_identity,
+    qualification_permission_ceiling_sha256,
+    qualification_read_profile_sha256,
+)
 from control_plane.contracts.ordinary_agent_effect import (
     OrdinaryAgentJobCursor,
     OrdinaryAgentJobClaimFence,
@@ -5587,6 +5595,13 @@ def _require_guarded_finite_request(
     if not is_guarded_ordinary_agent_finite_request(request):
         raise OrdinaryAgentSessionAdmissionDenied("request_purpose_unsupported")
     return request
+
+
+def _ordinary_agent_snapshot_read_permissions() -> tuple[str, ...]:
+    """Delay identity-module import until storage is fully initialized."""
+    from control_plane.github_app_identity import ordinary_agent_effect_permissions
+
+    return ordinary_agent_effect_permissions("merge_train_snapshot")
 
 
 class PostgresRecordStore(HumanSessionStore):
@@ -25996,6 +26011,218 @@ class PostgresRecordStore(HumanSessionStore):
         )
 
     @_private_ordinary_agent_operation
+    def reserve_ordinary_agent_qualification_attempt(
+        self,
+        *,
+        claim_fence: OrdinaryAgentJobClaimFence,
+        setup: OrdinaryAgentQualificationSetup,
+    ) -> effect_contracts.OrdinaryAgentQualificationAttemptRecord:
+        """Reserve the one finite preflight action without touching a controller."""
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            # There may be no first-attempt row to lock yet. Serialize the
+            # cross-revision charge decision explicitly so two workers cannot
+            # both observe an empty history and spend the same finite action.
+            self._lock_landing_authority(
+                session, "ordinary-qualification-attempt:" + claim_fence.request_id
+            )
+            context = self._ordinary_agent_current_chain_context(
+                session, request_id=claim_fence.request_id
+            )
+            request = context.request
+            if not isinstance(request, OrdinaryAgentQualificationFiniteRequestV2):
+                raise OrdinaryAgentSessionAdmissionDenied("request_purpose_unsupported")
+            self._require_ordinary_agent_claim(
+                session, claim_fence=claim_fence, now=context.now, for_update=True
+            )
+            if (
+                setup.target != request.target
+                or setup.managed_set_id != context.lease.managed_set_id
+                or setup.managed_rule_id != context.lease.managed_rule_id
+                or setup.attestation_expires_at <= context.now
+            ):
+                raise OrdinaryAgentSessionAdmissionDenied("qualification_setup_conflict")
+            self._lock_ordinary_agent_provider_waits(
+                session,
+                principal=context.principal,
+                resource_classes=("core", "graphql", "secondary"),
+            )
+            custody_row = session.get(
+                LaunchplaneOrdinaryAgentCredentialCustodyRow, context.principal.custody_record_id
+            )
+            if custody_row is None:
+                raise OrdinaryAgentSessionAdmissionDenied("custody_unavailable")
+            custody = OrdinaryAgentCredentialCustodyRecord.model_validate(custody_row.payload)
+            if (
+                custody.custody_sha256 != context.principal.custody_sha256
+                or custody.target != request.target
+                or custody.credential_id != context.credential.credential_id
+                or custody.credential_version != context.credential.credential_version
+                or "merge_train_snapshot" not in custody.effect_profiles
+                or custody.github_installation_id is None
+                or not custody.valid_from <= context.now < custody.expires_at
+            ):
+                raise OrdinaryAgentSessionAdmissionDenied("custody_binding_conflict")
+            rows = tuple(
+                session.scalars(
+                    select(LaunchplaneOrdinaryAgentReadAttemptRow)
+                    .where(
+                        LaunchplaneOrdinaryAgentReadAttemptRow.request_id == request.request_id,
+                        LaunchplaneOrdinaryAgentReadAttemptRow.purpose == "qualification",
+                    )
+                    .order_by(LaunchplaneOrdinaryAgentReadAttemptRow.attempt_ordinal)
+                    .with_for_update()
+                )
+            )
+            records = tuple(
+                effect_contracts.parse_ordinary_agent_read_attempt(row.payload) for row in rows
+            )
+            qualification_records = tuple(
+                item
+                for item in records
+                if isinstance(item, effect_contracts.OrdinaryAgentQualificationAttemptRecord)
+            )
+            if len(qualification_records) != len(records):
+                raise OrdinaryAgentSessionAdmissionDenied("read_attempt_provenance_conflict")
+            current = tuple(
+                item
+                for item in qualification_records
+                if item.binding_revision == request.binding_revision
+            )
+            active = next((item for item in current if item.state in {"reserved", "reading"}), None)
+            if active is not None:
+                return active
+            if current:
+                latest = current[-1]
+                if latest.state == "fenced" and latest.reason_code == "cleanup_unknown":
+                    custody_rows = tuple(
+                        session.get(LaunchplaneOrdinaryAgentCustodyIssueAttemptRow, identifier)
+                        for identifier in latest.custody_attempt_ids
+                    )
+                    if custody_rows and all(
+                        item is not None and item.state == "closed" for item in custody_rows
+                    ):
+                        restored = latest.model_copy(
+                            update={
+                                "state": "completed" if latest.result is not None else "incomplete",
+                                "reason_code": None
+                                if latest.result is not None
+                                else "cleanup_unknown",
+                                "next_due_at": None,
+                                "revision": latest.revision + 1,
+                                "updated_at": context.now,
+                            }
+                        )
+                        latest_row = session.get(
+                            LaunchplaneOrdinaryAgentReadAttemptRow, latest.attempt_id
+                        )
+                        assert latest_row is not None
+                        latest_row.state, latest_row.revision, latest_row.payload = (
+                            restored.state,
+                            restored.revision,
+                            self._payload_dict(restored),
+                        )
+                        if restored.result is not None:
+                            session.commit()
+                            return restored
+                        latest = restored
+                        current = (*current[:-1], restored)
+                        qualification_records = tuple(
+                            restored if item.attempt_id == restored.attempt_id else item
+                            for item in qualification_records
+                        )
+                if latest.state in {"completed", "fenced", "exhausted"}:
+                    return latest
+                if latest.next_due_at is not None and latest.next_due_at > context.now:
+                    raise OrdinaryAgentSessionAdmissionDenied(
+                        "qualification_wait", retry_not_before=latest.next_due_at
+                    )
+                if len(latest.custody_attempt_ids) and any(
+                    item is None or item.state != "closed"
+                    for item in (
+                        session.get(LaunchplaneOrdinaryAgentCustodyIssueAttemptRow, identifier)
+                        for identifier in latest.custody_attempt_ids
+                    )
+                ):
+                    raise OrdinaryAgentSessionAdmissionDenied("read_custody_fenced")
+            failures = sum(item.state == "incomplete" for item in qualification_records)
+            if failures >= effect_contracts.MAX_SNAPSHOT_PROVIDER_ATTEMPTS:
+                # Persist a closed-custody recovery even when it reveals that
+                # no successor may be reserved under the finite retry cap.
+                session.commit()
+                raise OrdinaryAgentSessionAdmissionDenied("read_attempts_exhausted")
+            # A charge is tied to logical request identity, not a mutable binding revision.
+            if not qualification_records:
+                budget = context.lease.budget
+                if budget.actions_used >= budget.action_limit:
+                    raise OrdinaryAgentSessionAdmissionDenied("budget_exhausted")
+                charged_lease = context.lease.model_copy(
+                    update={
+                        "revision": context.lease.revision + 1,
+                        "budget": budget.model_copy(
+                            update={"actions_used": budget.actions_used + 1}
+                        ),
+                    }
+                )
+                context.lease_row.revision, context.lease_row.payload = (
+                    charged_lease.revision,
+                    self._payload_dict(charged_lease),
+                )
+            ordinal = max((item.attempt_ordinal for item in current), default=0) + 1
+            attempt_id = "qualification-read-" + canonical_json_sha256(
+                {
+                    "request_id": request.request_id,
+                    "binding_revision": request.binding_revision,
+                    "ordinal": ordinal,
+                }
+            )
+            record = effect_contracts.OrdinaryAgentQualificationAttemptRecord(
+                attempt_id=attempt_id,
+                request_id=request.request_id,
+                binding_revision=request.binding_revision,
+                scope_sha256=request.scope_sha256,
+                principal_id=context.principal.principal_id,
+                credential_id=context.credential.credential_id,
+                credential_version=context.credential.credential_version,
+                attempt_ordinal=ordinal,
+                setup=setup,
+                custody_record_id=custody.record_id,
+                custody_sha256=custody.custody_sha256,
+                repository_inventory_record_id=custody.repository_inventory.record_id,
+                repository_inventory_revision=custody.repository_inventory.inventory_revision,
+                repository_inventory_digest=custody.repository_inventory.inventory_digest,
+                github_app_id=custody.github_app_id,
+                github_installation_id=custody.github_installation_id,
+                managed_secret_binding_id=custody.managed_secret.binding_id,
+                managed_secret_id=custody.managed_secret.secret_id,
+                managed_secret_version_id=custody.managed_secret.secret_version_id,
+                provider_inspection_sha256=custody.provider_inspection_sha256,
+                installed_permission_ceiling_sha256=qualification_permission_ceiling_sha256(
+                    permissions=[item.model_dump(mode="json") for item in custody.permissions]
+                ),
+                read_profile_sha256=qualification_read_profile_sha256(
+                    permissions=_ordinary_agent_snapshot_read_permissions()
+                ),
+                created_at=context.now,
+                updated_at=context.now,
+            )
+            session.add(
+                LaunchplaneOrdinaryAgentReadAttemptRow(
+                    attempt_id=attempt_id,
+                    request_id=request.request_id,
+                    binding_revision=request.binding_revision,
+                    purpose="qualification",
+                    candidate_sha="",
+                    attempt_ordinal=ordinal,
+                    state=record.state,
+                    revision=record.revision,
+                    payload=self._payload_dict(record),
+                )
+            )
+            session.commit()
+            return record
+
+    @_private_ordinary_agent_operation
     def reserve_ordinary_agent_read_custody_attempt(
         self, *, attempt_id: str, expected_attempt_revision: int
     ) -> effect_contracts.OrdinaryAgentReadCustodyReservation:
@@ -26121,6 +26348,191 @@ class PostgresRecordStore(HumanSessionStore):
             session.commit()
             return result
 
+    @_private_ordinary_agent_operation
+    def reserve_ordinary_agent_qualification_custody_attempt(
+        self,
+        *,
+        claim_fence: OrdinaryAgentJobClaimFence,
+        attempt_id: str,
+        expected_attempt_revision: int,
+    ) -> effect_contracts.OrdinaryAgentQualificationReadCustodyReservation:
+        """Mint reservation with current authority but no merge-controller state."""
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            locator = session.get(LaunchplaneOrdinaryAgentReadAttemptRow, attempt_id)
+            if locator is None:
+                raise OrdinaryAgentSessionAdmissionDenied("read_attempt_unavailable")
+            stored = effect_contracts.parse_ordinary_agent_read_attempt(locator.payload)
+            if not isinstance(stored, effect_contracts.OrdinaryAgentQualificationAttemptRecord):
+                raise OrdinaryAgentSessionAdmissionDenied("request_purpose_unsupported")
+            context = self._ordinary_agent_current_chain_context(
+                session, request_id=stored.request_id
+            )
+            if not isinstance(context.request, OrdinaryAgentQualificationFiniteRequestV2):
+                raise OrdinaryAgentSessionAdmissionDenied("request_purpose_unsupported")
+            self._require_ordinary_agent_claim(
+                session,
+                claim_fence=claim_fence,
+                now=context.now,
+                for_update=True,
+            )
+            row = session.get(
+                LaunchplaneOrdinaryAgentReadAttemptRow,
+                attempt_id,
+                with_for_update=True,
+                populate_existing=True,
+            )
+            assert row is not None
+            record = effect_contracts.parse_ordinary_agent_read_attempt(row.payload)
+            if (
+                not isinstance(record, effect_contracts.OrdinaryAgentQualificationAttemptRecord)
+                or record.binding_revision != context.request.binding_revision
+                or record.scope_sha256 != context.request.scope_sha256
+                or record.revision != expected_attempt_revision
+                or record.state not in {"reserved", "reading"}
+            ):
+                raise OrdinaryAgentSessionAdmissionDenied("read_revision_conflict")
+            if record.custody_attempt_ids:
+                previous_id = record.custody_attempt_ids[-1]
+                previous = session.get(LaunchplaneOrdinaryAgentCustodyIssueAttemptRow, previous_id)
+                if previous is None or previous.state != "closed":
+                    reservation_row = session.get(
+                        LaunchplaneOrdinaryAgentReadCustodyRow, previous_id
+                    )
+                    if reservation_row is None:
+                        raise OrdinaryAgentSessionAdmissionDenied("read_provenance_unavailable")
+                    return effect_contracts.OrdinaryAgentQualificationReadCustodyReservation.model_validate(
+                        reservation_row.payload
+                    )
+                if (
+                    OrdinaryAgentCustodyIssueAttempt.model_validate(previous.payload).close_reason
+                    != "not_dispatched"
+                ):
+                    raise OrdinaryAgentSessionAdmissionDenied("read_outcome_required")
+            if (
+                len(record.custody_attempt_ids)
+                >= effect_contracts.MAX_CUSTODY_MINT_ATTEMPTS_PER_DISPATCH_CHILD
+            ):
+                raise OrdinaryAgentSessionAdmissionDenied("read_custody_attempts_exhausted")
+            self._lock_ordinary_agent_provider_waits(
+                session,
+                principal=context.principal,
+                resource_classes=("core", "graphql", "secondary"),
+            )
+            custody_row = session.get(
+                LaunchplaneOrdinaryAgentCredentialCustodyRow, context.principal.custody_record_id
+            )
+            if custody_row is None:
+                raise OrdinaryAgentSessionAdmissionDenied("custody_unavailable")
+            custody = OrdinaryAgentCredentialCustodyRecord.model_validate(custody_row.payload)
+            if (
+                custody.custody_sha256 != context.principal.custody_sha256
+                or custody.target != context.request.target
+                or custody.credential_id != context.credential.credential_id
+                or custody.credential_version != context.credential.credential_version
+                or "merge_train_snapshot" not in custody.effect_profiles
+                or custody.github_installation_id is None
+                or not custody.valid_from <= context.now < custody.expires_at
+            ):
+                raise OrdinaryAgentSessionAdmissionDenied("custody_binding_conflict")
+            inventory_rows = tuple(
+                session.scalars(
+                    select(LaunchplaneRepositoryInventoryRow)
+                    .where(
+                        LaunchplaneRepositoryInventoryRow.repository_id
+                        == str(context.request.target.repository_id)
+                    )
+                    .order_by(LaunchplaneRepositoryInventoryRow.inventory_revision.desc())
+                    .limit(1)
+                )
+            )
+            if not inventory_rows:
+                raise OrdinaryAgentSessionAdmissionDenied("inventory_drift")
+            inventory = RepositoryInventoryRecord.model_validate(inventory_rows[0].payload)
+            if (
+                inventory.record_id != custody.repository_inventory.record_id
+                or inventory.inventory_revision != custody.repository_inventory.inventory_revision
+                or inventory.inventory_digest != custody.repository_inventory.inventory_digest
+                or inventory.inventory_state != "tracked"
+            ):
+                raise OrdinaryAgentSessionAdmissionDenied("inventory_drift")
+            secret = custody.managed_secret
+            candidate = OrdinaryAgentCustodyCandidate(
+                principal_id=context.principal.principal_id,
+                repository_id=context.request.target.repository_id,
+                repository=context.request.target.repository,
+                base_branch=context.request.target.base_branch,
+                credential_id=context.credential.credential_id,
+                credential_version=context.credential.credential_version,
+                secret_id=secret.secret_id,
+                secret_binding_id=secret.binding_id,
+                secret_version_id=secret.secret_version_id,
+                expected_app_id=custody.github_app_id,
+                expected_installation_id=custody.github_installation_id,
+                effect_profile="merge_train_snapshot",
+            )
+            ordinal = len(record.custody_attempt_ids) + 1
+            key = f"ordinary-qualification-read:{attempt_id}:{ordinal}"
+            custody_id = "custody_" + hashlib.sha256(key.encode()).hexdigest()
+            result = effect_contracts.OrdinaryAgentQualificationReadCustodyReservation(
+                read_attempt_id=attempt_id,
+                attempt_revision=record.revision + 1,
+                custody_attempt_id=custody_id,
+                custody_ordinal=ordinal,
+                idempotency_key=key,
+                candidate=candidate,
+            )
+            session.add(
+                LaunchplaneOrdinaryAgentReadCustodyRow(
+                    custody_attempt_id=custody_id,
+                    read_attempt_id=attempt_id,
+                    payload=self._payload_dict(result),
+                )
+            )
+            updated = record.model_copy(
+                update={
+                    "revision": record.revision + 1,
+                    "state": "reading",
+                    "custody_attempt_ids": (*record.custody_attempt_ids, custody_id),
+                    "updated_at": context.now,
+                }
+            )
+            row.state, row.revision, row.payload = (
+                updated.state,
+                updated.revision,
+                self._payload_dict(updated),
+            )
+            session.commit()
+            return result
+
+    @_private_ordinary_agent_operation
+    def require_ordinary_agent_qualification_read_authority(
+        self, *, claim_fence: OrdinaryAgentJobClaimFence, attempt_id: str
+    ) -> None:
+        """Recheck authority immediately before the one provider GET."""
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            context = self._ordinary_agent_current_chain_context(
+                session, request_id=claim_fence.request_id
+            )
+            if not isinstance(context.request, OrdinaryAgentQualificationFiniteRequestV2):
+                raise OrdinaryAgentSessionAdmissionDenied("request_purpose_unsupported")
+            self._require_ordinary_agent_claim(
+                session, claim_fence=claim_fence, now=context.now, for_update=True
+            )
+            row = session.get(LaunchplaneOrdinaryAgentReadAttemptRow, attempt_id)
+            if row is None:
+                raise OrdinaryAgentSessionAdmissionDenied("read_attempt_unavailable")
+            attempt = effect_contracts.parse_ordinary_agent_read_attempt(row.payload)
+            if (
+                not isinstance(attempt, effect_contracts.OrdinaryAgentQualificationAttemptRecord)
+                or attempt.request_id != context.request.request_id
+                or attempt.binding_revision != context.request.binding_revision
+                or attempt.scope_sha256 != context.request.scope_sha256
+                or attempt.state != "reading"
+            ):
+                raise OrdinaryAgentSessionAdmissionDenied("qualification_read_authority_lost")
+
     def _ordinary_agent_read_history_context(
         self, session: Any, *, attempt_id: str, custody_attempt_id: str
     ) -> tuple[
@@ -26167,6 +26579,58 @@ class PostgresRecordStore(HumanSessionStore):
             raise OrdinaryAgentSessionAdmissionDenied("read_provenance_conflict")
         request = parse_ordinary_agent_finite_request(request_row.payload)
         return row, record, _require_guarded_finite_request(request)
+
+    def _ordinary_agent_qualification_history_context(
+        self, session: Any, *, attempt_id: str, custody_attempt_id: str
+    ) -> tuple[
+        LaunchplaneOrdinaryAgentReadAttemptRow,
+        effect_contracts.OrdinaryAgentQualificationAttemptRecord,
+        effect_contracts.OrdinaryAgentQualificationReadCustodyReservation,
+    ]:
+        """Validate immutable issued-work provenance without current authority.
+
+        Outcome recording must survive expiry or revocation so custody cleanup can
+        settle a historical token attempt; reservation and mint methods perform
+        the current-chain checks instead.
+        """
+        locator = session.get(LaunchplaneOrdinaryAgentReadAttemptRow, attempt_id)
+        if locator is None:
+            raise OrdinaryAgentSessionAdmissionDenied("read_attempt_unavailable")
+        original = effect_contracts.parse_ordinary_agent_read_attempt(locator.payload)
+        if not isinstance(original, effect_contracts.OrdinaryAgentQualificationAttemptRecord):
+            raise OrdinaryAgentSessionAdmissionDenied("request_purpose_unsupported")
+        row = session.get(
+            LaunchplaneOrdinaryAgentReadAttemptRow,
+            attempt_id,
+            with_for_update=True,
+            populate_existing=True,
+        )
+        assert row is not None
+        record = effect_contracts.parse_ordinary_agent_read_attempt(row.payload)
+        if not isinstance(record, effect_contracts.OrdinaryAgentQualificationAttemptRecord):
+            raise OrdinaryAgentSessionAdmissionDenied("read_attempt_provenance_conflict")
+        reservation_row = session.get(LaunchplaneOrdinaryAgentReadCustodyRow, custody_attempt_id)
+        actual = session.get(LaunchplaneOrdinaryAgentCustodyIssueAttemptRow, custody_attempt_id)
+        if reservation_row is None or actual is None:
+            raise OrdinaryAgentSessionAdmissionDenied("read_provenance_unavailable")
+        reservation = (
+            effect_contracts.OrdinaryAgentQualificationReadCustodyReservation.model_validate(
+                reservation_row.payload
+            )
+        )
+        if (
+            reservation.read_attempt_id != attempt_id
+            or custody_attempt_id not in record.custody_attempt_ids
+            or actual.request_sha256
+            != canonical_json_sha256(
+                {
+                    "candidate": reservation.candidate.model_dump(mode="json"),
+                    "request": reservation.request_payload,
+                }
+            )
+        ):
+            raise OrdinaryAgentSessionAdmissionDenied("read_provenance_conflict")
+        return row, record, reservation
 
     def _record_ordinary_agent_read_success(
         self,
@@ -26645,56 +27109,188 @@ class PostgresRecordStore(HumanSessionStore):
             row, record, _ = self._ordinary_agent_read_history_context(
                 session, attempt_id=attempt_id, custody_attempt_id=custody_attempt_id
             )
-            payload = {"kind": "failure", "reason_code": reason_code, "counts": counts.model_dump()}
-            existing = session.get(LaunchplaneOrdinaryAgentReadOutcomeRow, attempt_id)
-            if reason_code == "cleanup_unknown":
-                actual = session.get(
-                    LaunchplaneOrdinaryAgentCustodyIssueAttemptRow, custody_attempt_id
+            updated = self._record_ordinary_agent_read_failure_history(
+                session=session,
+                row=row,
+                record=record,
+                custody_attempt_id=custody_attempt_id,
+                reason_code=reason_code,
+                counts=counts,
+                successful_outcome_kinds=("success",),
+            )
+            assert isinstance(updated, effect_contracts.OrdinaryAgentSnapshotAttemptRecord)
+            session.commit()
+            return updated
+
+    def _record_ordinary_agent_read_failure_history(
+        self,
+        *,
+        session: Any,
+        row: LaunchplaneOrdinaryAgentReadAttemptRow,
+        record: effect_contracts.OrdinaryAgentReadAttemptRecord,
+        custody_attempt_id: str,
+        reason_code: str,
+        counts: snapshot_contracts.OrdinaryAgentProviderRequestCounts,
+        successful_outcome_kinds: tuple[str, ...],
+    ) -> effect_contracts.OrdinaryAgentReadAttemptRecord:
+        """Apply the common immutable failure and cleanup fence transition."""
+        payload = {"kind": "failure", "reason_code": reason_code, "counts": counts.model_dump()}
+        existing = session.get(LaunchplaneOrdinaryAgentReadOutcomeRow, record.attempt_id)
+        if reason_code == "cleanup_unknown":
+            actual = session.get(LaunchplaneOrdinaryAgentCustodyIssueAttemptRow, custody_attempt_id)
+            if actual is None or actual.state != "cleanup_unknown":
+                raise OrdinaryAgentSessionAdmissionDenied("custody_cleanup_not_unknown")
+            if record.state == "fenced" and record.reason_code == "cleanup_unknown":
+                return record
+            if existing is not None and existing.payload.get("kind") in successful_outcome_kinds:
+                updated = record.model_copy(
+                    update={
+                        "state": "fenced",
+                        "reason_code": reason_code,
+                        "revision": record.revision + 1,
+                        "updated_at": self._ordinary_agent_database_epoch(session),
+                    }
                 )
-                if actual is None or actual.state != "cleanup_unknown":
-                    raise OrdinaryAgentSessionAdmissionDenied("custody_cleanup_not_unknown")
-                if record.state == "fenced" and record.reason_code == "cleanup_unknown":
-                    return record
-                # Custody's durable uncertainty is separate from the immutable successful response.
-                # Retain its normalized result and never append a contradictory provider outcome.
-                if existing is not None and existing.payload.get("kind") == "success":
-                    updated = record.model_copy(
-                        update={
-                            "state": "fenced",
-                            "reason_code": reason_code,
-                            "revision": record.revision + 1,
-                            "updated_at": self._ordinary_agent_database_epoch(session),
-                        }
-                    )
-                    row.state, row.revision, row.payload = (
-                        updated.state,
-                        updated.revision,
-                        self._payload_dict(updated),
-                    )
-                    session.commit()
-                    return updated
+                row.state, row.revision, row.payload = (
+                    updated.state,
+                    updated.revision,
+                    self._payload_dict(updated),
+                )
+                return updated
+        if existing is not None:
+            if existing.payload != payload:
+                raise OrdinaryAgentSessionAdmissionDenied("immutable_read_outcome_conflict")
+            return record
+        if record.state != "reading":
+            raise OrdinaryAgentSessionAdmissionDenied("read_attempt_closed")
+        now = self._ordinary_agent_database_epoch(session)
+        state = (
+            "exhausted"
+            if reason_code == "snapshot_query_cost_exceeded"
+            else "fenced"
+            if reason_code == "cleanup_unknown"
+            else "incomplete"
+        )
+        updated = record.model_copy(
+            update={
+                "state": state,
+                "revision": record.revision + 1,
+                "reason_code": reason_code,
+                "failure_counts": counts,
+                "updated_at": now,
+                "next_due_at": now + effect_contracts.MIN_RECONCILIATION_BACKOFF_SECONDS,
+            }
+        )
+        session.add(
+            LaunchplaneOrdinaryAgentReadOutcomeRow(attempt_id=record.attempt_id, payload=payload)
+        )
+        row.state, row.revision, row.payload = (
+            updated.state,
+            updated.revision,
+            self._payload_dict(updated),
+        )
+        return updated
+
+    @_private_ordinary_agent_operation
+    def record_ordinary_agent_qualification_result(
+        self,
+        *,
+        attempt_id: str,
+        custody_attempt_id: str,
+        result: OrdinaryRepositoryAdminObservation,
+        attestation: OrdinaryAgentQualificationAttestation | None,
+    ) -> effect_contracts.OrdinaryAgentQualificationAttemptRecord:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            row, record, reservation = self._ordinary_agent_qualification_history_context(
+                session, attempt_id=attempt_id, custody_attempt_id=custody_attempt_id
+            )
+            payload = {
+                "kind": "qualification_result",
+                "result": result.model_dump(mode="json"),
+                "attestation": None if attestation is None else attestation.model_dump(mode="json"),
+            }
+            existing = session.get(LaunchplaneOrdinaryAgentReadOutcomeRow, attempt_id)
             if existing is not None:
                 if existing.payload != payload:
                     raise OrdinaryAgentSessionAdmissionDenied("immutable_read_outcome_conflict")
                 return record
             if record.state != "reading":
                 raise OrdinaryAgentSessionAdmissionDenied("read_attempt_closed")
-            now = self._ordinary_agent_database_epoch(session)
-            state = (
-                "exhausted"
-                if reason_code == "snapshot_query_cost_exceeded"
-                else "fenced"
-                if reason_code == "cleanup_unknown"
-                else "incomplete"
+            custody = session.get(
+                LaunchplaneOrdinaryAgentCustodyIssueAttemptRow, custody_attempt_id
             )
+            assert custody is not None
+            issued = OrdinaryAgentCustodyIssueAttempt.model_validate(custody.payload)
+            if (
+                issued.token_expires_at is None
+                or issued.installation_id != record.github_installation_id
+                or issued.requested_permissions != _ordinary_agent_snapshot_read_permissions()
+            ):
+                raise OrdinaryAgentSessionAdmissionDenied("read_issuance_unproven")
+            expected_identity = qualification_identity(
+                github_id=record.setup.administrator_github_id,
+                login=record.setup.administrator_login,
+            )
+            if result.expected != expected_identity:
+                raise OrdinaryAgentSessionAdmissionDenied("qualification_setup_conflict")
+            if result.counts != snapshot_contracts.OrdinaryAgentProviderRequestCounts(
+                rest_core_requests=1, graphql_requests=0, graphql_points=0
+            ):
+                raise OrdinaryAgentSessionAdmissionDenied(
+                    "qualification_observation_counts_conflict"
+                )
+            if result.status == "qualified":
+                if attestation is None:
+                    raise OrdinaryAgentSessionAdmissionDenied("qualification_attestation_required")
+                if (
+                    attestation.request_id != record.request_id
+                    or attestation.scope_sha256 != record.scope_sha256
+                    or attestation.binding_revision != record.binding_revision
+                    or attestation.target != record.setup.target
+                    or attestation.source_activation_operation_id
+                    != record.setup.source_activation_operation_id
+                    or attestation.source_activation_binding_sha256
+                    != record.setup.source_activation_binding_sha256
+                    or attestation.administrator != expected_identity
+                    or attestation.principal_id != record.principal_id
+                    or attestation.credential_id != record.credential_id
+                    or attestation.credential_version != record.credential_version
+                    or attestation.policy_managed_set_id != record.setup.managed_set_id
+                    or attestation.policy_managed_rule_id != record.setup.managed_rule_id
+                    or attestation.custody_record_id != record.custody_record_id
+                    or attestation.custody_sha256 != record.custody_sha256
+                    or attestation.repository_inventory_record_id
+                    != record.repository_inventory_record_id
+                    or attestation.repository_inventory_revision
+                    != record.repository_inventory_revision
+                    or attestation.repository_inventory_digest != record.repository_inventory_digest
+                    or attestation.github_app_id != record.github_app_id
+                    or attestation.github_installation_id != record.github_installation_id
+                    or attestation.managed_secret_binding_id != record.managed_secret_binding_id
+                    or attestation.managed_secret_id != record.managed_secret_id
+                    or attestation.managed_secret_version_id != record.managed_secret_version_id
+                    or attestation.provider_inspection_sha256 != record.provider_inspection_sha256
+                    or attestation.installed_permission_ceiling_sha256
+                    != record.installed_permission_ceiling_sha256
+                    or attestation.read_profile_sha256 != record.read_profile_sha256
+                    or attestation.custody_attempt_id != custody_attempt_id
+                    or attestation.observation != result
+                    or attestation.expires_at != record.setup.attestation_expires_at
+                    or reservation.candidate.effect_profile != "merge_train_snapshot"
+                ):
+                    raise OrdinaryAgentSessionAdmissionDenied("qualification_provenance_conflict")
+            elif attestation is not None:
+                raise OrdinaryAgentSessionAdmissionDenied("qualification_attestation_conflict")
             updated = record.model_copy(
                 update={
-                    "state": state,
+                    "state": "completed",
                     "revision": record.revision + 1,
-                    "reason_code": reason_code,
-                    "failure_counts": counts,
-                    "updated_at": now,
-                    "next_due_at": now + effect_contracts.MIN_RECONCILIATION_BACKOFF_SECONDS,
+                    "result": result,
+                    "attestation": attestation,
+                    "reason_code": result.status,
+                    "next_due_at": None,
+                    "updated_at": self._ordinary_agent_database_epoch(session),
                 }
             )
             session.add(
@@ -26705,6 +27301,39 @@ class PostgresRecordStore(HumanSessionStore):
                 updated.revision,
                 self._payload_dict(updated),
             )
+            session.commit()
+            return updated
+
+    @_private_ordinary_agent_operation
+    def record_ordinary_agent_qualification_failure(
+        self,
+        *,
+        attempt_id: str,
+        custody_attempt_id: str,
+        reason_code: Literal[
+            "provider_wait",
+            "provider_attempt_deadline",
+            "provider_incomplete",
+            "provider_transport",
+            "cleanup_unknown",
+        ],
+        counts: snapshot_contracts.OrdinaryAgentProviderRequestCounts,
+    ) -> effect_contracts.OrdinaryAgentQualificationAttemptRecord:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            row, record, _ = self._ordinary_agent_qualification_history_context(
+                session, attempt_id=attempt_id, custody_attempt_id=custody_attempt_id
+            )
+            updated = self._record_ordinary_agent_read_failure_history(
+                session=session,
+                row=row,
+                record=record,
+                custody_attempt_id=custody_attempt_id,
+                reason_code=reason_code,
+                counts=counts,
+                successful_outcome_kinds=("qualification_result",),
+            )
+            assert isinstance(updated, effect_contracts.OrdinaryAgentQualificationAttemptRecord)
             session.commit()
             return updated
 
@@ -27720,11 +28349,15 @@ class PostgresRecordStore(HumanSessionStore):
                 now + lease_seconds,
                 "running",
             )
-            controller_row = session.get(
-                LaunchplaneMergeTrainControllerStateRow,
-                build_merge_train_controller_key(
-                    repository=request.target.repository, base_branch=request.target.base_branch
-                ),
+            controller_row = (
+                session.get(
+                    LaunchplaneMergeTrainControllerStateRow,
+                    build_merge_train_controller_key(
+                        repository=request.target.repository, base_branch=request.target.base_branch
+                    ),
+                )
+                if is_guarded_ordinary_agent_finite_request(request)
+                else None
             )
             historical_fence: OrdinaryAgentControllerFence | None = None
             if controller_row is not None:
@@ -27778,6 +28411,66 @@ class PostgresRecordStore(HumanSessionStore):
             raise OrdinaryAgentSessionAdmissionDenied("job_claim_lost")
         return cast(LaunchplaneOrdinaryAgentJobClaimRow, row)
 
+    def _require_ordinary_agent_qualification_completion(
+        self,
+        session: Any,
+        *,
+        request: OrdinaryAgentQualificationFiniteRequestV2,
+    ) -> effect_contracts.OrdinaryAgentQualificationAttemptRecord:
+        """Finish durable qualification evidence without reviving current authority."""
+        if self._ordinary_agent_job_custody_uncertainty(session, request.request_id):
+            raise OrdinaryAgentSessionAdmissionDenied("read_custody_fenced")
+        rows = tuple(
+            session.scalars(
+                select(LaunchplaneOrdinaryAgentReadAttemptRow)
+                .where(
+                    LaunchplaneOrdinaryAgentReadAttemptRow.request_id == request.request_id,
+                    LaunchplaneOrdinaryAgentReadAttemptRow.binding_revision
+                    == request.binding_revision,
+                    LaunchplaneOrdinaryAgentReadAttemptRow.purpose == "qualification",
+                )
+                .order_by(LaunchplaneOrdinaryAgentReadAttemptRow.attempt_ordinal)
+                .with_for_update()
+            )
+        )
+        attempts = tuple(
+            item
+            for item in (
+                effect_contracts.parse_ordinary_agent_read_attempt(row.payload) for row in rows
+            )
+            if isinstance(item, effect_contracts.OrdinaryAgentQualificationAttemptRecord)
+            and item.scope_sha256 == request.scope_sha256
+        )
+        completed = tuple(
+            item
+            for item in attempts
+            if item.state == "completed"
+            and item.result is not None
+            and item.result.status == "qualified"
+            and item.attestation is not None
+        )
+        if len(completed) != 1:
+            raise OrdinaryAgentSessionAdmissionDenied("qualification_completion_unproven")
+        attempt = completed[0]
+        assert attempt.result is not None and attempt.attestation is not None
+        if not attempt.custody_attempt_ids:
+            raise OrdinaryAgentSessionAdmissionDenied("read_custody_fenced")
+        custody_rows = tuple(
+            session.get(LaunchplaneOrdinaryAgentCustodyIssueAttemptRow, identifier)
+            for identifier in attempt.custody_attempt_ids
+        )
+        if any(item is None or item.state != "closed" for item in custody_rows):
+            raise OrdinaryAgentSessionAdmissionDenied("read_custody_fenced")
+        outcome = session.get(LaunchplaneOrdinaryAgentReadOutcomeRow, attempt.attempt_id)
+        if (
+            outcome is None
+            or outcome.payload.get("kind") != "qualification_result"
+            or outcome.payload.get("result") != attempt.result.model_dump(mode="json")
+            or outcome.payload.get("attestation") != attempt.attestation.model_dump(mode="json")
+        ):
+            raise OrdinaryAgentSessionAdmissionDenied("immutable_read_outcome_conflict")
+        return attempt
+
     @_private_ordinary_agent_operation
     def finish_ordinary_agent_job_attempt(
         self,
@@ -27791,30 +28484,50 @@ class PostgresRecordStore(HumanSessionStore):
             if locator is None:
                 raise OrdinaryAgentSessionAdmissionDenied("job_unavailable")
             located = parse_ordinary_agent_finite_request(locator.payload)
-            key = build_merge_train_controller_key(
-                repository=located.target.repository, base_branch=located.target.base_branch
-            )
-            self._advisory_lock_merge_train_controller(session, key)
-            controller_row = session.get(
-                LaunchplaneMergeTrainControllerStateRow, key, with_for_update=True
-            )
+            controller_row: LaunchplaneMergeTrainControllerStateRow | None = None
+            request_row: LaunchplaneOrdinaryAgentFiniteRequestRow | None = None
+            if is_guarded_ordinary_agent_finite_request(located):
+                key = build_merge_train_controller_key(
+                    repository=located.target.repository, base_branch=located.target.base_branch
+                )
+                self._advisory_lock_merge_train_controller(session, key)
+                controller_row = session.get(
+                    LaunchplaneMergeTrainControllerStateRow, key, with_for_update=True
+                )
+            else:
+                # Qualification reservation locks its finite request before its
+                # claim. Keep the same order here now that qualification no
+                # longer takes the guarded controller serialization lock.
+                request_row = session.get(
+                    LaunchplaneOrdinaryAgentFiniteRequestRow,
+                    claim_fence.request_id,
+                    with_for_update=True,
+                    populate_existing=True,
+                )
+                if request_row is None:
+                    raise OrdinaryAgentSessionAdmissionDenied("job_unavailable")
             now = self._ordinary_agent_database_epoch(session)
             row = session.get(
                 LaunchplaneOrdinaryAgentJobClaimRow, claim_fence.request_id, with_for_update=True
             )
             self._require_ordinary_agent_claim(session, claim_fence=claim_fence, now=now)
             assert row is not None
-            request_row = session.get(
-                LaunchplaneOrdinaryAgentFiniteRequestRow,
-                row.request_id,
-                with_for_update=True,
-                populate_existing=True,
-            )
+            if request_row is None:
+                request_row = session.get(
+                    LaunchplaneOrdinaryAgentFiniteRequestRow,
+                    row.request_id,
+                    with_for_update=True,
+                    populate_existing=True,
+                )
             if request_row is None:
                 raise OrdinaryAgentSessionAdmissionDenied("job_unavailable")
             request = parse_ordinary_agent_finite_request(request_row.payload)
             view = self._ordinary_agent_job_view(session, request=request, claim=row)
-            if disposition.status == "completed" and view.unresolved_effects:
+            if (
+                disposition.status == "completed"
+                and is_guarded_ordinary_agent_finite_request(request)
+                and view.unresolved_effects
+            ):
                 raise OrdinaryAgentSessionAdmissionDenied("unresolved_effects")
             self._require_ordinary_agent_claim(
                 session, claim_fence=claim_fence, now=self._ordinary_agent_database_epoch(session)
@@ -27824,74 +28537,80 @@ class PostgresRecordStore(HumanSessionStore):
                 and request.cancellation_requested_at is None
                 and request.status != "cancelled"
             ):
-                binding = OrdinaryAgentJobBinding(
-                    request_id=request.request_id,
-                    scope_sha256=request.scope_sha256,
-                    binding_revision=request.binding_revision,
-                )
-                controller = (
-                    MergeTrainControllerStateRecord.model_validate(controller_row.payload)
-                    if controller_row is not None
-                    else None
-                )
-                if (
-                    controller is not None
-                    and controller.status != "idle"
-                    and controller.ordinary_job_binding == binding
-                ):
-                    raise OrdinaryAgentSessionAdmissionDenied("controller_not_yielded")
-                for model in (
-                    LaunchplaneMergeTrainBatchCandidateRow,
-                    LaunchplaneMergeTrainBatchLandingPlanRow,
-                    LaunchplaneMergeTrainStackCollapsePlanRow,
-                ):
-                    for raw_progress in session.scalars(
-                        select(model)
-                        .where(
-                            model.repository == request.target.repository.lower(),
-                            model.base_branch == request.target.base_branch,
-                            model.status == "active",
-                        )
-                        .with_for_update()
+                if isinstance(request, OrdinaryAgentQualificationFiniteRequestV2):
+                    self._require_ordinary_agent_qualification_completion(session, request=request)
+                    request = request.model_copy(update={"status": "completed"})
+                    request_row.payload = self._payload_dict(request)
+                else:
+                    request = _require_guarded_finite_request(request)
+                    binding = OrdinaryAgentJobBinding(
+                        request_id=request.request_id,
+                        scope_sha256=request.scope_sha256,
+                        binding_revision=request.binding_revision,
+                    )
+                    controller = (
+                        MergeTrainControllerStateRecord.model_validate(controller_row.payload)
+                        if controller_row is not None
+                        else None
+                    )
+                    if (
+                        controller is not None
+                        and controller.status != "idle"
+                        and controller.ordinary_job_binding == binding
                     ):
-                        progress = cast(
-                            LaunchplaneMergeTrainBatchCandidateRow
-                            | LaunchplaneMergeTrainBatchLandingPlanRow
-                            | LaunchplaneMergeTrainStackCollapsePlanRow,
-                            raw_progress,
-                        )
-                        if progress.payload.get("ordinary_job_binding") != binding.model_dump(
-                            mode="json"
-                        ):
-                            continue
-                        checkpoint = self._ordinary_agent_matching_released_controller(
-                            claim=row,
-                            request=request,
-                            target=request.target,
-                            progress_payload=progress.payload,
-                        )
-                        legacy_last_record_proves_progress = (
-                            row.released_controller is None
-                            and controller is not None
-                            and controller.status == "idle"
-                            and controller.last_record_id == progress.record_id
-                        )
-                        if checkpoint is None and not legacy_last_record_proves_progress:
-                            raise OrdinaryAgentSessionAdmissionDenied(
-                                "progress_completion_fence_conflict"
+                        raise OrdinaryAgentSessionAdmissionDenied("controller_not_yielded")
+                    for model in (
+                        LaunchplaneMergeTrainBatchCandidateRow,
+                        LaunchplaneMergeTrainBatchLandingPlanRow,
+                        LaunchplaneMergeTrainStackCollapsePlanRow,
+                    ):
+                        for raw_progress in session.scalars(
+                            select(model)
+                            .where(
+                                model.repository == request.target.repository.lower(),
+                                model.base_branch == request.target.base_branch,
+                                model.status == "active",
                             )
-                        progress.status = "superseded"
-                        progress.payload = {**progress.payload, "status": "superseded"}
-                self._retire_ordinary_agent_reserved_effects(
-                    session, request_id=request.request_id, now=now
-                )
-                if self._ordinary_agent_job_view(
-                    session, request=request, claim=row
-                ).unresolved_effects:
-                    raise OrdinaryAgentSessionAdmissionDenied("unresolved_effects")
-                request = request.model_copy(update={"status": "completed"})
-                request_row.payload = self._payload_dict(request)
-                row.released_controller = None
+                            .with_for_update()
+                        ):
+                            progress = cast(
+                                LaunchplaneMergeTrainBatchCandidateRow
+                                | LaunchplaneMergeTrainBatchLandingPlanRow
+                                | LaunchplaneMergeTrainStackCollapsePlanRow,
+                                raw_progress,
+                            )
+                            if progress.payload.get("ordinary_job_binding") != binding.model_dump(
+                                mode="json"
+                            ):
+                                continue
+                            checkpoint = self._ordinary_agent_matching_released_controller(
+                                claim=row,
+                                request=request,
+                                target=request.target,
+                                progress_payload=progress.payload,
+                            )
+                            legacy_last_record_proves_progress = (
+                                row.released_controller is None
+                                and controller is not None
+                                and controller.status == "idle"
+                                and controller.last_record_id == progress.record_id
+                            )
+                            if checkpoint is None and not legacy_last_record_proves_progress:
+                                raise OrdinaryAgentSessionAdmissionDenied(
+                                    "progress_completion_fence_conflict"
+                                )
+                            progress.status = "superseded"
+                            progress.payload = {**progress.payload, "status": "superseded"}
+                    self._retire_ordinary_agent_reserved_effects(
+                        session, request_id=request.request_id, now=now
+                    )
+                    if self._ordinary_agent_job_view(
+                        session, request=request, claim=row
+                    ).unresolved_effects:
+                        raise OrdinaryAgentSessionAdmissionDenied("unresolved_effects")
+                    request = request.model_copy(update={"status": "completed"})
+                    request_row.payload = self._payload_dict(request)
+                    row.released_controller = None
             row.status, row.reason_code = disposition.status, disposition.reason_code
             row.claim_expires_at = 0
             row.next_due_at = max(now, disposition.next_due_at or now)

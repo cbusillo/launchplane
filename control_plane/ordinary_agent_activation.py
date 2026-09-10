@@ -33,6 +33,9 @@ from control_plane.contracts.ordinary_agent_activation import (
 )
 from control_plane.contracts.ordinary_agent_custody import OrdinaryAgentCustodyIssueAttempt
 from control_plane.contracts.ordinary_agent_effect import OrdinaryAgentSnapshotAttemptRecord
+from control_plane.contracts.ordinary_agent_qualification import (
+    OrdinaryAgentQualificationAttestation,
+)
 from control_plane.contracts.ordinary_agent_session_lifecycle import (
     OrdinaryAgentFiniteRequestRecord,
     OrdinaryAgentGuardedDeliveryFiniteRequestV2,
@@ -413,7 +416,9 @@ def _runtime_capability(
         ),
         read_attempt_versions=(_model_schema_version(OrdinaryAgentSnapshotAttemptRecord),),
         custody_reservation_versions=(_model_schema_version(OrdinaryAgentCustodyIssueAttempt),),
-        qualification_attestation_versions=(),
+        qualification_attestation_versions=(
+            _model_schema_version(OrdinaryAgentQualificationAttestation),
+        ),
         activation_record_versions=(_model_schema_version(OrdinaryAgentDeliveryActivationRecord),),
         activation_event_versions=(_model_schema_version(OrdinaryAgentDeliveryActivationEvent),),
         recovery_versions=(1,) if activation_recovery_registered else (),
