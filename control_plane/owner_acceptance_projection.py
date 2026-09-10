@@ -35,6 +35,7 @@ GitHubApiRequest = Callable[..., object]
 GitHubAppTokenProvider = Callable[[str, str], GitHubAppInstallationToken]
 OwnerAcceptanceEventPersistenceOutcome = Literal["absent", "unknown"]
 OWNER_ACCEPTANCE_WORKBENCH_PATH = "/ui/engineering/owner-acceptance"
+OWNER_REVIEW_PATH = "/ui/owner-review"
 logger = logging.getLogger(__name__)
 
 
@@ -372,7 +373,7 @@ def project_owner_acceptance_decision(
     api_request: GitHubApiRequest = github_api_request,
 ) -> AdvisoryCheckProjectionResult:
     external_id = owner_acceptance_projection_sha256(decision)
-    details_url = owner_acceptance_workbench_url(
+    details_url = owner_review_url(
         public_origin=public_origin,
         target=target,
     )
@@ -386,7 +387,11 @@ def project_owner_acceptance_decision(
             external_id=external_id,
             details_url=details_url,
             title=f"Owner acceptance: {decision.status.replace('_', ' ')}",
-            summary=_summary(decision),
+            summary=_with_engineering_details(
+                _summary(decision),
+                public_origin=public_origin,
+                target=target,
+            ),
             check_status=check_status,
             conclusion=conclusion,
         ),
@@ -403,7 +408,7 @@ def project_owner_acceptance_update_in_progress(
     installation_token: GitHubAppInstallationToken,
     api_request: GitHubApiRequest = github_api_request,
 ) -> AdvisoryCheckProjectionResult:
-    details_url = owner_acceptance_workbench_url(
+    details_url = owner_review_url(
         public_origin=public_origin,
         target=target,
     )
@@ -419,11 +424,15 @@ def project_owner_acceptance_update_in_progress(
             ),
             details_url=details_url,
             title="Owner acceptance: updating decision",
-            summary=(
-                "Launchplane is updating the authoritative Owner-review decision. "
-                "GitHub success is intentionally withheld until the current decision "
-                "is projected. Reconcile from the Launchplane Owner-review workbench "
-                "if this check remains in progress."
+            summary=_with_engineering_details(
+                (
+                    "Launchplane is updating the authoritative Owner-review decision. "
+                    "GitHub success is intentionally withheld until the current decision "
+                    "is projected. Use the Engineering details link if this check "
+                    "remains in progress."
+                ),
+                public_origin=public_origin,
+                target=target,
             ),
             check_status="in_progress",
             conclusion=None,
@@ -441,7 +450,7 @@ def project_owner_acceptance_reconciliation_required(
     installation_token: GitHubAppInstallationToken,
     api_request: GitHubApiRequest = github_api_request,
 ) -> AdvisoryCheckProjectionResult:
-    details_url = owner_acceptance_workbench_url(
+    details_url = owner_review_url(
         public_origin=public_origin,
         target=target,
     )
@@ -457,10 +466,14 @@ def project_owner_acceptance_reconciliation_required(
             ),
             details_url=details_url,
             title="Owner acceptance: reconciliation required",
-            summary=(
-                "Launchplane could not confirm the final authoritative Owner-review "
-                "projection. Reconcile from the Launchplane Owner-review workbench "
-                "before relying on this pull request state."
+            summary=_with_engineering_details(
+                (
+                    "Launchplane could not confirm the final authoritative Owner-review "
+                    "projection. Use the Engineering details link before relying on "
+                    "this pull request state."
+                ),
+                public_origin=public_origin,
+                target=target,
             ),
             conclusion="action_required",
         ),
@@ -478,7 +491,7 @@ def project_owner_acceptance_event_write_failure(
     installation_token: GitHubAppInstallationToken,
     api_request: GitHubApiRequest = github_api_request,
 ) -> AdvisoryCheckProjectionResult:
-    details_url = owner_acceptance_workbench_url(
+    details_url = owner_review_url(
         public_origin=public_origin,
         target=target,
     )
@@ -509,7 +522,11 @@ def project_owner_acceptance_event_write_failure(
             ),
             details_url=details_url,
             title=title,
-            summary=summary,
+            summary=_with_engineering_details(
+                summary,
+                public_origin=public_origin,
+                target=target,
+            ),
             conclusion="failure",
         ),
         installation_token=installation_token,
@@ -529,11 +546,52 @@ def owner_acceptance_workbench_url(
     )
 
 
+def owner_review_url(
+    *,
+    public_origin: str,
+    target: ChangeImpactTarget,
+) -> str:
+    return owner_review_reference_url(
+        public_origin=public_origin,
+        repository=target.repository,
+        pull_request_number=target.pull_request_number,
+    )
+
+
 def owner_acceptance_workbench_reference_url(
     *,
     public_origin: str,
     repository: str,
     pull_request_number: int,
+) -> str:
+    return _owner_acceptance_reference_url(
+        public_origin=public_origin,
+        repository=repository,
+        pull_request_number=pull_request_number,
+        path=OWNER_ACCEPTANCE_WORKBENCH_PATH,
+    )
+
+
+def owner_review_reference_url(
+    *,
+    public_origin: str,
+    repository: str,
+    pull_request_number: int,
+) -> str:
+    return _owner_acceptance_reference_url(
+        public_origin=public_origin,
+        repository=repository,
+        pull_request_number=pull_request_number,
+        path=OWNER_REVIEW_PATH,
+    )
+
+
+def _owner_acceptance_reference_url(
+    *,
+    public_origin: str,
+    repository: str,
+    pull_request_number: int,
+    path: str,
 ) -> str:
     origin = public_origin.strip()
     try:
@@ -568,7 +626,7 @@ def owner_acceptance_workbench_reference_url(
     if pull_request_number < 1:
         raise ValueError("Owner acceptance projection requires a positive pull request number.")
     return (
-        f"{origin.rstrip('/')}{OWNER_ACCEPTANCE_WORKBENCH_PATH}"
+        f"{origin.rstrip('/')}{path}"
         f"?repository={quote(repository, safe='')}&pull_request={pull_request_number}"
     )
 
@@ -582,6 +640,19 @@ def owner_acceptance_projection_sha256(decision: OwnerAcceptanceDecision) -> str
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
+
+
+def _with_engineering_details(
+    summary: str,
+    *,
+    public_origin: str,
+    target: ChangeImpactTarget,
+) -> str:
+    workbench_url = owner_acceptance_workbench_url(
+        public_origin=public_origin,
+        target=target,
+    )
+    return f"{summary}\n\n[Engineering details]({workbench_url})"
 
 
 def owner_acceptance_update_projection_sha256(

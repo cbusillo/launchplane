@@ -8,6 +8,7 @@ export type AppRoute =
       environment: string;
       view: EnvironmentView;
     }
+  | { kind: "owner-review" }
   | { kind: "engineering"; view: EngineeringView }
   | { kind: "not-found"; path: string };
 
@@ -55,6 +56,10 @@ export function engineeringPath(view: EngineeringView = "hub"): string {
   return view === "hub" ? basePath : `${basePath}/${view}`;
 }
 
+export function ownerReviewPath(): string {
+  return "/ui/owner-review";
+}
+
 export function engineeringViewLabel(view: EngineeringView): string {
   if (view === "work-graph") {
     return "Work graph";
@@ -91,6 +96,9 @@ export function parseAppRoute(pathname: string): AppRoute {
     normalizedPath === productIndexPath()
   ) {
     return { kind: "product-index" };
+  }
+  if (normalizedPath === ownerReviewPath()) {
+    return { kind: "owner-review" };
   }
   if (normalizedPath === engineeringPath()) {
     return { kind: "engineering", view: "hub" };

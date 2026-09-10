@@ -12,8 +12,9 @@ import type {
   MergeReadinessResult,
   MergeTrainControllerStatusResponse,
   MergeTrainPolicyTargetsResponse,
-  OwnerAcceptanceQueueResponse,
+  OwnerAcceptanceEvaluationResponse,
   OwnerAcceptanceProductDecision,
+  OwnerAcceptanceQueueResponse,
   ProductActionAvailability,
   ProductActivityReadModel,
   ProductEnvironmentConfigStatus,
@@ -3059,6 +3060,117 @@ export function ownerAcceptanceEvaluationForFixture(
     return legacyDecision as OwnerAcceptanceDecision;
   }
   return decision;
+}
+
+export function ownerReviewEvaluationForFixture(
+  fixture: DataFixtureMode,
+  afterBindingChange = false,
+  afterWrite = false,
+): OwnerAcceptanceEvaluationResponse {
+  const params = new URLSearchParams(window.location.search);
+  const scenario = params.get("scenario") ?? "single";
+  const viewer = params.get("viewer") ?? "owner";
+  const baseDecision = ownerAcceptanceEvaluationForFixture(fixture);
+  const firstBinding = _ownerAcceptanceBinding({
+    pull_request_number: 308,
+    binding_sha256: (afterBindingChange ? "d" : "a").repeat(64),
+    head_sha: (afterBindingChange ? "d" : "a").repeat(40),
+  });
+  const secondBinding = _ownerAcceptanceBinding({
+    pull_request_number: 308,
+    binding_sha256: "e".repeat(64),
+    head_sha: "a".repeat(40),
+    product: "example-store",
+    system: "storefront",
+    environment: "preview",
+  });
+  const withPreview = (binding: typeof firstBinding, suffix: string) => ({
+    ...binding,
+    preview: {
+      schema_version: 1,
+      preview_id: `preview-${suffix}`,
+      serving_generation_id: `generation-${suffix}`,
+      artifact_id: `artifact-${suffix}`,
+      manifest_fingerprint: "f".repeat(64),
+      artifact_image_digest: `sha256:${"1".repeat(64)}`,
+      context: `preview-${suffix}`,
+      preview_url: `https://${suffix}.preview.example.invalid/`,
+      runtime_identity: {
+        schema_version: 1,
+        product: binding.product,
+        context: `preview-${suffix}`,
+        instance: `preview-${suffix}`,
+        environment_kind: "preview",
+        artifact_id: `artifact-${suffix}`,
+        image_reference: `registry.example.invalid/${suffix}@sha256:${"1".repeat(64)}`,
+        source_git_ref: `refs/pull/${binding.pull_request_number}/head`,
+        release_tuple_id: `release-${suffix}`,
+        deployment_record_id: `deployment-${suffix}`,
+        preview_id: `preview-${suffix}`,
+        preview_generation_id: `generation-${suffix}`,
+        runtime_identity_sha256: "2".repeat(64),
+      },
+    },
+  });
+  const bindings = scenario === "multi"
+    ? [withPreview(firstBinding, "site"), withPreview(secondBinding, "store")]
+    : scenario === "missing-preview"
+      ? [firstBinding]
+      : [withPreview(firstBinding, afterBindingChange ? "site-updated" : "site")];
+  const unavailable = scenario === "stale" || scenario === "unavailable";
+  const products = scenario === "empty-unavailable" ? [] : bindings.map((binding, index) => ({
+    schema_version: 1,
+    product: binding.product,
+    system: binding.system,
+    action: binding.action,
+    environment: binding.environment,
+    status: unavailable ? (scenario === "stale" ? "stale" as const : "unavailable" as const) : scenario === "resolution" ? "changes_requested" as const : "pending" as const,
+    reason_code: unavailable ? (scenario === "stale" ? "acceptance_stale" as const : "preview_evidence_unavailable" as const) : scenario === "resolution" ? "changes_requested" as const : "acceptance_missing" as const,
+    binding,
+    current_event: scenario === "resolution" && index === 0
+      ? {
+          ..._ownerAcceptanceEvent("changes_requested", firstBinding),
+          binding,
+          reason: "Please revise the product behavior.",
+        }
+      : null,
+    admissible: false,
+    human_action_semantics: "none" as const,
+  }));
+  const decision: OwnerAcceptanceDecision = {
+    ...baseDecision,
+    status: scenario === "empty-unavailable" ? "unavailable" : unavailable ? (scenario === "stale" ? "stale" : "unavailable") : scenario === "resolution" ? "changes_requested" : "pending",
+    reason_code: scenario === "empty-unavailable" ? "change_impact_unavailable" : unavailable ? (scenario === "stale" ? "acceptance_stale" : "preview_evidence_unavailable") : scenario === "resolution" ? "changes_requested" : "acceptance_missing",
+    binding: products.length === 1 ? products[0].binding : null,
+    current_event: products.length === 1 ? products[0].current_event : null,
+    products,
+  };
+  return {
+    status: "ok",
+    trace_id: "fixture-owner-review",
+    decision,
+    viewer_capabilities: {
+      event_write_authorized: viewer !== "non-owner",
+      bindings: (scenario === "empty-unavailable" ? [] : bindings).map((binding, index) => {
+        const allowed = viewer !== "non-owner" && !unavailable;
+        const requestOnly = viewer === "mixed" && index === 1;
+        const acceptRemoved = scenario === "capability-transition" && afterWrite;
+        return {
+          schema_version: 1,
+          binding_sha256: binding.binding_sha256,
+          product: binding.product,
+          system: binding.system,
+          action: binding.action,
+          environment: binding.environment,
+          can_submit_event: allowed,
+          can_accept: allowed && !requestOnly && !acceptRemoved,
+          can_request_changes: allowed,
+          can_revoke: allowed && !requestOnly,
+          reason_code: allowed ? "current_product_owner" : "not_current_product_owner",
+        };
+      }),
+    },
+  };
 }
 
 export function governanceProjectionForFixture(

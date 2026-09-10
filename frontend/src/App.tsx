@@ -10,6 +10,10 @@ import {
 import { EngineeringOpsRoute } from "./EngineeringOps";
 import { ProductEnvironmentRoute } from "./EnvironmentRoute";
 import {
+  OwnerProductReviewRoute,
+  OwnerReviewShell,
+} from "./OwnerProductReviewRoute";
+import {
   LaunchplaneApiError,
   listProducts,
   logout,
@@ -153,7 +157,11 @@ export function App() {
   }, [authRefreshToken, fixtureMode]);
 
   useEffect(() => {
-    if (authState.status !== "signed_in" || route.kind === "engineering") {
+    if (
+      authState.status !== "signed_in" ||
+      route.kind === "engineering" ||
+      route.kind === "owner-review"
+    ) {
       setProductsResource(emptyResource());
       return;
     }
@@ -214,6 +222,10 @@ export function App() {
   }, []);
 
   const signOut = useCallback(async () => {
+    const signedOutDestination =
+      route.kind === "owner-review"
+        ? `${window.location.pathname}${window.location.search}`
+        : productIndexPath();
     setSigningOut(true);
     setSessionNotice("");
     try {
@@ -227,7 +239,7 @@ export function App() {
         traceId: "",
       });
       setProductsResource(emptyResource());
-      navigateTo(productIndexPath(), true);
+      navigateTo(signedOutDestination, true);
     } catch (error) {
       setSessionNotice(
         error instanceof Error
@@ -237,7 +249,7 @@ export function App() {
     } finally {
       setSigningOut(false);
     }
-  }, [fixtureMode]);
+  }, [fixtureMode, route.kind]);
 
   const selectedProduct = useMemo(() => {
     const productKey = routeProductKey(route);
@@ -252,9 +264,26 @@ export function App() {
   if (authState.status !== "signed_in") {
     return (
       <SessionGate
+        ownerReview={route.kind === "owner-review"}
         state={authState}
         onRetry={() => setAuthRefreshToken((current) => current + 1)}
       />
+    );
+  }
+
+  if (route.kind === "owner-review") {
+    return (
+      <OwnerReviewShell
+        identity={authState.identity}
+        notice={sessionNotice}
+        onDismissNotice={() => setSessionNotice("")}
+        onLogout={() => void signOut()}
+        onThemeChange={setTheme}
+        signingOut={signingOut}
+        theme={theme}
+      >
+        <OwnerProductReviewRoute fixtureMode={fixtureMode} />
+      </OwnerReviewShell>
     );
   }
 
@@ -316,9 +345,11 @@ export function App() {
 }
 
 function SessionGate({
+  ownerReview,
   state,
   onRetry,
 }: {
+  ownerReview: boolean;
   state: Exclude<AuthState, { status: "signed_in" }>;
   onRetry: () => void;
 }) {
@@ -356,20 +387,24 @@ function SessionGate({
             <ShieldCheck aria-hidden="true" />
           )}
         </div>
-        <p className="eyebrow">Operator access</p>
+        <p className="eyebrow">{ownerReview ? "Product review" : "Operator access"}</p>
         <h1 data-route-heading tabIndex={-1}>
           {checking
             ? "Verifying your session"
             : failed
               ? "Session verification failed"
-              : "Sign in to operate products"}
+              : ownerReview
+                ? "Sign in to review this change"
+                : "Sign in to operate products"}
         </h1>
         <p className="session-copy">
           {checking
             ? "Launchplane is checking the browser session before loading operational evidence."
             : failed
               ? state.error
-              : "GitHub authentication protects product evidence and operator actions."}
+              : ownerReview
+                ? "GitHub authentication protects this product review and returns you to the exact change."
+                : "GitHub authentication protects product evidence and operator actions."}
         </p>
         {failed && state.traceId ? <code className="trace-id">{state.traceId}</code> : null}
         {failed ? (
@@ -383,7 +418,9 @@ function SessionGate({
           </a>
         )}
         <p className="session-footnote">
-          Operational data is loaded only after the service confirms this session.
+          {ownerReview
+            ? "Review evidence is loaded only after the service confirms this session."
+            : "Operational data is loaded only after the service confirms this session."}
         </p>
       </section>
     </main>
