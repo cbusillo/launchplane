@@ -27,6 +27,7 @@ from control_plane.contracts.privileged_operation import (
     terminal_agent_principal_sha256,
 )
 from control_plane.contracts.ordinary_agent_activation import (
+    OrdinaryAgentDeliveryActivationDurationOption,
     OrdinaryAgentDeliveryActivationRevokeOption,
     OrdinaryAgentDeliveryActivationRevokeRequest,
     OrdinaryAgentDeliveryActivationSetupOption,
@@ -45,6 +46,7 @@ from control_plane.http_routes.support import ApiRouteRegistrar, ReadRouteDepend
 from control_plane.ordinary_agent_activation import (
     OrdinaryAgentDeliveryActivationPlanningError,
     list_ordinary_agent_delivery_activation_options,
+    ordinary_agent_delivery_activation_duration_options,
 )
 from control_plane.privileged_operation_registry import (
     PrivilegedOperationPlannerError,
@@ -263,6 +265,7 @@ class OrdinaryAgentDeliveryActivationOptionsResponse(BaseModel):
 
     status: Literal["ok"] = "ok"
     trace_id: str
+    duration_options: tuple[OrdinaryAgentDeliveryActivationDurationOption, ...]
     setup_options: tuple[OrdinaryAgentDeliveryActivationSetupOption, ...]
     revoke_options: tuple[OrdinaryAgentDeliveryActivationRevokeOption, ...]
 
@@ -518,8 +521,10 @@ def register_privileged_operation_routes(
             descriptor_id=descriptor_id,
         )
         try:
+            observed_at = datetime.now(timezone.utc)
             setup_options, revoke_options = list_ordinary_agent_delivery_activation_options(
-                record_store
+                record_store,
+                observed_at=observed_at,
             )
         except OrdinaryAgentDeliveryActivationPlanningError as error:
             raise dependencies.common.http_error(
@@ -530,6 +535,9 @@ def register_privileged_operation_routes(
             ) from error
         return OrdinaryAgentDeliveryActivationOptionsResponse(
             trace_id=trace_id,
+            duration_options=ordinary_agent_delivery_activation_duration_options(
+                observed_at=observed_at
+            ),
             setup_options=setup_options,
             revoke_options=revoke_options,
         )

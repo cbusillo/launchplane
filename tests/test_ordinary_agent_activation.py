@@ -30,6 +30,8 @@ from control_plane.contracts.privileged_operation import (
 from control_plane.contracts.repository_inventory import RepositoryInventoryRecord
 from control_plane.ordinary_agent_activation import (
     OrdinaryAgentDeliveryActivationPlanningError,
+    ordinary_agent_delivery_activation_duration_options,
+    plan_ordinary_agent_delivery_activation,
     resolve_ordinary_agent_delivery_activation_setup_source,
 )
 from control_plane.privileged_operation_service import (
@@ -124,6 +126,24 @@ class OrdinaryAgentDeliveryActivationContractTests(unittest.TestCase):
                 TypeAdapter(OrdinaryAgentDeliveryActivationRequest).validate_python(
                     {**payload, forbidden_field: value}
                 )
+
+    def test_server_duration_options_and_planner_enforce_thirty_day_ceiling(self) -> None:
+        observed_at = datetime(2026, 9, 10, 21, tzinfo=timezone.utc)
+        options = ordinary_agent_delivery_activation_duration_options(observed_at=observed_at)
+
+        self.assertEqual(options[0].activation_expires_at, "2026-09-10T22:00:00+00:00")
+        self.assertEqual(options[-1].activation_expires_at, "2026-10-10T21:00:00+00:00")
+        request = OrdinaryAgentDeliveryActivationSetupRequest(
+            policy_operation_id="privileged-operation-policy-package",
+            repository_inventory_record_id="repository-inventory-1001-r1",
+            activation_expires_at="2026-10-10T21:00:00.000001+00:00",
+            reason="Reject an activation beyond the server limit.",
+        )
+        with self.assertRaisesRegex(
+            OrdinaryAgentDeliveryActivationPlanningError,
+            "cannot exceed 30 days",
+        ):
+            plan_ordinary_agent_delivery_activation(object(), request, observed_at=observed_at)
 
     def test_record_digest_and_expired_predecessor_supersession_are_explicit(self) -> None:
         scope = _scope()

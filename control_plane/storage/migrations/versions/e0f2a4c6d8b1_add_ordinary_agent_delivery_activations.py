@@ -182,7 +182,6 @@ def upgrade() -> None:
         _ACTIVATIONS,
         [
             "repository_id",
-            "repository",
             "base_branch",
             "managed_set_id",
             "managed_rule_id",
@@ -196,7 +195,6 @@ def upgrade() -> None:
         _ACTIVATIONS,
         [
             "repository_id",
-            "repository",
             "base_branch",
             "managed_set_id",
             "managed_rule_id",

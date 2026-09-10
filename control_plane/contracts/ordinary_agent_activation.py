@@ -172,7 +172,7 @@ class OrdinaryAgentDeliveryActivationSetupOption(StrictFrozenActivationModel):
     repository_inventory_record_id: str
     scope: OrdinaryAgentDeliveryActivationScope
     predecessor: OrdinaryAgentDeliveryActivationReference | None = None
-    label: str = Field(min_length=1, max_length=400)
+    label: str = Field(min_length=1, max_length=600)
 
     @model_validator(mode="after")
     def _validate_option(self) -> "OrdinaryAgentDeliveryActivationSetupOption":
@@ -193,10 +193,28 @@ class OrdinaryAgentDeliveryActivationSetupOption(StrictFrozenActivationModel):
         return self
 
 
+class OrdinaryAgentDeliveryActivationDurationOption(StrictFrozenActivationModel):
+    duration_seconds: int = Field(ge=3600, le=2592000)
+    activation_expires_at: str
+    label: str = Field(min_length=1, max_length=80)
+
+    @model_validator(mode="after")
+    def _validate_option(self) -> "OrdinaryAgentDeliveryActivationDurationOption":
+        if self.duration_seconds not in {3600, 86400, 604800, 2592000}:
+            raise ValueError("duration_seconds is not an offered activation duration")
+        object.__setattr__(
+            self,
+            "activation_expires_at",
+            _timestamp(self.activation_expires_at, "activation_expires_at"),
+        )
+        object.__setattr__(self, "label", self.label.strip())
+        return self
+
+
 class OrdinaryAgentDeliveryActivationRevokeOption(StrictFrozenActivationModel):
     activation: OrdinaryAgentDeliveryActivationReference
     scope: OrdinaryAgentDeliveryActivationScope
-    label: str = Field(min_length=1, max_length=400)
+    label: str = Field(min_length=1, max_length=600)
 
     @model_validator(mode="after")
     def _validate_option(self) -> "OrdinaryAgentDeliveryActivationRevokeOption":

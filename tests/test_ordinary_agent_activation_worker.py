@@ -91,7 +91,14 @@ class OrdinaryAgentDeliveryActivationWorkerTests(unittest.TestCase):
     def test_worker_installs_qualification_only_then_executes_reviewed_terminal_revoke(
         self,
     ) -> None:
-        with TemporaryDirectory() as directory:
+        with (
+            TemporaryDirectory() as directory,
+            patch(
+                "control_plane.ordinary_agent_activation.datetime",
+                wraps=datetime,
+            ) as activation_datetime,
+        ):
+            activation_datetime.now.return_value = FIXED_NOW
             store = PostgresRecordStore(
                 database_url=_sqlite_database_url(Path(directory) / "launchplane.sqlite3")
             )

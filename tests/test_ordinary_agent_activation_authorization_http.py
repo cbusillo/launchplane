@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Iterator, cast
@@ -281,6 +282,31 @@ class OrdinaryAgentActivationAuthorizationHttpTests(unittest.IsolatedAsyncioTest
             ),
         )
         return app
+
+    async def test_activation_options_serve_server_clock_expiries(self) -> None:
+        policy = _policy(actions=(ORDINARY_AGENT_DELIVERY_ACTIVATION_READ_ACTION,))
+        with TemporaryDirectory() as directory:
+            app = self._app(
+                store=FilesystemRecordStore(Path(directory)),
+                policy=policy,
+            )
+            before = datetime.now(timezone.utc)
+            async with lifespan_client(app) as client:
+                response = await client.get(
+                    "/v1/privileged-operations/ordinary-agent-delivery-activation/options"
+                )
+            after = datetime.now(timezone.utc)
+
+        self.assertEqual(response.status_code, 200, response.text)
+        options = response.json()["duration_options"]
+        self.assertEqual(
+            [option["label"] for option in options], ["1 hour", "1 day", "7 days", "30 days"]
+        )
+        for option in options:
+            expiry = datetime.fromisoformat(option["activation_expires_at"])
+            duration = timedelta(seconds=option["duration_seconds"])
+            self.assertGreaterEqual(expiry, before + duration)
+            self.assertLessEqual(expiry, after + duration)
 
     async def test_exact_actions_allow_the_complete_human_lifecycle(self) -> None:
         policy = _policy(

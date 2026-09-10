@@ -13424,6 +13424,34 @@
         "title": "OrdinaryAgentConnectionView",
         "type": "object"
       },
+      "OrdinaryAgentDeliveryActivationDurationOption": {
+        "additionalProperties": false,
+        "properties": {
+          "activation_expires_at": {
+            "title": "Activation Expires At",
+            "type": "string"
+          },
+          "duration_seconds": {
+            "maximum": 2592000,
+            "minimum": 3600,
+            "title": "Duration Seconds",
+            "type": "integer"
+          },
+          "label": {
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Label",
+            "type": "string"
+          }
+        },
+        "required": [
+          "activation_expires_at",
+          "duration_seconds",
+          "label"
+        ],
+        "title": "OrdinaryAgentDeliveryActivationDurationOption",
+        "type": "object"
+      },
       "OrdinaryAgentDeliveryActivationExecutionEvidence": {
         "additionalProperties": false,
         "properties": {
@@ -13542,6 +13570,13 @@
       "OrdinaryAgentDeliveryActivationOptionsResponse": {
         "additionalProperties": false,
         "properties": {
+          "duration_options": {
+            "items": {
+              "$ref": "#/components/schemas/OrdinaryAgentDeliveryActivationDurationOption"
+            },
+            "title": "Duration Options",
+            "type": "array"
+          },
           "revoke_options": {
             "items": {
               "$ref": "#/components/schemas/OrdinaryAgentDeliveryActivationRevokeOption"
@@ -13568,6 +13603,7 @@
           }
         },
         "required": [
+          "duration_options",
           "revoke_options",
           "setup_options",
           "status",
@@ -13726,7 +13762,7 @@
             "$ref": "#/components/schemas/OrdinaryAgentDeliveryActivationReference"
           },
           "label": {
-            "maxLength": 400,
+            "maxLength": 600,
             "minLength": 1,
             "title": "Label",
             "type": "string"
@@ -13931,7 +13967,7 @@
         "additionalProperties": false,
         "properties": {
           "label": {
-            "maxLength": 400,
+            "maxLength": 600,
             "minLength": 1,
             "title": "Label",
             "type": "string"

@@ -49,6 +49,10 @@ class OrdinaryAgentDeliveryActivationPostgresTests(unittest.TestCase):
             )
             predicate = str(index["dialect_options"]["postgresql_where"]).lower()
             self.assertTrue(index["unique"])
+            self.assertEqual(
+                tuple(index["column_names"]),
+                ("repository_id", "base_branch", "managed_set_id", "managed_rule_id"),
+            )
             self.assertIn("revoked_at is null", predicate)
             self.assertIn("superseded_at is null", predicate)
             self.assertNotIn("now", predicate)
@@ -64,6 +68,13 @@ class OrdinaryAgentDeliveryActivationPostgresTests(unittest.TestCase):
                 operation_id="postgres-unique-setup-two",
                 installed_at="2026-09-10T20:01:00Z",
                 expires_at="2026-09-11T20:01:00Z",
+                scope=first.scope.model_copy(
+                    update={
+                        "target": first.scope.target.model_copy(
+                            update={"repository": "example/renamed-repository"}
+                        )
+                    }
+                ),
             )
             store.install_ordinary_agent_delivery_activation(
                 first,

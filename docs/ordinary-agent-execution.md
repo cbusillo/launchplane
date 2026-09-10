@@ -44,7 +44,10 @@ selected intent.
 The server-authored review names the project and branch, delivery expiry and
 remaining duration, checks-only starting behavior, and stop outcome. The UI
 labels the shorter plan deadline separately as `Approve by` and keeps digests
-and event provenance under collapsed technical details.
+and event provenance under collapsed technical details. Setup and stop choices
+include server-recorded preparation or installation times so same-project rows
+remain distinguishable without exposing rule IDs. Setup sends an absolute expiry
+offered by the server clock, and the planner enforces a maximum of 30 days.
 
 The first setup state is always desired `guarded` and effective
 `qualification_only`. That record has `authorizes_execution = false`; it creates

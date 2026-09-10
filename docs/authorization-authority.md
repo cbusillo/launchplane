@@ -515,9 +515,12 @@ terminal `revoked`. Replacing an expired guarded intent atomically supersedes th
 old projection, appends its event, and installs a new activation ID; a revoked
 predecessor stays unchanged. Recovery follows the append-only event bound to the
 setup or revoke operation, so later legitimate transitions do not erase the
-original result. The operator UI offers server-resolved targets and bounded
-duration/stop choices without requiring typed record IDs, digests, issue IDs, or
-free-form reasons.
+original result. Scope history and current-row uniqueness use the immutable
+repository ID, branch, managed set, and managed rule; the repository name remains
+display context and a rename cannot create a second current intent. The operator
+UI offers server-resolved targets and server-clock expiry choices from one hour
+through 30 days without requiring typed record IDs, digests, issue IDs, or
+free-form reasons. The planner rejects any setup expiry beyond 30 days.
 
 This descriptor makes no provider call, installs no authorization grant,
 registers no ordinary worker, derives no guarded readiness, and does not lift the

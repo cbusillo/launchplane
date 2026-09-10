@@ -167,6 +167,7 @@ test("activation UI reads server choices and submits their opaque references", a
         status: "ok",
         trace_id: "trace-activation",
         csrf_token: "csrf",
+        duration_options: [],
         setup_options: [],
         revoke_options: [],
         write_status: "written",
@@ -206,4 +207,5 @@ test("activation UI reads server choices and submits their opaque references", a
     "server-inventory-record",
   );
   assert.equal(body.request.predecessor, null);
+  assert.equal(body.request.activation_expires_at, "2026-09-11T12:00:00Z");
 });

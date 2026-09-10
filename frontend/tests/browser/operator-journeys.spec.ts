@@ -1942,6 +1942,47 @@ test.describe("operator journeys", () => {
     );
     diagnostics.assertClean();
   });
+
+  test("agent delivery setup submits the selected server expiry", async ({ page }) => {
+    let activationPlanRequest: {
+      request?: { activation_expires_at?: string };
+    } | null = null;
+    await page.route("**/v1/auth/session", async (route) => {
+      await route.fulfill({
+        json: { csrf_token: "fixture-activation-csrf" },
+      });
+    });
+    await page.route(
+      "**/v1/privileged-operations/ordinary-agent-delivery-activation/plans",
+      async (route) => {
+        activationPlanRequest = route.request().postDataJSON() as {
+          request?: { activation_expires_at?: string };
+        };
+        await route.fulfill({
+          json: {
+            status: "ok",
+            trace_id: "fixture-activation-plan",
+            write_status: "written",
+            record: {},
+            events: [],
+          },
+        });
+      },
+    );
+    await page.goto("/ui/engineering/privileged-operations?fixture=products");
+    await page.getByRole("button", { name: "Agent delivery" }).click();
+    await page
+      .getByRole("combobox", { name: "Project and branch" })
+      .selectOption({ index: 1 });
+    await page
+      .getByRole("combobox", { name: "Allow delivery for" })
+      .selectOption({ label: "7 days" });
+    await page.getByRole("button", { name: "Review setup" }).click();
+
+    await expect
+      .poll(() => activationPlanRequest?.request?.activation_expires_at)
+      .toBe("2026-08-29T16:00:00+00:00");
+  });
 });
 
 function monitorBrowser(

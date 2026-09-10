@@ -58,6 +58,10 @@ class OrdinaryAgentDeliveryActivationSchemaTests(unittest.TestCase):
             )
             predicate = str(current_index["dialect_options"]["sqlite_where"]).lower()
             self.assertEqual(
+                tuple(current_index["column_names"]),
+                ("repository_id", "base_branch", "managed_set_id", "managed_rule_id"),
+            )
+            self.assertEqual(
                 "".join(predicate.split()),
                 "revoked_atisnullandsuperseded_atisnull",
             )

@@ -2264,7 +2264,6 @@ class LaunchplaneOrdinaryAgentDeliveryActivationRow(Base):
         Index(
             "launchplane_ordinary_agent_activation_current_scope_uidx",
             "repository_id",
-            "repository",
             "base_branch",
             "managed_set_id",
             "managed_rule_id",
@@ -2275,7 +2274,6 @@ class LaunchplaneOrdinaryAgentDeliveryActivationRow(Base):
         Index(
             "launchplane_ordinary_agent_activation_scope_history_idx",
             "repository_id",
-            "repository",
             "base_branch",
             "managed_set_id",
             "managed_rule_id",
@@ -29807,8 +29805,6 @@ class PostgresRecordStore(HumanSessionStore):
         return (
             LaunchplaneOrdinaryAgentDeliveryActivationRow.repository_id
             == record.scope.target.repository_id,
-            LaunchplaneOrdinaryAgentDeliveryActivationRow.repository
-            == record.scope.target.repository,
             LaunchplaneOrdinaryAgentDeliveryActivationRow.base_branch
             == record.scope.target.base_branch,
             LaunchplaneOrdinaryAgentDeliveryActivationRow.managed_set_id
@@ -29828,7 +29824,6 @@ class PostgresRecordStore(HumanSessionStore):
                 "launchplane",
                 "ordinary-agent-delivery-activation",
                 str(scope.target.repository_id),
-                scope.target.repository,
                 scope.target.base_branch,
                 scope.managed_set_id,
                 scope.managed_rule_id,
@@ -30126,21 +30121,31 @@ class PostgresRecordStore(HumanSessionStore):
                         "Activation replacement requires an exact predecessor."
                     )
             else:
-                predecessor_row = next(
-                    (
-                        row
-                        for row in scope_rows
-                        if row.activation_id == predecessor_reference.activation_id
-                    ),
-                    None,
+                scope_records = tuple(
+                    (row, self._ordinary_agent_delivery_activation_from_row(row))
+                    for row in scope_rows
                 )
-                if predecessor_row is None:
+                if not scope_records:
                     raise OrdinaryAgentDeliveryActivationConflictError(
                         "Activation predecessor was not found in the exact scope."
                     )
-                stored_predecessor = self._ordinary_agent_delivery_activation_from_row(
-                    predecessor_row
+                newest_installed_at = max(
+                    datetime.fromisoformat(stored.installed_at) for _, stored in scope_records
                 )
+                newest = tuple(
+                    (row, stored)
+                    for row, stored in scope_records
+                    if datetime.fromisoformat(stored.installed_at) == newest_installed_at
+                )
+                if len(newest) != 1:
+                    raise OrdinaryAgentDeliveryActivationConflictError(
+                        "Activation history does not have one latest predecessor."
+                    )
+                predecessor_row, stored_predecessor = newest[0]
+                if predecessor_row.activation_id != predecessor_reference.activation_id:
+                    raise OrdinaryAgentDeliveryActivationConflictError(
+                        "Activation setup requires the exact latest predecessor."
+                    )
                 if (
                     predecessor_reference.revision != stored_predecessor.revision
                     or predecessor_reference.activation_sha256
@@ -30148,6 +30153,10 @@ class PostgresRecordStore(HumanSessionStore):
                 ):
                     raise OrdinaryAgentDeliveryActivationConflictError(
                         "Activation predecessor revision or digest changed."
+                    )
+                if datetime.fromisoformat(record.installed_at) <= newest_installed_at:
+                    raise OrdinaryAgentDeliveryActivationConflictError(
+                        "Activation setup must be installed after its latest predecessor."
                     )
                 if stored_predecessor.desired_state == "revoked":
                     if current_rows or predecessor_event is not None:

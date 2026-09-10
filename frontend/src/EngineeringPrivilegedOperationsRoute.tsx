@@ -238,7 +238,10 @@ function OrdinaryAgentDeliveryActivationComposer({
         const option = data.setup_options.find(
           (candidate) => candidate.policy_operation_id === selection,
         );
-        if (!option) return;
+        const duration = data.duration_options.find(
+          (candidate) => candidate.duration_seconds === durationSeconds,
+        );
+        if (!option || !duration) return;
         await planOrdinaryAgentDeliveryActivation({
           schema_version: 1,
           action: "setup",
@@ -246,9 +249,7 @@ function OrdinaryAgentDeliveryActivationComposer({
           repository_inventory_record_id:
             option.repository_inventory_record_id,
           predecessor: option.predecessor,
-          activation_expires_at: new Date(
-            Date.now() + durationSeconds * 1000,
-          ).toISOString(),
+          activation_expires_at: duration.activation_expires_at,
           reason: `Prepare qualification-only delivery for ${option.label}.`,
         });
         setMessage(
@@ -360,10 +361,14 @@ function OrdinaryAgentDeliveryActivationComposer({
                       setDurationSeconds(Number(event.target.value))
                     }
                   >
-                    <option value={60 * 60}>1 hour</option>
-                    <option value={24 * 60 * 60}>1 day</option>
-                    <option value={7 * 24 * 60 * 60}>7 days</option>
-                    <option value={30 * 24 * 60 * 60}>30 days</option>
+                    {data.duration_options.map((option) => (
+                      <option
+                        key={option.duration_seconds}
+                        value={option.duration_seconds}
+                      >
+                        {option.label}
+                      </option>
+                    ))}
                   </select>
                 </label>
               ) : null}
@@ -671,6 +676,28 @@ function activationOptionsFixture(): OrdinaryAgentDeliveryActivationOptionsRespo
   return {
     status: "ok",
     trace_id: "fixture-activation-options",
+    duration_options: [
+      {
+        duration_seconds: 3600,
+        activation_expires_at: "2026-08-22T17:00:00+00:00",
+        label: "1 hour",
+      },
+      {
+        duration_seconds: 86400,
+        activation_expires_at: "2026-08-23T16:00:00+00:00",
+        label: "1 day",
+      },
+      {
+        duration_seconds: 604800,
+        activation_expires_at: "2026-08-29T16:00:00+00:00",
+        label: "7 days",
+      },
+      {
+        duration_seconds: 2592000,
+        activation_expires_at: "2026-09-21T16:00:00+00:00",
+        label: "30 days",
+      },
+    ],
     setup_options: [
       {
         policy_operation_id:
@@ -678,7 +705,8 @@ function activationOptionsFixture(): OrdinaryAgentDeliveryActivationOptionsRespo
         repository_inventory_record_id: "repository-inventory-1001-r3",
         scope,
         predecessor: null,
-        label: "example/launchplane · main",
+        label:
+          "example/launchplane · main · prepared Aug 22, 2026 at 16:00:00 UTC",
       },
     ],
     revoke_options: [
@@ -690,7 +718,8 @@ function activationOptionsFixture(): OrdinaryAgentDeliveryActivationOptionsRespo
           activation_sha256: "3".repeat(64),
         },
         scope,
-        label: "example/launchplane · main",
+        label:
+          "example/launchplane · main · set up Aug 22, 2026 at 16:00:00 UTC · allowed until Aug 23, 2026 at 16:00:00 UTC",
       },
     ],
   };

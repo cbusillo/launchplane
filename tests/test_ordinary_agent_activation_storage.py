@@ -371,6 +371,168 @@ class OrdinaryAgentDeliveryActivationStorageTests(unittest.TestCase):
         )
         self.assertEqual(len(self.store.list_ordinary_agent_delivery_activation_records()), 2)
 
+    def test_repository_rename_does_not_create_a_second_current_scope(self) -> None:
+        first = _record(
+            operation_id="activation-before-repository-rename",
+            installed_at="2026-09-10T20:00:00Z",
+            expires_at="2026-09-11T20:00:00Z",
+        )
+        self.store.install_ordinary_agent_delivery_activation(
+            first,
+            _event(first, action="installed", source_operation_id=first.source_setup_operation_id),
+        )
+        renamed_scope = first.scope.model_copy(
+            update={
+                "target": first.scope.target.model_copy(
+                    update={"repository": "example/renamed-repository"}
+                )
+            }
+        )
+        renamed = _record(
+            operation_id="activation-after-repository-rename",
+            installed_at="2026-09-10T21:00:00Z",
+            expires_at="2026-09-11T21:00:00Z",
+            scope=renamed_scope,
+        )
+
+        with self.assertRaisesRegex(
+            OrdinaryAgentDeliveryActivationConflictError,
+            "exact predecessor",
+        ):
+            self.store.install_ordinary_agent_delivery_activation(
+                renamed,
+                _event(
+                    renamed,
+                    action="installed",
+                    source_operation_id=renamed.source_setup_operation_id,
+                ),
+            )
+
+        self.assertEqual(
+            self.store.list_ordinary_agent_delivery_activation_records(),
+            (first,),
+        )
+
+    def test_revoked_predecessor_rejects_setup_after_newer_history(self) -> None:
+        first = _record(
+            operation_id="activation-stale-predecessor-first",
+            installed_at="2026-09-10T20:00:00Z",
+            expires_at="2026-09-11T20:00:00Z",
+        )
+        self.store.install_ordinary_agent_delivery_activation(
+            first,
+            _event(first, action="installed", source_operation_id=first.source_setup_operation_id),
+        )
+        revoked_first = _revoked(first, occurred_at="2026-09-10T21:00:00Z")
+        self.store.revoke_ordinary_agent_delivery_activation(
+            revoked_first,
+            _event(
+                revoked_first,
+                action="revoked",
+                source_operation_id="activation-stale-predecessor-revoke-first",
+                previous=first,
+            ),
+        )
+        stale_reference = _reference(revoked_first)
+        stale = _record(
+            operation_id="activation-stale-predecessor-planned",
+            installed_at="2026-09-10T22:00:00Z",
+            expires_at="2026-09-11T22:00:00Z",
+            predecessor=stale_reference,
+        )
+        newer = _record(
+            operation_id="activation-stale-predecessor-newer",
+            installed_at="2026-09-10T22:01:00Z",
+            expires_at="2026-09-11T22:01:00Z",
+            predecessor=stale_reference,
+        )
+        self.store.install_ordinary_agent_delivery_activation(
+            newer,
+            _event(
+                newer,
+                action="installed",
+                source_operation_id=newer.source_setup_operation_id,
+            ),
+            predecessor=revoked_first,
+        )
+        revoked_newer = _revoked(newer, occurred_at="2026-09-10T22:02:00Z")
+        self.store.revoke_ordinary_agent_delivery_activation(
+            revoked_newer,
+            _event(
+                revoked_newer,
+                action="revoked",
+                source_operation_id="activation-stale-predecessor-revoke-newer",
+                previous=newer,
+            ),
+        )
+
+        with self.assertRaisesRegex(
+            OrdinaryAgentDeliveryActivationConflictError,
+            "exact latest predecessor",
+        ):
+            self.store.install_ordinary_agent_delivery_activation(
+                stale,
+                _event(
+                    stale,
+                    action="installed",
+                    source_operation_id=stale.source_setup_operation_id,
+                ),
+                predecessor=revoked_first,
+            )
+
+        self.assertEqual(
+            self.store.read_ordinary_agent_delivery_activation_record(newer.activation_id),
+            revoked_newer,
+        )
+        with self.assertRaises(FileNotFoundError):
+            self.store.read_ordinary_agent_delivery_activation_record(stale.activation_id)
+
+    def test_replacement_installed_at_must_be_newer_than_predecessor(self) -> None:
+        first = _record(
+            operation_id="activation-tied-predecessor-first",
+            installed_at="2026-09-10T20:00:00Z",
+            expires_at="2026-09-11T20:00:00Z",
+        )
+        self.store.install_ordinary_agent_delivery_activation(
+            first,
+            _event(first, action="installed", source_operation_id=first.source_setup_operation_id),
+        )
+        revoked = _revoked(first, occurred_at="2026-09-10T21:00:00Z")
+        self.store.revoke_ordinary_agent_delivery_activation(
+            revoked,
+            _event(
+                revoked,
+                action="revoked",
+                source_operation_id="activation-tied-predecessor-revoke",
+                previous=first,
+            ),
+        )
+        tied = _record(
+            operation_id="activation-tied-predecessor-replacement",
+            installed_at=first.installed_at,
+            expires_at="2026-09-12T20:00:00Z",
+            predecessor=_reference(revoked),
+        )
+
+        with self.assertRaisesRegex(
+            OrdinaryAgentDeliveryActivationConflictError,
+            "installed after its latest predecessor",
+        ):
+            self.store.install_ordinary_agent_delivery_activation(
+                tied,
+                _event(
+                    tied,
+                    action="installed",
+                    source_operation_id=tied.source_setup_operation_id,
+                ),
+                predecessor=revoked,
+            )
+
+        self.assertEqual(
+            self.store.list_ordinary_agent_delivery_activation_records(),
+            (revoked,),
+        )
+
     def test_event_failure_rolls_back_activation_projection(self) -> None:
         failing_store = _FailingActivationStore(database_url=self.database_url)
         self.addCleanup(failing_store.close)

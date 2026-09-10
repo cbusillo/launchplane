@@ -1380,6 +1380,12 @@ export type OrdinaryAgentConnectionView = {
     status: 'revoked';
 };
 
+export type OrdinaryAgentDeliveryActivationDurationOption = {
+    activation_expires_at: string;
+    duration_seconds: number;
+    label: string;
+};
+
 export type OrdinaryAgentDeliveryActivationExecutionEvidence = {
     action: 'setup' | 'revoke_activation';
     activation_id: string;
@@ -1397,6 +1403,7 @@ export type OrdinaryAgentDeliveryActivationExecutionEvidence = {
 };
 
 export type OrdinaryAgentDeliveryActivationOptionsResponse = {
+    duration_options: Array<OrdinaryAgentDeliveryActivationDurationOption>;
     revoke_options: Array<OrdinaryAgentDeliveryActivationRevokeOption>;
     setup_options: Array<OrdinaryAgentDeliveryActivationSetupOption>;
     status: 'ok';

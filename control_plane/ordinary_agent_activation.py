@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, cast
 
 from pydantic import BaseModel
@@ -16,6 +16,7 @@ from control_plane.contracts.authz_policy_record import (
 )
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.ordinary_agent_activation import (
+    OrdinaryAgentDeliveryActivationDurationOption,
     OrdinaryAgentDeliveryActivationRecord,
     OrdinaryAgentDeliveryActivationEvent,
     OrdinaryAgentDeliveryActivationReference,
@@ -62,10 +63,35 @@ from control_plane.storage.schema_invariants import RUNTIME_COMPATIBLE_ALEMBIC_R
 
 
 _ADMISSIBLE_POLICY_OPERATION_STATUSES = frozenset({"planned", "approved", "executing", "executed"})
+_ACTIVATION_DURATION_OPTIONS = (
+    (60 * 60, "1 hour"),
+    (24 * 60 * 60, "1 day"),
+    (7 * 24 * 60 * 60, "7 days"),
+    (30 * 24 * 60 * 60, "30 days"),
+)
+_MAX_ACTIVATION_DURATION = timedelta(days=30)
 
 
 class OrdinaryAgentDeliveryActivationPlanningError(ValueError):
     """Raised when referenced server-owned setup data does not resolve exactly."""
+
+
+def _same_activation_scope_identity(
+    left: OrdinaryAgentDeliveryActivationScope,
+    right: OrdinaryAgentDeliveryActivationScope,
+) -> bool:
+    return (
+        left.target.repository_id == right.target.repository_id
+        and left.target.base_branch == right.target.base_branch
+        and left.managed_set_id == right.managed_set_id
+        and left.managed_rule_id == right.managed_rule_id
+    )
+
+
+def _activation_option_timestamp(value: str) -> str:
+    parsed = datetime.fromisoformat(value).astimezone(timezone.utc)
+    fraction = f".{parsed.microsecond:06d}" if parsed.microsecond else ""
+    return f"{parsed.strftime('%b %d, %Y at %H:%M:%S')}{fraction} UTC"
 
 
 @dataclass(frozen=True, slots=True)
@@ -480,7 +506,9 @@ def _scope_predecessor(
     observed_at: datetime,
 ) -> OrdinaryAgentDeliveryActivationReference | None:
     matching = tuple(
-        record for record in _activation_records(record_store) if record.scope == scope
+        record
+        for record in _activation_records(record_store)
+        if _same_activation_scope_identity(record.scope, scope)
     )
     if not matching:
         if requested is not None:
@@ -521,7 +549,9 @@ def _available_scope_predecessor(
     observed_at: datetime,
 ) -> OrdinaryAgentDeliveryActivationReference | None:
     matching = tuple(
-        record for record in _activation_records(record_store) if record.scope == scope
+        record
+        for record in _activation_records(record_store)
+        if _same_activation_scope_identity(record.scope, scope)
     )
     if not matching:
         return None
@@ -586,6 +616,10 @@ def plan_ordinary_agent_delivery_activation(
         if expires_at <= now:
             raise OrdinaryAgentDeliveryActivationPlanningError(
                 "Activation setup expiry must be in the future."
+            )
+        if expires_at > now + _MAX_ACTIVATION_DURATION:
+            raise OrdinaryAgentDeliveryActivationPlanningError(
+                "Activation setup expiry cannot exceed 30 days."
             )
         source = resolve_ordinary_agent_delivery_activation_setup_source(
             record_store,
@@ -665,6 +699,20 @@ def plan_ordinary_agent_delivery_activation(
     )
 
 
+def ordinary_agent_delivery_activation_duration_options(
+    *, observed_at: datetime | None = None
+) -> tuple[OrdinaryAgentDeliveryActivationDurationOption, ...]:
+    now = (observed_at or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    return tuple(
+        OrdinaryAgentDeliveryActivationDurationOption(
+            duration_seconds=duration_seconds,
+            activation_expires_at=(now + timedelta(seconds=duration_seconds)).isoformat(),
+            label=label,
+        )
+        for duration_seconds, label in _ACTIVATION_DURATION_OPTIONS
+    )
+
+
 def list_ordinary_agent_delivery_activation_options(
     record_store: object,
     *,
@@ -734,7 +782,10 @@ def list_ordinary_agent_delivery_activation_options(
                 repository_inventory_record_id=current[0].record_id,
                 scope=scope,
                 predecessor=predecessor,
-                label=f"{scope.target.repository} · {scope.target.base_branch}",
+                label=(
+                    f"{scope.target.repository} · {scope.target.base_branch} · prepared "
+                    f"{_activation_option_timestamp(typed_operation.created_at)}"
+                ),
             )
         )
     revoke_options = tuple(
@@ -745,7 +796,11 @@ def list_ordinary_agent_delivery_activation_options(
                 activation_sha256=record.activation_sha256,
             ),
             scope=record.scope,
-            label=(f"{record.scope.target.repository} · {record.scope.target.base_branch}"),
+            label=(
+                f"{record.scope.target.repository} · {record.scope.target.base_branch} · set up "
+                f"{_activation_option_timestamp(record.installed_at)} · allowed until "
+                f"{_activation_option_timestamp(record.activation_expires_at)}"
+            ),
         )
         for record in _activation_records(record_store)
         if record.desired_state == "guarded"

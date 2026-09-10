@@ -799,7 +799,6 @@ ORDINARY_AGENT_ACTIVATION_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
         "launchplane_ordinary_agent_activation_current_scope_uidx",
         (
             "repository_id",
-            "repository",
             "base_branch",
             "managed_set_id",
             "managed_rule_id",
@@ -812,7 +811,6 @@ ORDINARY_AGENT_ACTIVATION_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
         "launchplane_ordinary_agent_activation_scope_history_idx",
         (
             "repository_id",
-            "repository",
             "base_branch",
             "managed_set_id",
             "managed_rule_id",
