@@ -8,15 +8,18 @@ from pathlib import Path
 import signal
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
+from typing import Any
 import unittest
 from unittest.mock import patch
 
 from click.testing import CliRunner
 
 from control_plane import secrets as control_plane_secrets
+from control_plane.authz_grant_service import execute_managed_authz_policy_reconcile
 from control_plane.cli import main
 from control_plane.contracts.authz_policy_record import (
     AuthzPolicyCompareWriteResult,
+    AuthzPolicySchemaWriteNotActivatedError,
     LaunchplaneAuthzPolicyRecord,
     authz_policy_sha256,
     build_authz_policy_record_id,
@@ -626,6 +629,77 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
                 for rule in active_records[0].policy.github_humans
             )
         )
+
+    def test_worker_keeps_explicit_v3_migration_apply_fenced(self) -> None:
+        apply_errors: list[Exception] = []
+
+        def capture_apply_fence(**kwargs: Any) -> Any:
+            try:
+                return execute_managed_authz_policy_reconcile(**kwargs)
+            except Exception as error:
+                apply_errors.append(error)
+                raise
+
+        with TemporaryDirectory() as directory:
+            store = self._store(directory)
+            try:
+                approval_policy = store.seed_authz_policy_if_absent(
+                    _policy_admin_record(include_same_approver_scoped_admin=True)
+                )
+                desired_policy = LaunchplaneAuthzPolicy.model_validate(
+                    {
+                        "schema_version": 3,
+                        "github_humans": [
+                            {
+                                "managed_set_id": "test.policy-operation",
+                                "managed_rule_id": "policy-operation-reader",
+                                "github_ids": [789],
+                                "roles": ["admin"],
+                                "products": ["launchplane"],
+                                "contexts": ["launchplane"],
+                                "actions": ["authz_policy_operation.read"],
+                            }
+                        ],
+                    }
+                )
+                operation_id = _prepare_approved_policy_operation(
+                    store,
+                    approval_policy=approval_policy,
+                    request=ManagedAuthzPolicySetProposalInput(
+                        managed_set_id="test.policy-operation",
+                        schema_migration="migrate_v2_to_v3",
+                        reason="Apply only after the schema-v3 write fence is activated.",
+                        desired_policy=desired_policy,
+                    ),
+                )
+
+                with patch(
+                    "control_plane.privileged_operation_worker.authz_grant_service."
+                    "execute_managed_authz_policy_reconcile",
+                    side_effect=capture_apply_fence,
+                ):
+                    completed = execute_approved_privileged_operations_once(
+                        record_store=store,
+                        now=lambda: FIXED_NOW,
+                    )
+
+                record = store.read_privileged_operation_record(operation_id)
+                active_records = store.list_authz_policy_records(status="active", limit=2)
+            finally:
+                store.close()
+
+        self.assertEqual([item.operation_id for item in completed], [operation_id])
+        self.assertEqual(record.status, "execution_failed")
+        self.assertIsInstance(record.request, ManagedAuthzPolicySetProposalInput)
+        assert isinstance(record.request, ManagedAuthzPolicySetProposalInput)
+        self.assertEqual(record.request.schema_migration, "migrate_v2_to_v3")
+        self.assertIsInstance(record.execution, ManagedAuthzPolicySetExecutionEvidence)
+        assert isinstance(record.execution, ManagedAuthzPolicySetExecutionEvidence)
+        self.assertEqual(record.execution.failure_code, "privileged_operation_execution_error")
+        self.assertFalse(record.execution.reconciliation_required)
+        self.assertEqual(len(apply_errors), 1)
+        self.assertIsInstance(apply_errors[0], AuthzPolicySchemaWriteNotActivatedError)
+        self.assertEqual(active_records, (approval_policy,))
 
     def test_worker_rejects_org_scoped_approver_as_continuity_admin(self) -> None:
         with TemporaryDirectory() as directory:
