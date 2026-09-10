@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import unittest
+from email.message import Message
+from urllib.error import HTTPError
 from contextlib import contextmanager
 from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
@@ -32,6 +34,7 @@ from control_plane.ordinary_agent_merge_train_executor import (
     OrdinaryAgentMergeTrainEffectExecutor,
     OrdinaryAgentEffectProofUnavailable,
     OrdinaryAgentEffectTerminal,
+    OrdinaryAgentEffectQuotaUnknown,
 )
 from tests.test_ordinary_agent_effect_lifecycle import effect_record
 
@@ -103,6 +106,53 @@ class OrdinaryAgentMergeTrainEffectExecutorTests(unittest.TestCase):
                     "observe" if proof_read else "terminal",
                 )
                 self.assertEqual(sum(request.method == "POST" for request in transport.requests), 1)
+
+    def test_quota_mutation_stays_unknown_even_when_reset_cannot_schedule_a_wait(self) -> None:
+        effect = CandidateHeadMergeEffect(
+            lineage=MergeTrainEffectLineage(
+                repository="example/repo", base_branch="main", batch_id="batch-one"
+            ),
+            candidate_ref="refs/heads/candidate",
+            rolling_parent_sha="a" * 40,
+            pull_request_number=7,
+            head_sha="b" * 40,
+        )
+        for status in (403, 429):
+            with self.subTest(status=status):
+                headers = Message()
+                if status == 403:
+                    headers["X-RateLimit-Remaining"] = "0"
+                    headers["X-RateLimit-Reset"] = "1"  # Clock-skewed or stale evidence.
+                cause = HTTPError("https://api.github.com/test", status, "quota", headers, None)
+                error = MergeTrainGitHubError("quota", status_code=status)
+                error.__cause__ = cause
+                record = effect_record(effects.CandidateHeadMergeCommand(effect=effect))
+                store = _dispatch_store(record)
+                transport = RecordingMergeTrainGitHubTransport(responses=(error,))
+                executor = OrdinaryAgentMergeTrainEffectExecutor(
+                    record=record,
+                    controller_fence=record.controller_fence,
+                    effect_store=store,
+                    custody_store=Mock(),
+                    secret_store=Mock(),
+                    transport_factory=lambda _: transport,
+                    monotonic=lambda: 0,
+                )
+                with (
+                    patch(
+                        "control_plane.ordinary_agent_merge_train_executor.ordinary_agent_provider_token_lease",
+                        _provider_lease,
+                    ),
+                    self.assertRaises(OrdinaryAgentEffectQuotaUnknown),
+                ):
+                    executor.merge_candidate_head(effect)
+                outcome = store.record_ordinary_semantic_outcome.call_args.kwargs["typed_outcome"]
+                self.assertEqual(outcome.kind, "unknown")
+                self.assertEqual(len(transport.requests), 1)
+                if status == 403:
+                    store.record_provider_wait.assert_not_called()
+                else:
+                    store.record_provider_wait.assert_called_once()
 
     def test_comment_dispatch_body_can_be_reconciled_after_response_loss(self) -> None:
         effect = StackChildCommentEffect(

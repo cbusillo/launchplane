@@ -621,6 +621,7 @@ class OrdinaryAgentSnapshotStore(Protocol):
         custody_attempt_id: str,
         reason_code: Literal[
             "provider_wait",
+            "provider_attempt_deadline",
             "provider_incomplete",
             "provider_transport",
             "snapshot_query_cost_exceeded",

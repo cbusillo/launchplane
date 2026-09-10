@@ -14,8 +14,10 @@ from control_plane.merge_train_github import UrllibMergeTrainGitHubTransport
 from control_plane.ordinary_agent_provider_wait import call_with_provider_wait_observation
 from control_plane.ordinary_agent_provider_wait import observe_graphql_provider_wait
 from control_plane.ordinary_agent_provider_wait import observe_provider_wait_error
+from control_plane.ordinary_agent_provider_wait import provider_error_is_quota_limited
 from control_plane.ordinary_agent_provider_wait import provider_wait_observation_from_exception
 from control_plane.ordinary_agent_provider_wait import provider_wait_observation_from_graphql
+from control_plane.ordinary_agent_provider_wait import provider_wait_observation_from_headers
 from control_plane.workflows.launchplane import github_api_request
 
 
@@ -38,7 +40,99 @@ def _http_error(status: int, **headers: str) -> HTTPError:
     )
 
 
+class _Response:
+    def __init__(self, payload: bytes, headers: Message) -> None:
+        self.payload = payload
+        self.headers = headers
+
+    def __enter__(self) -> _Response:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return self.payload
+
+
 class OrdinaryAgentProviderWaitTests(unittest.TestCase):
+    def test_real_transport_observes_only_normalized_quota_headers(self) -> None:
+        reset = int((NOW + timedelta(hours=2)).timestamp())
+        headers = Message()
+        headers["X-RateLimit-Remaining"] = "0"
+        headers["X-RateLimit-Reset"] = f" {reset} "
+        headers["X-OAuth-Scopes"] = "repo"
+        observed: list[dict[str, str]] = []
+        response = _Response(b'{"data": null}', headers)
+
+        with patch("control_plane.merge_train_github.urlopen", return_value=response):
+            payload = UrllibMergeTrainGitHubTransport(
+                token="secret-token",
+                response_headers_observer=lambda values: observed.append(dict(values)),
+            ).request(method="POST", path="/graphql", body={"query": "query { viewer { id } }"})
+
+        self.assertEqual(payload, {"data": None})
+        self.assertEqual(
+            observed,
+            [{"x-ratelimit-remaining": "0", "x-ratelimit-reset": str(reset)}],
+        )
+        observation = provider_wait_observation_from_headers(observed[0], utc_now=lambda: NOW)
+        self.assertIsNotNone(observation)
+        assert observation is not None
+        self.assertEqual(observation.retry_not_before, reset)
+
+    def test_success_observer_failure_preserves_both_http_entrypoint_responses(self) -> None:
+        headers = Message()
+        headers["Retry-After"] = "60"
+
+        def fail(_headers: object) -> None:
+            raise RuntimeError("observer unavailable")
+
+        with patch(
+            "control_plane.merge_train_github.urlopen",
+            return_value=_Response(b'{"ok": true}', headers),
+        ):
+            transport_payload = UrllibMergeTrainGitHubTransport(
+                token="secret-token", response_headers_observer=fail
+            ).request(method="GET", path="/repos/example/project")
+        with patch(
+            "control_plane.workflows.launchplane.urlopen",
+            return_value=_Response(b'{"ok": true}', headers),
+        ):
+            workflow_payload = github_api_request(
+                path="/installation/token",
+                token="secret-token",
+                response_headers_observer=fail,
+            )
+
+        self.assertEqual(transport_payload, {"ok": True})
+        self.assertEqual(workflow_payload, {"ok": True})
+
+    def test_quota_error_classifier_is_independent_of_schedulable_deadline(self) -> None:
+        past_reset = _http_error(
+            403,
+            x_ratelimit_remaining="0",
+            x_ratelimit_reset=str(int(NOW.timestamp()) - 1),
+        )
+        wrapped = RuntimeError("provider request failed")
+        wrapped.__cause__ = past_reset
+
+        self.assertTrue(provider_error_is_quota_limited(wrapped))
+        self.assertIsNone(provider_wait_observation_from_exception(wrapped, utc_now=lambda: NOW))
+        self.assertTrue(provider_error_is_quota_limited(_http_error(429)))
+        self.assertFalse(provider_error_is_quota_limited(_http_error(403)))
+
+    def test_error_path_preserves_original_http_cause_without_success_observation(self) -> None:
+        provider_error = _http_error(429, retry_after="60")
+        observer = Mock(side_effect=RuntimeError("observer unavailable"))
+        with patch("control_plane.merge_train_github.urlopen", side_effect=provider_error):
+            with self.assertRaises(MergeTrainGitHubError) as raised:
+                UrllibMergeTrainGitHubTransport(
+                    token="secret-token", response_headers_observer=observer
+                ).request(method="GET", path="/repos/example/project")
+        self.assertIs(raised.exception.__cause__, provider_error)
+        observer.assert_not_called()
+
     def test_graphql_observer_failure_does_not_disrupt_response_handling(self) -> None:
         writer = Mock()
         for clock in (lambda: datetime(2026, 1, 1), Mock(side_effect=RuntimeError("clock"))):
@@ -108,6 +202,22 @@ class OrdinaryAgentProviderWaitTests(unittest.TestCase):
         assert observation is not None
         self.assertEqual(observation.retry_not_before, reset)
         self.assertEqual(observation.classification, "primary_rate_limit")
+
+    def test_later_retry_after_wins_over_primary_reset(self) -> None:
+        reset = int((NOW + timedelta(minutes=5)).timestamp())
+        observation = provider_wait_observation_from_headers(
+            _http_error(
+                403,
+                x_ratelimit_remaining="0",
+                x_ratelimit_reset=str(reset),
+                retry_after="3600",
+            ).headers,
+            utc_now=lambda: NOW,
+        )
+        self.assertIsNotNone(observation)
+        assert observation is not None
+        self.assertEqual(observation.retry_not_before, int(NOW.timestamp()) + 3600)
+        self.assertEqual(observation.classification, "secondary_rate_limit")
 
     def test_retry_after_longer_than_one_hour_is_retained(self) -> None:
         observation = provider_wait_observation_from_exception(

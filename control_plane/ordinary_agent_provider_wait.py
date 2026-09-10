@@ -14,6 +14,7 @@ from control_plane.contracts.ordinary_agent_effect import (
     OrdinaryAgentProviderWaitObservation,
     OrdinaryAgentProviderWaitRecord,
 )
+from control_plane.github_response_headers import normalized_github_quota_response_headers
 
 
 SECONDARY_RATE_LIMIT_FALLBACK_SECONDS = 60
@@ -39,27 +40,83 @@ def provider_wait_observation_from_exception(
     utc_now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
 ) -> OrdinaryAgentProviderWaitObservation | None:
     """Read explicit HTTP error causes; implicit unrelated exception contexts are ignored."""
+    return _latest_observation(
+        _provider_wait_observations_from_exception(
+            error,
+            now=_utc_datetime(utc_now()),
+        )
+    )
+
+
+def provider_wait_observation_from_headers(
+    headers: object,
+    *,
+    utc_now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+) -> OrdinaryAgentProviderWaitObservation | None:
+    """Parse a schedulable primary or secondary wait from quota response headers."""
+    return _latest_observation(
+        _provider_wait_observations_from_headers(
+            headers,
+            now=_utc_datetime(utc_now()),
+        )
+    )
+
+
+def _provider_wait_observations_from_headers(
+    headers: object,
+    *,
+    now: datetime,
+) -> tuple[OrdinaryAgentProviderWaitObservation, ...]:
+    normalized = normalized_github_quota_response_headers(headers)
+    remaining = _header(normalized, "x-ratelimit-remaining")
+    reset = _future_epoch(_header(normalized, "x-ratelimit-reset"), now=now)
+    observations: list[OrdinaryAgentProviderWaitObservation] = []
+    if remaining is not None and remaining.strip() == "0" and reset is not None:
+        observations.append(
+            OrdinaryAgentProviderWaitObservation(
+                retry_not_before=reset,
+                classification="primary_rate_limit",
+            )
+        )
+    retry_not_before = _retry_after_epoch(_header(normalized, "retry-after"), now=now)
+    if retry_not_before is not None:
+        observations.append(
+            OrdinaryAgentProviderWaitObservation(
+                retry_not_before=retry_not_before,
+                classification="secondary_rate_limit",
+            )
+        )
+    return tuple(observations)
+
+
+def provider_error_is_quota_limited(error: BaseException) -> bool:
+    """Classify quota-shaped 403/429 errors without requiring a future deadline."""
     http_error = _chained_http_error(error)
     if http_error is None or http_error.code not in {403, 429}:
-        return None
-    now = _utc_datetime(utc_now())
-    headers = http_error.headers
-    remaining = _header(headers, "x-ratelimit-remaining")
-    reset = _future_epoch(_header(headers, "x-ratelimit-reset"), now=now)
-    if remaining is not None and remaining.strip() == "0" and reset is not None:
-        return OrdinaryAgentProviderWaitObservation(
-            retry_not_before=reset,
-            classification="primary_rate_limit",
-        )
-    retry_not_before = _retry_after_epoch(_header(headers, "retry-after"), now=now)
-    if retry_not_before is not None:
-        return OrdinaryAgentProviderWaitObservation(
-            retry_not_before=retry_not_before,
-            classification="secondary_rate_limit",
-        )
+        return False
     if http_error.code == 429:
-        return _secondary_fallback(now=now)
-    return None
+        return True
+    headers = normalized_github_quota_response_headers(http_error.headers)
+    remaining = _header(headers, "x-ratelimit-remaining")
+    return (remaining is not None and remaining.strip() == "0") or "retry-after" in headers
+
+
+def _provider_wait_observations_from_exception(
+    error: BaseException,
+    *,
+    now: datetime,
+) -> tuple[OrdinaryAgentProviderWaitObservation, ...]:
+    http_error = _chained_http_error(error)
+    if http_error is None or http_error.code not in {403, 429}:
+        return ()
+    observations = list(_provider_wait_observations_from_headers(http_error.headers, now=now))
+    if http_error.code == 429 and not any(
+        observation.classification == "secondary_rate_limit" for observation in observations
+    ):
+        fallback = _secondary_fallback(now=now)
+        if fallback is not None:
+            observations.append(fallback)
+    return tuple(observations)
 
 
 def provider_wait_observation_from_graphql(
@@ -68,24 +125,65 @@ def provider_wait_observation_from_graphql(
     utc_now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
 ) -> OrdinaryAgentProviderWaitObservation | None:
     """Return quota evidence from an in-band GraphQL envelope without counting cost."""
+    return _latest_observation(
+        _provider_wait_observations_from_graphql(
+            payload,
+            now=_utc_datetime(utc_now()),
+        )
+    )
+
+
+def _provider_wait_observations_from_graphql(
+    payload: object,
+    *,
+    now: datetime,
+) -> tuple[OrdinaryAgentProviderWaitObservation, ...]:
     if not isinstance(payload, Mapping):
-        return None
-    now = _utc_datetime(utc_now())
+        return ()
+    observations: list[OrdinaryAgentProviderWaitObservation] = []
     data = payload.get("data")
     rate_limit = data.get("rateLimit") if isinstance(data, Mapping) else None
     if isinstance(rate_limit, Mapping) and _is_zero(rate_limit.get("remaining")):
         reset = _graphql_reset_epoch(rate_limit.get("resetAt"), now=now)
         if reset is not None:
-            return OrdinaryAgentProviderWaitObservation(
-                retry_not_before=reset,
-                classification="primary_rate_limit",
+            observations.append(
+                OrdinaryAgentProviderWaitObservation(
+                    retry_not_before=reset,
+                    classification="primary_rate_limit",
+                )
             )
     errors = payload.get("errors")
     if isinstance(errors, list) and any(
         isinstance(item, Mapping) and item.get("type") == "RATE_LIMITED" for item in errors
     ):
-        return _secondary_fallback(now=now)
-    return None
+        fallback = _secondary_fallback(now=now)
+        if fallback is not None:
+            observations.append(fallback)
+    return tuple(observations)
+
+
+def observe_provider_wait_headers(
+    headers: object,
+    *,
+    quota_key: OrdinaryAgentProviderQuotaKey,
+    record_provider_wait: OrdinaryAgentProviderWaitWriter,
+    utc_now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+) -> OrdinaryAgentProviderWaitObservation | None:
+    """Best-effort record every scoped wait carried by response headers."""
+    try:
+        observations = _provider_wait_observations_from_headers(
+            headers,
+            now=_utc_datetime(utc_now()),
+        )
+    except Exception:
+        return None
+    for observation in observations:
+        _record_wait(
+            quota_key=quota_key,
+            observation=observation,
+            record_provider_wait=record_provider_wait,
+        )
+    return _latest_observation(observations)
 
 
 def observe_provider_wait_error(
@@ -97,16 +195,19 @@ def observe_provider_wait_error(
 ) -> OrdinaryAgentProviderWaitObservation | None:
     """Best-effort record an HTTP wait while retaining typed evidence for the caller."""
     try:
-        observation = provider_wait_observation_from_exception(error, utc_now=utc_now)
+        observations = _provider_wait_observations_from_exception(
+            error,
+            now=_utc_datetime(utc_now()),
+        )
     except Exception:
         return None
-    if observation is not None:
+    for observation in observations:
         _record_wait(
             quota_key=quota_key,
             observation=observation,
             record_provider_wait=record_provider_wait,
         )
-    return observation
+    return _latest_observation(observations)
 
 
 def observe_graphql_provider_wait(
@@ -118,16 +219,19 @@ def observe_graphql_provider_wait(
 ) -> OrdinaryAgentProviderWaitObservation | None:
     """Best-effort record in-band GraphQL wait evidence and return the signal."""
     try:
-        observation = provider_wait_observation_from_graphql(payload, utc_now=utc_now)
+        observations = _provider_wait_observations_from_graphql(
+            payload,
+            now=_utc_datetime(utc_now()),
+        )
     except Exception:
         return None
-    if observation is not None:
+    for observation in observations:
         _record_wait(
             quota_key=quota_key,
             observation=observation,
             record_provider_wait=record_provider_wait,
         )
-    return observation
+    return _latest_observation(observations)
 
 
 def call_with_provider_wait_observation(
@@ -152,6 +256,12 @@ def call_with_provider_wait_observation(
             # Observer/clock failures cannot replace the original provider outcome.
             pass
         raise
+
+
+def _latest_observation(
+    observations: tuple[OrdinaryAgentProviderWaitObservation, ...],
+) -> OrdinaryAgentProviderWaitObservation | None:
+    return max(observations, key=lambda item: item.retry_not_before, default=None)
 
 
 def _record_wait(

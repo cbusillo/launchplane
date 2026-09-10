@@ -37,6 +37,8 @@ from control_plane.contracts.merge_train_structural_provenance import (
 from control_plane.github_payload import json_object
 from control_plane.github_payload import required_positive_int
 from control_plane.github_payload import required_string_text
+from control_plane.github_response_headers import GitHubResponseHeadersObserver
+from control_plane.github_response_headers import notify_github_quota_response_headers
 from control_plane.merge_train import MergeTrainCheckStatus
 from control_plane.merge_train import MergeTrainDryRunSnapshot
 from control_plane.merge_train import MergeTrainMergeableState
@@ -66,11 +68,18 @@ class MergeTrainGitHubTransport(Protocol):
 
 
 class UrllibMergeTrainGitHubTransport:
-    def __init__(self, *, token: str, api_base_url: str = "https://api.github.com") -> None:
+    def __init__(
+        self,
+        *,
+        token: str,
+        api_base_url: str = "https://api.github.com",
+        response_headers_observer: GitHubResponseHeadersObserver | None = None,
+    ) -> None:
         self.token = _required_value(token, "GitHub token is required.")
         self.api_base_url = _required_value(
             api_base_url, "GitHub API base URL is required."
         ).rstrip("/")
+        self.response_headers_observer = response_headers_observer
 
     def request(self, *, method: str, path: str, body: dict[str, object] | None = None) -> object:
         request_body = None
@@ -91,6 +100,10 @@ class UrllibMergeTrainGitHubTransport:
         try:
             with urlopen(request, timeout=15) as response:
                 response_text = response.read().decode("utf-8")
+                notify_github_quota_response_headers(
+                    self.response_headers_observer,
+                    getattr(response, "headers", None),
+                )
                 return json.loads(response_text) if response_text.strip() else None
         except HTTPError as error:
             raise _github_http_error(path=path, status_code=error.code, error=error) from error

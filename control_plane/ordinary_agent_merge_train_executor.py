@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from control_plane.ordinary_agent_quota_transport import OrdinaryAgentQuotaTransport
+from control_plane.ordinary_agent_provider_wait import provider_error_is_quota_limited
+
 from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
 import time
@@ -37,7 +40,6 @@ from control_plane.merge_train_github import (
     LegacyMergeTrainEffectExecutor,
     MergeTrainGitHubError,
     MergeTrainGitHubTransport,
-    UrllibMergeTrainGitHubTransport,
 )
 from control_plane.ordinary_agent_custody import (
     OrdinaryAgentCustodyAttemptStore,
@@ -68,6 +70,10 @@ class OrdinaryAgentEffectProofUnavailable(MergeTrainGitHubError):
     """Unreadable proof has no mutation rejection status and remains retryable."""
 
 
+class OrdinaryAgentEffectQuotaUnknown(MergeTrainGitHubError):
+    """A quota-shaped mutation response does not prove non-dispatch."""
+
+
 class _EffectTransport:
     """GET failures never prove a write was rejected.
 
@@ -85,6 +91,8 @@ class _EffectTransport:
         except MergeTrainGitHubError as error:
             if method == "GET":
                 raise OrdinaryAgentEffectProofUnavailable("effect_proof_read_failed") from error
+            if provider_error_is_quota_limited(error):
+                raise OrdinaryAgentEffectQuotaUnknown("effect_provider_quota_unknown") from error
             raise
 
 
@@ -110,9 +118,7 @@ class OrdinaryAgentMergeTrainEffectExecutor:
         self._custody_store = custody_store
         self._secret_store = secret_store
         self._api_request = api_request
-        self._transport_factory = transport_factory or (
-            lambda token: UrllibMergeTrainGitHubTransport(token=token)
-        )
+        self._transport_factory = transport_factory
         self._monotonic = monotonic
         self._utc_now = utc_now
 
@@ -329,6 +335,7 @@ class OrdinaryAgentMergeTrainEffectExecutor:
                 api_request=self._api_request,
                 monotonic=self._monotonic,
                 utc_now=self._utc_now,
+                quota_writer=self._effect_store.record_provider_wait,
                 before_token_mint=lambda app_id, installation_id: (
                     require_installation_provider_ready(
                         app_id=app_id,
@@ -344,7 +351,17 @@ class OrdinaryAgentMergeTrainEffectExecutor:
                 )
                 transport = DeadlineMergeTrainGitHubTransport(
                     transport=_EffectTransport(
-                        self._transport_factory(lease.installation_token.token)
+                        OrdinaryAgentQuotaTransport(
+                            token=lease.installation_token.token,
+                            installation_id=lease.installation_token.installation_id,
+                            writer=self._effect_store.record_provider_wait,
+                            transport=(
+                                self._transport_factory(lease.installation_token.token)
+                                if self._transport_factory is not None
+                                else None
+                            ),
+                            utc_now=self._utc_now,
+                        )
                     ),
                     work_deadline=started + ORDINARY_MUTATION_WORK_SECONDS,
                     token_deadline=self._monotonic()

@@ -794,12 +794,17 @@ remains visible in history. These storage and projection changes do not assemble
 or activate the ordinary worker, renew a finite admission, or resolve changed-base
 landing evidence.
 
-Provider quota observation preparation remains inactive until the worker and
-credential transports are assembled. The observation helper reads typed HTTP
-headers or GraphQL quota evidence without consuming response bodies or changing
-the provider outcome. Best-effort persistence cannot replace that outcome.
-Secondary waits share the secondary resource key; valid provider deadlines are
-never shortened. The existing quota guards report the latest applicable deadline
+Ordinary snapshot, mutation, landing, and reconciliation transports observe
+provider quota evidence. Credential discovery and mint requests use the App
+quota identity; token revocation uses the actual installation identity. Successful
+HTTP response headers are observed before JSON validation, including GraphQL
+rate-limit errors with null data. Observation does not add requests or double
+count costs, gate in-flight proof or revocation, or change the provider outcome.
+Best-effort persistence cannot replace that outcome. A quota-shaped mutation
+failure remains outcome-unknown even without a usable future reset deadline.
+Primary and secondary constraints are both retained when one response carries
+both; secondary waits share the secondary resource key across request types.
+Valid provider deadlines are never shortened. The existing quota guards report the latest applicable deadline
 through `retry_not_before`, including all known App and installation keys. The
 worker must persist that deadline as its next due time; adding the exception
 field alone does not implement scheduling. Installation identity must be known

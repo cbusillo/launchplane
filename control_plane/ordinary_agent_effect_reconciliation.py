@@ -10,10 +10,10 @@ from control_plane.contracts.ordinary_agent_session_lifecycle import (
     OrdinaryAgentFiniteRequestRecord,
 )
 from control_plane.github_app_identity import GitHubApiRequest
+from control_plane.ordinary_agent_quota_transport import OrdinaryAgentQuotaTransport
 from control_plane.merge_train_github import (
     MergeTrainGitHubTransport,
     MergeTrainGitHubError,
-    UrllibMergeTrainGitHubTransport,
 )
 from control_plane.ordinary_agent_custody import (
     OrdinaryAgentCustodyAttemptStore,
@@ -58,9 +58,7 @@ def reconcile_ordinary_effect_once(
     request: OrdinaryAgentFiniteRequestRecord,
     effect_id: str,
     api_request: GitHubApiRequest = github_api_request,
-    transport_factory: Callable[[str], MergeTrainGitHubTransport] = lambda token: (
-        UrllibMergeTrainGitHubTransport(token=token)
-    ),
+    transport_factory: Callable[[str], MergeTrainGitHubTransport] | None = None,
     monotonic: Callable[[], float] = time.monotonic,
     utc_now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
 ) -> effects.OrdinaryAgentEffectHistory:
@@ -91,6 +89,7 @@ def reconcile_ordinary_effect_once(
         api_request=api_request,
         monotonic=monotonic,
         utc_now=utc_now,
+        quota_writer=store.record_provider_wait,
         before_token_mint=lambda app_id, installation_id: require_installation_provider_ready(
             app_id=app_id,
             installation_id=installation_id,
@@ -104,7 +103,19 @@ def reconcile_ordinary_effect_once(
             lease.installation_token.expires_at.replace("Z", "+00:00")
         ).timestamp()
         transport = DeadlineMergeTrainGitHubTransport(
-            transport=_ReadOnlyTransport(transport_factory(lease.installation_token.token)),
+            transport=_ReadOnlyTransport(
+                OrdinaryAgentQuotaTransport(
+                    token=lease.installation_token.token,
+                    installation_id=lease.installation_token.installation_id,
+                    writer=store.record_provider_wait,
+                    transport=(
+                        transport_factory(lease.installation_token.token)
+                        if transport_factory is not None
+                        else None
+                    ),
+                    utc_now=utc_now,
+                )
+            ),
             work_deadline=started + ORDINARY_CANDIDATE_CHECK_WORK_SECONDS,
             token_deadline=anchor + max(0, expiry - epoch),
             monotonic=monotonic,

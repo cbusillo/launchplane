@@ -128,6 +128,19 @@ class OrdinaryAgentGitHubTransportTests(unittest.TestCase):
                 )
         self.assertEqual(transport.graphql_points, 12)
 
+    def test_graphql_quota_response_reports_wait_without_becoming_valid_evidence(self) -> None:
+        transport = DeadlineMergeTrainGitHubTransport(
+            transport=RecordingMergeTrainGitHubTransport(),
+            work_deadline=100,
+            token_deadline=100,
+            monotonic=lambda: 0,
+        )
+        with self.assertRaisesRegex(OrdinaryAgentProviderEvidenceError, "provider_wait"):
+            require_complete_graphql_data(
+                {"data": None, "errors": [{"type": "RATE_LIMITED"}]}, transport=transport
+            )
+        self.assertEqual(transport.graphql_points, 0)
+
     def test_connection_rejects_silent_truncation(self) -> None:
         with self.assertRaisesRegex(OrdinaryAgentProviderEvidenceError, "checks_truncated"):
             require_complete_connection(

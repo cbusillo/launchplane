@@ -19,10 +19,10 @@ from control_plane.contracts.ordinary_agent_effect import (
 )
 from control_plane.contracts.ordinary_agent_snapshot import OrdinaryAgentLandingEvidence
 from control_plane.github_app_identity import GitHubApiRequest
+from control_plane.ordinary_agent_quota_transport import OrdinaryAgentQuotaTransport
 from control_plane.merge_admission import GuardedMergeAdmission, MergeAdmissionDeniedError
 from control_plane.merge_train_github import (
     MergeTrainGitHubTransport,
-    UrllibMergeTrainGitHubTransport,
 )
 from control_plane.ordinary_agent_custody import (
     OrdinaryAgentCustodyAttemptStore,
@@ -77,9 +77,7 @@ def execute_fresh_ordinary_landing(
     ],
     checkpoint: Callable[[MergeTrainBatchLandingEntry], None],
     api_request: GitHubApiRequest = github_api_request,
-    transport_factory: Callable[[str], MergeTrainGitHubTransport] = (
-        lambda token: UrllibMergeTrainGitHubTransport(token=token)
-    ),
+    transport_factory: Callable[[str], MergeTrainGitHubTransport] | None = None,
     monotonic: Callable[[], float] = time.monotonic,
     utc_now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
 ) -> MergeTrainBatchLandingEntry:
@@ -103,6 +101,7 @@ def execute_fresh_ordinary_landing(
             api_request=api_request,
             monotonic=monotonic,
             utc_now=utc_now,
+            quota_writer=store.record_provider_wait,
             before_token_mint=lambda app_id, installation_id: require_installation_provider_ready(
                 app_id=app_id,
                 installation_id=installation_id,
@@ -121,7 +120,17 @@ def execute_fresh_ordinary_landing(
                     "Landing custody issuance did not stamp its preparation deadline"
                 )
             transport = DeadlineMergeTrainGitHubTransport(
-                transport=transport_factory(lease.installation_token.token),
+                transport=OrdinaryAgentQuotaTransport(
+                    token=lease.installation_token.token,
+                    installation_id=lease.installation_token.installation_id,
+                    writer=store.record_provider_wait,
+                    transport=(
+                        transport_factory(lease.installation_token.token)
+                        if transport_factory is not None
+                        else None
+                    ),
+                    utc_now=utc_now,
+                ),
                 work_deadline=anchor
                 + min(ORDINARY_MUTATION_WORK_SECONDS, max(0, preparation.work_expires_at - now)),
                 token_deadline=anchor

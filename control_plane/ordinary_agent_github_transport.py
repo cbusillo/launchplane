@@ -41,6 +41,11 @@ class OrdinaryAgentProviderEvidenceError(RuntimeError):
         self.reason_code = reason_code
 
 
+def ordinary_provider_resource_class(path: str) -> Literal["core", "graphql"]:
+    # Finite ordinary operations use REST core or GraphQL; none issue search requests.
+    return "graphql" if path == "/graphql" else "core"
+
+
 class DeadlineMergeTrainGitHubTransport:
     def __init__(
         self,
@@ -67,7 +72,7 @@ class DeadlineMergeTrainGitHubTransport:
         minimum_remaining_seconds: float = ORDINARY_PROVIDER_TRANSPORT_ALLOWANCE_SECONDS,
     ) -> object:
         self.require_remaining(minimum_remaining_seconds)
-        if path == "/graphql":
+        if ordinary_provider_resource_class(path) == "graphql":
             self.graphql_requests += 1
         else:
             self.rest_core_requests += 1
@@ -108,6 +113,14 @@ def require_complete_graphql_data(
         cost = rate_limit.get("cost") if isinstance(rate_limit, dict) else None
         if isinstance(cost, int) and not isinstance(cost, bool) and cost >= 0:
             transport.graphql_points += cost
+        if (
+            isinstance(errors, list)
+            and errors
+            and all(
+                isinstance(error, dict) and error.get("type") == "RATE_LIMITED" for error in errors
+            )
+        ):
+            raise OrdinaryAgentProviderEvidenceError("provider_wait")
         raise OrdinaryAgentProviderEvidenceError("graphql_field_error")
     if not isinstance(data, dict):
         raise OrdinaryAgentProviderEvidenceError("graphql_required_data_missing")

@@ -11,6 +11,7 @@ from control_plane.contracts.ordinary_agent_effect import (
     OrdinaryAgentControllerFence,
     OrdinaryAgentProviderQuotaKey,
     OrdinaryAgentProviderWaitRecord,
+    OrdinaryAgentProviderWaitObservation,
     OrdinaryAgentSnapshotStore,
     OrdinaryAgentSnapshotAttemptRecord,
 )
@@ -33,8 +34,11 @@ from control_plane.ordinary_agent_github_transport import (
     OrdinaryAgentProviderDeferred,
     OrdinaryAgentProviderEvidenceError,
     require_installation_provider_ready,
+    ordinary_provider_resource_class,
 )
 from control_plane.workflows.launchplane import github_api_request
+from control_plane.ordinary_agent_quota_transport import observed_ordinary_api_request
+from control_plane.ordinary_agent_provider_wait import OrdinaryAgentProviderWaitWriter
 from control_plane.ordinary_agent_session_lifecycle import OrdinaryAgentSessionAdmissionDenied
 
 
@@ -47,15 +51,33 @@ CandidateCheckReader = Callable[
 
 
 class _ProviderWaitStore(Protocol):
+    def record_provider_wait(
+        self,
+        *,
+        quota_key: OrdinaryAgentProviderQuotaKey,
+        observation: OrdinaryAgentProviderWaitObservation,
+    ) -> OrdinaryAgentProviderWaitRecord: ...
+
     def read_provider_wait(
         self, *, quota_key: OrdinaryAgentProviderQuotaKey
     ) -> OrdinaryAgentProviderWaitRecord | None: ...
 
 
 class _ApiRequestTransport:
-    def __init__(self, *, token: str, api_request: GitHubApiRequest) -> None:
+    def __init__(
+        self,
+        *,
+        token: str,
+        api_request: GitHubApiRequest,
+        installation_id: int,
+        writer: OrdinaryAgentProviderWaitWriter,
+        utc_now: Callable[[], datetime],
+    ) -> None:
         self._token = token
         self._api_request = api_request
+        self._installation_id = installation_id
+        self._writer = writer
+        self._utc_now = utc_now
 
     def request(self, *, method: str, path: str, body: dict[str, object] | None = None) -> object:
         values: dict[str, object] = {
@@ -65,7 +87,17 @@ class _ApiRequestTransport:
         }
         if body is not None:
             values["body"] = body
-        return self._api_request(**values)
+        return observed_ordinary_api_request(
+            api_request=self._api_request,
+            quota_key=OrdinaryAgentProviderQuotaKey(
+                authority_kind="installation",
+                authority_id=self._installation_id,
+                resource_class=ordinary_provider_resource_class(path),
+            ),
+            writer=self._writer,
+            utc_now=self._utc_now,
+            **values,
+        )
 
 
 def acquire_ordinary_agent_merge_train_snapshot(
@@ -183,6 +215,7 @@ def _acquire_read(
             api_request=api_request,
             monotonic=monotonic,
             utc_now=utc_now,
+            quota_writer=cast(_ProviderWaitStore, store).record_provider_wait,
             before_token_mint=lambda app_id, installation_id: require_installation_provider_ready(
                 app_id=app_id,
                 installation_id=installation_id,
@@ -199,6 +232,9 @@ def _acquire_read(
                 transport=_ApiRequestTransport(
                     token=lease.installation_token.token,
                     api_request=api_request,
+                    installation_id=lease.installation_token.installation_id,
+                    writer=cast(_ProviderWaitStore, store).record_provider_wait,
+                    utc_now=utc_now,
                 ),
                 work_deadline=started + work_seconds,
                 token_deadline=monotonic() + token_seconds,
@@ -228,12 +264,13 @@ def _acquire_read(
         if isinstance(error, OrdinaryAgentCustodyCleanupUnknown):
             reason = "cleanup_unknown"
         elif isinstance(error, OrdinaryAgentProviderDeferred):
-            reason = "provider_wait"
+            reason = error.reason_code
         elif isinstance(error, OrdinaryAgentProviderEvidenceError):
             reason = error.reason_code
         else:
             reason = "provider_transport"
         if reason not in {
+            "provider_attempt_deadline",
             "provider_wait",
             "provider_incomplete",
             "provider_transport",
