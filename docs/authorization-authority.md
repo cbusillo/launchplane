@@ -438,10 +438,14 @@ DB policy.
 
 ## Privileged-Operation Canary Actions
 
-The governed privileged-operation surface uses schema-v2 managed rules and
-requires exactly one match with both managed IDs. Legacy unmanaged action-empty
-rules cannot inherit any action. Code deployment introduces no policy rule or
-grant.
+The governed privileged-operation surface accepts schema-v2 and schema-v3
+managed rules for the existing caller identity types and requires exactly one
+match with both managed IDs. Durable authorizations captured under schema v2
+may continue under schema v3 only while that exact caller, action, target, and
+managed rule still match. Schema-v3 captures fail closed against schema v2.
+Legacy unmanaged action-empty rules cannot inherit any action. Code deployment
+introduces no policy rule or grant, and schema-v3 policy writes and activation
+remain separately fenced.
 
 Merge-train policy imports use a dedicated privileged-operation action family:
 `merge_train_policy_operation.propose`, `.read`, `.cancel`, `.approve`, and

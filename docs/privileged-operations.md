@@ -64,9 +64,11 @@ browser approval remains the only active approval transport.
 ## Authorization
 
 Privileged-operation routes do not use bare `LaunchplaneAuthzPolicy.allows`.
-They require active schema-v2 policy and exactly one matching managed rule with
-both `managed_set_id` and `managed_rule_id`. Unmanaged rules, including rules
-with an empty action list, cannot authorize the routes.
+They require active schema-v2 or schema-v3 policy and exactly one matching
+managed rule with both `managed_set_id` and `managed_rule_id` for an existing
+caller identity type. Unmanaged rules, including rules with an empty action
+list, cannot authorize the routes. This compatibility does not lift the
+schema-v3 policy write fence or activate ordinary-agent authority.
 
 The human routes use a named GitHub-human browser dependency that:
 
@@ -108,12 +110,13 @@ workflows, borrowed identities, and local-admin bearer credentials are not
 bootstrap paths.
 
 Policy-operation approval additionally requires that the signed-in approver is
-already authorized for `authz_policy_grant.write` by an active schema-v2 rule
-with the same immutable GitHub ID. Execution checks that immutable pre-existing
-administrator authority again, then requires the candidate policy to retain the
-applying administrator, at least one reachable strict immutable-ID
-GitHub-human administrator, and the effective administrator quorum. An
-approval-only rule cannot bootstrap its holder into policy administration.
+already authorized for `authz_policy_grant.write` by an active schema-v2 or
+schema-v3 rule with the same immutable GitHub ID. Execution checks that
+immutable pre-existing administrator authority again, then requires the
+candidate policy to retain the applying administrator, at least one reachable
+strict immutable-ID GitHub-human administrator, and the effective administrator
+quorum. An approval-only rule cannot bootstrap its holder into policy
+administration.
 
 Merge-train policy-operation approval uses the separate
 `merge_train_policy_operation.*` action family. Existing

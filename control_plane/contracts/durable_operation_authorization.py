@@ -90,7 +90,7 @@ class DurableOperationAuthorization(BaseModel):
     managed_rule_id: str
     policy_record_id: str
     policy_revision: int = Field(ge=1)
-    policy_schema_version: Literal[2]
+    policy_schema_version: Literal[2, 3]
     policy_sha256: str
     policy_source: str
     authorized_at: str

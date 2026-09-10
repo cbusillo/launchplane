@@ -55,6 +55,7 @@ from control_plane.privileged_operation_service import (
     PrivilegedOperationNotApprovableError,
 )
 from control_plane.privileged_operation_worker import (
+    _construct_approver_authorization,
     OrdinaryAgentDeliveryCleanupState,
     PRIVILEGED_OPERATION_EXECUTION_ROUTE,
     execute_approved_privileged_operations_once,
@@ -123,13 +124,14 @@ def _fernet_key(offset: int) -> str:
 def _policy_record(
     *,
     revision: int,
+    schema_version: int = 2,
     github_ids: tuple[int, ...] = (123,),
     logins: tuple[str, ...] = (),
     roles: tuple[str, ...] = (),
 ) -> LaunchplaneAuthzPolicyRecord:
     policy = LaunchplaneAuthzPolicy.model_validate(
         {
-            "schema_version": 2,
+            "schema_version": schema_version,
             "github_humans": [
                 {
                     "managed_set_id": "privileged-operations.secret-execution",
@@ -1568,6 +1570,7 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
         approval_policy = _policy_record(revision=3)
         active_policy = _policy_record(
             revision=9,
+            schema_version=3,
             logins=("renamed-operator",),
             roles=("read_only",),
         )
@@ -1631,6 +1634,27 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
             reservation.provider_target_key,
             privileged_operation_provider_target_key(current),
         )
+
+    def test_reconstructed_approver_authorization_records_active_v3_policy(self) -> None:
+        approval_policy = _policy_record(revision=3)
+        active_policy = _policy_record(revision=9, schema_version=3)
+        with TemporaryDirectory() as directory:
+            store = self._store(directory)
+            try:
+                operation_id, _secret_id = _prepare_approved_operation(
+                    store,
+                    approval_policy=approval_policy,
+                )
+                approved = store.read_privileged_operation_record(operation_id)
+            finally:
+                store.close()
+
+        authorization = _construct_approver_authorization(approved, active_policy)
+
+        self.assertEqual(authorization.policy_schema_version, 3)
+        self.assertEqual(authorization.policy_record_id, active_policy.record_id)
+        self.assertEqual(authorization.policy_revision, active_policy.revision)
+        self.assertEqual(authorization.policy_sha256, active_policy.policy_sha256)
 
     def test_stale_execution_recovers_completed_effect_by_operation_token(self) -> None:
         approval_policy = _policy_record(revision=3)

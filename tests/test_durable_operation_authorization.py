@@ -1,13 +1,28 @@
+import hashlib
 import unittest
 
+from pydantic import ValidationError
+
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
+from control_plane.contracts.durable_operation_authorization import (
+    DurableOperationAuthorization,
+)
 from control_plane.durable_operation_authorization import (
     DurableOperationAuthorizationCaptureError,
     capture_durable_operation_authorization,
     durable_operation_authorization_allows,
+    managed_github_id_action_allows,
+    managed_github_id_rule_allows,
+    require_single_managed_github_id_rule_identity,
 )
-from control_plane.service_auth import GitHubActionsIdentity, LaunchplaneAuthzPolicy
+from control_plane.service_auth import (
+    AuthorizationTarget,
+    GitHubActionsIdentity,
+    GitHubHumanIdentity,
+    LaunchplaneAuthzPolicy,
+)
 from tests.support.auth import _identity
+from tests.support.durable_operations import durable_operation_authorization_payload
 
 
 class DurableOperationAuthorizationTests(unittest.TestCase):
@@ -17,6 +32,7 @@ class DurableOperationAuthorizationTests(unittest.TestCase):
         managed_rule_id: str = "cm-testing-bootstrap",
         instances: tuple[str, ...] = ("testing",),
         include_unmanaged_overlap: bool = False,
+        schema_version: int = 2,
     ) -> LaunchplaneAuthzPolicy:
         rules: list[dict[str, object]] = [
             {
@@ -51,7 +67,7 @@ class DurableOperationAuthorizationTests(unittest.TestCase):
             )
         return LaunchplaneAuthzPolicy.model_validate(
             {
-                "schema_version": 2,
+                "schema_version": schema_version,
                 "github_actions": rules,
             }
         )
@@ -161,7 +177,7 @@ class DurableOperationAuthorizationTests(unittest.TestCase):
         )
 
         updated_policy_record = self._policy_record(
-            self._policy(include_unmanaged_overlap=True),
+            self._policy(include_unmanaged_overlap=True, schema_version=3),
             revision=42,
         )
         self.assertNotEqual(
@@ -178,7 +194,7 @@ class DurableOperationAuthorizationTests(unittest.TestCase):
             durable_operation_authorization_allows(
                 authorization=authorization,
                 policy_record=self._policy_record(
-                    self._policy(managed_rule_id="replacement-rule"),
+                    self._policy(managed_rule_id="replacement-rule", schema_version=3),
                     revision=43,
                 ),
             )
@@ -187,9 +203,181 @@ class DurableOperationAuthorizationTests(unittest.TestCase):
             durable_operation_authorization_allows(
                 authorization=authorization,
                 policy_record=self._policy_record(
-                    self._policy(instances=("prod",)),
+                    self._policy(instances=("prod",), schema_version=3),
                     revision=44,
                 ),
+            )
+        )
+
+    def test_v3_managed_github_id_helpers_preserve_immutable_id_requirements(self) -> None:
+        identity = GitHubHumanIdentity(
+            login="operator",
+            github_id=123,
+            name="",
+            email="",
+            organizations=frozenset(),
+            teams=frozenset(),
+            role="admin",
+        )
+        target = AuthorizationTarget(scope="global")
+        rule = {
+            "managed_set_id": "privileged-operations.secret-execution",
+            "managed_rule_id": "human-secret-approver",
+            "github_ids": [123],
+            "roles": ["admin"],
+            "products": ["launchplane"],
+            "contexts": ["launchplane"],
+            "actions": ["privileged_secret_operation.approve"],
+        }
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {"schema_version": 3, "github_humans": [rule]}
+        )
+
+        managed_identity = require_single_managed_github_id_rule_identity(
+            policy=policy,
+            identity=identity,
+            action="privileged_secret_operation.approve",
+            product="launchplane",
+            context="launchplane",
+            target=target,
+        )
+        self.assertEqual(managed_identity.managed_rule_id, "human-secret-approver")
+        self.assertTrue(
+            managed_github_id_rule_allows(
+                policy=policy,
+                github_id=123,
+                managed_set_id=managed_identity.managed_set_id,
+                managed_rule_id=managed_identity.managed_rule_id,
+                action="privileged_secret_operation.approve",
+                product="launchplane",
+                context="launchplane",
+                target=target,
+            )
+        )
+        self.assertTrue(
+            managed_github_id_action_allows(
+                policy=policy,
+                github_id=123,
+                action="privileged_secret_operation.approve",
+                product="launchplane",
+                context="launchplane",
+                target=target,
+            )
+        )
+
+        mutable_only_policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "schema_version": 3,
+                "github_humans": [{**rule, "github_ids": [], "logins": ["operator"]}],
+            }
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "immutable GitHub-ID selector",
+        ):
+            require_single_managed_github_id_rule_identity(
+                policy=mutable_only_policy,
+                identity=identity,
+                action="privileged_secret_operation.approve",
+                product="launchplane",
+                context="launchplane",
+                target=target,
+            )
+        self.assertFalse(
+            managed_github_id_rule_allows(
+                policy=mutable_only_policy,
+                github_id=123,
+                managed_set_id=managed_identity.managed_set_id,
+                managed_rule_id=managed_identity.managed_rule_id,
+                action="privileged_secret_operation.approve",
+                product="launchplane",
+                context="launchplane",
+                target=target,
+            )
+        )
+
+    def test_legacy_v2_authorization_serialization_remains_byte_compatible(self) -> None:
+        authorization = DurableOperationAuthorization.model_validate(
+            durable_operation_authorization_payload(
+                action="odoo_stable_bootstrap.execute",
+                managed_rule_id="cm-testing-bootstrap",
+            )
+        )
+
+        serialized = authorization.model_dump_json().encode("utf-8")
+
+        # Captured from the pre-compatibility schema-v1 authorization serializer.
+        self.assertEqual(
+            hashlib.sha256(serialized).hexdigest(),
+            "0cf6f4cb4f8139829a6ef8fe879422cd166452db1d4f0286f358435b7d0571a0",
+        )
+        self.assertEqual(
+            DurableOperationAuthorization.model_validate_json(serialized),
+            authorization,
+        )
+
+    def test_policy_schema_provenance_is_required_and_rejects_unsupported_versions(self) -> None:
+        payload = durable_operation_authorization_payload(
+            action="odoo_stable_bootstrap.execute",
+            managed_rule_id="cm-testing-bootstrap",
+        )
+        missing_version = dict(payload)
+        missing_version.pop("policy_schema_version")
+        with self.assertRaises(ValidationError):
+            DurableOperationAuthorization.model_validate(missing_version)
+
+        for unsupported_version in (1, 4):
+            with self.subTest(unsupported_version=unsupported_version):
+                with self.assertRaises(ValidationError):
+                    DurableOperationAuthorization.model_validate(
+                        {**payload, "policy_schema_version": unsupported_version}
+                    )
+
+        with self.assertRaisesRegex(
+            DurableOperationAuthorizationCaptureError,
+            "schema-v2 or schema-v3",
+        ):
+            capture_durable_operation_authorization(
+                identity=self._identity(),
+                action="odoo_stable_bootstrap.execute",
+                product="odoo-tenant-cm",
+                context="cm",
+                instances=("testing",),
+                policy_record=self._policy_record(LaunchplaneAuthzPolicy(schema_version=1)),
+                authorized_at="2026-07-23T03:31:00Z",
+            )
+
+    def test_v3_capture_records_active_policy_provenance_and_round_trips(self) -> None:
+        policy_record = self._policy_record(self._policy(schema_version=3), revision=51)
+
+        authorization = capture_durable_operation_authorization(
+            identity=self._identity(),
+            action="odoo_stable_bootstrap.execute",
+            product="odoo-tenant-cm",
+            context="cm",
+            instances=("testing",),
+            policy_record=policy_record,
+            authorized_at="2026-07-23T03:31:00Z",
+        )
+        round_tripped = DurableOperationAuthorization.model_validate_json(
+            authorization.model_dump_json()
+        )
+
+        self.assertEqual(round_tripped, authorization)
+        self.assertEqual(authorization.policy_schema_version, 3)
+        self.assertEqual(authorization.policy_record_id, policy_record.record_id)
+        self.assertEqual(authorization.policy_revision, policy_record.revision)
+        self.assertEqual(authorization.policy_sha256, policy_record.policy_sha256)
+        self.assertTrue(
+            durable_operation_authorization_allows(
+                authorization=round_tripped,
+                policy_record=policy_record,
+            )
+        )
+        self.assertFalse(
+            durable_operation_authorization_allows(
+                authorization=round_tripped,
+                policy_record=self._policy_record(self._policy(schema_version=2), revision=52),
             )
         )
 
