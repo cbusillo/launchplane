@@ -50,6 +50,11 @@ from control_plane.contracts.ordinary_agent_snapshot import (
     OrdinaryAgentLandingEvidence,
     OrdinaryAgentReadmissionObservation,
 )
+from control_plane.contracts.ordinary_agent_qualification import (
+    OrdinaryAgentQualificationAttestation,
+    OrdinaryAgentQualificationSetup,
+    OrdinaryRepositoryAdminObservation,
+)
 
 OrdinaryAgentProgressRecord: TypeAlias = (
     MergeTrainBatchCandidateRecord
@@ -669,6 +674,109 @@ class OrdinaryAgentReadCustodyReservation(StrictFrozenModel):
         }
 
 
+class OrdinaryAgentQualificationAttemptRecord(StrictFrozenModel):
+    """Schema-v2 controller-free qualification attempt.
+
+    It deliberately does not share the guarded v1 controller field: parsing a
+    qualification payload must never induce a merge-controller lookup.
+    """
+
+    schema_version: Literal[2] = 2
+    attempt_id: Identifier
+    request_id: Identifier
+    binding_revision: int = Field(ge=1)
+    scope_sha256: Digest
+    principal_id: Identifier
+    credential_id: Identifier
+    credential_version: int = Field(ge=1)
+    purpose: Literal["qualification"] = "qualification"
+    attempt_ordinal: int = Field(ge=1)
+    candidate_sha: Literal[""] = ""
+    setup: OrdinaryAgentQualificationSetup
+    custody_record_id: Identifier
+    custody_sha256: Digest
+    repository_inventory_record_id: Identifier
+    repository_inventory_revision: int = Field(ge=1)
+    repository_inventory_digest: Digest
+    github_app_id: int = Field(gt=0, le=2**63 - 1)
+    github_installation_id: int | None = Field(default=None, gt=0, le=2**63 - 1)
+    managed_secret_binding_id: Identifier
+    managed_secret_id: Identifier
+    managed_secret_version_id: Identifier
+    provider_inspection_sha256: Digest
+    installed_permission_ceiling_sha256: Digest
+    read_profile_sha256: Digest
+    state: Literal["reserved", "reading", "completed", "incomplete", "fenced", "exhausted"] = (
+        "reserved"
+    )
+    revision: int = Field(default=1, ge=1)
+    created_at: Epoch
+    updated_at: Epoch
+    custody_attempt_ids: tuple[str, ...] = ()
+    result: OrdinaryRepositoryAdminObservation | None = None
+    attestation: OrdinaryAgentQualificationAttestation | None = None
+    failure_counts: OrdinaryAgentProviderRequestCounts | None = None
+    reason_code: str | None = Field(default=None, max_length=128)
+    next_due_at: Epoch | None = None
+
+    @field_validator("custody_attempt_ids", mode="before")
+    @classmethod
+    def read_ids(cls, value: object) -> object:
+        return tuple(value) if isinstance(value, list) else value
+
+    @model_validator(mode="after")
+    def validate_success_pair(self) -> Self:
+        if self.attestation is not None and (
+            self.result is None or self.result.status != "qualified"
+        ):
+            raise ValueError("only a positive qualification result may have an attestation")
+        if (
+            self.result is not None
+            and self.result.status == "qualified"
+            and self.attestation is None
+        ):
+            raise ValueError("positive qualification result requires an attestation")
+        if self.attestation is not None and self.result != self.attestation.observation:
+            raise ValueError("qualification attestation must bind its exact observation")
+        return self
+
+
+OrdinaryAgentReadAttemptRecord: TypeAlias = (
+    OrdinaryAgentSnapshotAttemptRecord | OrdinaryAgentQualificationAttemptRecord
+)
+_READ_ATTEMPT_ADAPTER: TypeAdapter[OrdinaryAgentReadAttemptRecord] = TypeAdapter(
+    OrdinaryAgentReadAttemptRecord
+)
+
+
+def parse_ordinary_agent_read_attempt(value: object) -> OrdinaryAgentReadAttemptRecord:
+    """Read v1 guarded and v2 qualification payloads without adapting old bytes."""
+    return _READ_ATTEMPT_ADAPTER.validate_python(value)
+
+
+class OrdinaryAgentQualificationReadCustodyReservation(StrictFrozenModel):
+    read_attempt_id: Identifier
+    attempt_revision: int = Field(ge=1)
+    custody_attempt_id: Identifier
+    custody_ordinal: int = Field(ge=1)
+    purpose: Literal["qualification"] = "qualification"
+    idempotency_key: Identifier
+    candidate: OrdinaryAgentCustodyCandidate = Field(repr=False)
+
+    @property
+    def request_payload(self) -> dict[str, object]:
+        return {
+            "read_attempt_id": self.read_attempt_id,
+            "purpose": self.purpose,
+            "custody_ordinal": self.custody_ordinal,
+        }
+
+
+OrdinaryAgentAnyReadCustodyReservation: TypeAlias = (
+    OrdinaryAgentReadCustodyReservation | OrdinaryAgentQualificationReadCustodyReservation
+)
+
+
 class OrdinaryAgentSnapshotStore(Protocol):
     def reserve_ordinary_agent_snapshot_attempt(
         self,
@@ -725,6 +833,51 @@ class OrdinaryAgentSnapshotStore(Protocol):
         ],
         counts: OrdinaryAgentProviderRequestCounts,
     ) -> OrdinaryAgentSnapshotAttemptRecord: ...
+
+
+class OrdinaryAgentQualificationStore(Protocol):
+    def reserve_ordinary_agent_qualification_attempt(
+        self,
+        *,
+        claim_fence: OrdinaryAgentJobClaimFence,
+        setup: OrdinaryAgentQualificationSetup,
+    ) -> OrdinaryAgentQualificationAttemptRecord: ...
+
+    def reserve_ordinary_agent_qualification_custody_attempt(
+        self,
+        *,
+        claim_fence: OrdinaryAgentJobClaimFence,
+        attempt_id: str,
+        expected_attempt_revision: int,
+    ) -> OrdinaryAgentQualificationReadCustodyReservation: ...
+
+    def require_ordinary_agent_qualification_read_authority(
+        self, *, claim_fence: OrdinaryAgentJobClaimFence, attempt_id: str
+    ) -> None: ...
+
+    def record_ordinary_agent_qualification_result(
+        self,
+        *,
+        attempt_id: str,
+        custody_attempt_id: str,
+        result: OrdinaryRepositoryAdminObservation,
+        attestation: OrdinaryAgentQualificationAttestation | None,
+    ) -> OrdinaryAgentQualificationAttemptRecord: ...
+
+    def record_ordinary_agent_qualification_failure(
+        self,
+        *,
+        attempt_id: str,
+        custody_attempt_id: str,
+        reason_code: Literal[
+            "provider_wait",
+            "provider_attempt_deadline",
+            "provider_incomplete",
+            "provider_transport",
+            "cleanup_unknown",
+        ],
+        counts: OrdinaryAgentProviderRequestCounts,
+    ) -> OrdinaryAgentQualificationAttemptRecord: ...
 
 
 class OrdinaryAgentReadmissionStore(Protocol):

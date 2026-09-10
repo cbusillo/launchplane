@@ -53,6 +53,7 @@ from tests.test_every_code_feedback_resume_storage import (
     T0 as FEEDBACK_T0,
     T1 as FEEDBACK_T1,
 )
+from tests.test_ordinary_agent_qualification_storage import QualificationStorageScenario
 from control_plane.contracts.manager_preview_approval import (
     ManagerPreviewApprovalAuthorization,
     ManagerPreviewApprovalBinding,
@@ -3040,6 +3041,69 @@ def _owner_control_shadow_envelope(
 
 
 class RealPostgresStorageConcurrencyTests(unittest.TestCase):
+    def test_concurrent_qualification_first_attempt_charges_once_after_competing_rollback(
+        self,
+    ) -> None:
+        from control_plane.contracts.ordinary_agent_effect import (
+            OrdinaryAgentQualificationAttemptRecord,
+        )
+
+        with _store_for_fresh_head_database() as first_store:
+            scenario = QualificationStorageScenario(self, store=first_store)
+            claimed = scenario.claim(lease_seconds=120)
+            second_store = PostgresRecordStore(database_url=first_store.database_url)
+            charged_before_insert = threading.Event()
+            competing_at_lock = threading.Event()
+            release_failure = threading.Event()
+            original_payload = first_store._payload_dict
+            original_lock = second_store._lock_landing_authority
+
+            def fail_after_charge(record: Any) -> dict[str, object]:
+                if isinstance(record, OrdinaryAgentQualificationAttemptRecord):
+                    charged_before_insert.set()
+                    if not release_failure.wait(timeout=10):
+                        raise AssertionError("competing qualification reservation did not start")
+                    raise RuntimeError("injected qualification reservation failure")
+                return original_payload(record)
+
+            def observe_competing_lock(session: Any, lock_name: str) -> None:
+                competing_at_lock.set()
+                original_lock(session, lock_name)
+
+            def reserve(store: PostgresRecordStore) -> OrdinaryAgentQualificationAttemptRecord:
+                return store.reserve_ordinary_agent_qualification_attempt(
+                    claim_fence=claimed.claim_fence, setup=scenario.setup
+                )
+
+            try:
+                with (
+                    patch.object(first_store, "_payload_dict", side_effect=fail_after_charge),
+                    patch.object(
+                        second_store,
+                        "_lock_landing_authority",
+                        side_effect=observe_competing_lock,
+                    ),
+                    ThreadPoolExecutor(max_workers=2) as executor,
+                ):
+                    failing = executor.submit(reserve, first_store)
+                    self.assertTrue(charged_before_insert.wait(timeout=10))
+                    succeeding = executor.submit(reserve, second_store)
+                    self.assertTrue(competing_at_lock.wait(timeout=10))
+                    release_failure.set()
+                    with self.assertRaisesRegex(
+                        RuntimeError, "injected qualification reservation failure"
+                    ):
+                        failing.result(timeout=10)
+                    persisted = succeeding.result(timeout=10)
+
+                self.assertEqual(persisted.state, "reserved")
+                self.assertEqual(scenario.persisted_lease().budget.actions_used, 1)
+                self.assertEqual(reserve(first_store), persisted)
+                self.assertEqual(scenario.persisted_lease().budget.actions_used, 1)
+            finally:
+                release_failure.set()
+                second_store.close()
+
     def test_ordinary_agent_custody_fence_serializes_same_principal_repository(self) -> None:
         candidate = OrdinaryAgentCustodyCandidate(
             principal_id="agent_one",
@@ -7639,6 +7703,111 @@ class RealPostgresOrdinaryAgentSessionTests(unittest.TestCase):
             )
             preflight = next(lease for lease in replayed.leases if lease.action == "preflight")
             self.assertEqual(preflight.budget.pull_requests_used, 0)
+
+    def test_qualification_reservation_and_finish_share_request_then_claim_lock_order(
+        self,
+    ) -> None:
+        from control_plane.contracts.ordinary_agent_effect import (
+            OrdinaryAgentJobAttemptDisposition,
+            OrdinaryAgentJobView,
+        )
+
+        with _store_for_fresh_head_database() as store:
+            scenario = QualificationStorageScenario(
+                self, store=store, request_id="postgres-qualification-lock-order"
+            )
+            claimed = scenario.claim(lease_seconds=120)
+            reservation_store = PostgresRecordStore(database_url=store.database_url)
+            finish_store = PostgresRecordStore(database_url=store.database_url)
+            request_locked = threading.Event()
+            release_reservation = threading.Event()
+            finish_request_lock_attempted = threading.Event()
+            finish_completed = threading.Event()
+
+            def pause_reservation_after_request_lock(
+                _connection: object,
+                _cursor: object,
+                statement: str,
+                _parameters: object,
+                _context: object,
+                _executemany: bool,
+            ) -> None:
+                if (
+                    "launchplane_ordinary_agent_finite_requests" in statement
+                    and "FOR UPDATE" in statement
+                    and not request_locked.is_set()
+                ):
+                    request_locked.set()
+                    if not release_reservation.wait(timeout=10):
+                        raise TimeoutError("qualification reservation was not released")
+
+            def observe_finish_request_lock(
+                _connection: object,
+                _cursor: object,
+                statement: str,
+                _parameters: object,
+                _context: object,
+                _executemany: bool,
+            ) -> None:
+                if (
+                    "launchplane_ordinary_agent_finite_requests" in statement
+                    and "FOR UPDATE" in statement
+                ):
+                    finish_request_lock_attempted.set()
+
+            def finish_waiting() -> OrdinaryAgentJobView:
+                try:
+                    return finish_store.finish_ordinary_agent_job_attempt(
+                        claim_fence=claimed.claim_fence,
+                        disposition=OrdinaryAgentJobAttemptDisposition(
+                            status="waiting", reason_code="qualification_wait"
+                        ),
+                    )
+                finally:
+                    finish_completed.set()
+
+            event.listen(
+                reservation_store._engine,
+                "after_cursor_execute",
+                pause_reservation_after_request_lock,
+            )
+            event.listen(
+                finish_store._engine,
+                "before_cursor_execute",
+                observe_finish_request_lock,
+            )
+            executor = ThreadPoolExecutor(max_workers=2)
+            try:
+                reservation_future = executor.submit(
+                    reservation_store.reserve_ordinary_agent_qualification_attempt,
+                    claim_fence=claimed.claim_fence,
+                    setup=scenario.setup,
+                )
+                self.assertTrue(request_locked.wait(timeout=10))
+                finish_future = executor.submit(finish_waiting)
+                self.assertTrue(finish_request_lock_attempted.wait(timeout=10))
+                self.assertFalse(finish_completed.wait(timeout=0.2))
+                release_reservation.set()
+                attempt = reservation_future.result(timeout=10)
+                finished = finish_future.result(timeout=10)
+            finally:
+                release_reservation.set()
+                executor.shutdown(wait=True)
+                event.remove(
+                    reservation_store._engine,
+                    "after_cursor_execute",
+                    pause_reservation_after_request_lock,
+                )
+                event.remove(
+                    finish_store._engine,
+                    "before_cursor_execute",
+                    observe_finish_request_lock,
+                )
+                reservation_store.close()
+                finish_store.close()
+
+        self.assertEqual(attempt.state, "reserved")
+        self.assertEqual(finished.status, "waiting")
 
     def test_concurrent_admission_charges_one_budget_and_replay_is_free(self) -> None:
         from tests import test_ordinary_agent_session_storage as session_tests

@@ -343,8 +343,23 @@ Version-2 intent and scope identities use a fixed v2 domain plus the schema
 version and purpose, so the two purposes cannot share an identity. Qualification
 requires a `preflight` lease with a positive finite action allowance, charges
 zero PRs against that lease, and guarded delivery requires `guarded_merge`.
-Existing merge, snapshot, landing and effect paths refuse qualification until
-its separate read-only advancer is installed.
+Existing merge, snapshot, landing and effect paths refuse qualification. The
+separate qualification advancer is a dormant, direct-call-only source slice:
+it has no ingress, dispatcher registration, worker assembly, activation record,
+provider setup resolver, or production loop wiring.
+
+The dormant advancer reserves a schema-v2 controller-free read attempt and one
+read-only `merge_train_snapshot` custody lease. Its only provider observation is
+one `GET /repos/{repository}/collaborators?permission=admin&per_page=100&page=1`.
+It retains no collaborator list: exact ID plus casefolded login and literal
+admin permission produces an attestation; a changed login, conflicting ID,
+short-page absence, and full-page inconclusive result remain distinct terminal
+outcomes. Malformed or incomplete responses alone use the finite retry path.
+The first logical qualification attempt consumes one `preflight` action across
+all binding revisions; retries never recharge it. Current authority is required
+to reserve, mint, and read, while recording an already-issued response or cleanup
+uncertainty remains possible after expiry or revocation. A positive response is
+not complete or readiness-valid until its custody attempt has closed.
 
 Admission charges a guarded request's PR count once against the lease; effect
 reservations spend the action allowance. Existing-job checks do not spend
