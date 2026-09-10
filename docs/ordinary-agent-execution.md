@@ -41,6 +41,10 @@ installed schema and compiled handler/version support. The browser never asks th
 operator to search for or type policy, inventory, activation, rule, digest,
 issue, or pull-request IDs, and it derives the bounded audit reason from the
 selected intent.
+The server-authored review names the project and branch, delivery expiry and
+remaining duration, checks-only starting behavior, and stop outcome. The UI
+labels the shorter plan deadline separately as `Approve by` and keeps digests
+and event provenance under collapsed technical details.
 
 The first setup state is always desired `guarded` and effective
 `qualification_only`. That record has `authorizes_execution = false`; it creates

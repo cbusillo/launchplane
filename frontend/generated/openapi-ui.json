@@ -17929,7 +17929,8 @@
               "Managed-secret re-encryption review",
               "Managed authorization policy review",
               "Managed merge-train policy review",
-              "Ordinary-agent delivery activation review"
+              "Review agent delivery setup",
+              "Review stopping agent delivery"
             ],
             "title": "Title",
             "type": "string"

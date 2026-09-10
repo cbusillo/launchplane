@@ -51,6 +51,9 @@ from control_plane.authz_grant_service import (
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.ordinary_agent import OrdinaryAgentTarget
 from control_plane.contracts.ordinary_agent_activation import (
+    OrdinaryAgentDeliveryActivationReference,
+    OrdinaryAgentDeliveryActivationRevokeHumanEvidence,
+    OrdinaryAgentDeliveryActivationRevokeRequest,
     OrdinaryAgentDeliveryActivationScope,
     OrdinaryAgentDeliveryActivationSetupHumanEvidence,
     OrdinaryAgentDeliveryActivationSetupRequest,
@@ -439,6 +442,25 @@ class PrivilegedOperationContractTests(unittest.TestCase):
         self.assertFalse(any(review.authorizes_approval for review in reviews))
         self.assertFalse(any(review.persists_state for review in reviews))
         self.assertTrue(all(review.schema_version == 1 for review in reviews))
+        activation_review = next(
+            review
+            for review in reviews
+            if review.operation_class == "ordinary_agent_delivery_activation"
+        )
+        self.assertEqual(activation_review.title, "Review agent delivery setup")
+        self.assertIn("example/launchplane on main", activation_review.change.summary)
+        self.assertIn("Aug 23, 2026 at 20:00 UTC", activation_review.change.summary)
+        self.assertIn("23 hours 50 minutes remaining", activation_review.change.summary)
+        self.assertIn("checks only", activation_review.change.summary)
+        self.assertIn("already sent may still finish", activation_review.change.summary)
+        self.assertEqual(
+            activation_review.blast_radius.summary,
+            "example/launchplane on main; one agent delivery setup.",
+        )
+        self.assertEqual(
+            activation_review.lifecycle.expires_at,
+            "2026-08-22T20:30:00+00:00",
+        )
 
     def _ordinary_agent_activation_record(self) -> PrivilegedOperationRecord:
         scope = OrdinaryAgentDeliveryActivationScope(
@@ -524,6 +546,59 @@ class PrivilegedOperationContractTests(unittest.TestCase):
             updated_at="2026-08-22T20:00:00Z",
             expires_at="2026-08-22T20:30:00Z",
         )
+
+    def _ordinary_agent_activation_revoke_record(self) -> PrivilegedOperationRecord:
+        setup = self._ordinary_agent_activation_record()
+        assert isinstance(setup.evidence, OrdinaryAgentDeliveryActivationSetupHumanEvidence)
+        request = OrdinaryAgentDeliveryActivationRevokeRequest(
+            activation_id="ordinary-agent-delivery-activation-22222222222222222222222222222222",
+            expected_revision=1,
+            expected_activation_sha256="3" * 64,
+            reason="Stop agent delivery.",
+        )
+        evidence = OrdinaryAgentDeliveryActivationRevokeHumanEvidence(
+            scope=setup.evidence.scope,
+            activation=OrdinaryAgentDeliveryActivationReference(
+                activation_id=request.activation_id,
+                revision=request.expected_revision,
+                activation_sha256=request.expected_activation_sha256,
+            ),
+            source_setup_operation_id=setup.operation_id,
+            plan_digest="4" * 64,
+        )
+        return PrivilegedOperationRecord(
+            operation_id=build_privileged_operation_id_for_actor(
+                descriptor_id="ordinary-agent-delivery-activation",
+                actor=setup.requested_by,
+                source_event_id="activation-stop-1",
+            ),
+            descriptor_id="ordinary-agent-delivery-activation",
+            safety_class="policy_admin",
+            status="planned",
+            source_event_id="activation-stop-1",
+            requested_by=setup.requested_by,
+            request=request,
+            request_digest=privileged_operation_request_digest(request),
+            evidence=evidence,
+            evidence_digest=privileged_operation_evidence_digest(evidence),
+            created_at="2026-08-22T20:00:00Z",
+            updated_at="2026-08-22T20:00:00Z",
+            expires_at="2026-08-22T20:30:00Z",
+        )
+
+    def test_stopping_delivery_review_names_scope_and_plain_outcome(self) -> None:
+        record = self._ordinary_agent_activation_revoke_record()
+
+        review = privileged_operation_semantic_review(
+            record=record,
+            generated_at=datetime(2026, 8, 22, 20, 10, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(review.title, "Review stopping agent delivery")
+        self.assertIn("example/launchplane on main", review.change.summary)
+        self.assertIn("already sent may still finish", review.change.summary)
+        self.assertNotIn("managed set", review.change.summary.casefold())
+        self.assertNotIn("CAS", review.change.summary)
 
     def test_semantic_review_registry_coverage_fails_closed_on_descriptor_drift(self) -> None:
         with patch(

@@ -1054,7 +1054,8 @@ PrivilegedOperationSemanticReviewTitle = Literal[
     "Managed-secret re-encryption review",
     "Managed authorization policy review",
     "Managed merge-train policy review",
-    "Ordinary-agent delivery activation review",
+    "Review agent delivery setup",
+    "Review stopping agent delivery",
 ]
 PrivilegedOperationSemanticReviewMetricKind = Literal[
     "configured_secrets",
@@ -1315,40 +1316,46 @@ class PrivilegedOperationSemanticReview(BaseModel):
             "managed-secret-reencryption": (
                 "managed_secret_reencryption",
                 "secret_backed",
-                "Managed-secret re-encryption review",
                 "managed_secret_store",
                 "key_retained",
             ),
             "managed-authz-policy-set": (
                 "managed_authz_policy_set",
                 "policy_admin",
-                "Managed authorization policy review",
                 "authorization_policy",
                 "policy_cas",
             ),
             "managed-merge-train-policy-import": (
                 "managed_merge_train_policy_import",
                 "policy_admin",
-                "Managed merge-train policy review",
                 "merge_train_policy",
                 "policy_cas",
             ),
             "ordinary-agent-delivery-activation": (
                 "ordinary_agent_delivery_activation",
                 "policy_admin",
-                "Ordinary-agent delivery activation review",
                 "ordinary_agent_delivery_activation",
                 "activation_revoke",
+            ),
+        }
+        expected_titles = {
+            "managed-secret-reencryption": frozenset({"Managed-secret re-encryption review"}),
+            "managed-authz-policy-set": frozenset({"Managed authorization policy review"}),
+            "managed-merge-train-policy-import": frozenset({"Managed merge-train policy review"}),
+            "ordinary-agent-delivery-activation": frozenset(
+                {"Review agent delivery setup", "Review stopping agent delivery"}
             ),
         }
         actual_descriptor_fields = (
             self.operation_class,
             self.safety_class,
-            self.title,
             self.blast_radius.scope,
             self.rollback.rollback_class,
         )
-        if actual_descriptor_fields != expected_descriptor_fields[self.descriptor_id]:
+        if (
+            actual_descriptor_fields != expected_descriptor_fields[self.descriptor_id]
+            or self.title not in expected_titles[self.descriptor_id]
+        ):
             raise ValueError(
                 "Privileged-operation semantic review fields do not match the descriptor"
             )

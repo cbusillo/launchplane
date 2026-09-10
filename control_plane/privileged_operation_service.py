@@ -284,6 +284,30 @@ def _semantic_review_result_status(
     return record.evidence.result_status
 
 
+def _plain_utc_timestamp(value: str) -> str:
+    observed = datetime.fromisoformat(value).astimezone(timezone.utc)
+    return observed.strftime("%b %d, %Y at %H:%M UTC")
+
+
+def _remaining_duration(*, expires_at: str, observed_at: datetime) -> str:
+    expires = datetime.fromisoformat(expires_at).astimezone(timezone.utc)
+    remaining_seconds = max(0, int((expires - observed_at).total_seconds()))
+    units = (
+        ("day", 24 * 60 * 60),
+        ("hour", 60 * 60),
+        ("minute", 60),
+        ("second", 1),
+    )
+    parts: list[str] = []
+    for label, unit_seconds in units:
+        value, remaining_seconds = divmod(remaining_seconds, unit_seconds)
+        if value:
+            parts.append(f"{value} {label}{'' if value == 1 else 's'}")
+        if len(parts) == 2:
+            break
+    return " ".join(parts) or "less than a minute"
+
+
 def _semantic_review_lifecycle_blocker_codes(
     record: PrivilegedOperationRecord,
     *,
@@ -657,6 +681,9 @@ def _build_privileged_operation_semantic_review(
         extra_digests: tuple[PrivilegedOperationSemanticReviewDigest, ...]
         metrics: tuple[PrivilegedOperationSemanticReviewMetric, ...]
         change_summary: str
+        title: Literal["Review agent delivery setup", "Review stopping agent delivery"]
+        repository = record.evidence.scope.target.repository
+        branch = record.evidence.scope.target.base_branch
         if isinstance(record.evidence, OrdinaryAgentDeliveryActivationSetupHumanEvidence):
             activation_blocker_codes += tuple(
                 _semantic_review_blocker_code(code) for code in record.evidence.blocker_codes
@@ -664,16 +691,24 @@ def _build_privileged_operation_semantic_review(
             metrics = (
                 PrivilegedOperationSemanticReviewMetric(
                     kind="activation_scope_targets",
-                    label="Activation targets",
+                    label="Projects and branches",
                     value=1,
                 ),
                 PrivilegedOperationSemanticReviewMetric(
                     kind="activation_setup_blockers",
-                    label="Setup blockers",
+                    label="Checks blocking setup",
                     value=len(record.evidence.blocker_codes),
                 ),
             )
-            change_summary = f"{record.evidence.initial_behavior} {record.evidence.stop_behavior}"
+            title = "Review agent delivery setup"
+            change_summary = (
+                f"Set up agent delivery for {repository} on {branch} until "
+                f"{_plain_utc_timestamp(record.evidence.activation_expires_at)} "
+                f"({_remaining_duration(expires_at=record.evidence.activation_expires_at, observed_at=observed_at)} remaining). "
+                "Delivery starts with checks only; new agent work stays blocked until "
+                "every required check passes. Stopping delivery blocks new work. Work "
+                "already sent may still finish while Launchplane checks its outcome."
+            )
             extra_digests = (
                 PrivilegedOperationSemanticReviewDigest(
                     kind="activation_policy_package",
@@ -695,11 +730,16 @@ def _build_privileged_operation_semantic_review(
             metrics = (
                 PrivilegedOperationSemanticReviewMetric(
                     kind="activation_scope_targets",
-                    label="Activation targets",
+                    label="Projects and branches",
                     value=1,
                 ),
             )
-            change_summary = record.evidence.stop_behavior
+            title = "Review stopping agent delivery"
+            change_summary = (
+                f"Stop agent delivery for {repository} on {branch}. New work will be "
+                "blocked permanently for this setup. Work already sent may still finish; "
+                "Launchplane will check its outcome."
+            )
             extra_digests = (
                 PrivilegedOperationSemanticReviewDigest(
                     kind="activation_record",
@@ -714,7 +754,7 @@ def _build_privileged_operation_semantic_review(
             descriptor_version=record.descriptor_version,
             operation_class="ordinary_agent_delivery_activation",
             safety_class=record.safety_class,
-            title="Ordinary-agent delivery activation review",
+            title=title,
             requested_by_kind=_semantic_review_requester_kind(record),
             lifecycle=lifecycle,
             blockers=PrivilegedOperationSemanticReviewBlocker(
@@ -735,12 +775,18 @@ def _build_privileged_operation_semantic_review(
             ),
             blast_radius=PrivilegedOperationSemanticReviewBlastRadius(
                 scope="ordinary_agent_delivery_activation",
-                summary="Bounded to one repository, branch, managed set, and managed rule.",
+                summary=f"{repository} on {branch}; one agent delivery setup.",
                 affected_count=1,
             ),
             rollback=PrivilegedOperationSemanticReviewRollback(
                 rollback_class="activation_revoke",
-                summary="Rollback requires a separate reviewed activation revocation operation.",
+                summary=(
+                    "Stopping later requires a separate review."
+                    if isinstance(
+                        record.evidence, OrdinaryAgentDeliveryActivationSetupHumanEvidence
+                    )
+                    else "Stopping is permanent for this setup. Starting again requires a new reviewed setup."
+                ),
             ),
             evidence=PrivilegedOperationSemanticReviewEvidence(
                 result_status=_semantic_review_result_status(record),

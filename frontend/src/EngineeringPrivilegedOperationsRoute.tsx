@@ -454,7 +454,7 @@ function PrivilegedOperationPlanCard({
     managed_secret_reencryption: "Managed-secret re-encryption",
     managed_authz_policy_set: "Managed authorization policy",
     managed_merge_train_policy_import: "Managed merge-train policy",
-    ordinary_agent_delivery_activation: "Ordinary-agent delivery activation",
+    ordinary_agent_delivery_activation: "Agent delivery",
   }[review.operation_class];
 
   return (
@@ -501,7 +501,7 @@ function PrivilegedOperationPlanCard({
 
       <dl className="privileged-operation-details">
         <div>
-          <dt>Plan expires</dt>
+          <dt>Approve by</dt>
           <dd>{formatTime(review.lifecycle.expires_at)}</dd>
         </div>
         <div>
@@ -509,7 +509,7 @@ function PrivilegedOperationPlanCard({
           <dd>{review.lifecycle.expiry_state.replaceAll("_", " ")}</dd>
         </div>
         <div>
-          <dt>Blast radius</dt>
+          <dt>Scope</dt>
           <dd>{review.blast_radius.summary}</dd>
         </div>
         <div>
@@ -523,7 +523,7 @@ function PrivilegedOperationPlanCard({
       </dl>
 
       <details className="privileged-operation-policy-review">
-        <summary>Digest evidence</summary>
+        <summary>Technical details</summary>
         <dl className="privileged-operation-details">
           {review.evidence.digests.map((digest) => (
             <div key={`${digest.kind}:${digest.sha256}`}>
@@ -536,25 +536,24 @@ function PrivilegedOperationPlanCard({
             </div>
           ))}
         </dl>
+        {review.activity.length ? (
+          <ol className="privileged-operation-activity">
+            {review.activity.map((entry) => (
+              <li key={entry.event_id}>
+                <span>{formatTime(entry.occurred_at)}</span>
+                <strong>{entry.action}</strong>
+                <span>
+                  {entry.actor_type.replace("_", " ")} via{" "}
+                  {entry.source_kind.replace("_", " ")}
+                </span>
+                <code className="privileged-operation-digest">
+                  {entry.resulting_record_digest}
+                </code>
+              </li>
+            ))}
+          </ol>
+        ) : null}
       </details>
-
-      {review.activity.length ? (
-        <ol className="privileged-operation-activity">
-          {review.activity.map((entry) => (
-            <li key={entry.event_id}>
-              <span>{formatTime(entry.occurred_at)}</span>
-              <strong>{entry.action}</strong>
-              <span>
-                {entry.actor_type.replace("_", " ")} via{" "}
-                {entry.source_kind.replace("_", " ")}
-              </span>
-              <code className="privileged-operation-digest">
-                {entry.resulting_record_digest}
-              </code>
-            </li>
-          ))}
-        </ol>
-      ) : null}
 
       {review.can_approve || review.can_revoke ? (
         <div className="privileged-operation-actions">
@@ -775,25 +774,25 @@ function activationFixtureReview(): PrivilegedOperationSemanticReview {
     operationClass: "ordinary_agent_delivery_activation",
     descriptorId: "ordinary-agent-delivery-activation",
     safetyClass: "policy_admin",
-    title: "Ordinary-agent delivery activation review",
+    title: "Review agent delivery setup",
     requestedByKind: "github_human",
     createdAt: "2026-09-03T10:03:00+00:00",
     expiresAt: "2026-09-03T10:33:00+00:00",
     scope: "ordinary_agent_delivery_activation",
-    blastRadius:
-      "Bounded to one repository, branch, managed set, and managed rule.",
+    blastRadius: "example/launchplane on main; one agent delivery setup.",
     rollbackClass: "activation_revoke",
-    rollback:
-      "Rollback requires a separate reviewed activation revocation operation.",
+    rollback: "Stopping later requires a separate review.",
+    summary:
+      "Set up agent delivery for example/launchplane on main until Sep 04, 2026 at 10:03 UTC (1 day remaining). Delivery starts with checks only; new agent work stays blocked until every required check passes. Stopping delivery blocks new work. Work already sent may still finish while Launchplane checks its outcome.",
     metrics: [
       {
         kind: "activation_scope_targets",
-        label: "Activation targets",
+        label: "Projects and branches",
         value: 1,
       },
       {
         kind: "activation_setup_blockers",
-        label: "Setup blockers",
+        label: "Checks blocking setup",
         value: 0,
       },
     ],
@@ -812,6 +811,7 @@ function semanticReviewFixture({
   blastRadius,
   rollbackClass,
   rollback,
+  summary,
   metrics,
 }: {
   operationClass: PrivilegedOperationSemanticReview["operation_class"];
@@ -825,6 +825,7 @@ function semanticReviewFixture({
   blastRadius: string;
   rollbackClass: PrivilegedOperationSemanticReview["rollback"]["rollback_class"];
   rollback: string;
+  summary?: string;
   metrics: PrivilegedOperationSemanticReview["change"]["metrics"];
 }): PrivilegedOperationSemanticReview {
   return {
@@ -856,7 +857,7 @@ function semanticReviewFixture({
       codes: [],
     },
     change: {
-      summary: "Server-computed semantic review fixture.",
+      summary: summary ?? "Server-computed semantic review fixture.",
       changed: true,
       metrics,
     },
