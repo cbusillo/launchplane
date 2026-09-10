@@ -834,3 +834,12 @@ Blocked admission or recovery results use their explicit blocked reason instead.
 A terminal active landing remains selectable until cleanup; job completion then
 yields its controller and supersedes its own progress through the joined store.
 This result contract does not itself assemble the production worker.
+
+Completed ordinary landing history can restore a missing landing outcome or
+progress checkpoint without provider work. Creating a missing exact landing
+outcome requires a stored base-ref proof; a merged-PR observation alone remains
+recovery work until base containment is verified. Recovery checks the exact admission
+scope before interpreting missing outcomes and reuses an existing matching
+terminal outcome. Uncertain dispatches and retryable preparations remain separate
+recovery work; this adapter grants no new admission or retry. The current joined
+progress checkpoint still owns authority to persist the successor.
