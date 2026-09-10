@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from typing import Literal
 from unittest.mock import patch
 
 from pydantic import ValidationError
@@ -53,6 +54,7 @@ def worker_rule(**changes: object) -> TerminalAgentPolicyRule:
 
 def policy_record(
     *,
+    schema_version: Literal[2, 3] = 2,
     humans: tuple[GitHubHumanPolicyRule, ...] = (),
     workers: tuple[TerminalAgentPolicyRule, ...] = (),
 ) -> LaunchplaneAuthzPolicyRecord:
@@ -62,7 +64,7 @@ def policy_record(
         source="test",
         updated_at="2026-09-08T00:00:00Z",
         policy=LaunchplaneAuthzPolicy(
-            schema_version=2, github_humans=humans, terminal_agents=workers
+            schema_version=schema_version, github_humans=humans, terminal_agents=workers
         ),
     )
 
@@ -74,21 +76,25 @@ class EveryCodeFeedbackAuthorizationTests(unittest.TestCase):
                 human_rule(github_ids=(github_id,))
 
     def test_exact_human_and_worker_evidence_binds_actual_policy(self) -> None:
-        record = policy_record(humans=(human_rule(),), workers=(worker_rule(),))
-        human = resolve_every_code_feedback_resume_actor(
-            policy_record=record, github_id=17, repository_id=42
-        )
-        worker = resolve_every_code_feedback_resume_worker(
-            policy_record=record,
-            identity=TerminalAgentIdentity(subject="test-worker", token_label="test-token"),
-            repository_id=42,
-        )
-        self.assertIsNotNone(human)
-        self.assertIsNotNone(worker)
-        assert human is not None and worker is not None
-        self.assertEqual(human.policy_sha256, record.policy_sha256)
-        self.assertEqual(worker.policy_revision, 7)
-        self.assertNotEqual(human.action, worker.action)
+        for version in (2, 3):
+            with self.subTest(schema_version=version):
+                record = policy_record(
+                    schema_version=version, humans=(human_rule(),), workers=(worker_rule(),)
+                )
+                human = resolve_every_code_feedback_resume_actor(
+                    policy_record=record, github_id=17, repository_id=42
+                )
+                worker = resolve_every_code_feedback_resume_worker(
+                    policy_record=record,
+                    identity=TerminalAgentIdentity(subject="test-worker", token_label="test-token"),
+                    repository_id=42,
+                )
+                self.assertIsNotNone(human)
+                self.assertIsNotNone(worker)
+                assert human is not None and worker is not None
+                self.assertEqual(human.policy_sha256, record.policy_sha256)
+                self.assertEqual(worker.policy_revision, 7)
+                self.assertNotEqual(human.action, worker.action)
 
     def test_mutable_or_broad_human_selectors_never_supply_capability(self) -> None:
         cases: tuple[dict[str, object], ...] = (
@@ -120,57 +126,75 @@ class EveryCodeFeedbackAuthorizationTests(unittest.TestCase):
                 )
 
     def test_ambiguous_exact_grants_deny_and_revocation_takes_effect(self) -> None:
-        rules = (human_rule(), human_rule(managed_rule_id="human-duplicate"))
-        self.assertIsNone(
-            resolve_every_code_feedback_resume_actor(
-                policy_record=policy_record(humans=rules), github_id=17, repository_id=42
-            )
-        )
-        self.assertIsNone(
-            resolve_every_code_feedback_resume_actor(
-                policy_record=policy_record(), github_id=17, repository_id=42
-            )
-        )
-        for actor, repository in ((True, 42), (17, True), (0, 42), (17, 43), (18, 42)):
-            with self.subTest(actor=actor, repository=repository):
+        for version in (2, 3):
+            with self.subTest(schema_version=version):
+                rules = (human_rule(), human_rule(managed_rule_id="human-duplicate"))
                 self.assertIsNone(
                     resolve_every_code_feedback_resume_actor(
-                        policy_record=policy_record(humans=(human_rule(),)),
-                        github_id=actor,
-                        repository_id=repository,
-                    )
-                )
-
-    def test_worker_requires_both_literal_subject_and_token_label(self) -> None:
-        identity = TerminalAgentIdentity(subject="test-worker", token_label="test-token")
-        cases: tuple[dict[str, object], ...] = (
-            {"subjects": ()},
-            {"subjects": ("*",)},
-            {"subjects": ("test-*",)},
-            {"subjects": ("test-worker", "other")},
-            {"token_labels": ()},
-            {"token_labels": ("*",)},
-            {"token_labels": ("test-token", "other")},
-            {"actions": ()},
-            {"instances": ("*",)},
-            {"managed_set_id": None, "managed_rule_id": None},
-        )
-        for changes in cases:
-            with self.subTest(changes=changes):
-                self.assertIsNone(
-                    resolve_every_code_feedback_resume_worker(
-                        policy_record=policy_record(workers=(worker_rule(**changes),)),
-                        identity=identity,
+                        policy_record=policy_record(schema_version=version, humans=rules),
+                        github_id=17,
                         repository_id=42,
                     )
                 )
-        self.assertIsNone(
-            resolve_every_code_feedback_resume_worker(
-                policy_record=policy_record(workers=(worker_rule(),)),
-                identity=LocalAdminIdentity(subject="test-worker", token_label="test-token"),
-                repository_id=42,
-            )
-        )
+                self.assertIsNone(
+                    resolve_every_code_feedback_resume_actor(
+                        policy_record=policy_record(
+                            schema_version=version,
+                        ),
+                        github_id=17,
+                        repository_id=42,
+                    )
+                )
+                for actor, repository in ((True, 42), (17, True), (0, 42), (17, 43), (18, 42)):
+                    with self.subTest(actor=actor, repository=repository):
+                        self.assertIsNone(
+                            resolve_every_code_feedback_resume_actor(
+                                policy_record=policy_record(
+                                    schema_version=version, humans=(human_rule(),)
+                                ),
+                                github_id=actor,
+                                repository_id=repository,
+                            )
+                        )
+
+    def test_worker_requires_both_literal_subject_and_token_label(self) -> None:
+        for version in (2, 3):
+            with self.subTest(schema_version=version):
+                identity = TerminalAgentIdentity(subject="test-worker", token_label="test-token")
+                cases: tuple[dict[str, object], ...] = (
+                    {"subjects": ()},
+                    {"subjects": ("*",)},
+                    {"subjects": ("test-*",)},
+                    {"subjects": ("test-worker", "other")},
+                    {"token_labels": ()},
+                    {"token_labels": ("*",)},
+                    {"token_labels": ("test-token", "other")},
+                    {"actions": ()},
+                    {"instances": ("*",)},
+                    {"managed_set_id": None, "managed_rule_id": None},
+                )
+                for changes in cases:
+                    with self.subTest(changes=changes):
+                        self.assertIsNone(
+                            resolve_every_code_feedback_resume_worker(
+                                policy_record=policy_record(
+                                    schema_version=version, workers=(worker_rule(**changes),)
+                                ),
+                                identity=identity,
+                                repository_id=42,
+                            )
+                        )
+                self.assertIsNone(
+                    resolve_every_code_feedback_resume_worker(
+                        policy_record=policy_record(
+                            schema_version=version, workers=(worker_rule(),)
+                        ),
+                        identity=LocalAdminIdentity(
+                            subject="test-worker", token_label="test-token"
+                        ),
+                        repository_id=42,
+                    )
+                )
 
     def test_matching_malformed_worker_subjects_and_labels_still_deny(self) -> None:
         for field in ("subject", "token_label"):

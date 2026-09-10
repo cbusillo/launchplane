@@ -163,7 +163,10 @@ def _evaluate_rule(
         failures.append("target")
     if rule.actions and request.action not in rule.actions:
         failures.append("action")
-    if policy.schema_version != 2 and request.action in exact_instance_workflow_authz_actions():
+    if (
+        policy.schema_version not in (2, 3)
+        and request.action in exact_instance_workflow_authz_actions()
+    ):
         failures.append("policy_schema")
     return AuthzDiagnosticRuleEvaluation(
         decision="allowed" if not failures else "denied",
@@ -210,7 +213,7 @@ def _target_allowed(
 ) -> bool:
     target = request.target
     if (
-        policy.schema_version == 2
+        policy.schema_version in (2, 3)
         and request.action in exclusively_instance_scoped_authz_actions()
         and target.scope != "instance"
     ):
