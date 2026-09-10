@@ -7,21 +7,28 @@ import type { BrowserOperationFailure } from "./browser-operation";
 
 export type OwnerAcceptanceHumanAction = OwnerAcceptanceEventEnvelope["action"];
 
-export function ownerAcceptanceOperationScope(binding: OwnerAcceptanceBinding): string {
+export type OwnerAcceptanceOperationBinding = Pick<
+  OwnerAcceptanceBinding,
+  "binding_sha256" | "environment" | "product" | "pull_request_number" | "repository"
+> & Partial<Pick<OwnerAcceptanceBinding, "action" | "system">>;
+
+export function ownerAcceptanceOperationScope(
+  binding: OwnerAcceptanceOperationBinding,
+): string {
   return [
     "owner-acceptance",
     binding.repository,
     binding.pull_request_number,
     binding.product,
-    binding.system,
-    binding.action,
+    binding.system ?? "owner-review",
+    binding.action ?? "product-review",
     binding.environment,
     binding.binding_sha256,
   ].join(":");
 }
 
 export function ownerAcceptanceRequest(
-  binding: OwnerAcceptanceBinding,
+  binding: OwnerAcceptanceOperationBinding,
   action: OwnerAcceptanceHumanAction,
   reason: string,
   resolution: OwnerAcceptanceEventEnvelope["resolution"] = null,

@@ -18815,6 +18815,41 @@
         "title": "OwnerAcceptanceEventReadResponse",
         "type": "object"
       },
+      "OwnerAcceptanceEventReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "response_kind": {
+            "const": "receipt",
+            "default": "receipt",
+            "title": "Response Kind",
+            "type": "string"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          },
+          "write_status": {
+            "enum": [
+              "written",
+              "replayed"
+            ],
+            "title": "Write Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "write_status"
+        ],
+        "title": "OwnerAcceptanceEventReceipt",
+        "type": "object"
+      },
       "OwnerAcceptanceEventRecord": {
         "additionalProperties": false,
         "properties": {
@@ -18918,6 +18953,12 @@
           "record": {
             "$ref": "#/components/schemas/OwnerAcceptanceEventRecord"
           },
+          "response_kind": {
+            "const": "full",
+            "default": "full",
+            "title": "Response Kind",
+            "type": "string"
+          },
           "semantics": {
             "$ref": "#/components/schemas/OwnerAcceptanceEventSemantics"
           },
@@ -18971,6 +19012,127 @@
           "human_action_semantics"
         ],
         "title": "OwnerAcceptanceEventSemantics",
+        "type": "object"
+      },
+      "OwnerAcceptanceOwnerEvaluationResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "evaluated_at": {
+            "title": "Evaluated At",
+            "type": "string"
+          },
+          "products": {
+            "items": {
+              "$ref": "#/components/schemas/OwnerAcceptanceOwnerProduct"
+            },
+            "title": "Products",
+            "type": "array"
+          },
+          "review_status": {
+            "enum": [
+              "not_required",
+              "review_required",
+              "accepted",
+              "changes_requested",
+              "unavailable"
+            ],
+            "title": "Review Status",
+            "type": "string"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "review_status",
+          "evaluated_at",
+          "products"
+        ],
+        "title": "OwnerAcceptanceOwnerEvaluationResponse",
+        "type": "object"
+      },
+      "OwnerAcceptanceOwnerProduct": {
+        "additionalProperties": false,
+        "properties": {
+          "binding_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Binding Sha256",
+            "type": "string"
+          },
+          "can_accept": {
+            "title": "Can Accept",
+            "type": "boolean"
+          },
+          "can_request_changes": {
+            "title": "Can Request Changes",
+            "type": "boolean"
+          },
+          "can_revoke": {
+            "title": "Can Revoke",
+            "type": "boolean"
+          },
+          "environment": {
+            "title": "Environment",
+            "type": "string"
+          },
+          "preview_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Preview Url"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "resolution_evidence_references": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Resolution Evidence References",
+            "type": "array"
+          },
+          "resolution_required": {
+            "default": false,
+            "title": "Resolution Required",
+            "type": "boolean"
+          },
+          "review_status": {
+            "enum": [
+              "not_required",
+              "review_required",
+              "accepted",
+              "changes_requested",
+              "unavailable"
+            ],
+            "title": "Review Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "product",
+          "environment",
+          "review_status",
+          "binding_sha256",
+          "can_accept",
+          "can_request_changes",
+          "can_revoke"
+        ],
+        "title": "OwnerAcceptanceOwnerProduct",
         "type": "object"
       },
       "OwnerAcceptancePolicyFingerprintBinding": {
@@ -65297,7 +65459,22 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/OwnerAcceptanceEventResponse"
+                  "discriminator": {
+                    "mapping": {
+                      "full": "#/components/schemas/OwnerAcceptanceEventResponse",
+                      "receipt": "#/components/schemas/OwnerAcceptanceEventReceipt"
+                    },
+                    "propertyName": "response_kind"
+                  },
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/OwnerAcceptanceEventResponse"
+                    },
+                    {
+                      "$ref": "#/components/schemas/OwnerAcceptanceEventReceipt"
+                    }
+                  ],
+                  "title": "Response Write Owner Acceptance Event"
                 }
               }
             },
@@ -65480,6 +65657,131 @@
           }
         },
         "summary": "Read Event",
+        "tags": [
+          "owner-acceptance"
+        ]
+      }
+    },
+    "/v1/owner-acceptance/owner-evaluation": {
+      "get": {
+        "operationId": "evaluate_owner_product_review",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "repository",
+            "required": true,
+            "schema": {
+              "maxLength": 256,
+              "minLength": 3,
+              "pattern": "^[^/\\s]+/[^/\\s]+$",
+              "title": "Repository",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "pull_request_number",
+            "required": true,
+            "schema": {
+              "minimum": 1,
+              "title": "Pull Request Number",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OwnerAcceptanceOwnerEvaluationResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Evaluate For Owner",
         "tags": [
           "owner-acceptance"
         ]
@@ -78854,6 +79156,7 @@
     "/v1/governance/projection": "read_governance_projection",
     "/v1/owner-acceptance/current-items": "list_owner_acceptance_current_items",
     "/v1/owner-acceptance/evaluation": "evaluate_owner_acceptance",
+    "/v1/owner-acceptance/owner-evaluation": "evaluate_owner_product_review",
     "/v1/owner-acceptance/queue": "list_owner_acceptance_queue",
     "/v1/previews/readiness": "read_preview_readiness",
     "/v1/privileged-operations/plans": "list_human_privileged_operations",

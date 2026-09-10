@@ -2,7 +2,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import logging
-from typing import Annotated, Literal, cast
+from typing import Annotated, Literal, Never, assert_never, cast
 
 from fastapi import Depends, Header, Path, Query
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -18,6 +18,7 @@ from control_plane.contracts.owner_acceptance import (
     OWNER_ACCEPTANCE_PROJECT_ACTION,
     OWNER_ACCEPTANCE_READ_ACTION,
     OwnerAcceptanceDecision,
+    OwnerAcceptanceDecisionStatus,
     OwnerAcceptanceEventRecord,
     OwnerAcceptanceHumanActionSemantics,
     OwnerAcceptanceResolutionEvidence,
@@ -26,6 +27,7 @@ from control_plane.contracts.owner_acceptance import (
     owner_acceptance_event_replay_matches,
     owner_acceptance_human_action_semantics,
 )
+from control_plane.contracts.repository_inventory import RepositoryInventoryRecord
 from control_plane.github_app_identity import GitHubAppInstallationToken
 from control_plane.http_routes.support import (
     ApiRouteRegistrar,
@@ -57,6 +59,11 @@ from control_plane.owner_acceptance_projection import (
     OwnerAcceptanceProjectionReconciliationError,
     OwnerAcceptanceProjectionService,
 )
+from control_plane.product_owner_service import (
+    get_product_owner_read_model,
+    require_product_owner_policy_read_store,
+)
+from control_plane.repository_inventory import require_repository_inventory_read_store
 from control_plane.service_auth import AuthorizationTarget, GitHubHumanIdentity, LaunchplaneIdentity
 from control_plane.workflows.launchplane import github_api_request
 
@@ -65,6 +72,7 @@ logger = logging.getLogger(__name__)
 
 
 OWNER_ACCEPTANCE_EVALUATION_ROUTE = "/v1/owner-acceptance/evaluation"
+OWNER_ACCEPTANCE_OWNER_EVALUATION_ROUTE = "/v1/owner-acceptance/owner-evaluation"
 OWNER_ACCEPTANCE_EVENTS_ROUTE = "/v1/owner-acceptance/events"
 OWNER_ACCEPTANCE_EVENT_ROUTE = "/v1/owner-acceptance/events/{event_id}"
 OWNER_ACCEPTANCE_QUEUE_ROUTE = "/v1/owner-acceptance/queue"
@@ -166,6 +174,52 @@ class OwnerAcceptanceEvaluationResponse(BaseModel):
     viewer_capabilities: OwnerAcceptanceViewerCapabilities
 
 
+OwnerReviewStatus = Literal[
+    "not_required",
+    "review_required",
+    "accepted",
+    "changes_requested",
+    "unavailable",
+]
+
+
+class OwnerAcceptanceOwnerProduct(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    product: str
+    environment: str
+    review_status: OwnerReviewStatus
+    binding_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    preview_url: str | None = None
+    resolution_required: bool = False
+    resolution_evidence_references: tuple[str, ...] = ()
+    can_accept: bool
+    can_request_changes: bool
+    can_revoke: bool
+
+    @model_validator(mode="after")
+    def _validate_owner_product(self) -> "OwnerAcceptanceOwnerProduct":
+        if self.can_accept and self.preview_url is None:
+            raise ValueError("Owner product acceptance requires a preview URL.")
+        if self.resolution_required and (
+            self.preview_url is None or not self.resolution_evidence_references
+        ):
+            raise ValueError("Owner product resolution requires bound preview evidence references.")
+        if not self.resolution_required and self.resolution_evidence_references:
+            raise ValueError("Owner product resolution references require a pending resolution.")
+        return self
+
+
+class OwnerAcceptanceOwnerEvaluationResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    review_status: OwnerReviewStatus
+    evaluated_at: str
+    products: tuple[OwnerAcceptanceOwnerProduct, ...]
+
+
 class OwnerAcceptanceEventSemantics(BaseModel):
     """Machine-readable projection of a stored human product-review action.
 
@@ -182,12 +236,28 @@ class OwnerAcceptanceEventSemantics(BaseModel):
 class OwnerAcceptanceEventResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    response_kind: Literal["full"] = "full"
     status: Literal["ok"] = "ok"
     trace_id: str
     write_status: Literal["written", "replayed"]
     record: OwnerAcceptanceEventRecord
     semantics: OwnerAcceptanceEventSemantics
     decision: OwnerAcceptanceDecision
+
+
+class OwnerAcceptanceEventReceipt(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    response_kind: Literal["receipt"] = "receipt"
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    write_status: Literal["written", "replayed"]
+
+
+OwnerAcceptanceEventWriteResponse = Annotated[
+    OwnerAcceptanceEventResponse | OwnerAcceptanceEventReceipt,
+    Field(discriminator="response_kind"),
+]
 
 
 class OwnerAcceptanceEventReadResponse(BaseModel):
@@ -283,6 +353,72 @@ def _owner_acceptance_event_persistence_outcome(
         return "persisted"
     logger.error("Owner acceptance event id resolved to a different persisted payload.")
     return "unknown"
+
+
+def _owner_review_status(status: OwnerAcceptanceDecisionStatus) -> OwnerReviewStatus:
+    match status:
+        case "not_required":
+            return "not_required"
+        case "pending" | "revoked":
+            return "review_required"
+        case "accepted":
+            return "accepted"
+        case "changes_requested":
+            return "changes_requested"
+        case "stale" | "unavailable":
+            return "unavailable"
+        case unhandled:
+            assert_never(unhandled)
+
+
+def _current_owner_repository_id(
+    *,
+    store: object,
+    repository: str,
+    identity: GitHubHumanIdentity,
+) -> str | None:
+    inventory_store = require_repository_inventory_read_store(store)
+    policy_store = require_product_owner_policy_read_store(store)
+    inventory_by_id: dict[str, list[RepositoryInventoryRecord]] = {}
+    for record in inventory_store.list_repository_inventory_records():
+        inventory_by_id.setdefault(record.repository_id, []).append(record)
+    matching_repository_ids: list[str] = []
+    for repository_id, records in inventory_by_id.items():
+        highest_revision = max(record.inventory_revision for record in records)
+        current = tuple(
+            record for record in records if record.inventory_revision == highest_revision
+        )
+        if len(current) != 1:
+            continue
+        record = current[0]
+        if (
+            record.inventory_state == "tracked"
+            and record.repository.casefold() == repository.casefold()
+        ):
+            matching_repository_ids.append(repository_id)
+    if len(matching_repository_ids) != 1:
+        return None
+    repository_id = matching_repository_ids[0]
+
+    policy_scopes: set[tuple[str, str]] = set()
+    for policy in policy_store.list_product_owner_policy_records():
+        policy_scopes.add((policy.product, policy.system))
+    for product, system in policy_scopes:
+        current_policy = get_product_owner_read_model(
+            store=store,
+            product=product,
+            system=system,
+        ).current_policy
+        if current_policy is None:
+            continue
+        for owner in current_policy.owners:
+            if (
+                owner.identity.provider == "github"
+                and owner.identity.provider_subject_id == str(identity.github_id)
+                and repository_id in owner.repository_ids
+            ):
+                return repository_id
+    return None
 
 
 def register_owner_acceptance_routes(
@@ -382,6 +518,157 @@ def register_owner_acceptance_routes(
             ),
         )
 
+    def evaluate_for_owner(
+        repository: Annotated[
+            str,
+            Query(min_length=3, max_length=256, pattern=r"^[^/\s]+/[^/\s]+$"),
+        ],
+        pull_request_number: Annotated[int, Query(ge=1)],
+        identity: Annotated[
+            LaunchplaneIdentity,
+            Depends(common.read_identity),
+        ],
+        record_store: Annotated[object, Depends(common.get_record_store)],
+    ) -> OwnerAcceptanceOwnerEvaluationResponse:
+        trace_id = common.next_trace_id()
+
+        def unavailable() -> Never:
+            raise common.http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="owner_review_unavailable",
+                message="This product review is unavailable.",
+            )
+
+        if not isinstance(identity, GitHubHumanIdentity):
+            raise common.http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="github_human_required",
+                message="Product review requires a browser-authenticated GitHub human.",
+            )
+        evaluated_at = (
+            datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        )
+        try:
+            repository_id = _current_owner_repository_id(
+                store=record_store,
+                repository=repository,
+                identity=identity,
+            )
+        except (FileNotFoundError, LookupError, TypeError, ValueError):
+            unavailable()
+        if repository_id is None:
+            unavailable()
+
+        try:
+            decision = evaluate_owner_acceptance(
+                store=record_store,
+                repository_evidence_provider=dependencies.repository_evidence_provider,
+                target=ChangeImpactTargetReference(
+                    repository=repository,
+                    pull_request_number=pull_request_number,
+                ),
+                evaluated_at=evaluated_at,
+            )
+        except (OwnerAcceptanceEvaluationUnavailableError, TypeError, ValueError):
+            unavailable()
+        try:
+            if (
+                _current_owner_repository_id(
+                    store=record_store,
+                    repository=repository,
+                    identity=identity,
+                )
+                != repository_id
+            ):
+                unavailable()
+        except (FileNotFoundError, LookupError, TypeError, ValueError):
+            unavailable()
+        if decision.status == "not_required":
+            return OwnerAcceptanceOwnerEvaluationResponse(
+                trace_id=trace_id,
+                review_status="not_required",
+                evaluated_at=decision.evaluated_at,
+                products=(),
+            )
+        if not decision.products:
+            unavailable()
+
+        eligibility_by_binding = {
+            eligibility.binding_sha256: eligibility
+            for eligibility in evaluate_owner_acceptance_viewer_eligibility(
+                store=record_store,
+                decisions=(decision,),
+                identity=identity,
+            )
+            if eligibility.reason_code in {"current_product_owner", "self_review_denied"}
+        }
+        event_write_authorized = common.authorization_allows(
+            identity=identity,
+            action=OWNER_ACCEPTANCE_EVENT_WRITE_ACTION,
+            product="launchplane",
+            context="owner-acceptance",
+            target=AuthorizationTarget(scope="context"),
+        )
+        products: list[OwnerAcceptanceOwnerProduct] = []
+        for product in decision.products:
+            binding = product.binding
+            if binding is None or binding.repository_id != repository_id:
+                continue
+            eligibility = eligibility_by_binding.get(binding.binding_sha256)
+            if eligibility is None:
+                continue
+            preview_url = binding.preview.preview_url if binding.preview is not None else None
+            resolution_required = bool(
+                binding.preview is not None
+                and product.current_event is not None
+                and product.current_event.binding.binding_sha256 == binding.binding_sha256
+                and product.current_event.action == "changes_requested"
+            )
+            products.append(
+                OwnerAcceptanceOwnerProduct(
+                    product=product.product,
+                    environment=product.environment,
+                    review_status=_owner_review_status(product.status),
+                    binding_sha256=binding.binding_sha256,
+                    preview_url=preview_url,
+                    resolution_required=resolution_required,
+                    resolution_evidence_references=(
+                        (
+                            f"preview:{binding.preview.preview_id}",
+                            f"preview-generation:{binding.preview.serving_generation_id}",
+                        )
+                        if resolution_required and binding.preview is not None
+                        else ()
+                    ),
+                    can_accept=bool(
+                        event_write_authorized and eligibility.can_accept and preview_url
+                    ),
+                    can_request_changes=bool(
+                        event_write_authorized and eligibility.can_request_changes
+                    ),
+                    can_revoke=bool(event_write_authorized and eligibility.can_revoke),
+                )
+            )
+        if not products:
+            unavailable()
+        status_precedence: tuple[OwnerReviewStatus, ...] = (
+            "unavailable",
+            "changes_requested",
+            "review_required",
+            "accepted",
+            "not_required",
+        )
+        product_statuses = {product.review_status for product in products}
+        review_status = next(status for status in status_precedence if status in product_statuses)
+        return OwnerAcceptanceOwnerEvaluationResponse(
+            trace_id=trace_id,
+            review_status=review_status,
+            evaluated_at=decision.evaluated_at,
+            products=tuple(products),
+        )
+
     def write_event(
         envelope: OwnerAcceptanceEventEnvelope,
         idempotency_key: Annotated[
@@ -398,7 +685,7 @@ def register_owner_acceptance_routes(
             Depends(dependencies.read_browser_mutation_identity),
         ],
         record_store: Annotated[object, Depends(common.get_record_store)],
-    ) -> OwnerAcceptanceEventResponse:
+    ) -> OwnerAcceptanceEventWriteResponse:
         trace_id = common.next_trace_id()
         if not isinstance(identity, GitHubHumanIdentity):
             raise common.http_error(
@@ -420,6 +707,36 @@ def register_owner_acceptance_routes(
                 code="authorization_denied",
                 message="Caller cannot write Owner acceptance events.",
             )
+        broad_read_authorized = common.authorization_allows(
+            identity=identity,
+            action=OWNER_ACCEPTANCE_READ_ACTION,
+            product="launchplane",
+            context="owner-acceptance",
+            target=AuthorizationTarget(scope="context"),
+        )
+        if not broad_read_authorized:
+            try:
+                owner_repository_id = _current_owner_repository_id(
+                    store=record_store,
+                    repository=envelope.target.repository,
+                    identity=identity,
+                )
+            except (FileNotFoundError, LookupError, TypeError, ValueError):
+                owner_repository_id = None
+            if owner_repository_id is None:
+                logger.info(
+                    "Limited Owner acceptance event write failed repository ownership prefilter."
+                )
+                raise common.http_error(
+                    status_code=404,
+                    trace_id=trace_id,
+                    code="owner_review_unavailable",
+                    message="This product review is unavailable.",
+                )
+
+        def bounded_message(error: Exception, limited_message: str) -> str:
+            return str(error) if broad_read_authorized else limited_message
+
         try:
             projection_service.resolve_current(
                 store=record_store,
@@ -430,7 +747,10 @@ def register_owner_acceptance_routes(
                 status_code=503,
                 trace_id=trace_id,
                 code="owner_acceptance_projection_unavailable",
-                message=str(error),
+                message=bounded_message(
+                    error,
+                    "Owner acceptance projection is unavailable.",
+                ),
             ) from error
 
         try:
@@ -587,7 +907,11 @@ def register_owner_acceptance_routes(
                 message=(
                     "Owner acceptance event was persisted, but the final GitHub status "
                     "projection requires reconciliation. Retry with the same Idempotency-Key "
-                    "or use the Owner acceptance projection endpoint."
+                    + (
+                        "or use the Owner acceptance projection endpoint."
+                        if broad_read_authorized
+                        else "only."
+                    )
                 ),
             ) from error
         except OwnerAcceptanceEventNotPersistedError as error:
@@ -639,35 +963,44 @@ def register_owner_acceptance_routes(
                 status_code=403,
                 trace_id=trace_id,
                 code="owner_acceptance_self_review_denied",
-                message=str(error),
+                message=bounded_message(error, "This Owner decision is not permitted."),
             ) from error
         except OwnerAcceptanceAuthorizationError as error:
             raise common.http_error(
                 status_code=403,
                 trace_id=trace_id,
                 code="owner_acceptance_authorization_denied",
-                message=str(error),
+                message=bounded_message(error, "This Owner decision is not permitted."),
             ) from error
         except OwnerAcceptanceEventConflictError as error:
             raise common.http_error(
                 status_code=409,
                 trace_id=trace_id,
                 code="owner_acceptance_event_conflict",
-                message=str(error),
+                message=bounded_message(
+                    error,
+                    "This Owner decision conflicts with an existing event.",
+                ),
             ) from error
         except OwnerAcceptanceTransitionError as error:
             raise common.http_error(
                 status_code=409,
                 trace_id=trace_id,
                 code="owner_acceptance_transition_invalid",
-                message=str(error),
+                message=bounded_message(
+                    error,
+                    "This Owner decision transition is invalid.",
+                ),
             ) from error
         except OwnerAcceptanceBindingConflictError as error:
             raise common.http_error(
                 status_code=409,
                 trace_id=trace_id,
                 code="owner_acceptance_binding_changed",
-                message=str(error),
+                message=bounded_message(
+                    error,
+                    "The reviewed Owner acceptance binding changed.",
+                ),
             ) from error
         except (OwnerAcceptanceEvaluationUnavailableError, ValueError):
             raise common.http_error(
@@ -681,8 +1014,13 @@ def register_owner_acceptance_routes(
                 status_code=503,
                 trace_id=trace_id,
                 code="database_storage_required",
-                message=str(error),
+                message=bounded_message(error, "Owner acceptance storage is unavailable."),
             ) from error
+        if not broad_read_authorized:
+            return OwnerAcceptanceEventReceipt(
+                trace_id=trace_id,
+                write_status=result.status,
+            )
         return OwnerAcceptanceEventResponse(
             trace_id=trace_id,
             write_status=result.status,
@@ -913,6 +1251,15 @@ def register_owner_acceptance_routes(
         responses=errors,
     )
     app.add_api_route(
+        OWNER_ACCEPTANCE_OWNER_EVALUATION_ROUTE,
+        evaluate_for_owner,
+        methods=["GET"],
+        response_model=OwnerAcceptanceOwnerEvaluationResponse,
+        tags=["owner-acceptance"],
+        operation_id="evaluate_owner_product_review",
+        responses=errors,
+    )
+    app.add_api_route(
         OWNER_ACCEPTANCE_CURRENT_ITEMS_ROUTE,
         read_current_items,
         methods=["GET"],
@@ -936,7 +1283,7 @@ def register_owner_acceptance_routes(
         OWNER_ACCEPTANCE_EVENTS_ROUTE,
         write_event,
         methods=["POST"],
-        response_model=OwnerAcceptanceEventResponse,
+        response_model=OwnerAcceptanceEventWriteResponse,
         status_code=202,
         tags=["owner-acceptance"],
         operation_id="write_owner_acceptance_event",

@@ -119,6 +119,18 @@ showing unusable Owner controls. The capability is advisory: browser-session
 requirements and current product Owner authority are revalidated independently
 when an event is submitted.
 
+`GET /v1/owner-acceptance/owner-evaluation` is the narrower browser Owner read.
+It requires a GitHub-human session and accepts the same exact repository and PR
+reference. Before resolving repository-provider evidence, it requires the
+current DB repository inventory and current product Owner policy to identify the
+caller as an Owner for that immutable repository. Unowned, nonexistent, and
+unavailable targets return the same closed `owner_review_unavailable` response.
+The result contains only owned product labels, environments, Owner-facing review
+states, exact binding digests, validated preview URLs, resolution-reference
+inputs when required, and server-computed action flags. It does not return the
+engineering decision, change-impact diagnostics, repository evidence, policy
+records, other products, Owner rosters, or prior event records.
+
 When route-level event access is present, `viewer_capabilities.bindings`
 provides viewer-specific advisory eligibility keyed by each exact
 `binding_sha256`. It identifies only whether the current viewer may submit for
@@ -421,7 +433,7 @@ second semantic state.
 ## Owner Product Review Route
 
 `/ui/owner-review?repository=<owner/repo>&pull_request=<number>` is a focused
-browser view over the existing exact evaluation and event routes. It has minimal
+browser view over the owner-safe exact evaluation and existing event routes. It has minimal
 product-review chrome and does not load the product catalog, Current-items list,
 recorded ledger, or Engineering Ops navigation. Every returned per-product
 binding is shown independently with its server-bound preview URL, exact
@@ -439,13 +451,31 @@ keeps the decision controls while each preview opens as an external page.
 Advisory checks link directly to this focused route and retain an explicit
 Engineering details link in their summary for the compatibility workbench.
 
-This source UI does not establish product-scoped read isolation. The current
-evaluation route first authorizes the broad Launchplane `owner-acceptance` read
-context and returns the full decision; per-binding capabilities govern action
-visibility and the event route independently revalidates writes. Before narrowly
-scoped site Owners can be enrolled, Launchplane still needs a separately reviewed
-owner-safe evaluation projection and product-scoped read authorization. Hidden
-controls are chrome scoping, not evidence of foreign-product denial.
+The owner-safe route establishes positive read authority from current DB-backed
+Owner membership and filters the response before serialization. The engineering
+evaluation, Current items, queue, and event-read routes remain protected by
+`owner_acceptance.read`; an Owner candidate with only
+`owner_acceptance_event.write` cannot read them. Event writes independently
+revalidate the current binding and product Owner authority.
+
+`POST /v1/owner-acceptance/events` computes the existing broad
+`owner_acceptance.read` authorization independently from event-write authority.
+Broad-read callers receive the tagged full response with the event record,
+semantics, and aggregate decision. Event-write-only Owners receive a tagged
+receipt containing only `status`, `trace_id`, and `write_status`, then refresh
+through the owner-safe evaluation route. Before any provider lookup, a limited
+caller must match one current tracked repository and one valid current product
+Owner policy history that grants ownership for that immutable repository.
+Missing, untracked, foreign-owned, ambiguous, and invalid-history targets all
+fail with the same closed `owner_review_unavailable` response. Limited-caller
+errors keep their established status and stable code while replacing internal
+provider, policy, binding, and storage details with bounded messages.
+
+This is the source contract, not evidence that the deployed runtime or its DB
+policy has changed. Limited site-Owner enrollment still requires the separately
+reviewed managed-policy contraction from the combined read/write candidate rule
+to the event-write-only shape, followed by exact deployed-SHA validation and
+readback. This change adds no grant and performs no policy mutation.
 
 The browser operation controller retains an uncertain request and idempotency key
 while the page remains mounted. Its persisted recovery record contains identity,

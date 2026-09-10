@@ -235,9 +235,11 @@ _OWNER_ACCEPTANCE_ACTIONS = frozenset(
     {OWNER_ACCEPTANCE_READ_ACTION, OWNER_ACCEPTANCE_EVENT_WRITE_ACTION}
 )
 _OWNER_ACCEPTANCE_READ_ONLY_ACTIONS = frozenset({OWNER_ACCEPTANCE_READ_ACTION})
+_OWNER_ACCEPTANCE_EVENT_WRITE_ONLY_ACTIONS = frozenset({OWNER_ACCEPTANCE_EVENT_WRITE_ACTION})
 _OWNER_ACCEPTANCE_PERMITTED_ACTION_SETS = (
     _OWNER_ACCEPTANCE_READ_ONLY_ACTIONS,
     _OWNER_ACCEPTANCE_ACTIONS,
+    _OWNER_ACCEPTANCE_EVENT_WRITE_ONLY_ACTIONS,
 )
 _PRODUCT_OWNER_POLICY_ADMIN_MANAGED_SET_ID = "operator.product-owner-policy-admin"
 _PRODUCT_OWNER_POLICY_ADMIN_ACTIONS = frozenset(
@@ -285,8 +287,8 @@ def _validate_owner_acceptance_managed_set(policy: LaunchplaneAuthzPolicy) -> No
             )
         if actions not in _OWNER_ACCEPTANCE_PERMITTED_ACTION_SETS:
             raise ValueError(
-                "Owner Acceptance managed authz rules require either the read action alone or "
-                "the read and event-write actions together."
+                "Owner Acceptance managed authz rules require the read action alone, the event-write "
+                "action alone, or both actions together."
             )
 
 

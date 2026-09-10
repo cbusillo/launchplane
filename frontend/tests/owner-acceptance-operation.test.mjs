@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
+import { LaunchplaneApiError } from "../src/api.ts";
 import {
+  ownerAcceptanceFailureCertainty,
   ownerAcceptanceOperationScope,
   ownerAcceptanceRequest,
 } from "../src/owner-acceptance-operation.ts";
@@ -47,5 +49,22 @@ test("Owner acceptance operation scope changes with the binding digest", () => {
   assert.notEqual(
     ownerAcceptanceOperationScope(binding),
     ownerAcceptanceOperationScope({ ...binding, binding_sha256: "b".repeat(64) }),
+  );
+});
+
+test("Owner acceptance keeps post-dispatch server failures uncertain", () => {
+  assert.equal(
+    ownerAcceptanceFailureCertainty(
+      new LaunchplaneApiError("projection unavailable", 503),
+      true,
+    ),
+    "uncertain",
+  );
+  assert.equal(
+    ownerAcceptanceFailureCertainty(
+      new LaunchplaneApiError("binding changed", 409),
+      true,
+    ),
+    "definitive",
   );
 });

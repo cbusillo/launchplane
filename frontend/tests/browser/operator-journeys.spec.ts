@@ -110,6 +110,7 @@ test.describe("operator journeys", () => {
     expect(requestedPaths).not.toContain("/v1/owner-acceptance/current-items");
     expect(requestedPaths).not.toContain("/v1/owner-acceptance/queue");
     expect(requestedPaths).not.toContain("/v1/owner-acceptance/evaluation");
+    expect(requestedPaths).not.toContain("/v1/owner-acceptance/owner-evaluation");
     await expect(page.getByRole("link", { name: "Engineering Ops" })).toHaveCount(0);
     await expect(page.getByRole("link", { name: "Product Ops" })).toHaveCount(0);
     await assertDocumentBasics(page);
@@ -279,7 +280,7 @@ test.describe("operator journeys", () => {
 
   test("Owner review blocks a restored uncertain identity when its draft is absent", async ({ page }) => {
     const digest = "a".repeat(64);
-    const storageKey = `launchplane.browser-operation.owner-acceptance-example-control-plane-308-example-site-web-deploy-production-${digest}`;
+    const storageKey = `launchplane.browser-operation.owner-acceptance-example-control-plane-308-example-site-owner-review-product-review-production-${digest}`;
     await page.addInitScript(
       ({ key }) => {
         window.sessionStorage.setItem(
