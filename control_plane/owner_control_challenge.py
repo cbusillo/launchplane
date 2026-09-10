@@ -189,9 +189,9 @@ def derive_owner_control_approval_request(
         raise OwnerControlChallengeProvenanceError(
             "Owner-control challenges require an active policy."
         )
-    if policy_record.policy.schema_version != 2:
+    if policy_record.policy.schema_version not in (2, 3):
         raise OwnerControlChallengeProvenanceError(
-            "Owner-control challenges require schema-v2 authz policy."
+            "Owner-control challenges require schema-v2 or schema-v3 authz policy."
         )
     _canonical_timestamp(issued_at, "issued_at")
     if _canonical_timestamp(expires_at, "expires_at") <= _canonical_timestamp(

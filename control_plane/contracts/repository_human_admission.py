@@ -272,7 +272,7 @@ class TenantTechnicalHumanWaiverAuthorization(BaseModel):
     managed_rule_id: str
     authz_policy_record_id: str
     authz_policy_revision: int = Field(ge=1)
-    authz_policy_schema_version: Literal[2] = 2
+    authz_policy_schema_version: Literal[2, 3] = 2
     authz_policy_digest: str
     authz_policy_source: str
     role_policy_provenance: RepositoryHumanRolePolicyProvenance

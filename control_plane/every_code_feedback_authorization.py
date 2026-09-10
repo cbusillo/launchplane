@@ -77,7 +77,7 @@ def resolve_every_code_feedback_resume_actor(
         or type(repository_id) is not int
         or repository_id < 1
         or policy_record.status != "active"
-        or policy_record.policy.schema_version != 2
+        or policy_record.policy.schema_version not in (2, 3)
     ):
         return None
     action: FeedbackPolicyAction = EVERY_CODE_FEEDBACK_RESUME_REQUEST_ACTION
@@ -108,7 +108,7 @@ def resolve_every_code_feedback_resume_worker(
         or type(repository_id) is not int
         or repository_id < 1
         or policy_record.status != "active"
-        or policy_record.policy.schema_version != 2
+        or policy_record.policy.schema_version not in (2, 3)
     ):
         return None
     action: FeedbackPolicyAction = EVERY_CODE_FEEDBACK_RESUME_EXECUTE_ACTION

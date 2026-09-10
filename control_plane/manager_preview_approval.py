@@ -81,7 +81,7 @@ def manager_preview_approval_required(
     product: str,
     context: str,
 ) -> bool:
-    if policy_record.status != "active" or policy_record.policy.schema_version != 2:
+    if policy_record.status != "active" or policy_record.policy.schema_version not in (2, 3):
         return False
     return any(
         rule.managed_set_id is not None
@@ -149,9 +149,9 @@ def capture_manager_preview_approval_authorization(
         raise ManagerPreviewApprovalAuthorizationError(
             "Manager preview approval requires a stable GitHub numeric identity."
         )
-    if policy_record.status != "active" or policy_record.policy.schema_version != 2:
+    if policy_record.status != "active" or policy_record.policy.schema_version not in (2, 3):
         raise ManagerPreviewApprovalAuthorizationError(
-            "Manager preview approval requires one active schema-v2 authorization policy."
+            "Manager preview approval requires one active schema-v2 or schema-v3 authorization policy."
         )
     role_policy_provenance = None
     if role_policy_record is not None:
@@ -200,6 +200,7 @@ def capture_manager_preview_approval_authorization(
         policy_revision=policy_record.revision,
         policy_sha256=policy_record.policy_sha256,
         policy_source=policy_record.source,
+        policy_schema_version=policy_record.policy.schema_version,
         role_policy_provenance=role_policy_provenance,
         authorized_at=authorized_at,
     )
@@ -307,7 +308,7 @@ def evaluate_manager_preview_approval(
     if (
         policy_record is None
         or policy_record.status != "active"
-        or policy_record.policy.schema_version != 2
+        or policy_record.policy.schema_version not in (2, 3)
     ):
         return _decision(
             status="unavailable",
@@ -445,7 +446,8 @@ def _approval_authorization_matches_policy(
     if authorization is None:
         return False
     if (
-        authorization.policy_record_id != policy_record.record_id
+        authorization.policy_schema_version != policy_record.policy.schema_version
+        or authorization.policy_record_id != policy_record.record_id
         or authorization.policy_revision != policy_record.revision
         or authorization.policy_sha256 != policy_record.policy_sha256
     ):
