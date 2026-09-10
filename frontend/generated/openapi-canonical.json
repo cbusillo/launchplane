@@ -1725,7 +1725,8 @@
                   "github_humans",
                   "terminal_agents",
                   "local_operators",
-                  "local_admins"
+                  "local_admins",
+                  "ordinary_agents"
                 ],
                 "type": "string"
               },
@@ -1752,7 +1753,8 @@
                   "github_humans",
                   "terminal_agents",
                   "local_operators",
-                  "local_admins"
+                  "local_admins",
+                  "ordinary_agents"
                 ],
                 "type": "string"
               },
@@ -1817,7 +1819,7 @@
             "type": "string"
           },
           "principal_rule_counts": {
-            "$ref": "#/components/schemas/AuthzPrincipalRuleCounts"
+            "$ref": "#/components/schemas/AuthzPolicyCollectionRuleCounts"
           },
           "rule_count": {
             "minimum": 1.0,
@@ -2088,7 +2090,7 @@
             "type": "integer"
           },
           "active_principal_rule_counts": {
-            "$ref": "#/components/schemas/AuthzPrincipalRuleCounts"
+            "$ref": "#/components/schemas/AuthzPolicyCollectionRuleCounts"
           },
           "active_rule_count": {
             "minimum": 0.0,
@@ -2116,7 +2118,7 @@
             "type": "integer"
           },
           "candidate_principal_rule_counts": {
-            "$ref": "#/components/schemas/AuthzPrincipalRuleCounts"
+            "$ref": "#/components/schemas/AuthzPolicyCollectionRuleCounts"
           },
           "candidate_rule_count": {
             "minimum": 0.0,
@@ -2139,7 +2141,8 @@
                 "github_humans",
                 "terminal_agents",
                 "local_operators",
-                "local_admins"
+                "local_admins",
+                "ordinary_agents"
               ],
               "type": "string"
             },
@@ -2216,8 +2219,11 @@
             "type": "integer"
           },
           "schema_version": {
-            "const": 2,
             "default": 2,
+            "enum": [
+              2,
+              3
+            ],
             "title": "Schema Version",
             "type": "integer"
           },
@@ -2233,6 +2239,51 @@
           "rule_count"
         ],
         "title": "AuthzPolicyCandidateSummary",
+        "type": "object"
+      },
+      "AuthzPolicyCollectionRuleCounts": {
+        "additionalProperties": false,
+        "properties": {
+          "github_actions": {
+            "minimum": 0.0,
+            "title": "Github Actions",
+            "type": "integer"
+          },
+          "github_humans": {
+            "minimum": 0.0,
+            "title": "Github Humans",
+            "type": "integer"
+          },
+          "local_admins": {
+            "minimum": 0.0,
+            "title": "Local Admins",
+            "type": "integer"
+          },
+          "local_operators": {
+            "minimum": 0.0,
+            "title": "Local Operators",
+            "type": "integer"
+          },
+          "ordinary_agents": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Ordinary Agents",
+            "type": "integer"
+          },
+          "terminal_agents": {
+            "minimum": 0.0,
+            "title": "Terminal Agents",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "github_actions",
+          "github_humans",
+          "terminal_agents",
+          "local_operators",
+          "local_admins"
+        ],
+        "title": "AuthzPolicyCollectionRuleCounts",
         "type": "object"
       },
       "AuthzPolicyHealthResponse": {
@@ -44936,7 +44987,8 @@
                     "default": "reject",
                     "enum": [
                       "reject",
-                      "migrate_v1_to_v2"
+                      "migrate_v1_to_v2",
+                      "migrate_v2_to_v3"
                     ],
                     "title": "Schema Migration",
                     "type": "string"
@@ -45223,7 +45275,8 @@
                         "default": "reject",
                         "enum": [
                           "reject",
-                          "migrate_v1_to_v2"
+                          "migrate_v1_to_v2",
+                          "migrate_v2_to_v3"
                         ],
                         "title": "Schema Migration",
                         "type": "string"

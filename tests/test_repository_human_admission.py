@@ -1,3 +1,4 @@
+import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -272,38 +273,80 @@ class RepositoryHumanAdmissionTests(unittest.TestCase):
             )
 
     def test_owner_waiver_captures_exact_managed_authz_and_satisfies_path(self) -> None:
-        role_policy = _role_policy(repository_owner_ids=(301,))
-        authz_policy = _authz_policy_record(github_ids=(301,))
+        for version in (2, 3):
+            with self.subTest(schema_version=version):
+                role_policy = _role_policy(repository_owner_ids=(301,))
+                authz_policy = _authz_policy_record(github_ids=(301,), schema_version=version)
 
-        result = capture_tenant_technical_human_waiver_event(
-            identity=_human(github_id=301),
-            candidate=_candidate(),
-            classification=_classification(),
-            role_policy_record=role_policy,
-            authz_policy_record=authz_policy,
-            action="created",
-            occurred_at=OCCURRED_AT,
-            source_event_kind="github_issue_comment",
-            source_event_id="comment-1001",
-            reason="Narrow technical change reviewed by repo owner.",
-            recorded_at=OCCURRED_AT,
-            expires_at="2026-07-31T13:00:00Z",
-        )
+                result = capture_tenant_technical_human_waiver_event(
+                    identity=_human(github_id=301),
+                    candidate=_candidate(),
+                    classification=_classification(),
+                    role_policy_record=role_policy,
+                    authz_policy_record=authz_policy,
+                    action="created",
+                    occurred_at=OCCURRED_AT,
+                    source_event_kind="github_issue_comment",
+                    source_event_id="comment-1001",
+                    reason="Narrow technical change reviewed by repo owner.",
+                    recorded_at=OCCURRED_AT,
+                    expires_at="2026-07-31T13:00:00Z",
+                )
 
-        self.assertEqual(result.path_result.state, "satisfied")
-        self.assertEqual(result.record.binding.head_sha, HEAD_SHA)
-        self.assertEqual(result.record.binding.product, PRODUCT)
-        self.assertEqual(result.record.binding.context, CONTEXT)
-        self.assertEqual(result.record.authorization.managed_set_id, "tenant-human.example")
-        self.assertEqual(result.record.authorization.managed_rule_id, "technical-waiver")
-        self.assertEqual(
-            result.record.authorization.action,
-            TENANT_TECHNICAL_HUMAN_WAIVER_WRITE_ACTION,
-        )
-        self.assertEqual(
-            result.record.authorization.role_policy_provenance.authority_kind,
-            "repository_owner",
-        )
+                self.assertEqual(result.path_result.state, "satisfied")
+                self.assertEqual(result.record.binding.head_sha, HEAD_SHA)
+                self.assertEqual(result.record.binding.product, PRODUCT)
+                self.assertEqual(result.record.binding.context, CONTEXT)
+                self.assertEqual(result.record.authorization.managed_set_id, "tenant-human.example")
+                self.assertEqual(result.record.authorization.managed_rule_id, "technical-waiver")
+                self.assertEqual(
+                    result.record.authorization.action,
+                    TENANT_TECHNICAL_HUMAN_WAIVER_WRITE_ACTION,
+                )
+                self.assertEqual(
+                    result.record.authorization.role_policy_provenance.authority_kind,
+                    "repository_owner",
+                )
+
+                self.assertEqual(
+                    result.record.authorization.authz_policy_schema_version,
+                    authz_policy.policy.schema_version,
+                )
+                restored = type(result.record).model_validate_json(result.record.model_dump_json())
+                if version == 2:
+                    legacy_payload = restored.model_dump(mode="json")
+                    legacy_payload["authorization"].pop("authz_policy_schema_version")
+                    legacy_event_digest = legacy_payload["event_digest"]
+                    legacy_bytes = json.dumps(
+                        legacy_payload,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                    legacy = type(restored).model_validate_json(legacy_bytes)
+                    self.assertEqual(legacy.event_digest, legacy_event_digest)
+                    self.assertEqual(legacy.model_dump_json(), restored.model_dump_json())
+                    legacy_decision = technical_human_waiver_path_result(
+                        candidate=_candidate(),
+                        classification=_classification(),
+                        role_policy_record=role_policy,
+                        authz_policy_record=authz_policy,
+                        events=(legacy,),
+                        evaluated_at=EVALUATED_AT,
+                    )
+                    self.assertEqual(legacy_decision.state, "satisfied")
+
+                payload = restored.model_dump(mode="json")
+                payload["authorization"]["authz_policy_schema_version"] = 3 if version == 2 else 2
+                payload["event_digest"] = ""
+                mislabelled = type(restored).model_validate(payload)
+                decision = technical_human_waiver_path_result(
+                    candidate=_candidate(),
+                    classification=_classification(),
+                    role_policy_record=role_policy,
+                    authz_policy_record=authz_policy,
+                    events=(mislabelled,),
+                    evaluated_at=EVALUATED_AT,
+                )
+                self.assertEqual(decision.state, "stale")
 
     def test_waiver_requires_human_owner_and_active_authz(self) -> None:
         role_policy = _role_policy(repository_owner_ids=(301,))
@@ -904,6 +947,7 @@ def _role_policy(
 
 def _authz_policy_record(
     *,
+    schema_version: Literal[2, 3] = 2,
     github_ids: tuple[int, ...],
     extra_rule: dict[str, object] | None = None,
 ) -> LaunchplaneAuthzPolicyRecord:
@@ -922,7 +966,7 @@ def _authz_policy_record(
         )
     if extra_rule is not None:
         rules.append(GitHubHumanPolicyRule.model_validate(extra_rule))
-    policy = LaunchplaneAuthzPolicy(schema_version=2, github_humans=tuple(rules))
+    policy = LaunchplaneAuthzPolicy(schema_version=schema_version, github_humans=tuple(rules))
     digest = authz_policy_sha256(policy)
     return LaunchplaneAuthzPolicyRecord(
         record_id=build_authz_policy_record_id(revision=1, policy_sha256=digest),

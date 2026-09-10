@@ -1061,9 +1061,12 @@ def capture_tenant_technical_human_waiver_event(
         raise TenantTechnicalHumanWaiverAuthorizationError(
             "Tenant technical human waiver requires a stable GitHub numeric identity."
         )
-    if authz_policy_record.status != "active" or authz_policy_record.policy.schema_version != 2:
+    if authz_policy_record.status != "active" or authz_policy_record.policy.schema_version not in (
+        2,
+        3,
+    ):
         raise TenantTechnicalHumanWaiverAuthorizationError(
-            "Tenant technical human waiver requires one active schema-v2 authorization policy."
+            "Tenant technical human waiver requires one active schema-v2 or schema-v3 authorization policy."
         )
     if not _classification_matches_candidate(classification=classification, candidate=candidate):
         raise ValueError("Tenant technical human waiver classification does not match candidate.")
@@ -1124,6 +1127,7 @@ def capture_tenant_technical_human_waiver_event(
         authz_policy_revision=authz_policy_record.revision,
         authz_policy_digest=authz_policy_record.policy_sha256,
         authz_policy_source=authz_policy_record.source,
+        authz_policy_schema_version=authz_policy_record.policy.schema_version,
         role_policy_provenance=role_provenance,
         authorized_at=normalized_occurred_at,
     )
@@ -1313,10 +1317,11 @@ def _waiver_authz_rule_current(
     context: str,
 ) -> bool:
     authorization = event.authorization
-    if authz_policy_record.policy.schema_version != 2:
+    if authz_policy_record.policy.schema_version not in (2, 3):
         return False
     if (
-        authorization.authz_policy_record_id != authz_policy_record.record_id
+        authorization.authz_policy_schema_version != authz_policy_record.policy.schema_version
+        or authorization.authz_policy_record_id != authz_policy_record.record_id
         or authorization.authz_policy_revision != authz_policy_record.revision
         or authorization.authz_policy_digest != authz_policy_record.policy_sha256
     ):
@@ -1440,9 +1445,9 @@ def _current_expected_waiver_authz_policy(
             "Tenant technical human waiver requires exactly one active authz policy."
         )
     current_record = records[0]
-    if current_record.policy.schema_version != 2:
+    if current_record.policy.schema_version not in (2, 3):
         raise TenantTechnicalHumanWaiverAuthorizationError(
-            "Tenant technical human waiver requires schema-v2 authz policy."
+            "Tenant technical human waiver requires schema-v2 or schema-v3 authz policy."
         )
     if (
         current_record.record_id != expected_authority.authz_policy_record_id
@@ -1461,7 +1466,7 @@ def _matching_managed_waiver_rules_for_identity(
     product: str,
     context: str,
 ) -> tuple[GitHubHumanPolicyRule, ...]:
-    if authz_policy_record.policy.schema_version != 2:
+    if authz_policy_record.policy.schema_version not in (2, 3):
         return ()
 
     def intersects(values: frozenset[str], allowed_values: tuple[str, ...]) -> bool:

@@ -15,6 +15,82 @@ from control_plane.service_auth import (
 
 
 class AuthzDiagnosticsTests(unittest.TestCase):
+    def test_exact_instance_diagnostics_agree_with_evaluator(self) -> None:
+        action = "route_binding.external.plan"
+        for version in (2, 3):
+            policy_payload = _policy(job_workflow_ref="expected-worker").model_dump(mode="json")
+            policy_payload["schema_version"] = version
+            policy_payload["github_actions"][0].update(actions=[action], instances=["instance-a"])
+            policy = LaunchplaneAuthzPolicy.model_validate(policy_payload)
+            for case, target, identity in (
+                (
+                    "exact",
+                    AuthorizationTarget(scope="instance", instances=("instance-a",)),
+                    _identity(),
+                ),
+                (
+                    "wrong-instance",
+                    AuthorizationTarget(scope="instance", instances=("instance-b",)),
+                    _identity(),
+                ),
+                ("missing-instance", AuthorizationTarget(scope="context"), _identity()),
+                (
+                    "selector",
+                    AuthorizationTarget(scope="instance", instances=("instance-a",)),
+                    _identity(job_workflow_ref="other-worker"),
+                ),
+                (
+                    "identity",
+                    AuthorizationTarget(scope="instance", instances=("instance-a",)),
+                    _identity(repository="example-org/other-product"),
+                ),
+            ):
+                with self.subTest(schema_version=version, case=case):
+                    request = AuthzDiagnosticEvaluateEnvelope(
+                        action=action,
+                        product="example-product",
+                        context="example-preview",
+                        target=target,
+                    )
+                    diagnostic = evaluate_github_actions_authz(
+                        policy=policy,
+                        identity=identity,
+                        request=request,
+                    )
+                    actual = policy.evaluate(
+                        identity=identity,
+                        action=action,
+                        product=request.product,
+                        context=request.context,
+                        target=target,
+                        record_context=False,
+                    )
+                    self.assertEqual(diagnostic.decision, actual.decision)
+                    self.assertEqual(
+                        diagnostic.decision, "allowed" if case == "exact" else "denied"
+                    )
+
+    def test_schema_one_retains_legacy_unpinned_instance_diagnostics(self) -> None:
+        payload = _policy(job_workflow_ref="expected-worker").model_dump(mode="json")
+        payload["schema_version"] = 1
+        policy = LaunchplaneAuthzPolicy.model_validate(payload)
+        request = _request().model_copy(
+            update={"target": AuthorizationTarget(scope="instance", instances=("instance-a",))}
+        )
+        diagnostic = evaluate_github_actions_authz(
+            policy=policy, identity=_identity(), request=request
+        )
+        self.assertTrue(
+            policy.allows(
+                identity=_identity(),
+                action=request.action,
+                product=request.product,
+                context=request.context,
+                target=request.target,
+            )
+        )
+        self.assertEqual(diagnostic.decision, "allowed")
+
     def test_reports_only_failed_selector_categories_for_closest_rule(self) -> None:
         identity = _identity(job_workflow_ref="actual-worker")
         policy = _policy(job_workflow_ref="expected-worker")

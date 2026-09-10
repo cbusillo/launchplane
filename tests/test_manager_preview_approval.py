@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from typing import Literal
 
 from control_plane.contracts.authz_policy_record import (
     LaunchplaneAuthzPolicyRecord,
@@ -33,6 +34,7 @@ from control_plane.manager_preview_approval import (
     capture_manager_preview_approval_authorization,
     evaluate_manager_preview_approval,
     record_manager_preview_approval_event,
+    manager_preview_approval_required,
 )
 from control_plane.service_auth import (
     GitHubHumanIdentity,
@@ -76,35 +78,74 @@ class ManagerPreviewApprovalTests(unittest.TestCase):
         self.assertEqual(binding.runtime_identity.preview_generation_id, "")
 
     def test_records_approval_only_after_exact_manager_authorization(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name))
-            result = record_manager_preview_approval_event(
-                record_store=store,
-                identity=_manager_identity(login="renamed-manager"),
-                policy_record=_policy_record(),
-                product=PRODUCT,
-                preview=_preview(),
-                generation=_generation(),
-                action="approved",
-                occurred_at=OCCURRED_AT,
-                source_event_kind="github_issue_comment",
-                source_event_id="comment-101",
-            )
+        for version in (2, 3):
+            with self.subTest(schema_version=version):
+                with TemporaryDirectory() as temporary_directory_name:
+                    store = FilesystemRecordStore(state_dir=Path(temporary_directory_name))
+                    result = record_manager_preview_approval_event(
+                        record_store=store,
+                        identity=_manager_identity(login="renamed-manager"),
+                        policy_record=_policy_record(schema_version=version),
+                        product=PRODUCT,
+                        preview=_preview(),
+                        generation=_generation(),
+                        action="approved",
+                        occurred_at=OCCURRED_AT,
+                        source_event_kind="github_issue_comment",
+                        source_event_id="comment-101",
+                    )
 
-            self.assertEqual(result.status, "written")
-            self.assertEqual(result.record.manager_github_id, 101)
-            self.assertEqual(result.record.manager_login, "renamed-manager")
-            self.assertEqual(result.record.binding.head_sha, HEAD_SHA)
-            self.assertEqual(result.record.binding.artifact_image_digest, IMAGE_DIGEST)
-            self.assertEqual(
-                store.list_manager_preview_approval_event_records(
-                    product=PRODUCT,
-                    context=CONTEXT,
-                    repository=REPOSITORY,
-                    pr_number=PR_NUMBER,
-                ),
-                (result.record,),
-            )
+                    self.assertEqual(result.status, "written")
+                    self.assertEqual(result.record.manager_github_id, 101)
+                    self.assertEqual(result.record.manager_login, "renamed-manager")
+                    self.assertEqual(result.record.binding.head_sha, HEAD_SHA)
+                    self.assertEqual(result.record.binding.artifact_image_digest, IMAGE_DIGEST)
+                    self.assertEqual(
+                        store.list_manager_preview_approval_event_records(
+                            product=PRODUCT,
+                            context=CONTEXT,
+                            repository=REPOSITORY,
+                            pr_number=PR_NUMBER,
+                        ),
+                        (result.record,),
+                    )
+
+                policy = _policy_record(schema_version=version)
+                self.assertTrue(
+                    manager_preview_approval_required(
+                        policy_record=policy, product=PRODUCT, context=CONTEXT
+                    )
+                )
+                assert result.record.authorization is not None
+                self.assertEqual(
+                    result.record.authorization.policy_schema_version, policy.policy.schema_version
+                )
+                restored = ManagerPreviewApprovalEventRecord.model_validate_json(
+                    result.record.model_dump_json()
+                )
+                self.assertEqual(
+                    _decision(events=(restored,), policy_record=policy).status, "approved"
+                )
+                if version == 2:
+                    legacy_payload = restored.model_dump(mode="json")
+                    legacy_payload["authorization"].pop("policy_schema_version")
+                    legacy_bytes = json.dumps(
+                        legacy_payload,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                    legacy = ManagerPreviewApprovalEventRecord.model_validate_json(legacy_bytes)
+                    self.assertEqual(legacy.model_dump_json(), restored.model_dump_json())
+                    self.assertEqual(
+                        _decision(events=(legacy,), policy_record=policy).status,
+                        "approved",
+                    )
+
+                payload = restored.model_dump(mode="json")
+                payload["authorization"]["policy_schema_version"] = 3 if version == 2 else 2
+                mislabelled = ManagerPreviewApprovalEventRecord.model_validate(payload)
+                self.assertEqual(
+                    _decision(events=(mislabelled,), policy_record=policy).status, "stale"
+                )
 
     def test_rejects_actor_not_named_by_stable_github_id(self) -> None:
         with self.assertRaisesRegex(
@@ -632,11 +673,12 @@ def _manager_identity(*, github_id: int = 101, login: str = "manager") -> GitHub
 
 def _policy_record(
     *,
+    schema_version: Literal[2, 3] = 2,
     revision: int = 1,
     extra_actions: tuple[str, ...] = (),
 ) -> LaunchplaneAuthzPolicyRecord:
     policy = LaunchplaneAuthzPolicy(
-        schema_version=2,
+        schema_version=schema_version,
         github_humans=(
             GitHubHumanPolicyRule(
                 managed_set_id="manager.example-site",

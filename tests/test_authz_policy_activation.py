@@ -125,8 +125,36 @@ def _record(policy: LaunchplaneAuthzPolicy) -> LaunchplaneAuthzPolicyRecord:
 
 
 class AuthzPolicyOperationActivationDomainTests(unittest.TestCase):
+    def test_ordinary_rule_occupying_activation_set_is_a_conflict(self) -> None:
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "schema_version": 3,
+                "ordinary_agents": [
+                    {
+                        "managed_set_id": (
+                            authz_policy_activation.AUTHZ_POLICY_OPERATION_ACTIVATION_MANAGED_SET_ID
+                        ),
+                        "managed_rule_id": "ordinary-collision",
+                        "principal_id": "agent_one",
+                        "target": {
+                            "repository_id": 1001,
+                            "repository": "example/launchplane",
+                            "base_branch": "main",
+                        },
+                        "actions": ["preflight"],
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(
+            authz_policy_activation.authz_policy_operation_activation_state(policy),
+            "conflict",
+        )
+
     def test_compiled_set_is_exactly_one_immutable_human_rule(self) -> None:
         request = authz_policy_activation.build_authz_policy_operation_activation_reconcile_request(
+            current_policy=_policy(administrator_quorum=2),
             github_id=123,
             mode="dry_run",
             reason="Activate the reviewed privileged-policy lifecycle.",

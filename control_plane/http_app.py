@@ -14935,6 +14935,7 @@ def create_launchplane_fastapi_app(
             trace_id=trace_id,
         )
         activation_request = control_plane_authz_policy_activation.build_authz_policy_operation_activation_reconcile_request(
+            current_policy=active_record.policy,
             github_id=identity.github_id,
             mode=mode,
             reason=reason,

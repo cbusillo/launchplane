@@ -7,6 +7,7 @@ import unittest
 
 from control_plane import authz_policy_recovery
 from control_plane import authz_policy_activation
+from control_plane.authz_grant_service import plan_managed_authz_policy_reconcile
 from control_plane.contracts.authz_policy_record import (
     LaunchplaneAuthzPolicyRecord,
     authz_policy_sha256,
@@ -120,6 +121,102 @@ def _record(policy: LaunchplaneAuthzPolicy) -> LaunchplaneAuthzPolicyRecord:
         policy_sha256=digest,
         policy=policy,
     )
+
+
+class AuthzPolicyRecoveryDomainTests(unittest.TestCase):
+    def test_v3_ordinary_bootstrap_occupant_blocks_generation_without_counting_actions(
+        self,
+    ) -> None:
+        base_payload = _policy().model_dump(mode="json")
+        base_payload["schema_version"] = 3
+        base_policy = LaunchplaneAuthzPolicy.model_validate(base_payload)
+        collision_payload = {
+            **base_payload,
+            "ordinary_agents": [
+                {
+                    "managed_set_id": (
+                        authz_policy_recovery.AUTHZ_POLICY_RECOVERY_BOOTSTRAP_MANAGED_SET_ID
+                    ),
+                    "managed_rule_id": "ordinary-collision",
+                    "principal_id": "agent_one",
+                    "target": {
+                        "repository_id": 1001,
+                        "repository": "example/launchplane",
+                        "base_branch": "main",
+                    },
+                    "actions": ["preflight"],
+                }
+            ],
+        }
+        collision_policy = LaunchplaneAuthzPolicy.model_validate(collision_payload)
+
+        with self.assertRaisesRegex(ValueError, "exactly the temporary human and terminal rules"):
+            authz_policy_recovery.build_authz_policy_recovery_candidate_reconcile_request(
+                policy=collision_policy,
+                github_id=123,
+                candidate_id="retire-privileged-operation-bootstrap",
+                mode="dry_run",
+                reason="Reject an occupied reserved set.",
+            )
+        self.assertEqual(
+            authz_policy_recovery.recovery_action_match_cardinality(
+                policy=collision_policy, github_id=123
+            ),
+            authz_policy_recovery.recovery_action_match_cardinality(
+                policy=base_policy, github_id=123
+            ),
+        )
+
+    def test_v3_reset_and_bootstrap_retirement_preserve_ordinary_rules_on_replay(self) -> None:
+        policy_payload = _policy().model_dump(mode="json")
+        policy_payload.update(
+            {
+                "schema_version": 3,
+                "ordinary_agents": [
+                    {
+                        "managed_set_id": "ordinary-agent.pilot",
+                        "managed_rule_id": "agent-one",
+                        "principal_id": "agent_one",
+                        "target": {
+                            "repository_id": 1001,
+                            "repository": "example/launchplane",
+                            "base_branch": "main",
+                        },
+                        "actions": ["self_read", "preflight"],
+                    }
+                ],
+            }
+        )
+        policy = LaunchplaneAuthzPolicy.model_validate(policy_payload)
+        active_record = _record(policy)
+
+        class Store:
+            def list_authz_policy_records(
+                self, *, status: str = "", limit: int | None = None
+            ) -> tuple[LaunchplaneAuthzPolicyRecord, ...]:
+                records = (active_record,) if status in {"", "active"} else ()
+                return records[:limit]
+
+        for candidate_id in (
+            "reset-unconfirmed-privileged-policy-operation-activation",
+            "retire-privileged-operation-bootstrap",
+        ):
+            with self.subTest(candidate_id=candidate_id):
+                request = (
+                    authz_policy_recovery.build_authz_policy_recovery_candidate_reconcile_request(
+                        policy=policy,
+                        github_id=123,
+                        candidate_id=candidate_id,
+                        mode="dry_run",
+                        reason="Preserve schema-v3 policy state.",
+                    )
+                )
+                first = plan_managed_authz_policy_reconcile(record_store=Store(), request=request)
+                second = plan_managed_authz_policy_reconcile(record_store=Store(), request=request)
+
+                self.assertEqual(request.desired_policy.schema_version, 3)
+                self.assertEqual(first[2].ordinary_agents, policy.ordinary_agents)
+                self.assertEqual(first[3].plan_sha256, second[3].plan_sha256)
 
 
 class AuthzPolicyRecoveryHttpTests(unittest.IsolatedAsyncioTestCase):

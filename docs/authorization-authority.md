@@ -79,6 +79,13 @@ compare-and-swap, idempotency, reviewed-plan digests, and redacted evidence. A
 protected GitHub workflow currently reads desired managed sets from repository
 secrets and transports them to that endpoint through GitHub Actions OIDC.
 
+Reconciliation planning accepts schema-v2 and schema-v3 desired managed sets.
+It resolves only the explicit v1-to-v2, v2-to-v3, and same-schema transitions,
+preserves unrelated managed sets across all six policy collections, and reports
+ordinary-agent rules as structural policy content. Schema-v3 planning remains
+read-only: apply and every schema-v3 storage seed, compare-write, deletion, and
+downgrade retain the `authz_policy_schema_v3_write_not_activated` fence.
+
 That workflow is transitional compatibility infrastructure. The database remains
 the live decision authority, but GitHub-hosted desired sets still make GitHub
 part of the effective administration chain. Do not interpret the workflow's
@@ -490,3 +497,27 @@ handoff criteria are complete.
 
 **Preserved history:** Phase 1 introduced planning-only actions without grants.
 That history does not describe the deployed Phase 2 worker flow.
+
+## Existing-identity policy version compatibility
+
+Authorization policy readers support schemas 2 and 3 for existing human,
+workflow, and terminal-agent identities. Owner-control challenge derivation,
+authorization diagnostics, feedback actor/worker resolution, repository human
+waiver capture and evaluation, and manager preview
+requirement/capture/evaluation preserve the same immutable identity, scope,
+role, current policy, expiry, and revocation checks across these versions. This
+does not register an ordinary-agent identity or enable ordinary-agent execution.
+
+Manager approval and human waiver evidence records store the actual evaluated
+policy version. Readers retain the legacy default of 2 for older evidence that
+omitted that field. Current evaluation rejects a recorded version inconsistent
+with the current policy, including inconsistent evidence that carries the
+correct policy digest. Policy identity, revision and digest remain required; a
+policy change does not carry prior acceptance forward automatically.
+
+These compatibility paths do not widen authorization policy writers or the
+candidate-policy preview boundary. Their existing v2-only behavior and the
+mechanical v3 persistence fence remain in place until the separately reviewed
+activation work enables a complete supported path. Once v3 policy or evidence is
+persisted, rollback must use an image that can read it; a source compatibility
+change alone is neither activation nor proof of the deployed policy version.

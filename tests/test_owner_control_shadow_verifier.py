@@ -207,14 +207,14 @@ def _owner_control_policy_record(
     action: str,
     owner_ids: tuple[int, ...] = (100001,),
     roles: tuple[Literal["read_only", "admin"], ...] = (),
-    schema_version: Literal[1, 2] = 2,
+    schema_version: Literal[1, 2, 3] = 2,
 ) -> LaunchplaneAuthzPolicyRecord:
     policy = LaunchplaneAuthzPolicy(
         schema_version=schema_version,
         github_humans=(
             GitHubHumanPolicyRule(
-                managed_set_id="owner-control-tests" if schema_version == 2 else None,
-                managed_rule_id="approve" if schema_version == 2 else None,
+                managed_set_id="owner-control-tests" if schema_version in (2, 3) else None,
+                managed_rule_id="approve" if schema_version in (2, 3) else None,
                 github_ids=owner_ids,
                 roles=roles,
                 products=("launchplane",),
@@ -939,10 +939,28 @@ class OwnerControlShadowVerifierStorageTests(unittest.TestCase):
                 expires_at="2026-08-28T00:05:00+00:00",
             )
 
-    def test_owner_control_challenge_requires_schema_v2_policy(self) -> None:
+    def test_owner_control_challenge_binds_supported_policy_provenance(self) -> None:
+        for version in (2, 3):
+            with self.subTest(schema_version=version):
+                policy = _owner_control_policy_record(
+                    action=AUTHZ_POLICY_OPERATION_APPROVE_ACTION,
+                    schema_version=version,
+                )
+                request = derive_owner_control_approval_request(
+                    operation=_managed_policy_operation(blocked=False),
+                    policy_record=policy,
+                    owner_github_id=100001,
+                    nonce="owner-control-nonce-0000000000000013",
+                    issued_at="2026-08-28T00:00:00+00:00",
+                    expires_at="2026-08-28T00:05:00+00:00",
+                )
+                self.assertEqual(request.policy_sha256, policy.policy_sha256)
+                self.assertEqual(request.policy_record_id, policy.record_id)
+
+    def test_owner_control_challenge_rejects_legacy_schema_policy(self) -> None:
         with self.assertRaisesRegex(
             OwnerControlChallengeProvenanceError,
-            "schema-v2 authz policy",
+            "schema-v2 or schema-v3 authz policy",
         ):
             derive_owner_control_approval_request(
                 operation=_managed_policy_operation(blocked=False),
