@@ -1889,7 +1889,7 @@ test.describe("operator journeys", () => {
       }),
     ).toHaveAttribute("aria-current", "page");
     await expect(
-      page.getByText("Human-governed approval — internal execution only"),
+      page.getByText("Review each change before approving it"),
     ).toBeVisible();
     await expect(page.getByText("Would rotate")).toBeVisible();
     await expect(page.getByText("18", { exact: true }).first()).toBeVisible();

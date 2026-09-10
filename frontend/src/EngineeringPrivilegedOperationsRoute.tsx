@@ -136,17 +136,13 @@ function DefaultPrivilegedOperationsRoute({
           />
         </div>
       }
-      description="Review typed, redacted privileged-operation plans and record human approvals or revocations without exposing credentials."
+      description="Review access, delivery, and secret changes before approving them."
       icon={KeyRound}
       title="Privileged operation plans"
       view="privileged-operations"
     >
-      <EngineeringBoundaryNote title="Human-governed approval — internal execution only">
-        GitHub humans may approve or revoke a current plan. Execution remains a
-        service-internal worker action with fresh policy and plan revalidation;
-        this UI has no execute control. Agents may submit inert policy proposals
-        and receive only their own bounded summaries. The new actions ship with
-        no production grants.
+      <EngineeringBoundaryNote title="Review each change before approving it">
+        Launchplane applies approved changes after required checks pass.
       </EngineeringBoundaryNote>
 
       <EngineeringResourceGate
@@ -181,9 +177,9 @@ function PrivilegedOperationPlanList({
   if (!data.reviews.length) {
     return (
       <EngineeringEmpty
-        detail="No typed privileged-operation plan has been recorded. Planning routes remain unavailable until an explicit managed rule is activated through the separate authorization process."
+        detail="Prepared changes will appear here."
         icon={KeyRound}
-        title="No privileged-operation plans"
+        title="No changes are waiting for review"
       />
     );
   }
@@ -252,9 +248,7 @@ function OrdinaryAgentDeliveryActivationComposer({
           activation_expires_at: duration.activation_expires_at,
           reason: `Prepare qualification-only delivery for ${option.label}.`,
         });
-        setMessage(
-          "Setup plan recorded. Review its qualification-only behavior and stop boundary below.",
-        );
+        setMessage("Review the setup below. It starts with checks only.");
       } else {
         const option = data.revoke_options.find(
           (candidate) => candidate.activation.activation_id === selection,
