@@ -4,6 +4,8 @@ from datetime import datetime, timezone
 import unittest
 from unittest.mock import patch
 
+from sqlalchemy import select
+
 from control_plane.contracts import ordinary_agent_effect as effects
 from control_plane.contracts import ordinary_agent_snapshot as snapshots
 from control_plane.contracts.merge_train_controller_state import MergeTrainControllerStateRecord
@@ -45,6 +47,20 @@ class OrdinaryAgentReadObservationTests(unittest.TestCase):
     def advance(self) -> None:
         self.now += 1
         self.clock.return_value = datetime.fromtimestamp(self.now, timezone.utc).isoformat()
+
+    def read_attempt_count(self, purpose: str) -> int:
+        with self.store._session_factory() as session:
+            return len(
+                tuple(
+                    session.scalars(
+                        select(LaunchplaneOrdinaryAgentReadAttemptRow.attempt_id).where(
+                            LaunchplaneOrdinaryAgentReadAttemptRow.request_id
+                            == self.request.request_id,
+                            LaunchplaneOrdinaryAgentReadAttemptRow.purpose == purpose,
+                        )
+                    )
+                )
+            )
 
     def observe(
         self,
@@ -137,15 +153,20 @@ class OrdinaryAgentReadObservationTests(unittest.TestCase):
             result = self.candidate_result(status)
             completed = self.observe(result, cleanup_unknown=status == "unknown")
             if status != "pass":
+                expected_due = completed.next_due_at
+                self.assertIsNotNone(expected_due)
+                attempts_before_wait = self.read_attempt_count("candidate_check")
                 with self.assertRaisesRegex(
                     OrdinaryAgentSessionAdmissionDenied, "candidate_check_wait"
-                ):
+                ) as raised:
                     self.store.reserve_ordinary_agent_candidate_check_attempt(
                         request_id=self.request.request_id,
                         expected_binding_revision=1,
                         controller_fence=self.fixture.fence,
                         candidate_sha=result.candidate_identity.sha,
                     )
+                self.assertEqual(raised.exception.retry_not_before, expected_due)
+                self.assertEqual(self.read_attempt_count("candidate_check"), attempts_before_wait)
                 self.advance()
             else:
                 replay = self.store.reserve_ordinary_agent_candidate_check_attempt(
@@ -273,12 +294,19 @@ class OrdinaryAgentReadObservationTests(unittest.TestCase):
         )
         pending = self.observe(requested_pending)
         self.assertEqual(pending.reason_code, "source_checks_undecided")
-        with self.assertRaisesRegex(OrdinaryAgentSessionAdmissionDenied, "source_check_wait"):
+        expected_due = pending.next_due_at
+        self.assertIsNotNone(expected_due)
+        attempts_before_wait = self.read_attempt_count("snapshot")
+        with self.assertRaisesRegex(
+            OrdinaryAgentSessionAdmissionDenied, "source_check_wait"
+        ) as raised:
             self.store.reserve_ordinary_agent_snapshot_attempt(
                 request_id=self.request.request_id,
                 expected_binding_revision=1,
                 controller_fence=self.fixture.fence,
             )
+        self.assertEqual(raised.exception.retry_not_before, expected_due)
+        self.assertEqual(self.read_attempt_count("snapshot"), attempts_before_wait)
         self.advance()
 
         extra_number = max(requested_numbers) + 1

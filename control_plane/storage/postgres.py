@@ -24305,7 +24305,8 @@ class PostgresRecordStore(HumanSessionStore):
                     )
                 if latest.next_due_at is not None and latest.next_due_at > context.now:
                     raise OrdinaryAgentSessionAdmissionDenied(
-                        "source_check_wait" if purpose == "snapshot" else "candidate_check_wait"
+                        "source_check_wait" if purpose == "snapshot" else "candidate_check_wait",
+                        retry_not_before=latest.next_due_at,
                     )
                 if latest.state == "completed":
                     result = latest.result
