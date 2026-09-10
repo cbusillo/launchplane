@@ -7,7 +7,7 @@ import time
 
 from control_plane.contracts import ordinary_agent_effect as effects
 from control_plane.contracts.ordinary_agent_session_lifecycle import (
-    OrdinaryAgentFiniteRequestRecord,
+    OrdinaryAgentGuardedFiniteRequest,
 )
 from control_plane.github_app_identity import GitHubApiRequest
 from control_plane.ordinary_agent_quota_transport import OrdinaryAgentQuotaTransport
@@ -55,7 +55,7 @@ class _ReadOnlyTransport:
 def reconcile_ordinary_effect_once(
     *,
     store: OrdinaryEffectReconciliationStore,
-    request: OrdinaryAgentFiniteRequestRecord,
+    request: OrdinaryAgentGuardedFiniteRequest,
     effect_id: str,
     api_request: GitHubApiRequest = github_api_request,
     transport_factory: Callable[[str], MergeTrainGitHubTransport] | None = None,

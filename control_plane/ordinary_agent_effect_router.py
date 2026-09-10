@@ -22,7 +22,7 @@ from control_plane.contracts.merge_train_effect import (
     StackChildMergeEffect,
 )
 from control_plane.contracts.ordinary_agent_session_lifecycle import (
-    OrdinaryAgentFiniteRequestRecord,
+    OrdinaryAgentGuardedFiniteRequest,
 )
 from control_plane.github_app_identity import GitHubApiRequest
 from control_plane.merge_train_github import MergeTrainGitHubTransport
@@ -77,7 +77,7 @@ class OrdinaryAgentSemanticEffectRouter:
     def __init__(
         self,
         *,
-        request: OrdinaryAgentFiniteRequestRecord,
+        request: OrdinaryAgentGuardedFiniteRequest,
         controller_fence: Callable[[], effects.OrdinaryAgentControllerFence],
         store: OrdinaryAgentSemanticRouterStore,
         api_request: GitHubApiRequest = github_api_request,

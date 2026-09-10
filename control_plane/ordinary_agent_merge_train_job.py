@@ -27,6 +27,9 @@ from control_plane.contracts.ordinary_agent_snapshot import (
     OrdinaryAgentLandingEvidence,
     OrdinaryAgentMergeTrainSnapshotResult,
 )
+from control_plane.contracts.ordinary_agent_session_lifecycle import (
+    is_guarded_ordinary_agent_finite_request,
+)
 from control_plane.github_app_identity import GitHubApiRequest
 from control_plane.merge_admission import (
     GuardedMergeAdmission,
@@ -261,6 +264,9 @@ def advance_ordinary_agent_merge_train_job(
     utc_now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
 ) -> effects.OrdinaryAgentJobAttemptDisposition:
     """Advance one finite ordinary job step without registering a runtime worker."""
+    request = claimed.request
+    if not is_guarded_ordinary_agent_finite_request(request):
+        raise OrdinaryAgentSessionAdmissionDenied("request_purpose_unsupported")
     snapshot = store.read_ordinary_agent_job_recovery_snapshot(claim_fence=claimed.claim_fence)
     _require_recovery_binding(claimed, snapshot)
     controller = OrdinaryAgentControllerAdapter(claimed=claimed, store=store, reader=store)
@@ -295,7 +301,6 @@ def advance_ordinary_agent_merge_train_job(
     if routed is not None:
         return routed
 
-    request = claimed.request
     terminal_at = request.continuation_expires_at or request.expires_at
     if request.cancellation_requested_at is not None or snapshot.observed_at >= terminal_at:
         store.retire_ordinary_agent_job_history(claim_fence=claimed.claim_fence)
@@ -611,6 +616,9 @@ def _route_existing_history(
     monotonic: Callable[[], float],
     utc_now: Callable[[], datetime],
 ) -> effects.OrdinaryAgentJobAttemptDisposition | None:
+    request = claimed.request
+    if not is_guarded_ordinary_agent_finite_request(request):
+        raise OrdinaryAgentSessionAdmissionDenied("request_purpose_unsupported")
     history = snapshot.unresolved_effect or snapshot.latest_unadvanced_effect
     if history is None:
         return None
@@ -622,7 +630,7 @@ def _route_existing_history(
             return _waiting(snapshot, reason_code="prior_effect_unresolved")
         reconcile_ordinary_effect_once(
             store=store,
-            request=claimed.request,
+            request=request,
             effect_id=history.effect.effect_id,
             api_request=api_request,
             transport_factory=effect_transport_factory,

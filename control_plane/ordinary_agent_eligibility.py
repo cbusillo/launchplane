@@ -6,6 +6,7 @@ from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.ordinary_agent import (
     OrdinaryAgentAction,
     OrdinaryAgentCredentialEvidence,
+    OrdinaryAgentEligibilityRequest,
     OrdinaryAgentEligibilityResult,
     OrdinaryAgentLease,
     OrdinaryAgentPolicyEvaluation,
@@ -13,7 +14,6 @@ from control_plane.contracts.ordinary_agent import (
     OrdinaryAgentPolicySnapshot,
     OrdinaryAgentPrincipal,
     OrdinaryAgentReasonCode,
-    OrdinaryAgentRequest,
     OrdinaryAgentSession,
     OrdinaryAgentTarget,
     PolicyDecision,
@@ -137,7 +137,7 @@ def evaluate_ordinary_agent_eligibility(
     credential: OrdinaryAgentCredentialEvidence,
     session: OrdinaryAgentSession,
     lease: OrdinaryAgentLease,
-    request: OrdinaryAgentRequest,
+    request: OrdinaryAgentEligibilityRequest,
 ) -> OrdinaryAgentEligibilityResult:
     if isinstance(now, bool) or not isinstance(now, int) or not 0 <= now <= 2**63 - 1:
         raise ValueError("now must be a non-negative signed-64-bit integer")
@@ -185,7 +185,7 @@ def _eligibility_reason(
     credential: OrdinaryAgentCredentialEvidence,
     session: OrdinaryAgentSession,
     lease: OrdinaryAgentLease,
-    request: OrdinaryAgentRequest,
+    request: OrdinaryAgentEligibilityRequest,
     policy: OrdinaryAgentPolicyEvaluation,
 ) -> OrdinaryAgentReasonCode:
     reason = ordinary_agent_chain_reason(
@@ -207,11 +207,15 @@ def _eligibility_reason(
         return "budget_window_inactive"
     if (
         lease.budget.actions_used + 1 > lease.budget.action_limit
-        or lease.budget.pull_requests_used + len(request.pull_requests)
+        or lease.budget.pull_requests_used + _request_pull_request_count(request)
         > lease.budget.pull_request_limit
     ):
         return "budget_exhausted"
     return "eligible"
+
+
+def _request_pull_request_count(request: OrdinaryAgentEligibilityRequest) -> int:
+    return len(request.pull_requests) if hasattr(request, "pull_requests") else 0
 
 
 def ordinary_agent_chain_reason(
@@ -220,7 +224,7 @@ def ordinary_agent_chain_reason(
     credential: OrdinaryAgentCredentialEvidence,
     session: OrdinaryAgentSession,
     lease: OrdinaryAgentLease,
-    request: OrdinaryAgentRequest,
+    request: OrdinaryAgentEligibilityRequest,
 ) -> OrdinaryAgentReasonCode:
     """Check immutable lineage independently of admission or finite-job timing."""
     # Stable refusal order: principal/profile, target, chain, time, policy, request, budget.
@@ -265,7 +269,7 @@ def ordinary_agent_effective_authority_reason(
     *,
     policy: OrdinaryAgentPolicyEvaluation,
     lease: OrdinaryAgentLease,
-    request: OrdinaryAgentRequest,
+    request: OrdinaryAgentEligibilityRequest,
 ) -> OrdinaryAgentReasonCode:
     """Compare current policy semantics with the original lease attenuation."""
     if policy.decision != "allow":

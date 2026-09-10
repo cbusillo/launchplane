@@ -5,6 +5,7 @@ import unittest
 from control_plane.contracts.ordinary_agent import OrdinaryAgentPullRequest
 from control_plane.contracts.ordinary_agent_session_lifecycle import (
     OrdinaryAgentFiniteRequestRecord,
+    OrdinaryAgentQualificationFiniteRequestV2,
     OrdinaryAgentSessionDelegation,
 )
 from control_plane.ordinary_agent_lifecycle import build_ordinary_agent_lifecycle_write_set
@@ -152,6 +153,72 @@ class OrdinaryAgentSessionLifecycleTests(unittest.TestCase):
                 lease=self.lease,
                 request=self.request.model_copy(update={"admitted_at": self.now + 100}),
                 now=self.now + 100,
+            )
+
+    def test_qualification_requires_preflight_and_charges_no_prs(self) -> None:
+        delegation = self.delegation.model_copy(
+            update={
+                "operation_id": "approved-qualification-one",
+                "actions": ("preflight", "guarded_merge"),
+                "action_limit": 2,
+                "pull_request_limit": 1,
+                "refresh_allowance": 0,
+            }
+        )
+        issued = build_ordinary_agent_session_write_set(
+            policy=self.policy,
+            principal=self.principal,
+            credential=self.credential,
+            delegation=delegation,
+            now=self.now,
+        )
+        request = OrdinaryAgentQualificationFiniteRequestV2(
+            request_id="qualification-one",
+            idempotency_key="qualification-one",
+            principal_id=self.principal.principal_id,
+            session_id=issued.session.session_id,
+            lease_id=issued.leases[0].lease_id,
+            target=issued.leases[0].target,
+            admitted_at=self.now,
+            expires_at=self.now + 100,
+            continuation_expires_at=self.now + 200,
+        )
+
+        admitted = build_ordinary_agent_request_admission_write_set(
+            policy=self.policy,
+            principal=self.principal,
+            credential=self.credential,
+            session=issued.session,
+            lease=issued.leases[0],
+            request=request,
+            now=self.now,
+        )
+        self.assertEqual(admitted.lease.action, "preflight")
+        self.assertEqual(admitted.lease.budget.pull_request_limit, 1)
+        self.assertEqual(admitted.lease.budget.pull_requests_used, 0)
+        require_ordinary_agent_finite_job_authority(
+            policy=self.policy,
+            principal=self.principal,
+            credential=self.credential,
+            session=issued.session,
+            lease=admitted.lease,
+            request=request,
+            now=self.now + 1,
+        )
+        with self.assertRaisesRegex(OrdinaryAgentSessionAdmissionDenied, "request_action_mismatch"):
+            build_ordinary_agent_request_admission_write_set(
+                policy=self.policy,
+                principal=self.principal,
+                credential=self.credential,
+                session=self.session,
+                lease=self.lease,
+                request=request.model_copy(
+                    update={
+                        "session_id": self.session.session_id,
+                        "lease_id": self.lease.lease_id,
+                    }
+                ),
+                now=self.now,
             )
 
     def test_continuation_expires_and_cannot_survive_revocation_or_rotation(self) -> None:

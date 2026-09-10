@@ -10,6 +10,7 @@ from sqlalchemy.exc import DBAPIError
 
 from control_plane.contracts.ordinary_agent_session_lifecycle import (
     OrdinaryAgentFiniteRequestRecord,
+    OrdinaryAgentGuardedFiniteRequest,
     OrdinaryAgentLeaseRecord,
 )
 from control_plane.contracts.ordinary_agent_effect import OrdinaryAgentUnknownOutcome
@@ -191,7 +192,7 @@ class OrdinaryAgentEffectPostgresTests(unittest.TestCase):
             fixture.prepare_effect_fixture(session_fixture)
             effect, fence, completed = fixture.complete_refresh()
 
-            def rebind() -> OrdinaryAgentFiniteRequestRecord:
+            def rebind() -> OrdinaryAgentGuardedFiniteRequest:
                 return store.rebind_ordinary_agent_after_head_refresh(
                     effect_id=effect.effect_id,
                     expected_effect_revision=completed.revision,

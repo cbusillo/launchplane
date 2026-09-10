@@ -447,6 +447,10 @@ from control_plane.contracts.ordinary_agent_lifecycle import (
 )
 from control_plane.service_human_auth import SESSION_AUTHORIZATION_CLAIMS_TTL_SECONDS
 from control_plane.contracts.ordinary_agent_session_lifecycle import (
+    OrdinaryAgentFiniteRequest,
+    OrdinaryAgentFiniteRequestRecord,
+    OrdinaryAgentGuardedDeliveryFiniteRequestV2,
+    OrdinaryAgentGuardedFiniteRequest,
     OrdinaryAgentJobBinding,
     OrdinaryAgentSessionAttenuation,
     OrdinaryAgentSessionOperationView,
@@ -454,7 +458,9 @@ from control_plane.contracts.ordinary_agent_session_lifecycle import (
     OrdinaryAgentSessionDelegation,
     OrdinaryAgentSessionRecord,
     OrdinaryAgentLeaseRecord,
-    OrdinaryAgentFiniteRequestRecord,
+    OrdinaryAgentQualificationFiniteRequestV2,
+    is_guarded_ordinary_agent_finite_request,
+    parse_ordinary_agent_finite_request,
 )
 from control_plane.contracts import ordinary_agent_effect as effect_contracts
 from control_plane.contracts import ordinary_agent_noop as noop_contracts
@@ -489,6 +495,8 @@ from control_plane.ordinary_agent_session_lifecycle import (
     require_ordinary_agent_reconciliation_authority,
     rebind_ordinary_agent_finite_request,
     cancel_ordinary_agent_finite_request,
+    ordinary_agent_finite_request_intent_sha256,
+    ordinary_agent_finite_request_replay_identity,
 )
 from control_plane.ordinary_agent_authentication import (
     OrdinaryAgentIdentity,
@@ -5373,7 +5381,7 @@ def _engine_connect_args(
 
 @dataclass(frozen=True)
 class _OrdinaryAgentCurrentJobContext:
-    request: OrdinaryAgentFiniteRequestRecord
+    request: OrdinaryAgentFiniteRequest
     request_row: LaunchplaneOrdinaryAgentFiniteRequestRow
     session: OrdinaryAgentSessionRecord
     lease: OrdinaryAgentLeaseRecord
@@ -5382,6 +5390,14 @@ class _OrdinaryAgentCurrentJobContext:
     principal: OrdinaryAgentPrincipalRecord
     credential: OrdinaryAgentAuthenticationCredentialRecord
     now: int
+
+
+def _require_guarded_finite_request(
+    request: OrdinaryAgentFiniteRequest,
+) -> OrdinaryAgentGuardedFiniteRequest:
+    if not is_guarded_ordinary_agent_finite_request(request):
+        raise OrdinaryAgentSessionAdmissionDenied("request_purpose_unsupported")
+    return request
 
 
 class PostgresRecordStore(HumanSessionStore):
@@ -17702,7 +17718,7 @@ class PostgresRecordStore(HumanSessionStore):
         cls,
         *,
         claim: LaunchplaneOrdinaryAgentJobClaimRow | None,
-        request: OrdinaryAgentFiniteRequestRecord,
+        request: OrdinaryAgentFiniteRequest,
         target: OrdinaryAgentTarget,
         progress_payload: PayloadDict,
     ) -> MergeTrainControllerStateRecord | None:
@@ -17766,7 +17782,7 @@ class PostgresRecordStore(HumanSessionStore):
         if request_row is None:
             return False
         try:
-            request = OrdinaryAgentFiniteRequestRecord.model_validate(request_row.payload)
+            request = parse_ordinary_agent_finite_request(request_row.payload)
         except ValueError:
             return False
         if self._ordinary_agent_matching_released_controller(
@@ -21004,7 +21020,7 @@ class PostgresRecordStore(HumanSessionStore):
             .order_by(LaunchplaneOrdinaryAgentFiniteRequestRow.request_id)
             .with_for_update()
         ):
-            request = OrdinaryAgentFiniteRequestRecord.model_validate(row.payload)
+            request = parse_ordinary_agent_finite_request(row.payload)
             row.payload = self._payload_dict(
                 cancel_ordinary_agent_finite_request(request=request, now=now)
             )
@@ -21106,12 +21122,33 @@ class PostgresRecordStore(HumanSessionStore):
                 ),
             )
 
-    @_private_ordinary_agent_operation
+    @overload
     def admit_ordinary_agent_finite_request(
         self, *, proof: OrdinaryAgentTokenProof, request: OrdinaryAgentFiniteRequestRecord
-    ) -> OrdinaryAgentFiniteRequestRecord:
+    ) -> OrdinaryAgentFiniteRequestRecord: ...
+
+    @overload
+    def admit_ordinary_agent_finite_request(
+        self,
+        *,
+        proof: OrdinaryAgentTokenProof,
+        request: OrdinaryAgentGuardedDeliveryFiniteRequestV2,
+    ) -> OrdinaryAgentGuardedDeliveryFiniteRequestV2: ...
+
+    @overload
+    def admit_ordinary_agent_finite_request(
+        self,
+        *,
+        proof: OrdinaryAgentTokenProof,
+        request: OrdinaryAgentQualificationFiniteRequestV2,
+    ) -> OrdinaryAgentQualificationFiniteRequestV2: ...
+
+    @_private_ordinary_agent_operation
+    def admit_ordinary_agent_finite_request(
+        self, *, proof: OrdinaryAgentTokenProof, request: OrdinaryAgentFiniteRequest
+    ) -> OrdinaryAgentFiniteRequest:
         """Authenticate, check current authority and charge first admission atomically."""
-        intent = canonical_json_sha256(request.model_dump(mode="json", exclude={"admitted_at"}))
+        intent = ordinary_agent_finite_request_intent_sha256(request)
         with self._session_factory() as session:
             self._begin_serialized_write(session)
             policy, principal, credential, _, now = self._ordinary_agent_session_context(
@@ -21133,15 +21170,20 @@ class PostgresRecordStore(HumanSessionStore):
                 .with_for_update()
             )
             if existing is not None:
-                if existing.intent_sha256 != intent:
+                persisted = parse_ordinary_agent_finite_request(existing.payload)
+                if (
+                    existing.intent_sha256 != intent
+                    or ordinary_agent_finite_request_replay_identity(persisted)
+                    != ordinary_agent_finite_request_replay_identity(request)
+                ):
                     raise OrdinaryAgentSessionAdmissionDenied("idempotency_conflict")
-                return OrdinaryAgentFiniteRequestRecord.model_validate(existing.payload)
+                return persisted
             collision = session.get(LaunchplaneOrdinaryAgentFiniteRequestRow, request.request_id)
             if collision is not None:
                 raise OrdinaryAgentSessionAdmissionDenied("request_id_conflict")
             if request.expires_at <= now:
                 raise OrdinaryAgentSessionAdmissionDenied("request_expired")
-            request = OrdinaryAgentFiniteRequestRecord.model_validate(
+            request = parse_ordinary_agent_finite_request(
                 {**request.model_dump(), "admitted_at": now}
             )
             admitted = build_ordinary_agent_request_admission_write_set(
@@ -21210,7 +21252,7 @@ class PostgresRecordStore(HumanSessionStore):
             locator = session.get(LaunchplaneOrdinaryAgentFiniteRequestRow, claim_fence.request_id)
             if locator is None:
                 raise OrdinaryAgentSessionAdmissionDenied("job_unavailable")
-            target = OrdinaryAgentFiniteRequestRecord.model_validate(locator.payload).target
+            target = parse_ordinary_agent_finite_request(locator.payload).target
             key = build_merge_train_controller_key(
                 repository=target.repository, base_branch=target.base_branch
             )
@@ -21455,7 +21497,7 @@ class PostgresRecordStore(HumanSessionStore):
             if claim is None:
                 raise OrdinaryAgentSessionAdmissionDenied("controller_unavailable")
             controller = MergeTrainControllerStateRecord.model_validate(row.payload)
-            request = OrdinaryAgentFiniteRequestRecord.model_validate(request_row.payload)
+            request = parse_ordinary_agent_finite_request(request_row.payload)
             binding = OrdinaryAgentJobBinding(
                 request_id=request_id,
                 scope_sha256=request.scope_sha256,
@@ -21577,6 +21619,7 @@ class PostgresRecordStore(HumanSessionStore):
                 expected_binding_revision=expected_binding_revision,
                 controller_fence=controller_fence,
             )
+            request = _require_guarded_finite_request(context.request)
             if (
                 record.ordinary_job_binding != controller.ordinary_job_binding
                 or record.status != "active"
@@ -21634,10 +21677,10 @@ class PostgresRecordStore(HumanSessionStore):
                 numbers = {entry.pull_request_number for entry in collapse.entries}
                 repository, base_branch = collapse.repository, collapse.base_branch
             if (
-                repository.lower() != context.request.target.repository.lower()
-                or base_branch != context.request.target.base_branch
+                repository.lower() != request.target.repository.lower()
+                or base_branch != request.target.base_branch
                 or not numbers
-                or not numbers.issubset({item.number for item in context.request.pull_requests})
+                or not numbers.issubset({item.number for item in request.pull_requests})
             ):
                 raise OrdinaryAgentSessionAdmissionDenied("record_scope_conflict")
             inner = (
@@ -21713,7 +21756,7 @@ class PostgresRecordStore(HumanSessionStore):
         self,
         session: Any,
         *,
-        request: OrdinaryAgentFiniteRequestRecord,
+        request: OrdinaryAgentFiniteRequest,
         policy_key: str,
         policy_sha256: str,
     ) -> None:
@@ -21804,7 +21847,7 @@ class PostgresRecordStore(HumanSessionStore):
         self,
         session: Any,
         *,
-        request: OrdinaryAgentFiniteRequestRecord,
+        request: OrdinaryAgentFiniteRequest,
     ) -> tuple[tuple[OrdinaryAgentEffectRecord, str], ...]:
         results: list[tuple[OrdinaryAgentEffectRecord, str]] = []
         for row in session.scalars(
@@ -21862,7 +21905,7 @@ class PostgresRecordStore(HumanSessionStore):
         self,
         session: Any,
         *,
-        request: OrdinaryAgentFiniteRequestRecord,
+        request: OrdinaryAgentGuardedFiniteRequest,
     ) -> dict[int, str]:
         heads = {item.number: item.head_sha for item in request.pull_requests}
         for effect, sha in self._ordinary_agent_bound_effect_results(session, request=request):
@@ -21884,7 +21927,7 @@ class PostgresRecordStore(HumanSessionStore):
         context: _OrdinaryAgentCurrentJobContext,
         record: effect_contracts.OrdinaryAgentProgressRecord,
     ) -> None:
-        request = context.request
+        request = _require_guarded_finite_request(context.request)
         heads = self._ordinary_agent_proven_heads(session, request=request)
         results = self._ordinary_agent_bound_effect_results(session, request=request)
         if isinstance(record, MergeTrainBatchCandidateRecord):
@@ -22028,7 +22071,7 @@ class PostgresRecordStore(HumanSessionStore):
         controller: MergeTrainControllerStateRecord,
         command: effect_contracts.OrdinaryAgentSemanticCommand,
     ) -> None:
-        request = context.request
+        request = _require_guarded_finite_request(context.request)
         lineage = command.effect.lineage
         if (
             lineage.repository.lower() != request.target.repository.lower()
@@ -22312,7 +22355,7 @@ class PostgresRecordStore(HumanSessionStore):
                 request_row = session.get(LaunchplaneOrdinaryAgentFiniteRequestRow, request_id)
                 if request_row is None:
                     raise OrdinaryAgentSessionAdmissionDenied("job_unavailable")
-                request = OrdinaryAgentFiniteRequestRecord.model_validate(request_row.payload)
+                request = parse_ordinary_agent_finite_request(request_row.payload)
                 # Keep the historical binding even if a later refresh changed the request.
                 historical_request = request.model_copy(
                     update={"binding_revision": expected_binding_revision}
@@ -22366,6 +22409,7 @@ class PostgresRecordStore(HumanSessionStore):
                 expected_binding_revision=expected_binding_revision,
                 controller_fence=controller_fence,
             )
+            request = _require_guarded_finite_request(context.request)
             validate_merge_admission_controller_fence(
                 admission=record,
                 controller_state=controller,
@@ -22380,10 +22424,10 @@ class PostgresRecordStore(HumanSessionStore):
             if (
                 plan.ordinary_job_binding != controller.ordinary_job_binding
                 or plan.status != "active"
-                or record.repository.lower() != context.request.target.repository.lower()
-                or record.base_branch != context.request.target.base_branch
+                or record.repository.lower() != request.target.repository.lower()
+                or record.base_branch != request.target.base_branch
                 or record.pull_request_number
-                not in tuple(item.number for item in context.request.pull_requests)
+                not in tuple(item.number for item in request.pull_requests)
                 or record.landing_plan_record_id != plan.record_id
                 or record.landing_plan_id != plan.landing_plan.plan_id
             ):
@@ -23861,6 +23905,7 @@ class PostgresRecordStore(HumanSessionStore):
         str,
         str,
     ]:
+        request = _require_guarded_finite_request(context.request)
         row = session.get(LaunchplaneMergeTrainBatchLandingPlanRow, controller.active_record_id)
         if row is None:
             raise OrdinaryAgentSessionAdmissionDenied("landing_plan_unavailable")
@@ -23890,8 +23935,8 @@ class PostgresRecordStore(HumanSessionStore):
             raise OrdinaryAgentSessionAdmissionDenied("merge_policy_unavailable")
         policy = MergeTrainPolicyRecord.model_validate(active_policy.payload)
         repository_policy = policy.policy.find_repository_policy(
-            repository=context.request.target.repository,
-            base_branch=context.request.target.base_branch,
+            repository=request.target.repository,
+            base_branch=request.target.base_branch,
         )
         if repository_policy.merge_method != "merge":
             raise OrdinaryAgentSessionAdmissionDenied("ordinary_merge_method_unsupported")
@@ -23903,9 +23948,9 @@ class PostgresRecordStore(HumanSessionStore):
             raise OrdinaryAgentSessionAdmissionDenied("landing_candidate_unavailable")
         candidate = matching[0]
         provenance = candidate.candidate.structural_provenance
-        if provenance is None or provenance.base_sha != context.request.base_sha:
+        if provenance is None or provenance.base_sha != request.base_sha:
             raise OrdinaryAgentSessionAdmissionDenied("landing_base_unproven")
-        base_sha = context.request.base_sha
+        base_sha = request.base_sha
         base_tree = provenance.base_tree_sha
         results = self._ordinary_agent_bound_effect_results(session, request=context.request)
         for previous in plan.landing_plan.entries[: entry.position - 1]:
@@ -25538,6 +25583,7 @@ class PostgresRecordStore(HumanSessionStore):
                 expected_binding_revision=expected_binding_revision,
                 controller_fence=controller_fence,
             )
+            request = _require_guarded_finite_request(context.request)
             if purpose == "candidate_check":
                 candidate_row = session.get(
                     LaunchplaneMergeTrainBatchCandidateRow, controller.active_record_id
@@ -25635,7 +25681,7 @@ class PostgresRecordStore(HumanSessionStore):
                                 result, snapshot_contracts.OrdinaryAgentMergeTrainSnapshotResult
                             )
                             and not result.awaits_source_observation_for(
-                                tuple(item.number for item in context.request.pull_requests)
+                                tuple(item.number for item in request.pull_requests)
                             )
                         )
                         or (
@@ -25891,7 +25937,7 @@ class PostgresRecordStore(HumanSessionStore):
     ) -> tuple[
         LaunchplaneOrdinaryAgentReadAttemptRow,
         effect_contracts.OrdinaryAgentSnapshotAttemptRecord,
-        OrdinaryAgentFiniteRequestRecord,
+        OrdinaryAgentGuardedFiniteRequest,
     ]:
         locator = session.get(LaunchplaneOrdinaryAgentReadAttemptRow, attempt_id)
         if locator is None:
@@ -25930,7 +25976,8 @@ class PostgresRecordStore(HumanSessionStore):
             )
         ):
             raise OrdinaryAgentSessionAdmissionDenied("read_provenance_conflict")
-        return row, record, OrdinaryAgentFiniteRequestRecord.model_validate(request_row.payload)
+        request = parse_ordinary_agent_finite_request(request_row.payload)
+        return row, record, _require_guarded_finite_request(request)
 
     def _record_ordinary_agent_read_success(
         self,
@@ -26162,7 +26209,7 @@ class PostgresRecordStore(HumanSessionStore):
         expected_binding_revision: int,
         read_attempt_id: str,
         expected_observation_sha256: str,
-    ) -> OrdinaryAgentFiniteRequestRecord:
+    ) -> OrdinaryAgentGuardedFiniteRequest:
         """Consume one exact drift observation without creating effect authority."""
         with self._session_factory() as session:
             self._begin_serialized_write(session)
@@ -26177,9 +26224,8 @@ class PostgresRecordStore(HumanSessionStore):
             )
             if request_locator is None:
                 raise OrdinaryAgentSessionAdmissionDenied("job_unavailable")
-            located_request = OrdinaryAgentFiniteRequestRecord.model_validate(
-                request_locator.payload
-            )
+            located_request = parse_ordinary_agent_finite_request(request_locator.payload)
+            _require_guarded_finite_request(located_request)
             controller_key = build_merge_train_controller_key(
                 repository=located_request.target.repository,
                 base_branch=located_request.target.base_branch,
@@ -26200,7 +26246,9 @@ class PostgresRecordStore(HumanSessionStore):
             )
             if request_row is None:
                 raise OrdinaryAgentSessionAdmissionDenied("job_unavailable")
-            request = OrdinaryAgentFiniteRequestRecord.model_validate(request_row.payload)
+            request = _require_guarded_finite_request(
+                parse_ordinary_agent_finite_request(request_row.payload)
+            )
             attempt_snapshot_row = session.get(
                 LaunchplaneOrdinaryAgentReadAttemptRow,
                 read_attempt_id,
@@ -26854,7 +26902,7 @@ class PostgresRecordStore(HumanSessionStore):
             )
             if request_row is None:
                 raise OrdinaryAgentSessionAdmissionDenied("job_unavailable")
-            request = OrdinaryAgentFiniteRequestRecord.model_validate(request_row.payload)
+            request = parse_ordinary_agent_finite_request(request_row.payload)
 
             total_effects, completed_effects = session.execute(
                 select(
@@ -27152,7 +27200,7 @@ class PostgresRecordStore(HumanSessionStore):
         self,
         session: Any,
         *,
-        request: OrdinaryAgentFiniteRequestRecord,
+        request: OrdinaryAgentFiniteRequest,
         claim: LaunchplaneOrdinaryAgentJobClaimRow | None,
     ) -> OrdinaryAgentJobView:
         effects = tuple(
@@ -27245,7 +27293,11 @@ class PostgresRecordStore(HumanSessionStore):
             principal_id=request.principal_id,
             session_id=request.session_id,
             target=request.target,
-            pull_request_numbers=tuple(item.number for item in request.pull_requests),
+            pull_request_numbers=(
+                tuple(item.number for item in request.pull_requests)
+                if is_guarded_ordinary_agent_finite_request(request)
+                else ()
+            ),
             expires_at=request.expires_at,
             continuation_expires_at=request.continuation_expires_at,
             cancellation_requested=cancelled,
@@ -27271,7 +27323,7 @@ class PostgresRecordStore(HumanSessionStore):
                 raise OrdinaryAgentSessionAdmissionDenied("job_unavailable")
             return self._ordinary_agent_job_view(
                 session,
-                request=OrdinaryAgentFiniteRequestRecord.model_validate(row.payload),
+                request=parse_ordinary_agent_finite_request(row.payload),
                 claim=session.get(LaunchplaneOrdinaryAgentJobClaimRow, request_id),
             )
 
@@ -27291,7 +27343,7 @@ class PostgresRecordStore(HumanSessionStore):
                 raise OrdinaryAgentSessionAdmissionDenied("job_unavailable")
             return self._ordinary_agent_job_view(
                 session,
-                request=OrdinaryAgentFiniteRequestRecord.model_validate(row.payload),
+                request=parse_ordinary_agent_finite_request(row.payload),
                 claim=session.get(LaunchplaneOrdinaryAgentJobClaimRow, request_id),
             )
 
@@ -27307,7 +27359,7 @@ class PostgresRecordStore(HumanSessionStore):
             locator = session.get(LaunchplaneOrdinaryAgentFiniteRequestRow, claim_fence.request_id)
             if locator is None:
                 raise OrdinaryAgentSessionAdmissionDenied("job_unavailable")
-            request = OrdinaryAgentFiniteRequestRecord.model_validate(locator.payload)
+            request = parse_ordinary_agent_finite_request(locator.payload)
             key = build_merge_train_controller_key(
                 repository=request.target.repository, base_branch=request.target.base_branch
             )
@@ -27472,7 +27524,7 @@ class PostgresRecordStore(HumanSessionStore):
             request_row = session.get(LaunchplaneOrdinaryAgentFiniteRequestRow, row.request_id)
             if request_row is None:
                 raise OrdinaryAgentSessionAdmissionDenied("job_unavailable")
-            request = OrdinaryAgentFiniteRequestRecord.model_validate(request_row.payload)
+            request = parse_ordinary_agent_finite_request(request_row.payload)
             row.generation += 1
             row.worker_id, row.claim_expires_at, row.status = (
                 worker_id,
@@ -27549,7 +27601,7 @@ class PostgresRecordStore(HumanSessionStore):
             locator = session.get(LaunchplaneOrdinaryAgentFiniteRequestRow, claim_fence.request_id)
             if locator is None:
                 raise OrdinaryAgentSessionAdmissionDenied("job_unavailable")
-            located = OrdinaryAgentFiniteRequestRecord.model_validate(locator.payload)
+            located = parse_ordinary_agent_finite_request(locator.payload)
             key = build_merge_train_controller_key(
                 repository=located.target.repository, base_branch=located.target.base_branch
             )
@@ -27571,7 +27623,7 @@ class PostgresRecordStore(HumanSessionStore):
             )
             if request_row is None:
                 raise OrdinaryAgentSessionAdmissionDenied("job_unavailable")
-            request = OrdinaryAgentFiniteRequestRecord.model_validate(request_row.payload)
+            request = parse_ordinary_agent_finite_request(request_row.payload)
             view = self._ordinary_agent_job_view(session, request=request, claim=row)
             if disposition.status == "completed" and view.unresolved_effects:
                 raise OrdinaryAgentSessionAdmissionDenied("unresolved_effects")
@@ -27742,7 +27794,7 @@ class PostgresRecordStore(HumanSessionStore):
         )
         if row is None:
             raise OrdinaryAgentSessionAdmissionDenied("job_unavailable")
-        request = OrdinaryAgentFiniteRequestRecord.model_validate(row.payload)
+        request = parse_ordinary_agent_finite_request(row.payload)
         lease_row = next((item for item in leases if item.lease_id == request.lease_id), None)
         if lease_row is None:
             raise OrdinaryAgentSessionAdmissionDenied("lease_unavailable")
@@ -27771,24 +27823,26 @@ class PostgresRecordStore(HumanSessionStore):
     def _ordinary_agent_job_context(
         self, session: Any, *, request_id: str
     ) -> tuple[
-        OrdinaryAgentFiniteRequestRecord,
+        OrdinaryAgentGuardedFiniteRequest,
         LaunchplaneOrdinaryAgentFiniteRequestRow,
         OrdinaryAgentSessionRecord,
         OrdinaryAgentLeaseRecord,
         int,
     ]:
         context = self._ordinary_agent_new_effect_context(session, request_id=request_id)
-        return context.request, context.request_row, context.session, context.lease, context.now
+        request = _require_guarded_finite_request(context.request)
+        return request, context.request_row, context.session, context.lease, context.now
 
     @_private_ordinary_agent_operation
     def reauthorize_ordinary_agent_finite_job(
         self, *, request_id: str
-    ) -> OrdinaryAgentFiniteRequestRecord:
+    ) -> OrdinaryAgentFiniteRequest:
         """Internal check only; effect dispatch must reauthorize within its reservation transaction."""
         with self._session_factory() as session:
             self._begin_serialized_write(session)
-            request, _, _, _, _ = self._ordinary_agent_job_context(session, request_id=request_id)
-            return request
+            return self._ordinary_agent_current_chain_context(
+                session, request_id=request_id
+            ).request
 
     @_private_ordinary_agent_operation
     def rebind_ordinary_agent_after_head_refresh(
@@ -27797,7 +27851,7 @@ class PostgresRecordStore(HumanSessionStore):
         effect_id: str,
         expected_effect_revision: int,
         controller_fence: OrdinaryAgentControllerFence,
-    ) -> OrdinaryAgentFiniteRequestRecord:
+    ) -> OrdinaryAgentGuardedFiniteRequest:
         """Only completed exact refresh evidence may advance a finite request binding."""
         with self._session_factory() as session:
             self._begin_serialized_write(session)
@@ -27816,13 +27870,16 @@ class PostgresRecordStore(HumanSessionStore):
                         or historical.revision != expected_effect_revision + 1
                     ):
                         raise OrdinaryAgentSessionAdmissionDenied("refresh_replay_conflict")
-                    replay = OrdinaryAgentFiniteRequestRecord.model_validate(request_row.payload)
+                    replay = _require_guarded_finite_request(
+                        parse_ordinary_agent_finite_request(request_row.payload)
+                    )
                     if replay.binding_revision != historical.rebound_revision:
                         raise OrdinaryAgentSessionAdmissionDenied("refresh_superseded")
                     return replay  # Historical replay; dispatch still requires current joined authority.
             context, row, record = self._ordinary_agent_reserved_effect_context(
                 session, effect_id=effect_id, controller_fence=controller_fence
             )
+            request = _require_guarded_finite_request(context.request)
             if (
                 record.command.kind != "pull_request_head_refresh"
                 or record.state != "rebind_pending"
@@ -27875,13 +27932,13 @@ class PostgresRecordStore(HumanSessionStore):
                 ),
             )
             updated = rebind_ordinary_agent_finite_request(
-                request=context.request,
+                request=request,
                 base_sha=observation.base_sha,
                 pull_requests=tuple(
                     OrdinaryAgentPullRequest(number=item.number, head_sha=observation.head_sha)
                     if item.number == observation.number
                     else item
-                    for item in context.request.pull_requests
+                    for item in request.pull_requests
                 ),
                 expected_binding_revision=record.binding_revision,
             )
@@ -28000,13 +28057,15 @@ class PostgresRecordStore(HumanSessionStore):
         expected_binding_revision: int,
         base_sha: str,
         pull_requests: tuple[OrdinaryAgentPullRequest, ...],
-    ) -> OrdinaryAgentFiniteRequestRecord:
+    ) -> OrdinaryAgentGuardedFiniteRequest:
         with self._session_factory() as session:
             self._begin_serialized_write(session)
             locator = session.get(LaunchplaneOrdinaryAgentFiniteRequestRow, request_id)
             if locator is None:
                 raise OrdinaryAgentSessionAdmissionDenied("job_unavailable")
-            located = OrdinaryAgentFiniteRequestRecord.model_validate(locator.payload)
+            located = _require_guarded_finite_request(
+                parse_ordinary_agent_finite_request(locator.payload)
+            )
             controller_key = build_merge_train_controller_key(
                 repository=located.target.repository,
                 base_branch=located.target.base_branch,
@@ -28103,7 +28162,7 @@ class PostgresRecordStore(HumanSessionStore):
             .order_by(LaunchplaneOrdinaryAgentFiniteRequestRow.request_id)
             .with_for_update()
         ):
-            request = OrdinaryAgentFiniteRequestRecord.model_validate(job.payload)
+            request = parse_ordinary_agent_finite_request(job.payload)
             job.payload = self._payload_dict(
                 cancel_ordinary_agent_finite_request(request=request, now=now)
             )
