@@ -808,7 +808,7 @@ missing or ambiguous policy state fail closed. No CLI bearer helper or direct
 database fallback exists, and no grant or other durable record is created.
 
 `POST /v1/authz-diagnostics/candidate-policy/preview` is the non-persisting
-administrator preview for one exact schema-v2 candidate policy. The caller must
+administrator preview for one exact schema-v2 or schema-v3 candidate policy. The caller must
 be a GitHub administrator or local administrator with
 `authz_policy_candidate_preview.read`; Launchplane authorizes against runtime
 policy, reloads the single active DB record, and authorizes again. The service
@@ -823,6 +823,14 @@ tokens, secrets, or topology. Browser calls retain same-origin and CSRF checks
 without session renewal or rotation, and no policy, session, denial, audit,
 idempotency, outbox, provider, runtime, secret, or durable-operation record is
 written.
+
+Schema-v3 candidate previews include `ordinary_agents` in structural rule
+counts and changed-collection reporting. Effective-access probes remain closed
+to the five established caller identity types, and ordinary rules do not enter
+administrator reachability, applying-administrator retention, strict-human
+evidence, or quorum. Managed reconciliation dry-runs may explicitly migrate v2
+to v3 while replacing one reviewed managed set and preserving every unrelated
+set. Schema-v3 apply remains fenced.
 
 `POST /v1/authz-diagnostics/repository-scope/read` provides one bounded
 DB-backed comparison for authorization portfolio audits. Supply at most 100
@@ -901,6 +909,11 @@ fresh dry-run, acknowledgement, confirmation, and activation; then bootstrap
 retirement. The recovery diagnostic is read-only and returns only confirmation
 backing plus per-action managed-rule match cardinalities, never rule selectors
 or bodies.
+
+Recovery, privileged-policy activation, and generic-web preview generators use
+the active policy schema for their exact managed-set request. Against schema v3
+they can produce repeatable dry-run candidates while the shared reconciliation
+apply fence and storage fences continue to reject persistence.
 
 `LAUNCHPLANE_AUTHZ_MANAGED_SET_JSON` currently carries the primary operator set;
 `LAUNCHPLANE_AUTHZ_POLICY_RECONCILE_MANAGED_SET_JSON` owns the exact immutable

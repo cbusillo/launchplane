@@ -68,6 +68,7 @@ class AuthzPolicyOperationActivationApplyRequest(AuthzPolicyOperationActivationD
 
 def build_authz_policy_operation_activation_reconcile_request(
     *,
+    current_policy: LaunchplaneAuthzPolicy,
     github_id: int,
     mode: Literal["dry_run", "apply"],
     reason: str,
@@ -76,7 +77,7 @@ def build_authz_policy_operation_activation_reconcile_request(
     if github_id < 1:
         raise ValueError("Activation requires an immutable GitHub ID.")
     desired_policy = LaunchplaneAuthzPolicy(
-        schema_version=2,
+        schema_version=3 if current_policy.schema_version == 3 else 2,
         github_humans=(
             GitHubHumanPolicyRule(
                 managed_set_id=AUTHZ_POLICY_OPERATION_ACTIVATION_MANAGED_SET_ID,
@@ -111,6 +112,7 @@ def authz_policy_operation_activation_state(
             ("terminal_agents", policy.terminal_agents),
             ("local_operators", policy.local_operators),
             ("local_admins", policy.local_admins),
+            ("ordinary_agents", policy.ordinary_agents),
         )
         for rule in rules
         if rule.managed_set_id == AUTHZ_POLICY_OPERATION_ACTIVATION_MANAGED_SET_ID

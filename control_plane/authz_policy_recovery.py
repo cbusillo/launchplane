@@ -24,9 +24,6 @@ from control_plane.contracts.privileged_operation import (
     AUTHZ_POLICY_OPERATION_READ_ACTION,
     AUTHZ_POLICY_OPERATION_REVOKE_ACTION,
 )
-from control_plane.contracts.authz_policy_record import (
-    require_authz_policy_schema_write_activated,
-)
 from control_plane.service_auth import (
     GitHubHumanPolicyRule,
     LaunchplaneAuthzPolicy,
@@ -157,6 +154,7 @@ def _bootstrap_rule_entries(policy: LaunchplaneAuthzPolicy) -> tuple[tuple[str, 
             ("github_actions", policy.github_actions),
             ("local_operators", policy.local_operators),
             ("local_admins", policy.local_admins),
+            ("ordinary_agents", policy.ordinary_agents),
         )
         for rule in rules
         if getattr(rule, "managed_set_id", None) == AUTHZ_POLICY_RECOVERY_BOOTSTRAP_MANAGED_SET_ID
@@ -230,7 +228,7 @@ def _bootstrap_retirement_desired_policy(
             "Recovery bootstrap set does not contain the expected temporary bridge rules."
         )
     return LaunchplaneAuthzPolicy(
-        schema_version=2,
+        schema_version=3 if policy.schema_version == 3 else 2,
         github_humans=(retained_human_rule,) if retained_human_rule is not None else (),
     )
 
@@ -246,7 +244,6 @@ def build_authz_policy_recovery_candidate_reconcile_request(
 ) -> AuthzManagedPolicyReconcileEnvelope:
     """Compile one audited recovery candidate without accepting raw policy input."""
 
-    require_authz_policy_schema_write_activated(policy)
     if github_id < 1:
         raise ValueError("Recovery candidate requires an immutable GitHub ID.")
     activation_state = authz_policy_operation_activation_state(policy)
@@ -254,6 +251,7 @@ def build_authz_policy_recovery_candidate_reconcile_request(
         if activation_state != "available":
             raise ValueError("Fresh activation requires an empty activation managed set.")
         return build_authz_policy_operation_activation_reconcile_request(
+            current_policy=policy,
             github_id=github_id,
             mode=mode,
             reason=reason,
@@ -262,7 +260,9 @@ def build_authz_policy_recovery_candidate_reconcile_request(
     if candidate_id == "reset-unconfirmed-privileged-policy-operation-activation":
         if activation_state != "active":
             raise ValueError("Activation reset requires the exact active activation managed set.")
-        desired_policy = LaunchplaneAuthzPolicy(schema_version=2)
+        desired_policy = LaunchplaneAuthzPolicy(
+            schema_version=3 if policy.schema_version == 3 else 2
+        )
         managed_set_id = AUTHZ_POLICY_OPERATION_ACTIVATION_MANAGED_SET_ID
     elif candidate_id == "retire-privileged-operation-bootstrap":
         if (

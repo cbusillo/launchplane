@@ -1955,6 +1955,7 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
             try:
                 seed_record = store.seed_authz_policy_if_absent(seed_record)
                 dry_run_request = authz_policy_activation.build_authz_policy_operation_activation_reconcile_request(
+                    current_policy=seed_record.policy,
                     github_id=applying_identity.github_id,
                     mode="dry_run",
                     reason="Review the privileged-policy activation.",
@@ -1973,6 +1974,7 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                     dry_run_result.driver_result["diff"]
                 )
                 apply_request = authz_policy_activation.build_authz_policy_operation_activation_reconcile_request(
+                    current_policy=seed_record.policy,
                     github_id=applying_identity.github_id,
                     mode="apply",
                     reason="Review the privileged-policy activation.",

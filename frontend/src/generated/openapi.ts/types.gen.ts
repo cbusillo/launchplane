@@ -212,10 +212,10 @@ export type AuthzManagedPolicySafetyBlocker = {
 
 export type AuthzManagedRuleChange = {
     change: 'added' | 'adopted' | 'updated' | 'removed';
-    desired_principal_type: 'github_actions' | 'github_humans' | 'terminal_agents' | 'local_operators' | 'local_admins' | null;
+    desired_principal_type: 'github_actions' | 'github_humans' | 'terminal_agents' | 'local_operators' | 'local_admins' | 'ordinary_agents' | null;
     desired_rule_sha256: string;
     managed_rule_id: string;
-    previous_principal_type: 'github_actions' | 'github_humans' | 'terminal_agents' | 'local_operators' | 'local_admins' | null;
+    previous_principal_type: 'github_actions' | 'github_humans' | 'terminal_agents' | 'local_operators' | 'local_admins' | 'ordinary_agents' | null;
     previous_rule_sha256: string;
 };
 

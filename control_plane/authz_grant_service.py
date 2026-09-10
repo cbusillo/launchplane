@@ -33,6 +33,8 @@ from control_plane.contracts.authz_access_read import (
     AuthzPolicyCandidateReadinessSummary,
     AuthzPolicyCandidateStructuralDiff,
     AuthzPolicyCandidateSummary,
+    AuthzPolicyCollectionRuleCounts,
+    AuthzPolicyCollectionType,
     AuthzPolicyHealthReasonCode,
     AuthzPolicyHealthSnapshot,
     AuthzPolicyHealthState,
@@ -48,6 +50,7 @@ from control_plane.contracts.owner_acceptance import (
     OWNER_ACCEPTANCE_EVENT_WRITE_ACTION,
     OWNER_ACCEPTANCE_READ_ACTION,
 )
+from control_plane.contracts.ordinary_agent import OrdinaryAgentPolicyRule
 from control_plane.contracts.product_owner import (
     PRODUCT_OWNER_POLICY_READ_ACTION,
     PRODUCT_OWNER_POLICY_WRITE_ACTION,
@@ -97,13 +100,14 @@ def _require_expected_authz_policy(
         )
 
 
-AuthzPolicyRule: TypeAlias = (
+AuthzExistingPolicyRule: TypeAlias = (
     GitHubActionsPolicyRule
     | GitHubHumanPolicyRule
     | TerminalAgentPolicyRule
     | LocalOperatorPolicyRule
     | LocalAdminPolicyRule
 )
+AuthzPolicyRule: TypeAlias = AuthzExistingPolicyRule | OrdinaryAgentPolicyRule
 AuthzApplyingIdentity: TypeAlias = (
     GitHubActionsIdentity
     | GitHubHumanIdentity
@@ -112,6 +116,7 @@ AuthzApplyingIdentity: TypeAlias = (
     | LocalAdminIdentity
 )
 AuthzPrincipalType: TypeAlias = AuthzPolicyPrincipalType
+AuthzCollectionType: TypeAlias = AuthzPolicyCollectionType
 _AUTHZ_PRINCIPAL_TYPES: tuple[AuthzPrincipalType, ...] = (
     "github_actions",
     "github_humans",
@@ -119,30 +124,47 @@ _AUTHZ_PRINCIPAL_TYPES: tuple[AuthzPrincipalType, ...] = (
     "local_operators",
     "local_admins",
 )
+_AUTHZ_COLLECTION_TYPES: tuple[AuthzCollectionType, ...] = (
+    *_AUTHZ_PRINCIPAL_TYPES,
+    "ordinary_agents",
+)
 _AUTHZ_POLICY_HEALTH_MANAGED_SET_LIMIT = 100
 
 
 @dataclass(frozen=True)
 class AuthzRuleLocation:
-    principal_type: AuthzPrincipalType
+    principal_type: AuthzCollectionType
     index: int
 
 
 @dataclass(frozen=True)
 class AuthzManagedRuleEntry:
-    principal_type: AuthzPrincipalType
+    principal_type: AuthzCollectionType
     rule: AuthzPolicyRule
 
 
 @dataclass(frozen=True)
 class AuthzPolicyRuleEntry:
-    principal_type: AuthzPrincipalType
+    principal_type: AuthzCollectionType
     rule: AuthzPolicyRule
 
 
 def _authz_policy_rule_collections(
     policy: LaunchplaneAuthzPolicy,
-) -> tuple[tuple[AuthzPrincipalType, tuple[AuthzPolicyRule, ...]], ...]:
+) -> tuple[tuple[AuthzCollectionType, tuple[AuthzPolicyRule, ...]], ...]:
+    return (
+        ("github_actions", policy.github_actions),
+        ("github_humans", policy.github_humans),
+        ("terminal_agents", policy.terminal_agents),
+        ("local_operators", policy.local_operators),
+        ("local_admins", policy.local_admins),
+        ("ordinary_agents", policy.ordinary_agents),
+    )
+
+
+def _existing_authz_policy_rule_collections(
+    policy: LaunchplaneAuthzPolicy,
+) -> tuple[tuple[AuthzPrincipalType, tuple[AuthzExistingPolicyRule, ...]], ...]:
     return (
         ("github_actions", policy.github_actions),
         ("github_humans", policy.github_humans),
@@ -191,6 +213,10 @@ def _normalize_authz_rule(rule: LocalOperatorPolicyRule) -> LocalOperatorPolicyR
 def _normalize_authz_rule(rule: LocalAdminPolicyRule) -> LocalAdminPolicyRule: ...
 
 
+@overload
+def _normalize_authz_rule(rule: OrdinaryAgentPolicyRule) -> OrdinaryAgentPolicyRule: ...
+
+
 def _normalize_authz_rule(rule: AuthzPolicyRule) -> AuthzPolicyRule:
     updates: dict[str, object] = {}
     for field_name in _AUTHZ_RULE_SELECTOR_FIELDS:
@@ -202,12 +228,15 @@ def _normalize_authz_rule(rule: AuthzPolicyRule) -> AuthzPolicyRule:
 
 
 def _normalize_desired_authz_policy(policy: LaunchplaneAuthzPolicy) -> LaunchplaneAuthzPolicy:
-    require_authz_policy_schema_write_activated(policy)
     normalized_collections = {
         principal_type: tuple(
             sorted(
                 (_normalize_authz_rule(rule) for rule in rules),
-                key=lambda rule: rule.managed_rule_id or "",
+                key=(
+                    (lambda rule: (rule.managed_set_id, rule.managed_rule_id))
+                    if principal_type == "ordinary_agents"
+                    else (lambda rule: rule.managed_rule_id or "")
+                ),
             )
         )
         for principal_type, rules in _authz_policy_rule_collections(policy)
@@ -252,7 +281,7 @@ _PRODUCT_OWNER_POLICY_ADMIN_ACTIONS = frozenset(
         PRODUCT_OWNER_REQUIREMENT_WRITE_ACTION,
     }
 )
-AuthzSchemaMigrationMode: TypeAlias = Literal["reject", "migrate_v1_to_v2"]
+AuthzSchemaMigrationMode: TypeAlias = Literal["reject", "migrate_v1_to_v2", "migrate_v2_to_v3"]
 AuthzUnmanagedAdoptionMode: TypeAlias = Literal["reject", "adopt_matching"]
 
 
@@ -383,8 +412,8 @@ class AuthzManagedPolicyReconcileEnvelope(BaseModel):
             raise ValueError(
                 "Managed authz policy reconciliation dry-run cannot declare reviewed_plan_sha256."
             )
-        if self.desired_policy.schema_version != 2:
-            raise ValueError("Managed authz desired policy must use schema version 2.")
+        if self.desired_policy.schema_version not in (2, 3):
+            raise ValueError("Managed authz desired policy must use schema version 2 or 3.")
         if self.desired_policy.administrator_quorum is not None:
             raise ValueError(
                 "Managed authz desired policy cannot declare administrator_quorum; "
@@ -467,8 +496,8 @@ class AuthzManagedRuleChange(BaseModel):
 
     managed_rule_id: str
     change: AuthzManagedRuleChangeKind
-    previous_principal_type: AuthzPrincipalType | None = None
-    desired_principal_type: AuthzPrincipalType | None = None
+    previous_principal_type: AuthzCollectionType | None = None
+    desired_principal_type: AuthzCollectionType | None = None
     previous_rule_sha256: str = ""
     desired_rule_sha256: str = ""
 
@@ -633,6 +662,7 @@ def summarize_active_authz_policy_record(
     unmanaged_rule_counts = {
         principal_type: sum(rule.managed_set_id is None for rule in rules)
         for principal_type, rules in rules_by_principal
+        if principal_type != "ordinary_agents" or rules
     }
     summary["managed_rules"] = managed_rules
     summary["managed_rule_count"] = len(managed_rules)
@@ -652,12 +682,21 @@ def summarize_active_authz_policy_record(
     return summary
 
 
-def _authz_principal_rule_counts(
+def _authz_collection_rule_counts(
     entries: list[AuthzPolicyRuleEntry],
-) -> AuthzPrincipalRuleCounts:
-    counts = {principal_type: 0 for principal_type in _AUTHZ_PRINCIPAL_TYPES}
+) -> AuthzPolicyCollectionRuleCounts:
+    counts = {principal_type: 0 for principal_type in _AUTHZ_COLLECTION_TYPES}
     for entry in entries:
         counts[entry.principal_type] += 1
+    return AuthzPolicyCollectionRuleCounts(**counts)
+
+
+def _authz_principal_rule_counts(
+    entries: list[tuple[AuthzPrincipalType, AuthzExistingPolicyRule]],
+) -> AuthzPrincipalRuleCounts:
+    counts = {principal_type: 0 for principal_type in _AUTHZ_PRINCIPAL_TYPES}
+    for principal_type, _ in entries:
+        counts[principal_type] += 1
     return AuthzPrincipalRuleCounts(**counts)
 
 
@@ -691,21 +730,24 @@ def summarize_authz_policy_health(
         AuthzManagedSetSummary(
             managed_set_id=managed_set_id,
             rule_count=len(managed_sets[managed_set_id]),
-            principal_rule_counts=_authz_principal_rule_counts(managed_sets[managed_set_id]),
+            principal_rule_counts=_authz_collection_rule_counts(managed_sets[managed_set_id]),
         )
         for managed_set_id in returned_managed_set_ids
     )
 
     administrator_entries = [
-        entry for entry in rule_entries if _authz_rule_grants_policy_administration(entry.rule)
+        (principal_type, rule)
+        for principal_type, rules in _existing_authz_policy_rule_collections(policy)
+        for rule in rules
+        if _authz_rule_grants_policy_administration(rule)
     ]
     caller_administrator_rule_count = sum(
         _authz_rule_allows_identity(
-            rule=entry.rule,
+            rule=rule,
             identity=caller_identity,
             schema_version=policy.schema_version,
         )
-        for entry in administrator_entries
+        for _, rule in administrator_entries
     )
     strict_human_administrator_rules = tuple(
         rule
@@ -719,7 +761,7 @@ def summarize_authz_policy_health(
         administrator_quorum == 1 and len(strict_human_administrator_ids) == 1
     )
     managed_administrator_rule_count = sum(
-        entry.rule.managed_set_id is not None for entry in administrator_entries
+        rule.managed_set_id is not None for _, rule in administrator_entries
     )
 
     immutable_repository_rule_count = sum(1 for rule in policy.github_actions if rule.repository_id)
@@ -1012,23 +1054,23 @@ def _managed_operational_readiness_blockers(
 def _candidate_managed_set_policies(
     policy: LaunchplaneAuthzPolicy,
 ) -> dict[str, LaunchplaneAuthzPolicy]:
-    grouped: dict[str, dict[AuthzPrincipalType, list[AuthzPolicyRule]]] = {}
+    grouped: dict[str, dict[AuthzCollectionType, list[AuthzPolicyRule]]] = {}
     for principal_type, rules in _authz_policy_rule_collections(policy):
         for rule in rules:
             if rule.managed_set_id is None:
                 continue
             collections = grouped.setdefault(
                 rule.managed_set_id,
-                {candidate_type: [] for candidate_type in _AUTHZ_PRINCIPAL_TYPES},
+                {candidate_type: [] for candidate_type in _AUTHZ_COLLECTION_TYPES},
             )
             collections[principal_type].append(rule)
     return {
         managed_set_id: LaunchplaneAuthzPolicy.model_validate(
             {
-                "schema_version": 2,
+                "schema_version": policy.schema_version,
                 **{
                     principal_type: tuple(collections[principal_type])
-                    for principal_type in _AUTHZ_PRINCIPAL_TYPES
+                    for principal_type in _AUTHZ_COLLECTION_TYPES
                 },
             }
         )
@@ -1039,8 +1081,8 @@ def _candidate_managed_set_policies(
 def validate_authz_candidate_policy(
     policy: LaunchplaneAuthzPolicy,
 ) -> LaunchplaneAuthzPolicy:
-    if policy.schema_version != 2:
-        raise ValueError("Authorization candidate policy preview requires schema version 2.")
+    if policy.schema_version not in (2, 3):
+        raise ValueError("Authorization candidate policy preview requires schema version 2 or 3.")
     normalized_policy = _normalize_desired_authz_policy(policy)
     for managed_set_id, managed_set_policy in sorted(
         _candidate_managed_set_policies(normalized_policy).items()
@@ -1059,8 +1101,8 @@ def _authz_policy_rule_count(policy: LaunchplaneAuthzPolicy) -> int:
 
 def _authz_policy_principal_rule_counts(
     policy: LaunchplaneAuthzPolicy,
-) -> AuthzPrincipalRuleCounts:
-    return AuthzPrincipalRuleCounts(
+) -> AuthzPolicyCollectionRuleCounts:
+    return AuthzPolicyCollectionRuleCounts(
         **{
             principal_type: len(rules)
             for principal_type, rules in _authz_policy_rule_collections(policy)
@@ -1084,13 +1126,9 @@ def _authz_policy_managed_rule_entries(
 
 def _authz_policy_unmanaged_rule_hashes(
     policy: LaunchplaneAuthzPolicy,
-) -> dict[AuthzPrincipalType, Counter[str]]:
-    rule_hashes: dict[AuthzPrincipalType, Counter[str]] = {
-        "github_actions": Counter(),
-        "github_humans": Counter(),
-        "terminal_agents": Counter(),
-        "local_operators": Counter(),
-        "local_admins": Counter(),
+) -> dict[AuthzCollectionType, Counter[str]]:
+    rule_hashes: dict[AuthzCollectionType, Counter[str]] = {
+        principal_type: Counter() for principal_type in _AUTHZ_COLLECTION_TYPES
     }
     for principal_type, rules in _authz_policy_rule_collections(policy):
         for rule in rules:
@@ -1114,7 +1152,7 @@ def build_authz_candidate_policy_structural_diff(
     removed_managed_rule_count = 0
     updated_managed_rule_count = 0
     unchanged_managed_rule_count = 0
-    changed_principal_types: set[AuthzPrincipalType] = set()
+    changed_principal_types: set[AuthzCollectionType] = set()
     for managed_key in managed_keys:
         active_entry = active_managed.get(managed_key)
         candidate_entry = candidate_managed.get(managed_key)
@@ -1140,7 +1178,7 @@ def build_authz_candidate_policy_structural_diff(
     added_unmanaged_rule_count = 0
     removed_unmanaged_rule_count = 0
     unchanged_unmanaged_rule_count = 0
-    for principal_type in _AUTHZ_PRINCIPAL_TYPES:
+    for principal_type in _AUTHZ_COLLECTION_TYPES:
         active_hashes = active_unmanaged[principal_type]
         candidate_hashes = candidate_unmanaged[principal_type]
         for rule_sha256 in active_hashes.keys() | candidate_hashes.keys():
@@ -1184,7 +1222,7 @@ def build_authz_candidate_policy_structural_diff(
         retained_managed_set_count=len(active_managed_sets & candidate_managed_sets),
         changed_principal_types=tuple(
             principal_type
-            for principal_type in _AUTHZ_PRINCIPAL_TYPES
+            for principal_type in _AUTHZ_COLLECTION_TYPES
             if principal_type in changed_principal_types
         ),
         active_principal_rule_counts=_authz_policy_principal_rule_counts(active_policy),
@@ -1311,6 +1349,7 @@ def preview_authz_candidate_policy(
             submitted_policy_sha256=submitted_candidate_sha256,
             evaluated_policy_sha256=evaluated_candidate_sha256,
             normalized=submitted_candidate_sha256 != evaluated_candidate_sha256,
+            schema_version=cast(Literal[2, 3], candidate_policy.schema_version),
             rule_count=_authz_policy_rule_count(candidate_policy),
         ),
         diff=build_authz_candidate_policy_structural_diff(
@@ -1458,6 +1497,10 @@ def _managed_rule_adoption_matches(
     *, current_rule: AuthzPolicyRule, desired_rule: AuthzPolicyRule
 ) -> bool:
     if current_rule.managed_set_id is not None:
+        return False
+    if isinstance(current_rule, OrdinaryAgentPolicyRule) or isinstance(
+        desired_rule, OrdinaryAgentPolicyRule
+    ):
         return False
     normalized_current_rule = _normalize_authz_rule(
         _authz_rule_without_managed_identity(current_rule)
@@ -1615,21 +1658,21 @@ def _desired_managed_set_payload(policy: LaunchplaneAuthzPolicy) -> list[dict[st
 def _authz_policy_without_managed_identities(
     policy: LaunchplaneAuthzPolicy,
 ) -> LaunchplaneAuthzPolicy:
-    require_authz_policy_schema_write_activated(policy)
     collections = {
         principal_type: tuple(_authz_rule_without_managed_identity(rule) for rule in rules)
-        for principal_type, rules in _authz_policy_rule_collections(policy)
+        for principal_type, rules in _existing_authz_policy_rule_collections(policy)
     }
     return LaunchplaneAuthzPolicy.model_validate(
         {
             "schema_version": policy.schema_version,
             "administrator_quorum": policy.administrator_quorum,
             **collections,
+            "ordinary_agents": policy.ordinary_agents,
         }
     )
 
 
-def _authz_rule_grants_policy_administration(rule: AuthzPolicyRule) -> bool:
+def _authz_rule_grants_policy_administration(rule: AuthzExistingPolicyRule) -> bool:
     if rule.actions and _AUTHZ_POLICY_ADMIN_ACTION not in rule.actions:
         return False
     if isinstance(rule, GitHubHumanPolicyRule):
@@ -1653,10 +1696,10 @@ def _authz_rule_grants_policy_administration(rule: AuthzPolicyRule) -> bool:
 
 def _authz_policy_administrator_rules(
     policy: LaunchplaneAuthzPolicy,
-) -> tuple[AuthzPolicyRule, ...]:
+) -> tuple[AuthzExistingPolicyRule, ...]:
     return tuple(
         rule
-        for _, rules in _authz_policy_rule_collections(policy)
+        for _, rules in _existing_authz_policy_rule_collections(policy)
         for rule in rules
         if _authz_rule_grants_policy_administration(rule)
     )
@@ -1668,7 +1711,7 @@ def _authz_policy_retains_administration(policy: LaunchplaneAuthzPolicy) -> bool
 
 def _authz_rule_allows_identity(
     *,
-    rule: AuthzPolicyRule,
+    rule: AuthzExistingPolicyRule,
     identity: AuthzApplyingIdentity,
     schema_version: Literal[1, 2, 3],
 ) -> bool:
@@ -1767,7 +1810,6 @@ def _reconcile_managed_policy(
     int,
     tuple[AuthzManagedCompatibilityRetirement, ...],
 ]:
-    require_authz_policy_schema_write_activated(current_policy, desired_policy)
     current_managed_rules = _managed_rules_by_id(
         policy=current_policy,
         managed_set_id=managed_set_id,
@@ -1885,8 +1927,8 @@ def _reconcile_managed_policy(
                 )
             retirement_locations[location] = managed_rule_id
 
-    updated_collections: dict[AuthzPrincipalType, list[AuthzPolicyRule]] = {
-        principal_type: [] for principal_type in _AUTHZ_PRINCIPAL_TYPES
+    updated_collections: dict[AuthzCollectionType, list[AuthzPolicyRule]] = {
+        principal_type: [] for principal_type in _AUTHZ_COLLECTION_TYPES
     }
     placed_desired_rule_ids: set[str] = set()
     compatibility_retirements: list[AuthzManagedCompatibilityRetirement] = []
@@ -1936,7 +1978,7 @@ def _reconcile_managed_policy(
         )
 
     updated_policy = LaunchplaneAuthzPolicy.model_validate(
-        {"schema_version": 2, **updated_collections}
+        {"schema_version": desired_policy.schema_version, **updated_collections}
     )
     changes: list[AuthzManagedRuleChange] = []
     unchanged_rule_count = 0
@@ -1986,6 +2028,37 @@ def _reconcile_managed_policy(
     )
 
 
+def _resolve_managed_authz_reconcile_base(
+    *,
+    current_policy: LaunchplaneAuthzPolicy,
+    schema_migration: AuthzSchemaMigrationMode,
+    desired_schema_version: Literal[1, 2, 3],
+) -> LaunchplaneAuthzPolicy:
+    if current_policy.schema_version == 3 and desired_schema_version == 2:
+        raise AuthzPolicyConflictError(
+            "Managed authz policy schema downgrade from version 3 to version 2 is not supported."
+        )
+    transition = (
+        current_policy.schema_version,
+        schema_migration,
+        desired_schema_version,
+    )
+    if transition == (1, "migrate_v1_to_v2", 2):
+        return migrate_authz_policy_to_schema_v2(current_policy)
+    if transition == (2, "reject", 2):
+        return current_policy
+    if transition == (2, "migrate_v2_to_v3", 3):
+        return LaunchplaneAuthzPolicy.model_validate(
+            {**current_policy.model_dump(mode="json"), "schema_version": 3}
+        )
+    if transition == (3, "reject", 3):
+        return current_policy
+    raise AuthzPolicyConflictError(
+        "Managed authz policy reconciliation requires an explicit schema_migration matching "
+        "the active and desired policy schemas."
+    )
+
+
 def plan_managed_authz_policy_reconcile(
     *,
     record_store: AuthzPolicyRecordStore,
@@ -2003,13 +2076,13 @@ def plan_managed_authz_policy_reconcile(
         raise AuthzPolicyConflictError("Multiple active Launchplane authz policy records found.")
     current_record = active_records[0]
     current_policy = current_record.policy
-    require_authz_policy_schema_write_activated(current_policy, request.desired_policy)
-    if current_policy.schema_version != 2 and request.schema_migration != "migrate_v1_to_v2":
-        raise AuthzPolicyConflictError(
-            "Managed authz policy reconciliation requires explicit "
-            "schema_migration='migrate_v1_to_v2' for the active schema-v1 policy."
-        )
-    base_policy = migrate_authz_policy_to_schema_v2(current_policy)
+    if request.mode == "apply":
+        require_authz_policy_schema_write_activated(current_policy, request.desired_policy)
+    base_policy = _resolve_managed_authz_reconcile_base(
+        current_policy=current_policy,
+        schema_migration=request.schema_migration,
+        desired_schema_version=request.desired_policy.schema_version,
+    )
     desired_collections = dict(_authz_policy_rule_collections(request.desired_policy))
     _validate_github_managed_workflow_transition(
         current_rules=dict(_authz_policy_rule_collections(base_policy))["github_actions"],
@@ -2099,7 +2172,7 @@ def plan_managed_authz_policy_reconcile(
         desired_policy_sha256=desired_policy_sha256,
         desired_set_sha256=desired_set_sha256,
         plan_sha256=plan_sha256,
-        schema_migrated=current_policy.schema_version != 2,
+        schema_migrated=current_policy.schema_version != updated_policy.schema_version,
         previous_administrator_quorum=effective_administrator_quorum(current_policy),
         administrator_quorum=candidate_administrator_quorum,
         administrator_quorum_changed=(

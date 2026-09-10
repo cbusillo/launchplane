@@ -34,6 +34,14 @@ AuthzPolicyPrincipalType: TypeAlias = Literal[
     "local_operators",
     "local_admins",
 ]
+AuthzPolicyCollectionType: TypeAlias = Literal[
+    "github_actions",
+    "github_humans",
+    "terminal_agents",
+    "local_operators",
+    "local_admins",
+    "ordinary_agents",
+]
 AuthzPolicyCandidateReadinessReason: TypeAlias = Literal[
     "repository_not_exact",
     "workflow_refs_not_singleton",
@@ -295,8 +303,10 @@ class AuthzPolicyCandidatePreviewRequest(BaseModel):
 
     @model_validator(mode="after")
     def _validate_candidate(self) -> "AuthzPolicyCandidatePreviewRequest":
-        if self.candidate_policy.schema_version != 2:
-            raise ValueError("Authorization candidate policy preview requires schema version 2.")
+        if self.candidate_policy.schema_version not in (2, 3):
+            raise ValueError(
+                "Authorization candidate policy preview requires schema version 2 or 3."
+            )
         rule_count = sum(
             len(rules)
             for rules in (
@@ -305,6 +315,7 @@ class AuthzPolicyCandidatePreviewRequest(BaseModel):
                 self.candidate_policy.terminal_agents,
                 self.candidate_policy.local_operators,
                 self.candidate_policy.local_admins,
+                self.candidate_policy.ordinary_agents,
             )
         )
         if rule_count > AUTHZ_POLICY_CANDIDATE_PREVIEW_MAX_RULES:
@@ -359,6 +370,10 @@ class AuthzPrincipalRuleCounts(BaseModel):
     local_admins: int = Field(ge=0)
 
 
+class AuthzPolicyCollectionRuleCounts(AuthzPrincipalRuleCounts):
+    ordinary_agents: int = Field(default=0, ge=0, exclude_if=lambda value: value == 0)
+
+
 class AuthzPolicyRecordSummary(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -389,7 +404,7 @@ class AuthzManagedSetSummary(BaseModel):
 
     managed_set_id: str
     rule_count: int = Field(ge=1)
-    principal_rule_counts: AuthzPrincipalRuleCounts
+    principal_rule_counts: AuthzPolicyCollectionRuleCounts
 
 
 class AuthzManagedSetCollectionSummary(BaseModel):
@@ -509,7 +524,7 @@ class AuthzPolicyCandidateSummary(BaseModel):
     submitted_policy_sha256: str
     evaluated_policy_sha256: str
     normalized: bool
-    schema_version: Literal[2] = 2
+    schema_version: Literal[2, 3] = 2
     rule_count: int = Field(ge=0)
 
 
@@ -531,9 +546,9 @@ class AuthzPolicyCandidateStructuralDiff(BaseModel):
     added_managed_set_count: int = Field(ge=0)
     removed_managed_set_count: int = Field(ge=0)
     retained_managed_set_count: int = Field(ge=0)
-    changed_principal_types: tuple[AuthzPolicyPrincipalType, ...]
-    active_principal_rule_counts: AuthzPrincipalRuleCounts
-    candidate_principal_rule_counts: AuthzPrincipalRuleCounts
+    changed_principal_types: tuple[AuthzPolicyCollectionType, ...]
+    active_principal_rule_counts: AuthzPolicyCollectionRuleCounts
+    candidate_principal_rule_counts: AuthzPolicyCollectionRuleCounts
 
 
 class AuthzPolicyCandidateReadinessSummary(BaseModel):

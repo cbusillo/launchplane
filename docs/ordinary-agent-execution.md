@@ -24,10 +24,19 @@ under schema v2/v3 rather than coercing v3 through a v2-only generic helper.
 Schema-v3 policy writes are not activated. The authoritative store rejects a v3
 seed even when no active record exists, rejects v3 replacement records, and
 rejects replacement, deletion, downgrade, or retirement when the observed
-active record is v3. Managed policy administration, recovery, and generated
-preview planning also reject an observed v3 policy before constructing an
-applicable v2 plan. This fence remains until a later activation slice enforces a
-minimum compatible service image and a rollback boundary.
+active record is v3. Managed reconciliation and candidate-preview paths can
+construct read-only schema-v3 plans, including an explicit v2-to-v3 migration,
+while preserving unrelated managed sets. Recovery and generated planners retain
+the active schema in their desired set. The common apply path and storage still
+reject schema-v3 persistence. This fence remains until a later activation slice
+enforces verified schema/protocol compatibility and a rollback boundary.
+
+Ordinary rules participate only in structural policy normalization, managed-set
+replacement and reporting. Their managed set and rule IDs remain semantic
+because eligibility binds those exact IDs; changing either produces a missing
+bound rule for existing leases. They remain absent from generic caller identity
+and effective-access probe unions and never count toward human administrator
+reachability or quorum.
 
 Existing v1 and v2 policies omit the empty `ordinary_agents` field from
 serialization and canonical hashing, preserving their prior payloads, digests,

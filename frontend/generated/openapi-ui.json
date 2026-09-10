@@ -6178,7 +6178,8 @@
                   "github_humans",
                   "terminal_agents",
                   "local_operators",
-                  "local_admins"
+                  "local_admins",
+                  "ordinary_agents"
                 ],
                 "type": "string"
               },
@@ -6205,7 +6206,8 @@
                   "github_humans",
                   "terminal_agents",
                   "local_operators",
-                  "local_admins"
+                  "local_admins",
+                  "ordinary_agents"
                 ],
                 "type": "string"
               },
