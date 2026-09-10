@@ -843,3 +843,10 @@ scope before interpreting missing outcomes and reuses an existing matching
 terminal outcome. Uncertain dispatches and retryable preparations remain separate
 recovery work; this adapter grants no new admission or retry. The current joined
 progress checkpoint still owns authority to persist the successor.
+
+The ordinary semantic router reserves each invoked command by its kind and its
+stable position in the finite request. It dispatches through the existing bounded
+executor or replays validated completion without provider work. Unknown effects
+and head-refresh rebinding return typed recovery requirements for a separate job
+poll; the router never reconciles and resends in the same call. Landing remains
+in the joined landing path, and stack methods are excluded from this router.
