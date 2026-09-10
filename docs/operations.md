@@ -916,9 +916,13 @@ numeric GitHub user IDs. Engineering viewer rules grant only
 `owner_acceptance.read` and match both resolved human roles, `admin` and
 `read_only`, so an existing global admin assignment cannot suppress the narrow
 viewer grant. Owner candidate rules use only `read_only` and may grant that read
-action plus `owner_acceptance_event.write`. Both shapes remain limited to
-product `launchplane` and context `owner-acceptance`. Product Owner membership
-remains a separate server-side requirement for event writes.
+action plus `owner_acceptance_event.write`, or may grant only
+`owner_acceptance_event.write` for the owner-safe product-review route. All
+three shapes remain limited to product `launchplane` and context
+`owner-acceptance`. Product Owner membership remains a separate server-side
+requirement for the owner-safe read and event writes. Event-write-only source
+compatibility does not alter the current DB policy; use it only in a separately
+reviewed contraction after the supporting service SHA is deployed.
 
 The manager-preview set above is current compatibility authority, not the issue
 `#2240` target. Preserve it only until Owner-acceptance replacement coverage and
