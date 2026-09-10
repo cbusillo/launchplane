@@ -277,6 +277,9 @@ class LandingDispatchTests(unittest.TestCase):
             merge_commit_sha=self.result_sha,
             merge_commit_tree_sha=p.expected_merge_tree_sha,
             merge_commit_parents=(p.expected_base_sha, p.entry.expected_head_sha),
+            observed_base_sha=self.result_sha,
+            observed_base_tree_sha=p.expected_merge_tree_sha,
+            base_contains_merge_commit=True,
         )
         observation = OrdinaryAgentReconciliationObservation(
             observation_id="landing-recovery",

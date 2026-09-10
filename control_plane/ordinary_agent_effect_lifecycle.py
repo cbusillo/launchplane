@@ -80,6 +80,12 @@ def require_completed_effect_proof(
                 or proof.merge_commit_parents != landing_parents
             ):
                 _deny()
+            if (
+                not proof.observed_base_sha
+                or not proof.observed_base_tree_sha
+                or proof.base_contains_merge_commit is not True
+            ):
+                raise OrdinaryAgentSessionAdmissionDenied("landing_base_evidence_unavailable")
         else:
             _deny()
     elif command.kind == "pull_request_head_refresh":
@@ -204,7 +210,12 @@ def classify_effect_reconciliation(
             return "terminal_conflict"
         return (
             "completed_observed"
-            if observation.merged and observation.merge_commit_sha
+            if observation.merged
+            and observation.merge_commit_sha
+            and observation.merge_commit_tree_sha
+            and observation.observed_base_sha
+            and observation.observed_base_tree_sha
+            and observation.base_contains_merge_commit is True
             else "reconciliation_required"
         )
     if command.kind == "stack_child_comment" and isinstance(

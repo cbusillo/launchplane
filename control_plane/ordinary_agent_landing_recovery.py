@@ -162,10 +162,19 @@ def recover_ordinary_landing_entry(
     elif prior and prior[0].status != "reconcile_required":
         raise OrdinaryAgentSessionAdmissionDenied("landing_response_conflict")
     else:
-        # A merged-PR observation proves historical provider completion, but does
-        # not itself observe the base ref containing the merge. Preserve that
-        # distinction until a separate base-proof recovery step is available.
-        if not isinstance(proof, OrdinaryAgentRefObservation):
+        # Fresh dispatch observes the base at the merge commit. Reconciliation
+        # may observe it farther ahead and must retain that exact base witness.
+        if isinstance(proof, OrdinaryAgentRefObservation):
+            observed_base_sha = completed.result_sha
+            observed_base_tree_sha = preparation.expected_merge_tree_sha
+        elif (
+            proof.base_contains_merge_commit is True
+            and proof.observed_base_sha
+            and proof.observed_base_tree_sha
+        ):
+            observed_base_sha = proof.observed_base_sha
+            observed_base_tree_sha = proof.observed_base_tree_sha
+        else:
             raise OrdinaryLandingRecoveryRequired(preparation_id)
         observed_at = (
             history.reconciliations[-1].observed_at
@@ -175,8 +184,8 @@ def recover_ordinary_landing_entry(
         guard.record_landed(
             admission=finalization.admission,
             entry=entry,
-            observed_base_sha=completed.result_sha,
-            observed_base_tree_sha=preparation.expected_merge_tree_sha,
+            observed_base_sha=observed_base_sha,
+            observed_base_tree_sha=observed_base_tree_sha,
             base_contains_merge_commit=True,
             provider_effect_attempted=True,
             observed_at=datetime.fromtimestamp(observed_at, timezone.utc).isoformat(),

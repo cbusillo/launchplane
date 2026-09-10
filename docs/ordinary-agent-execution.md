@@ -776,6 +776,10 @@ continues to fence new issuance.
 Ref/commit/containment evidence uses the captured immutable SHA, comment scans stop
 at three pages, and a full label page cannot prove a missing label. The actual
 worker factory and fleet qualification are still required before activation.
+Landing reconciliation also captures the target base ref's exact commit and tree.
+It proves containment against that immutable commit before completing the effect;
+a merged PR alone, or a base that does not contain the merge, remains unproven.
+These reads use the existing observation, custody, deadline and quota limits.
 
 
 A yielded ordinary job keeps a private controller checkpoint on its existing claim
@@ -837,8 +841,11 @@ This result contract does not itself assemble the production worker.
 
 Completed ordinary landing history can restore a missing landing outcome or
 progress checkpoint without provider work. Creating a missing exact landing
-outcome requires a stored base-ref proof; a merged-PR observation alone remains
-recovery work until base containment is verified. Recovery checks the exact admission
+outcome requires a stored base-ref proof or a merged-PR observation with an exact
+base-containment witness. If the observed base is ahead of the merge, the outcome
+retains its actual SHA and tree separately from the merge commit. Legacy PR-only
+completion proof remains insufficient and does not trigger another provider write.
+Recovery checks the exact admission
 scope before interpreting missing outcomes and reuses an existing matching
 terminal outcome. Uncertain dispatches and retryable preparations remain separate
 recovery work; this adapter grants no new admission or retry. The current joined

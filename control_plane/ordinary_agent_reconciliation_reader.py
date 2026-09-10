@@ -82,10 +82,12 @@ def _read_observation(
         number = command.effect.pull_request_number
         payload = _object(transport.request(method="GET", path=f"{prefix}/pulls/{number}"))
         base, head = _object(payload.get("base")), _object(payload.get("head"))
+        base_ref = _text(base.get("ref"))
         if (
             _positive_integer(payload.get("number")) != number
             or _positive_integer(_object(base.get("repo")).get("id")) != record.target.repository_id
             or _positive_integer(_object(head.get("repo")).get("id")) != record.target.repository_id
+            or (command.kind == "pull_request_landing" and base_ref != record.target.base_branch)
             or payload.get("state") not in {"open", "closed"}
             or not isinstance(payload.get("merged"), bool)
         ):
@@ -94,7 +96,7 @@ def _read_observation(
             "repository": repository,
             "number": number,
             "head_sha": _text(head.get("sha")),
-            "base_ref": _text(base.get("ref")),
+            "base_ref": base_ref,
             "base_sha": _text(base.get("sha")),
             "state": payload["state"],
             "merged": payload["merged"],
@@ -116,6 +118,45 @@ def _read_observation(
                 merge_commit_sha=merged_sha,
                 merge_commit_tree_sha=proof.tree_sha,
                 merge_commit_parents=proof.parents,
+            )
+            canonical_base_ref = "refs/heads/" + record.target.base_branch
+            base_payload = _object(
+                transport.request(
+                    method="GET",
+                    path=f"{prefix}/git/ref/{quote(canonical_base_ref.removeprefix('refs/'), safe='/')}",
+                )
+            )
+            if _text(base_payload.get("ref")) != canonical_base_ref:
+                _deny()
+            observed_base_sha = _text(_object(base_payload.get("object")).get("sha"))
+            if observed_base_sha == merged_sha:
+                observed_base_tree_sha = proof.tree_sha
+                base_contains_merge_commit = True
+            else:
+                base_proof = _commit(transport, repository, observed_base_sha, canonical_base_ref)
+                observed_base_tree_sha = base_proof.tree_sha
+                compared = _object(
+                    transport.request(
+                        method="GET",
+                        path=f"{prefix}/compare/{quote(merged_sha, safe='')}...{quote(observed_base_sha, safe='')}",
+                    )
+                )
+                status = compared.get("status")
+                if status not in {"ahead", "behind", "diverged", "identical"}:
+                    _deny()
+                compared_base_sha = _text(_object(compared.get("base_commit")).get("sha"))
+                merge_base_sha = _text(_object(compared.get("merge_base_commit")).get("sha"))
+                if (
+                    compared_base_sha != merged_sha
+                    or status == "identical"
+                    or (status == "ahead" and merge_base_sha != merged_sha)
+                ):
+                    _deny()
+                base_contains_merge_commit = status == "ahead"
+            values.update(
+                observed_base_sha=observed_base_sha,
+                observed_base_tree_sha=observed_base_tree_sha,
+                base_contains_merge_commit=base_contains_merge_commit,
             )
         return effects.OrdinaryAgentPullRequestObservation.model_validate(values)
     if command.kind == "stack_child_label":

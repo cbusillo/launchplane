@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Literal, Protocol, TypeAlias
+from typing import Annotated, Literal, Protocol, Self, TypeAlias
 from dataclasses import fields
 import json
 
-from pydantic import Field, TypeAdapter, field_validator
+from pydantic import Field, TypeAdapter, field_validator, model_validator
 
 from control_plane.contracts.ordinary_agent import OrdinaryAgentTarget, StrictFrozenModel
 from control_plane.contracts.ordinary_agent_custody import OrdinaryAgentCustodyCandidate
@@ -375,12 +375,31 @@ class OrdinaryAgentPullRequestObservation(StrictFrozenModel):
     merge_commit_sha: str | None = Field(default=None, max_length=64)
     merge_commit_tree_sha: str | None = Field(default=None, max_length=64)
     merge_commit_parents: tuple[str, ...] = ()
+    observed_base_sha: str | None = Field(default=None, min_length=1, max_length=64)
+    observed_base_tree_sha: str | None = Field(default=None, min_length=1, max_length=64)
+    base_contains_merge_commit: bool | None = None
     head_parents: tuple[str, ...] = ()
 
     @field_validator("head_parents", "merge_commit_parents", mode="before")
     @classmethod
     def read_parents(cls, value: object) -> object:
         return tuple(value) if isinstance(value, list) else value
+
+    @model_validator(mode="after")
+    def validate_base_witness(self) -> Self:
+        witness = (
+            self.observed_base_sha,
+            self.observed_base_tree_sha,
+            self.base_contains_merge_commit,
+        )
+        if all(value is None for value in witness):
+            return self
+        if not self.merged or not self.merge_commit_sha or any(value is None for value in witness):
+            raise ValueError(
+                "landing base witness requires a merged pull request, merge commit, "
+                "and complete base identity"
+            )
+        return self
 
 
 class OrdinaryAgentCommentObservation(StrictFrozenModel):

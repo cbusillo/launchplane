@@ -7,6 +7,7 @@ from control_plane.contracts.merge_train_effect import (
     CandidateHeadMergeEffect,
     MergeTrainEffectLineage,
     PullRequestHeadRefreshEffect,
+    PullRequestLandingEffect,
 )
 from control_plane.contracts.ordinary_agent import OrdinaryAgentTarget
 from control_plane.ordinary_agent_effect_lifecycle import (
@@ -137,3 +138,76 @@ class OrdinaryAgentEffectLifecycleTests(unittest.TestCase):
             ),
             "reconciliation_required",
         )
+
+    def test_landing_completion_requires_coherent_true_base_witness(self) -> None:
+        command = effects.PullRequestLandingCommand(
+            effect=PullRequestLandingEffect(
+                lineage=MergeTrainEffectLineage(repository="example/repo", base_branch="main"),
+                pull_request_number=12,
+                head_sha="b" * 40,
+                rolling_base_sha="a" * 40,
+                admission_id="admission-one",
+                merge_method="merge",
+            )
+        )
+        record = effect_record(command)
+        proof = effects.OrdinaryAgentPullRequestObservation(
+            repository="example/repo",
+            number=12,
+            head_sha="b" * 40,
+            base_ref="main",
+            base_sha="a" * 40,
+            state="closed",
+            merged=True,
+            merge_commit_sha="c" * 40,
+            merge_commit_tree_sha="d" * 40,
+            merge_commit_parents=("a" * 40, "b" * 40),
+            observed_base_sha="e" * 40,
+            observed_base_tree_sha="f" * 40,
+            base_contains_merge_commit=True,
+        )
+        outcome = effects.OrdinaryAgentCompletedOutcome(result_sha="c" * 40, proof=proof)
+
+        self.assertEqual(classify_effect_reconciliation(record, proof), "completed_observed")
+        self.assertEqual(require_completed_effect_proof(record, outcome), "completed")
+
+        for incomplete in (
+            proof.model_copy(update={"base_contains_merge_commit": False}),
+            effects.OrdinaryAgentPullRequestObservation.model_validate(
+                proof.model_dump(
+                    exclude={
+                        "observed_base_sha",
+                        "observed_base_tree_sha",
+                        "base_contains_merge_commit",
+                    }
+                )
+            ),
+        ):
+            with self.subTest(witness=incomplete.model_dump(mode="json")):
+                self.assertEqual(
+                    classify_effect_reconciliation(record, incomplete),
+                    "reconciliation_required",
+                )
+                with self.assertRaisesRegex(
+                    OrdinaryAgentSessionAdmissionDenied,
+                    "landing_base_evidence_unavailable",
+                ):
+                    require_completed_effect_proof(
+                        record,
+                        effects.OrdinaryAgentCompletedOutcome(
+                            result_sha="c" * 40, proof=incomplete
+                        ),
+                    )
+
+        with self.assertRaisesRegex(ValueError, "landing base witness"):
+            effects.OrdinaryAgentPullRequestObservation.model_validate(
+                proof.model_dump(exclude={"observed_base_tree_sha"})
+            )
+
+        wrong_head = proof.model_copy(update={"head_sha": "0" * 40})
+        self.assertEqual(classify_effect_reconciliation(record, wrong_head), "terminal_conflict")
+        with self.assertRaisesRegex(OrdinaryAgentSessionAdmissionDenied, "effect_proof_conflict"):
+            require_completed_effect_proof(
+                record,
+                effects.OrdinaryAgentCompletedOutcome(result_sha="c" * 40, proof=wrong_head),
+            )

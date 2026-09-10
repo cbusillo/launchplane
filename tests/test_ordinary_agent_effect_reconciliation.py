@@ -7,8 +7,9 @@ import unittest
 from unittest.mock import Mock, patch
 
 from control_plane.contracts.ordinary_agent_effect import (
-    OrdinaryAgentUnknownOutcome,
     OrdinaryAgentEffectHistory,
+    OrdinaryAgentPullRequestObservation,
+    OrdinaryAgentUnknownOutcome,
 )
 from control_plane.github_app_identity import GitHubAppInstallationToken
 from control_plane.contracts.ordinary_agent_lifecycle import OrdinaryAgentEnrollApplyEnvelope
@@ -68,8 +69,11 @@ class OrdinaryEffectReconciliationTests(unittest.TestCase):
         )
         self.api = Mock(return_value=None)
 
-    def responses(self, *, wrong_tree: bool = False) -> tuple[object, ...]:
+    def responses(
+        self, *, wrong_tree: bool = False, base_contains_merge_commit: bool = True
+    ) -> tuple[object, ...]:
         p = self.preparation
+        observed_base_sha = "7" * 40
         return (
             {
                 "number": p.entry.pull_request_number,
@@ -93,6 +97,25 @@ class OrdinaryEffectReconciliationTests(unittest.TestCase):
                 "parents": [{"sha": p.expected_base_sha}, {"sha": p.entry.expected_head_sha}],
                 "message": "merge",
             },
+            {
+                "ref": "refs/heads/" + p.target.base_branch,
+                "object": {"sha": observed_base_sha},
+            },
+            {
+                "sha": observed_base_sha,
+                "tree": {"sha": "6" * 40},
+                "parents": [
+                    {"sha": self.fixture.result_sha if base_contains_merge_commit else "5" * 40}
+                ],
+                "message": "later base commit",
+            },
+            {
+                "status": "ahead" if base_contains_merge_commit else "diverged",
+                "base_commit": {"sha": self.fixture.result_sha},
+                "merge_base_commit": {
+                    "sha": self.fixture.result_sha if base_contains_merge_commit else "5" * 40
+                },
+            },
         )
 
     def run_recovery(
@@ -113,11 +136,31 @@ class OrdinaryEffectReconciliationTests(unittest.TestCase):
         history = self.run_recovery(transport)
         self.assertEqual(history.effect.state, "completed_observed")
         self.assertEqual(history.effect.dispatch_count, 1)
-        self.assertEqual([request.method for request in transport.requests], ["GET", "GET"])
+        self.assertEqual([request.method for request in transport.requests], ["GET"] * 5)
+        proof = history.reconciliations[-1].observation
+        assert isinstance(proof, OrdinaryAgentPullRequestObservation)
+        self.assertTrue(proof.base_contains_merge_commit)
         self.assertEqual(recover_ordinary_effect(history).disposition, "replay")
         self.assertEqual(self.run_recovery(transport), history)
         self.mint.assert_called_once()
-        self.assertEqual(len(transport.requests), 2)
+        self.assertEqual(len(transport.requests), 5)
+
+    def test_false_base_containment_remains_scheduled_without_redispatch(self) -> None:
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=self.responses(base_contains_merge_commit=False)
+        )
+
+        history = self.run_recovery(transport)
+
+        self.assertEqual(history.effect.state, "reconciliation_required")
+        self.assertIsNotNone(history.effect.next_observation_at)
+        self.assertEqual(history.effect.dispatch_count, 1)
+        self.assertEqual(history.effect.reconciliation_count, 1)
+        observation = history.reconciliations[-1].observation
+        assert isinstance(observation, OrdinaryAgentPullRequestObservation)
+        self.assertFalse(observation.base_contains_merge_commit)
+        self.assertEqual(recover_ordinary_effect(history).disposition, "observe")
+        self.assertEqual([request.method for request in transport.requests], ["GET"] * 5)
 
     def test_wrong_result_tree_is_terminal_even_after_provider_reports_merged(self) -> None:
         transport = RecordingMergeTrainGitHubTransport(responses=self.responses(wrong_tree=True))
@@ -222,7 +265,7 @@ class OrdinaryEffectReconciliationTests(unittest.TestCase):
         history = self.run_recovery(transport)
         self.assertEqual(history.effect.state, "completed_observed")
         self.assertEqual(history.effect.dispatch_count, 1)
-        self.assertEqual([request.method for request in transport.requests], ["GET", "GET"])
+        self.assertEqual([request.method for request in transport.requests], ["GET"] * 5)
 
     def test_observation_wait_denies_before_mint_or_read(self) -> None:
         self.now = self.session.now
