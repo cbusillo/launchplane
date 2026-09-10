@@ -7,7 +7,7 @@ store must verify the issuer proof/approved operation and serialize their inputs
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import overload
+from typing import Literal, assert_never, overload
 
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.contracts.canonical_json import canonical_json_sha256
@@ -73,11 +73,27 @@ class OrdinaryAgentRequestAdmissionWriteSet:
 def ordinary_agent_finite_request_action(
     request: OrdinaryAgentFiniteRequest,
 ) -> OrdinaryAgentAction:
-    return (
-        "preflight"
-        if isinstance(request, OrdinaryAgentQualificationFiniteRequestV2)
-        else "guarded_merge"
-    )
+    if isinstance(request, OrdinaryAgentQualificationFiniteRequestV2):
+        return "preflight"
+    if isinstance(
+        request,
+        (OrdinaryAgentFiniteRequestRecord, OrdinaryAgentGuardedDeliveryFiniteRequestV2),
+    ):
+        return "guarded_merge"
+    assert_never(request)
+
+
+def ordinary_agent_finite_request_purpose(
+    request: OrdinaryAgentFiniteRequest,
+) -> Literal["qualification", "guarded_delivery"]:
+    if isinstance(request, OrdinaryAgentQualificationFiniteRequestV2):
+        return "qualification"
+    if isinstance(
+        request,
+        (OrdinaryAgentFiniteRequestRecord, OrdinaryAgentGuardedDeliveryFiniteRequestV2),
+    ):
+        return "guarded_delivery"
+    assert_never(request)
 
 
 def ordinary_agent_finite_request_pull_request_count(
@@ -108,10 +124,10 @@ def ordinary_agent_finite_request_intent_sha256(
 def ordinary_agent_finite_request_replay_identity(
     request: OrdinaryAgentFiniteRequest,
 ) -> dict[str, object]:
-    """Fields that storage never rewrites after the first admission."""
+    """Immutable admission fields plus guarded scope that survives head refresh."""
     identity: dict[str, object] = {
         "schema_version": request.schema_version,
-        "purpose": getattr(request, "purpose", "guarded_delivery"),
+        "purpose": ordinary_agent_finite_request_purpose(request),
         "request_id": request.request_id,
         "idempotency_key": request.idempotency_key,
         "principal_id": request.principal_id,
@@ -123,6 +139,8 @@ def ordinary_agent_finite_request_replay_identity(
     }
     if is_guarded_ordinary_agent_finite_request(request):
         identity["refresh_allowance_total"] = request.refresh_allowance_total
+        identity["pull_requests"] = tuple(item.number for item in request.pull_requests)
+        identity["permitted_stack_edit_pull_requests"] = request.permitted_stack_edit_pull_requests
     return identity
 
 
@@ -321,11 +339,6 @@ def build_ordinary_agent_request_admission_write_set(
     if lease.action != purpose_action:
         raise OrdinaryAgentSessionAdmissionDenied("request_action_mismatch")
     pull_request_count = ordinary_agent_finite_request_pull_request_count(request)
-    if (
-        isinstance(request, OrdinaryAgentQualificationFiniteRequestV2)
-        and lease.budget.action_limit < 1
-    ):
-        raise OrdinaryAgentSessionAdmissionDenied("request_outside_delegation")
     credential_evidence, session_evidence, lease_evidence, request_evidence = _eligibility_evidence(
         credential=credential, session=session, lease=lease, request=request
     )

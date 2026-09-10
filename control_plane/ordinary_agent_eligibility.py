@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import cast
+from typing import assert_never, cast
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.ordinary_agent import (
@@ -13,7 +13,9 @@ from control_plane.contracts.ordinary_agent import (
     OrdinaryAgentPolicyRule,
     OrdinaryAgentPolicySnapshot,
     OrdinaryAgentPrincipal,
+    OrdinaryAgentQualificationRequest,
     OrdinaryAgentReasonCode,
+    OrdinaryAgentRequest,
     OrdinaryAgentSession,
     OrdinaryAgentTarget,
     PolicyDecision,
@@ -215,7 +217,11 @@ def _eligibility_reason(
 
 
 def _request_pull_request_count(request: OrdinaryAgentEligibilityRequest) -> int:
-    return len(request.pull_requests) if hasattr(request, "pull_requests") else 0
+    if isinstance(request, OrdinaryAgentQualificationRequest):
+        return 0
+    if isinstance(request, OrdinaryAgentRequest):
+        return len(request.pull_requests)
+    assert_never(request)
 
 
 def ordinary_agent_chain_reason(

@@ -15,6 +15,7 @@ from control_plane.contracts.ordinary_agent_custody import (
 )
 from control_plane.contracts.ordinary_agent_session_lifecycle import (
     OrdinaryAgentFiniteRequest,
+    OrdinaryAgentGuardedFiniteRequest,
 )
 from control_plane.contracts.merge_train_effect import (
     MergeTrainEffectLineage,
@@ -734,7 +735,7 @@ class OrdinaryAgentReadmissionStore(Protocol):
         expected_binding_revision: int,
         read_attempt_id: str,
         expected_observation_sha256: str,
-    ) -> OrdinaryAgentFiniteRequest:
+    ) -> OrdinaryAgentGuardedFiniteRequest:
         """Consume exact drift evidence and advance one finite binding revision."""
         ...
 
@@ -783,7 +784,7 @@ class OrdinaryAgentControllerStore(Protocol):
         effect_id: str,
         expected_effect_revision: int,
         controller_fence: OrdinaryAgentControllerFence,
-    ) -> OrdinaryAgentFiniteRequest:
+    ) -> OrdinaryAgentGuardedFiniteRequest:
         """Atomically consume exact refresh proof and yield an empty controller."""
         ...
 

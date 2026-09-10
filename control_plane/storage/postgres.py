@@ -27840,9 +27840,7 @@ class PostgresRecordStore(HumanSessionStore):
         """Internal check only; effect dispatch must reauthorize within its reservation transaction."""
         with self._session_factory() as session:
             self._begin_serialized_write(session)
-            return self._ordinary_agent_current_chain_context(
-                session, request_id=request_id
-            ).request
+            return self._ordinary_agent_new_effect_context(session, request_id=request_id).request
 
     @_private_ordinary_agent_operation
     def rebind_ordinary_agent_after_head_refresh(
