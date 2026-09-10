@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 import click
 
@@ -37,6 +37,16 @@ class DurableOperationAuthorizationDeniedError(click.ClickException):
     def __init__(self, *, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+_SUPPORTED_MANAGED_RULE_POLICY_SCHEMA_VERSIONS = frozenset({2, 3})
+_DURABLE_OPERATION_POLICY_SCHEMA_TRANSITIONS = frozenset(
+    {
+        (2, 2),
+        (2, 3),
+        (3, 3),
+    }
+)
 
 
 @dataclass
@@ -120,10 +130,15 @@ def capture_durable_operation_authorization(
     policy_record: LaunchplaneAuthzPolicyRecord,
     authorized_at: str,
 ) -> DurableOperationAuthorization:
-    if policy_record.policy.schema_version != 2:
-        raise DurableOperationAuthorizationCaptureError(
-            "Durable operations require schema-v2 managed authz policy."
-        )
+    match policy_record.policy.schema_version:
+        case 2:
+            policy_schema_version: Literal[2, 3] = 2
+        case 3:
+            policy_schema_version = 3
+        case _:
+            raise DurableOperationAuthorizationCaptureError(
+                "Durable operations require schema-v2 or schema-v3 managed authz policy."
+            )
     target = AuthorizationTarget(scope="instance", instances=instances)
     try:
         managed_rule = require_single_managed_rule_identity(
@@ -147,7 +162,7 @@ def capture_durable_operation_authorization(
         managed_rule_id=managed_rule.managed_rule_id,
         policy_record_id=policy_record.record_id,
         policy_revision=policy_record.revision,
-        policy_schema_version=2,
+        policy_schema_version=policy_schema_version,
         policy_sha256=policy_record.policy_sha256,
         policy_source=policy_record.source,
         authorized_at=authorized_at,
@@ -164,9 +179,9 @@ def require_single_managed_rule_identity(
     context: str,
     target: AuthorizationTarget,
 ) -> ManagedRuleIdentity:
-    if policy.schema_version != 2:
+    if policy.schema_version not in _SUPPORTED_MANAGED_RULE_POLICY_SCHEMA_VERSIONS:
         raise ManagedRuleAuthorizationError(
-            "Managed-rule authorization requires schema-v2 authz policy."
+            "Managed-rule authorization requires schema-v2 or schema-v3 authz policy."
         )
     matches = _matching_managed_rule_identities(
         policy=policy,
@@ -233,7 +248,7 @@ def managed_github_id_rule_allows(
     context: str,
     target: AuthorizationTarget,
 ) -> bool:
-    if policy.schema_version != 2 or github_id < 1:
+    if policy.schema_version not in _SUPPORTED_MANAGED_RULE_POLICY_SCHEMA_VERSIONS or github_id < 1:
         return False
     matching_rules = tuple(
         rule
@@ -265,7 +280,7 @@ def managed_github_id_action_allows(
     context: str,
     target: AuthorizationTarget,
 ) -> bool:
-    if policy.schema_version != 2 or github_id < 1:
+    if policy.schema_version not in _SUPPORTED_MANAGED_RULE_POLICY_SCHEMA_VERSIONS or github_id < 1:
         return False
     return any(
         rule.managed_set_id
@@ -288,7 +303,13 @@ def durable_operation_authorization_allows(
     authorization: DurableOperationAuthorization,
     policy_record: LaunchplaneAuthzPolicyRecord,
 ) -> bool:
-    if policy_record.status != "active" or policy_record.policy.schema_version != 2:
+    if policy_record.status != "active":
+        return False
+    schema_transition = (
+        authorization.policy_schema_version,
+        policy_record.policy.schema_version,
+    )
+    if schema_transition not in _DURABLE_OPERATION_POLICY_SCHEMA_TRANSITIONS:
         return False
     identity = launchplane_identity_from_durable_caller(authorization.caller)
     target = AuthorizationTarget(scope="instance", instances=authorization.instances)
