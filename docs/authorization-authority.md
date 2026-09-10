@@ -79,6 +79,13 @@ compare-and-swap, idempotency, reviewed-plan digests, and redacted evidence. A
 protected GitHub workflow currently reads desired managed sets from repository
 secrets and transports them to that endpoint through GitHub Actions OIDC.
 
+Reconciliation planning accepts schema-v2 and schema-v3 desired managed sets.
+It resolves only the explicit v1-to-v2, v2-to-v3, and same-schema transitions,
+preserves unrelated managed sets across all six policy collections, and reports
+ordinary-agent rules as structural policy content. Schema-v3 planning remains
+read-only: apply and every schema-v3 storage seed, compare-write, deletion, and
+downgrade retain the `authz_policy_schema_v3_write_not_activated` fence.
+
 That workflow is transitional compatibility infrastructure. The database remains
 the live decision authority, but GitHub-hosted desired sets still make GitHub
 part of the effective administration chain. Do not interpret the workflow's
