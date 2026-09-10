@@ -229,6 +229,11 @@ class ManagedAuthzPolicySetProposalInput(BaseModel):
     schema_version: int = Field(default=1, ge=1)
     managed_set_id: str = Field(min_length=1, max_length=96)
     desired_policy: LaunchplaneAuthzPolicy
+    schema_migration: Literal["reject", "migrate_v2_to_v3"] = Field(
+        default="reject",
+        exclude_if=lambda value: value == "reject",
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     administrator_quorum_change: int | None = Field(default=None, ge=1)
     reason: str = Field(min_length=1, max_length=240)
     related_issue: str = Field(default="", max_length=128)
@@ -237,6 +242,8 @@ class ManagedAuthzPolicySetProposalInput(BaseModel):
     def _validate_input(self) -> "ManagedAuthzPolicySetProposalInput":
         if self.schema_version != 1:
             raise ValueError("Unsupported managed authz policy proposal schema version.")
+        if self.schema_migration == "migrate_v2_to_v3" and self.desired_policy.schema_version != 3:
+            raise ValueError("migrate_v2_to_v3 requires desired policy schema version 3.")
         reason = _required_token(self.reason, "reason")
         related_issue = self.related_issue.strip()
         reconcile_request = AuthzManagedPolicyReconcileEnvelope(
@@ -244,7 +251,7 @@ class ManagedAuthzPolicySetProposalInput(BaseModel):
             product="launchplane",
             mode="dry_run",
             managed_set_id=self.managed_set_id,
-            schema_migration="reject",
+            schema_migration=self.schema_migration,
             unmanaged_adoption="reject",
             administrator_quorum_change=self.administrator_quorum_change,
             reason=reason,
@@ -268,7 +275,7 @@ class ManagedAuthzPolicySetProposalInput(BaseModel):
             product="launchplane",
             mode=mode,
             managed_set_id=self.managed_set_id,
-            schema_migration="reject",
+            schema_migration=self.schema_migration,
             unmanaged_adoption="reject",
             administrator_quorum_change=self.administrator_quorum_change,
             reason=self.reason,

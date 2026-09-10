@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -32,6 +33,12 @@ from control_plane.contracts.ordinary_agent import (
     OrdinaryAgentPolicySnapshot,
     OrdinaryAgentPrincipal,
 )
+from control_plane.contracts.privileged_operation import (
+    ManagedAuthzPolicySetProposalInput,
+    PrivilegedOperationActor,
+    PrivilegedOperationConflictError,
+    PrivilegedOperationRecord,
+)
 from control_plane.service_auth import (
     AuthorizationTarget,
     GitHubHumanIdentity,
@@ -46,6 +53,8 @@ from control_plane.generic_web_preview_authz import (
     plan_generic_web_preview_authz_reconcile,
 )
 from control_plane.ordinary_agent_eligibility import evaluate_ordinary_agent_policy
+from control_plane.privileged_operation_registry import PrivilegedOperationPlannerError
+from control_plane.privileged_operation_service import create_typed_privileged_operation_plan
 from control_plane.storage.postgres import PostgresRecordStore
 
 
@@ -432,6 +441,91 @@ class AuthzPolicySchemaV3CompatibilityTests(unittest.TestCase):
         self.assertEqual(candidate.ordinary_agents[0].actions, ("preflight", "self_read"))
         self.assertEqual(candidate.ordinary_agents[0].target.base_branch, "Release/Main")
         self.assertTrue(diff.schema_migrated)
+
+    def test_explicit_migration_proposal_persists_as_data_and_binds_replay(self) -> None:
+        request = ManagedAuthzPolicySetProposalInput(
+            managed_set_id="ordinary-agent.pilot",
+            schema_migration="migrate_v2_to_v3",
+            desired_policy=_schema_v3_policy(),
+            reason="Persist the reviewed policy migration proposal without applying it.",
+        )
+        actor = PrivilegedOperationActor(
+            identity_type="github_human",
+            github_id=101,
+            login="admin",
+        )
+        with TemporaryDirectory() as directory:
+            store = PostgresRecordStore(
+                database_url=f"sqlite+pysqlite:///{Path(directory) / 'launchplane.sqlite3'}"
+            )
+            store.ensure_schema()
+            active = store.seed_authz_policy_if_absent(
+                _record(LaunchplaneAuthzPolicy(schema_version=2))
+            )
+            try:
+                written = create_typed_privileged_operation_plan(
+                    record_store=store,
+                    descriptor_id="managed-authz-policy-set",
+                    actor=actor,
+                    source_kind="browser_api",
+                    source_event_id="policy-v2-to-v3-proposal",
+                    request=request,
+                    now=lambda: datetime(2026, 9, 10, tzinfo=timezone.utc),
+                )
+                persisted = store.read_privileged_operation_record(written.record.operation_id)
+                stored_active = store.list_authz_policy_records(status="active", limit=2)
+
+                replayed = create_typed_privileged_operation_plan(
+                    record_store=store,
+                    descriptor_id="managed-authz-policy-set",
+                    actor=actor,
+                    source_kind="browser_api",
+                    source_event_id="policy-v2-to-v3-proposal",
+                    request=request,
+                    now=lambda: datetime(2026, 9, 10, 0, 5, tzinfo=timezone.utc),
+                )
+
+                implicit_reject = request.model_copy(update={"schema_migration": "reject"})
+                with self.assertRaises(PrivilegedOperationConflictError):
+                    create_typed_privileged_operation_plan(
+                        record_store=store,
+                        descriptor_id="managed-authz-policy-set",
+                        actor=actor,
+                        source_kind="browser_api",
+                        source_event_id="policy-v2-to-v3-proposal",
+                        request=implicit_reject,
+                        now=lambda: datetime(2026, 9, 10, tzinfo=timezone.utc),
+                    )
+                with self.assertRaises(PrivilegedOperationPlannerError) as planning_error:
+                    create_typed_privileged_operation_plan(
+                        record_store=store,
+                        descriptor_id="managed-authz-policy-set",
+                        actor=actor,
+                        source_kind="browser_api",
+                        source_event_id="implicit-policy-v3-proposal",
+                        request=implicit_reject,
+                        now=lambda: datetime(2026, 9, 10, tzinfo=timezone.utc),
+                    )
+            finally:
+                store.close()
+
+        self.assertEqual(written.write_status, "written")
+        self.assertEqual(replayed.write_status, "replayed")
+        self.assertEqual(replayed.record, persisted)
+        self.assertEqual(persisted.status, "planned")
+        self.assertIsInstance(persisted.request, ManagedAuthzPolicySetProposalInput)
+        assert isinstance(persisted.request, ManagedAuthzPolicySetProposalInput)
+        self.assertEqual(persisted.request.schema_migration, "migrate_v2_to_v3")
+        self.assertEqual(persisted.request.reconcile_request().schema_migration, "migrate_v2_to_v3")
+        self.assertEqual(stored_active, (active,))
+        self.assertIsInstance(planning_error.exception.__cause__, AuthzPolicyConflictError)
+
+        tampered_payload = persisted.model_dump(mode="json")
+        tampered_request = tampered_payload["request"]
+        assert isinstance(tampered_request, dict)
+        tampered_request.pop("schema_migration")
+        with self.assertRaisesRegex(ValueError, "request_digest does not match request"):
+            PrivilegedOperationRecord.model_validate(tampered_payload)
 
     def test_v3_reconcile_replaces_only_selected_managed_set_and_keeps_ids_semantic(self) -> None:
         selected_first = _ordinary_rule_payload()

@@ -23,15 +23,22 @@ route, execute action, static execution credential, or agent execution path.
   re-encryption computation with `apply=False` only.
 - `managed-authz-policy-set` version 1 calls the existing managed-rule-set
   reconciliation planner with `mode="dry_run"` only. Its request contains one
-  managed set, the exact desired schema-v2 policy fragment, reason, and optional
-  related issue. Planning never writes the active authorization policy.
+  managed set, the exact desired schema-v2 or schema-v3 policy fragment, an
+  explicit `schema_migration` mode, reason, and optional related issue. The
+  migration mode defaults to `reject`; `migrate_v2_to_v3` is accepted only with
+  a schema-v3 desired policy and remains bound into planning, replay, approval,
+  and worker execution. Planning persists the proposal as operation data but
+  never writes the active authorization policy, and the existing schema-v3
+  policy-write fence still rejects apply.
   Historical requests created before the optional
   `administrator_quorum_change` field remain readable when that value is absent
-  or `null`. Historical evidence created before the administrator-quorum summary
-  fields remains readable only when all six fields normalize to their original
-  defaults. Validation accepts only those exact canonical digest projections.
-  New records continue to write the current request and evidence digests, and
-  every other mismatch fails closed.
+  or `null`. The default migration mode is omitted from serialized request bytes
+  so those historical request bytes and digests remain valid. Historical
+  evidence created before the administrator-quorum summary fields remains
+  readable only when all six fields normalize to their original defaults.
+  Validation accepts only those exact canonical digest projections. New records
+  continue to write the current request and evidence digests, and every other
+  mismatch fails closed.
 - `managed-merge-train-policy-import` version 1 accepts one complete schema-
   valid candidate merge-train policy record, a reason, and optional related
   issue. Its planner reads exactly one active merge-train policy record and

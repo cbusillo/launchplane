@@ -284,11 +284,42 @@ class PrivilegedOperationContractTests(unittest.TestCase):
         current_payload = current_record.model_dump(mode="json", exclude_none=True)
         legacy_payload = _legacy_authz_policy_payload()
 
+        expected_request_json = (
+            '{"schema_version":1,"managed_set_id":"test.policy-operation","desired_policy":'
+            '{"schema_version":2,"github_actions":[],"github_humans":['
+            '{"managed_set_id":"test.policy-operation","managed_rule_id":'
+            '"policy-operation-reader","products":["launchplane"],"contexts":'
+            '["launchplane"],"instances":[],"actions":["authz_policy_operation.read"],'
+            '"github_ids":[123],"logins":[],"organizations":[],"teams":[],"roles":'
+            '["admin"]}],"terminal_agents":[],"local_operators":[],"local_admins":[]},'
+            '"administrator_quorum_change":null,"reason":"Review the exact managed policy '
+            'plan.","related_issue":""}'
+        )
+        self.assertEqual(current_record.request.model_dump_json(), expected_request_json)
+        self.assertEqual(
+            current_record.request_digest,
+            "a29f405baab1f847db138205885d529d32cd98dcc89ea6c8050bad2e31b08940",
+        )
+        current_request_payload = current_payload["request"]
+        legacy_request_payload = legacy_payload["request"]
+        assert isinstance(current_request_payload, dict)
+        assert isinstance(legacy_request_payload, dict)
+        self.assertNotIn("schema_migration", current_request_payload)
+        self.assertNotIn("schema_migration", legacy_request_payload)
+        ui_schema = json.loads(
+            Path("frontend/generated/openapi-ui.json").read_text(encoding="utf-8")
+        )["components"]["schemas"]["ManagedAuthzPolicySetProposalInput-Output"]
+        self.assertTrue(set(ui_schema["required"]).issubset(json.loads(expected_request_json)))
+
         current_loaded = PrivilegedOperationRecord.model_validate(current_payload)
         legacy_loaded = PrivilegedOperationRecord.model_validate(legacy_payload)
 
         self.assertEqual(current_loaded.request_digest, current_record.request_digest)
         self.assertNotEqual(legacy_loaded.request_digest, current_record.request_digest)
+        self.assertEqual(
+            legacy_loaded.request_digest,
+            "42f4f55d00ccc17b8320a7949acc12cb8d6fc01f7f958a0761ee3e651ae0779a",
+        )
         self.assertIn(
             legacy_loaded.request_digest,
             privileged_operation_request_digest_candidates(legacy_loaded.request),
@@ -316,6 +347,15 @@ class PrivilegedOperationContractTests(unittest.TestCase):
 
         self.assertEqual(len(privileged_operation_request_digest_candidates(quorum_request)), 1)
         self.assertEqual(len(privileged_operation_evidence_digest_candidates(quorum_evidence)), 1)
+
+    def test_policy_migration_mode_requires_schema_v3_desired_policy(self) -> None:
+        with self.assertRaisesRegex(ValueError, "requires desired policy schema version 3"):
+            ManagedAuthzPolicySetProposalInput(
+                managed_set_id="test.policy-operation",
+                schema_migration="migrate_v2_to_v3",
+                desired_policy=LaunchplaneAuthzPolicy(schema_version=2),
+                reason="Reject a migration mode that cannot match the desired schema.",
+            )
 
     def test_action_safety_is_intentional(self) -> None:
         self.assertEqual(action_safety(PRIVILEGED_SECRET_OPERATION_PLAN_ACTION), "secret_backed")

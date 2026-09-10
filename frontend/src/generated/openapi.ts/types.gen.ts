@@ -791,6 +791,7 @@ export type ManagedAuthzPolicySetProposalInputOutput = {
     managed_set_id: string;
     reason: string;
     related_issue: string;
+    schema_migration?: 'reject' | 'migrate_v2_to_v3';
     schema_version: number;
 };
 

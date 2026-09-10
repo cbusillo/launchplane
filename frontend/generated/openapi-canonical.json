@@ -13490,6 +13490,16 @@
             "title": "Related Issue",
             "type": "string"
           },
+          "schema_migration": {
+            "default": "reject",
+            "enum": [
+              "reject",
+              "migrate_v2_to_v3"
+            ],
+            "title": "Schema Migration",
+            "type": "string",
+            "x-launchplane-optional-response": true
+          },
           "schema_version": {
             "default": 1,
             "minimum": 1.0,
@@ -13540,6 +13550,16 @@
             "maxLength": 128,
             "title": "Related Issue",
             "type": "string"
+          },
+          "schema_migration": {
+            "default": "reject",
+            "enum": [
+              "reject",
+              "migrate_v2_to_v3"
+            ],
+            "title": "Schema Migration",
+            "type": "string",
+            "x-launchplane-optional-response": true
           },
           "schema_version": {
             "default": 1,
