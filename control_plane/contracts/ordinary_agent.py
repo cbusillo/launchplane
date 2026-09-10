@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Literal, Protocol
+from typing import Literal, Protocol, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -250,6 +250,24 @@ class OrdinaryAgentRequest(InertRecord):
         if self.action != "guarded_merge" and self.permitted_stack_edit_pull_requests:
             raise ValueError("only guarded merge requests may permit stack edits")
         return self
+
+
+class OrdinaryAgentQualificationRequest(InertRecord):
+    """Eligibility evidence for a read-only qualification without merge fields."""
+
+    record_id: str = Field(min_length=1, max_length=256)
+    request_id: str = Field(pattern=r"^[a-z][a-z0-9_-]{2,127}$")
+    idempotency_key: str = Field(min_length=1, max_length=256)
+    lease_id: str = Field(pattern=r"^[a-z][a-z0-9_-]{2,127}$")
+    session_id: str = Field(pattern=r"^[a-z][a-z0-9_-]{2,127}$")
+    principal_id: str = Field(pattern=r"^[a-z][a-z0-9_-]{2,127}$")
+    target: OrdinaryAgentTarget
+    action: Literal["preflight"] = "preflight"
+
+
+OrdinaryAgentEligibilityRequest: TypeAlias = (
+    OrdinaryAgentRequest | OrdinaryAgentQualificationRequest
+)
 
 
 class OrdinaryAgentPolicyEvaluation(InertRecord):

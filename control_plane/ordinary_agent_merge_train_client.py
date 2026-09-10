@@ -20,7 +20,7 @@ from control_plane.contracts.merge_train_effect import (
 )
 from control_plane.contracts.merge_train_structural_provenance import MergeTrainRollingStep
 from control_plane.contracts.ordinary_agent_session_lifecycle import (
-    OrdinaryAgentFiniteRequestRecord,
+    OrdinaryAgentGuardedFiniteRequest,
     OrdinaryAgentJobBinding,
 )
 from control_plane.contracts.ordinary_agent_snapshot import (
@@ -62,7 +62,7 @@ class OrdinaryAgentMergeTrainClient(GitHubMergeTrainClient):
     def __init__(
         self,
         *,
-        request: OrdinaryAgentFiniteRequestRecord,
+        request: OrdinaryAgentGuardedFiniteRequest,
         effect_executor: MergeTrainSemanticEffectExecutor,
         snapshot: Callable[[], OrdinaryAgentMergeTrainSnapshotResult],
         candidate_check: Callable[[str], OrdinaryAgentCandidateCheckResult],
