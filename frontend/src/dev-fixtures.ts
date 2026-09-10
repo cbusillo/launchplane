@@ -12,7 +12,7 @@ import type {
   MergeReadinessResult,
   MergeTrainControllerStatusResponse,
   MergeTrainPolicyTargetsResponse,
-  OwnerAcceptanceEvaluationResponse,
+  OwnerAcceptanceOwnerEvaluationResponse,
   OwnerAcceptanceProductDecision,
   OwnerAcceptanceQueueResponse,
   ProductActionAvailability,
@@ -3066,7 +3066,7 @@ export function ownerReviewEvaluationForFixture(
   fixture: DataFixtureMode,
   afterBindingChange = false,
   afterWrite = false,
-): OwnerAcceptanceEvaluationResponse {
+): OwnerAcceptanceOwnerEvaluationResponse {
   const params = new URLSearchParams(window.location.search);
   const scenario = params.get("scenario") ?? "single";
   const viewer = params.get("viewer") ?? "owner";
@@ -3117,59 +3117,42 @@ export function ownerReviewEvaluationForFixture(
     : scenario === "missing-preview"
       ? [firstBinding]
       : [withPreview(firstBinding, afterBindingChange ? "site-updated" : "site")];
-  const unavailable = scenario === "stale" || scenario === "unavailable";
-  const products = scenario === "empty-unavailable" ? [] : bindings.map((binding, index) => ({
-    schema_version: 1,
-    product: binding.product,
-    system: binding.system,
-    action: binding.action,
-    environment: binding.environment,
-    status: unavailable ? (scenario === "stale" ? "stale" as const : "unavailable" as const) : scenario === "resolution" ? "changes_requested" as const : "pending" as const,
-    reason_code: unavailable ? (scenario === "stale" ? "acceptance_stale" as const : "preview_evidence_unavailable" as const) : scenario === "resolution" ? "changes_requested" as const : "acceptance_missing" as const,
-    binding,
-    current_event: scenario === "resolution" && index === 0
-      ? {
-          ..._ownerAcceptanceEvent("changes_requested", firstBinding),
-          binding,
-          reason: "Please revise the product behavior.",
-        }
-      : null,
-    admissible: false,
-    human_action_semantics: "none" as const,
-  }));
-  const decision: OwnerAcceptanceDecision = {
-    ...baseDecision,
-    status: scenario === "empty-unavailable" ? "unavailable" : unavailable ? (scenario === "stale" ? "stale" : "unavailable") : scenario === "resolution" ? "changes_requested" : "pending",
-    reason_code: scenario === "empty-unavailable" ? "change_impact_unavailable" : unavailable ? (scenario === "stale" ? "acceptance_stale" : "preview_evidence_unavailable") : scenario === "resolution" ? "changes_requested" : "acceptance_missing",
-    binding: products.length === 1 ? products[0].binding : null,
-    current_event: products.length === 1 ? products[0].current_event : null,
-    products,
-  };
+  const unavailable = scenario === "unavailable";
+  const reviewStatus = scenario === "empty-unavailable" || unavailable
+    ? "unavailable" as const
+    : scenario === "resolution"
+      ? "changes_requested" as const
+      : "review_required" as const;
   return {
     status: "ok",
     trace_id: "fixture-owner-review",
-    decision,
-    viewer_capabilities: {
-      event_write_authorized: viewer !== "non-owner",
-      bindings: (scenario === "empty-unavailable" ? [] : bindings).map((binding, index) => {
+    evaluated_at: baseDecision.evaluated_at,
+    review_status: reviewStatus,
+    products: (scenario === "empty-unavailable" ? [] : bindings).map((binding, index) => {
         const allowed = viewer !== "non-owner" && !unavailable;
         const requestOnly = viewer === "mixed" && index === 1;
         const acceptRemoved = scenario === "capability-transition" && afterWrite;
+        const resolutionRequired = scenario === "resolution" && index === 0;
         return {
-          schema_version: 1,
           binding_sha256: binding.binding_sha256,
           product: binding.product,
           system: binding.system,
           action: binding.action,
           environment: binding.environment,
-          can_submit_event: allowed,
+          review_status: reviewStatus,
+          preview_url: binding.preview?.preview_url ?? null,
+          resolution_required: resolutionRequired,
+          resolution_evidence_references: resolutionRequired && binding.preview
+            ? [
+                `preview:${binding.preview.preview_id}`,
+                `preview-generation:${binding.preview.serving_generation_id}`,
+              ]
+            : [],
           can_accept: allowed && !requestOnly && !acceptRemoved,
           can_request_changes: allowed,
           can_revoke: allowed && !requestOnly,
-          reason_code: allowed ? "current_product_owner" : "not_current_product_owner",
         };
       }),
-    },
   };
 }
 

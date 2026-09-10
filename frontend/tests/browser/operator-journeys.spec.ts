@@ -110,6 +110,7 @@ test.describe("operator journeys", () => {
     expect(requestedPaths).not.toContain("/v1/owner-acceptance/current-items");
     expect(requestedPaths).not.toContain("/v1/owner-acceptance/queue");
     expect(requestedPaths).not.toContain("/v1/owner-acceptance/evaluation");
+    expect(requestedPaths).not.toContain("/v1/owner-acceptance/owner-evaluation");
     await expect(page.getByRole("link", { name: "Engineering Ops" })).toHaveCount(0);
     await expect(page.getByRole("link", { name: "Product Ops" })).toHaveCount(0);
     await assertDocumentBasics(page);
@@ -280,24 +281,22 @@ test.describe("operator journeys", () => {
   test("Owner review blocks a restored uncertain identity when its draft is absent", async ({ page }) => {
     const digest = "a".repeat(64);
     const storageKey = `launchplane.browser-operation.owner-acceptance-example-control-plane-308-example-site-web-deploy-production-${digest}`;
+    const fallbackStorageKey = `launchplane.browser-operation.owner-acceptance-example-control-plane-308-example-site-owner-review-product-review-production-${digest}`;
+    const requestedPaths: string[] = [];
+    page.on("request", (request) => requestedPaths.push(new URL(request.url()).pathname));
     await page.addInitScript(
       ({ key }) => {
         window.sessionStorage.setItem(
           key,
           JSON.stringify({
-            failure: {
-              code: "request_interrupted",
-              message: "The prior request was interrupted.",
-              statusCode: 0,
-              traceId: "",
-            },
+            failure: null,
             identity: {
               idempotencyKey: "owner-review-recovered-key",
               requestFingerprint: "recovered-request-fingerprint",
             },
-            phase: "uncertain",
+            phase: "submitting",
             receipt: null,
-            requiresIdempotencyContinuity: true,
+            requiresIdempotencyContinuity: false,
           }),
         );
       },
@@ -312,6 +311,23 @@ test.describe("operator journeys", () => {
     const card = page.locator('[data-product="example-site"]');
     await expect(card.getByRole("button", { name: "Record decision" })).toBeDisabled();
     await expect(card.getByRole("status")).toContainText("cannot restore its feedback");
+    const storage = await page.evaluate(
+      ({ currentKey, removedFallbackKey }) => ({
+        current: window.sessionStorage.getItem(currentKey),
+        fallback: window.sessionStorage.getItem(removedFallbackKey),
+      }),
+      { currentKey: storageKey, removedFallbackKey: fallbackStorageKey },
+    );
+    if (!storage.current) throw new Error("Expected the deployed unresolved operation key.");
+    const recovered = JSON.parse(storage.current);
+    expect(recovered.identity).toEqual({
+      idempotencyKey: "owner-review-recovered-key",
+      requestFingerprint: "recovered-request-fingerprint",
+    });
+    expect(recovered.phase).toBe("submitting");
+    expect(recovered.requiresIdempotencyContinuity).toBe(false);
+    expect(storage.fallback).toBeNull();
+    expect(requestedPaths).not.toContain("/v1/owner-acceptance/events");
     await assertDocumentBasics(page);
     diagnostics.assertClean();
   });

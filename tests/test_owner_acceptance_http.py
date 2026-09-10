@@ -17,14 +17,21 @@ from control_plane.contracts.owner_acceptance import (
     OwnerAcceptanceDecision,
     OwnerAcceptanceTransitionError,
 )
-from control_plane.contracts.change_impact import ChangeImpactTargetReference
+from control_plane.contracts.change_impact import (
+    ChangeImpactAuthorshipEvidence,
+    ChangeImpactRepositoryEvidence,
+    ChangeImpactTargetReference,
+)
 from control_plane.contracts.product_owner import ProductOwnerGrant, ProductOwnerIdentity
+from control_plane.contracts.repository_inventory import RepositoryInventoryRecord
 from control_plane.http_routes.owner_acceptance import (
     OWNER_ACCEPTANCE_EVALUATION_ROUTE,
     OWNER_ACCEPTANCE_EVENT_ROUTE,
     OWNER_ACCEPTANCE_EVENTS_ROUTE,
+    OWNER_ACCEPTANCE_OWNER_EVALUATION_ROUTE,
     OWNER_ACCEPTANCE_PROJECT_ROUTE,
     OwnerAcceptanceRouteDependencies,
+    _owner_review_status,
     register_owner_acceptance_routes,
 )
 from control_plane.github_app_identity import GitHubAppInstallationToken
@@ -40,6 +47,7 @@ from tests.support.http import lifespan_client
 from tests.test_owner_acceptance import (
     PRODUCT,
     REPOSITORY,
+    REPOSITORY_OWNER_ID,
     SECOND_PRODUCT,
     _EvidenceProvider,
     REPOSITORY_ID,
@@ -191,7 +199,677 @@ def _postgres_store(root: Path) -> PostgresRecordStore:
     return store
 
 
+def _write_repository_inventory(store: object) -> None:
+    store.write_repository_inventory_record(  # type: ignore[attr-defined]
+        RepositoryInventoryRecord(
+            repository_id=REPOSITORY_ID,
+            repository_owner_id=REPOSITORY_OWNER_ID,
+            repository=REPOSITORY,
+            inventory_state="tracked",
+            inventory_revision=1,
+            recorded_at="2026-08-07T00:00:00Z",
+            source="test",
+            reason="Owner review repository identity.",
+        )
+    )
+
+
 class OwnerAcceptanceHttpTests(unittest.IsolatedAsyncioTestCase):
+    def test_owner_review_status_maps_every_engineering_state_to_owner_semantics(self) -> None:
+        self.assertEqual(
+            {
+                status: _owner_review_status(status)
+                for status in (
+                    "not_required",
+                    "pending",
+                    "accepted",
+                    "changes_requested",
+                    "revoked",
+                    "stale",
+                    "unavailable",
+                )
+            },
+            {
+                "not_required": "not_required",
+                "pending": "review_required",
+                "accepted": "accepted",
+                "changes_requested": "changes_requested",
+                "revoked": "review_required",
+                "stale": "review_required",
+                "unavailable": "unavailable",
+            },
+        )
+
+    async def test_owner_evaluation_projects_only_owned_preview_review_fields(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(Path(directory))
+            _write_repository_inventory(store)
+            _write_preview_evidence(store)
+            provider = _EvidenceProvider(_repository_evidence())
+            app = _app(
+                store=store,
+                repository_evidence_provider=provider,
+                authorization_allows=lambda **kwargs: (
+                    kwargs.get("action") == OWNER_ACCEPTANCE_EVENT_WRITE_ACTION
+                ),
+            )
+            read_only_app = _app(
+                store=store,
+                repository_evidence_provider=provider,
+                authorization_allows=lambda **kwargs: (
+                    kwargs.get("action") == OWNER_ACCEPTANCE_READ_ACTION
+                ),
+            )
+
+            async with lifespan_client(app) as client:
+                response = await client.get(
+                    OWNER_ACCEPTANCE_OWNER_EVALUATION_ROUTE,
+                    params={"repository": REPOSITORY, "pull_request_number": 2022},
+                )
+            async with lifespan_client(read_only_app) as client:
+                read_only_response = await client.get(
+                    OWNER_ACCEPTANCE_OWNER_EVALUATION_ROUTE,
+                    params={"repository": REPOSITORY, "pull_request_number": 2022},
+                )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(
+            set(payload),
+            {"status", "trace_id", "review_status", "evaluated_at", "products"},
+        )
+        self.assertEqual(payload["review_status"], "review_required")
+        self.assertEqual(len(payload["products"]), 1)
+        product = payload["products"][0]
+        self.assertEqual(product["product"], PRODUCT)
+        self.assertEqual(product["system"], SYSTEM)
+        self.assertEqual(product["action"], "pull_request.owner_acceptance")
+        self.assertEqual(product["preview_url"], "https://pr-2022.example.test")
+        self.assertIs(product["can_accept"], True)
+        self.assertIs(product["can_request_changes"], True)
+        self.assertIs(product["can_revoke"], True)
+        self.assertNotIn("decision", payload)
+        self.assertNotIn("repository", product)
+        self.assertNotIn("current_event", product)
+        read_only_product = read_only_response.json()["products"][0]
+        self.assertIs(read_only_product["can_accept"], False)
+        self.assertIs(read_only_product["can_request_changes"], False)
+        self.assertIs(read_only_product["can_revoke"], False)
+
+    async def test_self_review_denied_owner_retains_non_accept_actions(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(Path(directory))
+            _write_repository_inventory(store)
+            _write_preview_evidence(store)
+            owner = _human()
+            provider = _EvidenceProvider(
+                _repository_evidence(
+                    authorship=ChangeImpactAuthorshipEvidence(
+                        resolution="resolved",
+                        contributor_github_ids=(owner.github_id,),
+                        commit_count=1,
+                    )
+                )
+            )
+            app = _app(
+                store=store,
+                identity=owner,
+                repository_evidence_provider=provider,
+                authorization_allows=lambda **kwargs: (
+                    kwargs.get("action") == OWNER_ACCEPTANCE_EVENT_WRITE_ACTION
+                ),
+            )
+
+            async with lifespan_client(app) as client:
+                response = await client.get(
+                    OWNER_ACCEPTANCE_OWNER_EVALUATION_ROUTE,
+                    params={"repository": REPOSITORY, "pull_request_number": 2022},
+                )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(len(response.json()["products"]), 1)
+        product = response.json()["products"][0]
+        self.assertEqual(product["product"], PRODUCT)
+        self.assertIs(product["can_accept"], False)
+        self.assertIs(product["can_request_changes"], True)
+        self.assertIs(product["can_revoke"], True)
+
+    async def test_owner_evaluation_withholds_membership_revoked_during_provider_read(
+        self,
+    ) -> None:
+        class _RevokingProvider(_EvidenceProvider):
+            def __init__(self, *, store: Any) -> None:
+                super().__init__(_repository_evidence())
+                self.store = store
+                self.revoked = False
+
+            def resolve(
+                self,
+                target: ChangeImpactTargetReference,
+            ) -> ChangeImpactRepositoryEvidence:
+                if not self.revoked:
+                    current = self.store.list_product_owner_policy_records(
+                        product=PRODUCT,
+                        system=SYSTEM,
+                    )[0]
+                    self.store.write_product_owner_policy_record(
+                        _owner_policy(
+                            revision=2,
+                            supersedes_record_id=current.record_id,
+                            owners=(
+                                ProductOwnerGrant(
+                                    identity=ProductOwnerIdentity(
+                                        provider="github",
+                                        provider_subject_id="999999",
+                                    ),
+                                    repository_ids=(REPOSITORY_ID,),
+                                    environments=("pull_request",),
+                                ),
+                            ),
+                        )
+                    )
+                    self.revoked = True
+                return super().resolve(target)
+
+        with TemporaryDirectory() as directory:
+            store = _store(Path(directory))
+            _write_repository_inventory(store)
+            provider = _RevokingProvider(store=store)
+            app = _app(store=store, repository_evidence_provider=provider)
+
+            async with lifespan_client(app) as client:
+                response = await client.get(
+                    OWNER_ACCEPTANCE_OWNER_EVALUATION_ROUTE,
+                    params={"repository": REPOSITORY, "pull_request_number": 2022},
+                )
+
+        self.assertTrue(provider.revoked)
+        self.assertEqual(response.status_code, 404, response.text)
+        self.assertEqual(response.json()["detail"]["code"], "owner_review_unavailable")
+        self.assertNotIn(PRODUCT, response.text)
+
+    async def test_owner_resolution_round_trip_uses_returned_preview_handles(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(Path(directory))
+            _write_repository_inventory(store)
+            _write_preview_evidence(store)
+            app = _app(
+                store=store,
+                authorization_allows=lambda **kwargs: (
+                    kwargs.get("action") == OWNER_ACCEPTANCE_EVENT_WRITE_ACTION
+                ),
+            )
+            target: dict[str, str | int] = {
+                "repository": REPOSITORY,
+                "pull_request_number": 2022,
+            }
+
+            async with lifespan_client(app) as client:
+                initial = await client.get(
+                    OWNER_ACCEPTANCE_OWNER_EVALUATION_ROUTE,
+                    params=target,
+                )
+                self.assertEqual(initial.status_code, 200, initial.text)
+                binding_sha256 = initial.json()["products"][0]["binding_sha256"]
+                changes_requested = await client.post(
+                    OWNER_ACCEPTANCE_EVENTS_ROUTE,
+                    json={
+                        "target": target,
+                        "action": "changes_requested",
+                        "expected_binding_sha256": binding_sha256,
+                        "reason": "Clarify the product behavior.",
+                    },
+                    headers={"Idempotency-Key": "owner-resolution-request"},
+                )
+                pending_resolution = await client.get(
+                    OWNER_ACCEPTANCE_OWNER_EVALUATION_ROUTE,
+                    params=target,
+                )
+                self.assertEqual(
+                    pending_resolution.status_code,
+                    200,
+                    pending_resolution.text,
+                )
+                product = pending_resolution.json()["products"][0]
+                references = product["resolution_evidence_references"]
+                resolved = await client.post(
+                    OWNER_ACCEPTANCE_EVENTS_ROUTE,
+                    json={
+                        "target": target,
+                        "action": "accepted",
+                        "expected_binding_sha256": product["binding_sha256"],
+                        "resolution": {
+                            "schema_version": 1,
+                            "summary": "The requested behavior is implemented.",
+                            "resolved_evidence_references": references,
+                        },
+                    },
+                    headers={"Idempotency-Key": "owner-resolution-accept"},
+                )
+                final = await client.get(
+                    OWNER_ACCEPTANCE_OWNER_EVALUATION_ROUTE,
+                    params=target,
+                )
+
+        self.assertEqual(changes_requested.status_code, 202, changes_requested.text)
+        self.assertEqual(changes_requested.json()["response_kind"], "receipt")
+        self.assertEqual(product["review_status"], "changes_requested")
+        self.assertIs(product["resolution_required"], True)
+        self.assertGreater(len(references), 0)
+        self.assertEqual(resolved.status_code, 202, resolved.text)
+        self.assertEqual(resolved.json()["response_kind"], "receipt")
+        self.assertEqual(final.status_code, 200, final.text)
+        self.assertEqual(final.json()["products"][0]["review_status"], "accepted")
+
+    async def test_owner_evaluation_prefilters_nonowners_before_provider_read(self) -> None:
+        class _CountingProvider(_EvidenceProvider):
+            calls = 0
+
+            def resolve(self, target):  # type: ignore[no-untyped-def]
+                self.calls += 1
+                return super().resolve(target)
+
+        class _UnavailableProvider(_EvidenceProvider):
+            def resolve(self, target):  # type: ignore[no-untyped-def]
+                raise ValueError("provider sentinel must not reach the response")
+
+        with TemporaryDirectory() as directory:
+            store = _store(Path(directory))
+            _write_repository_inventory(store)
+            provider = _CountingProvider(_repository_evidence())
+            app = _app(store=store, identity=_human(999999), repository_evidence_provider=provider)
+            nonhuman_app = _app(
+                store=store,
+                identity=TerminalAgentIdentity(subject="agent", token_label="local"),
+                repository_evidence_provider=provider,
+            )
+            unavailable_app = _app(
+                store=store,
+                repository_evidence_provider=_UnavailableProvider(_repository_evidence()),
+            )
+            async with lifespan_client(app) as client:
+                unowned = await client.get(
+                    OWNER_ACCEPTANCE_OWNER_EVALUATION_ROUTE,
+                    params={"repository": REPOSITORY, "pull_request_number": 2022},
+                )
+                nonexistent = await client.get(
+                    OWNER_ACCEPTANCE_OWNER_EVALUATION_ROUTE,
+                    params={"repository": "example/not-present", "pull_request_number": 2022},
+                )
+            async with lifespan_client(nonhuman_app) as client:
+                nonhuman = await client.get(
+                    OWNER_ACCEPTANCE_OWNER_EVALUATION_ROUTE,
+                    params={"repository": REPOSITORY, "pull_request_number": 2022},
+                )
+            async with lifespan_client(unavailable_app) as client:
+                unavailable = await client.get(
+                    OWNER_ACCEPTANCE_OWNER_EVALUATION_ROUTE,
+                    params={"repository": REPOSITORY, "pull_request_number": 2022},
+                )
+
+        self.assertEqual(unowned.status_code, 404, unowned.text)
+        self.assertEqual(nonexistent.status_code, 404, nonexistent.text)
+        for response in (unowned, nonexistent, unavailable):
+            self.assertEqual(response.json()["detail"]["code"], "owner_review_unavailable")
+            self.assertEqual(
+                response.json()["detail"]["message"],
+                "This product review is unavailable.",
+            )
+        self.assertEqual(nonhuman.status_code, 403, nonhuman.text)
+        self.assertEqual(nonhuman.json()["detail"]["code"], "github_human_required")
+        self.assertEqual(provider.calls, 0)
+
+    async def test_owner_evaluation_filters_foreign_product_and_broad_reads_stay_denied(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(
+                Path(directory),
+                shared_dependency_evidence=True,
+                include_second_product_authority=False,
+            )
+            _write_repository_inventory(store)
+            app = _app(
+                store=store,
+                repository_evidence_provider=_EvidenceProvider(
+                    _repository_evidence(path="src/shared/app.py")
+                ),
+                authorization_allows=lambda **kwargs: (
+                    kwargs.get("action") == OWNER_ACCEPTANCE_EVENT_WRITE_ACTION
+                ),
+            )
+            async with lifespan_client(app) as client:
+                owner_response = await client.get(
+                    OWNER_ACCEPTANCE_OWNER_EVALUATION_ROUTE,
+                    params={"repository": REPOSITORY, "pull_request_number": 2022},
+                )
+                broad_responses = (
+                    await client.get(
+                        OWNER_ACCEPTANCE_EVALUATION_ROUTE,
+                        params={"repository": REPOSITORY, "pull_request_number": 2022},
+                    ),
+                    await client.get("/v1/owner-acceptance/current-items"),
+                    await client.get("/v1/owner-acceptance/queue"),
+                    await client.get(
+                        OWNER_ACCEPTANCE_EVENT_ROUTE.format(event_id="foreign-event-sentinel")
+                    ),
+                )
+
+        self.assertEqual(owner_response.status_code, 200, owner_response.text)
+        self.assertEqual(
+            [product["product"] for product in owner_response.json()["products"]],
+            [PRODUCT],
+        )
+        self.assertNotIn(SECOND_PRODUCT, owner_response.text)
+        for response in broad_responses:
+            self.assertEqual(response.status_code, 403, response.text)
+            self.assertEqual(response.json()["detail"]["code"], "authorization_denied")
+
+    async def test_event_write_only_owner_receives_receipt_for_write_and_replay(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(
+                Path(directory),
+                shared_dependency_evidence=True,
+                include_second_product_authority=False,
+            )
+            _write_repository_inventory(store)
+            app = _app(
+                store=store,
+                repository_evidence_provider=_EvidenceProvider(
+                    _repository_evidence(path="src/shared/app.py")
+                ),
+                authorization_allows=lambda **kwargs: (
+                    kwargs.get("action") == OWNER_ACCEPTANCE_EVENT_WRITE_ACTION
+                ),
+            )
+            target: dict[str, str | int] = {
+                "repository": REPOSITORY,
+                "pull_request_number": 2022,
+            }
+            async with lifespan_client(app) as client:
+                owner_evaluation = await client.get(
+                    OWNER_ACCEPTANCE_OWNER_EVALUATION_ROUTE,
+                    params=target,
+                )
+                binding_sha256 = owner_evaluation.json()["products"][0]["binding_sha256"]
+                request = {
+                    "target": target,
+                    "action": "accepted",
+                    "expected_binding_sha256": binding_sha256,
+                }
+                written = await client.post(
+                    OWNER_ACCEPTANCE_EVENTS_ROUTE,
+                    json=request,
+                    headers={"Idempotency-Key": "limited-owner-write"},
+                )
+                replayed = await client.post(
+                    OWNER_ACCEPTANCE_EVENTS_ROUTE,
+                    json=request,
+                    headers={"Idempotency-Key": "limited-owner-write"},
+                )
+
+        self.assertEqual(owner_evaluation.status_code, 200, owner_evaluation.text)
+        self.assertEqual(
+            [product["product"] for product in owner_evaluation.json()["products"]],
+            [PRODUCT],
+        )
+        for response, write_status in ((written, "written"), (replayed, "replayed")):
+            self.assertEqual(response.status_code, 202, response.text)
+            self.assertEqual(
+                response.json(),
+                {
+                    "response_kind": "receipt",
+                    "status": "ok",
+                    "trace_id": "trace-owner-acceptance",
+                    "write_status": write_status,
+                },
+            )
+            self.assertNotIn(SECOND_PRODUCT, response.text)
+
+    async def test_limited_event_write_prefilters_unowned_targets_before_provider_read(
+        self,
+    ) -> None:
+        class _CountingProvider(_EvidenceProvider):
+            calls = 0
+
+            def resolve(self, target):  # type: ignore[no-untyped-def]
+                self.calls += 1
+                return super().resolve(target)
+
+        with TemporaryDirectory() as directory:
+            store = _store(Path(directory))
+            _write_repository_inventory(store)
+            provider = _CountingProvider(_repository_evidence())
+            app = _app(
+                store=store,
+                browser_identity=_human(999999),
+                repository_evidence_provider=provider,
+                authorization_allows=lambda **kwargs: (
+                    kwargs.get("action") == OWNER_ACCEPTANCE_EVENT_WRITE_ACTION
+                ),
+            )
+            async with lifespan_client(app) as client:
+                responses = (
+                    await client.post(
+                        OWNER_ACCEPTANCE_EVENTS_ROUTE,
+                        json={
+                            "target": {
+                                "repository": REPOSITORY,
+                                "pull_request_number": 2022,
+                            },
+                            "action": "accepted",
+                            "expected_binding_sha256": "0" * 64,
+                        },
+                        headers={"Idempotency-Key": "foreign-owner-write"},
+                    ),
+                    await client.post(
+                        OWNER_ACCEPTANCE_EVENTS_ROUTE,
+                        json={
+                            "target": {
+                                "repository": "example/not-present",
+                                "pull_request_number": 2022,
+                            },
+                            "action": "accepted",
+                            "expected_binding_sha256": "0" * 64,
+                        },
+                        headers={"Idempotency-Key": "missing-owner-write"},
+                    ),
+                )
+
+        self.assertEqual(provider.calls, 0)
+        self.assertEqual(responses[0].json(), responses[1].json())
+        self.assertEqual(responses[0].status_code, 404)
+        self.assertEqual(responses[0].json()["detail"]["code"], "owner_review_unavailable")
+
+    async def test_limited_event_write_rejects_malformed_owner_policy_history(
+        self,
+    ) -> None:
+        class _CountingProvider(_EvidenceProvider):
+            calls = 0
+
+            def resolve(self, target):  # type: ignore[no-untyped-def]
+                self.calls += 1
+                return super().resolve(target)
+
+        with TemporaryDirectory() as directory:
+            store = _store(Path(directory))
+            _write_repository_inventory(store)
+            current_policy = store.list_product_owner_policy_records(
+                product=PRODUCT,
+                system=SYSTEM,
+            )[0]
+            broken_revision = _owner_policy(
+                revision=3,
+                supersedes_record_id=current_policy.record_id,
+            ).model_copy(update={"status": "superseded"})
+            provider = _CountingProvider(_repository_evidence())
+            app = _app(
+                store=store,
+                repository_evidence_provider=provider,
+                authorization_allows=lambda **kwargs: (
+                    kwargs.get("action") == OWNER_ACCEPTANCE_EVENT_WRITE_ACTION
+                ),
+            )
+            with patch.object(
+                store,
+                "list_product_owner_policy_records",
+                return_value=(current_policy, broken_revision),
+            ):
+                async with lifespan_client(app) as client:
+                    response = await client.post(
+                        OWNER_ACCEPTANCE_EVENTS_ROUTE,
+                        json={
+                            "target": {
+                                "repository": REPOSITORY,
+                                "pull_request_number": 2022,
+                            },
+                            "action": "accepted",
+                            "expected_binding_sha256": "0" * 64,
+                        },
+                        headers={"Idempotency-Key": "malformed-owner-policy"},
+                    )
+
+        self.assertEqual(response.status_code, 404, response.text)
+        self.assertEqual(response.json()["detail"]["code"], "owner_review_unavailable")
+        self.assertEqual(provider.calls, 0)
+
+    async def test_limited_event_write_bounds_provider_and_binding_errors(self) -> None:
+        class _UnavailableProvider(_EvidenceProvider):
+            def resolve(self, target):  # type: ignore[no-untyped-def]
+                raise ValueError("secret foreign-product provider sentinel")
+
+        with TemporaryDirectory() as directory:
+            store = _store(Path(directory))
+            _write_repository_inventory(store)
+
+            def authorization_allows(**kwargs: object) -> bool:
+                return kwargs.get("action") == OWNER_ACCEPTANCE_EVENT_WRITE_ACTION
+
+            unavailable_app = _app(
+                store=store,
+                repository_evidence_provider=_UnavailableProvider(_repository_evidence()),
+                authorization_allows=authorization_allows,
+            )
+            provider = _EvidenceProvider(_repository_evidence())
+            drift_app = _app(
+                store=store,
+                repository_evidence_provider=provider,
+                authorization_allows=authorization_allows,
+            )
+            target: dict[str, str | int] = {
+                "repository": REPOSITORY,
+                "pull_request_number": 2022,
+            }
+            async with lifespan_client(unavailable_app) as client:
+                unavailable = await client.post(
+                    OWNER_ACCEPTANCE_EVENTS_ROUTE,
+                    json={
+                        "target": target,
+                        "action": "accepted",
+                        "expected_binding_sha256": "0" * 64,
+                    },
+                    headers={"Idempotency-Key": "limited-provider-error"},
+                )
+            async with lifespan_client(drift_app) as client:
+                evaluated = await client.get(
+                    OWNER_ACCEPTANCE_OWNER_EVALUATION_ROUTE,
+                    params=target,
+                )
+                provider.evidence = _repository_evidence(head="c" * 40)
+                drift = await client.post(
+                    OWNER_ACCEPTANCE_EVENTS_ROUTE,
+                    json={
+                        "target": target,
+                        "action": "accepted",
+                        "expected_binding_sha256": evaluated.json()["products"][0][
+                            "binding_sha256"
+                        ],
+                    },
+                    headers={"Idempotency-Key": "limited-binding-drift"},
+                )
+
+        self.assertEqual(unavailable.status_code, 503, unavailable.text)
+        self.assertEqual(
+            unavailable.json()["detail"],
+            {
+                "status_code": 503,
+                "trace_id": "trace-owner-acceptance",
+                "code": "owner_acceptance_projection_unavailable",
+                "message": "Owner acceptance projection is unavailable.",
+            },
+        )
+        self.assertNotIn("sentinel", unavailable.text)
+        self.assertEqual(drift.status_code, 409, drift.text)
+        self.assertEqual(drift.json()["detail"]["code"], "owner_acceptance_binding_changed")
+        self.assertEqual(
+            drift.json()["detail"]["message"],
+            "The reviewed Owner acceptance binding changed.",
+        )
+
+    async def test_limited_event_write_preserves_uncertain_reconciliation_receipt(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(Path(directory))
+            _write_repository_inventory(store)
+            github_api = _GitHubCheckApi(fail_read_numbers=(2,))
+
+            def authorization_allows(**kwargs: object) -> bool:
+                return kwargs.get("action") == OWNER_ACCEPTANCE_EVENT_WRITE_ACTION
+
+            app = _app(
+                store=store,
+                github_api=github_api,
+                authorization_allows=authorization_allows,
+            )
+            target: dict[str, str | int] = {
+                "repository": REPOSITORY,
+                "pull_request_number": 2022,
+            }
+            async with lifespan_client(app) as client:
+                evaluated = await client.get(
+                    OWNER_ACCEPTANCE_OWNER_EVALUATION_ROUTE,
+                    params=target,
+                )
+                request = {
+                    "target": target,
+                    "action": "accepted",
+                    "expected_binding_sha256": evaluated.json()["products"][0]["binding_sha256"],
+                }
+                failed = await client.post(
+                    OWNER_ACCEPTANCE_EVENTS_ROUTE,
+                    json=request,
+                    headers={"Idempotency-Key": "limited-reconciliation"},
+                )
+                replayed = await client.post(
+                    OWNER_ACCEPTANCE_EVENTS_ROUTE,
+                    json=request,
+                    headers={"Idempotency-Key": "limited-reconciliation"},
+                )
+
+        self.assertEqual(failed.status_code, 503, failed.text)
+        self.assertEqual(
+            failed.json()["detail"],
+            {
+                "status_code": 503,
+                "trace_id": "trace-owner-acceptance",
+                "code": "owner_acceptance_projection_reconciliation_required",
+                "message": (
+                    "Owner acceptance event was persisted, but the final GitHub status "
+                    "projection requires reconciliation. Retry with the same "
+                    "Idempotency-Key only."
+                ),
+            },
+        )
+        self.assertNotIn("projection endpoint", failed.text)
+        self.assertEqual(
+            replayed.json(),
+            {
+                "response_kind": "receipt",
+                "status": "ok",
+                "trace_id": "trace-owner-acceptance",
+                "write_status": "replayed",
+            },
+        )
+
     async def test_preview_projection_and_negative_event_share_projection_lock(self) -> None:
         with TemporaryDirectory() as directory:
             store = _store(Path(directory))
@@ -1172,6 +1850,7 @@ class OwnerAcceptanceHttpTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(written.status_code, 202, written.text)
                 payload = written.json()
+                self.assertEqual(payload["response_kind"], "full")
                 self.assertEqual(payload["write_status"], "written")
                 self.assertEqual(payload["decision"]["status"], "accepted")
                 self.assertEqual(payload["record"]["subject_sequence"], 1)
@@ -1191,6 +1870,7 @@ class OwnerAcceptanceHttpTests(unittest.IsolatedAsyncioTestCase):
                     headers={"Idempotency-Key": "accept-1"},
                 )
                 self.assertEqual(replayed.status_code, 202, replayed.text)
+                self.assertEqual(replayed.json()["response_kind"], "full")
                 self.assertEqual(replayed.json()["write_status"], "replayed")
                 self.assertEqual(replayed.json()["record"], payload["record"])
 

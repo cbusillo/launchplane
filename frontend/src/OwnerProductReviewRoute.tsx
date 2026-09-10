@@ -8,12 +8,10 @@ import {
 } from "react";
 
 import {
-  evaluateOwnerAcceptance,
+  evaluateOwnerProductReview,
   LaunchplaneApiError,
   writeOwnerAcceptanceEvent,
-  type OwnerAcceptanceDecision,
   type OwnerAcceptanceEventMutationResponse,
-  type OwnerAcceptanceProductDecision,
 } from "./api";
 import type { DevFixtureMode } from "./dev-fixture-loader";
 import { loadDevFixtures } from "./dev-fixture-loader";
@@ -32,11 +30,9 @@ import { useBrowserOperationController } from "./use-browser-operation";
 
 import type {
   GitHubHumanIdentityResponse,
-  OwnerAcceptanceBinding,
-  OwnerAcceptanceEvaluationResponse,
   OwnerAcceptanceEventEnvelope,
-  OwnerAcceptanceViewerBindingEligibility,
-  OwnerAcceptanceViewerCapabilities,
+  OwnerAcceptanceOwnerEvaluationResponse,
+  OwnerAcceptanceOwnerProduct,
 } from "./generated/openapi.ts";
 
 type Theme = "dark" | "light";
@@ -130,7 +126,7 @@ export function OwnerProductReviewRoute({
   const searchParams = useAppSearchParams();
   const lookup = ownerAcceptanceLookupFromSearch(searchParams.toString());
   const [evaluation, setEvaluation] =
-    useState<OwnerAcceptanceEvaluationResponse | null>(null);
+    useState<OwnerAcceptanceOwnerEvaluationResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [driftMessage, setDriftMessage] = useState("");
@@ -156,7 +152,7 @@ export function OwnerProductReviewRoute({
                 afterWrite,
               ),
             )
-          : await evaluateOwnerAcceptance(
+          : await evaluateOwnerProductReview(
               lookup.repository,
               Number(lookup.pullRequest),
               signal,
@@ -217,18 +213,19 @@ export function OwnerProductReviewRoute({
           <div className="owner-review-context">
             <span>{lookup.repository}</span>
             <span>PR #{lookup.pullRequest}</span>
-            <span>Decision: {evaluation.decision.status.replaceAll("_", " ")}</span>
-            <span>Evaluated {formatTime(evaluation.decision.evaluated_at)}</span>
+            <span>Decision: {evaluation.review_status.replaceAll("_", " ")}</span>
+            <span>Evaluated {formatTime(evaluation.evaluated_at)}</span>
           </div>
           {driftMessage ? (
             <p className="owner-review-alert" role="alert">{driftMessage}</p>
           ) : null}
           <OwnerBindingList
-            decision={evaluation.decision}
+            evaluation={evaluation}
             fixtureMode={fixtureMode}
+            pullRequestNumber={Number(lookup.pullRequest)}
+            repository={lookup.repository}
             onRefreshAfterChange={() => loadEvaluation(true, false)}
             onRefreshAfterWrite={() => loadEvaluation(false, true)}
-            viewerCapabilities={evaluation.viewer_capabilities}
           />
         </>
       ) : null}
@@ -247,20 +244,22 @@ function OwnerReviewState({
 }
 
 function OwnerBindingList({
-  decision,
+  evaluation,
   fixtureMode,
   onRefreshAfterChange,
   onRefreshAfterWrite,
-  viewerCapabilities,
+  pullRequestNumber,
+  repository,
 }: {
-  decision: OwnerAcceptanceDecision;
+  evaluation: OwnerAcceptanceOwnerEvaluationResponse;
   fixtureMode: DevFixtureMode;
   onRefreshAfterChange: () => Promise<void>;
   onRefreshAfterWrite: () => Promise<void>;
-  viewerCapabilities: OwnerAcceptanceViewerCapabilities;
+  pullRequestNumber: number;
+  repository: string;
 }) {
-  if (!decision.products.length) {
-    return decision.status === "not_required" ? (
+  if (!evaluation.products.length) {
+    return evaluation.review_status === "not_required" ? (
       <OwnerReviewState>No product review is required for this change.</OwnerReviewState>
     ) : (
       <OwnerReviewState tone="error">
@@ -270,27 +269,17 @@ function OwnerBindingList({
   }
   return (
     <div className="owner-review-bindings">
-      {decision.products.map((product) => {
-        const binding = product.binding;
-        if (!binding) {
-          return (
-            <article className="owner-review-card" key={`${product.product}:${product.system}:${product.action}:${product.environment}`}>
-              <OwnerBindingHeading product={product} />
-              <OwnerReviewState tone="error">Current preview evidence is unavailable for this product.</OwnerReviewState>
-            </article>
-          );
-        }
-        const eligibility = viewerCapabilities.bindings.find(
-          (candidate) => candidate.binding_sha256 === binding.binding_sha256,
-        );
+      {evaluation.products.map((product) => {
+        const binding = {
+          ...product,
+          repository,
+          pull_request_number: pullRequestNumber,
+        };
         return (
           <OwnerBindingCard
             binding={binding}
-            decision={decision}
-            eligibility={eligibility}
-            eventWriteAuthorized={viewerCapabilities.event_write_authorized}
             fixtureMode={fixtureMode}
-            key={binding.binding_sha256}
+            key={product.binding_sha256}
             onRefreshAfterChange={onRefreshAfterChange}
             onRefreshAfterWrite={onRefreshAfterWrite}
             product={product}
@@ -301,38 +290,36 @@ function OwnerBindingList({
   );
 }
 
+type OwnerReviewBinding = OwnerAcceptanceOwnerProduct & {
+  pull_request_number: number;
+  repository: string;
+};
+
 function OwnerBindingCard({
   binding,
-  decision,
-  eligibility,
-  eventWriteAuthorized,
   fixtureMode,
   onRefreshAfterChange,
   onRefreshAfterWrite,
   product,
 }: {
-  binding: OwnerAcceptanceBinding;
-  decision: OwnerAcceptanceDecision;
-  eligibility: OwnerAcceptanceViewerBindingEligibility | undefined;
-  eventWriteAuthorized: boolean;
+  binding: OwnerReviewBinding;
   fixtureMode: DevFixtureMode;
   onRefreshAfterChange: () => Promise<void>;
   onRefreshAfterWrite: () => Promise<void>;
-  product: OwnerAcceptanceProductDecision;
+  product: OwnerAcceptanceOwnerProduct;
 }) {
-  const previewUrl = safeExternalUrl(binding.preview?.preview_url ?? "");
+  const previewUrl = safeExternalUrl(binding.preview_url ?? "");
   const maySubmit = Boolean(
-    eventWriteAuthorized && eligibility?.can_submit_event &&
-      ((eligibility.can_accept && previewUrl) ||
-        eligibility.can_request_changes ||
-        eligibility.can_revoke),
+    (binding.can_accept && previewUrl) ||
+      binding.can_request_changes ||
+      binding.can_revoke,
   );
   return (
     <article className="owner-review-card" data-product={product.product}>
       <OwnerBindingHeading product={product} />
       <dl>
         <div><dt>Environment</dt><dd>{binding.environment}</dd></div>
-        <div><dt>Current decision</dt><dd>{product.status.replaceAll("_", " ")}</dd></div>
+        <div><dt>Current decision</dt><dd>{product.review_status.replaceAll("_", " ")}</dd></div>
       </dl>
       {previewUrl ? (
         <a className="button button-primary owner-review-preview" href={previewUrl.toString()} target="_blank" rel="noreferrer">
@@ -341,11 +328,9 @@ function OwnerBindingCard({
       ) : (
         <OwnerReviewState tone="error">A verified preview link is unavailable for this product.</OwnerReviewState>
       )}
-      {maySubmit && eligibility ? (
+      {maySubmit ? (
         <OwnerReviewAction
           binding={binding}
-          decision={decision}
-          eligibility={eligibility}
           fixtureMode={fixtureMode}
           previewAvailable={Boolean(previewUrl)}
           onRefreshAfterChange={onRefreshAfterChange}
@@ -358,34 +343,33 @@ function OwnerBindingCard({
   );
 }
 
-function OwnerBindingHeading({ product }: { product: OwnerAcceptanceProductDecision }) {
+function OwnerBindingHeading({ product }: { product: OwnerAcceptanceOwnerProduct }) {
   return <header><p className="eyebrow">Product</p><h2>{product.product}</h2></header>;
 }
 
 function OwnerReviewAction({
   binding,
-  decision,
-  eligibility,
   fixtureMode,
   onRefreshAfterChange,
   onRefreshAfterWrite,
   previewAvailable,
 }: {
-  binding: OwnerAcceptanceBinding;
-  decision: OwnerAcceptanceDecision;
-  eligibility: OwnerAcceptanceViewerBindingEligibility;
+  binding: OwnerReviewBinding;
   fixtureMode: DevFixtureMode;
   onRefreshAfterChange: () => Promise<void>;
   onRefreshAfterWrite: () => Promise<void>;
   previewAvailable: boolean;
 }) {
-  const allowedActions = ownerAllowedActions(eligibility, previewAvailable);
+  const allowedActions = ownerAllowedActions(binding, previewAvailable);
   const [action, setAction] = useState<OwnerAcceptanceHumanAction>(allowedActions[0]);
   const [reason, setReason] = useState("");
   const [resolutionSummary, setResolutionSummary] = useState("");
   const [confirmRevoke, setConfirmRevoke] = useState(false);
   const handledDriftRef = useRef<object | null>(null);
-  const operation = useBrowserOperationController<OwnerAcceptanceEventEnvelope, OwnerAcceptanceEventMutationResponse>({
+  const operation = useBrowserOperationController<
+    OwnerAcceptanceEventEnvelope,
+    OwnerAcceptanceEventMutationResponse
+  >({
     scope: ownerAcceptanceOperationScope(binding),
     execute: async (payload, options) => {
       if (!fixtureMode) return writeOwnerAcceptanceEvent(payload, options);
@@ -393,7 +377,7 @@ function OwnerReviewAction({
       if (new URLSearchParams(window.location.search).get("scenario") === "drift") {
         throw new LaunchplaneApiError("The reviewed binding changed.", 409, "fixture-owner-drift", "owner_acceptance_binding_changed");
       }
-      return ownerFixtureMutationResponse(decision, binding, payload, options.idempotencyKey);
+      return ownerFixtureMutationResponse();
     },
     failureFor: ownerAcceptanceFailure,
     failureCertainty: ownerAcceptanceFailureCertainty,
@@ -434,20 +418,8 @@ function OwnerReviewAction({
   }, [action, allowedActionKey, effectiveAction, operation.state.requiresIdempotencyContinuity]);
   const busy = operation.state.phase === "queued" || operation.state.phase === "submitting";
   const reasonRequired = effectiveAction !== "accepted";
-  const currentProductEvent = decision.products.find(
-    (productDecision) =>
-      productDecision.binding?.binding_sha256 === binding.binding_sha256,
-  )?.current_event;
-  const resolutionRequired =
-    effectiveAction === "accepted" &&
-    currentProductEvent?.binding.binding_sha256 === binding.binding_sha256 &&
-    currentProductEvent.action === "changes_requested";
-  const resolvedEvidenceReferences = binding.preview
-    ? [
-        `preview:${binding.preview.preview_id}`,
-        `preview-generation:${binding.preview.serving_generation_id}`,
-      ]
-    : [];
+  const resolutionRequired = effectiveAction === "accepted" && binding.resolution_required;
+  const resolvedEvidenceReferences = binding.resolution_evidence_references;
   const fieldsLocked = busy || operation.state.requiresIdempotencyContinuity;
   const canSubmit =
     Boolean(effectiveAction) &&
@@ -474,9 +446,9 @@ function OwnerReviewAction({
   return (
     <section className="owner-review-action" aria-label={`Decision for ${binding.product}`}>
       <label><span>Decision</span><select value={effectiveAction} disabled={fieldsLocked} onChange={(event) => { clearCompletedReceipt(); setAction(event.target.value as OwnerAcceptanceHumanAction); setReason(""); setResolutionSummary(""); setConfirmRevoke(false); }}>
-        {eligibility.can_accept && previewAvailable ? <option value="accepted">Accept product change</option> : null}
-        {eligibility.can_request_changes ? <option value="changes_requested">Request product changes</option> : null}
-        {eligibility.can_revoke ? <option value="revoked">Revoke prior acceptance</option> : null}
+        {binding.can_accept && previewAvailable ? <option value="accepted">Accept product change</option> : null}
+        {binding.can_request_changes ? <option value="changes_requested">Request product changes</option> : null}
+        {binding.can_revoke ? <option value="revoked">Revoke prior acceptance</option> : null}
       </select></label>
       {reasonRequired ? <label><span>Feedback</span><textarea maxLength={4000} value={reason} disabled={fieldsLocked} onChange={(event) => { clearCompletedReceipt(); setReason(event.target.value); }} /></label> : null}
       {resolutionRequired ? <div className="owner-review-resolution"><p>Explain how the requested changes were resolved. Launchplane will attach this preview and its current version to the decision.</p><label><span>Resolution explanation</span><textarea maxLength={4000} value={resolutionSummary} disabled={fieldsLocked} onChange={(event) => { clearCompletedReceipt(); setResolutionSummary(event.target.value); }} /></label></div> : null}
@@ -513,46 +485,22 @@ function OwnerReviewAction({
 }
 
 function ownerAllowedActions(
-  eligibility: OwnerAcceptanceViewerBindingEligibility,
+  product: OwnerAcceptanceOwnerProduct,
   previewAvailable: boolean,
 ): OwnerAcceptanceHumanAction[] {
   const actions: OwnerAcceptanceHumanAction[] = [];
-  if (eligibility.can_accept && previewAvailable) actions.push("accepted");
-  if (eligibility.can_request_changes) actions.push("changes_requested");
-  if (eligibility.can_revoke) actions.push("revoked");
+  if (product.can_accept && previewAvailable) actions.push("accepted");
+  if (product.can_request_changes) actions.push("changes_requested");
+  if (product.can_revoke) actions.push("revoked");
   return actions;
 }
 
-function ownerFixtureMutationResponse(
-  decision: OwnerAcceptanceDecision,
-  binding: OwnerAcceptanceBinding,
-  payload: OwnerAcceptanceEventEnvelope,
-  idempotencyKey: string,
-): OwnerAcceptanceEventMutationResponse {
-  const occurredAt = new Date().toISOString();
-  const record = {
-    schema_version: 1,
-    event_id: `fixture-${idempotencyKey}`,
-    acceptance_id: `fixture-${binding.binding_sha256.slice(0, 32)}`,
-    subject_sequence: 1,
-    binding,
-    action: payload.action,
-    occurred_at: occurredAt,
-    source_event_kind: "browser_api" as const,
-    source_event_id: idempotencyKey,
-    reason: payload.reason ?? "",
-    resolution: payload.resolution ?? null,
-    authorization: null,
-  };
+function ownerFixtureMutationResponse(): OwnerAcceptanceEventMutationResponse {
   return {
+    response_kind: "receipt",
     status: "ok",
     trace_id: "fixture-owner-review-write",
     write_status: "written",
-    record,
-    semantics: {
-      human_action_semantics: payload.action === "accepted" ? "product_review_accepted" : payload.action === "revoked" ? "product_review_revoked" : "product_review_changes_requested",
-    },
-    decision,
     replayed: false,
   };
 }
