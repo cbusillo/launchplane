@@ -29,6 +29,10 @@ from control_plane.contracts.ordinary_agent_snapshot import (
 )
 from control_plane.merge_train import MergeTrainDryRunSnapshot
 from control_plane.merge_admission import GuardedMergeAdmission
+from control_plane.merge_train_structural_provenance import (
+    ordinary_candidate_is_exact_landing_dependency,
+)
+from control_plane.ordinary_agent_noop_route import OrdinaryNoOpFinalizationUnavailable
 from control_plane.merge_train_github import (
     GitHubMergeTrainClient,
     MergeTrainGitHubStaleHeadError,
@@ -63,12 +67,14 @@ class OrdinaryAgentMergeTrainClient(GitHubMergeTrainClient):
         snapshot: Callable[[], OrdinaryAgentMergeTrainSnapshotResult],
         candidate_check: Callable[[str], OrdinaryAgentCandidateCheckResult],
         advance_landing_entry: OrdinaryAgentLandingStep | None = None,
+        advance_no_op_landing_entry: OrdinaryAgentLandingStep | None = None,
     ) -> None:
         super().__init__(transport=_NoAmbientTransport(), effect_executor=effect_executor)
         self._request = request
         self._snapshot = snapshot
         self._candidate_check = candidate_check
         self._advance_landing_entry = advance_landing_entry
+        self._advance_no_op_landing_entry = advance_no_op_landing_entry
 
     @property
     def binding(self) -> OrdinaryAgentJobBinding:
@@ -283,8 +289,13 @@ class OrdinaryAgentMergeTrainClient(GitHubMergeTrainClient):
         provenance = candidate_record.candidate.structural_provenance
         assert provenance is not None
         candidate_step = provenance.steps[selected_index]
-        if candidate_step.kind == "no_op_already_contained":
-            raise PermissionError("ordinary candidate no-op requires joined no-op finalization")
+        is_no_op = candidate_step.kind == "no_op_already_contained"
+        if is_no_op and self._advance_no_op_landing_entry is None:
+            raise OrdinaryNoOpFinalizationUnavailable()
+        advance_entry = (
+            self._advance_no_op_landing_entry if is_no_op else self._advance_landing_entry
+        )
+        assert advance_entry is not None
 
         checkpointed_entry: MergeTrainBatchLandingEntry | None = None
         checkpointed_plan: MergeTrainBatchLandingPlan | None = None
@@ -298,6 +309,7 @@ class OrdinaryAgentMergeTrainClient(GitHubMergeTrainClient):
                 landed=entry,
                 rolling_base_sha=rolling_base_sha,
                 rolling_base_tree_sha=rolling_base_tree_sha,
+                no_op=is_no_op,
             )
             successor = _validated_model_update(
                 landing_plan,
@@ -307,7 +319,9 @@ class OrdinaryAgentMergeTrainClient(GitHubMergeTrainClient):
                     *landing_plan.entries[selected_index + 1 :],
                 ),
             )
-            persisted = checkpoint(successor, entry, "entry_merged")
+            persisted = checkpoint(
+                successor, entry, "entry_skipped" if is_no_op else "entry_merged"
+            )
             if (
                 not isinstance(persisted, MergeTrainBatchLandingPlanRecord)
                 or persisted.status != "active"
@@ -322,7 +336,7 @@ class OrdinaryAgentMergeTrainClient(GitHubMergeTrainClient):
             checkpointed_entry = entry
             checkpointed_plan = persisted.landing_plan
 
-        result = self._advance_landing_entry(
+        result = advance_entry(
             candidate_record=candidate_record,
             landing_plan_record=landing_record,
             entry=selected,
@@ -358,7 +372,14 @@ class OrdinaryAgentMergeTrainClient(GitHubMergeTrainClient):
         )
         if (
             landing_record.status != "active"
-            or candidate_record.status != "active"
+            or candidate_record.status not in {"active", "superseded"}
+            or (
+                candidate_record.status == "superseded"
+                and not ordinary_candidate_is_exact_landing_dependency(
+                    candidate_record=candidate_record,
+                    landing_plan_record=landing_record,
+                )
+            )
             or landing_record.ordinary_job_binding != self.binding
             or candidate_record.ordinary_job_binding != self.binding
             or landing_record.landing_plan != landing_plan
@@ -492,6 +513,7 @@ class OrdinaryAgentMergeTrainClient(GitHubMergeTrainClient):
         landed: MergeTrainBatchLandingEntry,
         rolling_base_sha: str,
         rolling_base_tree_sha: str,
+        no_op: bool = False,
     ) -> None:
         immutable_fields = (
             "pull_request_number",
@@ -506,7 +528,7 @@ class OrdinaryAgentMergeTrainClient(GitHubMergeTrainClient):
             "recorded_candidate_result_tree_sha",
         )
         if (
-            landed.status != "merged"
+            landed.status != ("skipped" if no_op else "merged")
             or any(getattr(landed, name) != getattr(planned, name) for name in immutable_fields)
             or landed.recorded_rolling_base_sha != rolling_base_sha
             or landed.recorded_rolling_base_tree_sha != rolling_base_tree_sha
@@ -514,7 +536,14 @@ class OrdinaryAgentMergeTrainClient(GitHubMergeTrainClient):
             or landed.landed_head_tree_sha != planned.expected_head_tree_sha
             or not landed.merge_commit_sha
             or not landed.merge_commit_tree_sha
-            or landed.merge_commit_sha == rolling_base_sha
+            or (
+                (
+                    landed.merge_commit_sha != rolling_base_sha
+                    or landed.merge_commit_tree_sha != rolling_base_tree_sha
+                )
+                if no_op
+                else landed.merge_commit_sha == rolling_base_sha
+            )
         ):
             raise MergeTrainGitHubStaleHeadError(
                 "ordinary landing callback returned incomplete or mismatched merge proof",

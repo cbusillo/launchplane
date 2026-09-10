@@ -20,6 +20,7 @@ from control_plane.contracts.ordinary_agent_session_lifecycle import (
     OrdinaryAgentFiniteRequestRecord,
     OrdinaryAgentJobBinding,
 )
+from control_plane.contracts.ordinary_agent_noop import OrdinaryAgentNoOpLandingStore
 from control_plane.contracts.ordinary_agent_snapshot import OrdinaryAgentLandingEvidence
 from control_plane.merge_admission import GuardedMergeAdmission, MergeAdmissionDeniedError
 from control_plane.ordinary_agent_effect_recovery import recover_ordinary_effect
@@ -27,8 +28,14 @@ from control_plane.ordinary_agent_landing_execution import OrdinaryLandingRecove
 from control_plane.ordinary_agent_session_lifecycle import OrdinaryAgentSessionAdmissionDenied
 
 
-class OrdinaryLandingRecoveryStore(OrdinaryAgentLandingStore, OrdinaryAgentEffectStore, Protocol):
+class OrdinaryLandingRecoveryStore(
+    OrdinaryAgentLandingStore, OrdinaryAgentNoOpLandingStore, OrdinaryAgentEffectStore, Protocol
+):
     pass
+
+
+class OrdinaryLandingProgressReloadRequired(RuntimeError):
+    """The no-op transaction already committed progress; reload it next poll."""
 
 
 def recover_ordinary_landing_entry(
@@ -51,6 +58,34 @@ def recover_ordinary_landing_entry(
     """
     finalization = store.read_ordinary_landing_finalization(preparation_id=preparation_id)
     if finalization is None:
+        no_op = store.read_ordinary_no_op_landing_finalization(preparation_id=preparation_id)
+        if no_op is not None:
+            binding = OrdinaryAgentJobBinding(
+                request_id=request.request_id,
+                binding_revision=request.binding_revision,
+                scope_sha256=request.scope_sha256,
+            )
+            preparation = no_op.preparation
+            if (
+                preparation.preparation_id != preparation_id
+                or preparation.request_id != request.request_id
+                or preparation.binding_revision != request.binding_revision
+                or preparation.scope_sha256 != request.scope_sha256
+                or preparation.target != request.target
+                or preparation.state != "consumed"
+                or preparation.effect_id is not None
+                or preparation.candidate_record_id != candidate_record.record_id
+                or candidate_record.ordinary_job_binding != binding
+                or landing_plan_record.ordinary_job_binding != binding
+                or no_op.successor.ordinary_job_binding != binding
+                or landing_plan_record.record_id
+                not in {preparation.landing_plan_record_id, no_op.successor.record_id}
+                or no_op.outcome.reason != "already_contained_no_provider_effect"
+            ):
+                raise OrdinaryAgentSessionAdmissionDenied("landing_history_binding_conflict")
+            # No callback: the exact successor, admission and outcome committed
+            # together. Constructing another checkpoint would duplicate progress.
+            raise OrdinaryLandingProgressReloadRequired()
         raise OrdinaryLandingRecoveryRequired(preparation_id)
     preparation = finalization.preparation
     binding = OrdinaryAgentJobBinding(

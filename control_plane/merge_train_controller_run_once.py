@@ -67,6 +67,9 @@ from control_plane.merge_train_stack_collapse import (
     MergeTrainStackCollapsePlanRecordStore,
     stack_collapse_expected_root_head_sha,
 )
+from control_plane.merge_train_structural_provenance import (
+    ordinary_candidate_is_exact_landing_dependency,
+)
 from control_plane.workflows.merge_train_controller import (
     latest_completed_merge_train_batch_landing_plan_record as latest_completed_merge_train_batch_landing_progress_record,
     latest_merge_train_batch_candidate_progress_record,
@@ -151,6 +154,14 @@ class MergeTrainControllerStateRecordStore(Protocol):
         expected_lease_acquired_at: str,
         lease_seconds: int,
     ) -> MergeTrainControllerStateRecord: ...
+
+
+class _OrdinaryCandidateDependencyStore(Protocol):
+    def list_ordinary_merge_train_batch_candidate_dependencies(
+        self,
+        *,
+        landing_plan_record: MergeTrainBatchLandingPlanRecord,
+    ) -> tuple[MergeTrainBatchCandidateRecord, ...]: ...
 
 
 @dataclass(frozen=True)
@@ -671,8 +682,27 @@ def latest_passed_merge_train_batch_candidate_record(
 def _candidate_record_for_landing_plan(
     *,
     record_store: MergeTrainBatchCandidateRecordStore,
-    landing_plan: MergeTrainBatchLandingPlan,
+    landing_plan_record: MergeTrainBatchLandingPlanRecord,
 ) -> MergeTrainBatchCandidateRecord | None:
+    landing_plan = landing_plan_record.landing_plan
+    if landing_plan_record.ordinary_job_binding is not None:
+        if not hasattr(record_store, "list_ordinary_merge_train_batch_candidate_dependencies"):
+            return None
+        dependencies = cast(
+            _OrdinaryCandidateDependencyStore,
+            record_store,
+        ).list_ordinary_merge_train_batch_candidate_dependencies(
+            landing_plan_record=landing_plan_record,
+        )
+        matches = tuple(
+            record
+            for record in dependencies
+            if ordinary_candidate_is_exact_landing_dependency(
+                candidate_record=record,
+                landing_plan_record=landing_plan_record,
+            )
+        )
+        return matches[0] if len(matches) == 1 else None
     matches = tuple(
         record
         for record in record_store.list_merge_train_batch_candidate_records(
@@ -866,11 +896,15 @@ def _advance_active_landing_record(
             )
     candidate_record = _candidate_record_for_landing_plan(
         record_store=candidate_store,
-        landing_plan=active_landing_record.landing_plan,
+        landing_plan_record=active_landing_record,
     )
     if candidate_record is None:
         raise MergeTrainControllerRequestError(
-            "merge train landing requires its exact active candidate record"
+            (
+                "ordinary merge train landing requires its exact candidate dependency"
+                if active_landing_record.ordinary_job_binding is not None
+                else "merge train landing requires its exact active candidate record"
+            )
         )
     if active_landing_record.ordinary_job_binding is not None and collapse_record is not None:
         raise MergeTrainControllerRequestError(

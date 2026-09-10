@@ -30,7 +30,11 @@ from control_plane.contracts.ordinary_agent_snapshot import (
     OrdinaryAgentLandingEvidence,
     OrdinaryAgentProviderRequestCounts,
 )
-from control_plane.merge_train import MergeTrainDryRunSnapshot, MergeTrainPullRequestSnapshot
+from control_plane.merge_train import (
+    MergeTrainDryRunSnapshot,
+    MergeTrainPullRequestSnapshot,
+    MergeTrainPullRequestState,
+)
 from control_plane.ordinary_agent_github_transport import (
     DeadlineMergeTrainGitHubTransport,
     OrdinaryAgentProviderEvidenceError,
@@ -80,13 +84,20 @@ def read_ordinary_agent_landing_evidence(
     terminal = frozenset(
         entry.pull_request_number for entry in plan.entries if entry.status in {"merged", "skipped"}
     )
+    allowed_non_open = terminal
+    if _is_selected_candidate_no_op(
+        preparation=preparation,
+        candidate_record=candidate_record,
+        landing_plan_record=landing_plan_record,
+    ):
+        allowed_non_open = terminal | {preparation.entry.pull_request_number}
     observation = read_landing_graphql(
         transport=transport,
         candidate=candidate,
         repository_id=target.repository_id,
         repository_owner_id=repository_owner_id,
         base_sha=preparation.expected_base_sha,
-        terminal_entries=terminal,
+        terminal_entries=allowed_non_open,
         utc_seconds=utc_seconds,
     )
     data = json.loads(observation.repository_json)
@@ -180,7 +191,7 @@ def read_ordinary_agent_landing_evidence(
         repository_id=target.repository_id,
         repository_owner_id=repository_owner_id,
         base_sha=preparation.expected_base_sha,
-        terminal_entries=terminal,
+        terminal_entries=allowed_non_open,
         observation=observation,
     )
     selected = next(
@@ -265,24 +276,89 @@ def _queue_entry(
         raise OrdinaryAgentProviderEvidenceError("landing_queue_draft_missing")
     if isinstance(number, bool) or not isinstance(number, int) or number <= 0:
         raise OrdinaryAgentProviderEvidenceError("landing_queue_number_missing")
+    state_by_graphql_value: dict[object, MergeTrainPullRequestState] = {
+        "OPEN": "open",
+        "CLOSED": "closed",
+        "MERGED": "merged",
+    }
+    state = state_by_graphql_value.get(pr.get("state"))
+    if state is None:
+        raise OrdinaryAgentProviderEvidenceError("landing_queue_state_missing")
+    raw_head_ref = pr.get("headRefName")
+    head_ref = "" if raw_head_ref is None and state != "open" else _text(raw_head_ref)
     # Landing uses this snapshot to rebuild queue eligibility. Source-head
     # technical checks were not queried and must not inherit combined checks.
     return MergeTrainPullRequestSnapshot(
         number=number,
         url=_text(pr.get("url")),
         title=_text(pr.get("title")),
-        state="open",
+        state=state,
         is_draft=draft,
         created_at=_text(pr.get("createdAt")),
         labels=tuple(_text(label.get("name")) for label in labels),
         actor_id=actor_id,
         actor_role=role,
         head_sha=_text(pr.get("headRefOid")),
-        head_ref=_text(pr.get("headRefName")),
+        head_ref=head_ref,
         head_repository=_text(_object(pr.get("headRepository")).get("nameWithOwner")),
         base_sha=_text(pr.get("baseRefOid")),
         base_ref=_text(pr.get("baseRefName")),
         base_repository=_text(_object(pr.get("baseRepository")).get("nameWithOwner")),
+    )
+
+
+def _is_selected_candidate_no_op(
+    *,
+    preparation: OrdinaryAgentLandingPreparation,
+    candidate_record: MergeTrainBatchCandidateRecord,
+    landing_plan_record: MergeTrainBatchLandingPlanRecord,
+) -> bool:
+    binding = landing_plan_record.ordinary_job_binding
+    if binding is None or candidate_record.ordinary_job_binding != binding:
+        return False
+    provenance = candidate_record.candidate.structural_provenance
+    if provenance is None:
+        return False
+    entry = preparation.entry
+    candidate_entries = tuple(
+        item
+        for item in candidate_record.candidate.entries
+        if item.position == entry.position and item.pull_request_number == entry.pull_request_number
+    )
+    step = next(
+        (
+            item
+            for item in provenance.steps
+            if item.position == entry.position
+            and item.pull_request_number == entry.pull_request_number
+        ),
+        None,
+    )
+    plan_entry = next(
+        (
+            item
+            for item in landing_plan_record.landing_plan.entries
+            if item.position == entry.position
+            and item.pull_request_number == entry.pull_request_number
+        ),
+        None,
+    )
+    return bool(
+        step is not None
+        and len(candidate_entries) == 1
+        and plan_entry == entry
+        and entry.status == "planned"
+        and step.kind == "no_op_already_contained"
+        and step.parent_sha == step.result_sha == preparation.expected_base_sha
+        and step.parent_tree_sha == step.result_tree_sha == preparation.expected_base_tree_sha
+        and step.head_sha == entry.expected_head_sha
+        and step.head_tree_sha == entry.expected_head_tree_sha
+        and candidate_entries[0].head_sha == step.head_sha
+        and candidate_entries[0].head_tree_sha == step.head_tree_sha
+        and entry.recorded_candidate_parent_sha == step.parent_sha
+        and entry.recorded_candidate_parent_tree_sha == step.parent_tree_sha
+        and entry.recorded_candidate_result_sha == step.result_sha
+        and entry.recorded_candidate_result_tree_sha == step.result_tree_sha
     )
 
 

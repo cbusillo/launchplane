@@ -2,9 +2,10 @@
 
 from concurrent.futures import ThreadPoolExecutor
 import os
+from threading import Event, current_thread
 import unittest
 
-from sqlalchemy import select, update
+from sqlalchemy import event, func, select, update
 from sqlalchemy.exc import DBAPIError
 
 from control_plane.contracts.ordinary_agent_session_lifecycle import OrdinaryAgentLeaseRecord
@@ -14,6 +15,7 @@ from control_plane.storage.postgres import (
     LaunchplaneOrdinaryAgentLeaseRow,
     LaunchplaneOrdinaryAgentSemanticOutcomeRow,
     LaunchplaneOrdinaryAgentReadAttemptRow,
+    LaunchplaneOrdinaryAgentNoOpLandingFinalizationRow,
 )
 from tests import test_postgres_integration as postgres_support
 from tests import test_ordinary_agent_session_storage as session_support
@@ -24,6 +26,111 @@ from tests import test_ordinary_agent_effect_storage as effect_support
     os.environ.get("LAUNCHPLANE_TEST_POSTGRES_URL"), "isolated PostgreSQL not configured"
 )
 class OrdinaryAgentEffectPostgresTests(unittest.TestCase):
+    def test_concurrent_no_op_finalization_has_one_created_and_one_replay(self) -> None:
+        from tests.test_ordinary_agent_noop_storage import NoOpLandingStorageFixture
+
+        with postgres_support._store_for_fresh_head_database() as store:
+            session_fixture = session_support.OrdinaryAgentSessionStorageTests()
+            session_fixture.prepare_store(store)
+            self.addCleanup(session_fixture.doCleanups)
+            fixture = NoOpLandingStorageFixture(self, session_fixture)
+            preparation, proposal = fixture.observed()
+            successor = fixture.successor(preparation)
+
+            def finalize() -> str:
+                return fixture.finalize(preparation, proposal, successor).disposition
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                dispositions = tuple(executor.map(lambda _: finalize(), range(2)))
+            self.assertEqual(sorted(dispositions), ["created", "replay"])
+            with store._session_factory() as session:
+                self.assertEqual(
+                    session.scalar(
+                        select(func.count()).select_from(
+                            LaunchplaneOrdinaryAgentNoOpLandingFinalizationRow
+                        )
+                    ),
+                    1,
+                )
+
+    def test_recovery_snapshot_is_repeatable_and_does_not_block_writer(self) -> None:
+        with postgres_support._store_for_fresh_head_database() as store:
+            session_fixture = session_support.OrdinaryAgentSessionStorageTests()
+            session_fixture.prepare_store(store)
+            self.addCleanup(session_fixture.doCleanups)
+            fixture = effect_support.OrdinaryAgentEffectStorageTests()
+            fixture.prepare_effect_fixture(session_fixture)
+            fence, command = fixture.prepare_controller()
+            effect = store.reserve_ordinary_agent_effect(
+                request_id=fixture.request.request_id,
+                expected_binding_revision=1,
+                controller_fence=fence,
+                command=command,
+                semantic_ordinal=1,
+            )
+            paused, resume = Event(), Event()
+
+            def pause_before_effect_read(
+                _connection: object,
+                _cursor: object,
+                statement: str,
+                _parameters: object,
+                _context: object,
+                _executemany: bool,
+            ) -> None:
+                if (
+                    current_thread().name.startswith("snapshot-reader")
+                    and statement.lstrip().upper().startswith("SELECT")
+                    and "launchplane_ordinary_agent_effects" in statement
+                ):
+                    paused.set()
+                    if not resume.wait(timeout=5):
+                        raise AssertionError("snapshot reader was not resumed")
+
+            def complete_effect() -> None:
+                with store._session_factory() as session:
+                    row = session.get(LaunchplaneOrdinaryAgentEffectRow, effect.effect_id)
+                    assert row is not None
+                    completed = effect.model_copy(
+                        update={"state": "completed", "revision": effect.revision + 1}
+                    )
+                    row.revision = completed.revision
+                    row.payload = completed.model_dump(mode="json", exclude_none=True)
+                    session.commit()
+
+            event.listen(store._engine, "before_cursor_execute", pause_before_effect_read)
+            try:
+                with (
+                    ThreadPoolExecutor(
+                        max_workers=1, thread_name_prefix="snapshot-reader"
+                    ) as snapshot_executor,
+                    ThreadPoolExecutor(
+                        max_workers=1, thread_name_prefix="effect-writer"
+                    ) as writer_executor,
+                ):
+                    snapshot_future = snapshot_executor.submit(
+                        store.read_ordinary_agent_job_recovery_snapshot,
+                        claim_fence=fixture.claim.claim_fence,
+                    )
+                    self.assertTrue(paused.wait(timeout=5))
+                    writer_future = writer_executor.submit(complete_effect)
+                    try:
+                        writer_future.result(timeout=5)
+                    finally:
+                        resume.set()
+                    before_write = snapshot_future.result(timeout=5)
+            finally:
+                resume.set()
+                event.remove(store._engine, "before_cursor_execute", pause_before_effect_read)
+
+            assert before_write.unresolved_effect is not None
+            self.assertEqual(before_write.unresolved_effect.effect, effect)
+            after_write = store.read_ordinary_agent_job_recovery_snapshot(
+                claim_fence=fixture.claim.claim_fence
+            )
+            self.assertIsNone(after_write.unresolved_effect)
+            self.assertEqual(after_write.completed_effects, 1)
+
     def test_two_reservations_charge_once_and_database_rejects_history_rewrite(self) -> None:
         with postgres_support._store_for_fresh_head_database() as store:
             session_fixture = session_support.OrdinaryAgentSessionStorageTests()

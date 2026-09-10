@@ -19,6 +19,10 @@ from control_plane.contracts.ordinary_agent_effect import (
     OrdinaryAgentProgressRecord,
 )
 from control_plane.contracts.ordinary_agent_session_lifecycle import OrdinaryAgentJobBinding
+from control_plane.ordinary_agent_noop_route import OrdinaryNoOpLandingRoute
+from control_plane.merge_train_structural_provenance import (
+    ordinary_candidate_is_exact_landing_dependency,
+)
 
 
 class OrdinaryAgentControllerReadStore(Protocol):
@@ -45,6 +49,16 @@ class OrdinaryAgentControllerAdapter:
     store: OrdinaryAgentControllerStore
     reader: OrdinaryAgentControllerReadStore
     _acquired_fence: OrdinaryAgentControllerFence | None = field(default=None, init=False)
+    _yield_confirmed: bool = field(default=False, init=False)
+
+    @property
+    def controller_acquired(self) -> bool:
+        return self._acquired_fence is not None
+
+    @property
+    def yield_confirmed(self) -> bool:
+        """Whether this adapter's latest acquired controller was durably yielded."""
+        return self._yield_confirmed
 
     @property
     def acquired_fence(self) -> OrdinaryAgentControllerFence:
@@ -117,6 +131,7 @@ class OrdinaryAgentControllerAdapter:
             lease_owner=record.lease_owner,
             lease_acquired_at=record.lease_acquired_at,
         )
+        self._yield_confirmed = False
         return record
 
     def compare_and_set_merge_train_controller_state_record(
@@ -138,11 +153,13 @@ class OrdinaryAgentControllerAdapter:
         if not record.lease_owner and not record.lease_acquired_at:
             # Release remains possible after cancellation. The store preserves
             # actual effect history; caller-provided error prose is not persisted.
-            return self.store.yield_ordinary_merge_train_controller_state_record(
+            yielded = self.store.yield_ordinary_merge_train_controller_state_record(
                 request_id=self.claimed.request.request_id,
                 expected_binding_revision=self.claimed.request.binding_revision,
                 controller_fence=fence,
             )
+            self._yield_confirmed = fence == self._acquired_fence
+            return yielded
         records = self.list_merge_train_controller_state_records(
             repository=record.repository, base_branch=record.base_branch, limit=1
         )
@@ -176,6 +193,12 @@ class OrdinaryAgentControllerAdapter:
 
 
 class OrdinaryAgentProgressReadStore(Protocol):
+    def list_ordinary_merge_train_batch_candidate_dependencies(
+        self,
+        *,
+        landing_plan_record: MergeTrainBatchLandingPlanRecord,
+    ) -> tuple[MergeTrainBatchCandidateRecord, ...]: ...
+
     def list_merge_train_batch_candidate_records(
         self,
         *,
@@ -208,6 +231,7 @@ class OrdinaryAgentProgressReadStore(Protocol):
 class OrdinaryAgentProgressAdapter:
     controller: OrdinaryAgentControllerAdapter
     reader: OrdinaryAgentProgressReadStore
+    no_op_route: OrdinaryNoOpLandingRoute | None = None
 
     def _filter[Record: OrdinaryAgentProgressRecord](
         self,
@@ -260,6 +284,27 @@ class OrdinaryAgentProgressAdapter:
             base_branch=base_branch,
             status=status,
             limit=limit,
+        )
+
+    def list_ordinary_merge_train_batch_candidate_dependencies(
+        self,
+        *,
+        landing_plan_record: MergeTrainBatchLandingPlanRecord,
+    ) -> tuple[MergeTrainBatchCandidateRecord, ...]:
+        plan = landing_plan_record.landing_plan
+        self.controller._require_target(plan.repository, plan.base_branch)
+        if landing_plan_record.ordinary_job_binding != self.controller.binding:
+            raise MergeTrainControllerLeaseLostError("ordinary progress binding mismatch")
+        records = self.reader.list_ordinary_merge_train_batch_candidate_dependencies(
+            landing_plan_record=landing_plan_record,
+        )
+        return tuple(
+            record
+            for record in records
+            if ordinary_candidate_is_exact_landing_dependency(
+                candidate_record=record,
+                landing_plan_record=landing_plan_record,
+            )
         )
 
     def list_merge_train_batch_landing_plan_records(
@@ -319,6 +364,12 @@ class OrdinaryAgentProgressAdapter:
             raise MergeTrainControllerLeaseLostError("ordinary progress fence changed")
         # This is the fence acquired for this claim, not a new authority lookup.
         # Joined storage checks its generation, current authority and predecessor.
+        if self.no_op_route is not None and self.no_op_route.armed:
+            return self.no_op_route.finalize(
+                record=record,
+                controller_fence=fence,
+                predecessor_record_id=current.active_record_id,
+            )
         return self.controller.store.write_ordinary_merge_train_record(
             request_id=self.controller.claimed.request.request_id,
             expected_binding_revision=self.controller.claimed.request.binding_revision,

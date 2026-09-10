@@ -10172,6 +10172,7 @@
           "reason": {
             "enum": [
               "provider_and_git_confirmed",
+              "already_contained_no_provider_effect",
               "provider_rejected",
               "reconciliation_confirmed_no_effect",
               "provider_transport_ambiguous",

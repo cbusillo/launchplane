@@ -35,6 +35,10 @@ from tests.test_merge_admission_records import _StaticEvaluator
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.merge_admission_record import MergeAdmissionProposal
 from control_plane.contracts.merge_train_controller_state import MergeTrainControllerStateRecord
+from control_plane.contracts.merge_train_batch import (
+    build_merge_train_batch_landing_plan,
+    build_ordinary_merge_train_candidate_ref,
+)
 from control_plane.contracts.ordinary_agent_effect import (
     OrdinaryAgentControllerFence,
     OrdinaryAgentLandingReservation,
@@ -105,11 +109,37 @@ class OrdinaryAgentLandingStorageTests(unittest.TestCase):
             head_sha=self.request.pull_requests[0].head_sha,
             policy_sha256=self.fixture.merge_policy.policy_sha256,
         )
+        binding = controller.ordinary_job_binding
+        assert binding is not None
+        candidate_value = candidate.candidate.model_copy(
+            update={
+                "candidate_ref": build_ordinary_merge_train_candidate_ref(
+                    binding=binding,
+                    batch_id=candidate.candidate.batch_id,
+                )
+            }
+        )
         self.candidate = candidate.model_copy(
-            update={"ordinary_job_binding": controller.ordinary_job_binding}
+            update={"ordinary_job_binding": binding, "candidate": candidate_value}
         )
         self.plan = plan.model_copy(
-            update={"ordinary_job_binding": controller.ordinary_job_binding}
+            update={
+                "ordinary_job_binding": binding,
+                "landing_plan": build_merge_train_batch_landing_plan(
+                    candidate=candidate_value,
+                    merge_method="merge",
+                    created_at=plan.landing_plan.created_at,
+                ),
+            }
+        )
+        provenance = candidate_value.structural_provenance
+        assert provenance is not None
+        self.structural = self.structural.model_copy(
+            update={
+                "candidate_sha256": candidate_value.candidate_sha256,
+                "landing_plan_sha256": self.plan.landing_plan.landing_plan_sha256,
+                "provenance_sha256": provenance.provenance_sha256,
+            }
         )
         # Seed already-built historical artifacts. These tests exercise landing
         # preparation, not the independently tested candidate-builder lifecycle.

@@ -21,7 +21,8 @@ LANDING_ENTRY_READ_RESERVE_SECONDS = 61
 LANDING_CONFIRMATION_RESERVE_SECONDS = 46
 
 # The same selection is used at both ends of acquisition. Terminal predecessor
-# branches may be deleted; their immutable head commit must still be readable.
+# branches and one explicitly proven no-op target may be deleted; their
+# immutable head commit must still be readable.
 _IDENTITY_FIELDS = """
 number headRefOid baseRefOid baseRefName updatedAt state
 mergeCommit { oid }
@@ -231,9 +232,10 @@ def _identity_signature(
             or "headRef" not in pull_request
             or "mergeCommit" not in pull_request
             or pull_request.get("state") not in {"OPEN", "CLOSED", "MERGED"}
+            or (pull_request.get("state") == "OPEN" and not pull_request.get("headRef"))
             or (
-                entry.pull_request_number not in terminal_entries
-                and (pull_request.get("state") != "OPEN" or not pull_request.get("headRef"))
+                pull_request.get("state") != "OPEN"
+                and entry.pull_request_number not in terminal_entries
             )
         ):
             raise OrdinaryAgentProviderEvidenceError("landing_entry_identity_mismatch")

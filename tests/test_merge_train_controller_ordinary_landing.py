@@ -18,6 +18,11 @@ from control_plane.contracts.merge_train_controller_state import (
     MergeTrainControllerStateRecord,
     build_merge_train_controller_key,
 )
+from control_plane.contracts.merge_train_structural_provenance import (
+    MergeTrainRollingStep,
+    MergeTrainStructuralEntryBinding,
+    MergeTrainStructuralProvenance,
+)
 from control_plane.contracts.ordinary_agent_session_lifecycle import OrdinaryAgentJobBinding
 from control_plane.merge_train_controller_run_once import (
     MergeTrainControllerLeaseContext,
@@ -66,14 +71,26 @@ class _ControllerStore:
 
 
 class _CandidateStore:
-    def __init__(self, record: MergeTrainBatchCandidateRecord) -> None:
+    def __init__(
+        self,
+        record: MergeTrainBatchCandidateRecord,
+        *,
+        dependencies: tuple[MergeTrainBatchCandidateRecord, ...] | None = None,
+    ) -> None:
         self.record = record
+        self.dependencies = dependencies or (record,)
 
     def list_merge_train_batch_candidate_records(
         self, **kwargs: object
     ) -> tuple[MergeTrainBatchCandidateRecord, ...]:
         del kwargs
         return (self.record,)
+
+    def list_ordinary_merge_train_batch_candidate_dependencies(
+        self, **kwargs: object
+    ) -> tuple[MergeTrainBatchCandidateRecord, ...]:
+        del kwargs
+        return self.dependencies
 
 
 class _LandingStore:
@@ -176,8 +193,61 @@ class OrdinaryLandingControllerTests(unittest.TestCase):
             binding_revision=1,
         )
         entries = (
-            MergeTrainBatchEntry(pull_request_number=12, position=1, head_sha="b" * 40),
-            MergeTrainBatchEntry(pull_request_number=13, position=2, head_sha="c" * 40),
+            MergeTrainBatchEntry(
+                pull_request_number=12,
+                position=1,
+                head_sha="b" * 40,
+                head_tree_sha="tree-head-12",
+            ),
+            MergeTrainBatchEntry(
+                pull_request_number=13,
+                position=2,
+                head_sha="c" * 40,
+                head_tree_sha="tree-head-13",
+            ),
+        )
+        provenance = MergeTrainStructuralProvenance(
+            repository=REPOSITORY,
+            base_branch="main",
+            base_sha="a" * 40,
+            base_tree_sha="tree-base",
+            policy_key=f"{REPOSITORY}:main",
+            policy_sha256=POLICY_SHA256,
+            entries=tuple(
+                MergeTrainStructuralEntryBinding(
+                    position=entry.position,
+                    pull_request_number=entry.pull_request_number,
+                    head_sha=entry.head_sha,
+                    head_tree_sha=entry.head_tree_sha,
+                )
+                for entry in entries
+            ),
+            steps=(
+                MergeTrainRollingStep(
+                    position=1,
+                    pull_request_number=12,
+                    parent_sha="a" * 40,
+                    parent_tree_sha="tree-base",
+                    head_sha="b" * 40,
+                    head_tree_sha="tree-head-12",
+                    result_sha="e" * 40,
+                    result_tree_sha="tree-result-12",
+                    kind="merge_commit",
+                ),
+                MergeTrainRollingStep(
+                    position=2,
+                    pull_request_number=13,
+                    parent_sha="e" * 40,
+                    parent_tree_sha="tree-result-12",
+                    head_sha="c" * 40,
+                    head_tree_sha="tree-head-13",
+                    result_sha="d" * 40,
+                    result_tree_sha="tree-result-13",
+                    kind="merge_commit",
+                ),
+            ),
+            candidate_sha="d" * 40,
+            candidate_tree_sha="tree-result-13",
         )
         candidate = MergeTrainBatchCandidate(
             batch_id="ordinary-batch",
@@ -190,8 +260,10 @@ class OrdinaryLandingControllerTests(unittest.TestCase):
                 binding=self.binding, batch_id="ordinary-batch"
             ),
             candidate_sha="d" * 40,
+            candidate_tree_sha="tree-result-13",
             status="passed",
             entries=entries,
+            structural_provenance=provenance,
             required_checks_status="pass",
             created_at=NOW,
             updated_at=NOW,
@@ -276,6 +348,30 @@ class OrdinaryLandingControllerTests(unittest.TestCase):
         self.assertEqual(resumed_result["landing_progress"], "complete")
         self.assertEqual(resumed_result["candidate_ref_cleanup_status"], "retained")
         self.assertEqual(client.cleanup_calls, 1)
+
+    def test_superseded_candidate_remains_exact_ordinary_landing_evidence(self) -> None:
+        candidate = self.candidate_record.model_copy(update={"status": "superseded"})
+
+        result, _ = self._advance(
+            record=self.landing_record,
+            landing_store=_LandingStore(self.landing_record),
+            client=_OrdinaryLandingClient(),
+            candidate_record=candidate,
+        )
+
+        self.assertEqual(result["landing_progress"], "partial")
+
+    def test_ambiguous_ordinary_candidate_dependency_is_denied(self) -> None:
+        candidate = self.candidate_record.model_copy(update={"status": "superseded"})
+        duplicate = candidate.model_copy(update={"record_id": "duplicate-candidate-record"})
+        store = _CandidateStore(candidate, dependencies=(candidate, duplicate))
+        with self.assertRaisesRegex(MergeTrainControllerRequestError, "exact candidate dependency"):
+            self._advance(
+                record=self.landing_record,
+                landing_store=_LandingStore(self.landing_record),
+                client=_OrdinaryLandingClient(),
+                candidate_store=store,
+            )
 
     def test_terminal_dry_run_and_failed_cleanup_remain_cleanup_pending(self) -> None:
         terminal = self._terminal_record()
@@ -396,6 +492,8 @@ class OrdinaryLandingControllerTests(unittest.TestCase):
         client: _OrdinaryLandingClient,
         mutate: bool = True,
         step_payload: dict[str, object] | None = None,
+        candidate_record: MergeTrainBatchCandidateRecord | None = None,
+        candidate_store: _CandidateStore | None = None,
     ) -> tuple[dict[str, object], MergeTrainControllerLeaseContext]:
         controller_store = _ControllerStore(
             _controller_record(
@@ -416,7 +514,8 @@ class OrdinaryLandingControllerTests(unittest.TestCase):
             trace_id="ordinary-landing-test",
             recorded_at=NOW,
             github_client=client,  # type: ignore[arg-type]
-            candidate_store=_CandidateStore(self.candidate_record),  # type: ignore[arg-type]
+            candidate_store=candidate_store
+            or _CandidateStore(candidate_record or self.candidate_record),  # type: ignore[arg-type]
             landing_store=landing_store,
             stack_collapse_store=_StackStore(),  # type: ignore[arg-type]
             admission_store=Mock(),

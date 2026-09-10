@@ -5,6 +5,7 @@ from copy import deepcopy
 from typing import Any
 
 from control_plane.contracts.ordinary_agent_snapshot import OrdinaryAgentLandingEvidence
+from control_plane.contracts.merge_train_batch import build_merge_train_batch_landing_plan
 from control_plane.merge_train_github import RecordingMergeTrainGitHubTransport
 from control_plane.ordinary_agent_github_transport import (
     DeadlineMergeTrainGitHubTransport,
@@ -143,6 +144,69 @@ class LandingReaderTests(unittest.TestCase):
         )
         return result, inner
 
+    def configure_selected_no_op(self, *, state: str) -> None:
+        candidate = self.fixture.candidate.candidate
+        provenance = candidate.structural_provenance
+        assert provenance is not None
+        step = provenance.steps[0]
+        no_op_step = step.model_copy(
+            update={
+                "result_sha": step.parent_sha,
+                "result_tree_sha": step.parent_tree_sha,
+                "kind": "no_op_already_contained",
+            }
+        )
+        provenance_payload = provenance.model_dump(mode="python")
+        provenance_payload.update(
+            {
+                "steps": (no_op_step,),
+                "candidate_sha": step.parent_sha,
+                "candidate_tree_sha": step.parent_tree_sha,
+                "provenance_sha256": "",
+                "candidate_sha256": "",
+            }
+        )
+        no_op_provenance = type(provenance).model_validate(provenance_payload)
+        candidate_payload = candidate.model_dump(mode="python")
+        candidate_payload.update(
+            {
+                "candidate_sha": step.parent_sha,
+                "candidate_tree_sha": step.parent_tree_sha,
+                "candidate_sha256": "",
+                "structural_provenance": no_op_provenance,
+            }
+        )
+        no_op_candidate = type(candidate).model_validate(candidate_payload)
+        self.fixture.candidate = self.fixture.candidate.model_copy(
+            update={"candidate": no_op_candidate}
+        )
+        landing_plan = build_merge_train_batch_landing_plan(
+            candidate=no_op_candidate,
+            merge_method="merge",
+            created_at=self.fixture.plan.landing_plan.created_at,
+        )
+        self.fixture.plan = self.fixture.plan.model_copy(update={"landing_plan": landing_plan})
+        selected = landing_plan.entries[0]
+        self.preparation = self.preparation.model_copy(
+            update={
+                "landing_plan_sha256": landing_plan.landing_plan_sha256,
+                "entry": selected,
+                "expected_merge_tree_sha": selected.recorded_candidate_result_tree_sha,
+            }
+        )
+        repository = self.response["data"]["repository"]
+        repository["candidate"]["oid"] = no_op_candidate.candidate_sha
+        repository["candidate"]["tree"]["oid"] = no_op_candidate.candidate_tree_sha
+        repository["ref"]["compare"]["headTarget"]["oid"] = no_op_candidate.candidate_sha
+        pull_request = repository["pr0"]
+        pull_request["state"] = state
+        if state == "OPEN":
+            pull_request["mergeCommit"] = None
+        else:
+            pull_request["headRef"] = None
+            pull_request["headRefName"] = None
+            pull_request["mergeCommit"] = {"oid": "f" * 40} if state == "MERGED" else None
+
     def test_prepared_reader_preserves_rename_and_authorship_without_source_check_invention(
         self,
     ) -> None:
@@ -186,3 +250,35 @@ class LandingReaderTests(unittest.TestCase):
         self.assertIsNone(entry.actor_id)
         self.assertEqual(entry.actor_role, "unknown")
         self.assertFalse(any("/collaborators/" in item.path for item in inner.requests))
+
+    def test_selected_proven_no_op_preserves_explicit_lifecycle_in_queue_evidence(self) -> None:
+        preparation = self.preparation
+        candidate = self.fixture.candidate
+        plan = self.fixture.plan
+        response = deepcopy(self.response)
+        for state in ("OPEN", "CLOSED", "MERGED"):
+            with self.subTest(state=state):
+                self.preparation = preparation
+                self.fixture.candidate = candidate
+                self.fixture.plan = plan
+                self.response = deepcopy(response)
+                self.configure_selected_no_op(state=state)
+
+                evidence, _ = self.read(deepcopy(self.response))
+
+                self.assertEqual(len(evidence.snapshot.pull_requests), 1)
+                self.assertEqual(evidence.snapshot.pull_requests[0].state, state.lower())
+                self.assertEqual(
+                    evidence.snapshot.pull_requests[0].head_sha,
+                    self.preparation.entry.expected_head_sha,
+                )
+
+    def test_non_no_op_selected_entry_still_requires_open_lifecycle(self) -> None:
+        self.response["data"]["repository"]["pr0"]["state"] = "CLOSED"
+        self.response["data"]["repository"]["pr0"]["headRef"] = None
+        self.response["data"]["repository"]["pr0"]["headRefName"] = None
+
+        with self.assertRaisesRegex(
+            OrdinaryAgentProviderEvidenceError, "landing_entry_identity_mismatch"
+        ):
+            self.read(deepcopy(self.response))

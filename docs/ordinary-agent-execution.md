@@ -816,11 +816,13 @@ before custody reservation to avoid charging an attempt for an existing wait.
 
 The ordinary controller client has an optional one-entry landing callback. Each
 call persists the exact successor before returning, retains the proven rolling
-base across completed entries, and refuses unassembled, no-op, stack-collapse,
-or recovery paths. The callback owns joined admission and durable dispatch intent;
+base across completed entries, and rejects inconsistent recovery state and
+unassembled or unsupported stack-collapse paths. The merge callback owns joined
+admission and durable dispatch intent;
 the legacy provider checkpoint hook does not establish ordinary-agent authority.
-Production worker assembly, joined no-op finalization, recovery routing, and
-activation qualification remain prerequisites.
+Already-contained entries require the separate joined no-op callback described
+below. Renewed finite admission, measured fleet qualification and runtime
+activation remain separate prerequisites.
 
 New provider-inspected enrollment carries the discovered installation ID into
 the target-specific custody record. Absent IDs are omitted when serializing old
@@ -838,6 +840,14 @@ Blocked admission or recovery results use their explicit blocked reason instead.
 A terminal active landing remains selectable until cleanup; job completion then
 yields its controller and supersedes its own progress through the joined store.
 This result contract does not itself assemble the production worker.
+
+Creating an ordinary landing plan supersedes its candidate as the active
+coordination record. The active landing may still use that exact historical
+candidate as evidence: the binding, candidate ref, policy and immutable digests
+must all match. A bounded exact lookup rejects ambiguous dependencies. The
+candidate is never revived as active work, and generic controller behavior still
+requires an active candidate. Current controller and admission gates continue to
+decide whether the landing may advance.
 
 Completed ordinary landing history can restore a missing landing outcome or
 progress checkpoint without provider work. Creating a missing exact landing
@@ -857,3 +867,41 @@ executor or replays validated completion without provider work. Unknown effects
 and head-refresh rebinding return typed recovery requirements for a separate job
 poll; the router never reconciles and resends in the same call. Landing remains
 in the joined landing path, and stack methods are excluded from this router.
+
+The internal job recovery snapshot checks the exact live job claim and reads the
+current binding, reserved or uncertain effect history, open landing preparation,
+custody uncertainty, and applicable read/provider deadlines together. PostgreSQL
+uses a fresh read-only repeatable-read transaction; SQLite rehearsal uses an
+explicit read transaction. The read neither acquires a controller nor renews
+mutation authority, so recovery remains possible when the original request has
+expired or been cancelled. Every subsequent write still checks its own current
+authority and claim. Historical counts cover the request; actionable history and
+read deadlines belong to its current binding.
+
+The inactive ordinary job advancer uses that snapshot before acquiring a
+controller. It can perform one uncertain-effect observation and then yield,
+without continuing to mutation in the same poll. Mutation assembly requires the
+inspected installation and current policy and repository identities. A normal
+controller result, or an expected error mapped to a wait, is returned only after
+the acquired lease has a confirmed joined yield. Failed yield remains an error
+for claim recovery. Completion requires a fresh recovery snapshot with no
+unresolved effect or custody uncertainty. This callable is not registered with
+the service worker and does not activate delivery.
+
+For a proven `no_op_already_contained` candidate step, the ordinary landing
+executor uses one charged preparation and custody lease to read fresh evidence.
+It retains the actual PR lifecycle, including a closed or merged PR whose only
+queue ineligibility is that lifecycle. Current Owner, engineering, technical,
+policy and controller gates still apply. The executor arms a one-use progress
+route, then invokes the existing controller checkpoint. The route builds the
+admission after that checkpoint renews its lease and commits the admission,
+zero-effect outcome, exact skipped successor, predecessor supersession and
+preparation consumption together. It creates no dispatch child or landing effect
+and sends no merge request. A later poll loads the committed successor; recovery
+does not create a second progress record to recover a lost return value.
+An expired provider window closes the preparation with its deadline reason and
+returns a bounded wait after confirmed controller yield. Fresh authority or
+evidence changes use the existing blocked-admission path; a failed yield,
+missing historical proof, conflicting successor or persistence failure remains
+an error. None of these outcomes reuses a consumed admission or authorizes a
+new provider attempt.

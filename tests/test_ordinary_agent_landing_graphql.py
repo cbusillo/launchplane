@@ -126,6 +126,65 @@ class LandingGraphQLTests(unittest.TestCase):
         with self.assertRaises(OrdinaryAgentProviderEvidenceError):
             self.read(missing)
 
+    def test_explicitly_allowed_no_op_target_accepts_closed_or_merged_lifecycle(self) -> None:
+        for state in ("CLOSED", "MERGED"):
+            with self.subTest(state=state):
+                response = deepcopy(self.response)
+                target = response["data"]["repository"]["pr1"]
+                target["state"] = state
+                target["headRef"] = None
+                target["mergeCommit"] = (
+                    {"oid": "already-merged-elsewhere"} if state == "MERGED" else None
+                )
+                _, transport = self.transport([response, deepcopy(response)])
+                observation = read_landing_graphql(
+                    transport=transport,
+                    candidate=self.candidate,
+                    repository_id=123,
+                    repository_owner_id=456,
+                    base_sha="base",
+                    terminal_entries=frozenset({1, 2}),
+                    utc_seconds=lambda: 1000,
+                )
+                confirm_landing_graphql(
+                    transport=transport,
+                    candidate=self.candidate,
+                    repository_id=123,
+                    repository_owner_id=456,
+                    base_sha="base",
+                    terminal_entries=frozenset({1, 2}),
+                    observation=observation,
+                )
+
+    def test_non_open_target_without_explicit_permission_fails_closed(self) -> None:
+        response = deepcopy(self.response)
+        response["data"]["repository"]["pr1"]["state"] = "CLOSED"
+        response["data"]["repository"]["pr1"]["headRef"] = None
+        _, transport = self.transport([response])
+
+        with self.assertRaisesRegex(
+            OrdinaryAgentProviderEvidenceError, "landing_entry_identity_mismatch"
+        ):
+            self.read(transport)
+
+    def test_open_target_still_requires_a_live_head_ref_when_non_open_is_allowed(self) -> None:
+        response = deepcopy(self.response)
+        response["data"]["repository"]["pr1"]["headRef"] = None
+        _, transport = self.transport([response])
+
+        with self.assertRaisesRegex(
+            OrdinaryAgentProviderEvidenceError, "landing_entry_identity_mismatch"
+        ):
+            read_landing_graphql(
+                transport=transport,
+                candidate=self.candidate,
+                repository_id=123,
+                repository_owner_id=456,
+                base_sha="base",
+                terminal_entries=frozenset({1, 2}),
+                utc_seconds=lambda: 1000,
+            )
+
     def test_final_confirmation_rejects_pr_or_base_drift(self) -> None:
         for field, value in (
             ("headRefOid", "different-head"),

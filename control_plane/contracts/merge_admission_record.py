@@ -22,6 +22,7 @@ MergeLandingOutcomeStatus = Literal["landed", "rejected", "reconcile_required"]
 MergeLandingObservedPullRequestState = Literal["", "open", "closed", "merged"]
 MergeLandingOutcomeReason = Literal[
     "provider_and_git_confirmed",
+    "already_contained_no_provider_effect",
     "provider_rejected",
     "reconciliation_confirmed_no_effect",
     "provider_transport_ambiguous",
@@ -323,7 +324,7 @@ class MergeLandingOutcomeRecord(BaseModel):
             if self.provider_conclusive_rejection:
                 raise ValueError("landed outcome cannot carry provider rejection")
             if not self.exact_landing_confirmed or self.base_contains_merge_commit is not True:
-                raise ValueError("landed outcome requires exact provider and Git confirmation")
+                raise ValueError("landed outcome requires exact settled-state confirmation")
             if not all(
                 (
                     self.observed_pull_request_head_sha,
@@ -335,8 +336,22 @@ class MergeLandingOutcomeRecord(BaseModel):
                 )
             ):
                 raise ValueError("landed outcome requires complete Git evidence")
-            if self.reason != "provider_and_git_confirmed":
-                raise ValueError("landed outcome requires provider_and_git_confirmed reason")
+            if self.reason == "already_contained_no_provider_effect":
+                if (
+                    self.provider_effect_attempted
+                    or self.observation_sequence != 1
+                    or self.provider_status_code is not None
+                    or self.provider_request_id
+                    or self.provider_message
+                    or self.observed_pull_request_state not in {"open", "closed", "merged"}
+                    or self.merge_commit_sha != self.observed_base_sha
+                    or self.merge_commit_tree_sha != self.observed_base_tree_sha
+                ):
+                    raise ValueError(
+                        "already-contained outcome requires exact zero-effect base evidence"
+                    )
+            elif self.reason != "provider_and_git_confirmed":
+                raise ValueError("landed outcome reason is unsupported")
         elif self.status == "rejected":
             if self.exact_landing_confirmed or self.merge_commit_sha or self.merge_commit_tree_sha:
                 raise ValueError("rejected outcome cannot claim a landing")
@@ -370,7 +385,11 @@ class MergeLandingOutcomeRecord(BaseModel):
                 raise ValueError("reconcile-required outcome cannot claim conclusive rejection")
             if self.exact_landing_confirmed:
                 raise ValueError("reconcile-required outcome cannot claim exact landing")
-            if self.reason in {"provider_and_git_confirmed", "provider_rejected"}:
+            if self.reason in {
+                "provider_and_git_confirmed",
+                "already_contained_no_provider_effect",
+                "provider_rejected",
+            }:
                 raise ValueError("reconcile-required outcome requires an ambiguity reason")
         expected_binding = merge_landing_outcome_binding_sha256(self)
         binding = self.outcome_binding_sha256.strip().lower()
@@ -460,6 +479,17 @@ def validate_merge_landing_outcome_for_admission(
             or outcome.observed_base_tree_sha != admission.effective_base_tree_sha
         ):
             raise ValueError("no-effect reconciliation evidence does not match admission")
+    if outcome.reason == "already_contained_no_provider_effect":
+        if (
+            outcome.status != "landed"
+            or outcome.observed_pull_request_head_sha != admission.pull_request_head_sha
+            or outcome.observed_pull_request_head_tree_sha != admission.pull_request_head_tree_sha
+            or outcome.observed_base_sha != admission.effective_base_sha
+            or outcome.observed_base_tree_sha != admission.effective_base_tree_sha
+            or outcome.merge_commit_sha != admission.effective_base_sha
+            or outcome.merge_commit_tree_sha != admission.effective_base_tree_sha
+        ):
+            raise ValueError("already-contained outcome evidence does not match admission")
 
 
 def validate_merge_landing_outcome_successor(

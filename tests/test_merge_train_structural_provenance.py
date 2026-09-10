@@ -12,7 +12,9 @@ from control_plane.contracts.merge_train_batch import (
     build_merge_train_batch_candidate_ref,
     build_merge_train_batch_id,
     build_merge_train_batch_landing_plan,
+    build_ordinary_merge_train_candidate_ref,
 )
+from control_plane.contracts.ordinary_agent_session_lifecycle import OrdinaryAgentJobBinding
 from control_plane.contracts.merge_train_structural_provenance import (
     MergeTrainCombinedCandidateOwnerReview,
     MergeTrainOwnerEvidenceBinding,
@@ -32,6 +34,33 @@ from control_plane.merge_train_structural_provenance import (
 
 
 class MergeTrainStructuralProvenanceTests(unittest.TestCase):
+    def test_superseded_candidate_is_evidence_only_for_its_exact_ordinary_landing(self) -> None:
+        candidate_record, landing_record = _ordinary_records((_entry(1, 1),))
+
+        exact = _evaluate(candidate_record, landing_record, target_position=1)
+        wrong_binding = landing_record.model_copy(
+            update={
+                "ordinary_job_binding": landing_record.ordinary_job_binding.model_copy(
+                    update={"request_id": "other-request"}
+                )
+                if landing_record.ordinary_job_binding is not None
+                else None
+            }
+        )
+        mismatched = _evaluate(candidate_record, wrong_binding, target_position=1)
+        generic_candidate, generic_landing = _records((_entry(1, 1),))
+        generic = _evaluate(
+            generic_candidate.model_copy(update={"status": "superseded"}),
+            generic_landing,
+            target_position=1,
+        )
+
+        self.assertEqual(exact.status, "exact")
+        self.assertEqual(mismatched.status, "unknown")
+        self.assertIn("structural_record_superseded", mismatched.reason_codes)
+        self.assertEqual(generic.status, "unknown")
+        self.assertIn("structural_record_superseded", generic.reason_codes)
+
     def test_single_candidate_is_exact_only_on_recorded_base(self) -> None:
         candidate_record, landing_record = _records((_entry(1, 1),))
 
@@ -567,6 +596,44 @@ def _records(
         source="test",
         updated_at="2026-08-11T04:01:00Z",
         landing_plan=plan,
+    )
+
+
+def _ordinary_records(
+    entries: tuple[MergeTrainBatchEntry, ...],
+) -> tuple[MergeTrainBatchCandidateRecord, MergeTrainBatchLandingPlanRecord]:
+    candidate_record, _ = _records(entries)
+    binding = OrdinaryAgentJobBinding(
+        request_id="ordinary-request",
+        scope_sha256="a" * 64,
+        binding_revision=1,
+    )
+    candidate = candidate_record.candidate.model_copy(
+        update={
+            "candidate_ref": build_ordinary_merge_train_candidate_ref(
+                binding=binding,
+                batch_id=candidate_record.candidate.batch_id,
+            )
+        }
+    )
+    candidate_record = candidate_record.model_copy(
+        update={
+            "status": "superseded",
+            "ordinary_job_binding": binding,
+            "candidate": candidate,
+        }
+    )
+    landing_plan = build_merge_train_batch_landing_plan(
+        candidate=candidate,
+        merge_method="merge",
+        created_at="2026-08-11T04:01:00Z",
+    )
+    return candidate_record, MergeTrainBatchLandingPlanRecord(
+        ordinary_job_binding=binding,
+        record_id="ordinary-landing-record",
+        source="test",
+        updated_at="2026-08-11T04:01:00Z",
+        landing_plan=landing_plan,
     )
 
 

@@ -37,6 +37,11 @@ from control_plane.ordinary_agent_github_transport import (
     require_installation_provider_ready,
 )
 from control_plane.ordinary_agent_landing_dispatch import FinalizedOrdinaryLandingDispatcher
+from control_plane.ordinary_agent_noop_route import (
+    OrdinaryNoOpFinalizationUnavailable,
+    OrdinaryNoOpLandingContext,
+    OrdinaryNoOpLandingRoute,
+)
 from control_plane.ordinary_agent_session_lifecycle import OrdinaryAgentSessionAdmissionDenied
 from control_plane.ordinary_agent_landing_reader import read_ordinary_agent_landing_evidence
 from control_plane.workflows.launchplane import github_api_request
@@ -76,11 +81,29 @@ def execute_fresh_ordinary_landing(
         [OrdinaryAgentLandingPreparation, OrdinaryAgentLandingEvidence], GuardedMergeAdmission
     ],
     checkpoint: Callable[[MergeTrainBatchLandingEntry], None],
+    no_op_route: OrdinaryNoOpLandingRoute | None = None,
     api_request: GitHubApiRequest = github_api_request,
     transport_factory: Callable[[str], MergeTrainGitHubTransport] | None = None,
     monotonic: Callable[[], float] = time.monotonic,
     utc_now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
 ) -> MergeTrainBatchLandingEntry:
+    provenance = candidate_record.candidate.structural_provenance
+    step = (
+        next(
+            (
+                item
+                for item in provenance.steps
+                if item.pull_request_number == pull_request_number
+                and item.position == semantic_ordinal
+            ),
+            None,
+        )
+        if provenance is not None
+        else None
+    )
+    is_no_op = step is not None and step.kind == "no_op_already_contained"
+    if is_no_op and no_op_route is None:
+        raise OrdinaryNoOpFinalizationUnavailable()
     reservation = store.reserve_ordinary_landing_preparation(
         request_id=request_id,
         expected_binding_revision=binding_revision,
@@ -159,6 +182,30 @@ def execute_fresh_ordinary_landing(
                 evidence=evidence,
             )
             guard = guard_factory(preparation, evidence)
+            if is_no_op:
+                assert no_op_route is not None
+                entry = MergeTrainBatchLandingEntry.model_validate(
+                    {
+                        **preparation.entry.model_dump(mode="json"),
+                        "status": "skipped",
+                        "landed_head_sha": preparation.entry.expected_head_sha,
+                        "landed_head_tree_sha": preparation.entry.expected_head_tree_sha,
+                        "merge_commit_sha": evidence.base_identity.sha,
+                        "merge_commit_tree_sha": evidence.base_identity.tree_sha,
+                        "recorded_rolling_base_sha": preparation.expected_base_sha,
+                        "recorded_rolling_base_tree_sha": preparation.expected_base_tree_sha,
+                    }
+                )
+                with no_op_route.arm(
+                    OrdinaryNoOpLandingContext(
+                        preparation=preparation,
+                        guard=guard,
+                        entry=entry,
+                        custody_attempt_id=lease.attempt_id,
+                    )
+                ):
+                    checkpoint(entry)
+                return entry
             proposal = guard.build_proposal(
                 entry=preparation.entry,
                 observed_base_sha=evidence.base_identity.sha,
@@ -232,7 +279,7 @@ def _preparation_failure_reason(
 ) -> Literal[
     "provider_wait", "provider_attempt_deadline", "evidence_denied", "process_interrupted"
 ]:
-    if isinstance(error, OrdinaryAgentProviderDeferred):
+    if isinstance(error, (OrdinaryAgentProviderDeferred, OrdinaryAgentSessionAdmissionDenied)):
         if error.reason_code == "provider_wait":
             return "provider_wait"
         if error.reason_code == "provider_attempt_deadline":

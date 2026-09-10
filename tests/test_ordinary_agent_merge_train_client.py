@@ -196,13 +196,19 @@ class OrdinaryAgentLandingStepTests(unittest.TestCase):
         self.client_without_step = self.client()
         self.candidate_record, self.landing_record = self.records()
 
-    def client(self, step: OrdinaryAgentLandingStep | None = None) -> OrdinaryAgentMergeTrainClient:
+    def client(
+        self,
+        step: OrdinaryAgentLandingStep | None = None,
+        *,
+        no_op_step: OrdinaryAgentLandingStep | None = None,
+    ) -> OrdinaryAgentMergeTrainClient:
         return OrdinaryAgentMergeTrainClient(
             request=self.request,
             effect_executor=self.executor,
             snapshot=Mock(),
             candidate_check=Mock(),
             advance_landing_entry=step,
+            advance_no_op_landing_entry=no_op_step,
         )
 
     def records(
@@ -356,6 +362,58 @@ class OrdinaryAgentLandingStepTests(unittest.TestCase):
             }
         )
 
+    def test_no_op_checkpoints_once_and_next_entry_preserves_rolling_base(self) -> None:
+        candidate, landing = self.records(no_op_first=True)
+        merge_step = Mock()
+        phases: list[str] = []
+
+        def no_op_step(**kwargs: object) -> MergeTrainBatchLandingEntry:
+            entry = kwargs["entry"]
+            assert isinstance(entry, MergeTrainBatchLandingEntry)
+            skipped = MergeTrainBatchLandingEntry.model_validate(
+                {
+                    **entry.model_dump(),
+                    "status": "skipped",
+                    "recorded_rolling_base_sha": self.request.base_sha,
+                    "recorded_rolling_base_tree_sha": "base-tree",
+                    "landed_head_sha": entry.expected_head_sha,
+                    "landed_head_tree_sha": entry.expected_head_tree_sha,
+                    "merge_commit_sha": self.request.base_sha,
+                    "merge_commit_tree_sha": "base-tree",
+                }
+            )
+            callback = kwargs["checkpoint"]
+            assert callable(callback)
+            callback(skipped)
+            return skipped
+
+        def checkpoint(
+            plan: MergeTrainBatchLandingPlan, entry: MergeTrainBatchLandingEntry, phase: str
+        ) -> MergeTrainBatchLandingPlanRecord:
+            phases.append(phase)
+            return build_merge_train_batch_landing_plan_record(
+                landing_plan=plan,
+                source="test:no-op",
+                updated_at="2026-01-01T00:00:01Z",
+                ordinary_job_binding=self.client_without_step.binding,
+            )
+
+        client = self.client(merge_step, no_op_step=no_op_step)
+        guard = self.guard(candidate_record=candidate, landing_record=landing)
+        result = client.land_batch_candidate(
+            landing_plan=landing.landing_plan,
+            admission_guard=guard,
+            recorded_at=self.now,
+            checkpoint=checkpoint,
+        )
+        self.assertEqual(phases, ["entry_skipped"])
+        merge_step.assert_not_called()
+        self.assertEqual(
+            client._next_landing_entry(landing_plan=result, candidate_record=candidate),
+            (1, self.request.base_sha, "base-tree"),
+        )
+        self.assertEqual(guard.landing_plan_record.landing_plan, result)
+
     def test_advances_exactly_one_entry_and_restart_uses_proven_rolling_tip(self) -> None:
         calls: list[tuple[int, int, str]] = []
 
@@ -405,6 +463,47 @@ class OrdinaryAgentLandingStepTests(unittest.TestCase):
         )
         self.assertEqual(terminal, second)
         terminal_calls.assert_not_called()
+
+    def test_superseded_candidate_is_accepted_only_as_exact_landing_dependency(self) -> None:
+        candidate = self.candidate_record.model_copy(update={"status": "superseded"})
+        callback = Mock()
+        callback.side_effect = lambda **kwargs: self._checkpointed_merge(kwargs)
+
+        result = self.client(callback).land_batch_candidate(
+            landing_plan=self.landing_record.landing_plan,
+            admission_guard=self.guard(candidate_record=candidate),
+            recorded_at=self.now,
+            checkpoint=self.checkpoint,
+        )
+
+        self.assertEqual(result.entries[0].status, "merged")
+        wrong_binding = candidate.model_copy(
+            update={
+                "ordinary_job_binding": self.client_without_step.binding.model_copy(
+                    update={"request_id": "other-request"}
+                )
+            }
+        )
+        with self.assertRaises(MergeTrainGitHubStaleHeadError):
+            self.client(callback).land_batch_candidate(
+                landing_plan=self.landing_record.landing_plan,
+                admission_guard=self.guard(candidate_record=wrong_binding),
+                recorded_at=self.now,
+                checkpoint=self.checkpoint,
+            )
+
+    def _checkpointed_merge(self, kwargs: dict[str, object]) -> MergeTrainBatchLandingEntry:
+        entry = kwargs["entry"]
+        assert isinstance(entry, MergeTrainBatchLandingEntry)
+        result = self.merged_entry(
+            entry,
+            rolling_sha=self.request.base_sha,
+            rolling_tree="base-tree",
+        )
+        checkpoint = kwargs["checkpoint"]
+        assert callable(checkpoint)
+        checkpoint(result)
+        return result
 
     def test_requires_callback_and_exact_checkpoint_before_success(self) -> None:
         with self.assertRaisesRegex(PermissionError, "not assembled"):

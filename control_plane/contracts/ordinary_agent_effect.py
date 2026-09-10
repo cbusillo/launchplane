@@ -543,6 +543,34 @@ class OrdinaryAgentJobView(StrictFrozenModel):
         return tuple(value) if isinstance(value, list) else value
 
 
+class OrdinaryAgentJobRecoverySnapshot(StrictFrozenModel):
+    """One claim-bound read snapshot for recovery routing and completion checks.
+
+    Counts cover all request history. Actionable records and pending read timing
+    cover only the request's current scope and binding. Custody uncertainty is
+    separate because the public job view folds it into its unresolved count.
+    The latest unadvanced effect follows the persisted action order; its state
+    is deliberately unclassified so the recovery evaluator decides whether it
+    is retryable or terminal. The unresolved and latest-unadvanced fields may
+    identify the same effect when an open effect has exhausted recovery.
+    """
+
+    observed_at: Epoch
+    request_id: Identifier
+    scope_sha256: Digest
+    binding_revision: int = Field(ge=1)
+    unresolved_effect: OrdinaryAgentEffectHistory | None = None
+    open_landing_preparation: OrdinaryAgentLandingPreparation | None = None
+    latest_unadvanced_effect: OrdinaryAgentEffectHistory | None = None
+    completed_effects: int = Field(ge=0)
+    total_effects: int = Field(ge=0)
+    custody_uncertain: bool
+    pending_read_retry_not_before: Epoch | None = None
+    inspected_app_id: int | None = None
+    inspected_installation_id: int | None = None
+    provider_retry_not_before: Epoch | None = None
+
+
 class OrdinaryAgentSnapshotAttemptRecord(StrictFrozenModel):
     schema_version: Literal[1] = 1
     attempt_id: Identifier
@@ -739,6 +767,9 @@ class OrdinaryAgentControllerStore(Protocol):
 
 
 class OrdinaryAgentEffectStore(Protocol):
+    def read_ordinary_agent_job_recovery_snapshot(
+        self, *, claim_fence: OrdinaryAgentJobClaimFence
+    ) -> OrdinaryAgentJobRecoverySnapshot: ...
     def reserve_ordinary_agent_effect(
         self,
         *,
