@@ -336,7 +336,11 @@ class OrdinaryAgentLandingStepTests(unittest.TestCase):
         plan: MergeTrainBatchLandingPlan,
         entry: MergeTrainBatchLandingEntry,
         phase: str,
-    ) -> MergeTrainBatchLandingPlanRecord:
+    ) -> MergeTrainBatchLandingPlanRecord | None:
+        if phase == "merge_entry":
+            self.assertEqual(plan.entries[entry.position - 1], entry)
+            self.assertEqual(entry.status, "planned")
+            return None
         self.assertEqual(phase, "entry_merged")
         self.assertEqual(plan.entries[entry.position - 1], entry)
         return build_merge_train_batch_landing_plan_record(

@@ -930,7 +930,7 @@ export type MergeLandingOutcomeRecord = {
     provider_request_id: string;
     provider_status_code: number | null;
     pull_request_number: number;
-    reason: 'provider_and_git_confirmed' | 'already_contained_no_provider_effect' | 'provider_rejected' | 'reconciliation_confirmed_no_effect' | 'provider_transport_ambiguous' | 'process_interrupted' | 'lease_lost_after_admission' | 'landing_evidence_incomplete' | 'landing_evidence_contradicted';
+    reason: 'provider_and_git_confirmed' | 'already_contained_no_provider_effect' | 'provider_rejected' | 'dispatch_not_attempted' | 'reconciliation_confirmed_no_effect' | 'provider_transport_ambiguous' | 'process_interrupted' | 'lease_lost_after_admission' | 'landing_evidence_incomplete' | 'landing_evidence_contradicted';
     repository: string;
     schema_version: 1;
     source: string;

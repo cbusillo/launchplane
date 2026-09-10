@@ -9,7 +9,10 @@ import json
 from pydantic import Field, TypeAdapter, field_validator, model_validator
 
 from control_plane.contracts.ordinary_agent import OrdinaryAgentTarget, StrictFrozenModel
-from control_plane.contracts.ordinary_agent_custody import OrdinaryAgentCustodyCandidate
+from control_plane.contracts.ordinary_agent_custody import (
+    OrdinaryAgentCustodyCandidate,
+    OrdinaryAgentCustodyIssueAttempt,
+)
 from control_plane.contracts.ordinary_agent_session_lifecycle import (
     OrdinaryAgentFiniteRequestRecord,
 )
@@ -56,6 +59,7 @@ OrdinaryAgentProgressRecord: TypeAlias = (
 MAX_CUSTODY_MINT_ATTEMPTS_PER_DISPATCH_CHILD = 3
 MAX_CUSTODY_MINT_ATTEMPTS_PER_EFFECT = 9
 MAX_SEMANTIC_DISPATCH_ATTEMPTS_PER_EFFECT = 3
+MAX_ORDINARY_LANDING_ATTEMPTS_PER_ENTRY = MAX_SEMANTIC_DISPATCH_ATTEMPTS_PER_EFFECT
 MIN_PROVIDER_TOKEN_TTL_AT_DISPATCH_SECONDS = 120
 EFFECT_DISPATCH_DB_LOCK_TIMEOUT_SECONDS = 5
 MAX_ASYNC_PROVIDER_OBSERVATIONS = 3
@@ -178,6 +182,15 @@ class OrdinaryAgentLandingPreparation(StrictFrozenModel):
     principal_id: Identifier
     scope_sha256: Digest
     binding_revision: int = Field(ge=1)
+    attempt_ordinal: int = Field(
+        default=1,
+        ge=1,
+        le=MAX_ORDINARY_LANDING_ATTEMPTS_PER_ENTRY,
+        exclude_if=lambda value: value == 1,
+    )
+    predecessor_preparation_id: Identifier | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     semantic_ordinal: int = Field(ge=1)
     action_ordinal: int = Field(ge=1)
     target: OrdinaryAgentTarget
@@ -199,7 +212,7 @@ class OrdinaryAgentLandingPreparation(StrictFrozenModel):
     idempotency_key: Identifier
     candidate: OrdinaryAgentCustodyCandidate = Field(repr=False)
     revision: int = Field(default=1, ge=1)
-    state: Literal["reserved", "observed", "consumed", "terminal"] = "reserved"
+    state: Literal["reserved", "observed", "consumed", "terminal", "superseded"] = "reserved"
     reserved_at: Epoch
     work_expires_at: Epoch | None = None
     evidence: OrdinaryAgentLandingEvidence | None = None
@@ -211,6 +224,14 @@ class OrdinaryAgentLandingPreparation(StrictFrozenModel):
     @classmethod
     def normalize_authority(cls, value: object) -> object:
         return tuple(value) if isinstance(value, list) else value
+
+    @model_validator(mode="after")
+    def validate_attempt_lineage(self) -> Self:
+        if self.attempt_ordinal == 1 and self.predecessor_preparation_id is not None:
+            raise ValueError("root landing preparation cannot reference a predecessor")
+        if self.attempt_ordinal > 1 and self.predecessor_preparation_id is None:
+            raise ValueError("successor landing preparation requires its predecessor")
+        return self
 
     @property
     def request_payload(self) -> dict[str, object]:
@@ -309,6 +330,16 @@ class OrdinaryAgentSemanticDispatchAttemptRecord(StrictFrozenModel):
     work_expires_at: Epoch | None = None
     controller_fence: OrdinaryAgentControllerFence
     command_sha256: Digest
+    admission_id: Identifier | None = Field(default=None, exclude_if=lambda value: value is None)
+    admission_binding_sha256: Digest | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+
+    @model_validator(mode="after")
+    def validate_admission_association(self) -> Self:
+        if (self.admission_id is None) != (self.admission_binding_sha256 is None):
+            raise ValueError("dispatch admission association must be complete or absent")
+        return self
 
 
 class OrdinaryAgentCompletedOutcome(StrictFrozenModel):
@@ -875,6 +906,12 @@ class OrdinaryAgentLandingStore(Protocol):
     def read_ordinary_landing_preparation(
         self, *, preparation_id: str
     ) -> OrdinaryAgentLandingPreparation: ...
+    def resolve_latest_ordinary_landing_preparation(
+        self, *, root_preparation_id: str
+    ) -> OrdinaryAgentLandingPreparation: ...
+    def read_ordinary_agent_custody_issue_attempt(
+        self, attempt_id: str
+    ) -> OrdinaryAgentCustodyIssueAttempt: ...
     def reserve_ordinary_landing_preparation(
         self,
         *,
@@ -883,6 +920,14 @@ class OrdinaryAgentLandingStore(Protocol):
         controller_fence: OrdinaryAgentControllerFence,
         pull_request_number: int,
         semantic_ordinal: int,
+    ) -> OrdinaryAgentLandingReservation: ...
+    def reserve_ordinary_landing_retry_preparation(
+        self,
+        *,
+        request_id: str,
+        expected_binding_revision: int,
+        controller_fence: OrdinaryAgentControllerFence,
+        predecessor_preparation_id: str,
     ) -> OrdinaryAgentLandingReservation: ...
     def record_ordinary_landing_evidence(
         self,

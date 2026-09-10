@@ -83,6 +83,8 @@ from control_plane.ordinary_agent_landing_execution import (
 )
 from control_plane.ordinary_agent_landing_recovery import (
     OrdinaryLandingProgressReloadRequired,
+    OrdinaryLandingRetryRequired,
+    ordinary_landing_history_allows_retry,
     recover_ordinary_landing_entry,
 )
 from control_plane.ordinary_agent_merge_train_client import OrdinaryAgentMergeTrainClient
@@ -314,10 +316,17 @@ def advance_ordinary_agent_merge_train_job(
 
     if snapshot.custody_uncertain:
         return _waiting(snapshot, reason_code="custody_cleanup_required")
-    if snapshot.open_landing_preparation is not None:
-        # Dispatch finalization consumes its preparation before provider I/O.
-        # An open preparation therefore needs a fresh admission, not replay of
-        # a completed landing effect. Completed dispatch recovery remains below.
+    preparation = snapshot.open_landing_preparation
+    if preparation is not None and not (
+        preparation.state == "terminal"
+        and preparation.reason_code
+        in {"provider_wait", "provider_attempt_deadline", "evidence_denied"}
+        and preparation.attempt_ordinal < effects.MAX_ORDINARY_LANDING_ATTEMPTS_PER_ENTRY
+        and preparation.effect_id is None
+    ):
+        # Crashed open attempts remain blocked. A gracefully closed attempt may
+        # reach the retry reservation; that transaction rechecks custody and all
+        # current authority before a token can be minted.
         controller.release_terminal_history()
         return _blocked(snapshot, reason_code="ordinary_readmission_required")
     if (
@@ -472,7 +481,9 @@ def advance_ordinary_agent_merge_train_job(
                 trace_id=trace_id,
             )
 
-        try:
+        def execute_attempt(
+            predecessor_preparation_id: str | None = None,
+        ) -> MergeTrainBatchLandingEntry:
             return execute_fresh_ordinary_landing(
                 store=store,
                 request_id=request.request_id,
@@ -487,21 +498,30 @@ def advance_ordinary_agent_merge_train_job(
                 guard_factory=guard_factory,
                 checkpoint=checkpoint,
                 no_op_route=no_op_route,
+                predecessor_preparation_id=predecessor_preparation_id,
                 api_request=api_request,
                 transport_factory=effect_transport_factory,
                 monotonic=monotonic,
                 utc_now=utc_now,
             )
+
+        try:
+            return execute_attempt()
         except OrdinaryLandingRecoveryRequired as recovery:
-            return recover_ordinary_landing_entry(
-                store=store,
-                request=request,
-                preparation_id=recovery.preparation_id,
-                candidate_record=candidate_record,
-                landing_plan_record=landing_plan_record,
-                guard_factory=guard_factory,
-                checkpoint=checkpoint,
-            )
+            try:
+                return recover_ordinary_landing_entry(
+                    store=store,
+                    request=request,
+                    preparation_id=recovery.preparation_id,
+                    candidate_record=candidate_record,
+                    landing_plan_record=landing_plan_record,
+                    guard_factory=guard_factory,
+                    checkpoint=checkpoint,
+                )
+            except OrdinaryLandingRetryRequired as retry:
+                # At most one fresh successor executes in this poll. A replay or
+                # another pre-send deferral leaves recovery to the next claim.
+                return execute_attempt(retry.predecessor_preparation_id)
 
     client = OrdinaryAgentMergeTrainClient(
         request=request,
@@ -631,6 +651,8 @@ def _route_existing_history(
             claimed=claimed, store=store, controller=controller, snapshot=snapshot, history=history
         )
     if recovery.disposition == "retry" and history.effect.command.kind == "pull_request_landing":
+        if ordinary_landing_history_allows_retry(history):
+            return None
         controller.release_terminal_history()
         return _blocked(snapshot, reason_code="ordinary_readmission_required")
     if recovery.disposition == "terminal":

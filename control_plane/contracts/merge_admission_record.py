@@ -24,6 +24,7 @@ MergeLandingOutcomeReason = Literal[
     "provider_and_git_confirmed",
     "already_contained_no_provider_effect",
     "provider_rejected",
+    "dispatch_not_attempted",
     "reconciliation_confirmed_no_effect",
     "provider_transport_ambiguous",
     "process_interrupted",
@@ -378,6 +379,24 @@ class MergeLandingOutcomeRecord(BaseModel):
                     raise ValueError(
                         "no-effect reconciliation requires exact open PR and base evidence"
                     )
+            elif self.reason == "dispatch_not_attempted":
+                if (
+                    self.observation_sequence != 1
+                    or self.provider_effect_attempted
+                    or self.provider_conclusive_rejection
+                    or self.provider_status_code is not None
+                    or self.provider_request_id
+                    or self.provider_message
+                    or self.observed_pull_request_state
+                    or self.observed_pull_request_head_sha
+                    or self.observed_pull_request_head_tree_sha
+                    or self.observed_base_sha
+                    or self.observed_base_tree_sha
+                    or self.base_contains_merge_commit is not None
+                ):
+                    raise ValueError(
+                        "dispatch-not-attempted outcome requires a first zero-evidence observation"
+                    )
             else:
                 raise ValueError("rejected outcome requires conclusive no-effect evidence")
         else:
@@ -389,6 +408,7 @@ class MergeLandingOutcomeRecord(BaseModel):
                 "provider_and_git_confirmed",
                 "already_contained_no_provider_effect",
                 "provider_rejected",
+                "dispatch_not_attempted",
             }:
                 raise ValueError("reconcile-required outcome requires an ambiguity reason")
         expected_binding = merge_landing_outcome_binding_sha256(self)

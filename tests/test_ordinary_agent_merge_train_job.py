@@ -912,7 +912,7 @@ class OrdinaryAgentMergeTrainJobTests(unittest.TestCase):
         self.assertEqual(controller[0].status, "idle")
         provider.assert_not_called()
 
-    def test_known_not_dispatched_landing_waits_for_fresh_admission_without_falling_through(
+    def test_non_landing_deadline_classification_cannot_enable_landing_retry(
         self,
     ) -> None:
         landing = self.landing_fixture()
@@ -921,7 +921,7 @@ class OrdinaryAgentMergeTrainJobTests(unittest.TestCase):
         landing.store.record_ordinary_semantic_outcome(
             child_id=finalization.child.child_id,
             typed_outcome=effects.OrdinaryAgentKnownNotDispatchedOutcome(
-                reason="provider_attempt_deadline"
+                reason="transport_not_sent"
             ),
         )
         landing.store.close_ordinary_agent_custody_issue_attempt(
@@ -931,7 +931,7 @@ class OrdinaryAgentMergeTrainJobTests(unittest.TestCase):
         with patch.object(
             landing.store,
             "acquire_ordinary_merge_train_controller_state_record",
-            side_effect=AssertionError("landing retry cannot acquire fresh work yet"),
+            side_effect=AssertionError("non-landing deferral cannot authorize fresh work"),
         ):
             result = advance_ordinary_agent_merge_train_job(
                 claimed=reclaimed,

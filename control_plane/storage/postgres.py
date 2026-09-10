@@ -4,7 +4,7 @@ from uuid import uuid4
 
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager, suppress
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 import fcntl
@@ -15,7 +15,7 @@ from threading import Lock
 import time
 from typing import Any, Literal, NamedTuple, ParamSpec, Protocol, TypeVar, cast, overload
 
-from pydantic import BaseModel
+from pydantic import BaseModel, TypeAdapter
 from sqlalchemy import (
     BigInteger,
     Boolean,
@@ -2311,13 +2311,22 @@ class LaunchplaneOrdinaryAgentFiniteRequestRow(Base):
 class LaunchplaneOrdinaryAgentLandingPreparationRow(Base):
     __tablename__ = "launchplane_ordinary_agent_landing_preparations"
     __table_args__ = (
-        UniqueConstraint("lease_id", "action_ordinal", name="ordinary_landing_charge_uq"),
+        Index(
+            "ordinary_landing_root_charge_uq",
+            "lease_id",
+            "action_ordinal",
+            unique=True,
+            sqlite_where=text("predecessor_preparation_id IS NULL"),
+            postgresql_where=text("predecessor_preparation_id IS NULL"),
+        ),
         UniqueConstraint(
             "request_id",
             "binding_revision",
             "pull_request_number",
-            name="ordinary_landing_entry_uq",
+            "attempt_ordinal",
+            name="ordinary_landing_entry_attempt_uq",
         ),
+        UniqueConstraint("predecessor_preparation_id", name="ordinary_landing_predecessor_uq"),
         UniqueConstraint("custody_attempt_id", name="ordinary_landing_custody_uq"),
     )
     preparation_id: Mapped[str] = mapped_column(String, primary_key=True)
@@ -2325,6 +2334,8 @@ class LaunchplaneOrdinaryAgentLandingPreparationRow(Base):
     lease_id: Mapped[str] = mapped_column(String, nullable=False)
     binding_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
     pull_request_number: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    attempt_ordinal: Mapped[int] = mapped_column(BigInteger, nullable=False, default=1)
+    predecessor_preparation_id: Mapped[str | None] = mapped_column(String, nullable=True)
     action_ordinal: Mapped[int] = mapped_column(BigInteger, nullable=False)
     custody_attempt_id: Mapped[str] = mapped_column(String, nullable=False)
     revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
@@ -2333,9 +2344,15 @@ class LaunchplaneOrdinaryAgentLandingPreparationRow(Base):
 
 class LaunchplaneOrdinaryAgentLandingBindingRow(Base):
     __tablename__ = "launchplane_ordinary_agent_landing_bindings"
+    __table_args__ = (
+        UniqueConstraint(
+            "effect_id", "dispatch_ordinal", name="ordinary_landing_effect_dispatch_uq"
+        ),
+    )
     preparation_id: Mapped[str] = mapped_column(String, primary_key=True)
     admission_id: Mapped[str] = mapped_column(String, nullable=False, unique=True)
-    effect_id: Mapped[str] = mapped_column(String, nullable=False, unique=True)
+    effect_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    dispatch_ordinal: Mapped[int] = mapped_column(BigInteger, nullable=False, default=1)
     child_id: Mapped[str] = mapped_column(String, nullable=False, unique=True)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
@@ -18487,6 +18504,10 @@ class PostgresRecordStore(HumanSessionStore):
     def create_merge_landing_outcome_record_if_absent(
         self, record: MergeLandingOutcomeRecord
     ) -> tuple[MergeLandingOutcomeRecord, bool]:
+        if record.reason == "dispatch_not_attempted":
+            raise OrdinaryAgentSessionAdmissionDenied(
+                "dispatch_not_attempted_requires_joined_history"
+            )
         admission = self.read_merge_admission_record(record.admission_id)
         with self._session_factory() as check_session:
             plan_row = check_session.get(
@@ -22170,6 +22191,68 @@ class PostgresRecordStore(HumanSessionStore):
             ):
                 raise OrdinaryAgentSessionAdmissionDenied("landing_history_binding_conflict")
             validate_merge_landing_outcome_for_admission(admission=admission, outcome=record)
+            if record.reason == "dispatch_not_attempted":
+                existing_projection = session.get(
+                    LaunchplaneMergeLandingOutcomeRow,
+                    record.outcome_id,
+                    with_for_update=True,
+                    populate_existing=True,
+                )
+                landing_binding = session.scalar(
+                    select(LaunchplaneOrdinaryAgentLandingBindingRow)
+                    .where(
+                        LaunchplaneOrdinaryAgentLandingBindingRow.admission_id
+                        == admission.admission_id
+                    )
+                    .with_for_update()
+                )
+                finalization = (
+                    None
+                    if landing_binding is None
+                    else self._read_ordinary_landing_finalization(
+                        session, preparation_id=landing_binding.preparation_id
+                    )
+                )
+                outcome_row = (
+                    None
+                    if finalization is None
+                    else session.get(
+                        LaunchplaneOrdinaryAgentSemanticOutcomeRow,
+                        finalization.child.child_id,
+                        with_for_update=True,
+                        populate_existing=True,
+                    )
+                )
+                effect_row = (
+                    None
+                    if finalization is None
+                    else session.get(
+                        LaunchplaneOrdinaryAgentEffectRow,
+                        finalization.effect.effect_id,
+                        with_for_update=True,
+                        populate_existing=True,
+                    )
+                )
+                if existing_projection is None or outcome_row is None or effect_row is None:
+                    raise OrdinaryAgentSessionAdmissionDenied(
+                        "dispatch_not_attempted_requires_joined_history"
+                    )
+                typed: effect_contracts.OrdinaryAgentSemanticOutcome = TypeAdapter(
+                    effect_contracts.OrdinaryAgentSemanticOutcome
+                ).validate_python(outcome_row.payload)
+                assert finalization is not None
+                effect = OrdinaryAgentEffectRecord.model_validate(effect_row.payload)
+                proven = MergeLandingOutcomeRecord.model_validate(existing_projection.payload)
+                if (
+                    not isinstance(typed, effect_contracts.OrdinaryAgentKnownNotDispatchedOutcome)
+                    or typed.reason != "provider_attempt_deadline"
+                    or effect.command.kind != "pull_request_landing"
+                    or effect.effect_id != finalization.effect.effect_id
+                    or finalization.child.semantic_ordinal > effect.dispatch_count
+                    or proven != record
+                ):
+                    raise OrdinaryAgentSessionAdmissionDenied("immutable_landing_outcome_conflict")
+                return proven, False
             prior_rows = tuple(
                 session.scalars(
                     select(LaunchplaneMergeLandingOutcomeRow)
@@ -22190,25 +22273,41 @@ class PostgresRecordStore(HumanSessionStore):
                 validate_merge_landing_outcome_successor(prior=prior, successor=record)
             elif record.observation_sequence != 1:
                 raise OrdinaryAgentSessionAdmissionDenied("landing_outcome_predecessor_missing")
-            matches = []
-            for effect_row in session.scalars(
-                select(LaunchplaneOrdinaryAgentEffectRow).where(
-                    LaunchplaneOrdinaryAgentEffectRow.request_id == request_id,
-                    LaunchplaneOrdinaryAgentEffectRow.binding_revision == expected_binding_revision,
+            landing_binding = session.scalar(
+                select(LaunchplaneOrdinaryAgentLandingBindingRow)
+                .where(
+                    LaunchplaneOrdinaryAgentLandingBindingRow.admission_id == admission.admission_id
                 )
-            ):
-                effect = OrdinaryAgentEffectRecord.model_validate(effect_row.payload)
-                if (
-                    effect.command.kind == "pull_request_landing"
-                    and effect.command.effect.admission_id == admission.admission_id
-                ):
-                    matches.append(effect)
-            if len(matches) > 1 or (
-                record.provider_effect_attempted and (not matches or not matches[0].dispatch_count)
+                .with_for_update()
+            )
+            finalization = (
+                None
+                if landing_binding is None
+                else self._read_ordinary_landing_finalization(
+                    session, preparation_id=landing_binding.preparation_id
+                )
+            )
+            if finalization is None:
+                raise OrdinaryAgentSessionAdmissionDenied("landing_dispatch_unproven")
+            effect_row = session.get(
+                LaunchplaneOrdinaryAgentEffectRow,
+                finalization.effect.effect_id,
+                with_for_update=True,
+                populate_existing=True,
+            )
+            if effect_row is None:
+                raise OrdinaryAgentSessionAdmissionDenied("landing_dispatch_unproven")
+            effect = OrdinaryAgentEffectRecord.model_validate(effect_row.payload)
+            if (
+                effect.request_id != request_id
+                or effect.binding_revision != expected_binding_revision
+                or effect.command.kind != "pull_request_landing"
+                or not effect.dispatch_count
+                or finalization.admission != admission
             ):
                 raise OrdinaryAgentSessionAdmissionDenied("landing_dispatch_unproven")
             if record.status == "landed":
-                if not matches or matches[0].state not in {"completed", "completed_observed"}:
+                if effect.state not in {"completed", "completed_observed"}:
                     raise OrdinaryAgentSessionAdmissionDenied("landing_response_unproven")
                 request_row = session.get(LaunchplaneOrdinaryAgentFiniteRequestRow, request_id)
                 if request_row is None:
@@ -22219,8 +22318,8 @@ class PostgresRecordStore(HumanSessionStore):
                     update={"binding_revision": expected_binding_revision}
                 )
                 if not any(
-                    effect.effect_id == matches[0].effect_id and sha == record.merge_commit_sha
-                    for effect, sha in self._ordinary_agent_bound_effect_results(
+                    bound_effect.effect_id == effect.effect_id and sha == record.merge_commit_sha
+                    for bound_effect, sha in self._ordinary_agent_bound_effect_results(
                         session, request=historical_request
                     )
                 ):
@@ -22797,39 +22896,141 @@ class PostgresRecordStore(HumanSessionStore):
                     "semantic_key": semantic_key,
                 }
             )
-            effect = OrdinaryAgentEffectRecord(
-                effect_id=effect_id,
-                request_id=record.request_id,
-                session_id=record.session_id,
-                lease_id=record.lease_id,
-                principal_id=record.principal_id,
-                scope_sha256=record.scope_sha256,
-                binding_revision=record.binding_revision,
-                semantic_ordinal=record.semantic_ordinal,
-                action_ordinal=record.action_ordinal,
-                command_sha256=canonical_json_sha256(command.model_dump(mode="json")),
-                command=command,
-                target=record.target,
-                controller_fence=controller_fence,
-                policy_record_id=record.policy_record_id,
-                policy_revision=record.policy_revision,
-                policy_sha256=record.policy_sha256,
-                credential_id=record.credential_id,
-                credential_version=record.credential_version,
-                credential_digest=record.credential_digest,
-                reserved_at=record.reserved_at,
-                updated_at=now,
-                state="dispatching",
-                dispatch_count=1,
-                dispatch_custody_count=1,
-            )
+            reused_effect_row: LaunchplaneOrdinaryAgentEffectRow | None = None
+            reused_effect: OrdinaryAgentEffectRecord | None = None
+            if record.predecessor_preparation_id is not None:
+                root_id = self._ordinary_landing_preparation_id(
+                    request_id=record.request_id,
+                    binding_revision=record.binding_revision,
+                    pull_request_number=record.entry.pull_request_number,
+                    attempt_ordinal=1,
+                )
+                if (
+                    self._resolve_latest_ordinary_landing_preparation(
+                        session, root_preparation_id=root_id, for_update=True
+                    )
+                    != record
+                ):
+                    raise OrdinaryAgentSessionAdmissionDenied(
+                        "landing_preparation_lineage_conflict"
+                    )
+                predecessor_row = session.get(
+                    LaunchplaneOrdinaryAgentLandingPreparationRow,
+                    record.predecessor_preparation_id,
+                    with_for_update=True,
+                    populate_existing=True,
+                )
+                if predecessor_row is None:
+                    raise OrdinaryAgentSessionAdmissionDenied(
+                        "landing_preparation_lineage_conflict"
+                    )
+                predecessor = effect_contracts.OrdinaryAgentLandingPreparation.model_validate(
+                    predecessor_row.payload
+                )
+                if (
+                    predecessor.attempt_ordinal + 1 != record.attempt_ordinal
+                    or predecessor.preparation_id != record.predecessor_preparation_id
+                ):
+                    raise OrdinaryAgentSessionAdmissionDenied(
+                        "landing_preparation_lineage_conflict"
+                    )
+                effect_owner = self._ordinary_landing_effect_owner_preparation(
+                    session, lineage_tip=record
+                )
+                if predecessor.state == "consumed":
+                    if effect_owner != predecessor:
+                        raise OrdinaryAgentSessionAdmissionDenied("landing_retry_history_conflict")
+                elif (
+                    predecessor.state != "superseded"
+                    or predecessor.effect_id is not None
+                    or predecessor.reason_code
+                    not in {"provider_wait", "provider_attempt_deadline", "evidence_denied"}
+                    or session.get(
+                        LaunchplaneOrdinaryAgentLandingBindingRow,
+                        predecessor.preparation_id,
+                    )
+                    is not None
+                    or session.get(
+                        LaunchplaneOrdinaryAgentNoOpLandingFinalizationRow,
+                        predecessor.preparation_id,
+                    )
+                    is not None
+                ):
+                    raise OrdinaryAgentSessionAdmissionDenied("landing_retry_not_proven")
+                if effect_owner is not None:
+                    reused_effect_row, reused_effect, _, _, _ = (
+                        self._ordinary_landing_retry_effect_context(
+                            session, preparation=effect_owner
+                        )
+                    )
+                    stored_command = reused_effect.command
+                    if (
+                        stored_command.kind != "pull_request_landing"
+                        or reused_effect.effect_id != effect_id
+                        or {
+                            key: value
+                            for key, value in asdict(stored_command.effect).items()
+                            if key != "admission_id"
+                        }
+                        != {
+                            key: value
+                            for key, value in asdict(command.effect).items()
+                            if key != "admission_id"
+                        }
+                    ):
+                        raise OrdinaryAgentSessionAdmissionDenied("landing_retry_history_conflict")
+            if reused_effect is None:
+                if session.get(LaunchplaneOrdinaryAgentEffectRow, effect_id) is not None:
+                    raise OrdinaryAgentSessionAdmissionDenied("landing_retry_history_conflict")
+                effect = OrdinaryAgentEffectRecord(
+                    effect_id=effect_id,
+                    request_id=record.request_id,
+                    session_id=record.session_id,
+                    lease_id=record.lease_id,
+                    principal_id=record.principal_id,
+                    scope_sha256=record.scope_sha256,
+                    binding_revision=record.binding_revision,
+                    semantic_ordinal=record.semantic_ordinal,
+                    action_ordinal=record.action_ordinal,
+                    command_sha256=canonical_json_sha256(command.model_dump(mode="json")),
+                    command=command,
+                    target=record.target,
+                    controller_fence=controller_fence,
+                    policy_record_id=record.policy_record_id,
+                    policy_revision=record.policy_revision,
+                    policy_sha256=record.policy_sha256,
+                    credential_id=record.credential_id,
+                    credential_version=record.credential_version,
+                    credential_digest=record.credential_digest,
+                    reserved_at=record.reserved_at,
+                    updated_at=now,
+                    state="dispatching",
+                    dispatch_count=1,
+                    dispatch_custody_count=1,
+                )
+                dispatch_ordinal = 1
+            else:
+                dispatch_ordinal = reused_effect.dispatch_count + 1
+                effect = reused_effect.model_copy(
+                    update={
+                        "revision": reused_effect.revision + 1,
+                        "state": "dispatching",
+                        "dispatch_count": dispatch_ordinal,
+                        "dispatch_custody_count": reused_effect.dispatch_custody_count + 1,
+                        "updated_at": now,
+                        "next_observation_at": None,
+                        "reason_code": None,
+                    }
+                )
             if custody.token_expires_at is None:
                 raise OrdinaryAgentSessionAdmissionDenied("custody_binding_conflict")
             child = effect_contracts.OrdinaryAgentSemanticDispatchAttemptRecord(
                 child_id="dispatch-"
-                + canonical_json_sha256({"effect_id": effect_id, "semantic_ordinal": 1}),
+                + canonical_json_sha256(
+                    {"effect_id": effect_id, "semantic_ordinal": dispatch_ordinal}
+                ),
                 effect_id=effect_id,
-                semantic_ordinal=1,
+                semantic_ordinal=dispatch_ordinal,
                 custody_attempt_id=custody_attempt_id,
                 dispatch_checkpoint_at=now,
                 work_expires_at=record.work_expires_at,
@@ -22840,6 +23041,8 @@ class PostgresRecordStore(HumanSessionStore):
                 ),
                 controller_fence=controller_fence,
                 command_sha256=effect.command_sha256,
+                admission_id=admission.admission_id,
+                admission_binding_sha256=admission.admission_binding_sha256,
             )
             consumed = record.model_copy(
                 update={
@@ -22872,25 +23075,28 @@ class PostgresRecordStore(HumanSessionStore):
                     payload=self._payload_dict(admission),
                 )
             )
-            session.add(
-                LaunchplaneOrdinaryAgentEffectRow(
-                    effect_id=effect_id,
-                    lease_id=record.lease_id,
-                    request_id=record.request_id,
-                    scope_sha256=record.scope_sha256,
-                    binding_revision=record.binding_revision,
-                    action_ordinal=record.action_ordinal,
-                    semantic_key=semantic_key,
-                    command_sha256=effect.command_sha256,
-                    revision=effect.revision,
-                    payload=self._payload_dict(effect),
+            if reused_effect_row is None:
+                session.add(
+                    LaunchplaneOrdinaryAgentEffectRow(
+                        effect_id=effect_id,
+                        lease_id=record.lease_id,
+                        request_id=record.request_id,
+                        scope_sha256=record.scope_sha256,
+                        binding_revision=record.binding_revision,
+                        action_ordinal=record.action_ordinal,
+                        semantic_key=semantic_key,
+                        command_sha256=effect.command_sha256,
+                        revision=effect.revision,
+                        payload=self._payload_dict(effect),
+                    )
                 )
-            )
+            else:
+                self._ordinary_agent_save_effect(reused_effect_row, effect)
             session.add(
                 LaunchplaneOrdinaryAgentSemanticDispatchRow(
                     child_id=child.child_id,
                     effect_id=effect_id,
-                    semantic_ordinal=1,
+                    semantic_ordinal=child.semantic_ordinal,
                     payload=self._payload_dict(child),
                 )
             )
@@ -22899,18 +23105,23 @@ class PostgresRecordStore(HumanSessionStore):
                     preparation_id=preparation_id,
                     admission_id=admission.admission_id,
                     effect_id=effect_id,
+                    dispatch_ordinal=child.semantic_ordinal,
                     child_id=child.child_id,
                     payload=self._payload_dict(result),
                 )
             )
             row.revision, row.payload = consumed.revision, self._payload_dict(consumed)
-            context.request_row.payload = self._payload_dict(
-                context.request.model_copy(
-                    update={
-                        "execution_record_ids": (*context.request.execution_record_ids, effect_id),
-                    }
+            if reused_effect is None:
+                context.request_row.payload = self._payload_dict(
+                    context.request.model_copy(
+                        update={
+                            "execution_record_ids": (
+                                *context.request.execution_record_ids,
+                                effect_id,
+                            ),
+                        }
+                    )
                 )
-            )
             session.commit()
             return result
 
@@ -22923,6 +23134,174 @@ class PostgresRecordStore(HumanSessionStore):
             if row is None:
                 raise OrdinaryAgentSessionAdmissionDenied("landing_preparation_unavailable")
             return effect_contracts.OrdinaryAgentLandingPreparation.model_validate(row.payload)
+
+    @staticmethod
+    def _ordinary_landing_preparation_id(
+        *,
+        request_id: str,
+        binding_revision: int,
+        pull_request_number: int,
+        attempt_ordinal: int,
+    ) -> str:
+        payload: dict[str, object] = {
+            "request_id": request_id,
+            "binding_revision": binding_revision,
+            "pull_request_number": pull_request_number,
+        }
+        # Attempt one predates retry lineage. Preserve its immutable identifier.
+        if attempt_ordinal > 1:
+            payload["attempt_ordinal"] = attempt_ordinal
+        return "landing-preparation-" + canonical_json_sha256(payload)
+
+    def _resolve_latest_ordinary_landing_preparation(
+        self,
+        session: Any,
+        *,
+        root_preparation_id: str,
+        for_update: bool = False,
+    ) -> effect_contracts.OrdinaryAgentLandingPreparation:
+        root_row = session.get(
+            LaunchplaneOrdinaryAgentLandingPreparationRow,
+            root_preparation_id,
+            with_for_update=for_update,
+            populate_existing=for_update,
+        )
+        if root_row is None:
+            raise OrdinaryAgentSessionAdmissionDenied("landing_preparation_unavailable")
+        root = effect_contracts.OrdinaryAgentLandingPreparation.model_validate(root_row.payload)
+        if (
+            root.attempt_ordinal != 1
+            or root.predecessor_preparation_id is not None
+            or root.preparation_id != root_preparation_id
+            or root.preparation_id
+            != self._ordinary_landing_preparation_id(
+                request_id=root.request_id,
+                binding_revision=root.binding_revision,
+                pull_request_number=root.entry.pull_request_number,
+                attempt_ordinal=1,
+            )
+        ):
+            raise OrdinaryAgentSessionAdmissionDenied("landing_preparation_lineage_conflict")
+        statement = (
+            select(LaunchplaneOrdinaryAgentLandingPreparationRow)
+            .where(
+                LaunchplaneOrdinaryAgentLandingPreparationRow.request_id == root.request_id,
+                LaunchplaneOrdinaryAgentLandingPreparationRow.binding_revision
+                == root.binding_revision,
+                LaunchplaneOrdinaryAgentLandingPreparationRow.pull_request_number
+                == root.entry.pull_request_number,
+            )
+            .order_by(LaunchplaneOrdinaryAgentLandingPreparationRow.attempt_ordinal)
+            .limit(effect_contracts.MAX_ORDINARY_LANDING_ATTEMPTS_PER_ENTRY + 1)
+        )
+        if for_update:
+            statement = statement.with_for_update()
+        rows = tuple(session.scalars(statement).all())
+        if not rows or len(rows) > effect_contracts.MAX_ORDINARY_LANDING_ATTEMPTS_PER_ENTRY:
+            raise OrdinaryAgentSessionAdmissionDenied("landing_preparation_lineage_conflict")
+        records = tuple(
+            effect_contracts.OrdinaryAgentLandingPreparation.model_validate(row.payload)
+            for row in rows
+        )
+        immutable = (
+            "request_id",
+            "session_id",
+            "lease_id",
+            "principal_id",
+            "scope_sha256",
+            "binding_revision",
+            "semantic_ordinal",
+            "action_ordinal",
+            "target",
+            "landing_plan_record_id",
+            "landing_plan_sha256",
+            "candidate_record_id",
+            "entry",
+            "expected_base_sha",
+            "expected_base_tree_sha",
+            "expected_merge_tree_sha",
+        )
+        for index, (row, record) in enumerate(zip(rows, records, strict=True), start=1):
+            expected_predecessor = None if index == 1 else records[index - 2].preparation_id
+            if (
+                record.attempt_ordinal != index
+                or record.predecessor_preparation_id != expected_predecessor
+                or record.preparation_id
+                != self._ordinary_landing_preparation_id(
+                    request_id=root.request_id,
+                    binding_revision=root.binding_revision,
+                    pull_request_number=root.entry.pull_request_number,
+                    attempt_ordinal=index,
+                )
+                or any(getattr(record, field) != getattr(root, field) for field in immutable)
+                or row.preparation_id != record.preparation_id
+                or row.request_id != record.request_id
+                or row.lease_id != record.lease_id
+                or row.binding_revision != record.binding_revision
+                or row.pull_request_number != record.entry.pull_request_number
+                or row.attempt_ordinal != record.attempt_ordinal
+                or row.predecessor_preparation_id != record.predecessor_preparation_id
+                or row.action_ordinal != record.action_ordinal
+                or row.custody_attempt_id != record.custody_attempt_id
+                or row.revision != record.revision
+                or (index < len(records) and record.state not in {"consumed", "superseded"})
+            ):
+                raise OrdinaryAgentSessionAdmissionDenied("landing_preparation_lineage_conflict")
+        return records[-1]
+
+    @_private_ordinary_agent_operation
+    def resolve_latest_ordinary_landing_preparation(
+        self, *, root_preparation_id: str
+    ) -> effect_contracts.OrdinaryAgentLandingPreparation:
+        """Resolve bounded immutable retry lineage without granting authority."""
+        with self._session_factory() as session:
+            return self._resolve_latest_ordinary_landing_preparation(
+                session, root_preparation_id=root_preparation_id
+            )
+
+    def _ordinary_landing_effect_owner_preparation(
+        self,
+        session: Any,
+        *,
+        lineage_tip: effect_contracts.OrdinaryAgentLandingPreparation,
+    ) -> effect_contracts.OrdinaryAgentLandingPreparation | None:
+        """Find the latest effect owner after the caller locks and validates the full lineage."""
+        rows = tuple(
+            session.scalars(
+                select(LaunchplaneOrdinaryAgentLandingPreparationRow)
+                .where(
+                    LaunchplaneOrdinaryAgentLandingPreparationRow.request_id
+                    == lineage_tip.request_id,
+                    LaunchplaneOrdinaryAgentLandingPreparationRow.binding_revision
+                    == lineage_tip.binding_revision,
+                    LaunchplaneOrdinaryAgentLandingPreparationRow.pull_request_number
+                    == lineage_tip.entry.pull_request_number,
+                    LaunchplaneOrdinaryAgentLandingPreparationRow.attempt_ordinal
+                    <= lineage_tip.attempt_ordinal,
+                )
+                .order_by(desc(LaunchplaneOrdinaryAgentLandingPreparationRow.attempt_ordinal))
+                .limit(effect_contracts.MAX_ORDINARY_LANDING_ATTEMPTS_PER_ENTRY)
+                .with_for_update()
+            ).all()
+        )
+        owners = tuple(
+            record
+            for row in rows
+            if (
+                record := effect_contracts.OrdinaryAgentLandingPreparation.model_validate(
+                    row.payload
+                )
+            ).effect_id
+            is not None
+        )
+        if not owners:
+            return None
+        if (
+            any(record.state != "consumed" for record in owners)
+            or len({record.effect_id for record in owners}) != 1
+        ):
+            raise OrdinaryAgentSessionAdmissionDenied("landing_retry_history_conflict")
+        return owners[0]
 
     @_private_ordinary_agent_operation
     def read_ordinary_landing_finalization(
@@ -22959,6 +23338,22 @@ class PostgresRecordStore(HumanSessionStore):
             preparation_row.payload
         )
         effect = OrdinaryAgentEffectRecord.model_validate(effect_row.payload)
+        child = effect_contracts.OrdinaryAgentSemanticDispatchAttemptRecord.model_validate(
+            child_row.payload
+        )
+        child_admission_matches = (
+            child.admission_id == binding.admission_id
+            and child.admission_binding_sha256
+            == MergeAdmissionRecord.model_validate(admission_row.payload).admission_binding_sha256
+        )
+        legacy_child_matches = (
+            child.admission_id is None
+            and child.admission_binding_sha256 is None
+            and child.semantic_ordinal == 1
+            and binding.dispatch_ordinal == 1
+            and effect.command.kind == "pull_request_landing"
+            and effect.command.effect.admission_id == binding.admission_id
+        )
         if (
             recorded.preparation != preparation
             or preparation.preparation_id != preparation_id
@@ -22967,15 +23362,14 @@ class PostgresRecordStore(HumanSessionStore):
             or preparation.effect_id != binding.effect_id
             or recorded.admission.admission_id != binding.admission_id
             or recorded.admission != MergeAdmissionRecord.model_validate(admission_row.payload)
+            or binding.dispatch_ordinal != child.semantic_ordinal
             or recorded.effect.effect_id != binding.effect_id
             or recorded.effect.command != effect.command
             or recorded.effect.command_sha256 != effect.command_sha256
             or recorded.child.child_id != binding.child_id
             or recorded.child.effect_id != binding.effect_id
-            or recorded.child
-            != effect_contracts.OrdinaryAgentSemanticDispatchAttemptRecord.model_validate(
-                child_row.payload
-            )
+            or recorded.child != child
+            or not (child_admission_matches or legacy_child_matches)
         ):
             raise OrdinaryAgentSessionAdmissionDenied("landing_finalization_binding_conflict")
         # Later outcome/reconciliation updates do not alter the initial committed
@@ -23402,7 +23796,7 @@ class PostgresRecordStore(HumanSessionStore):
             if record.revision != expected_revision:
                 raise OrdinaryAgentSessionAdmissionDenied("landing_preparation_revision_conflict")
             if (
-                record.state == "consumed"
+                record.state in {"consumed", "superseded"}
                 or session.get(LaunchplaneOrdinaryAgentLandingBindingRow, preparation_id)
                 is not None
             ):
@@ -23563,12 +23957,11 @@ class PostgresRecordStore(HumanSessionStore):
                 expected_binding_revision=expected_binding_revision,
                 controller_fence=controller_fence,
             )
-            preparation_id = "landing-preparation-" + canonical_json_sha256(
-                {
-                    "request_id": request_id,
-                    "binding_revision": expected_binding_revision,
-                    "pull_request_number": pull_request_number,
-                }
+            preparation_id = self._ordinary_landing_preparation_id(
+                request_id=request_id,
+                binding_revision=expected_binding_revision,
+                pull_request_number=pull_request_number,
+                attempt_ordinal=1,
             )
             existing = session.get(LaunchplaneOrdinaryAgentLandingPreparationRow, preparation_id)
             if existing is not None:
@@ -23706,12 +24099,344 @@ class PostgresRecordStore(HumanSessionStore):
                     lease_id=record.lease_id,
                     binding_revision=expected_binding_revision,
                     pull_request_number=pull_request_number,
+                    attempt_ordinal=record.attempt_ordinal,
+                    predecessor_preparation_id=record.predecessor_preparation_id,
                     action_ordinal=record.action_ordinal,
                     custody_attempt_id=record.custody_attempt_id,
                     revision=record.revision,
                     payload=self._payload_dict(record),
                 )
             )
+            session.commit()
+            return effect_contracts.OrdinaryAgentLandingReservation(
+                disposition="created", preparation=record
+            )
+
+    def _ordinary_landing_retry_effect_context(
+        self,
+        session: Any,
+        *,
+        preparation: effect_contracts.OrdinaryAgentLandingPreparation,
+    ) -> tuple[
+        LaunchplaneOrdinaryAgentEffectRow,
+        OrdinaryAgentEffectRecord,
+        effect_contracts.OrdinaryAgentSemanticDispatchAttemptRecord,
+        effect_contracts.OrdinaryAgentKnownNotDispatchedOutcome,
+        MergeAdmissionRecord,
+    ]:
+        finalization = self._read_ordinary_landing_finalization(
+            session, preparation_id=preparation.preparation_id
+        )
+        if finalization is None:
+            raise OrdinaryAgentSessionAdmissionDenied("landing_retry_history_conflict")
+        effect_row = session.get(
+            LaunchplaneOrdinaryAgentEffectRow,
+            finalization.effect.effect_id,
+            with_for_update=True,
+            populate_existing=True,
+        )
+        child_row = session.get(
+            LaunchplaneOrdinaryAgentSemanticDispatchRow,
+            finalization.child.child_id,
+            with_for_update=True,
+            populate_existing=True,
+        )
+        outcome_row = session.get(
+            LaunchplaneOrdinaryAgentSemanticOutcomeRow,
+            finalization.child.child_id,
+            with_for_update=True,
+            populate_existing=True,
+        )
+        if effect_row is None or child_row is None or outcome_row is None:
+            raise OrdinaryAgentSessionAdmissionDenied("landing_retry_history_conflict")
+        effect = OrdinaryAgentEffectRecord.model_validate(effect_row.payload)
+        child = effect_contracts.OrdinaryAgentSemanticDispatchAttemptRecord.model_validate(
+            child_row.payload
+        )
+        outcome: effect_contracts.OrdinaryAgentSemanticOutcome = TypeAdapter(
+            effect_contracts.OrdinaryAgentSemanticOutcome
+        ).validate_python(outcome_row.payload)
+        if not isinstance(outcome, effect_contracts.OrdinaryAgentKnownNotDispatchedOutcome):
+            raise OrdinaryAgentSessionAdmissionDenied("landing_retry_not_proven")
+        reconciliations = tuple(
+            session.scalars(
+                select(LaunchplaneOrdinaryAgentEffectReconciliationRow)
+                .where(LaunchplaneOrdinaryAgentEffectReconciliationRow.child_id == child.child_id)
+                .limit(1)
+                .with_for_update()
+            ).all()
+        )
+        if (
+            preparation.state != "consumed"
+            or preparation.effect_id != effect.effect_id
+            or effect.command.kind != "pull_request_landing"
+            or effect.state != "not_dispatched"
+            or effect.request_id != preparation.request_id
+            or effect.binding_revision != preparation.binding_revision
+            or effect.scope_sha256 != preparation.scope_sha256
+            or effect.semantic_ordinal != preparation.semantic_ordinal
+            or effect.action_ordinal != preparation.action_ordinal
+            or effect.target != preparation.target
+            or effect.command.effect.pull_request_number != preparation.entry.pull_request_number
+            or effect.command.effect.head_sha != preparation.entry.expected_head_sha
+            or effect.command.effect.rolling_base_sha != preparation.expected_base_sha
+            or child != finalization.child
+            or child.semantic_ordinal != effect.dispatch_count
+            or outcome.reason != "provider_attempt_deadline"
+            or reconciliations
+            or effect.dispatch_count >= effect_contracts.MAX_SEMANTIC_DISPATCH_ATTEMPTS_PER_EFFECT
+            or effect.dispatch_custody_count
+            >= effect_contracts.MAX_CUSTODY_MINT_ATTEMPTS_PER_EFFECT
+            or effect.dispatch_custody_count + effect.reconciliation_custody_count
+            >= effect_contracts.MAX_TOTAL_CUSTODY_MINT_ATTEMPTS_PER_EFFECT
+        ):
+            raise OrdinaryAgentSessionAdmissionDenied("landing_retry_not_proven")
+        self._ensure_ordinary_landing_dispatch_not_attempted_outcome(
+            session,
+            effect=effect,
+            child=child,
+            typed_outcome=outcome,
+        )
+        return effect_row, effect, child, outcome, finalization.admission
+
+    @_private_ordinary_agent_operation
+    def reserve_ordinary_landing_retry_preparation(
+        self,
+        *,
+        request_id: str,
+        expected_binding_revision: int,
+        controller_fence: OrdinaryAgentControllerFence,
+        predecessor_preparation_id: str,
+    ) -> effect_contracts.OrdinaryAgentLandingReservation:
+        """Reserve one bounded successor without charging another semantic action."""
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            locator = session.get(
+                LaunchplaneOrdinaryAgentLandingPreparationRow, predecessor_preparation_id
+            )
+            if locator is None:
+                raise OrdinaryAgentSessionAdmissionDenied("landing_preparation_unavailable")
+            predecessor_hint = effect_contracts.OrdinaryAgentLandingPreparation.model_validate(
+                locator.payload
+            )
+            if (
+                predecessor_hint.request_id != request_id
+                or predecessor_hint.binding_revision != expected_binding_revision
+            ):
+                raise OrdinaryAgentSessionAdmissionDenied("landing_preparation_binding_conflict")
+            context, _, controller = self._ordinary_agent_controller_context(
+                session,
+                request_id=request_id,
+                expected_binding_revision=expected_binding_revision,
+                controller_fence=controller_fence,
+            )
+            root_id = self._ordinary_landing_preparation_id(
+                request_id=request_id,
+                binding_revision=expected_binding_revision,
+                pull_request_number=predecessor_hint.entry.pull_request_number,
+                attempt_ordinal=1,
+            )
+            latest = self._resolve_latest_ordinary_landing_preparation(
+                session, root_preparation_id=root_id, for_update=True
+            )
+            if (
+                latest.predecessor_preparation_id == predecessor_preparation_id
+                and latest.controller_fence == controller_fence
+                and latest.scope_sha256 == context.request.scope_sha256
+                and latest.target == context.request.target
+            ):
+                # This is historical resolution only. The caller sees replay
+                # and must not mint custody or perform provider I/O.
+                return effect_contracts.OrdinaryAgentLandingReservation(
+                    disposition="replay", preparation=latest
+                )
+            if latest.preparation_id != predecessor_preparation_id:
+                raise OrdinaryAgentSessionAdmissionDenied("landing_retry_predecessor_conflict")
+            predecessor = latest
+            if (
+                predecessor.attempt_ordinal
+                >= effect_contracts.MAX_ORDINARY_LANDING_ATTEMPTS_PER_ENTRY
+            ):
+                raise OrdinaryAgentSessionAdmissionDenied("landing_retry_attempts_exhausted")
+            plan, candidate_record, entry, base_sha, base_tree = (
+                self._ordinary_landing_plan_context(
+                    session,
+                    context=context,
+                    controller=controller,
+                    pull_request_number=predecessor.entry.pull_request_number,
+                )
+            )
+            if (
+                plan.record_id != predecessor.landing_plan_record_id
+                or plan.landing_plan.landing_plan_sha256 != predecessor.landing_plan_sha256
+                or candidate_record.record_id != predecessor.candidate_record_id
+                or entry != predecessor.entry
+                or (base_sha, base_tree)
+                != (predecessor.expected_base_sha, predecessor.expected_base_tree_sha)
+                or entry.recorded_candidate_result_tree_sha != predecessor.expected_merge_tree_sha
+            ):
+                raise OrdinaryAgentSessionAdmissionDenied("landing_preparation_lineage_changed")
+            self._lock_ordinary_agent_provider_waits(
+                session,
+                principal=context.principal,
+                resource_classes=("core", "graphql", "secondary"),
+            )
+            predecessor_custody_row = session.get(
+                LaunchplaneOrdinaryAgentCustodyIssueAttemptRow,
+                predecessor.custody_attempt_id,
+                with_for_update=True,
+                populate_existing=True,
+            )
+            if predecessor_custody_row is None:
+                raise OrdinaryAgentSessionAdmissionDenied("custody_unavailable")
+            predecessor_custody = OrdinaryAgentCustodyIssueAttempt.model_validate(
+                predecessor_custody_row.payload
+            )
+            if (
+                predecessor_custody.state != "closed"
+                or self._ordinary_agent_job_custody_uncertainty(session, request_id)
+            ):
+                raise OrdinaryAgentSessionAdmissionDenied("custody_cleanup_required")
+            effect_owner = self._ordinary_landing_effect_owner_preparation(
+                session, lineage_tip=predecessor
+            )
+            if predecessor.state == "consumed":
+                if effect_owner != predecessor:
+                    raise OrdinaryAgentSessionAdmissionDenied("landing_retry_history_conflict")
+            elif not (
+                predecessor.state == "terminal"
+                and predecessor.reason_code
+                in {"provider_wait", "provider_attempt_deadline", "evidence_denied"}
+                and predecessor.effect_id is None
+                and session.get(
+                    LaunchplaneOrdinaryAgentLandingBindingRow,
+                    predecessor.preparation_id,
+                )
+                is None
+                and session.get(
+                    LaunchplaneOrdinaryAgentNoOpLandingFinalizationRow,
+                    predecessor.preparation_id,
+                )
+                is None
+            ):
+                raise OrdinaryAgentSessionAdmissionDenied("landing_retry_not_proven")
+            if effect_owner is not None:
+                self._ordinary_landing_retry_effect_context(session, preparation=effect_owner)
+            else:
+                semantic_key = f"{predecessor.semantic_ordinal}:pull_request_landing"
+                if (
+                    session.scalar(
+                        select(LaunchplaneOrdinaryAgentEffectRow.effect_id)
+                        .where(
+                            LaunchplaneOrdinaryAgentEffectRow.request_id == request_id,
+                            LaunchplaneOrdinaryAgentEffectRow.binding_revision
+                            == expected_binding_revision,
+                            LaunchplaneOrdinaryAgentEffectRow.semantic_key == semantic_key,
+                        )
+                        .limit(1)
+                    )
+                    is not None
+                ):
+                    raise OrdinaryAgentSessionAdmissionDenied("landing_retry_history_conflict")
+            custody_row = session.get(
+                LaunchplaneOrdinaryAgentCredentialCustodyRow,
+                context.principal.custody_record_id,
+            )
+            if custody_row is None:
+                raise OrdinaryAgentSessionAdmissionDenied("custody_unavailable")
+            custody = OrdinaryAgentCredentialCustodyRecord.model_validate(custody_row.payload)
+            if (
+                custody.custody_sha256 != context.principal.custody_sha256
+                or custody.target != context.request.target
+                or custody.credential_id != context.credential.credential_id
+                or custody.credential_version != context.credential.credential_version
+                or not custody.valid_from <= context.now < custody.expires_at
+                or "guarded_merge" not in custody.effect_profiles
+            ):
+                raise OrdinaryAgentSessionAdmissionDenied("custody_binding_conflict")
+            secret = custody.managed_secret
+            candidate = OrdinaryAgentCustodyCandidate(
+                principal_id=context.principal.principal_id,
+                repository_id=context.request.target.repository_id,
+                repository=context.request.target.repository,
+                base_branch=context.request.target.base_branch,
+                credential_id=context.credential.credential_id,
+                credential_version=context.credential.credential_version,
+                secret_id=secret.secret_id,
+                secret_binding_id=secret.binding_id,
+                secret_version_id=secret.secret_version_id,
+                expected_app_id=custody.github_app_id,
+                expected_installation_id=custody.github_installation_id,
+                effect_profile="merge_train_landing",
+            )
+            attempt_ordinal = predecessor.attempt_ordinal + 1
+            preparation_id = self._ordinary_landing_preparation_id(
+                request_id=request_id,
+                binding_revision=expected_binding_revision,
+                pull_request_number=entry.pull_request_number,
+                attempt_ordinal=attempt_ordinal,
+            )
+            custody_key = "landing-" + canonical_json_sha256({"landing": preparation_id})
+            record = effect_contracts.OrdinaryAgentLandingPreparation(
+                preparation_id=preparation_id,
+                request_id=request_id,
+                session_id=context.request.session_id,
+                lease_id=context.lease.lease_id,
+                principal_id=context.principal.principal_id,
+                scope_sha256=context.request.scope_sha256,
+                binding_revision=expected_binding_revision,
+                attempt_ordinal=attempt_ordinal,
+                predecessor_preparation_id=predecessor.preparation_id,
+                semantic_ordinal=predecessor.semantic_ordinal,
+                action_ordinal=predecessor.action_ordinal,
+                target=context.request.target,
+                controller_fence=controller_fence,
+                landing_plan_record_id=plan.record_id,
+                landing_plan_sha256=plan.landing_plan.landing_plan_sha256,
+                candidate_record_id=candidate_record.record_id,
+                entry=entry,
+                expected_base_sha=base_sha,
+                expected_base_tree_sha=base_tree,
+                expected_merge_tree_sha=entry.recorded_candidate_result_tree_sha,
+                policy_record_id=context.policy.record_id,
+                policy_revision=context.policy.revision,
+                policy_sha256=context.policy.policy_sha256,
+                credential_id=context.credential.credential_id,
+                credential_version=context.credential.credential_version,
+                credential_digest=context.credential.credential_digest,
+                custody_attempt_id="custody_" + hashlib.sha256(custody_key.encode()).hexdigest(),
+                idempotency_key=custody_key,
+                candidate=candidate,
+                reserved_at=context.now,
+            )
+            session.add(
+                LaunchplaneOrdinaryAgentLandingPreparationRow(
+                    preparation_id=record.preparation_id,
+                    request_id=request_id,
+                    lease_id=record.lease_id,
+                    binding_revision=expected_binding_revision,
+                    pull_request_number=entry.pull_request_number,
+                    attempt_ordinal=record.attempt_ordinal,
+                    predecessor_preparation_id=record.predecessor_preparation_id,
+                    action_ordinal=record.action_ordinal,
+                    custody_attempt_id=record.custody_attempt_id,
+                    revision=record.revision,
+                    payload=self._payload_dict(record),
+                )
+            )
+            if predecessor.state == "terminal":
+                predecessor_row = session.get(
+                    LaunchplaneOrdinaryAgentLandingPreparationRow,
+                    predecessor.preparation_id,
+                    with_for_update=True,
+                    populate_existing=True,
+                )
+                assert predecessor_row is not None
+                superseded = predecessor.model_copy(
+                    update={"revision": predecessor.revision + 1, "state": "superseded"}
+                )
+                predecessor_row.revision = superseded.revision
+                predecessor_row.payload = self._payload_dict(superseded)
             session.commit()
             return effect_contracts.OrdinaryAgentLandingReservation(
                 disposition="created", preparation=record
@@ -24087,6 +24812,10 @@ class PostgresRecordStore(HumanSessionStore):
             context, row, record = self._ordinary_agent_reserved_effect_context(
                 session, effect_id=effect_id, check_provider_wait=True
             )
+            if record.command.kind == "pull_request_landing":
+                raise OrdinaryAgentSessionAdmissionDenied(
+                    "landing_dispatch_requires_joined_finalization"
+                )
             if record.state not in {"reserved", "not_dispatched"}:
                 raise OrdinaryAgentSessionAdmissionDenied("effect_not_dispatchable")
             if record.dispatch_count >= effect_contracts.MAX_SEMANTIC_DISPATCH_ATTEMPTS_PER_EFFECT:
@@ -24496,17 +25225,11 @@ class PostgresRecordStore(HumanSessionStore):
             if locator is None:
                 raise OrdinaryAgentSessionAdmissionDenied("effect_unavailable")
             original = OrdinaryAgentEffectRecord.model_validate(locator.payload)
-            self._advisory_lock_merge_train_controller(session, controller_fence.controller_key)
-            admission: MergeAdmissionRecord | None = None
-            if original.command.kind == "pull_request_landing":
-                admission_row = session.get(
-                    LaunchplaneMergeAdmissionRow,
-                    original.command.effect.admission_id,
-                    with_for_update=True,
+            if getattr(original.command, "kind", None) == "pull_request_landing":
+                raise OrdinaryAgentSessionAdmissionDenied(
+                    "landing_dispatch_requires_joined_finalization"
                 )
-                if admission_row is None:
-                    raise OrdinaryAgentSessionAdmissionDenied("landing_admission_unavailable")
-                admission = MergeAdmissionRecord.model_validate(admission_row.payload)
+            self._advisory_lock_merge_train_controller(session, controller_fence.controller_key)
             context, row, record = self._ordinary_agent_reserved_effect_context(
                 session,
                 effect_id=effect_id,
@@ -24616,28 +25339,6 @@ class PostgresRecordStore(HumanSessionStore):
                 or expiry - now < effect_contracts.MIN_PROVIDER_TOKEN_TTL_AT_DISPATCH_SECONDS
             ):
                 raise OrdinaryAgentSessionAdmissionDenied("provider_token_ttl_insufficient")
-            if record.command.kind == "pull_request_landing":
-                assert admission is not None
-                effect = record.command.effect
-                controller_row = session.get(
-                    LaunchplaneMergeTrainControllerStateRow, controller_fence.controller_key
-                )
-                assert controller_row is not None
-                controller = MergeTrainControllerStateRecord.model_validate(controller_row.payload)
-                validate_merge_admission_controller_fence(
-                    admission=admission,
-                    controller_state=controller,
-                    admitted_at=self._database_mutation_timestamp(session),
-                )
-                if (
-                    admission.pull_request_number != effect.pull_request_number
-                    or admission.pull_request_head_sha != effect.head_sha
-                    or admission.effective_base_sha != effect.rolling_base_sha
-                    or admission.merge_method != effect.merge_method
-                    or admission.landing_plan_id != effect.lineage.landing_plan_id
-                    or admission.landing_plan_record_id != controller.active_record_id
-                ):
-                    raise OrdinaryAgentSessionAdmissionDenied("landing_admission_conflict")
             child = effect_contracts.OrdinaryAgentSemanticDispatchAttemptRecord(
                 child_id=child_id,
                 effect_id=effect_id,
@@ -25821,6 +26522,42 @@ class PostgresRecordStore(HumanSessionStore):
             or child_row.semantic_ordinal != child.semantic_ordinal
         ):
             raise OrdinaryAgentSessionAdmissionDenied("dispatch_history_conflict")
+        if record.command.kind == "pull_request_landing":
+            binding = session.scalar(
+                select(LaunchplaneOrdinaryAgentLandingBindingRow)
+                .where(LaunchplaneOrdinaryAgentLandingBindingRow.child_id == child_id)
+                .with_for_update()
+            )
+            admission_row = (
+                None
+                if binding is None
+                else session.get(LaunchplaneMergeAdmissionRow, binding.admission_id)
+            )
+            admission = (
+                None
+                if admission_row is None
+                else MergeAdmissionRecord.model_validate(admission_row.payload)
+            )
+            associated = (
+                binding is not None
+                and admission is not None
+                and binding.effect_id == record.effect_id
+                and binding.dispatch_ordinal == child.semantic_ordinal
+                and (
+                    (
+                        child.admission_id == admission.admission_id
+                        and child.admission_binding_sha256 == admission.admission_binding_sha256
+                    )
+                    or (
+                        child.admission_id is None
+                        and child.admission_binding_sha256 is None
+                        and child.semantic_ordinal == 1
+                        and record.command.effect.admission_id == admission.admission_id
+                    )
+                )
+            )
+            if not associated:
+                raise OrdinaryAgentSessionAdmissionDenied("landing_dispatch_binding_conflict")
         return row, record, child
 
     def _require_ordinary_landing_result_tree(
@@ -25861,6 +26598,105 @@ class PostgresRecordStore(HumanSessionStore):
             finalized.preparation.entry.expected_head_sha,
         ):
             raise OrdinaryAgentSessionAdmissionDenied("landing_result_parents_mismatch")
+
+    def _ensure_ordinary_landing_dispatch_not_attempted_outcome(
+        self,
+        session: Any,
+        *,
+        effect: OrdinaryAgentEffectRecord,
+        child: effect_contracts.OrdinaryAgentSemanticDispatchAttemptRecord,
+        typed_outcome: effect_contracts.OrdinaryAgentSemanticOutcome,
+    ) -> MergeLandingOutcomeRecord:
+        if (
+            effect.command.kind != "pull_request_landing"
+            or effect.state != "not_dispatched"
+            or child.semantic_ordinal != effect.dispatch_count
+            or not isinstance(
+                typed_outcome, effect_contracts.OrdinaryAgentKnownNotDispatchedOutcome
+            )
+            or typed_outcome.reason != "provider_attempt_deadline"
+        ):
+            raise OrdinaryAgentSessionAdmissionDenied("landing_dispatch_not_attempted_unproven")
+        binding = session.scalar(
+            select(LaunchplaneOrdinaryAgentLandingBindingRow)
+            .where(LaunchplaneOrdinaryAgentLandingBindingRow.child_id == child.child_id)
+            .with_for_update()
+        )
+        admission_row = (
+            None
+            if binding is None
+            else session.get(
+                LaunchplaneMergeAdmissionRow,
+                binding.admission_id,
+                with_for_update=True,
+                populate_existing=True,
+            )
+        )
+        if binding is None or admission_row is None:
+            raise OrdinaryAgentSessionAdmissionDenied("landing_dispatch_binding_conflict")
+        admission = MergeAdmissionRecord.model_validate(admission_row.payload)
+        associated = (
+            child.admission_id == admission.admission_id
+            and child.admission_binding_sha256 == admission.admission_binding_sha256
+        ) or (
+            child.admission_id is None
+            and child.admission_binding_sha256 is None
+            and child.semantic_ordinal == 1
+            and binding.dispatch_ordinal == 1
+            and effect.command.effect.admission_id == admission.admission_id
+        )
+        if (
+            binding.effect_id != effect.effect_id
+            or binding.dispatch_ordinal != child.semantic_ordinal
+            or not associated
+        ):
+            raise OrdinaryAgentSessionAdmissionDenied("landing_dispatch_binding_conflict")
+        record = MergeLandingOutcomeRecord(
+            admission_id=admission.admission_id,
+            admission_binding_sha256=admission.admission_binding_sha256,
+            attempt_id=admission.attempt_id,
+            observation_sequence=1,
+            source="ordinary-agent-landing-dispatch",
+            repository=admission.repository,
+            base_branch=admission.base_branch,
+            pull_request_number=admission.pull_request_number,
+            status="rejected",
+            reason="dispatch_not_attempted",
+            provider_effect_attempted=False,
+            observed_at=datetime.fromtimestamp(effect.updated_at, timezone.utc).isoformat(),
+        )
+        validate_merge_landing_outcome_for_admission(admission=admission, outcome=record)
+        existing_rows = tuple(
+            session.scalars(
+                select(LaunchplaneMergeLandingOutcomeRow)
+                .where(LaunchplaneMergeLandingOutcomeRow.admission_id == admission.admission_id)
+                .limit(2)
+                .with_for_update()
+            ).all()
+        )
+        if existing_rows:
+            if len(existing_rows) != 1:
+                raise OrdinaryAgentSessionAdmissionDenied("landing_outcome_history_conflict")
+            existing = MergeLandingOutcomeRecord.model_validate(existing_rows[0].payload)
+            if existing != record:
+                raise OrdinaryAgentSessionAdmissionDenied("immutable_landing_outcome_conflict")
+            return existing
+        session.add(
+            LaunchplaneMergeLandingOutcomeRow(
+                outcome_id=record.outcome_id,
+                outcome_binding_sha256=record.outcome_binding_sha256,
+                admission_id=record.admission_id,
+                attempt_id=record.attempt_id,
+                observation_sequence=record.observation_sequence,
+                status=record.status,
+                repository=record.repository,
+                base_branch=record.base_branch,
+                pull_request_number=record.pull_request_number,
+                observed_at=record.observed_at,
+                payload=self._payload_dict(record),
+            )
+        )
+        return record
 
     @_private_ordinary_agent_operation
     def record_ordinary_semantic_outcome(
@@ -25920,6 +26756,19 @@ class PostgresRecordStore(HumanSessionStore):
                     "next_observation_at": next_due,
                 }
             )
+            if (
+                updated.command.kind == "pull_request_landing"
+                and isinstance(
+                    typed_outcome, effect_contracts.OrdinaryAgentKnownNotDispatchedOutcome
+                )
+                and typed_outcome.reason == "provider_attempt_deadline"
+            ):
+                self._ensure_ordinary_landing_dispatch_not_attempted_outcome(
+                    session,
+                    effect=updated,
+                    child=child,
+                    typed_outcome=typed_outcome,
+                )
             self._ordinary_agent_save_effect(row, updated)
             session.commit()
             return updated
@@ -26116,9 +26965,13 @@ class PostgresRecordStore(HumanSessionStore):
                         == request.scope_sha256,
                         LaunchplaneOrdinaryAgentLandingPreparationRow.payload["state"]
                         .as_string()
-                        .in_(("reserved", "observed")),
+                        .in_(("reserved", "observed", "terminal")),
                     )
-                    .order_by(LaunchplaneOrdinaryAgentLandingPreparationRow.preparation_id)
+                    .order_by(
+                        desc(LaunchplaneOrdinaryAgentLandingPreparationRow.action_ordinal),
+                        desc(LaunchplaneOrdinaryAgentLandingPreparationRow.attempt_ordinal),
+                        desc(LaunchplaneOrdinaryAgentLandingPreparationRow.preparation_id),
+                    )
                     .limit(2)
                 )
             )

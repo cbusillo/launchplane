@@ -10174,6 +10174,7 @@
               "provider_and_git_confirmed",
               "already_contained_no_provider_effect",
               "provider_rejected",
+              "dispatch_not_attempted",
               "reconciliation_confirmed_no_effect",
               "provider_transport_ambiguous",
               "process_interrupted",

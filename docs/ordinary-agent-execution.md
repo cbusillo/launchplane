@@ -10,8 +10,8 @@ union. Dedicated client routes propose connections and sessions; signed-browser
 routes review, approve, cancel and revoke their persisted domain operations.
 The service worker recovers approved enrollment and expires private delivery
 capsules. This source integration is not a deployed installation or a merge
-permission: ordinary effect/admission transport and the activation package still
-require their own complete implementation and qualification.
+permission: ordinary-worker runtime qualification and the separately reviewed
+activation package remain prerequisites to live execution.
 
 The older `proposed_ordinary_agent_v1` evidence models and their pure eligibility
 result remain inert fixture contracts. They do not authenticate a caller or
@@ -73,10 +73,11 @@ credential reference. The store also requires the code-owned App integration,
 private-key binding, full installation permission ceiling, and enrollment
 capability set, even when a caller constructs an internal candidate directly.
 
-These storage records do not grant execution. Their only callable entry point is
-the internal store method used by tests; production policy schema-v3 writes stay
-fenced, and there is no descriptor or route that can construct or dispatch the
-apply envelope.
+These storage records do not grant execution. The enrollment recovery worker
+constructs and applies the internal envelope only from a persisted, approved
+enrollment and rechecks its exact policy snapshots. Clients cannot dispatch that
+envelope directly. Production policy schema-v3 writes remain fenced pending the
+separate activation package.
 
 Every proposed record requires the `proposed_ordinary_agent_v1` record kind,
 `authority_state = "inert"`, and `authorizes_execution = false`. Missing markers,
@@ -658,12 +659,12 @@ match the approved step. Storage independently checks the result tree against
 the consumed preparation. Definite provider rejection and a pre-dispatch
 deadline remain distinct from a lost response or unproven merge result. Replay
 does not dispatch, and the generic ordinary effect executor cannot reacquire
-custody to land. Worker orchestration and complete fleet budget qualification
-remain required before this path is enabled.
+custody to land. The inactive worker composes these joined operations; supported
+installation and runtime qualification remain required before it is enabled.
 
 These internal records and tests do not activate ordinary execution or establish
-installed-client or production usability. Service wiring and the guarded landing
-admission integration must use the same joined boundaries before publication.
+installed-client or production usability. Runtime wiring must retain the same
+joined boundaries.
 
 A reconciliation read that proves a different merge tree or ordered parents is
 retained as a terminal conflict with its specific reason. It never counts as
@@ -707,25 +708,35 @@ unknown; no second page, per-user fallback or cross-observation role cache is us
 The actual ordinary installation/profile must qualify this endpoint during the
 existing activation package; source tests do not establish deployed capability.
 
-The normal six-repository request ledger is still an acceptance requirement,
-not a readiness claim. The source audit counted 318 immediate-success requests
-before role lookups because seven custody leases each included `GET /app`.
-Removing those redundant identity reads and batching roles projects 294 requests
-for one two-PR job per repository with one successful candidate-check observation.
-Retries and reconciliation remain separately bounded and counted. Required-check
-repolls, cleanup behavior, actual GraphQL point costs and the assembled worker
-must be measured before claiming the unchanged 300-request/120-point gate passes.
+The [six-repository qualification](../tests/test_ordinary_agent_six_repository_qualification.py)
+drives two scan clients through the real inactive worker and shared store. Each
+repository has four provider-side PRs and one finite request naming exactly two;
+the unbound PRs receive no provider reads or mutations. The immediate-success
+NORMAL run measures 294 raw provider calls and 48 reported GraphQL points, with
+maximum query cost 1. Its seven custody leases per repository include installation
+lookup, token mint and confirmed revocation. Five provider mutations and one
+retained-delete completion consume six actions per request, with two PRs used and
+no refresh. All custody is closed on completion.
 
+The test asserts the 300-call/120-point ceilings rather than requiring equality
+to that measured total. Its ledger records failed requests as well as successful
+calls, including App and installation-token traffic; recovery journeys have
+separate ledgers. Retained candidate-ref cleanup has no provider request or token
+lease. A deterministic clock measures full processed polls under controlled
+provider latency. This proves the composed source workload, not a hard wall-clock
+SLA under arbitrary database or network delays.
 
-The projection decomposes per repository as 28 custody requests (seven leases,
-four calls each), five semantic writes, two initial snapshot reads, two candidate
-check reads and sixteen landing evidence/proof reads: 53 before role lookups.
-Ordinary minting removes seven App reads, and three observations each add at most
-one admin-list read: `6 × (53 - 7 + 3) = 294`. This immediate-success projection
-includes no extra candidate-check repoll or unknown-write reconciliation. Those
-paths must appear in the measured ledger when exercised. Retained candidate-ref
-cleanup has no provider request or token lease.
+Separate fault journeys exercise a quota wait while another installation completes,
+permission denial without a false quota wait, restart after a lost progress
+checkpoint, and read-only observation after a lost merge response without resend.
+They also cover expiry before dispatch, session revocation preserving unresolved
+history, and genuine containment followed by the next landing and later cleanup.
 
+NORMAL uses non-strict required checks and truthful ancestry after the first
+landing. It changes no live protection and does not prove the real strict
+multiple-PR journey, which can require head refresh and readmission. Live
+installation access, runtime activation and engineering/owner-preview delivery
+remain separate qualification gates.
 
 Concrete controller snapshot and candidate-check readers query exact repository,
 base and immutable head identities, provider protection, and each relevant
@@ -734,9 +745,12 @@ source head without repeating its rules request. Initial queue checks and base
 freshness remain separate: passing CI on a stale strict branch requests a refresh,
 while unavailable source checks remain unknown and cannot start planning.
 Candidate checks bind to the candidate SHA and never reuse source-head results.
+Landing admission may evaluate them later within the existing 45-second evidence
+window; it retains their original observation timestamp and digest. Expired
+evidence yields a deadline wait rather than being restamped as fresh.
 These readers supply the existing custody acquisition adapters, including bounded
-pending-observation recovery. Full worker assembly and fleet qualification remain
-required before activation.
+pending-observation recovery, in the inactive worker assembly. Source qualification
+does not register that callable with the runtime scheduler.
 
 Restart recovery interprets the latest durable dispatch and its immutable outcome
 before selecting more work. Completed or reconciled proof is replayed without a
@@ -774,8 +788,8 @@ If a read token is confirmed closed but its observation append was lost, the sto
 records an incomplete read before permitting another attempt. Unknown token cleanup
 continues to fence new issuance.
 Ref/commit/containment evidence uses the captured immutable SHA, comment scans stop
-at three pages, and a full label page cannot prove a missing label. The actual
-worker factory and fleet qualification are still required before activation.
+at three pages, and a full label page cannot prove a missing label. Installed
+runtime qualification remains separate from the controlled source workload.
 Landing reconciliation also captures the target base ref's exact commit and tree.
 It proves containment against that immutable commit before completing the effect;
 a merged PR alone, or a base that does not contain the merge, remains unproven.
@@ -818,11 +832,13 @@ The ordinary controller client has an optional one-entry landing callback. Each
 call persists the exact successor before returning, retains the proven rolling
 base across completed entries, and rejects inconsistent recovery state and
 unassembled or unsupported stack-collapse paths. The merge callback owns joined
-admission and durable dispatch intent;
-the legacy provider checkpoint hook does not establish ordinary-agent authority.
+admission and durable dispatch intent. Before a normal landing step, the client
+uses the existing admission-phase checkpoint to bind the selected PR to the
+controller. The legacy provider checkpoint hook does not establish ordinary-agent
+authority.
 Already-contained entries require the separate joined no-op callback described
-below. Renewed finite admission, measured fleet qualification and runtime
-activation remain separate prerequisites.
+below. Retry admission uses the bounded fresh-attempt path; runtime activation
+remains a separate operation.
 
 New provider-inspected enrollment carries the discovered installation ID into
 the target-specific custody record. Absent IDs are omitted when serializing old
@@ -857,9 +873,10 @@ retains its actual SHA and tree separately from the merge commit. Legacy PR-only
 completion proof remains insufficient and does not trigger another provider write.
 Recovery checks the exact admission
 scope before interpreting missing outcomes and reuses an existing matching
-terminal outcome. Uncertain dispatches and retryable preparations remain separate
-recovery work; this adapter grants no new admission or retry. The current joined
-progress checkpoint still owns authority to persist the successor.
+terminal outcome. It resolves the latest attempt in a bounded linear preparation
+history, so a successful second dispatch replays against its own admission rather
+than the first attempt's admission. The current joined progress checkpoint still
+owns authority to persist the successor.
 
 The ordinary semantic router reserves each invoked command by its kind and its
 stable position in the finite request. It dispatches through the existing bounded
@@ -871,11 +888,32 @@ completing the effect, and yielding the empty controller in one transaction. It
 spends one existing refresh allowance while preserving action and dispatch charges,
 scope, and deadlines. Active progress or a parked checkpoint blocks this rebind;
 failures release the controller acquired by this attempt before returning. The
-next claim reads the new binding without another delegation approval. Retryable
-landing history is blocked before controller acquisition until a fresh-admission
-retry path is assembled.
-Landing remains
-in the joined landing path, and stack methods are excluded from this router.
+next claim reads the new binding without another delegation approval. Landing
+remains in the joined landing path, and stack methods are excluded from this router.
+
+A landing dispatch may retry only after an explicit pre-request deadline outcome,
+with no reconciliation history and conclusively closed custody. Unknown effects,
+provider rejections and reconciliation-derived no-effect classifications never
+permit a landing resend. The next poll reserves one successor preparation and
+rechecks current authority, the exact plan/head/rolling base, fresh provider
+evidence, and a fresh admission before dispatch. A gracefully terminal preparation
+with a provider wait, deadline or evidence denial can follow the same bounded path;
+crashed reserved/observed attempts remain blocked. Every successor consumes an
+attempt from the existing cap while retaining the original action charge.
+Gracefully terminal preparations between consumed attempts retain the lineage's
+original effect; preparation ordinals and dispatch ordinals count independently.
+Exhausting the preparation cap blocks further attempts even when dispatch budget
+remains.
+
+Consumed retries reuse one immutable semantic effect and command digest. Each
+child has a distinct preparation, custody attempt and admission binding; the
+command's embedded admission remains the first dispatch's compatibility value.
+The pre-send outcome atomically projects a truthful `dispatch_not_attempted`
+landing outcome for that attempt, allowing the latest-admission gate to consider
+a fresh proposal. The joined finalizer advances the dispatch and custody counters,
+consumes the successor, and restores the effect to dispatching together. Generic
+dispatch/custody entry points cannot authorize landing. Replay never sends, and
+neither this retry path nor successful readmission activates the worker.
 
 If the initial provider snapshot finds changed source heads or a changed base,
 it records the complete ordered tuple as immutable readmission evidence before
@@ -890,7 +928,7 @@ is evidence only: the fresh-binding normal admission and exact-containment check
 still decide whether the next step may proceed.
 
 The internal job recovery snapshot checks the exact live job claim and reads the
-current binding, reserved or uncertain effect history, open landing preparation,
+current binding, reserved or uncertain effect history, latest open or terminal landing preparation,
 custody uncertainty, and applicable read/provider deadlines together. PostgreSQL
 uses a fresh read-only repeatable-read transaction; SQLite rehearsal uses an
 explicit read transaction. The read neither acquires a controller nor renews

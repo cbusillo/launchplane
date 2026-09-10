@@ -38,6 +38,32 @@ class OrdinaryEffectRecoveryTests(unittest.TestCase):
             command_sha256=self.record.command_sha256,
         )
 
+    def test_dispatch_admission_association_is_coherent_and_legacy_optional(self) -> None:
+        legacy_payload = self.child.model_dump(
+            mode="json", exclude={"admission_id", "admission_binding_sha256"}
+        )
+        legacy = effects.OrdinaryAgentSemanticDispatchAttemptRecord.model_validate(legacy_payload)
+        associated = effects.OrdinaryAgentSemanticDispatchAttemptRecord.model_validate(
+            {
+                **legacy_payload,
+                "admission_id": "admission-one",
+                "admission_binding_sha256": "f" * 64,
+            }
+        )
+
+        self.assertIsNone(legacy.admission_id)
+        self.assertEqual(legacy.model_dump(mode="json"), legacy_payload)
+        self.assertEqual(associated.admission_id, "admission-one")
+        for field, value in (
+            ("admission_id", "admission-one"),
+            ("admission_binding_sha256", "f" * 64),
+        ):
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(ValueError, "complete or absent"):
+                    effects.OrdinaryAgentSemanticDispatchAttemptRecord.model_validate(
+                        {**legacy_payload, field: value}
+                    )
+
     def test_checkpoint_and_async_response_require_observation_not_fresh_dispatch(self) -> None:
         self.assertEqual(
             recover_ordinary_effect(

@@ -9,6 +9,7 @@ from control_plane.contracts.ordinary_agent_snapshot import (
     OrdinaryAgentProtectionEvidence,
     OrdinaryAgentProviderRequestCounts,
 )
+from control_plane.ordinary_agent_github_transport import OrdinaryAgentProviderDeferred
 from control_plane.ordinary_agent_landing_evidence import (
     OrdinaryAgentLandingTechnicalCheckClient,
     OrdinaryAgentLandingRepositoryEvidenceProvider,
@@ -88,6 +89,27 @@ class OrdinaryAgentLandingEvidenceTests(unittest.TestCase):
         payload["technical_checks"]["binding_sha256"] = ""
         with self.assertRaisesRegex(ValueError, "internally consistent"):
             OrdinaryAgentLandingEvidence.model_validate_json(json.dumps(payload))
+
+    def test_elapsed_admission_time_preserves_fresh_checks_but_rejects_stale_or_future_evidence(
+        self,
+    ) -> None:
+        evidence = self.evidence()
+        client = OrdinaryAgentLandingTechnicalCheckClient(evidence)
+
+        def read(at: str) -> TenantAdmissionTechnicalChecks:
+            return client.read_technical_checks(
+                repository=evidence.repository,
+                base_branch=evidence.base_ref,
+                base_sha=evidence.base_identity.sha,
+                head_sha=evidence.candidate_sha,
+                evaluated_at=at,
+            )
+
+        self.assertIs(read("2026-09-09T17:00:05.125Z"), evidence.technical_checks)
+        with self.assertRaises(OrdinaryAgentProviderDeferred):
+            read("2026-09-09T17:00:46Z")
+        with self.assertRaises(OrdinaryAgentLandingEvidenceMismatch):
+            read("2026-09-09T16:59:59Z")
 
     def test_previous_entry_resolves_without_putting_it_back_in_the_queue(self) -> None:
         evidence = self.evidence()

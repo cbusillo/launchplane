@@ -336,6 +336,11 @@ class OrdinaryAgentMergeTrainClient(GitHubMergeTrainClient):
             checkpointed_entry = entry
             checkpointed_plan = persisted.landing_plan
 
+        if not is_no_op:
+            # Bind the selected PR in the existing controller admission phase.
+            # This records no provider intent; dispatch still requires the
+            # joined preparation/admission/child transaction inside the step.
+            checkpoint(landing_plan, selected, "merge_entry")
         result = advance_entry(
             candidate_record=candidate_record,
             landing_plan_record=landing_record,

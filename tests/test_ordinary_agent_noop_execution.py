@@ -46,7 +46,7 @@ class OrdinaryAgentNoOpExecutionTests(unittest.TestCase):
     def test_core_checkpoint_commits_no_op_once_after_lease_renewal(self) -> None:
         self._exercise_no_op(checkpoint_delay=2)
 
-    def test_expired_provider_window_waits_and_closes_preparation_without_a_merge(self) -> None:
+    def test_expired_noop_preparation_retries_fresh_without_a_merge(self) -> None:
         self._exercise_no_op(checkpoint_delay=46)
 
     def _exercise_no_op(self, *, checkpoint_delay: int) -> None:
@@ -91,6 +91,8 @@ class OrdinaryAgentNoOpExecutionTests(unittest.TestCase):
                 ).isoformat(),
             )
         )
+        retry_predecessor: str | None = None
+        expected_attempts = 2 if checkpoint_delay == 46 else 1
         prepared: list[OrdinaryAgentLandingPreparation] = []
         evaluation_phases: list[str] = []
         before_checkpoint_expiry: list[str] = []
@@ -135,6 +137,7 @@ class OrdinaryAgentNoOpExecutionTests(unittest.TestCase):
                 guard_factory=guard_factory,
                 checkpoint=kwargs["checkpoint"],
                 no_op_route=route,
+                predecessor_preparation_id=retry_predecessor,
                 api_request=provider,
                 transport_factory=lambda token: transport,
                 utc_now=lambda: datetime.fromtimestamp(session_fixture.now, timezone.utc),
@@ -193,49 +196,48 @@ class OrdinaryAgentNoOpExecutionTests(unittest.TestCase):
             if checkpoint_delay == 46:
                 with self.assertRaises(OrdinaryAgentSessionAdmissionDenied) as denied:
                     advance()
-            else:
-                result = advance()
-        self.assertEqual(evaluation_phases, ["landing_entry_merged"])
-        mint.assert_called_once()
+                self.assertEqual(denied.exception.reason_code, "provider_attempt_deadline")
+                snapshot = store.read_ordinary_agent_job_recovery_snapshot(
+                    claim_fence=landing.claimed.claim_fence
+                )
+                disposition = _expected_exception_disposition(
+                    error=denied.exception, snapshot=snapshot
+                )
+                assert disposition is not None
+                self.assertEqual(disposition.status, "waiting")
+                assert disposition.next_due_at is not None
+                self.assertGreater(disposition.next_due_at, session_fixture.now)
+                retry_predecessor = prepared[0].preparation_id
+                terminal = store.read_ordinary_landing_preparation(preparation_id=retry_predecessor)
+                self.assertEqual(
+                    (terminal.state, terminal.reason_code),
+                    ("terminal", "provider_attempt_deadline"),
+                )
+                self.assertIsNone(
+                    store.read_ordinary_no_op_landing_finalization(preparation_id=retry_predecessor)
+                )
+                self.assertEqual(transport.requests, [])
+                checkpoint_delay = 2
+            result = advance()
+        self.assertEqual(evaluation_phases, ["landing_entry_merged"] * expected_attempts)
+        self.assertEqual(mint.call_count, expected_attempts)
         self.assertEqual(transport.requests, [])
         self.assertFalse(route.armed)
         finalization = store.read_ordinary_no_op_landing_finalization(
-            preparation_id=prepared[0].preparation_id
+            preparation_id=prepared[-1].preparation_id
         )
-        if checkpoint_delay == 46:
-            self.assertEqual(denied.exception.reason_code, "provider_attempt_deadline")
-            snapshot = store.read_ordinary_agent_job_recovery_snapshot(
-                claim_fence=landing.claimed.claim_fence
-            )
-            disposition = _expected_exception_disposition(error=denied.exception, snapshot=snapshot)
-            assert disposition is not None
-            self.assertEqual(disposition.status, "waiting")
-            assert disposition.next_due_at is not None
-            self.assertGreater(disposition.next_due_at, session_fixture.now)
-            self.assertIsNone(finalization)
-            terminal = store.read_ordinary_landing_preparation(
-                preparation_id=prepared[0].preparation_id
-            )
+        if retry_predecessor is not None:
             self.assertEqual(
-                (terminal.state, terminal.reason_code), ("terminal", "provider_attempt_deadline")
+                store.read_ordinary_landing_preparation(preparation_id=retry_predecessor).state,
+                "superseded",
             )
-            with store._session_factory() as session:
-                self.assertEqual(
-                    session.scalar(
-                        select(func.count()).select_from(
-                            LaunchplaneOrdinaryAgentSemanticDispatchRow
-                        )
-                    ),
-                    dispatches_before,
-                )
-            return
         self.assertEqual(result["landing_progress"], "cleanup_pending")
         assert finalization is not None
         self.assertEqual(
             result["merge_train_batch_landing_plan_record_id"], finalization.successor.record_id
         )
         self.assertEqual(finalization.successor.landing_plan.entries[0].status, "skipped")
-        self.assertGreater(lease.read_current().lease_expires_at, before_checkpoint_expiry[0])
+        self.assertGreater(lease.read_current().lease_expires_at, before_checkpoint_expiry[-1])
         with store._session_factory() as session:
             self.assertEqual(
                 session.scalar(
@@ -265,4 +267,4 @@ class OrdinaryAgentNoOpExecutionTests(unittest.TestCase):
                 checkpoint=checkpoint,
             )
         checkpoint.assert_not_called()
-        mint.assert_called_once()
+        self.assertEqual(mint.call_count, expected_attempts)

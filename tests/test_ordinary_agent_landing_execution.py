@@ -143,7 +143,9 @@ class OrdinaryAgentLandingExecutionTests(unittest.TestCase):
             raise self.revoke_error
         return None
 
-    def run_landing(self) -> MergeTrainBatchLandingEntry:
+    def run_landing(
+        self, predecessor_preparation_id: str | None = None
+    ) -> MergeTrainBatchLandingEntry:
         target = self.fixture.request.target
         with (
             patch(
@@ -178,6 +180,7 @@ class OrdinaryAgentLandingExecutionTests(unittest.TestCase):
                 ),
                 guard_factory=self.guard,
                 checkpoint=self.checkpoint,
+                predecessor_preparation_id=predecessor_preparation_id,
                 api_request=self.provider_request,
                 transport_factory=lambda token: self.inner,
                 monotonic=lambda: self.elapsed,

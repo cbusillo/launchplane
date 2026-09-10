@@ -145,6 +145,57 @@ def _already_contained_outcome(
 
 
 class MergeLandingOutcomeContractTests(unittest.TestCase):
+    def test_dispatch_not_attempted_is_a_terminal_zero_evidence_outcome(self) -> None:
+        admission = _merge_admission()
+        outcome = MergeLandingOutcomeRecord(
+            admission_id=admission.admission_id,
+            admission_binding_sha256=admission.admission_binding_sha256,
+            attempt_id=admission.attempt_id,
+            observation_sequence=1,
+            source="test:dispatch-not-attempted",
+            repository=admission.repository,
+            base_branch=admission.base_branch,
+            pull_request_number=admission.pull_request_number,
+            status="rejected",
+            reason="dispatch_not_attempted",
+            provider_effect_attempted=False,
+            observed_at="2026-08-11T03:02:00Z",
+        )
+
+        validate_merge_landing_outcome_for_admission(admission=admission, outcome=outcome)
+        for field, value in (
+            ("observation_sequence", 2),
+            ("provider_effect_attempted", True),
+            ("provider_status_code", 503),
+            ("provider_request_id", "request-one"),
+            ("provider_message", "request may have been sent"),
+            ("observed_base_sha", "7" * 40),
+            ("base_contains_merge_commit", False),
+        ):
+            with self.subTest(field=field):
+                payload = outcome.model_dump(mode="json")
+                payload.update(
+                    {
+                        field: value,
+                        "outcome_id": "",
+                        "outcome_binding_sha256": "",
+                    }
+                )
+                if field == "observation_sequence":
+                    payload["prior_outcome_id"] = "ambiguous-outcome"
+                with self.assertRaisesRegex(ValueError, "first zero-evidence observation"):
+                    MergeLandingOutcomeRecord.model_validate(payload)
+
+        with self.assertRaisesRegex(ValueError, "requires an ambiguity reason"):
+            MergeLandingOutcomeRecord.model_validate(
+                {
+                    **outcome.model_dump(
+                        mode="json", exclude={"outcome_id", "outcome_binding_sha256"}
+                    ),
+                    "status": "reconcile_required",
+                }
+            )
+
     def test_already_contained_outcome_accepts_explicit_lifecycle_and_unchanged_base(self) -> None:
         admission = _merge_admission()
 

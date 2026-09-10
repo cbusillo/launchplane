@@ -82,6 +82,7 @@ def execute_fresh_ordinary_landing(
     ],
     checkpoint: Callable[[MergeTrainBatchLandingEntry], None],
     no_op_route: OrdinaryNoOpLandingRoute | None = None,
+    predecessor_preparation_id: str | None = None,
     api_request: GitHubApiRequest = github_api_request,
     transport_factory: Callable[[str], MergeTrainGitHubTransport] | None = None,
     monotonic: Callable[[], float] = time.monotonic,
@@ -104,12 +105,21 @@ def execute_fresh_ordinary_landing(
     is_no_op = step is not None and step.kind == "no_op_already_contained"
     if is_no_op and no_op_route is None:
         raise OrdinaryNoOpFinalizationUnavailable()
-    reservation = store.reserve_ordinary_landing_preparation(
-        request_id=request_id,
-        expected_binding_revision=binding_revision,
-        controller_fence=controller_fence,
-        pull_request_number=pull_request_number,
-        semantic_ordinal=semantic_ordinal,
+    reservation = (
+        store.reserve_ordinary_landing_preparation(
+            request_id=request_id,
+            expected_binding_revision=binding_revision,
+            controller_fence=controller_fence,
+            pull_request_number=pull_request_number,
+            semantic_ordinal=semantic_ordinal,
+        )
+        if predecessor_preparation_id is None
+        else store.reserve_ordinary_landing_retry_preparation(
+            request_id=request_id,
+            expected_binding_revision=binding_revision,
+            controller_fence=controller_fence,
+            predecessor_preparation_id=predecessor_preparation_id,
+        )
     )
     if reservation.disposition != "created":
         raise OrdinaryLandingRecoveryRequired(reservation.preparation.preparation_id)

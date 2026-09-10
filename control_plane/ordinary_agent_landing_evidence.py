@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 
 from control_plane.contracts.change_impact import (
     ChangeImpactRepositoryEvidence,
     ChangeImpactTargetReference,
 )
 from control_plane.contracts.ordinary_agent_snapshot import OrdinaryAgentLandingEvidence
+from control_plane.contracts.ordinary_agent_effect import LANDING_EVIDENCE_MAX_AGE_SECONDS
 from control_plane.merge_train import MergeTrainDryRunSnapshot
+from control_plane.ordinary_agent_github_transport import OrdinaryAgentProviderDeferred
 from control_plane.tenant_admission_controller import TenantAdmissionTechnicalChecks
 
 
@@ -57,12 +60,32 @@ class OrdinaryAgentLandingTechnicalCheckClient:
         evaluated_at: str,
     ) -> TenantAdmissionTechnicalChecks:
         checks = self.evidence.technical_checks
+        try:
+            evaluation_time = datetime.fromisoformat(evaluated_at.replace("Z", "+00:00"))
+            observation_time = datetime.fromisoformat(checks.evaluated_at.replace("Z", "+00:00"))
+            if evaluation_time.tzinfo is None or observation_time.tzinfo is None:
+                raise ValueError("landing evaluation requires timezone-aware evidence")
+            evidence_age = evaluation_time.timestamp() - self.evidence.observed_at
+            checks_age = (evaluation_time - observation_time).total_seconds()
+        except ValueError as error:
+            raise OrdinaryAgentLandingEvidenceMismatch(
+                "landing_technical_lookup_mismatch"
+            ) from error
         if (
             repository != self.evidence.repository
             or base_branch != self.evidence.base_ref
             or base_sha != self.evidence.base_identity.sha
             or head_sha != checks.head_sha
-            or evaluated_at != checks.evaluated_at
+            or evidence_age < 0
+            or checks_age < 0
         ):
             raise OrdinaryAgentLandingEvidenceMismatch("landing_technical_lookup_mismatch")
+        if (
+            evidence_age > LANDING_EVIDENCE_MAX_AGE_SECONDS
+            or checks_age > LANDING_EVIDENCE_MAX_AGE_SECONDS
+        ):
+            raise OrdinaryAgentProviderDeferred()
+        # Admission evaluates current authority later than the provider read.
+        # Preserve the original observation and its digest instead of restamping
+        # old checks as newly observed evidence.
         return checks

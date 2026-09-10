@@ -6,6 +6,7 @@ from collections.abc import Callable
 import time
 
 from control_plane.contracts.ordinary_agent_effect import (
+    LANDING_EVIDENCE_MAX_AGE_SECONDS,
     OrdinaryAgentCompletedOutcome,
     OrdinaryAgentEffectStore,
     OrdinaryAgentKnownNotDispatchedOutcome,
@@ -54,6 +55,19 @@ class FinalizedOrdinaryLandingDispatcher:
         if command.kind != "pull_request_landing" or command.effect.merge_method != "merge":
             raise OrdinaryLandingDispatchStopped("landing_command_unsupported")
         effect = command.effect
+        child = finalized.child
+        if (
+            child.effect_id != finalized.effect.effect_id
+            or child.command_sha256 != finalized.effect.command_sha256
+            or child.semantic_ordinal != finalized.effect.dispatch_count
+            or child.custody_attempt_id != preparation.custody_attempt_id
+            or child.controller_fence != preparation.controller_fence
+            or child.admission_id != finalized.admission.admission_id
+            or child.admission_binding_sha256 != finalized.admission.admission_binding_sha256
+            or preparation.effect_id != finalized.effect.effect_id
+            or preparation.state != "consumed"
+        ):
+            raise OrdinaryLandingDispatchStopped("landing_dispatch_admission_mismatch")
         if (
             effect.lineage.repository != preparation.target.repository
             or effect.lineage.base_branch != preparation.target.base_branch
@@ -66,7 +80,9 @@ class FinalizedOrdinaryLandingDispatcher:
             self._transport.require_remaining(30)
             if (
                 preparation.evidence is None
-                or not 0 <= self._utc_seconds() - preparation.evidence.observed_at <= 45
+                or not 0
+                <= self._utc_seconds() - preparation.evidence.observed_at
+                <= LANDING_EVIDENCE_MAX_AGE_SECONDS
             ):
                 raise OrdinaryAgentProviderDeferred()
         except OrdinaryAgentProviderDeferred:
