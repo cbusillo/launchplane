@@ -7,7 +7,20 @@ import type { BrowserOperationFailure } from "./browser-operation";
 
 export type OwnerAcceptanceHumanAction = OwnerAcceptanceEventEnvelope["action"];
 
-export function ownerAcceptanceOperationScope(binding: OwnerAcceptanceBinding): string {
+export type OwnerAcceptanceOperationBinding = Pick<
+  OwnerAcceptanceBinding,
+  | "action"
+  | "binding_sha256"
+  | "environment"
+  | "product"
+  | "pull_request_number"
+  | "repository"
+  | "system"
+>;
+
+export function ownerAcceptanceOperationScope(
+  binding: OwnerAcceptanceOperationBinding,
+): string {
   return [
     "owner-acceptance",
     binding.repository,
@@ -21,7 +34,7 @@ export function ownerAcceptanceOperationScope(binding: OwnerAcceptanceBinding): 
 }
 
 export function ownerAcceptanceRequest(
-  binding: OwnerAcceptanceBinding,
+  binding: OwnerAcceptanceOperationBinding,
   action: OwnerAcceptanceHumanAction,
   reason: string,
   resolution: OwnerAcceptanceEventEnvelope["resolution"] = null,

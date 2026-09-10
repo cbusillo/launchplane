@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 
 import {
+  evaluateOwnerProductReview,
   readOwnerAcceptanceCurrentItems,
   readOwnerAcceptanceQueue,
   writeOwnerAcceptanceEvent,
@@ -11,6 +12,32 @@ const originalFetch = globalThis.fetch;
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
+});
+
+test("Owner product review uses only the owner-safe exact evaluation route", async () => {
+  const calls = [];
+  globalThis.fetch = async (input, init = {}) => {
+    calls.push({ input: String(input), init });
+    return new Response(
+      JSON.stringify({
+        status: "ok",
+        trace_id: "trace-owner-review",
+        review_status: "not_required",
+        evaluated_at: "2026-09-08T12:00:00Z",
+        products: [],
+      }),
+      { headers: { "Content-Type": "application/json" }, status: 200 },
+    );
+  };
+
+  await evaluateOwnerProductReview("example/tenant-site", 42);
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].init.method, "GET");
+  assert.equal(
+    calls[0].input,
+    "/v1/owner-acceptance/owner-evaluation?repository=example%2Ftenant-site&pull_request_number=42",
+  );
 });
 
 test("Owner acceptance write uses session CSRF and the binding-scoped idempotency key", async () => {
@@ -23,7 +50,7 @@ test("Owner acceptance write uses session CSRF and the binding-scoped idempotenc
         status: 200,
       });
     }
-    return new Response(JSON.stringify({ status: "ok", trace_id: "trace-write", write_status: "replayed" }), {
+    return new Response(JSON.stringify({ response_kind: "receipt", status: "ok", trace_id: "trace-write", write_status: "replayed" }), {
       headers: { "Content-Type": "application/json" },
       status: 202,
     });
@@ -45,6 +72,7 @@ test("Owner acceptance write uses session CSRF and the binding-scoped idempotenc
   const headers = new Headers(calls[1].init.headers);
   assert.equal(headers.get("X-CSRF-Token"), "csrf-owner");
   assert.equal(headers.get("Idempotency-Key"), "owner-binding-key");
+  assert.equal(response.response_kind, "receipt");
   assert.equal(response.replayed, true);
   assert.deepEqual(JSON.parse(calls[1].init.body), {
     schema_version: 1,

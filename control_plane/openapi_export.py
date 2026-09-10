@@ -192,6 +192,7 @@ UI_OPENAPI_READ_OPERATIONS: dict[str, str] = {
     "/v1/work-graph/tenant-admission/evaluation": "read_tenant_admission_evaluation",
     "/v1/governance/projection": "read_governance_projection",
     "/v1/owner-acceptance/evaluation": "evaluate_owner_acceptance",
+    "/v1/owner-acceptance/owner-evaluation": "evaluate_owner_product_review",
     "/v1/owner-acceptance/current-items": "list_owner_acceptance_current_items",
     "/v1/owner-acceptance/queue": "list_owner_acceptance_queue",
     "/v1/privileged-operations/plans": "list_human_privileged_operations",

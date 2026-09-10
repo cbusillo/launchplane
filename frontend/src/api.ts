@@ -15,6 +15,7 @@ import type {
   DryRunProductPromotionResponse,
   EveryCodeSummaryResponse,
   EvaluateOwnerAcceptanceResponse,
+  EvaluateOwnerProductReviewResponse,
   GovernanceProjectionResponse,
   ListHumanPrivilegedOperationsData,
   ListHumanPrivilegedOperationsResponse,
@@ -25,7 +26,6 @@ import type {
   OwnerAcceptanceQueueResponse,
   OwnerAcceptanceCurrentItemsResponse,
   OwnerAcceptanceDecision,
-  OwnerAcceptanceEventResponse,
   OwnerAcceptanceProductDecision,
   ProductActivityResponse,
   ProductEnvironmentConfigStatusResponse,
@@ -56,6 +56,7 @@ import type {
   WorkGraphSnapshot,
   WorkGraphSnapshotResponse,
   WriteOwnerAcceptanceEventData,
+  WriteOwnerAcceptanceEventResponse,
 } from "./generated/openapi.ts";
 import type {
   OrdinaryAgentOperationClientResponse,
@@ -577,7 +578,7 @@ export function readOwnerAcceptanceCurrentItems(
 
 export type { OwnerAcceptanceDecision, OwnerAcceptanceProductDecision };
 export type OwnerAcceptanceEventMutationResponse =
-  OwnerAcceptanceEventResponse & {
+  WriteOwnerAcceptanceEventResponse & {
     replayed: boolean;
   };
 
@@ -598,6 +599,23 @@ export function evaluateOwnerAcceptance(
   );
 }
 
+export function evaluateOwnerProductReview(
+  repository: string,
+  pullRequestNumber: number,
+  signal?: AbortSignal,
+): Promise<EvaluateOwnerProductReviewResponse> {
+  const params = new URLSearchParams({
+    repository,
+    pull_request_number: String(pullRequestNumber),
+  });
+  return requestJson<EvaluateOwnerProductReviewResponse>(
+    `/v1/owner-acceptance/owner-evaluation?${params.toString()}`,
+    "GET",
+    undefined,
+    signal,
+  );
+}
+
 export function writeOwnerAcceptanceEvent(
   payload: WriteOwnerAcceptanceEventData["body"],
   options: BrowserOperationOptions,
@@ -607,7 +625,7 @@ export function writeOwnerAcceptanceEvent(
     body: payload,
     headers: { "Idempotency-Key": options.idempotencyKey },
   };
-  return requestGeneratedPost<OwnerAcceptanceEventResponse>(
+  return requestGeneratedPost<WriteOwnerAcceptanceEventResponse>(
     request,
     options.signal,
     options.onDispatch,

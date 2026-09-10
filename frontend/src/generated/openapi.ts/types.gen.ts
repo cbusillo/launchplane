@@ -1566,6 +1566,13 @@ export type OwnerAcceptanceEventEnvelope = {
     target: ChangeImpactTargetReference;
 };
 
+export type OwnerAcceptanceEventReceipt = {
+    response_kind: 'receipt';
+    status: 'ok';
+    trace_id: string;
+    write_status: 'written' | 'replayed';
+};
+
 export type OwnerAcceptanceEventRecord = {
     acceptance_id: string;
     action: 'accepted' | 'changes_requested' | 'revoked' | 'superseded' | 'invalidated';
@@ -1584,6 +1591,7 @@ export type OwnerAcceptanceEventRecord = {
 export type OwnerAcceptanceEventResponse = {
     decision: OwnerAcceptanceDecision;
     record: OwnerAcceptanceEventRecord;
+    response_kind: 'full';
     semantics: OwnerAcceptanceEventSemantics;
     status: 'ok';
     trace_id: string;
@@ -1592,6 +1600,29 @@ export type OwnerAcceptanceEventResponse = {
 
 export type OwnerAcceptanceEventSemantics = {
     human_action_semantics: 'none' | 'product_review_accepted' | 'product_review_changes_requested' | 'product_review_revoked' | 'product_review_superseded' | 'product_review_invalidated';
+};
+
+export type OwnerAcceptanceOwnerEvaluationResponse = {
+    evaluated_at: string;
+    products: Array<OwnerAcceptanceOwnerProduct>;
+    review_status: 'not_required' | 'review_required' | 'accepted' | 'changes_requested' | 'unavailable';
+    status: 'ok';
+    trace_id: string;
+};
+
+export type OwnerAcceptanceOwnerProduct = {
+    action: string;
+    binding_sha256: string;
+    can_accept: boolean;
+    can_request_changes: boolean;
+    can_revoke: boolean;
+    environment: string;
+    preview_url: string | null;
+    product: string;
+    resolution_evidence_references: Array<string>;
+    resolution_required: boolean;
+    review_status: 'not_required' | 'review_required' | 'accepted' | 'changes_requested' | 'unavailable';
+    system: string;
 };
 
 export type OwnerAcceptancePolicyFingerprintBinding = {
@@ -3860,6 +3891,37 @@ export type EvaluateOwnerAcceptanceResponses = {
 
 export type EvaluateOwnerAcceptanceResponse = EvaluateOwnerAcceptanceResponses[keyof EvaluateOwnerAcceptanceResponses];
 
+export type EvaluateOwnerProductReviewData = {
+    body?: never;
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path?: never;
+    query: {
+        repository: string;
+        pull_request_number: number;
+    };
+    url: '/v1/owner-acceptance/owner-evaluation';
+};
+
+export type EvaluateOwnerProductReviewErrors = {
+    400: LaunchplaneErrorResponse;
+    401: LaunchplaneErrorResponse;
+    403: LaunchplaneErrorResponse;
+    404: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type EvaluateOwnerProductReviewError = EvaluateOwnerProductReviewErrors[keyof EvaluateOwnerProductReviewErrors];
+
+export type EvaluateOwnerProductReviewResponses = {
+    200: OwnerAcceptanceOwnerEvaluationResponse;
+};
+
+export type EvaluateOwnerProductReviewResponse = EvaluateOwnerProductReviewResponses[keyof EvaluateOwnerProductReviewResponses];
+
 export type ListOwnerAcceptanceQueueData = {
     body?: never;
     headers?: {
@@ -4671,7 +4733,11 @@ export type WriteOwnerAcceptanceEventErrors = {
 export type WriteOwnerAcceptanceEventError = WriteOwnerAcceptanceEventErrors[keyof WriteOwnerAcceptanceEventErrors];
 
 export type WriteOwnerAcceptanceEventResponses = {
-    202: OwnerAcceptanceEventResponse;
+    202: ({
+        response_kind: 'full';
+    } & OwnerAcceptanceEventResponse) | ({
+        response_kind: 'receipt';
+    } & OwnerAcceptanceEventReceipt);
 };
 
 export type WriteOwnerAcceptanceEventResponse = WriteOwnerAcceptanceEventResponses[keyof WriteOwnerAcceptanceEventResponses];

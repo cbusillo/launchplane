@@ -61,6 +61,7 @@ import type {
 } from "./generated/openapi.ts";
 
 const QUEUE_LIMIT = 50;
+type OwnerAcceptanceRefreshReason = "binding_changed" | "receipt";
 
 export function EngineeringOwnerAcceptanceRoute({
   fixtureMode,
@@ -318,7 +319,10 @@ function OwnerAcceptanceCurrentItemCard({
     setDriftMessage("");
     setError("");
   }, [item.decision, item.error_code, item.evaluation_status, viewerCapabilities]);
-  const refreshCurrentEvaluation = useCallback(async (binding: OwnerAcceptanceBinding) => {
+  const refreshCurrentEvaluation = useCallback(async (
+    binding: OwnerAcceptanceBinding,
+    reason: OwnerAcceptanceRefreshReason = "binding_changed",
+  ) => {
     try {
       const evaluation = fixtureMode
         ? null
@@ -338,11 +342,18 @@ function OwnerAcceptanceCurrentItemCard({
           : evaluation!.viewer_capabilities,
       );
       setDriftMessage(
-        "The reviewed binding changed. Current evidence was refreshed; review the new binding and explicitly submit again.",
+        reason === "binding_changed"
+          ? "The reviewed binding changed. Current evidence was refreshed; review the new binding and explicitly submit again."
+          : "Owner acceptance was recorded. Current engineering evidence was refreshed from the read-authorized route.",
       );
       setError("");
     } catch (refreshError: unknown) {
       const apiError = refreshError as LaunchplaneApiError;
+      setDecision(null);
+      setCurrentViewerCapabilities({
+        event_write_authorized: false,
+        bindings: [],
+      });
       setError(apiError?.message || "Current Owner acceptance evidence could not be refreshed.");
     }
   }, [fixtureMode]);
@@ -480,7 +491,10 @@ function OwnerAcceptanceLookupPane({
     void runLookup(initialRepository, initialPullRequest);
   }, [autoLookup, initialPullRequest, initialRepository, runLookup]);
 
-  const refreshCurrentEvaluation = useCallback(async (reviewedBinding: OwnerAcceptanceBinding) => {
+  const refreshCurrentEvaluation = useCallback(async (
+    reviewedBinding: OwnerAcceptanceBinding,
+    reason: OwnerAcceptanceRefreshReason = "binding_changed",
+  ) => {
     const repo = reviewedBinding.repository;
     const pr = reviewedBinding.pull_request_number;
     try {
@@ -502,11 +516,15 @@ function OwnerAcceptanceLookupPane({
           : evaluation!.viewer_capabilities,
       );
       setDriftMessage(
-        "The reviewed binding changed. Current evidence was refreshed; review the new binding and explicitly submit again.",
+        reason === "binding_changed"
+          ? "The reviewed binding changed. Current evidence was refreshed; review the new binding and explicitly submit again."
+          : "Owner acceptance was recorded. Current engineering evidence was refreshed from the read-authorized route.",
       );
       setError(null);
     } catch (err: unknown) {
       const apiErr = err as LaunchplaneApiError;
+      setDecision(null);
+      setViewerCapabilities(null);
       setError(apiErr?.message || "Current Owner acceptance evidence could not be refreshed.");
     }
   }, [fixtureMode]);
@@ -596,7 +614,10 @@ function OwnerAcceptanceDecisionDetails({
   driftMessage: string;
   viewerCapabilities: OwnerAcceptanceViewerCapabilities;
   fixtureMode: DevFixtureMode;
-  onBindingChanged: (binding: OwnerAcceptanceBinding) => Promise<void>;
+  onBindingChanged: (
+    binding: OwnerAcceptanceBinding,
+    reason?: OwnerAcceptanceRefreshReason,
+  ) => Promise<void>;
   onDecision: (decision: OwnerAcceptanceDecision) => void;
   showReadOnlyNotice?: boolean;
 }) {
@@ -843,7 +864,10 @@ function OwnerAcceptanceActionPanel({
   decision: OwnerAcceptanceDecision;
   eligibility: OwnerAcceptanceViewerBindingEligibility;
   fixtureMode: DevFixtureMode;
-  onBindingChanged: (binding: OwnerAcceptanceBinding) => Promise<void>;
+  onBindingChanged: (
+    binding: OwnerAcceptanceBinding,
+    reason?: OwnerAcceptanceRefreshReason,
+  ) => Promise<void>;
   onDecision: (decision: OwnerAcceptanceDecision) => void;
 }) {
   const defaultAction = ownerAcceptanceDefaultAction(eligibility);
@@ -885,6 +909,7 @@ function OwnerAcceptanceActionPanel({
         authorization: null,
       };
       return {
+        response_kind: "full" as const,
         status: "ok" as const,
         trace_id: "fixture-owner-acceptance-write",
         write_status: "written" as const,
@@ -1003,7 +1028,11 @@ function OwnerAcceptanceActionPanel({
               : null,
           ));
           if (response) {
-            onDecision(response.decision);
+            if (response.response_kind === "full") {
+              onDecision(response.decision);
+            } else {
+              await onBindingChanged(binding, "receipt");
+            }
             setAction(ownerAcceptanceDefaultAction(eligibility));
             setReason("");
             setResolutionSummary("");
