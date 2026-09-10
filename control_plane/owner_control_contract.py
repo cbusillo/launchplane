@@ -63,8 +63,8 @@ from control_plane.privileged_operation_registry import list_privileged_operatio
 from control_plane.privileged_operation_registry import read_privileged_operation_descriptor
 
 
-OWNER_CONTROL_CONTRACT_SCHEMA_VERSION = 5
-_OWNER_CONTROL_PREVIOUS_CONTRACT_SCHEMA_VERSION = 4
+OWNER_CONTROL_CONTRACT_SCHEMA_VERSION = 6
+_OWNER_CONTROL_PREVIOUS_CONTRACT_SCHEMA_VERSION = 5
 _OWNER_CONTROL_SIGNATURE_DECLARATION_SCHEMA_VERSION = 2
 _OWNER_CONTROL_VECTOR_SCHEMA_VERSION = 1
 _ARTIFACT_SYNTHETIC_PRIVATE_KEY_SEED = bytes(range(32))
@@ -93,6 +93,15 @@ _PRESERVED_V2_DESCRIPTOR_IDS = frozenset(
     ("managed-authz-policy-set", "managed-secret-reencryption")
 )
 _ALL_DESCRIPTOR_IDS = frozenset(get_args(PrivilegedOperationDescriptorId))
+_PRESERVED_V4_DESCRIPTOR_IDS = frozenset(
+    (
+        "managed-authz-policy-set",
+        "managed-merge-train-policy-import",
+        "managed-secret-reencryption",
+    )
+)
+# Descriptor literals are append-only: the projected enum order is part of the
+# preserved v4 schema digest.
 _PRESERVED_V4_SECTION_SHA256 = {
     "canonical_json": "0c6b6454d737943d01d4621c217ff8412552a0bf0c69a0f50a761d38ac0e7d1f",
     "canonicalization_vectors": "ca481ff769bba537310c8568b56850f5d12ebc0c90ace9ea2dc39ff714daa6a8",
@@ -106,6 +115,14 @@ _PRESERVED_V4_SECTION_SHA256 = {
     "schemas": "1fdb3187f24ee64f95a8f7753ec64b93d72d1f3b92ea118db00d43a798263f0c",
     "signature_declaration": "7d9c62d55792931383d4a02ed99d31e21c67b5ce714c01d9144dc2a3bed34f72",
     "verification_state_vectors": "4c199bf64618845f098ac12ef992a21111ab87a6e91e5325f962db3e8174c8df",
+}
+_PRESERVED_V5_SECTION_SHA256 = {
+    "compatibility": "eb3a3be1e246502561894c8d87089c288785960e6fe564e966145b95a889ea76",
+    "negative_provenance_vectors": "17ac70c3ecd73aa2b21bde393b1a4bd9016c9d5d2882774446a334a6e0823c29",
+    "provenance_declaration": "b4c762c1cbf3df80a2beba14e91ce5c52dbbc0e4e83487a3d5da7c08ab708d64",
+    "provenance_schemas": "f5b9d381a2f2d902724186040611062f4eb3d9951c419f514facc917206a7698",
+    "provenance_vectors": "9d531551aeeeedd48d3997cefc345366f901da976252a242bb608c3cb20c04d9",
+    "schema_version": "ef2d127de37b942baad06145e54b0c619a1f22327b2ebbcfbec78f5564afe39d",
 }
 
 
@@ -1102,10 +1119,10 @@ def _v4_compatibility_declaration() -> dict[str, Any]:
     }
 
 
-def _compatibility_declaration() -> dict[str, Any]:
+def _v5_compatibility_declaration() -> dict[str, Any]:
     return {
-        "container_schema_version": OWNER_CONTROL_CONTRACT_SCHEMA_VERSION,
-        "previous_container_schema_version": _OWNER_CONTROL_PREVIOUS_CONTRACT_SCHEMA_VERSION,
+        "container_schema_version": 5,
+        "previous_container_schema_version": 4,
         "change_kind": "additive-enrollment-provenance",
         "unknown_container_versions": "reject",
         "wire_model_schema_versions": [1],
@@ -1120,6 +1137,29 @@ def _compatibility_declaration() -> dict[str, Any]:
         ),
         "preserved_v2_schema_sha256": dict(_PRESERVED_V2_SCHEMA_SHA256),
         "preserved_v4_section_sha256": dict(_PRESERVED_V4_SECTION_SHA256),
+    }
+
+
+def _compatibility_declaration() -> dict[str, Any]:
+    return {
+        "container_schema_version": OWNER_CONTROL_CONTRACT_SCHEMA_VERSION,
+        "previous_container_schema_version": _OWNER_CONTROL_PREVIOUS_CONTRACT_SCHEMA_VERSION,
+        "change_kind": "additive-descriptor-wire-schema-and-vectors",
+        "unknown_container_versions": "reject",
+        "wire_model_schema_versions": [1],
+        "shadow_verifier_schema_versions": [OWNER_CONTROL_SHADOW_VERIFIER_SCHEMA_VERSION],
+        "enrollment_provenance_schema_versions": [
+            OWNER_CONTROL_ENROLLMENT_PROVENANCE_SCHEMA_VERSION
+        ],
+        "preserved_v2_section_sha256": dict(_PRESERVED_V2_SECTION_SHA256),
+        "preserved_v2_descriptor_ids": sorted(_PRESERVED_V2_DESCRIPTOR_IDS),
+        "preserved_v2_descriptor_vector_section_sha256": dict(
+            _PRESERVED_V2_DESCRIPTOR_VECTOR_SECTION_SHA256
+        ),
+        "preserved_v2_schema_sha256": dict(_PRESERVED_V2_SCHEMA_SHA256),
+        "preserved_v4_section_sha256": dict(_PRESERVED_V4_SECTION_SHA256),
+        "preserved_v5_section_sha256": dict(_PRESERVED_V5_SECTION_SHA256),
+        "schema_change": "descriptor literal expanded for ordinary-agent-delivery-activation",
     }
 
 
@@ -1147,9 +1187,11 @@ def _validate_preserved_v2_sections(artifact: Mapping[str, Any]) -> None:
             )
 
 
-def _preserve_v2_descriptor_enums(value: Any) -> Any:
+def _project_descriptor_enums(value: Any, *, allowed: frozenset[str]) -> Any:
     if isinstance(value, Mapping):
-        normalized = {key: _preserve_v2_descriptor_enums(item) for key, item in value.items()}
+        normalized = {
+            key: _project_descriptor_enums(item, allowed=allowed) for key, item in value.items()
+        }
         enum_values = normalized.get("enum")
         if (
             isinstance(enum_values, list)
@@ -1157,14 +1199,27 @@ def _preserve_v2_descriptor_enums(value: Any) -> Any:
             and set(enum_values) == _ALL_DESCRIPTOR_IDS
         ):
             normalized["enum"] = [
-                descriptor_id
-                for descriptor_id in enum_values
-                if descriptor_id in _PRESERVED_V2_DESCRIPTOR_IDS
+                descriptor_id for descriptor_id in enum_values if descriptor_id in allowed
             ]
         return normalized
     if isinstance(value, list):
-        return [_preserve_v2_descriptor_enums(item) for item in value]
+        return [_project_descriptor_enums(item, allowed=allowed) for item in value]
     return value
+
+
+def _preserve_v2_descriptor_enums(value: Any) -> Any:
+    return _project_descriptor_enums(value, allowed=_PRESERVED_V2_DESCRIPTOR_IDS)
+
+
+def _preserve_v4_descriptor_enums(value: Any) -> Any:
+    return _project_descriptor_enums(value, allowed=_PRESERVED_V4_DESCRIPTOR_IDS)
+
+
+def _validate_descriptor_projection_nesting() -> None:
+    if not _PRESERVED_V2_DESCRIPTOR_IDS <= _PRESERVED_V4_DESCRIPTOR_IDS:
+        raise OwnerControlContractError("Owner-control v2 descriptor projection exceeds v4")
+    if not _PRESERVED_V4_DESCRIPTOR_IDS <= _ALL_DESCRIPTOR_IDS:
+        raise OwnerControlContractError("Owner-control v4 descriptor projection exceeds current")
 
 
 def _validate_preserved_v4_sections(artifact: Mapping[str, Any]) -> None:
@@ -1173,6 +1228,16 @@ def _validate_preserved_v4_sections(artifact: Mapping[str, Any]) -> None:
             actual_sha256 = canonical_json_sha256(4)
         elif section == "compatibility":
             actual_sha256 = canonical_json_sha256(_v4_compatibility_declaration())
+        elif section in {"confirmation_golden_vectors", "golden_vectors"}:
+            actual_sha256 = canonical_json_sha256(
+                [
+                    vector
+                    for vector in artifact[section]
+                    if vector.get("descriptor_id") in _PRESERVED_V4_DESCRIPTOR_IDS
+                ]
+            )
+        elif section == "schemas":
+            actual_sha256 = canonical_json_sha256(_preserve_v4_descriptor_enums(artifact[section]))
         else:
             actual_sha256 = canonical_json_sha256(artifact[section])
         if actual_sha256 != expected_sha256:
@@ -1181,7 +1246,22 @@ def _validate_preserved_v4_sections(artifact: Mapping[str, Any]) -> None:
             )
 
 
+def _validate_preserved_v5_sections(artifact: Mapping[str, Any]) -> None:
+    for section, expected_sha256 in _PRESERVED_V5_SECTION_SHA256.items():
+        if section == "schema_version":
+            actual_sha256 = canonical_json_sha256(5)
+        elif section == "compatibility":
+            actual_sha256 = canonical_json_sha256(_v5_compatibility_declaration())
+        else:
+            actual_sha256 = canonical_json_sha256(artifact[section])
+        if actual_sha256 != expected_sha256:
+            raise OwnerControlContractError(
+                f"Owner-control v5 section {section!r} changed without a compatibility break"
+            )
+
+
 def _build_owner_control_contract() -> dict[str, Any]:
+    _validate_descriptor_projection_nesting()
     descriptors = list_privileged_operation_descriptors()
     return {
         "schema_version": OWNER_CONTROL_CONTRACT_SCHEMA_VERSION,
@@ -1244,6 +1324,7 @@ def build_owner_control_contract() -> dict[str, Any]:
     artifact = _build_owner_control_contract()
     _validate_preserved_v2_sections(artifact)
     _validate_preserved_v4_sections(artifact)
+    _validate_preserved_v5_sections(artifact)
     return artifact
 
 
@@ -1287,6 +1368,7 @@ def validate_owner_control_contract(artifact: Mapping[str, Any]) -> None:
         raise OwnerControlContractError("Owner-control compatibility declaration drifted")
     _validate_preserved_v2_sections(artifact)
     _validate_preserved_v4_sections(artifact)
+    _validate_preserved_v5_sections(artifact)
     if artifact["canonical_json"] != expected["canonical_json"]:
         raise OwnerControlContractError("Owner-control canonical JSON declaration drifted")
     if artifact["signature_declaration"] != expected["signature_declaration"]:

@@ -128,8 +128,8 @@
     }
   ],
   "compatibility": {
-    "change_kind": "additive-enrollment-provenance",
-    "container_schema_version": 5,
+    "change_kind": "additive-descriptor-wire-schema-and-vectors",
+    "container_schema_version": 6,
     "enrollment_provenance_schema_versions": [
       1
     ],
@@ -170,7 +170,16 @@
       "signature_declaration": "7d9c62d55792931383d4a02ed99d31e21c67b5ce714c01d9144dc2a3bed34f72",
       "verification_state_vectors": "4c199bf64618845f098ac12ef992a21111ab87a6e91e5325f962db3e8174c8df"
     },
-    "previous_container_schema_version": 4,
+    "preserved_v5_section_sha256": {
+      "compatibility": "eb3a3be1e246502561894c8d87089c288785960e6fe564e966145b95a889ea76",
+      "negative_provenance_vectors": "17ac70c3ecd73aa2b21bde393b1a4bd9016c9d5d2882774446a334a6e0823c29",
+      "provenance_declaration": "b4c762c1cbf3df80a2beba14e91ce5c52dbbc0e4e83487a3d5da7c08ab708d64",
+      "provenance_schemas": "f5b9d381a2f2d902724186040611062f4eb3d9951c419f514facc917206a7698",
+      "provenance_vectors": "9d531551aeeeedd48d3997cefc345366f901da976252a242bb608c3cb20c04d9",
+      "schema_version": "ef2d127de37b942baad06145e54b0c619a1f22327b2ebbcfbec78f5564afe39d"
+    },
+    "previous_container_schema_version": 5,
+    "schema_change": "descriptor literal expanded for ordinary-agent-delivery-activation",
     "shadow_verifier_schema_versions": [
       1
     ],
@@ -701,6 +710,180 @@
         "sha256": "db44c6648567a3a88e48cff26cf6c1efe11c9d6345d2ee457477292a335fa7d6"
       },
       "verification": "valid"
+    },
+    {
+      "challenge_response": {
+        "canonical_json": "{\"approval_request\":{\"descriptor_id\":\"ordinary-agent-delivery-activation\",\"descriptor_version\":1,\"evidence_digest\":\"c5a5da7694106c3b64192870616af357b7486aa739ac2e906be1b2451271d223\",\"expires_at\":\"2030-01-02T03:09:05+00:00\",\"issued_at\":\"2030-01-02T03:00:05+00:00\",\"nonce\":\"owner-control-7a5977c21c78f6c823b204cef6547bb2\",\"operation_id\":\"privileged-operation-206a39a7be530d906c862b5b03fe474d\",\"owner_github_id\":543932487,\"plan_digest\":\"cda186bb7a44a90afb5c0b23f043aafea81b638b391415778487fd23ce6bb94d\",\"policy_record_id\":\"owner-policy-206a39a7be530d906c86\",\"policy_revision\":1,\"policy_sha256\":\"ff2a542278ada8c417fb4427f98b3cbe896ed16c60ad4ed6bd3c59b16e4a71a7\",\"pre_state_digest\":\"b59df0f36184915903e89d552cddf1e84311b638f535f2c373dd8bc57acf346e\",\"request_digest\":\"a91e997ddd58bb82fa54eac82f40605aecb248c2f5edb4d575ac8ae1094e7ee5\",\"schema_version\":1,\"server_review\":{\"items\":[{\"key\":\"descriptor\",\"label\":\"Operation class\",\"value\":\"ordinary-agent-delivery-activation\"},{\"key\":\"safety_class\",\"label\":\"Safety class\",\"value\":\"policy_admin\"}],\"review_id\":\"review-206a39a7be530d906c862b5b\",\"schema_version\":1,\"summary\":\"Review this exact privileged operation before confirming.\",\"title\":\"Owner approval required\"}},\"approval_request_digest\":\"d014855024a427f07763ec6aca8307d0ef91fad3e46b1a3f554bdc04f51cbf34\",\"channel_binding_sha256\":\"6c75c61e1499682b816486eaa5f3ebe0051cc9c6862ae81abc1604424b144807\",\"confirmed_at\":\"2030-01-02T03:04:05+00:00\",\"decision\":\"approved\",\"schema_version\":1}",
+        "payload": {
+          "approval_request": {
+            "descriptor_id": "ordinary-agent-delivery-activation",
+            "descriptor_version": 1,
+            "evidence_digest": "c5a5da7694106c3b64192870616af357b7486aa739ac2e906be1b2451271d223",
+            "expires_at": "2030-01-02T03:09:05+00:00",
+            "issued_at": "2030-01-02T03:00:05+00:00",
+            "nonce": "owner-control-7a5977c21c78f6c823b204cef6547bb2",
+            "operation_id": "privileged-operation-206a39a7be530d906c862b5b03fe474d",
+            "owner_github_id": 543932487,
+            "plan_digest": "cda186bb7a44a90afb5c0b23f043aafea81b638b391415778487fd23ce6bb94d",
+            "policy_record_id": "owner-policy-206a39a7be530d906c86",
+            "policy_revision": 1,
+            "policy_sha256": "ff2a542278ada8c417fb4427f98b3cbe896ed16c60ad4ed6bd3c59b16e4a71a7",
+            "pre_state_digest": "b59df0f36184915903e89d552cddf1e84311b638f535f2c373dd8bc57acf346e",
+            "request_digest": "a91e997ddd58bb82fa54eac82f40605aecb248c2f5edb4d575ac8ae1094e7ee5",
+            "schema_version": 1,
+            "server_review": {
+              "items": [
+                {
+                  "key": "descriptor",
+                  "label": "Operation class",
+                  "value": "ordinary-agent-delivery-activation"
+                },
+                {
+                  "key": "safety_class",
+                  "label": "Safety class",
+                  "value": "policy_admin"
+                }
+              ],
+              "review_id": "review-206a39a7be530d906c862b5b",
+              "schema_version": 1,
+              "summary": "Review this exact privileged operation before confirming.",
+              "title": "Owner approval required"
+            }
+          },
+          "approval_request_digest": "d014855024a427f07763ec6aca8307d0ef91fad3e46b1a3f554bdc04f51cbf34",
+          "channel_binding_sha256": "6c75c61e1499682b816486eaa5f3ebe0051cc9c6862ae81abc1604424b144807",
+          "confirmed_at": "2030-01-02T03:04:05+00:00",
+          "decision": "approved",
+          "schema_version": 1
+        },
+        "sha256": "535f83420c84f9411cd24306f60109d267068110ea5105b6513aa5d123fae740"
+      },
+      "channel_binding": {
+        "canonical_json": "{\"channel_session_id\":\"channel-session-0ef9b610d2790e60e251d4bdad915173\",\"owner_github_id\":543932487,\"owner_public_key\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\",\"schema_version\":1,\"session_expires_at\":\"2030-01-02T03:09:05+00:00\",\"session_issued_at\":\"2030-01-02T03:00:05+00:00\",\"signature_algorithm\":\"ed25519\"}",
+        "payload": {
+          "channel_session_id": "channel-session-0ef9b610d2790e60e251d4bdad915173",
+          "owner_github_id": 543932487,
+          "owner_public_key": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+          "schema_version": 1,
+          "session_expires_at": "2030-01-02T03:09:05+00:00",
+          "session_issued_at": "2030-01-02T03:00:05+00:00",
+          "signature_algorithm": "ed25519"
+        },
+        "sha256": "6c75c61e1499682b816486eaa5f3ebe0051cc9c6862ae81abc1604424b144807"
+      },
+      "confirmation_envelope": {
+        "canonical_json": "{\"challenge_response\":{\"approval_request\":{\"descriptor_id\":\"ordinary-agent-delivery-activation\",\"descriptor_version\":1,\"evidence_digest\":\"c5a5da7694106c3b64192870616af357b7486aa739ac2e906be1b2451271d223\",\"expires_at\":\"2030-01-02T03:09:05+00:00\",\"issued_at\":\"2030-01-02T03:00:05+00:00\",\"nonce\":\"owner-control-7a5977c21c78f6c823b204cef6547bb2\",\"operation_id\":\"privileged-operation-206a39a7be530d906c862b5b03fe474d\",\"owner_github_id\":543932487,\"plan_digest\":\"cda186bb7a44a90afb5c0b23f043aafea81b638b391415778487fd23ce6bb94d\",\"policy_record_id\":\"owner-policy-206a39a7be530d906c86\",\"policy_revision\":1,\"policy_sha256\":\"ff2a542278ada8c417fb4427f98b3cbe896ed16c60ad4ed6bd3c59b16e4a71a7\",\"pre_state_digest\":\"b59df0f36184915903e89d552cddf1e84311b638f535f2c373dd8bc57acf346e\",\"request_digest\":\"a91e997ddd58bb82fa54eac82f40605aecb248c2f5edb4d575ac8ae1094e7ee5\",\"schema_version\":1,\"server_review\":{\"items\":[{\"key\":\"descriptor\",\"label\":\"Operation class\",\"value\":\"ordinary-agent-delivery-activation\"},{\"key\":\"safety_class\",\"label\":\"Safety class\",\"value\":\"policy_admin\"}],\"review_id\":\"review-206a39a7be530d906c862b5b\",\"schema_version\":1,\"summary\":\"Review this exact privileged operation before confirming.\",\"title\":\"Owner approval required\"}},\"approval_request_digest\":\"d014855024a427f07763ec6aca8307d0ef91fad3e46b1a3f554bdc04f51cbf34\",\"channel_binding_sha256\":\"6c75c61e1499682b816486eaa5f3ebe0051cc9c6862ae81abc1604424b144807\",\"confirmed_at\":\"2030-01-02T03:04:05+00:00\",\"decision\":\"approved\",\"schema_version\":1},\"channel_binding\":{\"channel_session_id\":\"channel-session-0ef9b610d2790e60e251d4bdad915173\",\"owner_github_id\":543932487,\"owner_public_key\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\",\"schema_version\":1,\"session_expires_at\":\"2030-01-02T03:09:05+00:00\",\"session_issued_at\":\"2030-01-02T03:00:05+00:00\",\"signature_algorithm\":\"ed25519\"},\"schema_version\":1,\"signature\":\"C_68f6DsO6R0-t_YBJlOGE5F9mwmWWWquKfv85xI8tXD6mtg5ebnDe4AbQkifny1K1yWaCCW9d4HoHYq68ywBw\",\"signature_algorithm\":\"ed25519\"}",
+        "payload": {
+          "challenge_response": {
+            "approval_request": {
+              "descriptor_id": "ordinary-agent-delivery-activation",
+              "descriptor_version": 1,
+              "evidence_digest": "c5a5da7694106c3b64192870616af357b7486aa739ac2e906be1b2451271d223",
+              "expires_at": "2030-01-02T03:09:05+00:00",
+              "issued_at": "2030-01-02T03:00:05+00:00",
+              "nonce": "owner-control-7a5977c21c78f6c823b204cef6547bb2",
+              "operation_id": "privileged-operation-206a39a7be530d906c862b5b03fe474d",
+              "owner_github_id": 543932487,
+              "plan_digest": "cda186bb7a44a90afb5c0b23f043aafea81b638b391415778487fd23ce6bb94d",
+              "policy_record_id": "owner-policy-206a39a7be530d906c86",
+              "policy_revision": 1,
+              "policy_sha256": "ff2a542278ada8c417fb4427f98b3cbe896ed16c60ad4ed6bd3c59b16e4a71a7",
+              "pre_state_digest": "b59df0f36184915903e89d552cddf1e84311b638f535f2c373dd8bc57acf346e",
+              "request_digest": "a91e997ddd58bb82fa54eac82f40605aecb248c2f5edb4d575ac8ae1094e7ee5",
+              "schema_version": 1,
+              "server_review": {
+                "items": [
+                  {
+                    "key": "descriptor",
+                    "label": "Operation class",
+                    "value": "ordinary-agent-delivery-activation"
+                  },
+                  {
+                    "key": "safety_class",
+                    "label": "Safety class",
+                    "value": "policy_admin"
+                  }
+                ],
+                "review_id": "review-206a39a7be530d906c862b5b",
+                "schema_version": 1,
+                "summary": "Review this exact privileged operation before confirming.",
+                "title": "Owner approval required"
+              }
+            },
+            "approval_request_digest": "d014855024a427f07763ec6aca8307d0ef91fad3e46b1a3f554bdc04f51cbf34",
+            "channel_binding_sha256": "6c75c61e1499682b816486eaa5f3ebe0051cc9c6862ae81abc1604424b144807",
+            "confirmed_at": "2030-01-02T03:04:05+00:00",
+            "decision": "approved",
+            "schema_version": 1
+          },
+          "channel_binding": {
+            "channel_session_id": "channel-session-0ef9b610d2790e60e251d4bdad915173",
+            "owner_github_id": 543932487,
+            "owner_public_key": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+            "schema_version": 1,
+            "session_expires_at": "2030-01-02T03:09:05+00:00",
+            "session_issued_at": "2030-01-02T03:00:05+00:00",
+            "signature_algorithm": "ed25519"
+          },
+          "schema_version": 1,
+          "signature": "C_68f6DsO6R0-t_YBJlOGE5F9mwmWWWquKfv85xI8tXD6mtg5ebnDe4AbQkifny1K1yWaCCW9d4HoHYq68ywBw",
+          "signature_algorithm": "ed25519"
+        },
+        "sha256": "f152bcb9b3b2f1c6da6d52e5a02cbb05622d8329fa260770d23a77c049d0a1aa"
+      },
+      "descriptor_id": "ordinary-agent-delivery-activation",
+      "descriptor_version": 1,
+      "signature_payload": {
+        "canonical_json": "{\"challenge_response\":{\"approval_request\":{\"descriptor_id\":\"ordinary-agent-delivery-activation\",\"descriptor_version\":1,\"evidence_digest\":\"c5a5da7694106c3b64192870616af357b7486aa739ac2e906be1b2451271d223\",\"expires_at\":\"2030-01-02T03:09:05+00:00\",\"issued_at\":\"2030-01-02T03:00:05+00:00\",\"nonce\":\"owner-control-7a5977c21c78f6c823b204cef6547bb2\",\"operation_id\":\"privileged-operation-206a39a7be530d906c862b5b03fe474d\",\"owner_github_id\":543932487,\"plan_digest\":\"cda186bb7a44a90afb5c0b23f043aafea81b638b391415778487fd23ce6bb94d\",\"policy_record_id\":\"owner-policy-206a39a7be530d906c86\",\"policy_revision\":1,\"policy_sha256\":\"ff2a542278ada8c417fb4427f98b3cbe896ed16c60ad4ed6bd3c59b16e4a71a7\",\"pre_state_digest\":\"b59df0f36184915903e89d552cddf1e84311b638f535f2c373dd8bc57acf346e\",\"request_digest\":\"a91e997ddd58bb82fa54eac82f40605aecb248c2f5edb4d575ac8ae1094e7ee5\",\"schema_version\":1,\"server_review\":{\"items\":[{\"key\":\"descriptor\",\"label\":\"Operation class\",\"value\":\"ordinary-agent-delivery-activation\"},{\"key\":\"safety_class\",\"label\":\"Safety class\",\"value\":\"policy_admin\"}],\"review_id\":\"review-206a39a7be530d906c862b5b\",\"schema_version\":1,\"summary\":\"Review this exact privileged operation before confirming.\",\"title\":\"Owner approval required\"}},\"approval_request_digest\":\"d014855024a427f07763ec6aca8307d0ef91fad3e46b1a3f554bdc04f51cbf34\",\"channel_binding_sha256\":\"6c75c61e1499682b816486eaa5f3ebe0051cc9c6862ae81abc1604424b144807\",\"confirmed_at\":\"2030-01-02T03:04:05+00:00\",\"decision\":\"approved\",\"schema_version\":1},\"domain\":\"launchplane-owner-control-confirmation-v1\",\"schema_version\":1}",
+        "payload": {
+          "challenge_response": {
+            "approval_request": {
+              "descriptor_id": "ordinary-agent-delivery-activation",
+              "descriptor_version": 1,
+              "evidence_digest": "c5a5da7694106c3b64192870616af357b7486aa739ac2e906be1b2451271d223",
+              "expires_at": "2030-01-02T03:09:05+00:00",
+              "issued_at": "2030-01-02T03:00:05+00:00",
+              "nonce": "owner-control-7a5977c21c78f6c823b204cef6547bb2",
+              "operation_id": "privileged-operation-206a39a7be530d906c862b5b03fe474d",
+              "owner_github_id": 543932487,
+              "plan_digest": "cda186bb7a44a90afb5c0b23f043aafea81b638b391415778487fd23ce6bb94d",
+              "policy_record_id": "owner-policy-206a39a7be530d906c86",
+              "policy_revision": 1,
+              "policy_sha256": "ff2a542278ada8c417fb4427f98b3cbe896ed16c60ad4ed6bd3c59b16e4a71a7",
+              "pre_state_digest": "b59df0f36184915903e89d552cddf1e84311b638f535f2c373dd8bc57acf346e",
+              "request_digest": "a91e997ddd58bb82fa54eac82f40605aecb248c2f5edb4d575ac8ae1094e7ee5",
+              "schema_version": 1,
+              "server_review": {
+                "items": [
+                  {
+                    "key": "descriptor",
+                    "label": "Operation class",
+                    "value": "ordinary-agent-delivery-activation"
+                  },
+                  {
+                    "key": "safety_class",
+                    "label": "Safety class",
+                    "value": "policy_admin"
+                  }
+                ],
+                "review_id": "review-206a39a7be530d906c862b5b",
+                "schema_version": 1,
+                "summary": "Review this exact privileged operation before confirming.",
+                "title": "Owner approval required"
+              }
+            },
+            "approval_request_digest": "d014855024a427f07763ec6aca8307d0ef91fad3e46b1a3f554bdc04f51cbf34",
+            "channel_binding_sha256": "6c75c61e1499682b816486eaa5f3ebe0051cc9c6862ae81abc1604424b144807",
+            "confirmed_at": "2030-01-02T03:04:05+00:00",
+            "decision": "approved",
+            "schema_version": 1
+          },
+          "domain": "launchplane-owner-control-confirmation-v1",
+          "schema_version": 1
+        },
+        "sha256": "268032095bd2319af919a168ff034754dcbbd838a893134de873a11cf831780c"
+      },
+      "verification": "valid"
     }
   ],
   "golden_vectors": [
@@ -969,6 +1152,95 @@
         "sha256": "76b409c883d422aef5378d03dfe1527c16f2f1ac41b8b81202a71c2375641a28"
       },
       "descriptor_id": "managed-secret-reencryption",
+      "descriptor_version": 1
+    },
+    {
+      "approval_request": {
+        "canonical_json": "{\"descriptor_id\":\"ordinary-agent-delivery-activation\",\"descriptor_version\":1,\"evidence_digest\":\"c5a5da7694106c3b64192870616af357b7486aa739ac2e906be1b2451271d223\",\"expires_at\":\"2030-01-02T03:09:05+00:00\",\"issued_at\":\"2030-01-02T03:00:05+00:00\",\"nonce\":\"owner-control-7a5977c21c78f6c823b204cef6547bb2\",\"operation_id\":\"privileged-operation-206a39a7be530d906c862b5b03fe474d\",\"owner_github_id\":543932487,\"plan_digest\":\"cda186bb7a44a90afb5c0b23f043aafea81b638b391415778487fd23ce6bb94d\",\"policy_record_id\":\"owner-policy-206a39a7be530d906c86\",\"policy_revision\":1,\"policy_sha256\":\"ff2a542278ada8c417fb4427f98b3cbe896ed16c60ad4ed6bd3c59b16e4a71a7\",\"pre_state_digest\":\"b59df0f36184915903e89d552cddf1e84311b638f535f2c373dd8bc57acf346e\",\"request_digest\":\"a91e997ddd58bb82fa54eac82f40605aecb248c2f5edb4d575ac8ae1094e7ee5\",\"schema_version\":1,\"server_review\":{\"items\":[{\"key\":\"descriptor\",\"label\":\"Operation class\",\"value\":\"ordinary-agent-delivery-activation\"},{\"key\":\"safety_class\",\"label\":\"Safety class\",\"value\":\"policy_admin\"}],\"review_id\":\"review-206a39a7be530d906c862b5b\",\"schema_version\":1,\"summary\":\"Review this exact privileged operation before confirming.\",\"title\":\"Owner approval required\"}}",
+        "payload": {
+          "descriptor_id": "ordinary-agent-delivery-activation",
+          "descriptor_version": 1,
+          "evidence_digest": "c5a5da7694106c3b64192870616af357b7486aa739ac2e906be1b2451271d223",
+          "expires_at": "2030-01-02T03:09:05+00:00",
+          "issued_at": "2030-01-02T03:00:05+00:00",
+          "nonce": "owner-control-7a5977c21c78f6c823b204cef6547bb2",
+          "operation_id": "privileged-operation-206a39a7be530d906c862b5b03fe474d",
+          "owner_github_id": 543932487,
+          "plan_digest": "cda186bb7a44a90afb5c0b23f043aafea81b638b391415778487fd23ce6bb94d",
+          "policy_record_id": "owner-policy-206a39a7be530d906c86",
+          "policy_revision": 1,
+          "policy_sha256": "ff2a542278ada8c417fb4427f98b3cbe896ed16c60ad4ed6bd3c59b16e4a71a7",
+          "pre_state_digest": "b59df0f36184915903e89d552cddf1e84311b638f535f2c373dd8bc57acf346e",
+          "request_digest": "a91e997ddd58bb82fa54eac82f40605aecb248c2f5edb4d575ac8ae1094e7ee5",
+          "schema_version": 1,
+          "server_review": {
+            "items": [
+              {
+                "key": "descriptor",
+                "label": "Operation class",
+                "value": "ordinary-agent-delivery-activation"
+              },
+              {
+                "key": "safety_class",
+                "label": "Safety class",
+                "value": "policy_admin"
+              }
+            ],
+            "review_id": "review-206a39a7be530d906c862b5b",
+            "schema_version": 1,
+            "summary": "Review this exact privileged operation before confirming.",
+            "title": "Owner approval required"
+          }
+        },
+        "sha256": "d014855024a427f07763ec6aca8307d0ef91fad3e46b1a3f554bdc04f51cbf34"
+      },
+      "challenge_response": {
+        "canonical_json": "{\"approval_request\":{\"descriptor_id\":\"ordinary-agent-delivery-activation\",\"descriptor_version\":1,\"evidence_digest\":\"c5a5da7694106c3b64192870616af357b7486aa739ac2e906be1b2451271d223\",\"expires_at\":\"2030-01-02T03:09:05+00:00\",\"issued_at\":\"2030-01-02T03:00:05+00:00\",\"nonce\":\"owner-control-7a5977c21c78f6c823b204cef6547bb2\",\"operation_id\":\"privileged-operation-206a39a7be530d906c862b5b03fe474d\",\"owner_github_id\":543932487,\"plan_digest\":\"cda186bb7a44a90afb5c0b23f043aafea81b638b391415778487fd23ce6bb94d\",\"policy_record_id\":\"owner-policy-206a39a7be530d906c86\",\"policy_revision\":1,\"policy_sha256\":\"ff2a542278ada8c417fb4427f98b3cbe896ed16c60ad4ed6bd3c59b16e4a71a7\",\"pre_state_digest\":\"b59df0f36184915903e89d552cddf1e84311b638f535f2c373dd8bc57acf346e\",\"request_digest\":\"a91e997ddd58bb82fa54eac82f40605aecb248c2f5edb4d575ac8ae1094e7ee5\",\"schema_version\":1,\"server_review\":{\"items\":[{\"key\":\"descriptor\",\"label\":\"Operation class\",\"value\":\"ordinary-agent-delivery-activation\"},{\"key\":\"safety_class\",\"label\":\"Safety class\",\"value\":\"policy_admin\"}],\"review_id\":\"review-206a39a7be530d906c862b5b\",\"schema_version\":1,\"summary\":\"Review this exact privileged operation before confirming.\",\"title\":\"Owner approval required\"}},\"approval_request_digest\":\"d014855024a427f07763ec6aca8307d0ef91fad3e46b1a3f554bdc04f51cbf34\",\"channel_binding_sha256\":\"6a168b04b5cb8ba1daf078c98e2599b26d033582779bfbac3afa530156bfe114\",\"confirmed_at\":\"2030-01-02T03:04:05+00:00\",\"decision\":\"approved\",\"schema_version\":1}",
+        "payload": {
+          "approval_request": {
+            "descriptor_id": "ordinary-agent-delivery-activation",
+            "descriptor_version": 1,
+            "evidence_digest": "c5a5da7694106c3b64192870616af357b7486aa739ac2e906be1b2451271d223",
+            "expires_at": "2030-01-02T03:09:05+00:00",
+            "issued_at": "2030-01-02T03:00:05+00:00",
+            "nonce": "owner-control-7a5977c21c78f6c823b204cef6547bb2",
+            "operation_id": "privileged-operation-206a39a7be530d906c862b5b03fe474d",
+            "owner_github_id": 543932487,
+            "plan_digest": "cda186bb7a44a90afb5c0b23f043aafea81b638b391415778487fd23ce6bb94d",
+            "policy_record_id": "owner-policy-206a39a7be530d906c86",
+            "policy_revision": 1,
+            "policy_sha256": "ff2a542278ada8c417fb4427f98b3cbe896ed16c60ad4ed6bd3c59b16e4a71a7",
+            "pre_state_digest": "b59df0f36184915903e89d552cddf1e84311b638f535f2c373dd8bc57acf346e",
+            "request_digest": "a91e997ddd58bb82fa54eac82f40605aecb248c2f5edb4d575ac8ae1094e7ee5",
+            "schema_version": 1,
+            "server_review": {
+              "items": [
+                {
+                  "key": "descriptor",
+                  "label": "Operation class",
+                  "value": "ordinary-agent-delivery-activation"
+                },
+                {
+                  "key": "safety_class",
+                  "label": "Safety class",
+                  "value": "policy_admin"
+                }
+              ],
+              "review_id": "review-206a39a7be530d906c862b5b",
+              "schema_version": 1,
+              "summary": "Review this exact privileged operation before confirming.",
+              "title": "Owner approval required"
+            }
+          },
+          "approval_request_digest": "d014855024a427f07763ec6aca8307d0ef91fad3e46b1a3f554bdc04f51cbf34",
+          "channel_binding_sha256": "6a168b04b5cb8ba1daf078c98e2599b26d033582779bfbac3afa530156bfe114",
+          "confirmed_at": "2030-01-02T03:04:05+00:00",
+          "decision": "approved",
+          "schema_version": 1
+        },
+        "sha256": "bca3c7c96a2e5d60503e6c261602d25c86d54bd1fc1d2ffd71cb30e1acb5f9db"
+      },
+      "descriptor_id": "ordinary-agent-delivery-activation",
       "descriptor_version": 1
     }
   ],
@@ -3259,7 +3531,7 @@
       }
     }
   ],
-  "schema_version": 5,
+  "schema_version": 6,
   "schemas": {
     "approval_request": {
       "$defs": {
@@ -3347,7 +3619,8 @@
           "enum": [
             "managed-secret-reencryption",
             "managed-authz-policy-set",
-            "managed-merge-train-policy-import"
+            "managed-merge-train-policy-import",
+            "ordinary-agent-delivery-activation"
           ],
           "title": "Descriptor Id",
           "type": "string"
@@ -3459,7 +3732,8 @@
               "enum": [
                 "managed-secret-reencryption",
                 "managed-authz-policy-set",
-                "managed-merge-train-policy-import"
+                "managed-merge-train-policy-import",
+                "ordinary-agent-delivery-activation"
               ],
               "title": "Descriptor Id",
               "type": "string"
@@ -3746,7 +4020,8 @@
               "enum": [
                 "managed-secret-reencryption",
                 "managed-authz-policy-set",
-                "managed-merge-train-policy-import"
+                "managed-merge-train-policy-import",
+                "ordinary-agent-delivery-activation"
               ],
               "title": "Descriptor Id",
               "type": "string"
@@ -4071,7 +4346,8 @@
               "enum": [
                 "managed-secret-reencryption",
                 "managed-authz-policy-set",
-                "managed-merge-train-policy-import"
+                "managed-merge-train-policy-import",
+                "ordinary-agent-delivery-activation"
               ],
               "title": "Descriptor Id",
               "type": "string"

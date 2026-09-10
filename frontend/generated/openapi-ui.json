@@ -14150,11 +14150,11 @@
             "title": "Bounded Cleanup Registered",
             "type": "boolean"
           },
-          "custody_reservation_versions": {
+          "custody_issue_attempt_versions": {
             "items": {
               "type": "integer"
             },
-            "title": "Custody Reservation Versions",
+            "title": "Custody Issue Attempt Versions",
             "type": "array"
           },
           "database_revision_compatible": {
@@ -14247,7 +14247,7 @@
           "authorizes_execution",
           "authz_policy_read_versions",
           "bounded_cleanup_registered",
-          "custody_reservation_versions",
+          "custody_issue_attempt_versions",
           "database_revision_compatible",
           "finite_request_versions",
           "guarded_worker_registered",

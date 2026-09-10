@@ -2765,7 +2765,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertEqual(result.output.strip(), str(output_path))
-        self.assertEqual(payload["schema_version"], 5)
+        self.assertEqual(payload["schema_version"], 6)
         self.assertTrue(payload["golden_vectors"])
         self.assertTrue(payload["verification_state_vectors"])
         self.assertTrue(payload["challenge_lifecycle_vectors"])

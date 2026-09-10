@@ -41,7 +41,9 @@ from control_plane.contracts.privileged_operation import (
 )
 from control_plane.owner_control_contract import (
     OwnerControlContractError,
+    _PRESERVED_V4_DESCRIPTOR_IDS,
     _preserve_v2_descriptor_enums,
+    _preserve_v4_descriptor_enums,
     build_owner_control_contract,
     validate_owner_control_contract,
     write_owner_control_contract,
@@ -261,14 +263,16 @@ class OwnerControlArtifactTests(unittest.TestCase):
         if expected_message := vector.get("error_message_contains"):
             self.assertIn(expected_message, errors[0]["msg"])
 
-    def test_v5_contract_pins_v4_and_preserves_existing_v2_payloads(self) -> None:
+    def test_v6_contract_pins_prior_contracts_and_preserves_existing_payloads(self) -> None:
         artifact = build_owner_control_contract()
         compatibility = artifact["compatibility"]
 
-        self.assertEqual(artifact["schema_version"], 5)
-        self.assertEqual(compatibility["container_schema_version"], 5)
-        self.assertEqual(compatibility["previous_container_schema_version"], 4)
-        self.assertEqual(compatibility["change_kind"], "additive-enrollment-provenance")
+        self.assertEqual(artifact["schema_version"], 6)
+        self.assertEqual(compatibility["container_schema_version"], 6)
+        self.assertEqual(compatibility["previous_container_schema_version"], 5)
+        self.assertEqual(
+            compatibility["change_kind"], "additive-descriptor-wire-schema-and-vectors"
+        )
         self.assertEqual(compatibility["unknown_container_versions"], "reject")
         self.assertEqual(compatibility["wire_model_schema_versions"], [1])
         self.assertEqual(compatibility["shadow_verifier_schema_versions"], [1])
@@ -323,6 +327,26 @@ class OwnerControlArtifactTests(unittest.TestCase):
             if section in {"schema_version", "compatibility"}:
                 continue
             with self.subTest(v4_section=section):
+                section_value = artifact[section]
+                if section in {"confirmation_golden_vectors", "golden_vectors"}:
+                    section_value = [
+                        vector
+                        for vector in section_value
+                        if vector["descriptor_id"] in _PRESERVED_V4_DESCRIPTOR_IDS
+                    ]
+                elif section == "schemas":
+                    section_value = _preserve_v4_descriptor_enums(section_value)
+                self.assertEqual(canonical_json_sha256(section_value), expected_sha256)
+        preserved_v5 = compatibility["preserved_v5_section_sha256"]
+        self.assertEqual(preserved_v5["schema_version"], canonical_json_sha256(5))
+        self.assertEqual(
+            preserved_v5["compatibility"],
+            "eb3a3be1e246502561894c8d87089c288785960e6fe564e966145b95a889ea76",
+        )
+        for section, expected_sha256 in preserved_v5.items():
+            if section in {"schema_version", "compatibility"}:
+                continue
+            with self.subTest(v5_section=section):
                 self.assertEqual(canonical_json_sha256(artifact[section]), expected_sha256)
 
     def test_provenance_vectors_are_exhaustive_inert_and_canonical(self) -> None:
@@ -431,6 +455,39 @@ class OwnerControlArtifactTests(unittest.TestCase):
                 vector["challenge_response"]["sha256"],
                 owner_control_challenge_response_digest(response),
             )
+
+    def test_activation_descriptor_conformance_is_additive_and_inert(self) -> None:
+        artifact = build_owner_control_contract()
+        descriptor_id = "ordinary-agent-delivery-activation"
+
+        for section in ("golden_vectors", "confirmation_golden_vectors"):
+            self.assertEqual(
+                [
+                    vector["descriptor_id"]
+                    for vector in artifact[section]
+                    if vector["descriptor_id"] == descriptor_id
+                ],
+                [descriptor_id],
+            )
+
+        def contains_descriptor(value: Any) -> bool:
+            if isinstance(value, dict):
+                return any(contains_descriptor(item) for item in value.values())
+            if isinstance(value, list):
+                return any(contains_descriptor(item) for item in value)
+            return isinstance(value, str) and value == descriptor_id
+
+        self.assertTrue(contains_descriptor(artifact["schemas"]["approval_request"]))
+        for section in (
+            "negative_vectors",
+            "negative_confirmation_vectors",
+            "verification_state_vectors",
+            "challenge_lifecycle_vectors",
+            "provenance_vectors",
+            "negative_provenance_vectors",
+        ):
+            with self.subTest(section=section):
+                self.assertFalse(contains_descriptor(artifact[section]))
 
     def test_confirmation_vectors_cover_every_descriptor_and_verify(self) -> None:
         artifact = build_owner_control_contract()
@@ -571,6 +628,12 @@ class OwnerControlArtifactTests(unittest.TestCase):
         artifact = build_owner_control_contract()
         changed = copy.deepcopy(artifact)
         changed["golden_vectors"][0]["approval_request"]["sha256"] = "0" * 64
+
+        with self.assertRaises(OwnerControlContractError):
+            validate_owner_control_contract(changed)
+
+        changed = copy.deepcopy(artifact)
+        changed["provenance_vectors"][0]["result"]["authorizes_execution"] = True
 
         with self.assertRaises(OwnerControlContractError):
             validate_owner_control_contract(changed)

@@ -1517,7 +1517,7 @@ export type OrdinaryAgentDeliveryRuntimeCapabilityEvidence = {
     authorizes_execution: false;
     authz_policy_read_versions: Array<number>;
     bounded_cleanup_registered: boolean;
-    custody_reservation_versions: Array<number>;
+    custody_issue_attempt_versions: Array<number>;
     database_revision_compatible: boolean;
     finite_request_versions: Array<number>;
     guarded_worker_registered: boolean;

@@ -212,7 +212,7 @@ class OrdinaryAgentDeliveryRuntimeCapabilityEvidence(StrictFrozenActivationModel
     activation_schema_invariants_valid: bool
     finite_request_versions: tuple[int, ...]
     read_attempt_versions: tuple[int, ...]
-    custody_reservation_versions: tuple[int, ...]
+    custody_issue_attempt_versions: tuple[int, ...]
     qualification_attestation_versions: tuple[int, ...]
     activation_record_versions: tuple[int, ...]
     activation_event_versions: tuple[int, ...]
@@ -235,7 +235,7 @@ class OrdinaryAgentDeliveryRuntimeCapabilityEvidence(StrictFrozenActivationModel
     @field_validator(
         "finite_request_versions",
         "read_attempt_versions",
-        "custody_reservation_versions",
+        "custody_issue_attempt_versions",
         "qualification_attestation_versions",
         "activation_record_versions",
         "activation_event_versions",
@@ -265,7 +265,7 @@ class OrdinaryAgentDeliveryRuntimeCapabilityEvidence(StrictFrozenActivationModel
         for field_name in (
             "finite_request_versions",
             "read_attempt_versions",
-            "custody_reservation_versions",
+            "custody_issue_attempt_versions",
             "qualification_attestation_versions",
             "activation_record_versions",
             "activation_event_versions",

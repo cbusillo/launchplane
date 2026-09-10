@@ -463,7 +463,7 @@ class PrivilegedOperationContractTests(unittest.TestCase):
             activation_schema_invariants_valid=True,
             finite_request_versions=(1, 2),
             read_attempt_versions=(1,),
-            custody_reservation_versions=(1,),
+            custody_issue_attempt_versions=(1,),
             qualification_attestation_versions=(),
             activation_record_versions=(1,),
             activation_event_versions=(1,),

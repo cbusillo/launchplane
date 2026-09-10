@@ -32,7 +32,11 @@ from control_plane.contracts.ordinary_agent_activation import (
     OrdinaryAgentDeliveryRuntimeCapabilityEvidence,
 )
 from control_plane.contracts.ordinary_agent_custody import OrdinaryAgentCustodyIssueAttempt
-from control_plane.contracts.ordinary_agent_effect import OrdinaryAgentSnapshotAttemptRecord
+from control_plane.contracts.ordinary_agent_effect import (
+    OrdinaryAgentQualificationAttemptRecord,
+    OrdinaryAgentSnapshotAttemptRecord,
+    parse_ordinary_agent_read_attempt,
+)
 from control_plane.contracts.ordinary_agent_qualification import (
     OrdinaryAgentQualificationAttestation,
 )
@@ -414,8 +418,15 @@ def _runtime_capability(
                 }
             )
         ),
-        read_attempt_versions=(_model_schema_version(OrdinaryAgentSnapshotAttemptRecord),),
-        custody_reservation_versions=(_model_schema_version(OrdinaryAgentCustodyIssueAttempt),),
+        read_attempt_versions=tuple(
+            sorted(
+                {
+                    _model_schema_version(OrdinaryAgentSnapshotAttemptRecord),
+                    _model_schema_version(OrdinaryAgentQualificationAttemptRecord),
+                }
+            )
+        ),
+        custody_issue_attempt_versions=(_model_schema_version(OrdinaryAgentCustodyIssueAttempt),),
         qualification_attestation_versions=(
             _model_schema_version(OrdinaryAgentQualificationAttestation),
         ),
@@ -423,7 +434,8 @@ def _runtime_capability(
         activation_event_versions=(_model_schema_version(OrdinaryAgentDeliveryActivationEvent),),
         recovery_versions=(1,) if activation_recovery_registered else (),
         authz_policy_read_versions=tuple(sorted(SUPPORTED_MANAGED_RULE_POLICY_SCHEMA_VERSIONS)),
-        variant_parsers_registered=callable(parse_ordinary_agent_finite_request),
+        variant_parsers_registered=callable(parse_ordinary_agent_finite_request)
+        and callable(parse_ordinary_agent_read_attempt),
         activation_storage_registered=activation_storage_registered,
         activation_cas_registered=activation_cas_registered,
         activation_recovery_registered=activation_recovery_registered,

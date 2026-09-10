@@ -19011,11 +19011,11 @@
             "title": "Bounded Cleanup Registered",
             "type": "boolean"
           },
-          "custody_reservation_versions": {
+          "custody_issue_attempt_versions": {
             "items": {
               "type": "integer"
             },
-            "title": "Custody Reservation Versions",
+            "title": "Custody Issue Attempt Versions",
             "type": "array"
           },
           "database_revision_compatible": {
@@ -19104,7 +19104,7 @@
           "activation_schema_invariants_valid",
           "finite_request_versions",
           "read_attempt_versions",
-          "custody_reservation_versions",
+          "custody_issue_attempt_versions",
           "qualification_attestation_versions",
           "activation_record_versions",
           "activation_event_versions",

@@ -2811,13 +2811,14 @@ the privileged worker uses atomic expected-active-policy compare-and-write,
 operation-scoped idempotency, and exact active/superseded read-back before an
 operation reaches `executed`.
 
-The checked schema-version-5 `contracts/owner-control-contract.json` artifact is
+The checked schema-version-6 `contracts/owner-control-contract.json` artifact is
 not a record or runtime authority. It supplies deterministic cross-host
 serialization, synthetic wire/signature vectors, complete shadow-verifier
 outcome vectors, one reactive expiry-lifecycle vector, managed merge-train
 policy descriptor coverage, and exhaustive inert enrollment-provenance vectors.
-Its compatibility declaration pins every version-4 top-level section while
-retaining the exact version-2 section, descriptor-scoped vector, and filtered
+Its compatibility declaration pins the version-5 provenance sections and
+projects the additive activation descriptor out of version-4 schema/vector
+checks while retaining the exact version-2 section, descriptor-scoped vector, and filtered
 schema digests carried by version `4`, so provenance cannot silently rewrite
 existing wire, verification, lifecycle, or descriptor contracts.
 

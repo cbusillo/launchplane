@@ -288,10 +288,11 @@ function OrdinaryAgentDeliveryActivationComposer({
       <header>
         <div>
           <span className="engineering-kicker">Agent delivery</span>
-          <h2>Plan a bounded delivery change</h2>
+          <h2>Set up or stop agent delivery</h2>
           <p>
-            Select a reviewed target and intent. Launchplane carries the stored
-            policy, inventory, activation, and digest references.
+            {intent === "setup"
+              ? "Choose a project and branch, then choose how long to allow agent delivery. Required checks must pass before delivery starts."
+              : "Stops new work. Work already sent may still finish; Launchplane will check its outcome."}
           </p>
         </div>
       </header>
@@ -329,9 +330,9 @@ function OrdinaryAgentDeliveryActivationComposer({
           const choices =
             intent === "setup" ? data.setup_options : data.revoke_options;
           return choices.length ? (
-            <div className="privileged-operation-actions">
+            <div className="privileged-operation-actions activation-plan-actions">
               <label>
-                Reviewed target
+                Project and branch
                 <select
                   value={selection}
                   onChange={(event) => setSelection(event.target.value)}
@@ -352,7 +353,7 @@ function OrdinaryAgentDeliveryActivationComposer({
               </label>
               {intent === "setup" ? (
                 <label>
-                  Delivery intent duration
+                  Allow delivery for
                   <select
                     value={durationSeconds}
                     onChange={(event) =>
@@ -371,7 +372,7 @@ function OrdinaryAgentDeliveryActivationComposer({
                 disabled={!selection}
                 onClick={() => void submit(data)}
               >
-                {intent === "setup" ? "Review setup plan" : "Review stop plan"}
+                {intent === "setup" ? "Review setup" : "Review stop"}
               </button>
             </div>
           ) : (
