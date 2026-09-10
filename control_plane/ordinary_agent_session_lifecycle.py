@@ -7,17 +7,21 @@ store must verify the issuer proof/approved operation and serialize their inputs
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal, assert_never, overload
 
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.ordinary_agent import (
+    OrdinaryAgentAction,
     OrdinaryAgentBudget,
     OrdinaryAgentCredentialEvidence,
     OrdinaryAgentEligibilityResult,
+    OrdinaryAgentEligibilityRequest,
     OrdinaryAgentLease,
     OrdinaryAgentPolicySnapshot,
     OrdinaryAgentPrincipal,
     OrdinaryAgentPullRequest,
+    OrdinaryAgentQualificationRequest,
     OrdinaryAgentRequest,
     OrdinaryAgentSession,
     OrdinaryAgentTarget,
@@ -27,10 +31,16 @@ from control_plane.contracts.ordinary_agent_lifecycle import (
     OrdinaryAgentPrincipalRecord,
 )
 from control_plane.contracts.ordinary_agent_session_lifecycle import (
+    OrdinaryAgentFiniteRequest,
     OrdinaryAgentFiniteRequestRecord,
+    OrdinaryAgentGuardedDeliveryFiniteRequestV2,
+    OrdinaryAgentGuardedFiniteRequest,
     OrdinaryAgentLeaseRecord,
+    OrdinaryAgentQualificationFiniteRequestV2,
     OrdinaryAgentSessionDelegation,
     OrdinaryAgentSessionRecord,
+    is_guarded_ordinary_agent_finite_request,
+    parse_ordinary_agent_finite_request,
 )
 from control_plane.ordinary_agent_eligibility import (
     evaluate_ordinary_agent_eligibility,
@@ -56,8 +66,82 @@ class OrdinaryAgentSessionWriteSet:
 @dataclass(frozen=True)
 class OrdinaryAgentRequestAdmissionWriteSet:
     lease: OrdinaryAgentLeaseRecord
-    request: OrdinaryAgentFiniteRequestRecord
+    request: OrdinaryAgentFiniteRequest
     evaluation: OrdinaryAgentEligibilityResult
+
+
+def ordinary_agent_finite_request_action(
+    request: OrdinaryAgentFiniteRequest,
+) -> OrdinaryAgentAction:
+    if isinstance(request, OrdinaryAgentQualificationFiniteRequestV2):
+        return "preflight"
+    if isinstance(
+        request,
+        (OrdinaryAgentFiniteRequestRecord, OrdinaryAgentGuardedDeliveryFiniteRequestV2),
+    ):
+        return "guarded_merge"
+    assert_never(request)
+
+
+def ordinary_agent_finite_request_purpose(
+    request: OrdinaryAgentFiniteRequest,
+) -> Literal["qualification", "guarded_delivery"]:
+    if isinstance(request, OrdinaryAgentQualificationFiniteRequestV2):
+        return "qualification"
+    if isinstance(
+        request,
+        (OrdinaryAgentFiniteRequestRecord, OrdinaryAgentGuardedDeliveryFiniteRequestV2),
+    ):
+        return "guarded_delivery"
+    assert_never(request)
+
+
+def ordinary_agent_finite_request_pull_request_count(
+    request: OrdinaryAgentFiniteRequest,
+) -> int:
+    return (
+        0
+        if isinstance(request, OrdinaryAgentQualificationFiniteRequestV2)
+        else len(request.pull_requests)
+    )
+
+
+def ordinary_agent_finite_request_intent_payload(
+    request: OrdinaryAgentFiniteRequest,
+) -> dict[str, object]:
+    payload = request.model_dump(mode="json", exclude={"admitted_at"})
+    if request.schema_version == 1:
+        return payload
+    return {"domain": "ordinary-agent-finite-request-intent-v2", **payload}
+
+
+def ordinary_agent_finite_request_intent_sha256(
+    request: OrdinaryAgentFiniteRequest,
+) -> str:
+    return canonical_json_sha256(ordinary_agent_finite_request_intent_payload(request))
+
+
+def ordinary_agent_finite_request_replay_identity(
+    request: OrdinaryAgentFiniteRequest,
+) -> dict[str, object]:
+    """Immutable admission fields plus guarded scope that survives head refresh."""
+    identity: dict[str, object] = {
+        "schema_version": request.schema_version,
+        "purpose": ordinary_agent_finite_request_purpose(request),
+        "request_id": request.request_id,
+        "idempotency_key": request.idempotency_key,
+        "principal_id": request.principal_id,
+        "session_id": request.session_id,
+        "lease_id": request.lease_id,
+        "target": request.target.model_dump(mode="json"),
+        "expires_at": request.expires_at,
+        "continuation_expires_at": request.continuation_expires_at,
+    }
+    if is_guarded_ordinary_agent_finite_request(request):
+        identity["refresh_allowance_total"] = request.refresh_allowance_total
+        identity["pull_requests"] = tuple(item.number for item in request.pull_requests)
+        identity["permitted_stack_edit_pull_requests"] = request.permitted_stack_edit_pull_requests
+    return identity
 
 
 def _policy_inputs(
@@ -214,7 +298,7 @@ def build_ordinary_agent_request_admission_write_set(
     credential: OrdinaryAgentAuthenticationCredentialRecord,
     session: OrdinaryAgentSessionRecord,
     lease: OrdinaryAgentLeaseRecord,
-    request: OrdinaryAgentFiniteRequestRecord,
+    request: OrdinaryAgentFiniteRequest,
     now: int,
 ) -> OrdinaryAgentRequestAdmissionWriteSet:
     """Calculate first admission only; the store resolves idempotency before spending."""
@@ -223,7 +307,6 @@ def build_ordinary_agent_request_admission_write_set(
     if (
         request.status != "waiting"
         or request.binding_revision != 1
-        or request.refresh_used != 0
         or request.cancellation_requested_at is not None
         or request.execution_record_ids
         or request.admitted_at != now
@@ -235,7 +318,6 @@ def build_ordinary_agent_request_admission_write_set(
                 or request.continuation_expires_at > session.delegation.continuation_expires_at
             )
         )
-        or request.refresh_allowance_total > session.delegation.refresh_allowance
         or lease.target != principal.policy.target
         or lease.managed_set_id != principal.policy.managed_set_id
         or lease.managed_rule_id != principal.policy.managed_rule_id
@@ -248,6 +330,15 @@ def build_ordinary_agent_request_admission_write_set(
         or lease.budget.pull_request_limit != session.delegation.pull_request_limit
     ):
         raise OrdinaryAgentSessionAdmissionDenied("request_outside_delegation")
+    if is_guarded_ordinary_agent_finite_request(request) and (
+        request.refresh_used != 0
+        or request.refresh_allowance_total > session.delegation.refresh_allowance
+    ):
+        raise OrdinaryAgentSessionAdmissionDenied("request_outside_delegation")
+    purpose_action = ordinary_agent_finite_request_action(request)
+    if lease.action != purpose_action:
+        raise OrdinaryAgentSessionAdmissionDenied("request_action_mismatch")
+    pull_request_count = ordinary_agent_finite_request_pull_request_count(request)
     credential_evidence, session_evidence, lease_evidence, request_evidence = _eligibility_evidence(
         credential=credential, session=session, lease=lease, request=request
     )
@@ -265,7 +356,7 @@ def build_ordinary_agent_request_admission_write_set(
         raise OrdinaryAgentSessionAdmissionDenied(evaluation.reason_code)
     budget = lease.budget.model_copy(
         update={
-            "pull_requests_used": lease.budget.pull_requests_used + len(request.pull_requests),
+            "pull_requests_used": lease.budget.pull_requests_used + pull_request_count,
         }
     )
     updated_lease = OrdinaryAgentLeaseRecord.model_validate(
@@ -285,9 +376,12 @@ def _eligibility_evidence(
     credential: OrdinaryAgentAuthenticationCredentialRecord,
     session: OrdinaryAgentSessionRecord,
     lease: OrdinaryAgentLeaseRecord,
-    request: OrdinaryAgentFiniteRequestRecord,
+    request: OrdinaryAgentFiniteRequest,
 ) -> tuple[
-    OrdinaryAgentCredentialEvidence, OrdinaryAgentSession, OrdinaryAgentLease, OrdinaryAgentRequest
+    OrdinaryAgentCredentialEvidence,
+    OrdinaryAgentSession,
+    OrdinaryAgentLease,
+    OrdinaryAgentEligibilityRequest,
 ]:
     credential_evidence = OrdinaryAgentCredentialEvidence(
         record_kind="proposed_ordinary_agent_v1",
@@ -317,22 +411,32 @@ def _eligibility_evidence(
         record_id=lease.lease_id,
         **lease.model_dump(exclude={"schema_version", "revision"}),
     )
-    request_evidence = OrdinaryAgentRequest(
-        record_kind="proposed_ordinary_agent_v1",
-        authority_state="inert",
-        authorizes_execution=False,
-        record_id=request.request_id,
-        request_id=request.request_id,
-        idempotency_key=request.idempotency_key,
-        principal_id=request.principal_id,
-        session_id=request.session_id,
-        lease_id=request.lease_id,
-        target=request.target,
-        base_sha=request.base_sha,
-        action="guarded_merge",
-        pull_requests=request.pull_requests,
-        permitted_stack_edit_pull_requests=request.permitted_stack_edit_pull_requests,
-    )
+    common = {
+        "record_kind": "proposed_ordinary_agent_v1",
+        "authority_state": "inert",
+        "authorizes_execution": False,
+        "record_id": request.request_id,
+        "request_id": request.request_id,
+        "idempotency_key": request.idempotency_key,
+        "principal_id": request.principal_id,
+        "session_id": request.session_id,
+        "lease_id": request.lease_id,
+        "target": request.target,
+    }
+    if isinstance(request, OrdinaryAgentQualificationFiniteRequestV2):
+        request_evidence: OrdinaryAgentEligibilityRequest = (
+            OrdinaryAgentQualificationRequest.model_validate({**common, "action": "preflight"})
+        )
+    else:
+        request_evidence = OrdinaryAgentRequest.model_validate(
+            {
+                **common,
+                "base_sha": request.base_sha,
+                "action": "guarded_merge",
+                "pull_requests": request.pull_requests,
+                "permitted_stack_edit_pull_requests": request.permitted_stack_edit_pull_requests,
+            }
+        )
     return credential_evidence, session_evidence, lease_evidence, request_evidence
 
 
@@ -343,7 +447,7 @@ def require_ordinary_agent_current_job_authority(
     credential: OrdinaryAgentAuthenticationCredentialRecord,
     session: OrdinaryAgentSessionRecord,
     lease: OrdinaryAgentLeaseRecord,
-    request: OrdinaryAgentFiniteRequestRecord,
+    request: OrdinaryAgentFiniteRequest,
     now: int,
 ) -> None:
     """Reauthorize an admitted job from storage; never admit or renew caller work.
@@ -414,7 +518,7 @@ def require_ordinary_agent_finite_job_authority(
     credential: OrdinaryAgentAuthenticationCredentialRecord,
     session: OrdinaryAgentSessionRecord,
     lease: OrdinaryAgentLeaseRecord,
-    request: OrdinaryAgentFiniteRequestRecord,
+    request: OrdinaryAgentFiniteRequest,
     now: int,
 ) -> None:
     """Require current job authority and capacity for a new semantic action.
@@ -435,13 +539,33 @@ def require_ordinary_agent_finite_job_authority(
         raise OrdinaryAgentSessionAdmissionDenied("budget_exhausted")
 
 
+@overload
 def rebind_ordinary_agent_finite_request(
     *,
     request: OrdinaryAgentFiniteRequestRecord,
     base_sha: str,
     pull_requests: tuple[OrdinaryAgentPullRequest, ...],
     expected_binding_revision: int,
-) -> OrdinaryAgentFiniteRequestRecord:
+) -> OrdinaryAgentFiniteRequestRecord: ...
+
+
+@overload
+def rebind_ordinary_agent_finite_request(
+    *,
+    request: OrdinaryAgentGuardedDeliveryFiniteRequestV2,
+    base_sha: str,
+    pull_requests: tuple[OrdinaryAgentPullRequest, ...],
+    expected_binding_revision: int,
+) -> OrdinaryAgentGuardedDeliveryFiniteRequestV2: ...
+
+
+def rebind_ordinary_agent_finite_request(
+    *,
+    request: OrdinaryAgentGuardedFiniteRequest,
+    base_sha: str,
+    pull_requests: tuple[OrdinaryAgentPullRequest, ...],
+    expected_binding_revision: int,
+) -> OrdinaryAgentGuardedFiniteRequest:
     """Calculate one bounded refresh after joined current-job authorization.
 
     Storage performs the revision compare-and-swap in the same transaction.
@@ -459,7 +583,8 @@ def rebind_ordinary_agent_finite_request(
         return request
     if request.refresh_used >= request.refresh_allowance_total:
         raise OrdinaryAgentSessionAdmissionDenied("refresh_allowance_exhausted")
-    return OrdinaryAgentFiniteRequestRecord.model_validate(
+    request_type = type(request)
+    return request_type.model_validate(
         {
             **request.model_dump(),
             "base_sha": base_sha,
@@ -471,15 +596,15 @@ def rebind_ordinary_agent_finite_request(
 
 
 def cancel_ordinary_agent_finite_request(
-    *, request: OrdinaryAgentFiniteRequestRecord, now: int
-) -> OrdinaryAgentFiniteRequestRecord:
+    *, request: OrdinaryAgentFiniteRequest, now: int
+) -> OrdinaryAgentFiniteRequest:
     """Keep unknown-effect reconciliation durable when cancellation is requested."""
     if (
         request.status in ("cancelled", "completed")
         or request.cancellation_requested_at is not None
     ):
         return request
-    return OrdinaryAgentFiniteRequestRecord.model_validate(
+    return parse_ordinary_agent_finite_request(
         {
             **request.model_dump(),
             "cancellation_requested_at": now,

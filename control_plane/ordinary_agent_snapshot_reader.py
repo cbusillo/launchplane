@@ -9,7 +9,7 @@ from urllib.parse import quote
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.merge_train_policy import MergeTrainRepositoryPolicy
 from control_plane.contracts.ordinary_agent_session_lifecycle import (
-    OrdinaryAgentFiniteRequestRecord,
+    OrdinaryAgentGuardedFiniteRequest,
 )
 from control_plane.contracts.ordinary_agent_snapshot import (
     MAX_ORDINARY_LANDING_ENTRIES,
@@ -43,7 +43,7 @@ from control_plane.ordinary_agent_repository_roles import OrdinaryRepositoryAdmi
 def read_ordinary_controller_snapshot(
     *,
     transport: DeadlineMergeTrainGitHubTransport,
-    request: OrdinaryAgentFiniteRequestRecord,
+    request: OrdinaryAgentGuardedFiniteRequest,
     repository_owner_id: int,
     repository_policy: MergeTrainRepositoryPolicy,
     utc_seconds: Callable[[], float] = time.time,
@@ -239,7 +239,7 @@ def read_ordinary_controller_snapshot(
 def read_ordinary_candidate_check(
     *,
     transport: DeadlineMergeTrainGitHubTransport,
-    request: OrdinaryAgentFiniteRequestRecord,
+    request: OrdinaryAgentGuardedFiniteRequest,
     repository_owner_id: int,
     candidate_sha: str,
     utc_seconds: Callable[[], float] = time.time,
@@ -312,7 +312,7 @@ def _rules(
 
 
 def _require_repository(
-    data: dict[str, object], request: OrdinaryAgentFiniteRequestRecord, owner_id: int
+    data: dict[str, object], request: OrdinaryAgentGuardedFiniteRequest, owner_id: int
 ) -> None:
     if (
         _positive_id(data.get("databaseId")) != request.target.repository_id
@@ -359,7 +359,7 @@ def _counts(transport: DeadlineMergeTrainGitHubTransport) -> OrdinaryAgentProvid
 
 def _readmission_observation(
     *,
-    request: OrdinaryAgentFiniteRequestRecord,
+    request: OrdinaryAgentGuardedFiniteRequest,
     repository_owner_id: int,
     observed_at: int,
     base_identity: OrdinaryAgentCommitIdentity,

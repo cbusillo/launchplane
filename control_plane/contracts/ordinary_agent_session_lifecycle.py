@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from typing import Literal
+from collections.abc import Hashable
+from typing import Annotated, Literal, TypeAlias, TypeGuard
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Discriminator, Field, Tag, TypeAdapter, field_validator, model_validator
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.ordinary_agent import (
@@ -168,6 +169,170 @@ class OrdinaryAgentFiniteRequestRecord(StrictFrozenModel):
                 "permitted_stack_edit_pull_requests": list(self.permitted_stack_edit_pull_requests),
             }
         )
+
+
+class OrdinaryAgentQualificationFiniteRequestV2(StrictFrozenModel):
+    """A bounded read-only setup qualification with no synthetic merge target."""
+
+    schema_version: Literal[2] = 2
+    purpose: Literal["qualification"] = "qualification"
+    request_id: str = Field(pattern=r"^[a-z][a-z0-9_-]{2,127}$")
+    idempotency_key: str = Field(min_length=1, max_length=256)
+    principal_id: str = Field(pattern=r"^[a-z][a-z0-9_-]{2,127}$")
+    session_id: str = Field(pattern=r"^[a-z][a-z0-9_-]{2,127}$")
+    lease_id: str = Field(pattern=r"^[a-z][a-z0-9_-]{2,127}$")
+    target: OrdinaryAgentTarget
+    binding_revision: int = Field(default=1, ge=1, le=2**63 - 1)
+    admitted_at: int = Field(ge=0, le=2**63 - 1)
+    expires_at: int = Field(ge=1, le=2**63 - 1)
+    continuation_expires_at: int | None = Field(default=None, ge=1, le=2**63 - 1)
+    status: Literal["waiting", "cancelled", "completed", "reconciliation_required"] = "waiting"
+    cancellation_requested_at: int | None = Field(default=None, ge=0, le=2**63 - 1)
+    execution_record_ids: tuple[str, ...] = ()
+
+    @field_validator("execution_record_ids", mode="before")
+    @classmethod
+    def read_execution_record_ids(cls, value: object) -> object:
+        return tuple(value) if isinstance(value, list) else value
+
+    @model_validator(mode="after")
+    def validate_lifetime(self) -> OrdinaryAgentQualificationFiniteRequestV2:
+        _validate_finite_request_lifecycle(self)
+        return self
+
+    @property
+    def scope_sha256(self) -> str:
+        return canonical_json_sha256(
+            {
+                "domain": "ordinary-agent-finite-request-scope-v2",
+                "schema_version": self.schema_version,
+                "purpose": self.purpose,
+                "principal_id": self.principal_id,
+                "session_id": self.session_id,
+                "lease_id": self.lease_id,
+                "target": self.target.model_dump(mode="json"),
+            }
+        )
+
+
+class OrdinaryAgentGuardedDeliveryFiniteRequestV2(StrictFrozenModel):
+    """A bounded guarded-delivery request with an exact captured merge scope."""
+
+    schema_version: Literal[2] = 2
+    purpose: Literal["guarded_delivery"] = "guarded_delivery"
+    request_id: str = Field(pattern=r"^[a-z][a-z0-9_-]{2,127}$")
+    idempotency_key: str = Field(min_length=1, max_length=256)
+    principal_id: str = Field(pattern=r"^[a-z][a-z0-9_-]{2,127}$")
+    session_id: str = Field(pattern=r"^[a-z][a-z0-9_-]{2,127}$")
+    lease_id: str = Field(pattern=r"^[a-z][a-z0-9_-]{2,127}$")
+    target: OrdinaryAgentTarget
+    base_sha: str = Field(pattern=r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+    pull_requests: tuple[OrdinaryAgentPullRequest, ...] = Field(min_length=1)
+    permitted_stack_edit_pull_requests: tuple[int, ...]
+    binding_revision: int = Field(default=1, ge=1, le=2**63 - 1)
+    refresh_allowance_total: int = Field(ge=0, le=2**63 - 1)
+    refresh_used: int = Field(default=0, ge=0, le=2**63 - 1)
+    admitted_at: int = Field(ge=0, le=2**63 - 1)
+    expires_at: int = Field(ge=1, le=2**63 - 1)
+    continuation_expires_at: int | None = Field(default=None, ge=1, le=2**63 - 1)
+    status: Literal["waiting", "cancelled", "completed", "reconciliation_required"] = "waiting"
+    cancellation_requested_at: int | None = Field(default=None, ge=0, le=2**63 - 1)
+    execution_record_ids: tuple[str, ...] = ()
+
+    @field_validator(
+        "pull_requests", "permitted_stack_edit_pull_requests", "execution_record_ids", mode="before"
+    )
+    @classmethod
+    def read_json_tuples(cls, value: object) -> object:
+        return tuple(value) if isinstance(value, list) else value
+
+    @model_validator(mode="after")
+    def validate_scope_and_lifetime(self) -> OrdinaryAgentGuardedDeliveryFiniteRequestV2:
+        numbers = tuple(item.number for item in self.pull_requests)
+        if len(set(numbers)) != len(numbers):
+            raise ValueError("finite request PRs must be unique")
+        stack = self.permitted_stack_edit_pull_requests
+        if len(set(stack)) != len(stack) or not set(stack).issubset(numbers):
+            raise ValueError("stack edit scope must be a unique subset of request PRs")
+        if self.refresh_used > self.refresh_allowance_total:
+            raise ValueError("refresh spending cannot exceed original allowance")
+        _validate_finite_request_lifecycle(self)
+        return self
+
+    @property
+    def scope_sha256(self) -> str:
+        return canonical_json_sha256(
+            {
+                "domain": "ordinary-agent-finite-request-scope-v2",
+                "schema_version": self.schema_version,
+                "purpose": self.purpose,
+                "principal_id": self.principal_id,
+                "session_id": self.session_id,
+                "lease_id": self.lease_id,
+                "target": self.target.model_dump(mode="json"),
+                "pull_requests": [item.number for item in self.pull_requests],
+                "permitted_stack_edit_pull_requests": list(self.permitted_stack_edit_pull_requests),
+            }
+        )
+
+
+def _validate_finite_request_lifecycle(
+    request: OrdinaryAgentQualificationFiniteRequestV2
+    | OrdinaryAgentGuardedDeliveryFiniteRequestV2,
+) -> None:
+    if request.expires_at <= request.admitted_at:
+        raise ValueError("request must expire after admission")
+    if (
+        request.continuation_expires_at is not None
+        and request.continuation_expires_at <= request.expires_at
+    ):
+        raise ValueError("continuation must have a later finite deadline")
+    if any(not item or len(item) > 256 for item in request.execution_record_ids):
+        raise ValueError("execution links must be bounded record identifiers")
+
+
+def _finite_request_discriminator(value: object) -> Hashable:
+    if isinstance(value, dict):
+        schema_version = value.get("schema_version")
+        purpose = value.get("purpose")
+    else:
+        schema_version = getattr(value, "schema_version", None)
+        purpose = getattr(value, "purpose", None)
+    if schema_version == 1 or (schema_version is None and purpose is None):
+        return "v1"
+    if schema_version == 2 and purpose == "qualification":
+        return "v2-qualification"
+    if schema_version == 2 and purpose == "guarded_delivery":
+        return "v2-guarded-delivery"
+    return "unknown"
+
+
+OrdinaryAgentFiniteRequest: TypeAlias = Annotated[
+    Annotated[OrdinaryAgentFiniteRequestRecord, Tag("v1")]
+    | Annotated[OrdinaryAgentQualificationFiniteRequestV2, Tag("v2-qualification")]
+    | Annotated[OrdinaryAgentGuardedDeliveryFiniteRequestV2, Tag("v2-guarded-delivery")],
+    Discriminator(_finite_request_discriminator),
+]
+OrdinaryAgentGuardedFiniteRequest: TypeAlias = (
+    OrdinaryAgentFiniteRequestRecord | OrdinaryAgentGuardedDeliveryFiniteRequestV2
+)
+_FINITE_REQUEST_ADAPTER: TypeAdapter[OrdinaryAgentFiniteRequest] = TypeAdapter(
+    OrdinaryAgentFiniteRequest
+)
+
+
+def parse_ordinary_agent_finite_request(value: object) -> OrdinaryAgentFiniteRequest:
+    """Parse the exact persisted v1/v2 JSON variant without adapting its shape."""
+    return _FINITE_REQUEST_ADAPTER.validate_python(value)
+
+
+def is_guarded_ordinary_agent_finite_request(
+    request: OrdinaryAgentFiniteRequest,
+) -> TypeGuard[OrdinaryAgentGuardedFiniteRequest]:
+    return isinstance(
+        request,
+        (OrdinaryAgentFiniteRequestRecord, OrdinaryAgentGuardedDeliveryFiniteRequestV2),
+    )
 
 
 class OrdinaryAgentSessionOperationView(StrictFrozenModel):

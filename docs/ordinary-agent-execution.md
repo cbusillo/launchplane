@@ -344,10 +344,21 @@ issuance, and serialize session, lease and finite-request records. Reconnecting
 to the same approved operation returns the stored session, including terminal
 state; it does not renew its lifetime. Separate approved operations can coexist.
 
-One finite request is one job. Admission charges its PR count once against the
-lease; effect reservations spend the action allowance. Existing-job checks do
-not spend admission capacity again. A bounded refresh preserves the original
-PR and stack-edit scope and consumes the original refresh allowance with a
+One finite request is one job. Historical schema-v1 requests remain byte- and
+identity-compatible guarded-delivery records. Schema v2 is a discriminated JSON
+payload: `guarded_delivery` retains the exact base, PR/head, stack-edit and
+refresh scope, while `qualification` has no base, PR or stack-edit fields.
+Version-2 intent and scope identities use a fixed v2 domain plus the schema
+version and purpose, so the two purposes cannot share an identity. Qualification
+requires a `preflight` lease with a positive finite action allowance, charges
+zero PRs against that lease, and guarded delivery requires `guarded_merge`.
+Existing merge, snapshot, landing and effect paths refuse qualification until
+its separate read-only advancer is installed.
+
+Admission charges a guarded request's PR count once against the lease; effect
+reservations spend the action allowance. Existing-job checks do not spend
+admission capacity again. A bounded guarded refresh preserves the original PR
+and stack-edit scope and consumes the original refresh allowance with a
 binding-revision compare-and-swap. Cancellation does not refund capacity.
 
 The internal dispatcher can continue an already admitted job only under its

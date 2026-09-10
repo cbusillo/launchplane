@@ -23,7 +23,7 @@ from control_plane.contracts.ordinary_agent_effect import (
     OrdinaryAgentRefObservation,
 )
 from control_plane.contracts.ordinary_agent_session_lifecycle import (
-    OrdinaryAgentFiniteRequestRecord,
+    OrdinaryAgentGuardedFiniteRequest,
     OrdinaryAgentJobBinding,
 )
 from control_plane.contracts.ordinary_agent_noop import OrdinaryAgentNoOpLandingStore
@@ -73,7 +73,7 @@ def ordinary_landing_history_allows_retry(history: OrdinaryAgentEffectHistory) -
 def recover_ordinary_landing_entry(
     *,
     store: OrdinaryLandingRecoveryStore,
-    request: OrdinaryAgentFiniteRequestRecord,
+    request: OrdinaryAgentGuardedFiniteRequest,
     preparation_id: str,
     candidate_record: MergeTrainBatchCandidateRecord,
     landing_plan_record: MergeTrainBatchLandingPlanRecord,

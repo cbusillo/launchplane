@@ -30,6 +30,9 @@ from control_plane.contracts.ordinary_agent_snapshot import (
     OrdinaryAgentRequiredCheck,
     OrdinaryAgentReadmissionObservation,
 )
+from control_plane.contracts.ordinary_agent_session_lifecycle import (
+    OrdinaryAgentGuardedFiniteRequest,
+)
 from control_plane.merge_admission import MergeAdmissionDeniedError
 from control_plane.github_app_identity import GitHubAppInstallationToken
 from control_plane.merge_train import MergeTrainDryRunSnapshot, MergeTrainPullRequestSnapshot
@@ -253,9 +256,10 @@ class OrdinaryAgentMergeTrainJobTests(unittest.TestCase):
             self.session.now, timezone.utc
         ).isoformat()
         resumed = self.claim("next-worker")
-        self.assertEqual(resumed.request.binding_revision, 2)
-        self.assertEqual(resumed.request.pull_requests[0].head_sha, "d" * 40)
-        self.assertEqual(resumed.request.refresh_used, 1)
+        resumed_request = cast(OrdinaryAgentGuardedFiniteRequest, resumed.request)
+        self.assertEqual(resumed_request.binding_revision, 2)
+        self.assertEqual(resumed_request.pull_requests[0].head_sha, "d" * 40)
+        self.assertEqual(resumed_request.refresh_used, 1)
         self.assertIsNone(resumed.controller_fence)
         self.provider.assert_not_called()
 
@@ -504,8 +508,9 @@ class OrdinaryAgentMergeTrainJobTests(unittest.TestCase):
             self.session.now, timezone.utc
         ).isoformat()
         resumed = self.claim("readmitted-worker")
-        self.assertEqual(resumed.request.base_sha, observation.base_identity.sha)
-        self.assertEqual(resumed.request.refresh_used, 1)
+        resumed_request = cast(OrdinaryAgentGuardedFiniteRequest, resumed.request)
+        self.assertEqual(resumed_request.base_sha, observation.base_identity.sha)
+        self.assertEqual(resumed_request.refresh_used, 1)
         mint.assert_called_once()
         self.assertEqual(
             [(call.kwargs["method"], call.kwargs["path"]) for call in provider.call_args_list],
