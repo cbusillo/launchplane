@@ -130,12 +130,15 @@ def capture_durable_operation_authorization(
     policy_record: LaunchplaneAuthzPolicyRecord,
     authorized_at: str,
 ) -> DurableOperationAuthorization:
-    policy_schema_version = policy_record.policy.schema_version
-    if policy_schema_version not in _SUPPORTED_MANAGED_RULE_POLICY_SCHEMA_VERSIONS:
-        raise DurableOperationAuthorizationCaptureError(
-            "Durable operations require schema-v2 or schema-v3 managed authz policy."
-        )
-    captured_policy_schema_version: Literal[2, 3] = 2 if policy_schema_version == 2 else 3
+    match policy_record.policy.schema_version:
+        case 2:
+            policy_schema_version: Literal[2, 3] = 2
+        case 3:
+            policy_schema_version = 3
+        case _:
+            raise DurableOperationAuthorizationCaptureError(
+                "Durable operations require schema-v2 or schema-v3 managed authz policy."
+            )
     target = AuthorizationTarget(scope="instance", instances=instances)
     try:
         managed_rule = require_single_managed_rule_identity(
@@ -159,7 +162,7 @@ def capture_durable_operation_authorization(
         managed_rule_id=managed_rule.managed_rule_id,
         policy_record_id=policy_record.record_id,
         policy_revision=policy_record.revision,
-        policy_schema_version=captured_policy_schema_version,
+        policy_schema_version=policy_schema_version,
         policy_sha256=policy_record.policy_sha256,
         policy_source=policy_record.source,
         authorized_at=authorized_at,

@@ -333,9 +333,13 @@ def _construct_approver_authorization(
     if approval is None:
         raise ValueError("approval_provenance_missing")
     descriptor = read_privileged_operation_descriptor(record.descriptor_id).descriptor
-    if policy_record.policy.schema_version not in (2, 3):
-        raise ValueError("approval_policy_schema_unsupported")
-    policy_schema_version: Literal[2, 3] = 2 if policy_record.policy.schema_version == 2 else 3
+    match policy_record.policy.schema_version:
+        case 2:
+            policy_schema_version: Literal[2, 3] = 2
+        case 3:
+            policy_schema_version = 3
+        case _:
+            raise ValueError("approval_policy_schema_unsupported")
     return DurableOperationAuthorization(
         action=descriptor.approve_action,
         product="launchplane",

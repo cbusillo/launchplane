@@ -1656,6 +1656,17 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
         self.assertEqual(authorization.policy_revision, active_policy.revision)
         self.assertEqual(authorization.policy_sha256, active_policy.policy_sha256)
 
+        unsupported_policy = LaunchplaneAuthzPolicy(schema_version=1)
+        unsupported_record = LaunchplaneAuthzPolicyRecord(
+            record_id="launchplane-authz-policy-r10",
+            revision=10,
+            source="test-policy-r10",
+            updated_at="2026-08-22T19:10:00+00:00",
+            policy=unsupported_policy,
+        )
+        with self.assertRaisesRegex(ValueError, "approval_policy_schema_unsupported"):
+            _construct_approver_authorization(approved, unsupported_record)
+
     def test_stale_execution_recovers_completed_effect_by_operation_token(self) -> None:
         approval_policy = _policy_record(revision=3)
         with TemporaryDirectory() as directory:

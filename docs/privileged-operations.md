@@ -70,6 +70,14 @@ caller identity type. Unmanaged rules, including rules with an empty action
 list, cannot authorize the routes. This compatibility does not lift the
 schema-v3 policy write fence or activate ordinary-agent authority.
 
+Stored durable-operation authorizations retain their capture-time policy schema
+and fail closed on a schema-v3-to-schema-v2 transition. The privileged worker's
+approver check is distinct: it reconstructs transient authorization from the
+current active policy and the approval's recorded managed IDs at execution
+time. The approval record has no approval-time policy-schema field, so this
+check carries current policy provenance and does not claim a capture-time schema
+transition.
+
 The human routes use a named GitHub-human browser dependency that:
 
 1. authenticates the Launchplane GitHub session;
