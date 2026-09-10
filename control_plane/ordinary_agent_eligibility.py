@@ -188,6 +188,41 @@ def _eligibility_reason(
     request: OrdinaryAgentRequest,
     policy: OrdinaryAgentPolicyEvaluation,
 ) -> OrdinaryAgentReasonCode:
+    reason = ordinary_agent_chain_reason(
+        principal=principal, credential=credential, session=session, lease=lease, request=request
+    )
+    if reason != "eligible":
+        return reason
+    for name, evidence in (("credential", credential), ("session", session), ("lease", lease)):
+        if now < evidence.valid_from:
+            return cast(OrdinaryAgentReasonCode, f"{name}_not_yet_valid")
+        if now >= evidence.expires_at:
+            return cast(OrdinaryAgentReasonCode, f"{name}_expired")
+        if evidence.revoked_at is not None and evidence.revoked_at <= now:
+            return cast(OrdinaryAgentReasonCode, f"{name}_revoked")
+    reason = ordinary_agent_effective_authority_reason(policy=policy, lease=lease, request=request)
+    if reason != "eligible":
+        return reason
+    if not lease.budget.window_start <= now < lease.budget.window_end:
+        return "budget_window_inactive"
+    if (
+        lease.budget.actions_used + 1 > lease.budget.action_limit
+        or lease.budget.pull_requests_used + len(request.pull_requests)
+        > lease.budget.pull_request_limit
+    ):
+        return "budget_exhausted"
+    return "eligible"
+
+
+def ordinary_agent_chain_reason(
+    *,
+    principal: OrdinaryAgentPrincipal,
+    credential: OrdinaryAgentCredentialEvidence,
+    session: OrdinaryAgentSession,
+    lease: OrdinaryAgentLease,
+    request: OrdinaryAgentRequest,
+) -> OrdinaryAgentReasonCode:
+    """Check immutable lineage independently of admission or finite-job timing."""
     # Stable refusal order: principal/profile, target, chain, time, policy, request, budget.
     if principal.status != "active":
         return "principal_revoked"
@@ -223,25 +258,20 @@ def _eligibility_reason(
         return "session_outside_credential_lifetime"
     if not session.valid_from <= lease.valid_from or lease.expires_at > session.expires_at:
         return "lease_outside_session_lifetime"
-    for name, evidence in (("credential", credential), ("session", session), ("lease", lease)):
-        if now < evidence.valid_from:
-            return cast(OrdinaryAgentReasonCode, f"{name}_not_yet_valid")
-        if now >= evidence.expires_at:
-            return cast(OrdinaryAgentReasonCode, f"{name}_expired")
-        if evidence.revoked_at is not None and evidence.revoked_at <= now:
-            return cast(OrdinaryAgentReasonCode, f"{name}_revoked")
+    return "eligible"
+
+
+def ordinary_agent_effective_authority_reason(
+    *,
+    policy: OrdinaryAgentPolicyEvaluation,
+    lease: OrdinaryAgentLease,
+    request: OrdinaryAgentRequest,
+) -> OrdinaryAgentReasonCode:
+    """Compare current policy semantics with the original lease attenuation."""
     if policy.decision != "allow":
         return policy.reason_code
     if lease.effective_decision_fingerprint != policy.effective_decision_fingerprint:
         return "effective_decision_fingerprint_mismatch"
     if request.action != lease.action:
         return "request_action_mismatch"
-    if not lease.budget.window_start <= now < lease.budget.window_end:
-        return "budget_window_inactive"
-    if (
-        lease.budget.actions_used + 1 > lease.budget.action_limit
-        or lease.budget.pull_requests_used + len(request.pull_requests)
-        > lease.budget.pull_request_limit
-    ):
-        return "budget_exhausted"
     return "eligible"

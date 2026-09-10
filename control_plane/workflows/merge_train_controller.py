@@ -52,7 +52,11 @@ def decide_merge_train_controller_record_action(
         )
         return MergeTrainControllerDecision(
             action="land_batch",
-            reason="active landing plan has planned entries",
+            reason=(
+                "active landing plan needs cleanup"
+                if _ordinary_landing_terminal_success(active_landing_record)
+                else "active landing plan has planned entries"
+            ),
             landing_plan_record_id=active_landing_record.record_id,
             stack_collapse_plan_record_id=""
             if waiting_collapse_record is None
@@ -168,7 +172,7 @@ def latest_merge_train_batch_landing_plan_record(
         return None
     if not any(
         entry.status in {"planned", "merging"} for entry in latest_record.landing_plan.entries
-    ):
+    ) and not _ordinary_landing_terminal_success(latest_record):
         return None
     return latest_record
 
@@ -190,9 +194,22 @@ def latest_completed_merge_train_batch_landing_plan_record(
         return None
     if not latest_record.landing_plan.entries:
         return None
-    if any(entry.status not in {"merged", "stale"} for entry in latest_record.landing_plan.entries):
+    completed_statuses = (
+        {"merged", "skipped"}
+        if latest_record.ordinary_job_binding is not None
+        else {"merged", "stale"}
+    )
+    if any(entry.status not in completed_statuses for entry in latest_record.landing_plan.entries):
         return None
     return latest_record
+
+
+def _ordinary_landing_terminal_success(record: MergeTrainBatchLandingPlanRecord) -> bool:
+    return (
+        record.ordinary_job_binding is not None
+        and bool(record.landing_plan.entries)
+        and all(entry.status in {"merged", "skipped"} for entry in record.landing_plan.entries)
+    )
 
 
 def latest_merge_train_stack_collapse_plan_record(

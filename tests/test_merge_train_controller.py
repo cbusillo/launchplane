@@ -16,9 +16,12 @@ from control_plane.contracts.merge_train_stack_collapse import (
     MergeTrainStackCollapsePlanRecord,
     build_merge_train_stack_collapse_id,
 )
+from control_plane.contracts.ordinary_agent_session_lifecycle import OrdinaryAgentJobBinding
 from control_plane.workflows.merge_train_controller import (
     MergeTrainControllerDecision,
     decide_merge_train_controller_record_action,
+    latest_completed_merge_train_batch_landing_plan_record,
+    latest_merge_train_batch_landing_plan_record,
 )
 
 
@@ -199,6 +202,80 @@ class MergeTrainControllerDecisionTests(unittest.TestCase):
         self.assertEqual(decision.action, "idle")
         self.assertEqual(decision.landing_plan_record_id, "")
 
+    def test_landing_completion_preserves_legacy_and_adds_ordinary_terminal_success(
+        self,
+    ) -> None:
+        candidate = _candidate_record(
+            status="passed", candidate_sha="candidate-sha", entry_count=2
+        ).candidate
+        binding = OrdinaryAgentJobBinding(
+            request_id="ordinary_request",
+            scope_sha256="a" * 64,
+            binding_revision=1,
+        )
+
+        for statuses in (("merged", "merged"), ("stale", "stale"), ("merged", "stale")):
+            with self.subTest(kind="legacy-completed", statuses=statuses):
+                record = _landing_plan_record(candidate=candidate, entry_statuses=statuses)
+                self.assertIsNotNone(
+                    latest_completed_merge_train_batch_landing_plan_record(
+                        landing_plan_records=(record,),
+                        batch_id=candidate.batch_id,
+                        candidate_sha=candidate.candidate_sha,
+                    )
+                )
+
+        legacy_skipped = _landing_plan_record(
+            candidate=candidate, entry_statuses=("merged", "skipped")
+        )
+        self.assertIsNone(
+            latest_completed_merge_train_batch_landing_plan_record(
+                landing_plan_records=(legacy_skipped,),
+                batch_id=candidate.batch_id,
+                candidate_sha=candidate.candidate_sha,
+            )
+        )
+
+        for statuses in (("merged", "merged"), ("skipped", "skipped"), ("merged", "skipped")):
+            with self.subTest(kind="ordinary-completed", statuses=statuses):
+                record = _landing_plan_record(
+                    candidate=candidate,
+                    entry_statuses=statuses,
+                    ordinary_job_binding=binding,
+                )
+                self.assertEqual(
+                    latest_completed_merge_train_batch_landing_plan_record(
+                        landing_plan_records=(record,),
+                        batch_id=candidate.batch_id,
+                        candidate_sha=candidate.candidate_sha,
+                    ),
+                    record,
+                )
+                self.assertEqual(latest_merge_train_batch_landing_plan_record((record,)), record)
+                decision = decide_merge_train_controller_record_action(
+                    candidate_records=(),
+                    landing_plan_records=(record,),
+                    stack_collapse_plan_records=(),
+                )
+                self.assertEqual(decision.action, "land_batch")
+                self.assertEqual(decision.landing_plan_record_id, record.record_id)
+
+        for statuses in (("merged", "stale"), ("merged", "blocked")):
+            with self.subTest(kind="ordinary-recovery", statuses=statuses):
+                record = _landing_plan_record(
+                    candidate=candidate,
+                    entry_statuses=statuses,
+                    ordinary_job_binding=binding,
+                )
+                self.assertIsNone(
+                    latest_completed_merge_train_batch_landing_plan_record(
+                        landing_plan_records=(record,),
+                        batch_id=candidate.batch_id,
+                        candidate_sha=candidate.candidate_sha,
+                    )
+                )
+                self.assertIsNone(latest_merge_train_batch_landing_plan_record((record,)))
+
     def test_decision_treats_stale_landing_plan_as_terminal_for_candidate(self) -> None:
         passed_record = _candidate_record(status="passed", candidate_sha="candidate-sha")
         stale_landing_record = _landing_plan_record(
@@ -263,8 +340,11 @@ def _candidate_record(
     record_id: str = "candidate-record",
     updated_at: str = "2026-05-18T01:00:00Z",
     candidate_sha: str = "",
+    entry_count: int = 1,
 ) -> MergeTrainBatchCandidateRecord:
-    entries = (_batch_entry(),)
+    entries = tuple(
+        _batch_entry(number=index, position=index) for index in range(1, entry_count + 1)
+    )
     batch_id = build_merge_train_batch_id(
         repository="example/merge-train-repo",
         base_branch="main",
@@ -302,17 +382,21 @@ def _landing_plan_record(
     candidate: MergeTrainBatchCandidate,
     record_id: str = "landing-record",
     entry_status: str = "planned",
+    entry_statuses: tuple[str, ...] | None = None,
     updated_at: str = "2026-05-18T01:01:00Z",
+    ordinary_job_binding: OrdinaryAgentJobBinding | None = None,
 ) -> MergeTrainBatchLandingPlanRecord:
     landing_plan = build_merge_train_batch_landing_plan(
         candidate=candidate,
         merge_method="squash",
         created_at=updated_at,
     )
+    statuses = entry_statuses or tuple(entry_status for _ in landing_plan.entries)
     landing_plan = landing_plan.model_copy(
         update={
             "entries": tuple(
-                entry.model_copy(update={"status": entry_status}) for entry in landing_plan.entries
+                entry.model_copy(update={"status": status})
+                for entry, status in zip(landing_plan.entries, statuses, strict=True)
             )
         }
     )
@@ -321,6 +405,7 @@ def _landing_plan_record(
         source="test",
         updated_at=updated_at,
         landing_plan=landing_plan,
+        ordinary_job_binding=ordinary_job_binding,
     )
 
 
@@ -382,11 +467,11 @@ def _stack_collapse_record(
     )
 
 
-def _batch_entry() -> MergeTrainBatchEntry:
+def _batch_entry(*, number: int = 1, position: int = 1) -> MergeTrainBatchEntry:
     return MergeTrainBatchEntry(
-        pull_request_number=1,
-        position=1,
-        head_sha="head-1",
-        title="PR 1",
-        url="https://github.com/example/merge-train-repo/pull/1",
+        pull_request_number=number,
+        position=position,
+        head_sha=f"head-{number}",
+        title=f"PR {number}",
+        url=f"https://github.com/example/merge-train-repo/pull/{number}",
     )

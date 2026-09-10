@@ -5,6 +5,7 @@ import {
   LaunchplaneApiError,
   approvePrivilegedOperation,
   readPrivilegedOperationPlans,
+  readPrivilegedOperationReview,
   readPrivilegedOperationRawDetail,
   revokePrivilegedOperation,
   type PrivilegedOperationDescriptorId,
@@ -24,12 +25,28 @@ import {
   EngineeringRouteFrame,
 } from "./EngineeringRouteUi";
 import { formatTime } from "./format";
+import { EngineeringOrdinaryAgentJobRoute } from "./EngineeringOrdinaryAgentJobRoute";
+import { EngineeringOrdinaryAgentRoute } from "./EngineeringOrdinaryAgentRoute";
 
-export function EngineeringPrivilegedOperationsRoute({
+export function EngineeringPrivilegedOperationsRoute({ fixtureMode }: { fixtureMode: DevFixtureMode }) {
+  const query = new URLSearchParams(window.location.search);
+  const principalId = query.get("principal_id");
+  const requestId = query.get("request_id");
+  if (principalId !== null && requestId !== null) {
+    return <EngineeringOrdinaryAgentJobRoute principalId={principalId} requestId={requestId} />;
+  }
+  if (principalId !== null) {
+    return <EngineeringOrdinaryAgentRoute principalId={principalId} operationId={query.get("operation_id") ?? ""} />;
+  }
+  return <DefaultPrivilegedOperationsRoute fixtureMode={fixtureMode} />;
+}
+
+function DefaultPrivilegedOperationsRoute({
   fixtureMode,
 }: {
   fixtureMode: DevFixtureMode;
 }) {
+  const operationId = new URLSearchParams(window.location.search).get("operation_id");
   const [descriptorId, setDescriptorId] =
     useState<PrivilegedOperationDescriptorId>("managed-secret-reencryption");
   const loader = useCallback(
@@ -41,19 +58,31 @@ export function EngineeringPrivilegedOperationsRoute({
         await fixtureDelay(signal);
         return privilegedOperationFixture(fixtureMode, descriptorId);
       }
+      if (operationId !== null) {
+        const result = await readPrivilegedOperationReview(operationId, signal);
+        return {
+          status: result.status,
+          trace_id: result.trace_id,
+          total: 1,
+          reviews: [result.review],
+        };
+      }
       return readPrivilegedOperationPlans(signal, descriptorId);
     },
-    [descriptorId, fixtureMode],
+    [descriptorId, fixtureMode, operationId],
   );
   const resource = useEngineeringResource(
     loader,
-    `privileged-operations:${descriptorId}:${fixtureMode}`,
+    `privileged-operations:${operationId ?? descriptorId}:${fixtureMode}`,
   );
 
   return (
     <EngineeringRouteFrame
       actions={
         <div className="privileged-operation-toolbar">
+          {operationId !== null ? (
+            <a href="/ui/engineering/privileged-operations">All operation plans</a>
+          ) : (
           <div
             className="privileged-operation-kind-switch"
             aria-label="Operation type"
@@ -84,6 +113,7 @@ export function EngineeringPrivilegedOperationsRoute({
               Merge-train policy
             </button>
           </div>
+          )}
           <EngineeringResourceControls
             cancel={resource.cancel}
             refresh={resource.refresh}

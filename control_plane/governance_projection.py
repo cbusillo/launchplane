@@ -162,9 +162,6 @@ class LiveGovernanceCurrentReadinessProvider:
             controller_state = controller_records[0]
             if controller_state.status != "running" or not controller_state.lease_owner:
                 return _unavailable_readiness()
-            token = self.github_token(github_token_env_var).strip()
-            if not token:
-                return _unavailable_readiness()
             stack_collapse_record = _stack_collapse_record(
                 store=store,
                 repository=repository,
@@ -175,6 +172,19 @@ class LiveGovernanceCurrentReadinessProvider:
                     else ""
                 ),
             )
+            ordinary_job_binding = candidate_record.ordinary_job_binding
+            if (
+                landing_record.ordinary_job_binding != ordinary_job_binding
+                or controller_state.ordinary_job_binding != ordinary_job_binding
+                or (
+                    stack_collapse_record is not None
+                    and stack_collapse_record.ordinary_job_binding != ordinary_job_binding
+                )
+            ):
+                return _unavailable_readiness()
+            token = self.github_token(github_token_env_var).strip()
+            if not token:
+                return _unavailable_readiness()
             evaluator = cast(
                 LiveMergeAdmissionEvaluator,
                 self.evaluator_factory(

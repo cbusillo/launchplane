@@ -72,3 +72,10 @@ SHA/tree, and merge-result SHA/tree on normal, retry, and already-merged crash
 recovery paths. Candidate no-op entries land as `skipped`, preserve the rolling
 parent as their result, and remain usable when later queue positions are
 evaluated. Absent legacy landing identities remain `unknown`, not contradiction.
+
+Ordinary jobs additionally bind a skipped entry to the persisted candidate
+effect's exact containment proof and a joined no-op finalization. A candidate
+record alone does not authorize skipping. The finalization preserves the actual
+rolling base, records fresh admission and a truthful zero-effect outcome, and
+advances progress atomically. Later successors may carry that proven skipped
+entry without treating it as a provider merge.

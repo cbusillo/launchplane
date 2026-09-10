@@ -8,6 +8,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import MagicMock, patch
 
 from alembic import command
+from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.exc import IntegrityError
 
@@ -42,6 +43,458 @@ from control_plane.storage.schema_migration import (
 
 
 class SchemaMigrationTests(unittest.TestCase):
+    def test_landing_retry_schema_invariants_are_expected(self) -> None:
+        column_types = {
+            (column.table_name, column.column_name): column.accepted_type_tokens
+            for column in CRITICAL_POSTGRES_COLUMN_TYPES
+        }
+        indexes = {(index.table_name, index.index_name): index for index in CRITICAL_SCHEMA_INDEXES}
+
+        self.assertEqual(EXPECTED_ALEMBIC_HEAD_REVISION, "d8a0b2c4e6f9")
+        self.assertEqual(
+            column_types[("launchplane_ordinary_agent_landing_preparations", "attempt_ordinal")],
+            ("bigint",),
+        )
+        self.assertEqual(
+            column_types[("launchplane_ordinary_agent_landing_bindings", "dispatch_ordinal")],
+            ("bigint",),
+        )
+        root_charge = indexes[
+            (
+                "launchplane_ordinary_agent_landing_preparations",
+                "ordinary_landing_root_charge_uq",
+            )
+        ]
+        self.assertTrue(root_charge.unique)
+        self.assertEqual(root_charge.column_names, ("lease_id", "action_ordinal"))
+        self.assertEqual(
+            root_charge.predicate_expression,
+            "predecessor_preparation_id IS NULL",
+        )
+        self.assertEqual(
+            indexes[
+                (
+                    "launchplane_ordinary_agent_landing_bindings",
+                    "ordinary_landing_effect_dispatch_uq",
+                )
+            ].column_names,
+            ("effect_id", "dispatch_ordinal"),
+        )
+
+    def test_landing_retry_migration_preserves_roots_and_allows_bounded_successors(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = (
+                f"sqlite+pysqlite:///{Path(temporary_directory_name) / 'records.sqlite3'}"
+            )
+            config = alembic_config(database_url)
+            command.upgrade(config, "c7f9a1b3d5e8")
+            engine = create_engine(database_url)
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "INSERT INTO launchplane_ordinary_agent_landing_preparations "
+                        "(preparation_id, request_id, lease_id, binding_revision, "
+                        "pull_request_number, action_ordinal, custody_attempt_id, revision, payload) "
+                        "VALUES ('preparation_one', 'request_one', 'lease_one', 1, 17, 2, "
+                        "'custody_one', 1, '{}')"
+                    )
+                )
+                connection.execute(
+                    text(
+                        "INSERT INTO launchplane_ordinary_agent_landing_bindings "
+                        "(preparation_id, admission_id, effect_id, child_id, payload) "
+                        "VALUES ('preparation_one', 'admission_one', 'effect_one', "
+                        "'child_one', '{}')"
+                    )
+                )
+            engine.dispose()
+
+            command.upgrade(config, EXPECTED_ALEMBIC_HEAD_REVISION)
+            engine = create_engine(database_url)
+            inspector = inspect(engine)
+            preparation_columns = {
+                str(column["name"])
+                for column in inspector.get_columns(
+                    "launchplane_ordinary_agent_landing_preparations"
+                )
+            }
+            binding_columns = {
+                str(column["name"])
+                for column in inspector.get_columns("launchplane_ordinary_agent_landing_bindings")
+            }
+            with engine.connect() as connection:
+                root = connection.execute(
+                    text(
+                        "SELECT attempt_ordinal, predecessor_preparation_id "
+                        "FROM launchplane_ordinary_agent_landing_preparations "
+                        "WHERE preparation_id = 'preparation_one'"
+                    )
+                ).one()
+                binding = connection.execute(
+                    text(
+                        "SELECT dispatch_ordinal "
+                        "FROM launchplane_ordinary_agent_landing_bindings "
+                        "WHERE preparation_id = 'preparation_one'"
+                    )
+                ).one()
+            self.assertEqual(root, (1, None))
+            self.assertEqual(binding, (1,))
+            self.assertIn("attempt_ordinal", preparation_columns)
+            self.assertIn("predecessor_preparation_id", preparation_columns)
+            self.assertIn("dispatch_ordinal", binding_columns)
+
+            # Supported schema repair may replay this migration after an operator
+            # stamps a newer physical schema back to its preceding revision.
+            with engine.begin() as connection:
+                connection.execute(text("UPDATE alembic_version SET version_num = 'c7f9a1b3d5e8'"))
+            engine.dispose()
+            command.upgrade(config, EXPECTED_ALEMBIC_HEAD_REVISION)
+            engine = create_engine(database_url)
+
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "INSERT INTO launchplane_ordinary_agent_landing_preparations "
+                        "(preparation_id, request_id, lease_id, binding_revision, "
+                        "pull_request_number, action_ordinal, custody_attempt_id, revision, payload, "
+                        "attempt_ordinal, predecessor_preparation_id) VALUES "
+                        "('preparation_two', 'request_one', 'lease_one', 1, 17, 2, "
+                        "'custody_two', 1, '{}', 2, 'preparation_one')"
+                    )
+                )
+                connection.execute(
+                    text(
+                        "INSERT INTO launchplane_ordinary_agent_landing_bindings "
+                        "(preparation_id, admission_id, effect_id, child_id, payload, "
+                        "dispatch_ordinal) VALUES ('preparation_two', 'admission_two', "
+                        "'effect_one', 'child_two', '{}', 2)"
+                    )
+                )
+            with self.assertRaises(IntegrityError), engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "INSERT INTO launchplane_ordinary_agent_landing_preparations "
+                        "(preparation_id, request_id, lease_id, binding_revision, "
+                        "pull_request_number, action_ordinal, custody_attempt_id, revision, payload, "
+                        "attempt_ordinal, predecessor_preparation_id) VALUES "
+                        "('preparation_fork', 'request_one', 'lease_one', 1, 17, 2, "
+                        "'custody_fork', 1, '{}', 3, 'preparation_one')"
+                    )
+                )
+            with self.assertRaises(IntegrityError), engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "INSERT INTO launchplane_ordinary_agent_landing_preparations "
+                        "(preparation_id, request_id, lease_id, binding_revision, "
+                        "pull_request_number, action_ordinal, custody_attempt_id, revision, payload, "
+                        "attempt_ordinal, predecessor_preparation_id) VALUES "
+                        "('preparation_root_duplicate', 'request_other', 'lease_one', 1, 18, 2, "
+                        "'custody_other', 1, '{}', 1, NULL)"
+                    )
+                )
+            with self.assertRaises(IntegrityError), engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "INSERT INTO launchplane_ordinary_agent_landing_bindings "
+                        "(preparation_id, admission_id, effect_id, child_id, payload, "
+                        "dispatch_ordinal) VALUES ('preparation_other', 'admission_other', "
+                        "'effect_one', 'child_other', '{}', 2)"
+                    )
+                )
+
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "DELETE FROM launchplane_ordinary_agent_landing_bindings "
+                        "WHERE preparation_id = 'preparation_two'"
+                    )
+                )
+                connection.execute(
+                    text(
+                        "DELETE FROM launchplane_ordinary_agent_landing_preparations "
+                        "WHERE preparation_id = 'preparation_two'"
+                    )
+                )
+            engine.dispose()
+            command.downgrade(config, "c7f9a1b3d5e8")
+            engine = create_engine(database_url)
+            try:
+                downgraded_preparation_columns = {
+                    str(column["name"])
+                    for column in inspect(engine).get_columns(
+                        "launchplane_ordinary_agent_landing_preparations"
+                    )
+                }
+                downgraded_binding_columns = {
+                    str(column["name"])
+                    for column in inspect(engine).get_columns(
+                        "launchplane_ordinary_agent_landing_bindings"
+                    )
+                }
+                self.assertNotIn("attempt_ordinal", downgraded_preparation_columns)
+                self.assertNotIn("predecessor_preparation_id", downgraded_preparation_columns)
+                self.assertNotIn("dispatch_ordinal", downgraded_binding_columns)
+            finally:
+                engine.dispose()
+
+    def test_landing_retry_migration_refuses_populated_retry_downgrade_before_ddl(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = (
+                f"sqlite+pysqlite:///{Path(temporary_directory_name) / 'records.sqlite3'}"
+            )
+            config = alembic_config(database_url)
+            command.upgrade(config, EXPECTED_ALEMBIC_HEAD_REVISION)
+            engine = create_engine(database_url)
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "INSERT INTO launchplane_ordinary_agent_landing_preparations "
+                        "(preparation_id, request_id, lease_id, binding_revision, "
+                        "pull_request_number, action_ordinal, custody_attempt_id, revision, payload, "
+                        "attempt_ordinal, predecessor_preparation_id) VALUES "
+                        "('preparation_root', 'request_one', 'lease_one', 1, 17, 2, "
+                        "'custody_root', 1, '{}', 1, NULL), "
+                        "('preparation_retry', 'request_one', 'lease_one', 1, 17, 2, "
+                        "'custody_retry', 1, '{}', 2, 'preparation_root')"
+                    )
+                )
+                connection.execute(
+                    text(
+                        "INSERT INTO launchplane_ordinary_agent_landing_bindings "
+                        "(preparation_id, admission_id, effect_id, child_id, payload, "
+                        "dispatch_ordinal) VALUES "
+                        "('preparation_root', 'admission_one', 'effect_one', "
+                        "'child_one', '{}', 1), "
+                        "('preparation_retry', 'admission_two', 'effect_one', "
+                        "'child_two', '{}', 2)"
+                    )
+                )
+            engine.dispose()
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "while retry attempts exist",
+            ):
+                command.downgrade(config, "c7f9a1b3d5e8")
+
+            engine = create_engine(database_url)
+            try:
+                inspector = inspect(engine)
+                preparation_columns = {
+                    str(column["name"])
+                    for column in inspector.get_columns(
+                        "launchplane_ordinary_agent_landing_preparations"
+                    )
+                }
+                binding_columns = {
+                    str(column["name"])
+                    for column in inspector.get_columns(
+                        "launchplane_ordinary_agent_landing_bindings"
+                    )
+                }
+                self.assertIn("attempt_ordinal", preparation_columns)
+                self.assertIn("predecessor_preparation_id", preparation_columns)
+                self.assertIn("dispatch_ordinal", binding_columns)
+                with engine.connect() as connection:
+                    self.assertEqual(
+                        connection.execute(
+                            text("SELECT version_num FROM alembic_version")
+                        ).scalar_one(),
+                        EXPECTED_ALEMBIC_HEAD_REVISION,
+                    )
+                    self.assertEqual(
+                        connection.execute(
+                            text(
+                                "SELECT count(*) FROM "
+                                "launchplane_ordinary_agent_landing_preparations"
+                            )
+                        ).scalar_one(),
+                        2,
+                    )
+                    self.assertEqual(
+                        connection.execute(
+                            text("SELECT count(*) FROM launchplane_ordinary_agent_landing_bindings")
+                        ).scalar_one(),
+                        2,
+                    )
+            finally:
+                engine.dispose()
+
+            engine = create_engine(database_url)
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "DELETE FROM launchplane_ordinary_agent_landing_bindings "
+                        "WHERE preparation_id = 'preparation_retry'"
+                    )
+                )
+                connection.execute(
+                    text(
+                        "DELETE FROM launchplane_ordinary_agent_landing_preparations "
+                        "WHERE preparation_id = 'preparation_retry'"
+                    )
+                )
+                connection.execute(
+                    text(
+                        "INSERT INTO launchplane_ordinary_agent_semantic_dispatches "
+                        "(child_id, effect_id, semantic_ordinal, payload) VALUES "
+                        "('associated_child', 'associated_effect', 1, "
+                        '\'{"admission_id":"admission_one",'
+                        '"admission_binding_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}\')'
+                    )
+                )
+                connection.execute(
+                    text(
+                        "INSERT INTO launchplane_merge_landing_outcomes "
+                        "(outcome_id, outcome_binding_sha256, admission_id, attempt_id, "
+                        "observation_sequence, status, repository, base_branch, "
+                        "pull_request_number, observed_at, payload) VALUES "
+                        "('outcome_one', 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', "
+                        "'admission_one', 'attempt_one', 1, 'rejected', 'owner/repo', 'main', "
+                        "17, '2026-09-09T12:00:00Z', "
+                        '\'{"reason":"dispatch_not_attempted"}\')'
+                    )
+                )
+            engine.dispose()
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "while admission-associated landing dispatch history exists",
+            ):
+                command.downgrade(config, "c7f9a1b3d5e8")
+
+            engine = create_engine(database_url)
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "DELETE FROM launchplane_ordinary_agent_semantic_dispatches "
+                        "WHERE child_id = 'associated_child'"
+                    )
+                )
+            engine.dispose()
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "while dispatch-not-attempted landing outcomes exist",
+            ):
+                command.downgrade(config, "c7f9a1b3d5e8")
+
+    def test_released_controller_checkpoint_migration_preserves_existing_claims(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = (
+                f"sqlite+pysqlite:///{Path(temporary_directory_name) / 'records.sqlite3'}"
+            )
+            config = alembic_config(database_url)
+            command.upgrade(config, "a4d9e2f6b8c1")
+            engine = create_engine(database_url)
+            try:
+                with engine.begin() as connection:
+                    connection.execute(
+                        text(
+                            "INSERT INTO launchplane_ordinary_agent_job_claims "
+                            "(request_id, worker_id, generation, claim_expires_at, "
+                            "next_due_at, status, reason_code) VALUES "
+                            "('request_one', '', 0, 0, 0, 'pending', NULL)"
+                        )
+                    )
+                self.assertNotIn(
+                    "released_controller",
+                    {
+                        str(column["name"])
+                        for column in inspect(engine).get_columns(
+                            "launchplane_ordinary_agent_job_claims"
+                        )
+                    },
+                )
+            finally:
+                engine.dispose()
+
+            command.upgrade(config, EXPECTED_ALEMBIC_HEAD_REVISION)
+            engine = create_engine(database_url)
+            try:
+                columns = {
+                    str(column["name"]): column
+                    for column in inspect(engine).get_columns(
+                        "launchplane_ordinary_agent_job_claims"
+                    )
+                }
+                with engine.connect() as connection:
+                    checkpoint = connection.scalar(
+                        text(
+                            "SELECT released_controller FROM "
+                            "launchplane_ordinary_agent_job_claims "
+                            "WHERE request_id = 'request_one'"
+                        )
+                    )
+                self.assertIn("released_controller", columns)
+                self.assertTrue(columns["released_controller"]["nullable"])
+                self.assertIsNone(checkpoint)
+            finally:
+                engine.dispose()
+
+            command.downgrade(config, "a4d9e2f6b8c1")
+            engine = create_engine(database_url)
+            try:
+                self.assertNotIn(
+                    "released_controller",
+                    {
+                        str(column["name"])
+                        for column in inspect(engine).get_columns(
+                            "launchplane_ordinary_agent_job_claims"
+                        )
+                    },
+                )
+            finally:
+                engine.dispose()
+
+    def test_ordinary_agent_custody_migration_fences_stable_authority_scope(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = (
+                f"sqlite+pysqlite:///{Path(temporary_directory_name) / 'records.sqlite3'}"
+            )
+            config = alembic_config(database_url)
+            command.upgrade(config, EXPECTED_ALEMBIC_HEAD_REVISION)
+            engine = create_engine(database_url)
+            insert_sql = text(
+                "INSERT INTO launchplane_ordinary_agent_custody_issue_attempts "
+                "(attempt_id, idempotency_key_sha256, request_sha256, principal_id, "
+                "repository_id, state, mint_started_at, dispatch_deadline, updated_at, payload) "
+                "VALUES (:attempt_id, :idempotency_key_sha256, :request_sha256, "
+                "'agent_one', 123, 'minting', '2026-09-08T12:00:00Z', "
+                "'2026-09-08T12:00:30Z', '2026-09-08T12:00:00Z', '{}')"
+            )
+            try:
+                indexes = {
+                    str(index["name"]): index
+                    for index in inspect(engine).get_indexes(
+                        "launchplane_ordinary_agent_custody_issue_attempts"
+                    )
+                }
+                with engine.begin() as connection:
+                    connection.execute(
+                        insert_sql,
+                        {
+                            "attempt_id": "custody_first",
+                            "idempotency_key_sha256": "1" * 64,
+                            "request_sha256": "3" * 64,
+                        },
+                    )
+                with self.assertRaises(IntegrityError):
+                    with engine.begin() as connection:
+                        connection.execute(
+                            insert_sql,
+                            {
+                                "attempt_id": "custody_second",
+                                "idempotency_key_sha256": "2" * 64,
+                                "request_sha256": "4" * 64,
+                            },
+                        )
+            finally:
+                engine.dispose()
+
+        active_index = indexes["launchplane_ordinary_agent_custody_active_fence_uidx"]
+        self.assertTrue(active_index["unique"])
+        self.assertEqual(active_index["column_names"], ["principal_id", "repository_id"])
+
     def test_merge_train_policy_migration_fences_plain_active_inserts(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
@@ -1673,7 +2126,10 @@ class SchemaMigrationTests(unittest.TestCase):
             for primary_key in CRITICAL_PRIMARY_KEYS
         }
 
-        self.assertEqual(EXPECTED_ALEMBIC_HEAD_REVISION, "f3a5b7c9d1e4")
+        self.assertEqual(
+            EXPECTED_ALEMBIC_HEAD_REVISION,
+            ScriptDirectory.from_config(alembic_config("sqlite+pysqlite://")).get_current_head(),
+        )
         self.assertFalse(
             [index.index_name for index in CRITICAL_SCHEMA_INDEXES if len(index.index_name) > 63]
         )

@@ -189,7 +189,7 @@ class MergeAdmissionEvidenceFailureHttpTests(unittest.IsolatedAsyncioTestCase):
                 )
                 with (
                     patch(
-                        "control_plane.merge_train_controller_run_once.GitHubMergeTrainSnapshotReader",
+                        "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
                         _FakeMergeTrainSnapshotReader,
                     ),
                     patch(

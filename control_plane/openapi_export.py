@@ -151,6 +151,8 @@ def write_canonical_openapi(output_path: Path) -> Path:
 
 
 UI_OPENAPI_READ_OPERATIONS: dict[str, str] = {
+    "/v1/ordinary-agent-jobs/{principal_id}/{request_id}": "read_human_ordinary_agent_job",
+    "/v1/ordinary-agent-operations/{principal_id}/{operation_id}": "read_human_ordinary_agent_operation",
     "/v1/auth/session": "read_human_auth_session",
     "/v1/drivers": "read_driver_descriptors",
     "/v1/contexts/{context}/driver-view": "read_driver_context_view",
@@ -201,6 +203,10 @@ UI_OPENAPI_READ_OPERATIONS: dict[str, str] = {
 
 
 UI_OPENAPI_WRITE_OPERATIONS: dict[str, str] = {
+    "/v1/ordinary-agent-operations/{principal_id}/{operation_id}/approve": "approve_ordinary_agent_operation",
+    "/v1/ordinary-agent-operations/{principal_id}/{operation_id}/cancel": "cancel_ordinary_agent_operation",
+    "/v1/ordinary-agent-sessions/{principal_id}/{session_id}/revoke": "revoke_ordinary_agent_session",
+    "/v1/ordinary-agent-connections/{principal_id}/disconnect": "disconnect_ordinary_agent_principal",
     "/v1/work-graph/rank": "rank_work_graph_snapshot",
     "/v1/products/{product}/environments/{environment}/config/apply": (
         "apply_product_environment_config"

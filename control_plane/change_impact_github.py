@@ -233,93 +233,12 @@ class GitHubChangeImpactRepositoryEvidenceProvider:
         pull_request_number: int,
         token: str,
     ) -> ChangeImpactAuthorshipEvidence:
-        """Resolve numeric GitHub contributing identities over the reviewed range.
-
-        Bot or agent work pushed under a human GitHub identity resolves to that
-        human identity because GitHub links the commit to it. Any commit without a
-        linked numeric identity, any login that maps to two different numeric IDs,
-        and any range longer than the provider page bound fail closed as unresolved.
-        """
-        identity_by_login: dict[str, int] = {}
-        contributor_ids: set[int] = set()
-        conflicts: list[str] = []
-
-        def record(actor: object, label: str) -> bool:
-            if not isinstance(actor, dict):
-                return False
-            raw_id = str(actor.get("id", "")).strip()
-            login = str(actor.get("login", "")).strip().casefold()
-            if not raw_id.isdecimal() or int(raw_id) < 1 or not login:
-                return False
-            github_id = int(raw_id)
-            known_id = identity_by_login.get(login)
-            if known_id is not None and known_id != github_id:
-                conflicts.append(f"{label} login {login} maps to {known_id} and {github_id}")
-                return True
-            identity_by_login[login] = github_id
-            if str(actor.get("type", "")).strip().casefold() != "user":
-                return False
-            contributor_ids.add(github_id)
-            return True
-
-        if not record(pull_request.get("user"), "pull request author"):
-            return ChangeImpactAuthorshipEvidence(
-                resolution="unresolved",
-                reason="pull request author has no linked numeric GitHub identity",
-            )
-
-        commit_count = 0
-        for page in range(1, self._max_commit_pages + 1):
-            commits = _list_payload(
-                self._github_api(
-                    path=(
-                        f"/repos/{repository_path}/pulls/{pull_request_number}/commits"
-                        f"?per_page=100&page={page}"
-                    ),
-                    token=token,
-                ),
-                "GitHub pull request commits",
-            )
-            for commit in commits:
-                commit_count += 1
-                commit_sha = str(commit.get("sha", "")).strip().lower() or "unknown"
-                linked = record(commit.get("author"), f"commit {commit_sha} author")
-                linked = record(commit.get("committer"), f"commit {commit_sha} committer") or linked
-                if not linked:
-                    return ChangeImpactAuthorshipEvidence(
-                        resolution="unresolved",
-                        commit_count=commit_count,
-                        reason=f"commit {commit_sha} has no linked numeric GitHub identity",
-                    )
-            if len(commits) < 100:
-                break
-        else:
-            return ChangeImpactAuthorshipEvidence(
-                resolution="unresolved",
-                commit_count=commit_count,
-                reason="reviewed commit range exceeded the provider page bound",
-            )
-        if conflicts:
-            return ChangeImpactAuthorshipEvidence(
-                resolution="conflicting",
-                commit_count=commit_count,
-                reason="; ".join(sorted(set(conflicts)))[:500],
-            )
-        if not commit_count:
-            return ChangeImpactAuthorshipEvidence(
-                resolution="unresolved",
-                reason="pull request returned no commit authorship evidence",
-            )
-        if not contributor_ids:
-            return ChangeImpactAuthorshipEvidence(
-                resolution="unresolved",
-                commit_count=commit_count,
-                reason="reviewed range has no human GitHub contributing identity",
-            )
-        return ChangeImpactAuthorshipEvidence(
-            resolution="resolved",
-            contributor_github_ids=tuple(sorted(contributor_ids)),
-            commit_count=commit_count,
+        return read_github_authorship(
+            request=lambda path: self._github_api(path=path, token=token),
+            repository_path=repository_path,
+            pull_request=pull_request,
+            pull_request_number=pull_request_number,
+            max_commit_pages=self._max_commit_pages,
         )
 
     def _changed_files(
@@ -330,57 +249,12 @@ class GitHubChangeImpactRepositoryEvidenceProvider:
         token: str,
         max_file_pages: int,
     ) -> tuple[ChangeImpactChangedFileEvidence, ...]:
-        evidence_by_path: dict[str, ChangeImpactChangedFileEvidence] = {}
-        for page in range(1, max_file_pages + 1):
-            payload = self._github_api(
-                path=(
-                    f"/repos/{repository_path}/pulls/{pull_request_number}/files"
-                    f"?per_page=100&page={page}"
-                ),
-                token=token,
-            )
-            files = _list_payload(payload, "GitHub pull request files")
-            for file_payload in files:
-                filename = _required_string(file_payload, "filename")
-                status = _required_string(file_payload, "status").lower()
-                change_kind = _change_kind(status)
-                previous_filename: str | None = None
-                if status == "renamed":
-                    origin = file_payload.get("previous_filename")
-                    if not isinstance(origin, str) or not origin.strip():
-                        raise ChangeImpactRepositoryEvidenceError(
-                            "GitHub renamed file is missing a valid previous_filename: "
-                            + filename[:256]
-                        )
-                    previous_filename = origin.strip()
-                evidence = ChangeImpactChangedFileEvidence(
-                    path=filename, change_kind=change_kind, previous_path=previous_filename
-                )
-                if evidence.path in evidence_by_path:
-                    raise ChangeImpactRepositoryEvidenceError(
-                        "GitHub changed-file evidence repeats a path: " + evidence.path[:256]
-                    )
-                evidence_by_path[evidence.path] = evidence
-            if len(files) < 100:
-                break
-        else:
-            raise ChangeImpactRepositoryEvidenceError(
-                "GitHub pull request file evidence exceeded the complete provider page bound."
-            )
-        if not evidence_by_path:
-            raise ChangeImpactRepositoryEvidenceError(
-                "GitHub pull request did not return changed-file evidence."
-            )
-        # Real entries retain their change kind when a rename recreates or swaps a path.
-        for evidence in tuple(evidence_by_path.values()):
-            if (
-                evidence.previous_path is not None
-                and evidence.previous_path not in evidence_by_path
-            ):
-                evidence_by_path[evidence.previous_path] = ChangeImpactChangedFileEvidence(
-                    path=evidence.previous_path, change_kind="removed"
-                )
-        return tuple(evidence_by_path.values())
+        return read_github_changed_files(
+            request=lambda path: self._github_api(path=path, token=token),
+            repository_path=repository_path,
+            pull_request_number=pull_request_number,
+            max_file_pages=max_file_pages,
+        )
 
 
 def _repository_path(repository: str) -> str:
@@ -485,3 +359,151 @@ def _change_kind(status: str) -> ChangeImpactChangeKind:
     if status == "renamed":
         return "renamed"
     return "unknown"
+
+
+def read_github_authorship(
+    *,
+    request: Callable[[str], object],
+    repository_path: str,
+    pull_request: dict[str, object],
+    pull_request_number: int,
+    max_commit_pages: int,
+) -> ChangeImpactAuthorshipEvidence:
+    """Resolve numeric GitHub contributing identities over the reviewed range.
+
+    Bot or agent work pushed under a human GitHub identity resolves to that
+    human identity because GitHub links the commit to it. Any commit without a
+    linked numeric identity, any login that maps to two different numeric IDs,
+    and any range longer than the provider page bound fail closed as unresolved.
+    """
+    identity_by_login: dict[str, int] = {}
+    contributor_ids: set[int] = set()
+    conflicts: list[str] = []
+
+    def record(actor: object, label: str) -> bool:
+        if not isinstance(actor, dict):
+            return False
+        raw_id = str(actor.get("id", "")).strip()
+        login = str(actor.get("login", "")).strip().casefold()
+        if not raw_id.isdecimal() or int(raw_id) < 1 or not login:
+            return False
+        github_id = int(raw_id)
+        known_id = identity_by_login.get(login)
+        if known_id is not None and known_id != github_id:
+            conflicts.append(f"{label} login {login} maps to {known_id} and {github_id}")
+            return True
+        identity_by_login[login] = github_id
+        if str(actor.get("type", "")).strip().casefold() != "user":
+            return False
+        contributor_ids.add(github_id)
+        return True
+
+    if not record(pull_request.get("user"), "pull request author"):
+        return ChangeImpactAuthorshipEvidence(
+            resolution="unresolved",
+            reason="pull request author has no linked numeric GitHub identity",
+        )
+
+    commit_count = 0
+    for page in range(1, max_commit_pages + 1):
+        commits = _list_payload(
+            request(
+                f"/repos/{repository_path}/pulls/{pull_request_number}/commits"
+                f"?per_page=100&page={page}"
+            ),
+            "GitHub pull request commits",
+        )
+        for commit in commits:
+            commit_count += 1
+            commit_sha = str(commit.get("sha", "")).strip().lower() or "unknown"
+            linked = record(commit.get("author"), f"commit {commit_sha} author")
+            linked = record(commit.get("committer"), f"commit {commit_sha} committer") or linked
+            if not linked:
+                return ChangeImpactAuthorshipEvidence(
+                    resolution="unresolved",
+                    commit_count=commit_count,
+                    reason=f"commit {commit_sha} has no linked numeric GitHub identity",
+                )
+        if len(commits) < 100:
+            break
+    else:
+        return ChangeImpactAuthorshipEvidence(
+            resolution="unresolved",
+            commit_count=commit_count,
+            reason="reviewed commit range exceeded the provider page bound",
+        )
+    if conflicts:
+        return ChangeImpactAuthorshipEvidence(
+            resolution="conflicting",
+            commit_count=commit_count,
+            reason="; ".join(sorted(set(conflicts)))[:500],
+        )
+    if not commit_count:
+        return ChangeImpactAuthorshipEvidence(
+            resolution="unresolved",
+            reason="pull request returned no commit authorship evidence",
+        )
+    if not contributor_ids:
+        return ChangeImpactAuthorshipEvidence(
+            resolution="unresolved",
+            commit_count=commit_count,
+            reason="reviewed range has no human GitHub contributing identity",
+        )
+    return ChangeImpactAuthorshipEvidence(
+        resolution="resolved",
+        contributor_github_ids=tuple(sorted(contributor_ids)),
+        commit_count=commit_count,
+    )
+
+
+def read_github_changed_files(
+    *,
+    request: Callable[[str], object],
+    repository_path: str,
+    pull_request_number: int,
+    max_file_pages: int,
+) -> tuple[ChangeImpactChangedFileEvidence, ...]:
+    evidence_by_path: dict[str, ChangeImpactChangedFileEvidence] = {}
+    for page in range(1, max_file_pages + 1):
+        payload = request(
+            f"/repos/{repository_path}/pulls/{pull_request_number}/files?per_page=100&page={page}"
+        )
+        files = _list_payload(payload, "GitHub pull request files")
+        for file_payload in files:
+            filename = _required_string(file_payload, "filename")
+            status = _required_string(file_payload, "status").lower()
+            change_kind = _change_kind(status)
+            previous_filename: str | None = None
+            if status == "renamed":
+                origin = file_payload.get("previous_filename")
+                if not isinstance(origin, str) or not origin.strip():
+                    raise ChangeImpactRepositoryEvidenceError(
+                        "GitHub renamed file is missing a valid previous_filename: "
+                        + filename[:256]
+                    )
+                previous_filename = origin.strip()
+            evidence = ChangeImpactChangedFileEvidence(
+                path=filename, change_kind=change_kind, previous_path=previous_filename
+            )
+            if evidence.path in evidence_by_path:
+                raise ChangeImpactRepositoryEvidenceError(
+                    "GitHub changed-file evidence repeats a path: " + evidence.path[:256]
+                )
+            evidence_by_path[evidence.path] = evidence
+        if len(files) < 100:
+            break
+    else:
+        raise ChangeImpactRepositoryEvidenceError(
+            "GitHub pull request file evidence exceeded the complete provider page bound."
+        )
+    if not evidence_by_path:
+        raise ChangeImpactRepositoryEvidenceError(
+            "GitHub pull request did not return changed-file evidence."
+        )
+    # Real entries retain their change kind when a rename recreates or swaps a path.
+    for evidence in tuple(evidence_by_path.values()):
+        if evidence.previous_path is not None and evidence.previous_path not in evidence_by_path:
+            evidence_by_path[evidence.previous_path] = ChangeImpactChangedFileEvidence(
+                path=evidence.previous_path, change_kind="removed"
+            )
+    return tuple(evidence_by_path.values())

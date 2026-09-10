@@ -755,6 +755,132 @@
         ]
       }
     },
+    "/v1/ordinary-agent-jobs/{principal_id}/{request_id}": {
+      "get": {
+        "operationId": "read_human_ordinary_agent_job",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "principal_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[a-z][a-z0-9_-]{2,127}$",
+              "title": "Principal Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "request_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[a-z][a-z0-9_-]{2,127}$",
+              "title": "Request Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrdinaryAgentJobView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Human Read Job",
+        "tags": [
+          "ordinary-agent"
+        ]
+      }
+    },
+    "/v1/ordinary-agent-operations/{principal_id}/{operation_id}": {
+      "get": {
+        "operationId": "read_human_ordinary_agent_operation",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "principal_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[a-z][a-z0-9_-]{2,127}$",
+              "title": "Principal Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "operation_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$",
+              "title": "Operation Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrdinaryAgentOperationClientResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Human Read",
+        "tags": [
+          "ordinary-agent"
+        ]
+      }
+    },
     "/v1/owner-acceptance/current-items": {
       "get": {
         "operationId": "list_owner_acceptance_current_items",
@@ -3670,6 +3796,259 @@
           }
         },
         "summary": "Read exact pull-request tenant admission and technical readiness"
+      }
+    },
+    "/v1/ordinary-agent-connections/{principal_id}/disconnect": {
+      "post": {
+        "operationId": "disconnect_ordinary_agent_principal",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "principal_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[a-z][a-z0-9_-]{2,127}$",
+              "title": "Principal Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OrdinaryAgentDisconnectRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrdinaryAgentConnectionView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Human Disconnect",
+        "tags": [
+          "ordinary-agent"
+        ]
+      }
+    },
+    "/v1/ordinary-agent-operations/{principal_id}/{operation_id}/approve": {
+      "post": {
+        "operationId": "approve_ordinary_agent_operation",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "principal_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[a-z][a-z0-9_-]{2,127}$",
+              "title": "Principal Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "operation_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$",
+              "title": "Operation Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrdinaryAgentOperationClientResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Human Approve",
+        "tags": [
+          "ordinary-agent"
+        ]
+      }
+    },
+    "/v1/ordinary-agent-operations/{principal_id}/{operation_id}/cancel": {
+      "post": {
+        "operationId": "cancel_ordinary_agent_operation",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "principal_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[a-z][a-z0-9_-]{2,127}$",
+              "title": "Principal Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "operation_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$",
+              "title": "Operation Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrdinaryAgentOperationClientResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Human Cancel",
+        "tags": [
+          "ordinary-agent"
+        ]
+      }
+    },
+    "/v1/ordinary-agent-sessions/{principal_id}/{session_id}/revoke": {
+      "post": {
+        "operationId": "revoke_ordinary_agent_session",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "principal_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[a-z][a-z0-9_-]{2,127}$",
+              "title": "Principal Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrdinaryAgentOperationClientResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Human Revoke Session",
+        "tags": [
+          "ordinary-agent"
+        ]
       }
     },
     "/v1/owner-acceptance/events": {
@@ -9793,7 +10172,9 @@
           "reason": {
             "enum": [
               "provider_and_git_confirmed",
+              "already_contained_no_provider_effect",
               "provider_rejected",
+              "dispatch_not_attempted",
               "reconciliation_confirmed_no_effect",
               "provider_transport_ambiguous",
               "process_interrupted",
@@ -11474,6 +11855,16 @@
             "title": "Lease Owner",
             "type": "string"
           },
+          "ordinary_job_binding": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OrdinaryAgentJobBinding"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "policy_key": {
             "title": "Policy Key",
             "type": "string"
@@ -11544,6 +11935,7 @@
           "lease_acquired_at",
           "lease_expires_at",
           "lease_owner",
+          "ordinary_job_binding",
           "policy_key",
           "policy_sha256",
           "reconciliation_detail",
@@ -12693,6 +13085,537 @@
           "url"
         ],
         "title": "OdooWebsiteBootstrapRoute",
+        "type": "object"
+      },
+      "OrdinaryAgentConnectionView": {
+        "additionalProperties": false,
+        "description": "Sanitized result of an administrator disconnect, not a credential capability.",
+        "properties": {
+          "principal_id": {
+            "title": "Principal Id",
+            "type": "string"
+          },
+          "schema_version": {
+            "const": 1,
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "status": {
+            "const": "revoked",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "principal_id",
+          "schema_version",
+          "status"
+        ],
+        "title": "OrdinaryAgentConnectionView",
+        "type": "object"
+      },
+      "OrdinaryAgentDisconnectRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "source_event_id": {
+            "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$",
+            "title": "Source Event Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_event_id"
+        ],
+        "title": "OrdinaryAgentDisconnectRequest",
+        "type": "object"
+      },
+      "OrdinaryAgentJobBinding": {
+        "additionalProperties": false,
+        "description": "Immutable attribution of controller history to one finite job revision.",
+        "properties": {
+          "binding_revision": {
+            "maximum": 9223372036854776000,
+            "minimum": 1,
+            "title": "Binding Revision",
+            "type": "integer"
+          },
+          "request_id": {
+            "pattern": "^[a-z][a-z0-9_-]{2,127}$",
+            "title": "Request Id",
+            "type": "string"
+          },
+          "scope_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Scope Sha256",
+            "type": "string"
+          }
+        },
+        "required": [
+          "binding_revision",
+          "request_id",
+          "scope_sha256"
+        ],
+        "title": "OrdinaryAgentJobBinding",
+        "type": "object"
+      },
+      "OrdinaryAgentJobView": {
+        "additionalProperties": false,
+        "properties": {
+          "cancellation_requested": {
+            "default": false,
+            "title": "Cancellation Requested",
+            "type": "boolean"
+          },
+          "completed_effects": {
+            "minimum": 0,
+            "title": "Completed Effects",
+            "type": "integer"
+          },
+          "continuation_expires_at": {
+            "anyOf": [
+              {
+                "maximum": 9223372036854776000,
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Continuation Expires At"
+          },
+          "expires_at": {
+            "maximum": 9223372036854776000,
+            "minimum": 0,
+            "title": "Expires At",
+            "type": "integer"
+          },
+          "next_due_at": {
+            "anyOf": [
+              {
+                "maximum": 9223372036854776000,
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Due At"
+          },
+          "principal_id": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Principal Id",
+            "type": "string"
+          },
+          "pull_request_numbers": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Pull Request Numbers",
+            "type": "array"
+          },
+          "reason_code": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason Code"
+          },
+          "request_id": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Request Id",
+            "type": "string"
+          },
+          "schema_version": {
+            "const": 1,
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "session_id": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Session Id",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "pending",
+              "running",
+              "waiting",
+              "blocked",
+              "cancelled",
+              "partially_completed",
+              "completed",
+              "reconciliation_required"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "target": {
+            "$ref": "#/components/schemas/OrdinaryAgentTarget"
+          },
+          "total_effects": {
+            "minimum": 0,
+            "title": "Total Effects",
+            "type": "integer"
+          },
+          "unresolved_effects": {
+            "minimum": 0,
+            "title": "Unresolved Effects",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "cancellation_requested",
+          "completed_effects",
+          "continuation_expires_at",
+          "expires_at",
+          "next_due_at",
+          "principal_id",
+          "pull_request_numbers",
+          "reason_code",
+          "request_id",
+          "schema_version",
+          "session_id",
+          "status",
+          "target",
+          "total_effects",
+          "unresolved_effects"
+        ],
+        "title": "OrdinaryAgentJobView",
+        "type": "object"
+      },
+      "OrdinaryAgentOperationClientResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "operation": {
+            "$ref": "#/components/schemas/OrdinaryAgentSessionOperationView"
+          },
+          "review_url": {
+            "title": "Review Url",
+            "type": "string"
+          },
+          "schema_version": {
+            "const": 1,
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "operation",
+          "review_url",
+          "schema_version"
+        ],
+        "title": "OrdinaryAgentOperationClientResponse",
+        "type": "object"
+      },
+      "OrdinaryAgentSessionAttenuation": {
+        "additionalProperties": false,
+        "description": "Requested finite bounds; no caller-supplied approval provenance.",
+        "properties": {
+          "action_limit": {
+            "maximum": 9223372036854776000,
+            "minimum": 0,
+            "title": "Action Limit",
+            "type": "integer"
+          },
+          "actions": {
+            "items": {
+              "enum": [
+                "self_read",
+                "preflight",
+                "guarded_merge"
+              ],
+              "type": "string"
+            },
+            "minItems": 1,
+            "title": "Actions",
+            "type": "array"
+          },
+          "continuation_expires_at": {
+            "anyOf": [
+              {
+                "maximum": 9223372036854776000,
+                "minimum": 1,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Continuation Expires At"
+          },
+          "lease_expires_at": {
+            "maximum": 9223372036854776000,
+            "minimum": 1,
+            "title": "Lease Expires At",
+            "type": "integer"
+          },
+          "pull_request_limit": {
+            "maximum": 9223372036854776000,
+            "minimum": 0,
+            "title": "Pull Request Limit",
+            "type": "integer"
+          },
+          "refresh_allowance": {
+            "maximum": 9223372036854776000,
+            "minimum": 0,
+            "title": "Refresh Allowance",
+            "type": "integer"
+          },
+          "session_expires_at": {
+            "maximum": 9223372036854776000,
+            "minimum": 1,
+            "title": "Session Expires At",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "action_limit",
+          "actions",
+          "continuation_expires_at",
+          "lease_expires_at",
+          "pull_request_limit",
+          "refresh_allowance",
+          "session_expires_at"
+        ],
+        "title": "OrdinaryAgentSessionAttenuation",
+        "type": "object"
+      },
+      "OrdinaryAgentSessionOperationView": {
+        "additionalProperties": false,
+        "description": "Public diagnostic projection, never an admission or execution capability.",
+        "properties": {
+          "applied": {
+            "default": false,
+            "title": "Applied",
+            "type": "boolean"
+          },
+          "attenuation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OrdinaryAgentSessionAttenuation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "can_approve": {
+            "default": false,
+            "title": "Can Approve",
+            "type": "boolean"
+          },
+          "credential_expires_at": {
+            "title": "Credential Expires At",
+            "type": "integer"
+          },
+          "credential_id": {
+            "title": "Credential Id",
+            "type": "string"
+          },
+          "credential_version": {
+            "title": "Credential Version",
+            "type": "integer"
+          },
+          "current_policy_actions": {
+            "default": [],
+            "items": {
+              "enum": [
+                "self_read",
+                "preflight",
+                "guarded_merge"
+              ],
+              "type": "string"
+            },
+            "title": "Current Policy Actions",
+            "type": "array"
+          },
+          "current_policy_execution_profile": {
+            "anyOf": [
+              {
+                "enum": [
+                  "read_only",
+                  "guarded_executor"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Policy Execution Profile"
+          },
+          "delivery_expires_at": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Delivery Expires At"
+          },
+          "kind": {
+            "enum": [
+              "initial",
+              "existing"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "operation_id": {
+            "title": "Operation Id",
+            "type": "string"
+          },
+          "principal_id": {
+            "title": "Principal Id",
+            "type": "string"
+          },
+          "reason_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason Code"
+          },
+          "requester_kind": {
+            "enum": [
+              "terminal_agent",
+              "ordinary_agent"
+            ],
+            "title": "Requester Kind",
+            "type": "string"
+          },
+          "requester_subject": {
+            "title": "Requester Subject",
+            "type": "string"
+          },
+          "requester_token_label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Requester Token Label"
+          },
+          "schema_version": {
+            "const": 1,
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "session_expires_at": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Expires At"
+          },
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Id"
+          },
+          "status": {
+            "enum": [
+              "pending",
+              "approved",
+              "expired",
+              "revoked",
+              "blocked",
+              "cancelled"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "target": {
+            "$ref": "#/components/schemas/OrdinaryAgentTarget"
+          }
+        },
+        "required": [
+          "applied",
+          "attenuation",
+          "can_approve",
+          "credential_expires_at",
+          "credential_id",
+          "credential_version",
+          "current_policy_actions",
+          "current_policy_execution_profile",
+          "delivery_expires_at",
+          "kind",
+          "operation_id",
+          "principal_id",
+          "reason_code",
+          "requester_kind",
+          "requester_subject",
+          "requester_token_label",
+          "schema_version",
+          "session_expires_at",
+          "session_id",
+          "status",
+          "target"
+        ],
+        "title": "OrdinaryAgentSessionOperationView",
+        "type": "object"
+      },
+      "OrdinaryAgentTarget": {
+        "additionalProperties": false,
+        "properties": {
+          "base_branch": {
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Base Branch",
+            "type": "string"
+          },
+          "repository": {
+            "maxLength": 140,
+            "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+            "title": "Repository",
+            "type": "string"
+          },
+          "repository_id": {
+            "exclusiveMinimum": 0,
+            "maximum": 9223372036854776000,
+            "title": "Repository Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "base_branch",
+          "repository",
+          "repository_id"
+        ],
+        "title": "OrdinaryAgentTarget",
         "type": "object"
       },
       "OwnerAcceptanceAuthorization": {
