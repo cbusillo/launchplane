@@ -13,6 +13,7 @@ from control_plane.contracts.merge_train_batch import (
     build_merge_train_batch_candidate,
     build_merge_train_batch_candidate_record,
 )
+from control_plane.contracts.merge_train_effect import MergeTrainSemanticEffectExecutor
 from control_plane.contracts.merge_train_policy import (
     MergeTrainPolicy,
     MergeTrainPolicyRecord,
@@ -33,7 +34,12 @@ from control_plane.merge_train import (
     build_merge_train_dry_run_result,
     discover_merge_train_stack,
 )
-from control_plane.merge_train_github import MergeTrainGitHubError, MergeTrainGitHubStaleHeadError
+from control_plane.merge_train_github import (
+    GitHubMergeTrainClient,
+    LegacyMergeTrainEffectExecutor,
+    MergeTrainGitHubError,
+    MergeTrainGitHubStaleHeadError,
+)
 from control_plane.merge_admission import GuardedMergeAdmission, MergeAdmissionDeniedError
 from control_plane.service_auth import GitHubActionsIdentity, LaunchplaneAuthzPolicy
 from control_plane.storage.filesystem import FilesystemRecordStore
@@ -56,8 +62,25 @@ class _FakeMergeTrainGitHubClient:
     land_batch_candidate_calls = 0
     cleanup_batch_candidate_ref_calls = 0
 
-    def __init__(self, *, transport: object) -> None:
+    def __init__(
+        self,
+        *,
+        transport: object,
+        effect_executor: MergeTrainSemanticEffectExecutor | None = None,
+    ) -> None:
         self.transport = transport
+        self.semantic_effect_executor = (
+            effect_executor
+            if effect_executor is not None
+            else LegacyMergeTrainEffectExecutor(client=cast(GitHubMergeTrainClient, self))
+        )
+
+    def read_merge_train_snapshot(
+        self, *, repository: str, base_branch: str
+    ) -> MergeTrainDryRunSnapshot:
+        return GitHubMergeTrainClient.read_merge_train_snapshot(
+            cast(GitHubMergeTrainClient, self), repository=repository, base_branch=base_branch
+        )
 
     def add_pull_request_label(
         self, *, repository: str, pull_request_number: int, label: str

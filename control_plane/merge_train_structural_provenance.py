@@ -3,6 +3,7 @@ from __future__ import annotations
 from control_plane.contracts.merge_train_batch import (
     MergeTrainBatchCandidateRecord,
     MergeTrainBatchLandingPlanRecord,
+    build_ordinary_merge_train_candidate_ref,
 )
 from control_plane.contracts.merge_train_stack_collapse import (
     MergeTrainStackCollapsePlanRecord,
@@ -18,6 +19,43 @@ from control_plane.contracts.merge_train_structural_provenance import (
 from control_plane.merge_train_stack_collapse import stack_collapse_expected_root_head_sha
 
 
+def ordinary_candidate_is_exact_landing_dependency(
+    *,
+    candidate_record: MergeTrainBatchCandidateRecord,
+    landing_plan_record: MergeTrainBatchLandingPlanRecord,
+) -> bool:
+    """Whether a current ordinary landing may use this candidate as provenance."""
+    binding = landing_plan_record.ordinary_job_binding
+    candidate = candidate_record.candidate
+    landing_plan = landing_plan_record.landing_plan
+    provenance = candidate.structural_provenance
+    return (
+        landing_plan_record.status == "active"
+        and binding is not None
+        and candidate_record.status in {"active", "superseded"}
+        and candidate_record.ordinary_job_binding == binding
+        and candidate.status == "passed"
+        and provenance is not None
+        and provenance.complete
+        and candidate.stack_collapse_root is None
+        and candidate.candidate_ref
+        == build_ordinary_merge_train_candidate_ref(
+            binding=binding,
+            batch_id=candidate.batch_id,
+        )
+        and landing_plan.repository == candidate.repository
+        and landing_plan.base_branch == candidate.base_branch
+        and landing_plan.batch_id == candidate.batch_id
+        and landing_plan.candidate_ref == candidate.candidate_ref
+        and landing_plan.candidate_sha == candidate.candidate_sha
+        and landing_plan.candidate_tree_sha == candidate.candidate_tree_sha
+        and landing_plan.candidate_sha256 == candidate.candidate_sha256
+        and landing_plan.structural_provenance_sha256 == provenance.provenance_sha256
+        and landing_plan.policy_key == candidate.policy_key
+        and landing_plan.policy_sha256 == candidate.policy_sha256
+    )
+
+
 def evaluate_merge_train_structural_candidate(
     *,
     evaluation: MergeTrainStructuralEvaluationInput,
@@ -27,7 +65,13 @@ def evaluate_merge_train_structural_candidate(
 ) -> MergeTrainStructuralCandidateResult:
     if candidate_record is None:
         return _result("unknown", "structural_evidence_unavailable")
-    if candidate_record.status == "superseded":
+    if candidate_record.status == "superseded" and (
+        landing_plan_record is None
+        or not ordinary_candidate_is_exact_landing_dependency(
+            candidate_record=candidate_record,
+            landing_plan_record=landing_plan_record,
+        )
+    ):
         return _result("unknown", "structural_record_superseded")
     candidate = candidate_record.candidate
     provenance = candidate.structural_provenance

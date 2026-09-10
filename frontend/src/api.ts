@@ -57,6 +57,12 @@ import type {
   WorkGraphSnapshotResponse,
   WriteOwnerAcceptanceEventData,
 } from "./generated/openapi.ts";
+import type {
+  OrdinaryAgentOperationClientResponse,
+  OrdinaryAgentJobView,
+  OrdinaryAgentConnectionView,
+} from "./generated/openapi.ts";
+export type { OrdinaryAgentOperationClientResponse } from "./generated/openapi.ts";
 import type { BrowserOperationOptions } from "./browser-operation";
 import {
   BROWSER_WRITE_ROUTES,
@@ -707,4 +713,28 @@ export function revokePrivilegedOperation(
     request.body,
     signal,
   );
+}
+
+export function readOrdinaryAgentOperation(principalId: string, operationId: string, signal?: AbortSignal): Promise<OrdinaryAgentOperationClientResponse> {
+  return requestJson(`/v1/ordinary-agent-operations/${encodeURIComponent(principalId)}/${encodeURIComponent(operationId)}`, "GET", undefined, signal);
+}
+
+export function approveOrdinaryAgentOperation(principalId: string, operationId: string): Promise<OrdinaryAgentOperationClientResponse> {
+  return requestJson(`/v1/ordinary-agent-operations/${encodeURIComponent(principalId)}/${encodeURIComponent(operationId)}/approve`, "POST");
+}
+
+export function cancelOrdinaryAgentOperation(principalId: string, operationId: string): Promise<OrdinaryAgentOperationClientResponse> {
+  return requestJson(`/v1/ordinary-agent-operations/${encodeURIComponent(principalId)}/${encodeURIComponent(operationId)}/cancel`, "POST");
+}
+
+export function revokeOrdinaryAgentSession(principalId: string, sessionId: string): Promise<OrdinaryAgentOperationClientResponse> {
+  return requestJson(`/v1/ordinary-agent-sessions/${encodeURIComponent(principalId)}/${encodeURIComponent(sessionId)}/revoke`, "POST");
+}
+
+export function disconnectOrdinaryAgent(principalId: string, sourceEventId: string): Promise<OrdinaryAgentConnectionView> {
+  return requestJson(`/v1/ordinary-agent-connections/${encodeURIComponent(principalId)}/disconnect`, "POST", { source_event_id: sourceEventId });
+}
+
+export function readOrdinaryAgentJob(principalId: string, requestId: string, signal?: AbortSignal): Promise<OrdinaryAgentJobView> {
+  return requestJson(`/v1/ordinary-agent-jobs/${encodeURIComponent(principalId)}/${encodeURIComponent(requestId)}`, "GET", undefined, signal);
 }

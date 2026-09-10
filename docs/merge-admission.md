@@ -56,8 +56,8 @@ The denial exposes a bounded message, not raw provider details or file paths.
 
 Outcomes use only three public states:
 
-- `landed`: provider response and exact Git commit/tree evidence confirm the
-  intended landing.
+- `landed`: exact evidence confirms the intended result, either a provider merge
+  or an ordinary job's proven already-contained change.
 - `rejected`: provider evidence, or later exact observation, conclusively proves
   that the attempt produced no landing.
 - `reconcile_required`: transport, process, lease, or observation evidence
@@ -67,6 +67,14 @@ An admission without an outcome is effect-unknown. A `reconcile_required`
 outcome is also effect-unknown. Neither state permits another provider attempt.
 Reconciliation observes GitHub first and appends a successor outcome; it never
 rewrites history or repeats an ambiguous mutation.
+
+The `already_contained_no_provider_effect` landed reason is a successful no-op,
+not evidence of a merge request. It records `provider_effect_attempted=false`,
+the observed PR lifecycle and exact unchanged base/head identities, with no
+provider status, request ID or rejection. Under the existing skipped-entry
+contract, the merge-commit fields carry the unchanged rolling base SHA/tree;
+they do not describe a newly created commit. Projections must use the reason to
+label this result as already contained and display the unchanged base.
 
 A conclusive provider refusal and a conclusive observed no-effect result are
 different evidence. No-effect reconciliation records the exact open PR state,

@@ -3874,6 +3874,10 @@ class FilesystemRecordStore:
         records.sort(key=lambda record: (record.updated_at, record.secret_id), reverse=True)
         return records[0] if records else None
 
+    def ordinary_agent_delivery_key_usage(self) -> dict[str, int]:
+        # Ordinary authentication delivery is DB-only, never file-backed authority.
+        return {}
+
     def list_secret_records(
         self,
         *,

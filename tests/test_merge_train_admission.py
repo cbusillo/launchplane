@@ -17,6 +17,7 @@ from control_plane.contracts.merge_train_controller_state import (
 )
 from control_plane.contracts.merge_train_run_record import MergeTrainRunRecord
 from control_plane.contracts.merge_train_run_record import build_merge_train_run_record
+from control_plane.contracts.ordinary_agent_session_lifecycle import OrdinaryAgentJobBinding
 from control_plane.contracts.merge_train_stack_collapse import (
     MergeTrainStackCollapseEntry,
     MergeTrainStackCollapseMutation,
@@ -278,6 +279,104 @@ class MergeTrainAdmissionTests(unittest.TestCase):
         self.assertTrue(decision.admitted)
         self.assertEqual(decision.controller_action, "build_candidate")
         self.assertEqual(decision.controller_candidate_record_id, candidate_record.record_id)
+
+    def test_ordinary_records_are_actionable_only_for_running_exact_binding(self) -> None:
+        active_binding = _ordinary_job_binding("active_request")
+        parked_binding = _ordinary_job_binding("parked_request")
+        candidate_record = _candidate_record(status="passed").model_copy(
+            update={"ordinary_job_binding": active_binding}
+        )
+        landing_plan_record = _landing_plan_record(candidate_record).model_copy(
+            update={"ordinary_job_binding": active_binding}
+        )
+        parked_candidate = _candidate_record(status="planned").model_copy(
+            update={
+                "record_id": "parked-candidate-record",
+                "ordinary_job_binding": parked_binding,
+                "updated_at": "2026-05-09T02:06:00Z",
+            }
+        )
+        store = _RunHistoryStore(
+            None,
+            candidate_records=(candidate_record, parked_candidate),
+            landing_plan_records=(landing_plan_record,),
+            controller_state_records=(_controller_state(active_binding),),
+        )
+
+        decision = evaluate_merge_train_admission_from_store(
+            store=store,
+            repository="cbusillo/sellyouroutboard",
+            base_branch="main",
+            requested_at="2026-05-09T02:10:00Z",
+        )
+
+        self.assertEqual(decision.controller_action, "land_batch")
+        self.assertEqual(
+            decision.controller_landing_plan_record_id,
+            landing_plan_record.record_id,
+        )
+        self.assertNotEqual(decision.controller_candidate_record_id, parked_candidate.record_id)
+
+    def test_mixed_ordinary_binding_records_do_not_form_landing_readiness(self) -> None:
+        active_binding = _ordinary_job_binding("active_request")
+        other_binding = _ordinary_job_binding("other_request")
+        candidate_record = _candidate_record(status="passed").model_copy(
+            update={"ordinary_job_binding": active_binding}
+        )
+        other_landing = _landing_plan_record(candidate_record).model_copy(
+            update={"ordinary_job_binding": other_binding}
+        )
+        other_stack_collapse = _stack_collapse_record(status="planned").model_copy(
+            update={"ordinary_job_binding": other_binding}
+        )
+        store = _RunHistoryStore(
+            None,
+            candidate_records=(candidate_record,),
+            landing_plan_records=(other_landing,),
+            stack_collapse_plan_records=(other_stack_collapse,),
+            controller_state_records=(_controller_state(active_binding),),
+        )
+
+        decision = evaluate_merge_train_admission_from_store(
+            store=store,
+            repository="cbusillo/sellyouroutboard",
+            base_branch="main",
+            requested_at="2026-05-09T02:10:00Z",
+        )
+
+        self.assertEqual(decision.controller_action, "plan_landing")
+        self.assertEqual(decision.controller_candidate_record_id, candidate_record.record_id)
+        self.assertEqual(decision.controller_landing_plan_record_id, "")
+        self.assertEqual(decision.controller_stack_collapse_plan_record_id, "")
+
+    def test_idle_controller_hides_parked_ordinary_records_but_keeps_history(self) -> None:
+        binding = _ordinary_job_binding("parked_request")
+        candidate_record = _candidate_record(status="passed").model_copy(
+            update={"ordinary_job_binding": binding}
+        )
+        landing_plan_record = _landing_plan_record(candidate_record).model_copy(
+            update={"ordinary_job_binding": binding}
+        )
+        store = _RunHistoryStore(
+            None,
+            candidate_records=(candidate_record,),
+            landing_plan_records=(landing_plan_record,),
+            controller_state_records=(_controller_state(None, status="idle"),),
+        )
+
+        read_model = build_merge_train_controller_status_read_model(
+            store=store,
+            repository="cbusillo/sellyouroutboard",
+            base_branch="main",
+            generated_at="2026-05-09T02:10:00Z",
+        )
+
+        self.assertEqual(read_model.admission.controller_action, "idle")
+        self.assertEqual(len(read_model.controller_records), 2)
+        self.assertEqual(
+            {record.record_id for record in read_model.controller_records},
+            {candidate_record.record_id, landing_plan_record.record_id},
+        )
 
     def test_ignores_stale_policy_controller_records_for_admission(self) -> None:
         candidate_record = _candidate_record(status="planned")
@@ -838,6 +937,41 @@ def _pull_request(
         base_sha="base-main",
         mergeable="mergeable",
         required_checks_status=required_checks_status,
+    )
+
+
+def _ordinary_job_binding(request_id: str) -> OrdinaryAgentJobBinding:
+    return OrdinaryAgentJobBinding(
+        request_id=request_id,
+        scope_sha256=("a" if request_id == "active_request" else "b") * 64,
+        binding_revision=1,
+    )
+
+
+def _controller_state(
+    binding: OrdinaryAgentJobBinding | None,
+    *,
+    status: str = "running",
+) -> MergeTrainControllerStateRecord:
+    running = status == "running"
+    return MergeTrainControllerStateRecord(
+        ordinary_job_binding=binding,
+        controller_key=build_merge_train_controller_key(
+            repository="cbusillo/sellyouroutboard",
+            base_branch="main",
+        ),
+        repository="cbusillo/sellyouroutboard",
+        base_branch="main",
+        policy_key="cbusillo/sellyouroutboard:main",
+        policy_sha256="policy-sha",
+        status=status,  # type: ignore[arg-type]
+        updated_at="2026-05-09T02:07:00Z",
+        lease_owner="controller-a" if running else "",
+        lease_acquired_at="2026-05-09T02:07:00Z" if running else "",
+        lease_expires_at="2026-05-09T02:17:00Z" if running else "",
+        heartbeat_at="2026-05-09T02:07:00Z" if running else "",
+        active_action="land_batch" if running else "",
+        active_phase="merge_batch_entries" if running else "",
     )
 
 

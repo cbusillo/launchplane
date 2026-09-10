@@ -4,6 +4,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 import hashlib
 import json
+from typing import Protocol
 
 from control_plane.change_impact_github import (
     ChangeImpactRepositoryEvidenceError,
@@ -64,6 +65,8 @@ from control_plane.merge_admission_impact_binding import (
 )
 from control_plane.merge_readiness import evaluate_merge_readiness_from_live_evidence
 from control_plane.merge_train import (
+    MergeTrainDryRunResult,
+    MergeTrainDryRunSnapshot,
     MergeTrainSnapshotReader,
     build_merge_train_dry_run_result,
 )
@@ -122,13 +125,126 @@ class _EntryEvidence:
     observation: MergeTrainStructuralEntryObservation
 
 
+class MergeAdmissionTechnicalCheckReader(Protocol):
+    def read_technical_checks(
+        self,
+        *,
+        repository: str,
+        base_branch: str,
+        base_sha: str,
+        head_sha: str,
+        evaluated_at: str,
+    ) -> TenantAdmissionTechnicalChecks: ...
+
+
+def _ordinary_no_op_lifecycle_queue_matches(
+    *,
+    candidate_record: MergeTrainBatchCandidateRecord,
+    landing_plan_record: MergeTrainBatchLandingPlanRecord,
+    entry: MergeTrainBatchLandingEntry,
+    snapshot: MergeTrainDryRunSnapshot,
+    live_queue: MergeTrainDryRunResult,
+    expected_queue: tuple[tuple[int, str], ...],
+    observed_base_sha: str,
+    observed_base_tree_sha: str,
+    observed_head_sha: str,
+    observed_head_tree_sha: str,
+) -> bool:
+    binding = landing_plan_record.ordinary_job_binding
+    if binding is None or candidate_record.ordinary_job_binding != binding:
+        return False
+    candidate = candidate_record.candidate
+    provenance = candidate.structural_provenance
+    if provenance is None:
+        return False
+    unresolved_entries = tuple(
+        item
+        for item in landing_plan_record.landing_plan.entries
+        if item.status not in {"merged", "skipped"}
+    )
+    if not unresolved_entries or unresolved_entries[0] != entry:
+        return False
+    plan_entries = tuple(
+        item
+        for item in landing_plan_record.landing_plan.entries
+        if item.position == entry.position and item.pull_request_number == entry.pull_request_number
+    )
+    candidate_entries = tuple(
+        item
+        for item in candidate.entries
+        if item.position == entry.position and item.pull_request_number == entry.pull_request_number
+    )
+    steps = tuple(
+        item
+        for item in provenance.steps
+        if item.position == entry.position and item.pull_request_number == entry.pull_request_number
+    )
+    if len(plan_entries) != 1 or plan_entries[0] != entry or len(candidate_entries) != 1:
+        return False
+    if len(steps) != 1:
+        return False
+    candidate_entry = candidate_entries[0]
+    step = steps[0]
+    if (
+        entry.status != "planned"
+        or step.kind != "no_op_already_contained"
+        or step.parent_sha != step.result_sha
+        or step.parent_tree_sha != step.result_tree_sha
+        or step.head_sha != candidate_entry.head_sha
+        or step.head_tree_sha != candidate_entry.head_tree_sha
+        or entry.expected_head_sha != step.head_sha
+        or entry.expected_head_tree_sha != step.head_tree_sha
+        or entry.recorded_candidate_parent_sha != step.parent_sha
+        or entry.recorded_candidate_parent_tree_sha != step.parent_tree_sha
+        or entry.recorded_candidate_result_sha != step.result_sha
+        or entry.recorded_candidate_result_tree_sha != step.result_tree_sha
+        or observed_base_sha != step.parent_sha
+        or observed_base_tree_sha != step.parent_tree_sha
+        or observed_head_sha != step.head_sha
+        or observed_head_tree_sha != step.head_tree_sha
+    ):
+        return False
+    target_snapshots = tuple(
+        item for item in snapshot.pull_requests if item.number == entry.pull_request_number
+    )
+    target_queue_entries = tuple(
+        item for item in live_queue.queue if item.number == entry.pull_request_number
+    )
+    if len(target_snapshots) != 1 or len(target_queue_entries) != 1:
+        return False
+    target_snapshot = target_snapshots[0]
+    target_queue_entry = target_queue_entries[0]
+    if (
+        target_snapshot.state not in {"closed", "merged"}
+        or target_snapshot.head_sha != step.head_sha
+        or target_queue_entry.head_sha != step.head_sha
+        or target_queue_entry.ineligible_reasons != ("pull request is not open",)
+    ):
+        return False
+    live_queue_by_number = {item.number: item for item in live_queue.queue}
+    live_queue_identity = tuple(
+        (pull_request_number, live_queue_by_number[pull_request_number].head_sha)
+        for pull_request_number in live_queue.queue_order
+    )
+    expected_without_target = tuple(
+        identity for identity in expected_queue if identity[0] != entry.pull_request_number
+    )
+    return live_queue_identity == expected_without_target
+
+
 @dataclass(frozen=True)
 class LiveMergeAdmissionEvaluator:
     store: object
     repository_evidence_provider: ChangeImpactRepositoryEvidenceProvider
-    technical_check_client: TenantAdmissionControllerGitHubClient
+    technical_check_client: MergeAdmissionTechnicalCheckReader
     policy_record_provider: Callable[[], MergeTrainPolicyRecord] | None = None
     snapshot_reader: MergeTrainSnapshotReader | None = None
+
+    def __post_init__(self) -> None:
+        if self.snapshot_reader is None and not isinstance(
+            self.technical_check_client, TenantAdmissionControllerGitHubClient
+        ):
+            raise ValueError("A transport-free check reader requires an explicit snapshot reader.")
 
     def evaluate(
         self,
@@ -146,9 +262,12 @@ class LiveMergeAdmissionEvaluator:
         evaluated_at: str,
     ) -> MergeAdmissionEvaluation:
         landing_plan = landing_plan_record.landing_plan
-        snapshot_reader = self.snapshot_reader or GitHubMergeTrainSnapshotReader(
-            transport=self.technical_check_client.transport
-        )
+        snapshot_reader = self.snapshot_reader
+        if snapshot_reader is None:
+            assert isinstance(self.technical_check_client, TenantAdmissionControllerGitHubClient)
+            snapshot_reader = GitHubMergeTrainSnapshotReader(
+                transport=self.technical_check_client.transport
+            )
         try:
             policy_record = (
                 self.policy_record_provider()
@@ -182,7 +301,21 @@ class LiveMergeAdmissionEvaluator:
             (pull_request_number, live_queue_by_number[pull_request_number].head_sha)
             for pull_request_number in live_queue.queue_order
         )
-        if snapshot.base_sha != observed_base_sha or live_queue_identity != expected_queue:
+        queue_matches = live_queue_identity == expected_queue
+        if not queue_matches:
+            queue_matches = _ordinary_no_op_lifecycle_queue_matches(
+                candidate_record=candidate_record,
+                landing_plan_record=landing_plan_record,
+                entry=entry,
+                snapshot=snapshot,
+                live_queue=live_queue,
+                expected_queue=expected_queue,
+                observed_base_sha=observed_base_sha,
+                observed_base_tree_sha=observed_base_tree_sha,
+                observed_head_sha=observed_head_sha,
+                observed_head_tree_sha=observed_head_tree_sha,
+            )
+        if snapshot.base_sha != observed_base_sha or not queue_matches:
             raise MergeAdmissionDeniedError(
                 "Live merge queue or base identity changed from the landing-plan lineage.",
                 reason_code="landing_lineage_changed",

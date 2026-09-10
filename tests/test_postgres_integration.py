@@ -17,6 +17,7 @@ from uuid import uuid4
 
 from alembic import command as alembic_command
 from alembic.config import Config as AlembicConfig
+from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.engine import Engine
@@ -69,6 +70,7 @@ from control_plane.contracts.owner_acceptance import (
     OwnerAcceptanceTransitionError,
     owner_acceptance_runtime_identity_binding,
 )
+from control_plane.contracts.ordinary_agent_custody import OrdinaryAgentCustodyCandidate
 from control_plane.contracts.owner_control import (
     ApprovalRequest,
     ChannelBindingRecord,
@@ -169,7 +171,9 @@ from control_plane.provider_operations import (
     run_durable_provider_operation,
 )
 from control_plane.privileged_operation_worker import (
+    OrdinaryAgentDeliveryCleanupState,
     execute_approved_privileged_operations_once,
+    run_ordinary_agent_delivery_cleanup_once,
 )
 from control_plane.workflows.public_ingress_monitor import (
     HttpObservation,
@@ -191,10 +195,14 @@ from control_plane.storage.postgres import (
     LaunchplaneEveryCodeWorkRequestRow,
     LaunchplaneOwnerControlIssuedChallengeRow,
     MutationReservationResult,
+    OrdinaryAgentPersistenceError,
     OutboxWithIdempotencyRequest,
     PostgresRecordStore,
 )
-from control_plane.storage.factory import build_privileged_operation_worker_store
+from control_plane.storage.factory import (
+    PrivilegedOperationWorkerSchemaError,
+    build_privileged_operation_worker_store,
+)
 from tests.support.durable_operations import durable_operation_cancellation_payload
 from tests.test_product_retirement import _Store as _RetirementStore
 from tests.test_product_retirement import _observation as _retirement_observation
@@ -218,6 +226,16 @@ from control_plane.trusted_maintenance import (
     TrustedMaintenanceGitHubEventFacts,
 )
 from tests.support.artifact_manifests import artifact_manifest_v2
+from control_plane.ordinary_agent_authentication import parse_ordinary_agent_token
+from tests.support.ordinary_agent_lifecycle import (
+    TEST_CLAIM_SECRET,
+    TEST_ISSUER_KEY,
+    prepare_test_issuance,
+    apply_test_enrollment,
+    enrollment_envelope,
+    enrollment_mutation,
+    setup_ordinary_agent_authority,
+)
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_record
 from tests.test_odoo_prod_retained_volume_backup_import_storage import (
     _retained_operation_for_restore_lane,
@@ -1077,6 +1095,46 @@ def _owner_acceptance_system_event(
 
 
 class RealPostgresSchemaIntegrationTests(unittest.TestCase):
+    def test_delivery_cleanup_database_failure_does_not_poison_privileged_store(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            with store._engine.begin() as connection:
+                connection.execute(text("DROP TABLE launchplane_ordinary_agent_deliveries CASCADE"))
+
+            with self.assertRaises(OrdinaryAgentPersistenceError):
+                store.expire_ordinary_agent_deliveries()
+
+            self.assertEqual(
+                execute_approved_privileged_operations_once(
+                    record_store=store,
+                    lease_owner="delivery-cleanup-isolation-test",
+                ),
+                (),
+            )
+
+    def test_privileged_worker_requires_delivery_cleanup_index(self) -> None:
+        with _isolated_postgres_database() as database_url:
+            _upgrade_empty_database_to_head(database_url)
+            store = build_privileged_operation_worker_store(database_url=database_url)
+            cleanup = run_ordinary_agent_delivery_cleanup_once(
+                record_store=store,
+                limit=5,
+                state=OrdinaryAgentDeliveryCleanupState(),
+                now_monotonic=10.0,
+                error_backoff_seconds=3,
+            )
+            store.close()
+            self.assertEqual(cleanup.status, "succeeded")
+
+            engine = create_engine(database_url)
+            with engine.begin() as connection:
+                connection.execute(text("DROP INDEX ordinary_agent_delivery_expiry_idx"))
+            engine.dispose()
+
+            with self.assertRaisesRegex(
+                PrivilegedOperationWorkerSchemaError, "not runtime-compatible"
+            ):
+                build_privileged_operation_worker_store(database_url=database_url)
+
     def test_production_backup_authority_schema_and_revision_fences(self) -> None:
         with _store_for_fresh_head_database() as store:
             dry_run = _dry_run_envelope()
@@ -2982,6 +3040,49 @@ def _owner_control_shadow_envelope(
 
 
 class RealPostgresStorageConcurrencyTests(unittest.TestCase):
+    def test_ordinary_agent_custody_fence_serializes_same_principal_repository(self) -> None:
+        candidate = OrdinaryAgentCustodyCandidate(
+            principal_id="agent_one",
+            repository_id=123,
+            repository="example/repo",
+            base_branch="main",
+            credential_id="credential_one",
+            credential_version=1,
+            secret_id="secret-app",
+            secret_binding_id="binding-app",
+            secret_version_id="version-1",
+            expected_app_id=42,
+            effect_profile="guarded_merge",
+        )
+        with _store_for_fresh_head_database() as first_store:
+            second_store = PostgresRecordStore(database_url=first_store.database_url)
+            barrier = threading.Barrier(2)
+
+            def acquire(index: int) -> str:
+                barrier.wait(timeout=10)
+                store = (first_store, second_store)[index]
+                status, _record = store.acquire_ordinary_agent_custody_issue_attempt(
+                    attempt_id=f"custody_attempt_{index}",
+                    idempotency_key_sha256=str(index + 1) * 64,
+                    request_sha256=str(index + 3) * 64,
+                    candidate=candidate.model_copy(
+                        update={
+                            "repository": "example/renamed" if index else "example/repo",
+                            "base_branch": "release/next" if index else "main",
+                        }
+                    ),
+                    requested_permissions=("contents:write",),
+                    dispatch_window_seconds=30,
+                )
+                return status
+
+            try:
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    outcomes = tuple(executor.map(acquire, (0, 1)))
+                self.assertCountEqual(outcomes, ("acquired", "fenced"))
+            finally:
+                second_store.close()
+
     def test_v2_owner_replay_across_policy_provenance_keeps_one_original_event(self) -> None:
         records = []
         for revision in (1, 2):
@@ -6596,6 +6697,279 @@ class RealPostgresFeedbackResumeEvidenceTests(unittest.TestCase):
                 store.close()
 
 
+class RealPostgresOrdinaryAgentLifecycleTests(unittest.TestCase):
+    def test_idempotency_row_is_resolved_before_principal_advisory_lock(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            policy, inventory = setup_ordinary_agent_authority(store)
+            envelope = enrollment_envelope(policy_record=policy, inventory=inventory)
+            mutation = enrollment_mutation(envelope)
+            reserved = store.reserve_mutation(
+                scope=mutation.scope,
+                route_path=mutation.route_path,
+                idempotency_key=mutation.idempotency_key,
+                request_fingerprint=mutation.request_fingerprint,
+                lease_owner="existing-worker",
+            )
+            self.assertEqual(reserved.status, "acquired")
+
+            worker_reached_idempotency_lock = threading.Event()
+
+            def observe_worker_statement(
+                _connection: object, _cursor: object, statement: str, *_: object
+            ) -> None:
+                if (
+                    "FROM launchplane_idempotency_records" in statement
+                    and "FOR UPDATE" in statement
+                ):
+                    worker_reached_idempotency_lock.set()
+
+            blocker = store._engine.connect()
+            transaction = blocker.begin()
+            try:
+                blocker.execute(
+                    text(
+                        "select record_id from launchplane_idempotency_records "
+                        "where scope = :scope and route_path = :route_path "
+                        "and idempotency_key = :idempotency_key for update"
+                    ),
+                    {
+                        "scope": mutation.scope,
+                        "route_path": mutation.route_path,
+                        "idempotency_key": mutation.idempotency_key,
+                    },
+                )
+                event.listen(store._engine, "before_cursor_execute", observe_worker_statement)
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(
+                        apply_test_enrollment,
+                        store,
+                        envelope=envelope,
+                        mutation=mutation,
+                    )
+                    self.assertTrue(worker_reached_idempotency_lock.wait(timeout=5))
+                    with store._engine.connect() as probe:
+                        principal_lock_available = probe.execute(
+                            text(
+                                "select pg_try_advisory_xact_lock(hashtextextended(:lock_name, 0))"
+                            ),
+                            {"lock_name": ("launchplane:ordinary-agent-principal:agent_one")},
+                        ).scalar_one()
+                        probe.rollback()
+                    self.assertTrue(principal_lock_available)
+                    transaction.commit()
+                    result = future.result(timeout=10)
+                self.assertEqual(result.status, "reservation_in_progress")
+            finally:
+                event.remove(store._engine, "before_cursor_execute", observe_worker_statement)
+                if transaction.is_active:
+                    transaction.rollback()
+                blocker.close()
+
+    def test_concurrent_first_enrollment_serializes_absent_principal(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            policy, inventory = setup_ordinary_agent_authority(store)
+            barrier = threading.Barrier(2)
+
+            def enroll(operation_id: str) -> str:
+                envelope = enrollment_envelope(
+                    policy_record=policy,
+                    inventory=inventory,
+                    operation_id=operation_id,
+                )
+                barrier.wait(timeout=10)
+                return apply_test_enrollment(
+                    store,
+                    envelope=envelope,
+                    mutation=enrollment_mutation(envelope),
+                ).status
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                futures = tuple(
+                    executor.submit(enroll, operation_id)
+                    for operation_id in (
+                        "ordinary-agent-concurrent-a",
+                        "ordinary-agent-concurrent-b",
+                    )
+                )
+                statuses = tuple(future.result(timeout=30) for future in futures)
+
+            self.assertEqual(sorted(statuses), ["invalid_transition", "written"])
+            with store._engine.connect() as connection:
+                counts = tuple(
+                    connection.execute(text(f"select count(*) from {table_name}")).scalar_one()
+                    for table_name in (
+                        "launchplane_ordinary_agent_principals",
+                        "launchplane_ordinary_agent_authentication_credentials",
+                        "launchplane_ordinary_agent_credential_custody",
+                        "launchplane_ordinary_agent_lifecycle_audits",
+                    )
+                )
+            self.assertEqual(counts, (1, 1, 1, 1))
+
+    def test_domain_failure_rolls_back_records_and_completed_receipt(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            policy, inventory = setup_ordinary_agent_authority(store)
+            envelope = enrollment_envelope(policy_record=policy, inventory=inventory)
+
+            def reject_audit_insert(
+                _connection: object, _cursor: object, statement: str, *_: object
+            ) -> None:
+                if statement.startswith("INSERT INTO launchplane_ordinary_agent_lifecycle_audits"):
+                    raise RuntimeError("injected ordinary-agent audit failure")
+
+            event.listen(store._engine, "before_cursor_execute", reject_audit_insert)
+            try:
+                with self.assertRaisesRegex(RuntimeError, "injected ordinary-agent audit"):
+                    apply_test_enrollment(
+                        store,
+                        envelope=envelope,
+                        mutation=enrollment_mutation(envelope),
+                    )
+            finally:
+                event.remove(store._engine, "before_cursor_execute", reject_audit_insert)
+
+            with store._engine.connect() as connection:
+                counts = tuple(
+                    connection.execute(text(f"select count(*) from {table_name}")).scalar_one()
+                    for table_name in (
+                        "launchplane_ordinary_agent_principals",
+                        "launchplane_ordinary_agent_authentication_credentials",
+                        "launchplane_ordinary_agent_credential_custody",
+                        "launchplane_ordinary_agent_lifecycle_audits",
+                        "launchplane_idempotency_records",
+                        "launchplane_ordinary_agent_deliveries",
+                    )
+                )
+            self.assertEqual(counts, (0, 0, 0, 0, 0, 0))
+
+    def test_randomized_same_intent_has_one_credential_and_recoverable_capsule(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            policy, inventory = setup_ordinary_agent_authority(store)
+            envelope = enrollment_envelope(policy_record=policy, inventory=inventory)
+            first, first_bundle = prepare_test_issuance(envelope)
+            second, second_bundle = prepare_test_issuance(envelope)
+            self.assertNotEqual(first_bundle.token.value, second_bundle.token.value)
+            barrier = threading.Barrier(2)
+
+            def apply(prepared: Any, bundle: Any) -> Any:
+                barrier.wait(timeout=5)
+                return store.compare_and_apply_ordinary_agent_enrollment(
+                    envelope=prepared, mutation=enrollment_mutation(prepared), issuance=bundle
+                )
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                futures = (
+                    executor.submit(apply, first, first_bundle),
+                    executor.submit(apply, second, second_bundle),
+                )
+                results = tuple(future.result(timeout=15) for future in futures)
+            self.assertEqual(sorted(result.status for result in results), ["replayed", "written"])
+            self.assertEqual(results[0].receipt, results[1].receipt)
+            with patch(
+                "control_plane.secrets._decrypt_secret_value",
+                side_effect=lambda ciphertext, key_id: (
+                    Fernet(TEST_ISSUER_KEY).decrypt(ciphertext.encode()).decode()
+                ),
+            ):
+                token = store.claim_ordinary_agent_credential(
+                    operation_id=envelope.operation_id, claim_secret=TEST_CLAIM_SECRET
+                )
+            self.assertIsNotNone(token)
+            assert token is not None
+            self.assertIn(token.value, (first_bundle.token.value, second_bundle.token.value))
+            self.assertIsNotNone(
+                store.verify_ordinary_agent_token(parse_ordinary_agent_token(token.value))
+            )
+            with store._engine.connect() as connection:
+                counts = tuple(
+                    connection.execute(text(f"select count(*) from {name}")).scalar_one()
+                    for name in (
+                        "launchplane_ordinary_agent_authentication_credentials",
+                        "launchplane_ordinary_agent_deliveries",
+                    )
+                )
+            self.assertEqual(counts, (1, 1))
+
+    def test_expiry_during_decryption_wins_without_network_lock_or_orphan_allow(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            policy, inventory = setup_ordinary_agent_authority(store)
+            envelope = enrollment_envelope(policy_record=policy, inventory=inventory)
+            prepared, bundle = prepare_test_issuance(envelope)
+            store.compare_and_apply_ordinary_agent_enrollment(
+                envelope=prepared, mutation=enrollment_mutation(prepared), issuance=bundle
+            )
+            decrypt_started = threading.Event()
+            release_decrypt = threading.Event()
+
+            def paused_decrypt(ciphertext: str, key_id: str) -> str:
+                decrypt_started.set()
+                if not release_decrypt.wait(timeout=10):
+                    raise RuntimeError(
+                        "Expiry failed to complete while decryption was outside locks"
+                    )
+                return Fernet(TEST_ISSUER_KEY).decrypt(ciphertext.encode()).decode()
+
+            with (
+                patch("control_plane.secrets._decrypt_secret_value", side_effect=paused_decrypt),
+                ThreadPoolExecutor(max_workers=1) as executor,
+            ):
+                future = executor.submit(
+                    store.claim_ordinary_agent_credential,
+                    operation_id=envelope.operation_id,
+                    claim_secret=TEST_CLAIM_SECRET,
+                )
+                self.assertTrue(decrypt_started.wait(timeout=5))
+                try:
+                    with patch.object(
+                        store,
+                        "_ordinary_agent_database_epoch",
+                        return_value=envelope.delivery.expires_at + 1,
+                    ):
+                        self.assertEqual(store.expire_ordinary_agent_deliveries(), 1)
+                finally:
+                    release_decrypt.set()
+                self.assertIsNone(future.result(timeout=10))
+            self.assertIsNone(
+                store.verify_ordinary_agent_token(parse_ordinary_agent_token(bundle.token.value))
+            )
+            principal = store.read_current_ordinary_agent_principal(
+                principal_id=envelope.principal_id
+            )
+            assert principal is not None
+            self.assertEqual(principal.status, "active")
+
+    def test_private_delivery_persistence_error_hides_parameters_and_postgres_detail(self) -> None:
+        import traceback
+        from control_plane.storage.postgres import OrdinaryAgentPersistenceError
+
+        with _store_for_fresh_head_database() as store:
+            policy, inventory = setup_ordinary_agent_authority(store)
+            envelope = enrollment_envelope(policy_record=policy, inventory=inventory)
+            prepared, bundle = prepare_test_issuance(envelope)
+            with store._engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "alter table launchplane_ordinary_agent_deliveries add constraint test_reject_capsule check (delivery_status <> 'never_attempted')"
+                    )
+                )
+            with self.assertRaises(OrdinaryAgentPersistenceError) as raised:
+                store.compare_and_apply_ordinary_agent_enrollment(
+                    envelope=prepared, mutation=enrollment_mutation(prepared), issuance=bundle
+                )
+            rendered = "".join(traceback.format_exception(raised.exception))
+            for private in (
+                bundle.token.value,
+                bundle.ciphertext,
+                bundle.receiver_claim_sha256,
+                bundle.candidate.credential_digest,
+            ):
+                self.assertNotIn(private, rendered)
+            self.assertEqual(raised.exception.sqlstate, "23514")
+            self.assertIsNone(
+                store.read_current_ordinary_agent_principal(principal_id=envelope.principal_id)
+            )
+
+
 class RealPostgresFeedbackIntentMintTests(unittest.TestCase):
     @staticmethod
     def seed(
@@ -7195,3 +7569,150 @@ class RealPostgresFeedbackIntentMintTests(unittest.TestCase):
                     ),
                     1,
                 )
+
+
+class RealPostgresOrdinaryAgentSessionTests(unittest.TestCase):
+    def test_concurrent_admission_charges_one_budget_and_replay_is_free(self) -> None:
+        from tests import test_ordinary_agent_session_storage as session_tests
+        from control_plane.ordinary_agent_session_lifecycle import (
+            OrdinaryAgentSessionAdmissionDenied,
+        )
+
+        with _store_for_fresh_head_database() as store:
+            fixture = session_tests.OrdinaryAgentSessionStorageTests()
+            self.addCleanup(fixture.doCleanups)
+            fixture.prepare_store(store)
+            fixture.enroll()
+            barrier = threading.Barrier(2)
+
+            def admit(number: int) -> str:
+                barrier.wait(timeout=10)
+                request = fixture.request.model_copy(
+                    update={
+                        "request_id": f"request-{number}",
+                        "idempotency_key": f"request-{number}",
+                    }
+                )
+                try:
+                    return store.admit_ordinary_agent_finite_request(
+                        proof=fixture.proof, request=request
+                    ).request_id
+                except OrdinaryAgentSessionAdmissionDenied as error:
+                    return error.reason_code
+
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                outcomes = tuple(pool.map(admit, (1, 2)))
+            self.assertEqual(outcomes.count("budget_exhausted"), 1)
+            winner = next(item for item in outcomes if item != "budget_exhausted")
+            request = fixture.request.model_copy(
+                update={"request_id": winner, "idempotency_key": winner}
+            )
+            self.assertEqual(
+                store.admit_ordinary_agent_finite_request(
+                    proof=fixture.proof, request=request
+                ).request_id,
+                winner,
+            )
+            lease = store.reconnect_ordinary_agent_session(
+                proof=fixture.proof, operation_id=fixture.envelope.operation_id
+            ).leases[0]
+            self.assertEqual(lease.budget.pull_requests_used, 1)
+
+    def test_approval_racing_logout_rechecks_locked_human_session(self) -> None:
+        from tests import test_ordinary_agent_session_storage as session_tests
+        from control_plane.ordinary_agent_session_approval import (
+            approve_existing_ordinary_agent_session,
+        )
+        from control_plane.ordinary_agent_session_lifecycle import (
+            OrdinaryAgentSessionAdmissionDenied,
+        )
+
+        with _store_for_fresh_head_database() as store:
+            fixture = session_tests.OrdinaryAgentSessionStorageTests()
+            self.addCleanup(fixture.doCleanups)
+            fixture.prepare_store(store)
+            fixture.enroll()
+            operation = (
+                store.propose_ordinary_agent_session(
+                    proof=fixture.proof,
+                    operation_id="fresh-session-one",
+                    attenuation=fixture.attenuation,
+                )
+            ).operation_id
+            reached = threading.Event()
+
+            def before_statement(
+                _connection: object, _cursor: object, statement: str, *_: object
+            ) -> None:
+                if "launchplane_human_sessions" in statement and "FOR UPDATE" in statement:
+                    reached.set()
+
+            with store._engine.connect() as blocker:
+                transaction = blocker.begin()
+                blocker.execute(
+                    text(
+                        "SELECT session_id FROM launchplane_human_sessions WHERE session_id=:id FOR UPDATE"
+                    ),
+                    {"id": fixture.human.session_id},
+                )
+                event.listen(store._engine, "before_cursor_execute", before_statement)
+                try:
+                    with ThreadPoolExecutor(max_workers=1) as pool:
+                        pending = pool.submit(
+                            approve_existing_ordinary_agent_session,
+                            store=store,
+                            manager=fixture.manager,
+                            cookie_header=fixture.manager.session_cookie_header(fixture.human),
+                            csrf_token=fixture.manager.csrf_token(fixture.human),
+                            principal_id="agent_one",
+                            operation_id=operation,
+                        )
+                        self.assertTrue(reached.wait(timeout=10))
+                        blocker.execute(
+                            text("DELETE FROM launchplane_human_sessions WHERE session_id=:id"),
+                            {"id": fixture.human.session_id},
+                        )
+                        transaction.commit()
+                        with self.assertRaisesRegex(
+                            OrdinaryAgentSessionAdmissionDenied, "administrator_session_unavailable"
+                        ):
+                            pending.result(timeout=10)
+                finally:
+                    if transaction.is_active:
+                        transaction.rollback()
+                    event.remove(store._engine, "before_cursor_execute", before_statement)
+
+    def test_recovery_scan_supports_bigint_deadlines_and_keyset(self) -> None:
+        from tests import test_ordinary_agent_session_storage as session_tests
+        from control_plane.contracts.ordinary_agent_lifecycle import OrdinaryAgentEnrollmentIntent
+        from control_plane.ordinary_agent_session_approval import approve_ordinary_agent_enrollment
+        from control_plane.service_auth import TerminalAgentIdentity
+
+        with _store_for_fresh_head_database() as store:
+            fixture = session_tests.OrdinaryAgentSessionStorageTests()
+            self.addCleanup(fixture.doCleanups)
+            fixture.prepare_store(store)
+            intent = OrdinaryAgentEnrollmentIntent.from_envelope(fixture.envelope).model_copy(
+                update={
+                    "operation_id": "z-bigint-recovery",
+                    "session_attenuation": None,
+                    "delivery": fixture.envelope.delivery.model_copy(
+                        update={"expires_at": 2**31 + 100}
+                    ),
+                }
+            )
+            store.propose_ordinary_agent_enrollment(
+                intent=intent,
+                requester=TerminalAgentIdentity(subject="test-cli", token_label="test"),
+            )
+            approve_ordinary_agent_enrollment(
+                store=store,
+                manager=fixture.manager,
+                cookie_header=fixture.manager.session_cookie_header(fixture.human),
+                csrf_token=fixture.manager.csrf_token(fixture.human),
+                principal_id=intent.principal_id,
+                operation_id=intent.operation_id,
+            )
+            first = store.list_pending_approved_ordinary_agent_enrollments(limit=1)
+            page = store.list_pending_approved_ordinary_agent_enrollments(after=first[0])
+            self.assertEqual([reference.operation_id for reference in page], [intent.operation_id])
