@@ -29,12 +29,16 @@ from control_plane.contracts.ordinary_agent_session_lifecycle import (
     OrdinaryAgentSessionAttenuation,
     OrdinaryAgentSessionDelegation,
     OrdinaryAgentFiniteRequestRecord,
+    OrdinaryAgentGuardedDeliveryFiniteRequestV2,
+    OrdinaryAgentLeaseRecord,
+    OrdinaryAgentQualificationFiniteRequestV2,
 )
 from control_plane.ordinary_agent_authentication import parse_ordinary_agent_token
 from control_plane.ordinary_agent_session_lifecycle import OrdinaryAgentSessionAdmissionDenied
 from control_plane.storage.postgres import (
     PostgresRecordStore,
     LaunchplaneOrdinaryAgentFiniteRequestRow,
+    LaunchplaneOrdinaryAgentLeaseRow,
     LaunchplaneOrdinaryAgentSessionRow,
 )
 from tests.support.ordinary_agent_lifecycle import (
@@ -172,6 +176,23 @@ class OrdinaryAgentSessionStorageTests(unittest.TestCase):
             continuation_expires_at=self.now + 200,
         )
 
+    def exhaust_lease_actions(self, lease_id: str) -> None:
+        with self.store._session_factory() as session:
+            row = session.get(LaunchplaneOrdinaryAgentLeaseRow, lease_id)
+            assert row is not None
+            lease = OrdinaryAgentLeaseRecord.model_validate(row.payload)
+            exhausted = lease.model_copy(
+                update={
+                    "revision": lease.revision + 1,
+                    "budget": lease.budget.model_copy(
+                        update={"actions_used": lease.budget.action_limit}
+                    ),
+                }
+            )
+            row.revision = exhausted.revision
+            row.payload = self.store._payload_dict(exhausted)
+            session.commit()
+
     def test_atomic_enrollment_replay_and_budgeted_request_replay(self) -> None:
         self.enroll()
         retry = self.store.compare_and_apply_ordinary_agent_enrollment(
@@ -210,6 +231,143 @@ class OrdinaryAgentSessionStorageTests(unittest.TestCase):
         self.clock.return_value = datetime.fromtimestamp(self.now + 200, timezone.utc).isoformat()
         with self.assertRaisesRegex(OrdinaryAgentSessionAdmissionDenied, "finite_job_expired"):
             self.store.reauthorize_ordinary_agent_finite_job(request_id=original.request_id)
+
+    def test_reauthorization_rejects_exhausted_v1_guarded_request(self) -> None:
+        self.enroll()
+        admitted = self.store.admit_ordinary_agent_finite_request(
+            proof=self.proof, request=self.request
+        )
+        self.exhaust_lease_actions(admitted.lease_id)
+
+        with self.assertRaisesRegex(OrdinaryAgentSessionAdmissionDenied, "budget_exhausted"):
+            self.store.reauthorize_ordinary_agent_finite_job(request_id=admitted.request_id)
+
+    def test_reauthorization_rejects_exhausted_v2_guarded_request(self) -> None:
+        self.enroll()
+        request = OrdinaryAgentGuardedDeliveryFiniteRequestV2.model_validate(
+            {**self.request.model_dump(), "schema_version": 2, "purpose": "guarded_delivery"}
+        )
+        admitted = self.store.admit_ordinary_agent_finite_request(proof=self.proof, request=request)
+        self.exhaust_lease_actions(admitted.lease_id)
+
+        with self.assertRaisesRegex(OrdinaryAgentSessionAdmissionDenied, "budget_exhausted"):
+            self.store.reauthorize_ordinary_agent_finite_job(request_id=admitted.request_id)
+
+    def test_qualification_round_trip_replay_and_cross_variant_conflict(self) -> None:
+        self.enroll()
+        attenuation = self.attenuation.model_copy(
+            update={
+                "actions": ("preflight", "guarded_merge"),
+                "action_limit": 2,
+                "pull_request_limit": 1,
+                "refresh_allowance": 0,
+            }
+        )
+        operation_id = self.store.propose_ordinary_agent_session(
+            proof=self.proof,
+            operation_id="qualification-session-one",
+            attenuation=attenuation,
+        ).operation_id
+        issued = approve_existing_ordinary_agent_session(
+            store=self.store,
+            manager=self.manager,
+            cookie_header=self.manager.session_cookie_header(self.human),
+            csrf_token=self.manager.csrf_token(self.human),
+            principal_id="agent_one",
+            operation_id=operation_id,
+        )
+        qualification = OrdinaryAgentQualificationFiniteRequestV2(
+            request_id="qualification-request-one",
+            idempotency_key="qualification-request-one",
+            principal_id=issued.session.principal_id,
+            session_id=issued.session.session_id,
+            lease_id=issued.leases[0].lease_id,
+            target=issued.leases[0].target,
+            admitted_at=self.now,
+            expires_at=self.now + 100,
+            continuation_expires_at=self.now + 200,
+        )
+
+        admitted = self.store.admit_ordinary_agent_finite_request(
+            proof=self.proof, request=qualification
+        )
+        self.assertEqual(
+            self.store.admit_ordinary_agent_finite_request(proof=self.proof, request=qualification),
+            admitted,
+        )
+        self.assertEqual(
+            self.store.reauthorize_ordinary_agent_finite_job(request_id=admitted.request_id),
+            admitted,
+        )
+        replayed_session = self.store.reconnect_ordinary_agent_session(
+            proof=self.proof, operation_id=operation_id
+        )
+        preflight = next(lease for lease in replayed_session.leases if lease.action == "preflight")
+        self.assertEqual(preflight.budget.pull_request_limit, 1)
+        self.assertEqual(preflight.budget.pull_requests_used, 0)
+        self.assertIn("guarded_merge", {lease.action for lease in replayed_session.leases})
+        self.assertEqual(
+            self.store.read_ordinary_agent_job(
+                proof=self.proof, request_id=admitted.request_id
+            ).pull_request_numbers,
+            (),
+        )
+        with self.store._session_factory() as session:
+            row = session.get(LaunchplaneOrdinaryAgentFiniteRequestRow, admitted.request_id)
+            assert row is not None
+            self.assertNotIn("base_sha", row.payload)
+            self.assertNotIn("pull_requests", row.payload)
+            self.assertNotIn("permitted_stack_edit_pull_requests", row.payload)
+
+        cross_purpose = OrdinaryAgentGuardedDeliveryFiniteRequestV2(
+            request_id="guarded-request-two",
+            idempotency_key=qualification.idempotency_key,
+            principal_id=self.request.principal_id,
+            session_id=self.request.session_id,
+            lease_id=self.request.lease_id,
+            target=self.request.target,
+            base_sha=self.request.base_sha,
+            pull_requests=self.request.pull_requests,
+            permitted_stack_edit_pull_requests=(),
+            refresh_allowance_total=1,
+            admitted_at=self.now,
+            expires_at=self.now + 100,
+            continuation_expires_at=self.now + 200,
+        )
+        with self.assertRaisesRegex(OrdinaryAgentSessionAdmissionDenied, "idempotency_conflict"):
+            self.store.admit_ordinary_agent_finite_request(proof=self.proof, request=cross_purpose)
+
+        guarded = cross_purpose.model_copy(
+            update={
+                "request_id": "guarded-request-three",
+                "idempotency_key": "guarded-request-three",
+            }
+        )
+        guarded_admitted = self.store.admit_ordinary_agent_finite_request(
+            proof=self.proof, request=guarded
+        )
+        self.assertIsInstance(guarded_admitted, OrdinaryAgentGuardedDeliveryFiniteRequestV2)
+        with self.store._session_factory() as session:
+            row = session.get(LaunchplaneOrdinaryAgentFiniteRequestRow, guarded_admitted.request_id)
+            assert row is not None
+            row.payload = {
+                **row.payload,
+                "pull_requests": [{"number": 13, "head_sha": guarded.pull_requests[0].head_sha}],
+            }
+            session.commit()
+        with self.assertRaisesRegex(OrdinaryAgentSessionAdmissionDenied, "idempotency_conflict"):
+            self.store.admit_ordinary_agent_finite_request(proof=self.proof, request=guarded)
+
+        with self.store._session_factory() as session:
+            row = session.get(LaunchplaneOrdinaryAgentFiniteRequestRow, admitted.request_id)
+            assert row is not None
+            row.payload = {
+                **row.payload,
+                "target": {**row.payload["target"], "repository_id": 43},
+            }
+            session.commit()
+        with self.assertRaisesRegex(OrdinaryAgentSessionAdmissionDenied, "idempotency_conflict"):
+            self.store.admit_ordinary_agent_finite_request(proof=self.proof, request=qualification)
 
     def test_failure_after_session_write_rolls_back_enrollment_and_retry_succeeds(self) -> None:
         with patch.object(

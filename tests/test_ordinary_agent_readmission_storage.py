@@ -15,6 +15,7 @@ from control_plane.contracts.ordinary_agent_effect import (
 )
 from control_plane.contracts.ordinary_agent_session_lifecycle import (
     OrdinaryAgentFiniteRequestRecord,
+    OrdinaryAgentGuardedFiniteRequest,
     OrdinaryAgentLeaseRecord,
 )
 from control_plane.ordinary_agent_session_lifecycle import OrdinaryAgentSessionAdmissionDenied
@@ -119,7 +120,7 @@ class ReadmissionStorageFixture:
         *,
         attempt: OrdinaryAgentSnapshotAttemptRecord,
         observation: snapshots.OrdinaryAgentReadmissionObservation,
-    ) -> OrdinaryAgentFiniteRequestRecord:
+    ) -> OrdinaryAgentGuardedFiniteRequest:
         return self.store.finalize_ordinary_agent_readmission(
             claim_fence=self.effect.claim.claim_fence,
             expected_binding_revision=1,

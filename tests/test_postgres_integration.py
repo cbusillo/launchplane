@@ -7572,6 +7572,74 @@ class RealPostgresFeedbackIntentMintTests(unittest.TestCase):
 
 
 class RealPostgresOrdinaryAgentSessionTests(unittest.TestCase):
+    def test_v2_qualification_round_trips_jsonb_without_pr_charge(self) -> None:
+        from control_plane.contracts.ordinary_agent_session_lifecycle import (
+            OrdinaryAgentQualificationFiniteRequestV2,
+            parse_ordinary_agent_finite_request,
+        )
+        from control_plane.ordinary_agent_session_approval import (
+            approve_existing_ordinary_agent_session,
+        )
+        from control_plane.storage.postgres import LaunchplaneOrdinaryAgentFiniteRequestRow
+        from tests import test_ordinary_agent_session_storage as session_tests
+
+        with _store_for_fresh_head_database() as store:
+            fixture = session_tests.OrdinaryAgentSessionStorageTests()
+            self.addCleanup(fixture.doCleanups)
+            fixture.prepare_store(store)
+            fixture.enroll()
+            attenuation = fixture.attenuation.model_copy(
+                update={
+                    "actions": ("preflight", "guarded_merge"),
+                    "action_limit": 2,
+                    "pull_request_limit": 1,
+                    "refresh_allowance": 0,
+                }
+            )
+            operation_id = store.propose_ordinary_agent_session(
+                proof=fixture.proof,
+                operation_id="postgres-qualification-session",
+                attenuation=attenuation,
+            ).operation_id
+            issued = approve_existing_ordinary_agent_session(
+                store=store,
+                manager=fixture.manager,
+                cookie_header=fixture.manager.session_cookie_header(fixture.human),
+                csrf_token=fixture.manager.csrf_token(fixture.human),
+                principal_id="agent_one",
+                operation_id=operation_id,
+            )
+            request = OrdinaryAgentQualificationFiniteRequestV2(
+                request_id="postgres-qualification-request",
+                idempotency_key="postgres-qualification-request",
+                principal_id=issued.session.principal_id,
+                session_id=issued.session.session_id,
+                lease_id=issued.leases[0].lease_id,
+                target=issued.leases[0].target,
+                admitted_at=fixture.now,
+                expires_at=fixture.now + 100,
+                continuation_expires_at=fixture.now + 200,
+            )
+
+            admitted = store.admit_ordinary_agent_finite_request(
+                proof=fixture.proof, request=request
+            )
+            self.assertEqual(
+                store.admit_ordinary_agent_finite_request(proof=fixture.proof, request=request),
+                admitted,
+            )
+            with store._session_factory() as session:
+                row = session.get(LaunchplaneOrdinaryAgentFiniteRequestRow, admitted.request_id)
+                assert row is not None
+                self.assertEqual(parse_ordinary_agent_finite_request(row.payload), admitted)
+                self.assertNotIn("base_sha", row.payload)
+                self.assertNotIn("pull_requests", row.payload)
+            replayed = store.reconnect_ordinary_agent_session(
+                proof=fixture.proof, operation_id=operation_id
+            )
+            preflight = next(lease for lease in replayed.leases if lease.action == "preflight")
+            self.assertEqual(preflight.budget.pull_requests_used, 0)
+
     def test_concurrent_admission_charges_one_budget_and_replay_is_free(self) -> None:
         from tests import test_ordinary_agent_session_storage as session_tests
         from control_plane.ordinary_agent_session_lifecycle import (
