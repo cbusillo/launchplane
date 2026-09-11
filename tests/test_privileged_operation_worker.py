@@ -662,6 +662,19 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
                                 "actions": ["authz_policy_operation.read"],
                             }
                         ],
+                        "ordinary_agents": [
+                            {
+                                "managed_set_id": "test.policy-operation",
+                                "managed_rule_id": "ordinary-delivery",
+                                "principal_id": "ordinary_delivery",
+                                "target": {
+                                    "repository_id": 1001,
+                                    "repository": "example/launchplane",
+                                    "base_branch": "main",
+                                },
+                                "actions": ["self_read", "preflight"],
+                            }
+                        ],
                     }
                 )
                 operation_id = _prepare_approved_policy_operation(
@@ -699,7 +712,7 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
         assert isinstance(record.execution, ManagedAuthzPolicySetExecutionEvidence)
         self.assertEqual(
             record.execution.failure_code,
-            "authz_policy_schema_v3_transition_denied:ordinary_enable_scope_not_singleton",
+            "authz_policy_schema_v3_transition_denied:activation_not_current",
         )
         self.assertFalse(record.execution.reconciliation_required)
         self.assertEqual(len(apply_errors), 1)

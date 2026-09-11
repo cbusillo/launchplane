@@ -12,6 +12,9 @@ from control_plane.contracts.authz_policy_record import (
     LaunchplaneAuthzPolicyRecord,
     require_authz_policy_schema_write_activated,
 )
+from control_plane.contracts.authz_policy_write_transition import (
+    AuthzPolicySchemaV3TransitionDeniedError,
+)
 from control_plane.contracts.ordinary_agent import OrdinaryAgentTarget
 from control_plane.contracts.ordinary_agent_activation import (
     OrdinaryAgentDeliveryActivationExecutionEvidence,
@@ -32,9 +35,6 @@ from control_plane.privileged_operation_service import (
 )
 from control_plane.privileged_operation_worker import (
     execute_approved_privileged_operations_once,
-)
-from control_plane.ordinary_agent_activation import (
-    OrdinaryAgentDeliveryActivationPlanningError,
 )
 from control_plane.service_auth import GitHubHumanIdentity, LaunchplaneAuthzPolicy
 from control_plane.storage.postgres import PostgresRecordStore
@@ -238,7 +238,7 @@ class OrdinaryAgentDeliveryActivationWorkerTests(unittest.TestCase):
                         "ordinary_agent_delivery_activation_schema_capability",
                         return_value=("incompatible", "0" * 64, False),
                     ),
-                    self.assertRaises(OrdinaryAgentDeliveryActivationPlanningError),
+                    self.assertRaises(AuthzPolicySchemaV3TransitionDeniedError),
                 ):
                     execute_managed_authz_policy_reconcile(
                         record_store=store,

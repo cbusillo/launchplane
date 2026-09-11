@@ -366,15 +366,17 @@ def resolve_authz_policy_schema_v3_enable_evidence(
 ) -> AuthzPolicySchemaV3OrdinaryEnableEvidence:
     transition = classify_authz_policy_schema_v3_transition(current_record.policy, candidate_policy)
     if transition.kind not in {"v2_to_v3_enable", "v3_enable_or_expand"}:
-        raise OrdinaryAgentDeliveryActivationPlanningError(
-            "Authz policy transition does not require ordinary activation evidence."
-        )
+        raise AuthzPolicySchemaV3TransitionDeniedError("ordinary_enable_evidence_not_required")
     managed_set_id, managed_rule_id = transition.added_or_changed_ordinary_rule_keys[0].split(
         "\x1f", 1
     )
+    try:
+        activation_records = _activation_records(record_store)
+    except OrdinaryAgentDeliveryActivationPlanningError as error:
+        raise AuthzPolicySchemaV3TransitionDeniedError("activation_history_unavailable") from error
     matching = tuple(
         record
-        for record in _activation_records(record_store)
+        for record in activation_records
         if record.scope.managed_set_id == managed_set_id
         and record.scope.managed_rule_id == managed_rule_id
         and record.desired_state == "guarded"
@@ -384,33 +386,31 @@ def resolve_authz_policy_schema_v3_enable_evidence(
         and observed_at < datetime.fromisoformat(record.activation_expires_at)
     )
     if len(matching) != 1:
-        raise OrdinaryAgentDeliveryActivationPlanningError(
-            "Authz policy transition requires one current matching activation."
-        )
+        raise AuthzPolicySchemaV3TransitionDeniedError("activation_not_current")
     activation = matching[0]
     current_capability = _runtime_capability(
         record_store,
         observed_at=observed_at.isoformat(),
     )
     if not _runtime_supports_authz_policy_schema_v3_enable(current_capability):
-        raise OrdinaryAgentDeliveryActivationPlanningError(
-            "Authz policy transition requires current compatible runtime support."
+        raise AuthzPolicySchemaV3TransitionDeniedError("runtime_incompatible")
+    try:
+        source = resolve_ordinary_agent_delivery_activation_setup_source(
+            record_store,
+            policy_operation_id=activation.policy_package.policy_operation_id,
+            repository_inventory_record_id=activation.inventory.record_id,
+            observed_at=observed_at,
         )
-    source = resolve_ordinary_agent_delivery_activation_setup_source(
-        record_store,
-        policy_operation_id=activation.policy_package.policy_operation_id,
-        repository_inventory_record_id=activation.inventory.record_id,
-        observed_at=observed_at,
-    )
+    except OrdinaryAgentDeliveryActivationPlanningError as error:
+        raise AuthzPolicySchemaV3TransitionDeniedError("activation_source_inadmissible") from error
     if source.scope != activation.scope or source.policy_package != activation.policy_package:
-        raise OrdinaryAgentDeliveryActivationPlanningError(
-            "Activation policy package no longer resolves exactly."
-        )
+        raise AuthzPolicySchemaV3TransitionDeniedError("activation_package_drift")
     if activation.policy_package.candidate_policy_sha256 != authz_policy_sha256(candidate_policy):
-        raise OrdinaryAgentDeliveryActivationPlanningError(
-            "Activation does not bind the complete candidate policy."
-        )
-    setup_operation = _read_policy_operation(record_store, activation.source_setup_operation_id)
+        raise AuthzPolicySchemaV3TransitionDeniedError("activation_candidate_unbound")
+    try:
+        setup_operation = _read_policy_operation(record_store, activation.source_setup_operation_id)
+    except OrdinaryAgentDeliveryActivationPlanningError as error:
+        raise AuthzPolicySchemaV3TransitionDeniedError("setup_operation_inadmissible") from error
     from control_plane.contracts.ordinary_agent_activation import (
         OrdinaryAgentDeliveryActivationExecutionEvidence,
         OrdinaryAgentDeliveryActivationSetupHumanEvidence,
@@ -431,24 +431,21 @@ def resolve_authz_policy_schema_v3_enable_evidence(
         or setup_operation.execution.action != "setup"
         or setup_operation.execution.result_status != "ok"
     ):
-        raise OrdinaryAgentDeliveryActivationPlanningError(
-            "Activation setup operation is not one successful terminal setup."
-        )
+        raise AuthzPolicySchemaV3TransitionDeniedError("setup_operation_inadmissible")
     if (
         canonical_json_sha256(setup_operation.approval.model_dump(mode="json"))
         != activation.source_setup_approval_sha256
     ):
-        raise OrdinaryAgentDeliveryActivationPlanningError(
-            "Activation setup approval digest changed."
-        )
+        raise AuthzPolicySchemaV3TransitionDeniedError("setup_operation_binding_mismatch")
     recovery = getattr(
         record_store, "recover_ordinary_agent_delivery_activation_by_source_operation", None
     )
     if not callable(recovery):
-        raise OrdinaryAgentDeliveryActivationPlanningError(
-            "Activation setup recovery is unavailable."
-        )
-    recovered = recovery(activation.source_setup_operation_id)
+        raise AuthzPolicySchemaV3TransitionDeniedError("activation_recovery_unavailable")
+    try:
+        recovered = recovery(activation.source_setup_operation_id)
+    except (FileNotFoundError, ValueError) as error:
+        raise AuthzPolicySchemaV3TransitionDeniedError("installed_outcome_invalid") from error
     installed_record, installed_event = recovered
     execution = setup_operation.execution
     if (
@@ -459,9 +456,7 @@ def resolve_authz_policy_schema_v3_enable_evidence(
         or execution.activation_sha256 != installed_record.activation_sha256
         or execution.source_operation_id != activation.source_setup_operation_id
     ):
-        raise OrdinaryAgentDeliveryActivationPlanningError(
-            "Activation setup execution does not match its installed outcome."
-        )
+        raise AuthzPolicySchemaV3TransitionDeniedError("installed_outcome_mismatch")
     package = activation.policy_package
     return AuthzPolicySchemaV3OrdinaryEnableEvidence(
         caller=AuthzPolicyImmutableHumanCallerBinding(github_id=github_id),

@@ -6436,6 +6436,116 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(active_records[0].revision, 1)
         self.assertEqual(superseded_records, ())
 
+    def test_managed_authz_reconcile_maps_early_scope_denial_before_store_write(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            workflow_ref = (
+                "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "schema_version": 2,
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [workflow_ref],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["authz_policy_grant.write"],
+                        }
+                    ],
+                    "github_humans": [
+                        {
+                            "github_ids": [123, 456],
+                            "roles": ["admin"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["authz_policy_grant.write"],
+                        }
+                    ],
+                }
+            )
+            app = create_launchplane_fastapi_test_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=workflow_ref,
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+            desired_policy = {
+                "schema_version": 3,
+                "ordinary_agents": [
+                    {
+                        "managed_set_id": "ordinary-agent.pilot",
+                        "managed_rule_id": "ordinary-delivery",
+                        "principal_id": "ordinary_delivery",
+                        "target": {
+                            "repository_id": 1001,
+                            "repository": "example/launchplane",
+                            "base_branch": "main",
+                        },
+                        "actions": ["self_read", "preflight"],
+                    },
+                    {
+                        "managed_set_id": "ordinary-agent.pilot",
+                        "managed_rule_id": "ordinary-delivery-two",
+                        "principal_id": "ordinary_delivery_two",
+                        "target": {
+                            "repository_id": 1002,
+                            "repository": "example/other",
+                            "base_branch": "main",
+                        },
+                        "actions": ["self_read", "preflight"],
+                    },
+                ],
+            }
+            dry_run_status, dry_run_response = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/authz-policies/managed-rule-sets/reconcile",
+                payload={
+                    "schema_version": 2,
+                    "product": "launchplane",
+                    "mode": "dry_run",
+                    "managed_set_id": "ordinary-agent.pilot",
+                    "schema_migration": "migrate_v2_to_v3",
+                    "reason": "Prepare one ordinary delivery scope.",
+                    "desired_policy": desired_policy,
+                },
+            )
+            self.assertEqual(dry_run_status, 202, dry_run_response)
+            apply_status, apply_response = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/authz-policies/managed-rule-sets/reconcile",
+                payload={
+                    "schema_version": 2,
+                    "product": "launchplane",
+                    "mode": "apply",
+                    "managed_set_id": "ordinary-agent.pilot",
+                    "schema_migration": "migrate_v2_to_v3",
+                    "reason": "Prepare one ordinary delivery scope.",
+                    "desired_policy": desired_policy,
+                    "reviewed_plan_sha256": dry_run_response["result"]["diff"]["plan_sha256"],
+                },
+                headers={"Idempotency-Key": "ambiguous-ordinary-activation-scope"},
+            )
+
+        self.assertEqual(dry_run_status, 202)
+        self.assertEqual(apply_status, 409)
+        self.assertEqual(
+            apply_response["error"]["code"], "authz_policy_schema_v3_transition_denied"
+        )
+        self.assertIn("ordinary_enable_scope_not_singleton", apply_response["error"]["message"])
+
     def test_managed_authz_reconcile_rejects_admin_human_session(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)

@@ -14676,6 +14676,13 @@ def create_launchplane_fastapi_app(
                     "Refresh the policy state and retry."
                 ),
             ) from error
+        except AuthzPolicySchemaV3TransitionDeniedError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code=AUTHZ_POLICY_SCHEMA_V3_TRANSITION_DENIED,
+                message=_schema_v3_transition_denial_message(error),
+            ) from error
         except ValueError as error:
             raise _launchplane_http_error(
                 status_code=503,
@@ -15001,6 +15008,13 @@ def create_launchplane_fastapi_app(
                 trace_id=trace_id,
                 code="authz_policy_conflict",
                 message=str(error),
+            ) from error
+        except AuthzPolicySchemaV3TransitionDeniedError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code=AUTHZ_POLICY_SCHEMA_V3_TRANSITION_DENIED,
+                message=_schema_v3_transition_denial_message(error),
             ) from error
         except ValueError as error:
             raise _launchplane_http_error(
@@ -15355,6 +15369,13 @@ def create_launchplane_fastapi_app(
                 trace_id=trace_id,
                 code=error.code,
                 message=str(error),
+            ) from error
+        except AuthzPolicySchemaV3TransitionDeniedError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code=AUTHZ_POLICY_SCHEMA_V3_TRANSITION_DENIED,
+                message=_schema_v3_transition_denial_message(error),
             ) from error
         except (control_plane_authz_grant_service.AuthzPolicyConflictError, ValueError) as error:
             raise _launchplane_http_error(
