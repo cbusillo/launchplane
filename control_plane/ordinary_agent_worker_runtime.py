@@ -107,6 +107,10 @@ class OrdinaryAgentWorkerSupportDescriptor:
             raise OrdinaryAgentWorkerCompatibilityError(
                 "Ordinary worker has incomplete read/effect support."
             )
+        if not self.qualification_phase_supported or not self.guarded_phase_supported:
+            raise OrdinaryAgentWorkerCompatibilityError(
+                "Ordinary worker does not support every registered request phase."
+            )
         if not self.compatible_alembic_revisions:
             raise OrdinaryAgentWorkerCompatibilityError(
                 "Ordinary worker has no compatible Alembic revisions."

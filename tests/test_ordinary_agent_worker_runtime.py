@@ -43,6 +43,8 @@ class OrdinaryAgentWorkerRuntimeTests(unittest.TestCase):
     def test_support_descriptor_rejects_empty_compatibility_sets(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "no supported finite-request"):
             OrdinaryAgentWorkerSupportDescriptor(finite_request_versions=()).validate()
+        with self.assertRaisesRegex(RuntimeError, "every registered request phase"):
+            OrdinaryAgentWorkerSupportDescriptor(effect_versions=(2,)).validate()
 
     def test_default_support_reports_both_composed_phases(self) -> None:
         DEFAULT_ORDINARY_AGENT_WORKER_SUPPORT.validate()

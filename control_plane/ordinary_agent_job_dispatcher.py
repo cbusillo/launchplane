@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Protocol, assert_never, cast
+from typing import Literal, Protocol, assert_never, cast
 
 from control_plane.contracts.ordinary_agent_effect import (
     OrdinaryAgentClaimedJob,
@@ -45,9 +45,15 @@ def build_ordinary_agent_job_dispatcher(
 
     def dispatch(claimed: OrdinaryAgentClaimedJob) -> OrdinaryAgentJobAttemptDisposition:
         request = claimed.request
-        if not support.supports_request(request):
+        purpose: Literal["qualification", "guarded_delivery"] = (
+            "qualification"
+            if isinstance(request, OrdinaryAgentQualificationFiniteRequestV2)
+            else "guarded_delivery"
+        )
+        if not support.supports_phase(request=request, purpose=purpose):
             raise OrdinaryAgentWorkerCompatibilityError(
-                f"Unsupported ordinary finite request schema version: {request.schema_version}."
+                "Unsupported ordinary finite request phase: "
+                f"schema={request.schema_version}, purpose={purpose}."
             )
         if isinstance(request, OrdinaryAgentQualificationFiniteRequestV2):
             return advance_ordinary_agent_qualification_job(
