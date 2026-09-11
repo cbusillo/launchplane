@@ -221,7 +221,7 @@ class OrdinaryAgentDeliveryActivationStorageTests(unittest.TestCase):
             (event,),
         )
 
-    def test_guarded_readiness_loss_commits_only_derived_projection_before_denial(self) -> None:
+    def test_provider_capability_gap_does_not_rewrite_activation_history(self) -> None:
         installed = _record(
             operation_id="activation-readiness-loss",
             installed_at="2026-09-10T20:00:00Z",
@@ -263,15 +263,13 @@ class OrdinaryAgentDeliveryActivationStorageTests(unittest.TestCase):
             self.store._begin_serialized_write(session)
             self.store._require_and_project_guarded_readiness(session, context=cast(Any, context))
 
-        lost = self.store.read_ordinary_agent_delivery_activation_record(guarded.activation_id)
-        self.assertEqual(lost.revision, guarded.revision + 1)
-        self.assertEqual(lost.effective_state, "qualification_only")
+        unchanged = self.store.read_ordinary_agent_delivery_activation_record(guarded.activation_id)
+        self.assertEqual(unchanged, guarded)
         events = self.store.list_ordinary_agent_delivery_activation_event_records(
             activation_id=guarded.activation_id
         )
         loss_events = tuple(item for item in events if item.action == "readiness_lost")
-        self.assertEqual(len(loss_events), 1)
-        self.assertEqual(loss_events[0].invalidation_reason, "provider_readiness_unavailable")
+        self.assertEqual(loss_events, ())
 
     def test_revoke_is_exact_and_original_setup_recovery_is_historical(self) -> None:
         installed = _record(

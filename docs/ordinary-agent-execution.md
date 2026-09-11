@@ -10,8 +10,9 @@ union. Dedicated client routes propose connections and sessions; signed-browser
 routes review, approve, cancel and revoke their persisted domain operations.
 The service worker recovers approved enrollment and expires private delivery
 capsules. This source integration is not a deployed installation or a merge
-permission: ordinary-worker runtime qualification and the separately reviewed
-activation package remain prerequisites to live execution.
+permission. The ordinary finite-job runtime remains dormant, and guarded
+delivery remains unavailable until Launchplane has a separately reviewed,
+independent provider-readiness observation and receipt.
 
 The source also contains a dormant finite-job worker surface:
 `uv run launchplane service ordinary-agent-workers run-once` performs one
@@ -68,10 +69,13 @@ offered by the server clock, and the planner enforces a maximum of 30 days.
 The first setup state is always desired `guarded` and effective
 `qualification_only`. That record has `authorizes_execution = false`; it creates
 no principal, credential, session, grant, provider request, worker registration,
-or policy write. The schema-v3 write fence above remains unchanged. A later
-readiness implementation must still join current policy authority, qualification,
-protection and merge identity, protocol/schema compatibility, and cleanup
-evidence before deriving effective guarded state.
+or policy write. The schema-v3 write fence above remains unchanged. Qualification
+runtime readiness joins current activation, policy, inventory, custody, managed
+secret and protocol support. Guarded runtime readiness additionally requires
+current positive qualification evidence. It then fails closed with
+`provider_readiness_unavailable`: this source slice has no trusted independent
+producer proving current provider protection and the exclusive Launchplane merge
+identity, so it cannot derive effective guarded state.
 
 Activation revocation is a new reviewed `revoke_activation` operation rather
 than the generic pre-execution approval revoke. It writes terminal desired and
@@ -80,8 +84,9 @@ new activation ID and binds the exact predecessor. Expired guarded replacement
 supersedes the old record and appends both changes atomically; revoked predecessors
 never revive. Append-only operation-bound install/revoke events provide recovery
 evidence even after later revocation or supersession changes the current
-projection. Known custody cleanup and history remain maintainable, while this
-slice still has no guarded execution consumer.
+projection. Known custody cleanup and history remain maintainable. The dormant
+guarded consumer is wired behind the provider-readiness denial above and cannot
+claim guarded work.
 
 Ordinary rules participate only in structural policy normalization, managed-set
 replacement and reporting. Their managed set and rule IDs remain semantic
@@ -400,6 +405,12 @@ One finite request is one job. Historical schema-v1 requests remain byte- and
 identity-compatible guarded-delivery records. Schema v2 is a discriminated JSON
 payload: `guarded_delivery` retains the exact base, PR/head, stack-edit and
 refresh scope, while `qualification` has no base, PR or stack-edit fields.
+Both variants remain in the strict public schema so clients can preserve the
+target contract, but current guarded admission and continuation fail with
+`provider_readiness_unavailable` before a lease budget or job row is written.
+The runtime capability fields report compiled dispatcher and handler
+registration only; they do not report deployment, activation or provider
+readiness.
 Version-2 intent and scope identities use a fixed v2 domain plus the schema
 version and purpose, so the two purposes cannot share an identity. The finite
 request row stores the original validated v2 client intent in nullable metadata,

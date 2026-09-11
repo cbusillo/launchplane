@@ -343,6 +343,52 @@ class OrdinaryAgentSessionStorageTests(unittest.TestCase):
                 request=intent.model_copy(update={"base_sha": "e" * 40}),
             )
 
+    def test_guarded_capability_denial_does_not_charge_or_persist_admission(self) -> None:
+        self.enroll()
+        lease = self.issued.leases[0]
+        intent = OrdinaryAgentGuardedDeliveryFiniteClientRequest(
+            idempotency_key="guarded-provider-readiness-gap",
+            session_id=self.issued.session.session_id,
+            lease_id=lease.lease_id,
+            base_sha="a" * 40,
+            pull_requests=(OrdinaryAgentPullRequest(number=12, head_sha="b" * 40),),
+            permitted_stack_edit_pull_requests=(),
+            refresh_allowance=0,
+        )
+        guarded_readiness = PostgresRecordStore._require_and_project_guarded_readiness.__get__(
+            self.store, PostgresRecordStore
+        )
+
+        with (
+            patch.object(
+                self.store,
+                "_require_and_project_guarded_readiness",
+                wraps=guarded_readiness,
+            ),
+            patch.object(
+                self.store,
+                "_require_ordinary_agent_runtime_readiness",
+                side_effect=OrdinaryAgentSessionAdmissionDenied("provider_readiness_unavailable"),
+            ),
+            self.assertRaisesRegex(
+                OrdinaryAgentSessionAdmissionDenied, "provider_readiness_unavailable"
+            ),
+        ):
+            self.store.admit_ordinary_agent_client_request(proof=self.proof, request=intent)
+
+        with self.store._session_factory() as session:
+            persisted_lease_row = session.get(LaunchplaneOrdinaryAgentLeaseRow, lease.lease_id)
+            assert persisted_lease_row is not None
+            persisted_lease = OrdinaryAgentLeaseRecord.model_validate(persisted_lease_row.payload)
+            request_row = session.scalar(
+                select(LaunchplaneOrdinaryAgentFiniteRequestRow).where(
+                    LaunchplaneOrdinaryAgentFiniteRequestRow.idempotency_key
+                    == intent.idempotency_key
+                )
+            )
+        self.assertEqual(persisted_lease, lease)
+        self.assertIsNone(request_row)
+
     def test_reauthorization_rejects_exhausted_v1_guarded_request(self) -> None:
         self.enroll()
         admitted = self.store.admit_ordinary_agent_finite_request(

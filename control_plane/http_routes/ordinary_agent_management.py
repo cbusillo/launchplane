@@ -77,7 +77,12 @@ def _operation_errors() -> Iterator[None]:
         yield
     except HTTPException:
         raise
-    except OrdinaryAgentSessionAdmissionDenied:
+    except OrdinaryAgentSessionAdmissionDenied as error:
+        if error.reason_code == "provider_readiness_unavailable":
+            raise HTTPException(
+                503,
+                "Guarded delivery is unavailable until Launchplane can verify repository protection.",
+            ) from None
         raise HTTPException(403, "This agent operation is unavailable.") from None
     except PermissionError:
         raise HTTPException(403, "This agent operation is not authorized.") from None

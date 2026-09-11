@@ -26250,14 +26250,22 @@ class PostgresRecordStore(HumanSessionStore):
             self._lock_landing_authority(
                 session, "ordinary-qualification-attempt:" + claim_fence.request_id
             )
-            context = self._ordinary_agent_current_chain_context(
-                session, request_id=claim_fence.request_id
+            request_row = session.scalar(
+                select(LaunchplaneOrdinaryAgentFiniteRequestRow)
+                .where(
+                    LaunchplaneOrdinaryAgentFiniteRequestRow.request_id == claim_fence.request_id
+                )
+                .execution_options(populate_existing=True)
+                .with_for_update()
             )
-            request = context.request
+            if request_row is None:
+                raise OrdinaryAgentSessionAdmissionDenied("job_unavailable")
+            request = parse_ordinary_agent_finite_request(request_row.payload)
             if not isinstance(request, OrdinaryAgentQualificationFiniteRequestV2):
                 raise OrdinaryAgentSessionAdmissionDenied("request_purpose_unsupported")
+            now = self._ordinary_agent_database_epoch(session)
             self._require_ordinary_agent_claim(
-                session, claim_fence=claim_fence, now=context.now, for_update=True
+                session, claim_fence=claim_fence, now=now, for_update=True
             )
             rows = tuple(
                 session.scalars(
@@ -26306,7 +26314,7 @@ class PostgresRecordStore(HumanSessionStore):
                                 else "cleanup_unknown",
                                 "next_due_at": None,
                                 "revision": latest.revision + 1,
-                                "updated_at": context.now,
+                                "updated_at": now,
                             }
                         )
                         latest_row = session.get(
@@ -26329,7 +26337,7 @@ class PostgresRecordStore(HumanSessionStore):
                         )
                 if latest.state in {"completed", "fenced", "exhausted"}:
                     return latest
-                if latest.next_due_at is not None and latest.next_due_at > context.now:
+                if latest.next_due_at is not None and latest.next_due_at > now:
                     raise OrdinaryAgentSessionAdmissionDenied(
                         "qualification_wait", retry_not_before=latest.next_due_at
                     )
@@ -26349,6 +26357,15 @@ class PostgresRecordStore(HumanSessionStore):
                 raise OrdinaryAgentSessionAdmissionDenied("read_attempts_exhausted")
             if setup is None:
                 raise OrdinaryAgentSessionAdmissionDenied("qualification_setup_required")
+            # Only a successor attempt may demand fresh principal/session/lease
+            # authority. Historical terminal evidence and closed-custody
+            # restoration above remain reachable after cancellation or revoke.
+            context = self._ordinary_agent_current_chain_context(
+                session, request_id=claim_fence.request_id
+            )
+            request = context.request
+            if not isinstance(request, OrdinaryAgentQualificationFiniteRequestV2):
+                raise OrdinaryAgentSessionAdmissionDenied("request_purpose_unsupported")
             activation, _, readiness_now = self._require_ordinary_agent_runtime_readiness(
                 session, context=context, purpose="qualification"
             )
@@ -29367,6 +29384,9 @@ class PostgresRecordStore(HumanSessionStore):
         )
         if setup_operation.approval is None:
             raise OrdinaryAgentSessionAdmissionDenied("setup_operation_inadmissible")
+        execution = setup_operation.execution
+        if not isinstance(execution, OrdinaryAgentDeliveryActivationExecutionEvidence):
+            raise OrdinaryAgentSessionAdmissionDenied("setup_operation_inadmissible")
         approver = setup_operation.approval.approver
         if approver.identity_type != "github_human" or approver.github_id < 1:
             raise OrdinaryAgentSessionAdmissionDenied("setup_operation_inadmissible")
@@ -29378,7 +29398,9 @@ class PostgresRecordStore(HumanSessionStore):
             raise OrdinaryAgentSessionAdmissionDenied("activation_expired")
         return OrdinaryAgentQualificationSetup(
             source_activation_operation_id=activation.source_setup_operation_id,
-            source_activation_binding_sha256=activation.activation_sha256,
+            # Bind the immutable installed activation, not a later derived
+            # guarded/readiness-lost projection of that same activation.
+            source_activation_binding_sha256=execution.activation_sha256,
             target=activation.scope.target,
             managed_set_id=activation.scope.managed_set_id,
             managed_rule_id=activation.scope.managed_rule_id,
@@ -29410,7 +29432,6 @@ class PostgresRecordStore(HumanSessionStore):
                 "installed_outcome_mismatch",
                 "inventory_drift",
                 "policy_source_inadmissible",
-                "provider_readiness_unavailable",
                 "qualification_attestation_required",
                 "setup_operation_inadmissible",
             }

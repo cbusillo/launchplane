@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import hashlib
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
@@ -32,6 +33,7 @@ from control_plane.contracts.ordinary_agent_qualification import (
     qualification_identity,
 )
 from control_plane.contracts.ordinary_agent_activation import (
+    OrdinaryAgentDeliveryActivationExecutionEvidence,
     OrdinaryAgentDeliveryActivationRecord,
     OrdinaryAgentDeliveryActivationScope,
 )
@@ -534,6 +536,132 @@ class OrdinaryAgentQualificationStorageTests(unittest.TestCase):
             )
             assert claim_row is not None
             self.assertGreater(claim_row.next_due_at, self.scenario.fixture.now + 31)
+
+    def test_cancelled_session_restores_closed_positive_history_without_provider_retry(
+        self,
+    ) -> None:
+        claimed = self.scenario.claim(lease_seconds=120)
+        attempt = self.scenario.reserve_attempt(claimed)
+        reservation = self.scenario.reserve_custody(claimed=claimed, attempt=attempt)
+        self.scenario.issue(reservation)
+        observation = self.scenario.observation()
+        attestation = self.scenario.attestation(
+            attempt=attempt,
+            custody_attempt_id=reservation.custody_attempt_id,
+            observation=observation,
+        )
+        self.scenario.store.record_ordinary_agent_qualification_result(
+            attempt_id=attempt.attempt_id,
+            custody_attempt_id=reservation.custody_attempt_id,
+            result=observation,
+            attestation=attestation,
+        )
+        self.scenario.store.mark_ordinary_agent_custody_cleanup_unknown(
+            attempt_id=reservation.custody_attempt_id
+        )
+        self.scenario.store.record_ordinary_agent_qualification_failure(
+            attempt_id=attempt.attempt_id,
+            custody_attempt_id=reservation.custody_attempt_id,
+            reason_code="cleanup_unknown",
+            counts=observation.counts,
+        )
+        self.scenario.store.close_ordinary_agent_custody_issue_attempt(
+            attempt_id=reservation.custody_attempt_id, reason="confirmed_revoked"
+        )
+        self.scenario.store.cancel_ordinary_agent_session(
+            proof=self.scenario.fixture.proof,
+            session_id=self.scenario.session.session_id,
+        )
+
+        provider_calls = 0
+
+        def reject_provider_call(**_: object) -> object:
+            nonlocal provider_calls
+            provider_calls += 1
+            raise AssertionError("historical recovery must not make a provider request")
+
+        disposition = advance_ordinary_agent_qualification_job(
+            claimed=claimed,
+            store=self.scenario.store,
+            setup_resolver=lambda **_: (_ for _ in ()).throw(
+                AssertionError("historical recovery must not resolve fresh setup")
+            ),
+            api_request=reject_provider_call,
+            utc_now=lambda: datetime.fromtimestamp(self.scenario.fixture.now, timezone.utc),
+        )
+
+        self.assertEqual(disposition.status, "completed")
+        self.assertEqual(disposition.reason_code, "qualification_attested")
+        self.assertEqual(provider_calls, 0)
+        self.assertEqual(self.scenario.persisted_lease().budget.actions_used, 1)
+
+    def test_qualification_setup_binds_immutable_installed_activation(self) -> None:
+        installed_at = datetime.fromtimestamp(
+            self.scenario.fixture.now - 10, timezone.utc
+        ).isoformat()
+        expires_at = datetime.fromtimestamp(
+            self.scenario.fixture.now + 90, timezone.utc
+        ).isoformat()
+        installed = activation_support._record(
+            operation_id="qualification-installed-binding",
+            installed_at=installed_at,
+            expires_at=expires_at,
+            scope=OrdinaryAgentDeliveryActivationScope(
+                target=self.scenario.request.target,
+                managed_set_id=self.scenario.lease.managed_set_id,
+                managed_rule_id=self.scenario.lease.managed_rule_id,
+            ),
+        )
+        projected = OrdinaryAgentDeliveryActivationRecord.model_validate(
+            {
+                **installed.model_dump(mode="json"),
+                "effective_state": "guarded",
+                "revision": installed.revision + 1,
+                "updated_at": datetime.fromtimestamp(
+                    self.scenario.fixture.now, timezone.utc
+                ).isoformat(),
+                "activation_sha256": "",
+            }
+        )
+        execution = OrdinaryAgentDeliveryActivationExecutionEvidence(
+            action="setup",
+            result_status="ok",
+            result_digest="c" * 64,
+            changed=True,
+            activation_id=installed.activation_id,
+            activation_revision=installed.revision,
+            activation_sha256=installed.activation_sha256,
+            desired_state=installed.desired_state,
+            effective_state=installed.effective_state,
+            source_operation_id=installed.source_setup_operation_id,
+            reconciliation_required=False,
+        )
+        operation = SimpleNamespace(
+            approval=SimpleNamespace(
+                approver=SimpleNamespace(
+                    identity_type="github_human",
+                    github_id=self.scenario.fixture.human.identity.github_id,
+                    login=self.scenario.fixture.human.identity.login,
+                )
+            ),
+            execution=execution,
+        )
+
+        with patch.object(
+            self.scenario.store,
+            "_locked_authz_transition_operation",
+            return_value=operation,
+        ):
+            setup = PostgresRecordStore._ordinary_agent_qualification_setup_from_activation(
+                self.scenario.store,
+                None,
+                request=self.scenario.request,
+                activation=projected,
+                observed_at=self.scenario.fixture.now,
+            )
+
+        self.assertEqual(setup.source_activation_binding_sha256, installed.activation_sha256)
+        self.assertNotEqual(setup.source_activation_binding_sha256, projected.activation_sha256)
 
     def test_exhausted_action_budget_denies_first_attempt_without_partial_history(self) -> None:
         self.scenario.fixture.exhaust_lease_actions(self.scenario.lease.lease_id)

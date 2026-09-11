@@ -16,6 +16,7 @@ from control_plane.ordinary_agent_session_approval import (
     approve_ordinary_agent_enrollment,
     disconnect_ordinary_agent_principal,
 )
+from control_plane.ordinary_agent_session_lifecycle import OrdinaryAgentSessionAdmissionDenied
 from control_plane.service_auth import (
     BearerIdentityConfig,
     GitHubHumanIdentity,
@@ -100,6 +101,44 @@ class OrdinaryAgentManagementHTTPTests(unittest.IsolatedAsyncioTestCase):
                 },
             )
             self.assertEqual(response.status_code, 503, response.text)
+
+    async def test_guarded_provider_readiness_gap_is_reported_as_service_unavailable(self) -> None:
+        fixture = effect_support.OrdinaryAgentEffectStorageTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        session = fixture.fixture
+        app = create_launchplane_fastapi_app(
+            verifier=Mock(),
+            authz_policy=session.policy.policy,
+            record_store_factory=lambda: fixture.store,
+        )
+        with patch.object(
+            PostgresRecordStore,
+            "admit_ordinary_agent_client_request",
+            side_effect=OrdinaryAgentSessionAdmissionDenied("provider_readiness_unavailable"),
+        ):
+            async with lifespan_client(app) as client:
+                response = await client.post(
+                    "/v1/agent/ordinary-agent-jobs",
+                    headers={"Authorization": f"Bearer {session.bundle.token.value}"},
+                    json={
+                        "schema_version": 2,
+                        "purpose": "guarded_delivery",
+                        "idempotency_key": "http-guarded-provider-readiness-gap",
+                        "session_id": fixture.request.session_id,
+                        "lease_id": fixture.request.lease_id,
+                        "base_sha": "a" * 40,
+                        "pull_requests": [{"number": 12, "head_sha": "b" * 40}],
+                        "permitted_stack_edit_pull_requests": [],
+                        "refresh_allowance": 0,
+                    },
+                )
+
+        self.assertEqual(response.status_code, 503, response.text)
+        self.assertEqual(
+            response.json()["error"]["message"],
+            "Guarded delivery is unavailable until Launchplane can verify repository protection.",
+        )
 
     async def test_job_reads_use_current_ordinary_or_signed_administrator_identity(self) -> None:
         fixture = effect_support.OrdinaryAgentEffectStorageTests()
