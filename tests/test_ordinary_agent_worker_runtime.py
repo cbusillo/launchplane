@@ -37,6 +37,7 @@ class OrdinaryAgentWorkerRuntimeTests(unittest.TestCase):
         self.assertEqual(result.failure_phase, "claim")
         self.assertEqual(telemetry.claim_failures, 1)
         self.assertEqual(telemetry.processed, 0)
+        self.assertEqual(telemetry.payload()["last_reason_code"], "request_variant_unsupported")
 
     def test_support_descriptor_rejects_empty_compatibility_sets(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "no supported finite-request"):

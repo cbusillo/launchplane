@@ -16,6 +16,7 @@ from control_plane.contracts.ordinary_agent_effect import (
 @dataclass
 class OrdinaryAgentJobScanState:
     after: OrdinaryAgentJobCursor | None = None
+    last_claim_rejection_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -45,9 +46,12 @@ def run_ordinary_agent_job_once(
         )
     except OrdinaryAgentJobClaimRejected as error:
         state.after = error.cursor
+        state.last_claim_rejection_reason = error.reason_code
         return OrdinaryAgentJobScanResult(failure_phase="claim")
     except Exception:
+        state.last_claim_rejection_reason = "claim_failed"
         return OrdinaryAgentJobScanResult(failure_phase="claim")
+    state.last_claim_rejection_reason = None
     if claimed is None:
         state.after = None
         return OrdinaryAgentJobScanResult()

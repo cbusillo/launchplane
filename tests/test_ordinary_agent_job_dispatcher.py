@@ -52,7 +52,9 @@ class OrdinaryAgentJobDispatcherTests(unittest.TestCase):
         dispatcher = build_ordinary_agent_job_dispatcher(
             record_store=store, support=DEFAULT_ORDINARY_AGENT_WORKER_SUPPORT
         )
-        disposition = OrdinaryAgentJobAttemptDisposition(status="waiting", next_due_at=1_800_000_010)
+        disposition = OrdinaryAgentJobAttemptDisposition(
+            status="waiting", next_due_at=1_800_000_010
+        )
         qualification = OrdinaryAgentQualificationFiniteRequestV2.model_validate(self.common)
         guarded_v2 = OrdinaryAgentGuardedDeliveryFiniteRequestV2.model_validate(
             {

@@ -9,7 +9,6 @@ from control_plane.contracts.ordinary_agent import OrdinaryAgentPullRequest, Ord
 from control_plane.contracts.ordinary_agent_client import (
     OrdinaryAgentFiniteRequestServerFields,
     build_ordinary_agent_finite_request_from_client,
-    ordinary_agent_finite_client_intent_matches,
     ordinary_agent_finite_client_intent_sha256,
     ordinary_agent_finite_request_deadlines,
     ordinary_agent_finite_request_id,
@@ -243,12 +242,6 @@ class OrdinaryAgentFiniteRequestV2Tests(unittest.TestCase):
         self.assertEqual(persisted.refresh_allowance_total, 2)
         self.assertEqual(persisted.status, "waiting")
         self.assertEqual(persisted.refresh_used, 0)
-        self.assertTrue(ordinary_agent_finite_client_intent_matches(request, persisted))
-        self.assertFalse(
-            ordinary_agent_finite_client_intent_matches(
-                request.model_copy(update={"refresh_allowance": 1}), persisted
-            )
-        )
         with self.assertRaisesRegex(ValueError, "refresh allowance exceeds server ceiling"):
             build_ordinary_agent_finite_request_from_client(
                 request.model_copy(update={"refresh_allowance": 3}),

@@ -80,12 +80,22 @@ class OrdinaryAgentWorkerTelemetry:
     empty_polls: int = 0
     last_status: str | None = None
     last_failure_phase: Literal["claim", "advance_or_finish"] | None = None
+    last_reason_code: str | None = None
 
-    def record(self, result: OrdinaryAgentJobScanResult) -> None:
+    def record(
+        self, result: OrdinaryAgentJobScanResult, *, claim_rejection_reason: str | None = None
+    ) -> None:
         self.polls += 1
         self.processed += result.processed
         self.last_status = result.status
         self.last_failure_phase = result.failure_phase
+        self.last_reason_code = (
+            claim_rejection_reason
+            if result.failure_phase == "claim"
+            else "advance_or_finish_failed"
+            if result.failure_phase == "advance_or_finish"
+            else result.status
+        )
         if result.failure_phase == "claim":
             self.claim_failures += 1
         elif result.failure_phase == "advance_or_finish":
@@ -119,7 +129,7 @@ def run_ordinary_agent_worker_once(
         lease_seconds=lease_seconds,
         advance_job=dispatcher,
     )
-    telemetry.record(result)
+    telemetry.record(result, claim_rejection_reason=state.last_claim_rejection_reason)
     return result
 
 

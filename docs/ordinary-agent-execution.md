@@ -401,13 +401,18 @@ identity-compatible guarded-delivery records. Schema v2 is a discriminated JSON
 payload: `guarded_delivery` retains the exact base, PR/head, stack-edit and
 refresh scope, while `qualification` has no base, PR or stack-edit fields.
 Version-2 intent and scope identities use a fixed v2 domain plus the schema
-version and purpose, so the two purposes cannot share an identity. Qualification
+version and purpose, so the two purposes cannot share an identity. The finite
+request row stores the original validated v2 client intent in nullable metadata,
+separate from the mutable job payload. Exact retries therefore return the current
+job after lifecycle or permitted-head-refresh progress, while changed original
+intent conflicts. Historical v1 rows have no such metadata and cannot be replayed
+through the v2 client endpoint. Qualification
 requires a `preflight` lease with a positive finite action allowance, charges
 zero PRs against that lease, and guarded delivery requires `guarded_merge`.
 Existing merge, snapshot, landing and effect paths refuse qualification. The
-separate qualification advancer is a dormant, direct-call-only source slice:
-it has no ingress, dispatcher registration, worker assembly, activation record,
-provider setup resolver, or production loop wiring.
+separate qualification advancer is selected by the exhaustive dormant ordinary
+worker dispatcher. Its setup and readiness come from current activation records;
+the checked compose profile remains disabled until a later activation change.
 
 The dormant advancer reserves a schema-v2 controller-free read attempt and one
 read-only `merge_train_snapshot` custody lease. Its only provider observation is

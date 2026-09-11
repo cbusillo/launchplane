@@ -50,7 +50,7 @@ class SchemaMigrationTests(unittest.TestCase):
         }
         indexes = {(index.table_name, index.index_name): index for index in CRITICAL_SCHEMA_INDEXES}
 
-        self.assertEqual(EXPECTED_ALEMBIC_HEAD_REVISION, "e0f2a4c6d8b1")
+        self.assertEqual(EXPECTED_ALEMBIC_HEAD_REVISION, "a3c5e7f9b1d4")
         self.assertEqual(
             column_types[("launchplane_ordinary_agent_landing_preparations", "attempt_ordinal")],
             ("bigint",),

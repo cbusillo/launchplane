@@ -19,7 +19,6 @@ from control_plane.contracts.ordinary_agent_session_lifecycle import (
 
 if TYPE_CHECKING:
     from control_plane.contracts.ordinary_agent_session_lifecycle import (
-        OrdinaryAgentFiniteRequest,
         OrdinaryAgentGuardedDeliveryFiniteRequestV2,
         OrdinaryAgentQualificationFiniteRequestV2,
     )
@@ -102,53 +101,6 @@ def ordinary_agent_finite_client_intent_sha256(
     request: OrdinaryAgentFiniteClientRequest,
 ) -> str:
     return canonical_json_sha256(ordinary_agent_finite_client_intent_payload(request))
-
-
-def ordinary_agent_finite_client_intent_from_persisted(
-    request: "OrdinaryAgentFiniteRequest",
-) -> OrdinaryAgentFiniteClientRequest:
-    """Project only immutable client intent from a stored complete variant."""
-
-    from control_plane.contracts.ordinary_agent_session_lifecycle import (
-        OrdinaryAgentGuardedDeliveryFiniteRequestV2,
-        OrdinaryAgentQualificationFiniteRequestV2,
-    )
-
-    common = {
-        "schema_version": 2,
-        "idempotency_key": request.idempotency_key,
-        "session_id": request.session_id,
-        "lease_id": request.lease_id,
-    }
-    if isinstance(request, OrdinaryAgentQualificationFiniteRequestV2):
-        return OrdinaryAgentQualificationFiniteClientRequest.model_validate(
-            {**common, "purpose": "qualification"}
-        )
-    if isinstance(request, OrdinaryAgentGuardedDeliveryFiniteRequestV2):
-        return OrdinaryAgentGuardedDeliveryFiniteClientRequest.model_validate(
-            {
-                **common,
-                "purpose": "guarded_delivery",
-                "base_sha": request.base_sha,
-                "pull_requests": request.pull_requests,
-                "permitted_stack_edit_pull_requests": request.permitted_stack_edit_pull_requests,
-                "refresh_allowance": request.refresh_allowance_total,
-            }
-        )
-    raise TypeError(f"unsupported persisted ordinary finite request: {type(request)!r}")
-
-
-def ordinary_agent_finite_client_intent_matches(
-    request: OrdinaryAgentFiniteClientRequest,
-    persisted: "OrdinaryAgentFiniteRequest",
-) -> bool:
-    """Compare replay intent without consulting mutable current settings."""
-
-    return ordinary_agent_finite_client_intent_payload(
-        request
-    ) == ordinary_agent_finite_client_intent_payload(
-        ordinary_agent_finite_client_intent_from_persisted(persisted)
-    )
 
 
 def ordinary_agent_finite_request_id(*, principal_id: str, idempotency_key: str) -> str:

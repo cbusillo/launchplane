@@ -454,10 +454,9 @@ from control_plane.contracts.ordinary_agent_client import (
     OrdinaryAgentFiniteClientRequest,
     OrdinaryAgentFiniteRequestServerFields,
     build_ordinary_agent_finite_request_from_client,
-    ordinary_agent_finite_client_intent_from_persisted,
-    ordinary_agent_finite_client_intent_matches,
     ordinary_agent_finite_client_intent_sha256,
     ordinary_agent_finite_request_id,
+    parse_ordinary_agent_finite_client_request,
 )
 from control_plane.contracts.ordinary_agent_activation import (
     OrdinaryAgentDeliveryActivationEvent,
@@ -2550,6 +2549,9 @@ class LaunchplaneOrdinaryAgentFiniteRequestRow(Base):
     lease_id: Mapped[str] = mapped_column(String, nullable=False)
     idempotency_key: Mapped[str] = mapped_column(String, nullable=False)
     intent_sha256: Mapped[str] = mapped_column(String, nullable=False)
+    client_intent_payload: Mapped[PayloadDict | None] = mapped_column(
+        PayloadJsonType, nullable=True
+    )
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -21503,12 +21505,18 @@ class PostgresRecordStore(HumanSessionStore):
             )
             if existing is not None:
                 persisted = parse_ordinary_agent_finite_request(existing.payload)
+                if existing.client_intent_payload is None:
+                    raise OrdinaryAgentSessionAdmissionDenied("idempotency_conflict")
+                stored_intent = parse_ordinary_agent_finite_client_request(
+                    existing.client_intent_payload
+                )
                 if (
                     existing.intent_sha256 != client_intent_sha256
-                    or not ordinary_agent_finite_client_intent_matches(request, persisted)
+                    or stored_intent != request
+                    or ordinary_agent_finite_client_intent_sha256(stored_intent)
+                    != existing.intent_sha256
                 ):
                     raise OrdinaryAgentSessionAdmissionDenied("idempotency_conflict")
-                stored_intent = ordinary_agent_finite_client_intent_from_persisted(persisted)
                 expected = build_ordinary_agent_finite_request_from_client(
                     stored_intent,
                     server=OrdinaryAgentFiniteRequestServerFields(
@@ -21522,7 +21530,9 @@ class PostgresRecordStore(HumanSessionStore):
                         refresh_allowance_ceiling=getattr(persisted, "refresh_allowance_total", 0),
                     ),
                 )
-                if expected != persisted:
+                if ordinary_agent_finite_request_replay_identity(
+                    expected
+                ) != ordinary_agent_finite_request_replay_identity(persisted):
                     raise OrdinaryAgentSessionAdmissionDenied("idempotency_conflict")
                 return persisted
 
@@ -21618,6 +21628,7 @@ class PostgresRecordStore(HumanSessionStore):
                     lease_id=admitted.lease.lease_id,
                     idempotency_key=request.idempotency_key,
                     intent_sha256=client_intent_sha256,
+                    client_intent_payload=self._payload_dict(request),
                     payload=self._payload_dict(admitted_request),
                 )
             )
@@ -29369,7 +29380,8 @@ class PostgresRecordStore(HumanSessionStore):
         context = self._ordinary_agent_current_chain_context(session, request_id=request_id)
         if context.lease.budget.actions_used >= context.lease.budget.action_limit:
             raise OrdinaryAgentSessionAdmissionDenied("budget_exhausted")
-        self._require_and_project_guarded_readiness(session, context=context)
+        if is_guarded_ordinary_agent_finite_request(context.request):
+            self._require_and_project_guarded_readiness(session, context=context)
         return context
 
     def _ordinary_agent_job_context(
