@@ -33,6 +33,7 @@ from control_plane.contracts.ordinary_agent_qualification import (
 )
 from control_plane.contracts.ordinary_agent_activation import (
     OrdinaryAgentDeliveryActivationRecord,
+    OrdinaryAgentDeliveryActivationScope,
 )
 from control_plane.contracts.ordinary_agent_session_lifecycle import (
     OrdinaryAgentJobBinding,
@@ -42,15 +43,20 @@ from control_plane.contracts.ordinary_agent_session_lifecycle import (
 from control_plane.contracts.ordinary_agent_snapshot import OrdinaryAgentProviderRequestCounts
 from control_plane.github_app_identity import ordinary_agent_effect_permissions
 from control_plane.ordinary_agent_session_approval import approve_existing_ordinary_agent_session
+from control_plane.ordinary_agent_qualification_job import (
+    advance_ordinary_agent_qualification_job,
+)
 from control_plane.ordinary_agent_session_lifecycle import OrdinaryAgentSessionAdmissionDenied
 from control_plane.storage.postgres import (
     LaunchplaneOrdinaryAgentFiniteRequestRow,
+    LaunchplaneOrdinaryAgentJobClaimRow,
     LaunchplaneOrdinaryAgentLeaseRow,
     LaunchplaneOrdinaryAgentReadAttemptRow,
     LaunchplaneMergeTrainControllerStateRow,
     PostgresRecordStore,
 )
 from tests import test_ordinary_agent_session_storage as session_support
+from tests import test_ordinary_agent_activation_storage as activation_support
 from tests.support.ordinary_agent_lifecycle import replace_policy_without_ordinary_agent_rule
 
 
@@ -129,7 +135,7 @@ class QualificationStorageScenario:
         )
         # These tests isolate qualification attempt/custody persistence. Runtime
         # activation resolution has dedicated end-to-end storage coverage.
-        readiness = patch.object(
+        self.readiness_patch = patch.object(
             self.store,
             "_require_ordinary_agent_runtime_readiness",
             return_value=(Mock(spec=OrdinaryAgentDeliveryActivationRecord), (), self.fixture.now),
@@ -139,9 +145,9 @@ class QualificationStorageScenario:
             "_ordinary_agent_qualification_setup_from_activation",
             return_value=self.setup,
         )
-        readiness.start()
+        self.readiness_patch.start()
         setup_resolution.start()
-        test_case.addCleanup(readiness.stop)
+        test_case.addCleanup(self.readiness_patch.stop)
         test_case.addCleanup(setup_resolution.stop)
 
     def claim(
@@ -383,6 +389,151 @@ class OrdinaryAgentQualificationStorageTests(unittest.TestCase):
         self.assertEqual(later_revision.binding_revision, 2)
         self.assertEqual(later_revision.attempt_ordinal, 1)
         self.assertEqual(self.scenario.persisted_lease().budget.actions_used, 1)
+
+    def test_pre_mint_readiness_rechecks_revoked_activation_without_second_charge(self) -> None:
+        claimed = self.scenario.claim(lease_seconds=120)
+        attempt = self.scenario.reserve_attempt(claimed)
+        self.scenario.reserve_custody(claimed=claimed, attempt=attempt)
+        actions_used = self.scenario.persisted_lease().budget.actions_used
+
+        scope = OrdinaryAgentDeliveryActivationScope(
+            target=self.scenario.request.target,
+            managed_set_id=self.scenario.lease.managed_set_id,
+            managed_rule_id=self.scenario.lease.managed_rule_id,
+        )
+        installed = activation_support._record(
+            operation_id="qualification-runtime-readiness",
+            installed_at="2026-09-10T00:00:00Z",
+            expires_at="2026-09-12T00:00:00Z",
+            scope=scope,
+        )
+        installed_event = activation_support._event(
+            installed,
+            action="installed",
+            source_operation_id=installed.source_setup_operation_id,
+        )
+        self.scenario.store.install_ordinary_agent_delivery_activation(installed, installed_event)
+        revoked = activation_support._revoked(installed, occurred_at="2026-09-10T00:01:00Z")
+        self.scenario.store.revoke_ordinary_agent_delivery_activation(
+            revoked,
+            activation_support._event(
+                revoked,
+                action="revoked",
+                source_operation_id="qualification-runtime-readiness-revoke",
+                previous=installed,
+            ),
+        )
+        self.scenario.readiness_patch.stop()
+
+        with self.assertRaisesRegex(OrdinaryAgentSessionAdmissionDenied, "activation_not_current"):
+            self.scenario.store.require_ordinary_agent_qualification_runtime_readiness(
+                claim_fence=claimed.claim_fence,
+                attempt_id=attempt.attempt_id,
+            )
+        self.assertEqual(
+            self.scenario.persisted_lease().budget.actions_used,
+            actions_used,
+        )
+
+    def test_revoked_activation_paces_closed_pre_mint_custody_without_provider_retry(
+        self,
+    ) -> None:
+        claimed = self.scenario.claim(lease_seconds=30)
+        attempt = self.scenario.reserve_attempt(claimed)
+        reservation = self.scenario.reserve_custody(claimed=claimed, attempt=attempt)
+        acquired, _ = self.scenario.store.acquire_ordinary_agent_custody_issue_attempt(
+            attempt_id=reservation.custody_attempt_id,
+            idempotency_key_sha256=hashlib.sha256(reservation.idempotency_key.encode()).hexdigest(),
+            request_sha256=canonical_json_sha256(
+                {
+                    "candidate": reservation.candidate.model_dump(mode="json"),
+                    "request": reservation.request_payload,
+                }
+            ),
+            candidate=reservation.candidate,
+            requested_permissions=ordinary_agent_effect_permissions(
+                reservation.candidate.effect_profile
+            ),
+            dispatch_window_seconds=30,
+        )
+        self.assertEqual(acquired, "acquired")
+        self.scenario.store.close_ordinary_agent_custody_issue_attempt(
+            attempt_id=reservation.custody_attempt_id,
+            reason="not_dispatched",
+        )
+        self.scenario.store.finish_ordinary_agent_job_attempt(
+            claim_fence=claimed.claim_fence,
+            disposition=OrdinaryAgentJobAttemptDisposition(
+                status="waiting",
+                next_due_at=self.scenario.fixture.now + 30,
+                reason_code="activation_not_current",
+            ),
+        )
+
+        scope = OrdinaryAgentDeliveryActivationScope(
+            target=self.scenario.request.target,
+            managed_set_id=self.scenario.lease.managed_set_id,
+            managed_rule_id=self.scenario.lease.managed_rule_id,
+        )
+        installed = activation_support._record(
+            operation_id="qualification-maintenance-readiness",
+            installed_at="2026-09-10T00:00:00Z",
+            expires_at="2026-09-12T00:00:00Z",
+            scope=scope,
+        )
+        self.scenario.store.install_ordinary_agent_delivery_activation(
+            installed,
+            activation_support._event(
+                installed,
+                action="installed",
+                source_operation_id=installed.source_setup_operation_id,
+            ),
+        )
+        revoked = activation_support._revoked(installed, occurred_at="2026-09-10T00:01:00Z")
+        self.scenario.store.revoke_ordinary_agent_delivery_activation(
+            revoked,
+            activation_support._event(
+                revoked,
+                action="revoked",
+                source_operation_id="qualification-maintenance-readiness-revoke",
+                previous=installed,
+            ),
+        )
+        self.scenario.readiness_patch.stop()
+        self.scenario.fixture.clock.return_value = datetime.fromtimestamp(
+            self.scenario.fixture.now + 31, timezone.utc
+        ).isoformat()
+        reclaimed = self.scenario.claim(worker_id="maintenance-worker", lease_seconds=30)
+        provider_calls = 0
+
+        def reject_provider_call(**_: object) -> object:
+            nonlocal provider_calls
+            provider_calls += 1
+            raise AssertionError("readiness denial must precede a fresh provider request")
+
+        disposition = advance_ordinary_agent_qualification_job(
+            claimed=reclaimed,
+            store=self.scenario.store,
+            setup_resolver=lambda **_: (_ for _ in ()).throw(
+                AssertionError("existing history must not resolve fresh setup")
+            ),
+            api_request=reject_provider_call,
+            utc_now=lambda: datetime.fromtimestamp(self.scenario.fixture.now + 31, timezone.utc),
+        )
+        self.assertEqual(disposition.status, "waiting")
+        self.assertEqual(disposition.reason_code, "activation_not_current")
+        self.assertEqual(provider_calls, 0)
+        self.assertEqual(self.scenario.persisted_lease().budget.actions_used, 1)
+        self.scenario.store.finish_ordinary_agent_job_attempt(
+            claim_fence=reclaimed.claim_fence,
+            disposition=disposition,
+        )
+        with self.scenario.store._session_factory() as session:
+            claim_row = session.get(
+                LaunchplaneOrdinaryAgentJobClaimRow, self.scenario.request.request_id
+            )
+            assert claim_row is not None
+            self.assertGreater(claim_row.next_due_at, self.scenario.fixture.now + 31)
 
     def test_exhausted_action_budget_denies_first_attempt_without_partial_history(self) -> None:
         self.scenario.fixture.exhaust_lease_actions(self.scenario.lease.lease_id)

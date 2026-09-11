@@ -609,6 +609,9 @@ from control_plane.storage.schema_invariants import (
     ordinary_agent_delivery_activation_schema_capability,
     verify_postgres_schema_invariants,
 )
+from control_plane.ordinary_agent_worker_runtime import (
+    DEFAULT_ORDINARY_AGENT_WORKER_SUPPORT,
+)
 
 RecordModel = TypeVar("RecordModel", bound=BaseModel)
 
@@ -26236,7 +26239,7 @@ class PostgresRecordStore(HumanSessionStore):
         self,
         *,
         claim_fence: OrdinaryAgentJobClaimFence,
-        setup: OrdinaryAgentQualificationSetup,
+        setup: OrdinaryAgentQualificationSetup | None,
     ) -> effect_contracts.OrdinaryAgentQualificationAttemptRecord:
         """Reserve the one finite preflight action without touching a controller."""
         with self._session_factory() as session:
@@ -26256,34 +26259,6 @@ class PostgresRecordStore(HumanSessionStore):
             self._require_ordinary_agent_claim(
                 session, claim_fence=claim_fence, now=context.now, for_update=True
             )
-            if (
-                setup.target != request.target
-                or setup.managed_set_id != context.lease.managed_set_id
-                or setup.managed_rule_id != context.lease.managed_rule_id
-                or setup.attestation_expires_at <= context.now
-            ):
-                raise OrdinaryAgentSessionAdmissionDenied("qualification_setup_conflict")
-            self._lock_ordinary_agent_provider_waits(
-                session,
-                principal=context.principal,
-                resource_classes=("core", "graphql", "secondary"),
-            )
-            custody_row = session.get(
-                LaunchplaneOrdinaryAgentCredentialCustodyRow, context.principal.custody_record_id
-            )
-            if custody_row is None:
-                raise OrdinaryAgentSessionAdmissionDenied("custody_unavailable")
-            custody = OrdinaryAgentCredentialCustodyRecord.model_validate(custody_row.payload)
-            if (
-                custody.custody_sha256 != context.principal.custody_sha256
-                or custody.target != request.target
-                or custody.credential_id != context.credential.credential_id
-                or custody.credential_version != context.credential.credential_version
-                or "merge_train_snapshot" not in custody.effect_profiles
-                or custody.github_installation_id is None
-                or not custody.valid_from <= context.now < custody.expires_at
-            ):
-                raise OrdinaryAgentSessionAdmissionDenied("custody_binding_conflict")
             rows = tuple(
                 session.scalars(
                     select(LaunchplaneOrdinaryAgentReadAttemptRow)
@@ -26372,6 +26347,8 @@ class PostgresRecordStore(HumanSessionStore):
                 # no successor may be reserved under the finite retry cap.
                 session.commit()
                 raise OrdinaryAgentSessionAdmissionDenied("read_attempts_exhausted")
+            if setup is None:
+                raise OrdinaryAgentSessionAdmissionDenied("qualification_setup_required")
             activation, _, readiness_now = self._require_ordinary_agent_runtime_readiness(
                 session, context=context, purpose="qualification"
             )
@@ -26383,6 +26360,31 @@ class PostgresRecordStore(HumanSessionStore):
             )
             if setup != trusted_setup:
                 raise OrdinaryAgentSessionAdmissionDenied("qualification_setup_conflict")
+            self._lock_ordinary_agent_provider_waits(
+                session,
+                principal=context.principal,
+                resource_classes=("core", "graphql", "secondary"),
+            )
+            custody_row = session.get(
+                LaunchplaneOrdinaryAgentCredentialCustodyRow, context.principal.custody_record_id
+            )
+            if custody_row is None:
+                raise OrdinaryAgentSessionAdmissionDenied("custody_unavailable")
+            custody = OrdinaryAgentCredentialCustodyRecord.model_validate(custody_row.payload)
+            if (
+                custody.custody_sha256 != context.principal.custody_sha256
+                or custody.principal_id != context.principal.principal_id
+                or custody.target != request.target
+                or custody.policy.target != request.target
+                or custody.policy.managed_set_id != context.lease.managed_set_id
+                or custody.policy.managed_rule_id != context.lease.managed_rule_id
+                or custody.credential_id != context.credential.credential_id
+                or custody.credential_version != context.credential.credential_version
+                or "merge_train_snapshot" not in custody.effect_profiles
+                or custody.github_installation_id is None
+                or not custody.valid_from <= context.now < custody.expires_at
+            ):
+                raise OrdinaryAgentSessionAdmissionDenied("custody_binding_conflict")
             # A charge is tied to logical request identity, not a mutable binding revision.
             if not qualification_records:
                 budget = context.lease.budget
@@ -28986,6 +28988,10 @@ class PostgresRecordStore(HumanSessionStore):
         expected_action = "preflight" if purpose == "qualification" else "guarded_merge"
         if context.lease.action != expected_action:
             raise OrdinaryAgentSessionAdmissionDenied("readiness_action_mismatch")
+        if not DEFAULT_ORDINARY_AGENT_WORKER_SUPPORT.supports_phase(
+            request=context.request, purpose=purpose
+        ):
+            raise OrdinaryAgentSessionAdmissionDenied("runtime_protocol_incompatible")
         activation_statement = select(LaunchplaneOrdinaryAgentDeliveryActivationRow).where(
             LaunchplaneOrdinaryAgentDeliveryActivationRow.repository_id
             == context.request.target.repository_id,
@@ -29134,6 +29140,67 @@ class PostgresRecordStore(HumanSessionStore):
         if custody_row is None:
             raise OrdinaryAgentSessionAdmissionDenied("custody_unavailable")
         custody = OrdinaryAgentCredentialCustodyRecord.model_validate(custody_row.payload)
+        required_effect_profiles = (
+            {"merge_train_snapshot"}
+            if purpose == "qualification"
+            else set(ordinary_agent_enrollment_effect_profiles())
+        )
+        required_permissions = (
+            {"metadata:read", *_ordinary_agent_snapshot_read_permissions()}
+            if purpose == "qualification"
+            else set(ordinary_agent_enrollment_permissions())
+        )
+        custody_permissions = {
+            f"{permission.name}:{permission.access}" for permission in custody.permissions
+        }
+        secret = custody.managed_secret
+        binding_row = session.get(
+            LaunchplaneSecretBindingRow,
+            secret.binding_id,
+            with_for_update=self.database_dialect_name == "postgresql",
+        )
+        secret_row = session.get(
+            LaunchplaneSecretRow,
+            secret.secret_id,
+            with_for_update=self.database_dialect_name == "postgresql",
+        )
+        version_row = session.get(
+            LaunchplaneSecretVersionRow,
+            secret.secret_version_id,
+            with_for_update=self.database_dialect_name == "postgresql",
+        )
+        if binding_row is None or secret_row is None or version_row is None:
+            raise OrdinaryAgentSessionAdmissionDenied("custody_binding_conflict")
+        binding = self._read_payload(model_type=SecretBinding, payload=binding_row.payload)
+        secret_record = self._read_payload(model_type=SecretRecord, payload=secret_row.payload)
+        secret_version = self._read_payload(model_type=SecretVersion, payload=version_row.payload)
+        if (
+            custody.custody_sha256 != context.principal.custody_sha256
+            or custody.principal_id != context.principal.principal_id
+            or custody.credential_id != context.credential.credential_id
+            or custody.credential_version != context.credential.credential_version
+            or custody.target != context.request.target
+            or custody.policy.target != context.request.target
+            or custody.policy.managed_set_id != context.lease.managed_set_id
+            or custody.policy.managed_rule_id != context.lease.managed_rule_id
+            or custody.repository_inventory.record_id != inventory.record_id
+            or custody.repository_inventory.inventory_revision != inventory.inventory_revision
+            or custody.repository_inventory.inventory_digest != inventory.inventory_digest
+            or not required_effect_profiles.issubset(custody.effect_profiles)
+            or not required_permissions.issubset(custody_permissions)
+            or custody.github_installation_id is None
+            or secret.integration != ORDINARY_AGENT_GITHUB_APP_INTEGRATION
+            or secret.binding_key != ORDINARY_AGENT_GITHUB_APP_PRIVATE_KEY_BINDING
+            or binding.secret_id != secret.secret_id
+            or binding.integration != secret.integration
+            or binding.binding_key != secret.binding_key
+            or binding.status != "configured"
+            or secret_record.status != "configured"
+            or secret_record.integration != secret.integration
+            or secret_record.current_version_id != secret.secret_version_id
+            or secret_version.secret_id != secret.secret_id
+        ):
+            raise OrdinaryAgentSessionAdmissionDenied("custody_binding_conflict")
         evidence_ids = [
             activation.activation_id,
             setup_operation.operation_id,
@@ -29142,7 +29209,7 @@ class PostgresRecordStore(HumanSessionStore):
             custody.record_id,
         ]
 
-        attestations: tuple[OrdinaryAgentQualificationAttestation, ...] = ()
+        attestations: list[tuple[int, int, str, OrdinaryAgentQualificationAttestation]] = []
         if purpose == "guarded_delivery":
             attestation_statement = (
                 select(LaunchplaneOrdinaryAgentReadAttemptRow)
@@ -29161,33 +29228,91 @@ class PostgresRecordStore(HumanSessionStore):
             if self.database_dialect_name == "postgresql":
                 attestation_statement = attestation_statement.with_for_update()
             candidates = tuple(session.scalars(attestation_statement).all())
-            attestations = tuple(
-                attempt.attestation
-                for attempt in (
-                    effect_contracts.parse_ordinary_agent_read_attempt(row.payload)
-                    for row in candidates
+            for candidate in candidates:
+                attempt = effect_contracts.parse_ordinary_agent_read_attempt(candidate.payload)
+                if (
+                    not isinstance(
+                        attempt, effect_contracts.OrdinaryAgentQualificationAttemptRecord
+                    )
+                    or attempt.state != "completed"
+                    or attempt.attestation is None
+                ):
+                    continue
+                attestation = attempt.attestation
+                request_row = session.get(
+                    LaunchplaneOrdinaryAgentFiniteRequestRow, attempt.request_id
                 )
-                if isinstance(attempt, effect_contracts.OrdinaryAgentQualificationAttemptRecord)
-                and attempt.attestation is not None
-                and attempt.attestation.target == context.request.target
-                and attempt.attestation.source_activation_operation_id
-                == activation.source_setup_operation_id
-                and attempt.attestation.principal_id == context.principal.principal_id
-                and attempt.attestation.credential_id == context.credential.credential_id
-                and attempt.attestation.credential_version == context.credential.credential_version
-                and attempt.attestation.policy_managed_set_id == context.lease.managed_set_id
-                and attempt.attestation.policy_managed_rule_id == context.lease.managed_rule_id
-                and attempt.attestation.custody_record_id == custody.record_id
-                and attempt.attestation.custody_sha256 == custody.custody_sha256
-                and attempt.attestation.repository_inventory_record_id == inventory.record_id
-                and attempt.attestation.repository_inventory_revision
-                == inventory.inventory_revision
-                and attempt.attestation.repository_inventory_digest == inventory.inventory_digest
-                and attempt.attestation.github_app_id == custody.github_app_id
-                and attempt.attestation.github_installation_id == custody.github_installation_id
-                and attempt.attestation.provider_inspection_sha256
-                == custody.provider_inspection_sha256
-            )
+                custody_attempt_row = session.get(
+                    LaunchplaneOrdinaryAgentCustodyIssueAttemptRow,
+                    attestation.custody_attempt_id,
+                    with_for_update=self.database_dialect_name == "postgresql",
+                )
+                if request_row is None or custody_attempt_row is None:
+                    continue
+                qualification_request = parse_ordinary_agent_finite_request(request_row.payload)
+                custody_attempt = OrdinaryAgentCustodyIssueAttempt.model_validate(
+                    custody_attempt_row.payload
+                )
+                if (
+                    not isinstance(qualification_request, OrdinaryAgentQualificationFiniteRequestV2)
+                    or qualification_request.request_id != attempt.request_id
+                    or qualification_request.principal_id != attempt.principal_id
+                    or qualification_request.target != attempt.setup.target
+                    or qualification_request.binding_revision != attempt.binding_revision
+                    or qualification_request.scope_sha256 != attempt.scope_sha256
+                    or attempt.request_id != attestation.request_id
+                    or attempt.binding_revision != attestation.binding_revision
+                    or attempt.scope_sha256 != attestation.scope_sha256
+                    or attempt.setup.target != attestation.target
+                    or attempt.setup.source_activation_operation_id
+                    != attestation.source_activation_operation_id
+                    or attempt.setup.source_activation_binding_sha256
+                    != attestation.source_activation_binding_sha256
+                    or attempt.principal_id != attestation.principal_id
+                    or attempt.credential_id != attestation.credential_id
+                    or attempt.credential_version != attestation.credential_version
+                    or attempt.custody_record_id != attestation.custody_record_id
+                    or attempt.custody_sha256 != attestation.custody_sha256
+                    or attestation.custody_attempt_id not in attempt.custody_attempt_ids
+                    or custody_attempt.state != "closed"
+                    or attestation.target != context.request.target
+                    or attestation.source_activation_operation_id
+                    != activation.source_setup_operation_id
+                    or attestation.source_activation_binding_sha256 != installed.activation_sha256
+                    or attestation.principal_id != context.principal.principal_id
+                    or attestation.credential_id != context.credential.credential_id
+                    or attestation.credential_version != context.credential.credential_version
+                    or attestation.policy_managed_set_id != context.lease.managed_set_id
+                    or attestation.policy_managed_rule_id != context.lease.managed_rule_id
+                    or attestation.custody_record_id != custody.record_id
+                    or attestation.custody_sha256 != custody.custody_sha256
+                    or attestation.repository_inventory_record_id != inventory.record_id
+                    or attestation.repository_inventory_revision != inventory.inventory_revision
+                    or attestation.repository_inventory_digest != inventory.inventory_digest
+                    or attestation.github_app_id != custody.github_app_id
+                    or attestation.github_installation_id != custody.github_installation_id
+                    or attestation.managed_secret_binding_id != secret.binding_id
+                    or attestation.managed_secret_id != secret.secret_id
+                    or attestation.managed_secret_version_id != secret.secret_version_id
+                    or attestation.provider_inspection_sha256 != custody.provider_inspection_sha256
+                    or attestation.installed_permission_ceiling_sha256
+                    != qualification_permission_ceiling_sha256(
+                        permissions=[item.model_dump(mode="json") for item in custody.permissions]
+                    )
+                    or attestation.read_profile_sha256
+                    != qualification_read_profile_sha256(
+                        permissions=_ordinary_agent_snapshot_read_permissions()
+                    )
+                ):
+                    continue
+                attestations.append(
+                    (
+                        attestation.observation.observed_at,
+                        attempt.attempt_ordinal,
+                        attempt.attempt_id,
+                        attestation,
+                    )
+                )
 
         if self.database_dialect_name == "postgresql":
             versions = tuple(session.scalars(text("select version_num from alembic_version")))
@@ -29208,11 +29333,20 @@ class PostgresRecordStore(HumanSessionStore):
         if datetime.fromisoformat(activation.activation_expires_at).timestamp() <= now:
             raise OrdinaryAgentSessionAdmissionDenied("activation_expired")
         if purpose == "guarded_delivery":
-            current_attestations = tuple(item for item in attestations if now < item.expires_at)
-            if len(current_attestations) != 1:
+            current_attestations = sorted(
+                (item for item in attestations if now < item[3].expires_at),
+                reverse=True,
+            )
+            if not current_attestations:
                 raise OrdinaryAgentSessionAdmissionDenied("qualification_attestation_required")
-            attestation = current_attestations[0]
-            evidence_ids.extend((attestation.request_id, attestation.attestation_sha256))
+            attestation = current_attestations[0][3]
+            evidence_ids.extend(
+                (
+                    attestation.request_id,
+                    attestation.custody_attempt_id,
+                    attestation.attestation_sha256,
+                )
+            )
         return activation, tuple(sorted(set(evidence_ids))), now
 
     def _ordinary_agent_qualification_setup_from_activation(
@@ -29373,6 +29507,9 @@ class PostgresRecordStore(HumanSessionStore):
                 or attempt.state not in {"reserved", "reading"}
             ):
                 raise OrdinaryAgentSessionAdmissionDenied("qualification_readiness_lost")
+            self._require_ordinary_agent_runtime_readiness(
+                session, context=context, purpose="qualification"
+            )
 
     def _ordinary_agent_new_effect_context(
         self, session: Any, *, request_id: str

@@ -10,6 +10,7 @@ from control_plane.contracts.ordinary_agent_effect import (
 )
 from control_plane.ordinary_agent_job_worker import OrdinaryAgentJobScanState
 from control_plane.ordinary_agent_worker_runtime import (
+    DEFAULT_ORDINARY_AGENT_WORKER_SUPPORT,
     OrdinaryAgentWorkerSupportDescriptor,
     OrdinaryAgentWorkerTelemetry,
     run_ordinary_agent_worker_once,
@@ -42,6 +43,11 @@ class OrdinaryAgentWorkerRuntimeTests(unittest.TestCase):
     def test_support_descriptor_rejects_empty_compatibility_sets(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "no supported finite-request"):
             OrdinaryAgentWorkerSupportDescriptor(finite_request_versions=()).validate()
+
+    def test_default_support_reports_both_composed_phases(self) -> None:
+        DEFAULT_ORDINARY_AGENT_WORKER_SUPPORT.validate()
+        self.assertTrue(DEFAULT_ORDINARY_AGENT_WORKER_SUPPORT.qualification_phase_supported)
+        self.assertTrue(DEFAULT_ORDINARY_AGENT_WORKER_SUPPORT.guarded_phase_supported)
 
 
 if __name__ == "__main__":

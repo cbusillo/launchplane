@@ -610,6 +610,34 @@ def _runtime_capability(
         and callable(compare_write)
         and "schema_v3_write_evidence" in inspect.signature(compare_write).parameters
     )
+    from control_plane.ordinary_agent_job_dispatcher import (
+        build_ordinary_agent_job_dispatcher,
+    )
+    from control_plane.ordinary_agent_merge_train_job import (
+        advance_ordinary_agent_merge_train_job,
+    )
+    from control_plane.ordinary_agent_qualification_job import (
+        advance_ordinary_agent_qualification_job,
+    )
+    from control_plane.ordinary_agent_worker_runtime import (
+        DEFAULT_ORDINARY_AGENT_WORKER_SUPPORT,
+    )
+
+    try:
+        DEFAULT_ORDINARY_AGENT_WORKER_SUPPORT.validate()
+        qualification_advancer_registered = (
+            DEFAULT_ORDINARY_AGENT_WORKER_SUPPORT.qualification_phase_supported
+            and callable(advance_ordinary_agent_qualification_job)
+            and callable(build_ordinary_agent_job_dispatcher)
+        )
+        guarded_worker_registered = (
+            DEFAULT_ORDINARY_AGENT_WORKER_SUPPORT.guarded_phase_supported
+            and callable(advance_ordinary_agent_merge_train_job)
+            and callable(build_ordinary_agent_job_dispatcher)
+        )
+    except RuntimeError:
+        qualification_advancer_registered = False
+        guarded_worker_registered = False
     return OrdinaryAgentDeliveryRuntimeCapabilityEvidence(
         observed_database_revision=observed_revision or "unavailable",
         database_revision_compatible=(
@@ -651,12 +679,8 @@ def _runtime_capability(
             getattr(record_store, "expire_ordinary_agent_deliveries", None)
         ),
         rollback_reader_registered=rollback_reader_registered,
-        qualification_advancer_registered=callable(
-            getattr(record_store, "advance_ordinary_agent_qualification", None)
-        ),
-        guarded_worker_registered=callable(
-            getattr(record_store, "claim_guarded_ordinary_agent_delivery", None)
-        ),
+        qualification_advancer_registered=qualification_advancer_registered,
+        guarded_worker_registered=guarded_worker_registered,
         policy_v3_write_supported=policy_v3_write_supported,
         observed_at=observed_at,
     )

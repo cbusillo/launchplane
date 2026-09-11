@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from control_plane.contracts.ordinary_agent import OrdinaryAgentTarget
+from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.ordinary_agent_custody import OrdinaryAgentCustodyCandidate
 from control_plane.contracts.ordinary_agent_effect import (
     OrdinaryAgentClaimedJob,
@@ -17,7 +18,12 @@ from control_plane.contracts.ordinary_agent_effect import (
     OrdinaryAgentQualificationAttemptRecord,
     OrdinaryAgentQualificationReadCustodyReservation,
 )
-from control_plane.contracts.ordinary_agent_qualification import OrdinaryAgentQualificationSetup
+from control_plane.contracts.ordinary_agent_qualification import (
+    OrdinaryAgentQualificationSetup,
+    OrdinaryRepositoryAdminObservation,
+    qualification_identity,
+)
+from control_plane.contracts.ordinary_agent_snapshot import OrdinaryAgentProviderRequestCounts
 from control_plane.contracts.ordinary_agent_session_lifecycle import (
     OrdinaryAgentQualificationFiniteRequestV2,
 )
@@ -38,19 +44,29 @@ class _Store:
         self,
         *,
         authority_error: str | None = None,
+        custody_error: str | None = None,
         result_denial: str | None = None,
         readiness_error_at: int | None = None,
+        existing_attempt: OrdinaryAgentQualificationAttemptRecord | None = None,
     ) -> None:
         self.authority_error = authority_error
+        self.custody_error = custody_error
         self.result_denial = result_denial
         self.received_claim: OrdinaryAgentJobClaimFence | None = None
         self.failure_calls = 0
         self.readiness_error_at = readiness_error_at
         self.readiness_calls = 0
+        self.existing_attempt = existing_attempt
+        self.received_setups: list[object | None] = []
 
     def reserve_ordinary_agent_qualification_attempt(
-        self, *, claim_fence: object, setup: object
+        self, *, claim_fence: object, setup: object | None
     ) -> OrdinaryAgentQualificationAttemptRecord:
+        self.received_setups.append(setup)
+        if self.existing_attempt is not None:
+            return self.existing_attempt
+        if setup is None:
+            raise OrdinaryAgentSessionAdmissionDenied("qualification_setup_required")
         return _attempt()
 
     def reserve_ordinary_agent_qualification_custody_attempt(
@@ -61,8 +77,8 @@ class _Store:
         expected_attempt_revision: int,
     ) -> OrdinaryAgentQualificationReadCustodyReservation:
         self.received_claim = claim_fence
-        if self.authority_error == "job_claim_lost":
-            raise OrdinaryAgentSessionAdmissionDenied("job_claim_lost")
+        if self.custody_error is not None:
+            raise OrdinaryAgentSessionAdmissionDenied(self.custody_error)
         return _reservation()
 
     def require_ordinary_agent_qualification_read_authority(
@@ -94,6 +110,10 @@ class _Store:
 
     def read_provider_wait(self, **kwargs: object) -> None:
         return None
+
+    def read_ordinary_agent_custody_issue_attempt(self, attempt_id: str) -> object:
+        del attempt_id
+        return SimpleNamespace(state="closed")
 
 
 def _request() -> OrdinaryAgentQualificationFiniteRequestV2:
@@ -178,6 +198,27 @@ def _reservation() -> OrdinaryAgentQualificationReadCustodyReservation:
     )
 
 
+def _not_admin_observation() -> OrdinaryRepositoryAdminObservation:
+    body = {
+        "schema_version": 1,
+        "status": "administrator_not_admin",
+        "expected": qualification_identity(github_id=42, login="administrator").model_dump(
+            mode="json"
+        ),
+        "observed": qualification_identity(github_id=42, login="administrator").model_dump(
+            mode="json"
+        ),
+        "entry_count": 1,
+        "counts": OrdinaryAgentProviderRequestCounts(
+            rest_core_requests=1, graphql_requests=0, graphql_points=0
+        ).model_dump(mode="json"),
+        "observed_at": 10,
+    }
+    return OrdinaryRepositoryAdminObservation.model_validate(
+        {**body, "observation_sha256": canonical_json_sha256(body)}
+    )
+
+
 class OrdinaryAgentQualificationJobTests(unittest.TestCase):
     def claimed(self) -> OrdinaryAgentClaimedJob:
         return OrdinaryAgentClaimedJob(
@@ -189,12 +230,102 @@ class OrdinaryAgentQualificationJobTests(unittest.TestCase):
         )
 
     def test_custody_reservation_receives_original_claim_generation(self) -> None:
-        store = _Store(authority_error="job_claim_lost")
+        store = _Store(custody_error="job_claim_lost")
         disposition = advance_ordinary_agent_qualification_job(
             claimed=self.claimed(), store=cast(Any, store), setup_resolver=lambda **_: _setup()
         )
         self.assertEqual(disposition.reason_code, "job_claim_lost")
         self.assertEqual(store.received_claim, self.claimed().claim_fence)
+
+    def test_fresh_attempt_resolves_setup_only_after_history_reports_none(self) -> None:
+        store = _Store(custody_error="job_claim_lost")
+        resolved = 0
+
+        def resolve(**_: object) -> OrdinaryAgentQualificationSetup:
+            nonlocal resolved
+            resolved += 1
+            return _setup()
+
+        advance_ordinary_agent_qualification_job(
+            claimed=self.claimed(), store=cast(Any, store), setup_resolver=resolve
+        )
+
+        self.assertEqual(store.received_setups, [None, _setup()])
+        self.assertEqual(resolved, 1)
+
+    def test_existing_completed_history_needs_no_fresh_setup_or_provider_get(self) -> None:
+        observation = _not_admin_observation()
+        attempt = _attempt().model_copy(
+            update={
+                "state": "completed",
+                "custody_attempt_ids": ("custody-attempt",),
+                "result": observation,
+                "reason_code": observation.status,
+            }
+        )
+        store = _Store(existing_attempt=attempt)
+
+        with patch(
+            "control_plane.ordinary_agent_qualification_job.observe_repository_administrator"
+        ) as provider_get:
+            disposition = advance_ordinary_agent_qualification_job(
+                claimed=self.claimed(),
+                store=cast(Any, store),
+                setup_resolver=lambda **_: (_ for _ in ()).throw(
+                    AssertionError("existing history must not resolve fresh setup")
+                ),
+            )
+
+        self.assertEqual(disposition.status, "blocked")
+        self.assertEqual(disposition.reason_code, "administrator_not_admin")
+        self.assertEqual(store.received_setups, [None])
+        provider_get.assert_not_called()
+
+    def test_restored_maintenance_denial_is_bounded_without_fresh_setup_or_get(self) -> None:
+        restored = _attempt().model_copy(
+            update={
+                "state": "incomplete",
+                "custody_attempt_ids": ("custody-attempt",),
+                "reason_code": "cleanup_unknown",
+            }
+        )
+        store = _Store(existing_attempt=restored, custody_error="activation_not_current")
+        observed = datetime(2030, 1, 1, tzinfo=timezone.utc)
+
+        with patch(
+            "control_plane.ordinary_agent_qualification_job.observe_repository_administrator"
+        ) as provider_get:
+            disposition = advance_ordinary_agent_qualification_job(
+                claimed=self.claimed(),
+                store=cast(Any, store),
+                setup_resolver=lambda **_: (_ for _ in ()).throw(
+                    AssertionError("restored history must not resolve fresh setup")
+                ),
+                utc_now=lambda: observed,
+            )
+
+        self.assertEqual(disposition.status, "waiting")
+        self.assertEqual(disposition.next_due_at, int(observed.timestamp()) + 30)
+        self.assertEqual(disposition.reason_code, "activation_not_current")
+        self.assertEqual(store.received_setups, [None])
+        provider_get.assert_not_called()
+
+    def test_setup_resolution_denial_is_a_finite_wait(self) -> None:
+        store = _Store()
+        observed = datetime(2030, 1, 1, tzinfo=timezone.utc)
+
+        disposition = advance_ordinary_agent_qualification_job(
+            claimed=self.claimed(),
+            store=cast(Any, store),
+            setup_resolver=lambda **_: (_ for _ in ()).throw(
+                OrdinaryAgentSessionAdmissionDenied("activation_expired")
+            ),
+            utc_now=lambda: observed,
+        )
+
+        self.assertEqual(disposition.status, "waiting")
+        self.assertEqual(disposition.next_due_at, int(observed.timestamp()) + 30)
+        self.assertEqual(disposition.reason_code, "activation_expired")
 
     def test_revocation_after_mint_denies_get_and_closes_custody_context(self) -> None:
         store = _Store(authority_error="qualification_read_authority_lost")

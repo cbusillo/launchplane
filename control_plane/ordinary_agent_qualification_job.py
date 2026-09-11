@@ -11,6 +11,7 @@ from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.ordinary_agent_effect import (
     OrdinaryAgentClaimedJob,
     OrdinaryAgentJobAttemptDisposition,
+    OrdinaryAgentJobClaimFence,
     OrdinaryAgentProviderQuotaKey,
     OrdinaryAgentProviderWaitObservation,
     OrdinaryAgentProviderWaitRecord,
@@ -76,6 +77,13 @@ class _QualificationStore(
         self, attempt_id: str
     ) -> OrdinaryAgentCustodyIssueAttempt: ...
 
+    def reserve_ordinary_agent_qualification_attempt(
+        self,
+        *,
+        claim_fence: OrdinaryAgentJobClaimFence,
+        setup: OrdinaryAgentQualificationSetup | None,
+    ) -> OrdinaryAgentQualificationAttemptRecord: ...
+
 
 def advance_ordinary_agent_qualification_job(
     *,
@@ -95,22 +103,41 @@ def advance_ordinary_agent_qualification_job(
         return OrdinaryAgentJobAttemptDisposition(
             status="blocked", reason_code="qualification_controller_fence"
         )
-    setup = setup_resolver(request=claimed.request)
-    if setup is None:
-        return OrdinaryAgentJobAttemptDisposition(
-            status="blocked", reason_code="qualification_setup_unavailable"
-        )
+    retry_at = int(utc_now().timestamp()) + 30
     try:
         attempt = store.reserve_ordinary_agent_qualification_attempt(
-            claim_fence=claimed.claim_fence, setup=setup
+            claim_fence=claimed.claim_fence, setup=None
         )
     except OrdinaryAgentSessionAdmissionDenied as error:
-        return _denied_disposition(error, retry_at=int(utc_now().timestamp()) + 30)
+        if error.reason_code != "qualification_setup_required":
+            return _denied_disposition(error, retry_at=retry_at)
+        try:
+            setup = setup_resolver(request=claimed.request)
+        except OrdinaryAgentSessionAdmissionDenied as setup_error:
+            return OrdinaryAgentJobAttemptDisposition(
+                status="waiting",
+                next_due_at=retry_at,
+                reason_code=setup_error.reason_code,
+            )
+        if setup is None:
+            return OrdinaryAgentJobAttemptDisposition(
+                status="waiting",
+                next_due_at=retry_at,
+                reason_code="qualification_setup_unavailable",
+            )
+        try:
+            attempt = store.reserve_ordinary_agent_qualification_attempt(
+                claim_fence=claimed.claim_fence, setup=setup
+            )
+        except OrdinaryAgentSessionAdmissionDenied as setup_error:
+            return _denied_disposition(setup_error, retry_at=retry_at)
+    setup = attempt.setup
     if attempt.state == "completed":
         return _completed_disposition(store=store, attempt=attempt)
     if attempt.state in {"fenced", "exhausted"}:
         return OrdinaryAgentJobAttemptDisposition(
             status="reconciliation_required" if attempt.state == "fenced" else "blocked",
+            next_due_at=retry_at if attempt.state == "fenced" else None,
             reason_code=attempt.reason_code or "qualification_attempt_closed",
         )
     try:
@@ -120,7 +147,7 @@ def advance_ordinary_agent_qualification_job(
             expected_attempt_revision=attempt.revision,
         )
     except OrdinaryAgentSessionAdmissionDenied as error:
-        return _denied_disposition(error, retry_at=int(utc_now().timestamp()) + 30)
+        return _denied_disposition(error, retry_at=retry_at)
     transport: DeadlineMergeTrainGitHubTransport | None = None
     recorded: OrdinaryAgentQualificationAttemptRecord | None = None
     result_denial: OrdinaryAgentSessionAdmissionDenied | None = None

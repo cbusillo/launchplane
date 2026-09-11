@@ -4,7 +4,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from time import time
-from typing import Annotated, cast
+from typing import Annotated
 from urllib.parse import urlencode
 
 from fastapi import Depends, HTTPException, Path, Request
@@ -22,7 +22,6 @@ from control_plane.contracts.ordinary_agent_client import (
 from control_plane.contracts.ordinary_agent_effect import OrdinaryAgentJobView
 from control_plane.contracts.ordinary_agent_session_lifecycle import (
     OrdinaryAgentConnectionView,
-    OrdinaryAgentFiniteRequest,
     OrdinaryAgentSessionOperationView,
 )
 from control_plane.http_routes.support import ApiRouteRegistrar, ReadRouteDependencies
@@ -290,16 +289,9 @@ def register_ordinary_agent_management_routes(
         store: Annotated[PostgresRecordStore, Depends(get_record_store)],
     ) -> OrdinaryAgentJobView:
         with _operation_errors():
-            admit_client_request = cast(
-                Callable[..., object],
-                getattr(store, "admit_ordinary_agent_client_request"),
-            )
-            request = cast(
-                OrdinaryAgentFiniteRequest,
-                admit_client_request(
-                    proof=proof,
-                    request=envelope,
-                ),
+            request = store.admit_ordinary_agent_client_request(
+                proof=proof,
+                request=envelope,
             )
             return store.read_ordinary_agent_job(proof=proof, request_id=request.request_id)
 
