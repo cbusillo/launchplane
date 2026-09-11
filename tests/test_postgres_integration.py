@@ -7946,6 +7946,51 @@ class RealPostgresOrdinaryAgentSessionTests(unittest.TestCase):
             self.assertEqual(custody.close_reason, "known_expired")
             self.assertEqual(scenario.persisted_lease().budget.actions_used, 1)
 
+    def test_postgres_closed_missing_outcome_reserves_qualification_successor(self) -> None:
+        from control_plane.contracts.ordinary_agent_effect import (
+            OrdinaryAgentQualificationAttemptRecord,
+            parse_ordinary_agent_read_attempt,
+        )
+        from control_plane.ordinary_agent_session_lifecycle import (
+            OrdinaryAgentSessionAdmissionDenied,
+        )
+        from control_plane.storage.postgres import LaunchplaneOrdinaryAgentReadAttemptRow
+
+        with _store_for_fresh_head_database() as store:
+            scenario = QualificationStorageScenario(
+                self, store=store, request_id="postgres-qualification-missing-outcome"
+            )
+            claimed = scenario.claim(lease_seconds=120)
+            attempt = scenario.reserve_attempt(claimed)
+            reservation = scenario.reserve_custody(claimed=claimed, attempt=attempt)
+            scenario.issue(reservation)
+            store.close_ordinary_agent_custody_issue_attempt(
+                attempt_id=reservation.custody_attempt_id,
+                reason="confirmed_revoked",
+            )
+
+            with self.assertRaisesRegex(
+                OrdinaryAgentSessionAdmissionDenied, "qualification_setup_required"
+            ):
+                store.reserve_ordinary_agent_qualification_attempt(
+                    claim_fence=claimed.claim_fence, setup=None
+                )
+            successor = store.reserve_ordinary_agent_qualification_attempt(
+                claim_fence=claimed.claim_fence, setup=scenario.setup
+            )
+
+            with store._session_factory() as session:
+                row = session.get(LaunchplaneOrdinaryAgentReadAttemptRow, attempt.attempt_id)
+                assert row is not None
+                recovered = parse_ordinary_agent_read_attempt(row.payload)
+            self.assertIsInstance(recovered, OrdinaryAgentQualificationAttemptRecord)
+            assert isinstance(recovered, OrdinaryAgentQualificationAttemptRecord)
+            self.assertEqual(recovered.state, "incomplete")
+            self.assertEqual(recovered.reason_code, "read_outcome_missing")
+            self.assertIsNone(recovered.failure_counts)
+            self.assertEqual(successor.attempt_ordinal, 2)
+            self.assertEqual(scenario.persisted_lease().budget.actions_used, 1)
+
     def test_guarded_provider_gap_rolls_back_postgres_admission_budget_and_history(
         self,
     ) -> None:

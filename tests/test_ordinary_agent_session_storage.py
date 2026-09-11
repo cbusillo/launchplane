@@ -391,6 +391,42 @@ class OrdinaryAgentSessionStorageTests(unittest.TestCase):
         self.assertEqual(persisted_lease, lease)
         self.assertIsNone(request_row)
 
+    def test_client_admission_rechecks_lease_against_post_readiness_time(self) -> None:
+        self.enroll()
+        lease = self.issued.leases[0]
+        intent = OrdinaryAgentGuardedDeliveryFiniteClientRequest(
+            idempotency_key="readiness-crossed-lease-expiry",
+            session_id=self.issued.session.session_id,
+            lease_id=lease.lease_id,
+            base_sha="a" * 40,
+            pull_requests=(OrdinaryAgentPullRequest(number=12, head_sha="b" * 40),),
+            permitted_stack_edit_pull_requests=(),
+            refresh_allowance=0,
+        )
+
+        with (
+            patch.object(
+                self.store,
+                "_require_and_project_guarded_readiness",
+                return_value=(Mock(spec=OrdinaryAgentDeliveryActivationRecord), lease.expires_at),
+            ),
+            self.assertRaisesRegex(OrdinaryAgentSessionAdmissionDenied, "lease_unavailable"),
+        ):
+            self.store.admit_ordinary_agent_client_request(proof=self.proof, request=intent)
+
+        with self.store._session_factory() as session:
+            persisted_lease_row = session.get(LaunchplaneOrdinaryAgentLeaseRow, lease.lease_id)
+            assert persisted_lease_row is not None
+            persisted_lease = OrdinaryAgentLeaseRecord.model_validate(persisted_lease_row.payload)
+            request_row = session.scalar(
+                select(LaunchplaneOrdinaryAgentFiniteRequestRow).where(
+                    LaunchplaneOrdinaryAgentFiniteRequestRow.idempotency_key
+                    == intent.idempotency_key
+                )
+            )
+        self.assertEqual(persisted_lease, lease)
+        self.assertIsNone(request_row)
+
     def test_reauthorization_rejects_exhausted_v1_guarded_request(self) -> None:
         self.enroll()
         admitted = self.store.admit_ordinary_agent_finite_request(

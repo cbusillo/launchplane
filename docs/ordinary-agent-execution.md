@@ -442,6 +442,10 @@ token expiry, and conservatively treats a mint with unknown outcome as live thro
 its dispatch deadline plus the provider's maximum token lifetime and clock-skew
 allowance. Once that bound passes, it closes custody as known-expired and retires a
 terminal request without starting fresh provider work or charging another action.
+If custody is already safely closed but its worker left no outcome, maintenance
+marks the attempt incomplete with `read_outcome_missing` and permits a successor
+only through fresh readiness. That marker carries no provider-failure counts, and
+the logical request is not charged again.
 
 Admission charges a guarded request's PR count once against the lease; effect
 reservations spend the action allowance. Existing-job checks do not spend

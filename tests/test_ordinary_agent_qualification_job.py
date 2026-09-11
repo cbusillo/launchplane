@@ -48,6 +48,7 @@ class _Store:
         result_denial: str | None = None,
         readiness_error_at: int | None = None,
         existing_attempt: OrdinaryAgentQualificationAttemptRecord | None = None,
+        provider_wait: OrdinaryAgentProviderWaitRecord | None = None,
     ) -> None:
         self.authority_error = authority_error
         self.custody_error = custody_error
@@ -57,6 +58,7 @@ class _Store:
         self.readiness_error_at = readiness_error_at
         self.readiness_calls = 0
         self.existing_attempt = existing_attempt
+        self.provider_wait = provider_wait
         self.received_setups: list[object | None] = []
 
     def reserve_ordinary_agent_qualification_attempt(
@@ -108,8 +110,8 @@ class _Store:
     def record_provider_wait(self, **kwargs: object) -> object:
         raise AssertionError("no provider request should record a wait")
 
-    def read_provider_wait(self, **kwargs: object) -> None:
-        return None
+    def read_provider_wait(self, **kwargs: object) -> OrdinaryAgentProviderWaitRecord | None:
+        return self.provider_wait
 
     def read_ordinary_agent_custody_issue_attempt(self, attempt_id: str) -> object:
         del attempt_id
@@ -368,7 +370,7 @@ class OrdinaryAgentQualificationJobTests(unittest.TestCase):
         self.assertEqual(disposition.status, "waiting")
         self.assertIsNotNone(disposition.next_due_at)
         self.assertEqual(disposition.reason_code, "qualification_read_authority_lost")
-        self.assertEqual(store.failure_calls, 1)
+        self.assertEqual(store.failure_calls, 0)
 
     def test_pre_mint_readiness_denial_is_not_recorded_as_provider_failure(self) -> None:
         store = _Store(readiness_error_at=1)
@@ -527,3 +529,27 @@ class OrdinaryAgentQualificationJobTests(unittest.TestCase):
                 utc_now=lambda: datetime.fromtimestamp(100, timezone.utc),
             )
         self.assertEqual(ordinary_agent_read_failure_reason(raised.exception), "provider_wait")
+
+    def test_cached_provider_wait_defers_before_custody_without_failure_history(self) -> None:
+        wait = OrdinaryAgentProviderWaitRecord(
+            quota_key=OrdinaryAgentProviderQuotaKey(
+                authority_kind="installation", authority_id=2, resource_class="core"
+            ),
+            retry_not_before=240,
+            observed_at=100,
+            classification="primary_rate_limit",
+        )
+        store = _Store(provider_wait=wait)
+
+        disposition = advance_ordinary_agent_qualification_job(
+            claimed=self.claimed(),
+            store=cast(Any, store),
+            setup_resolver=lambda **_: _setup(),
+            utc_now=lambda: datetime.fromtimestamp(100, timezone.utc),
+        )
+
+        self.assertEqual(disposition.status, "waiting")
+        self.assertEqual(disposition.next_due_at, 240)
+        self.assertEqual(disposition.reason_code, "provider_wait")
+        self.assertIsNone(store.received_claim)
+        self.assertEqual(store.failure_calls, 0)

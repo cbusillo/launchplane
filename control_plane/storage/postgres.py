@@ -21596,6 +21596,14 @@ class PostgresRecordStore(HumanSessionStore):
                     context=provisional_context,
                     purpose=purpose,
                 )
+            # PostgreSQL clock_timestamp() advances while the readiness locks
+            # are acquired. Recheck the same typed deadline immediately before
+            # using that later sample to build the authoritative request.
+            if lease.expires_at <= observed_at or (
+                session_record.delegation.continuation_expires_at is not None
+                and session_record.delegation.continuation_expires_at <= observed_at
+            ):
+                raise OrdinaryAgentSessionAdmissionDenied("lease_unavailable")
             admitted_request = build_ordinary_agent_finite_request_from_client(
                 request,
                 server=OrdinaryAgentFiniteRequestServerFields(
@@ -26428,9 +26436,79 @@ class PostgresRecordStore(HumanSessionStore):
                         self._payload_dict(restored),
                     )
                     restored_records[item.attempt_id] = restored
-            if restored_records:
+            missing_outcome_records: dict[
+                str, effect_contracts.OrdinaryAgentQualificationAttemptRecord
+            ] = {}
+            exhausted_custody_records: dict[
+                str, effect_contracts.OrdinaryAgentQualificationAttemptRecord
+            ] = {}
+            for item in qualification_records:
+                latest_custody = (
+                    custody_by_id.get(item.custody_attempt_ids[-1])
+                    if item.custody_attempt_ids
+                    else None
+                )
+                if (
+                    item.state in {"reserved", "reading"}
+                    and item.result is None
+                    and latest_custody is not None
+                    and latest_custody.state == "closed"
+                    and latest_custody.close_reason != "not_dispatched"
+                ):
+                    recovered = item.model_copy(
+                        update={
+                            "state": "incomplete",
+                            "reason_code": "read_outcome_missing",
+                            "next_due_at": now,
+                            "revision": item.revision + 1,
+                            "updated_at": now,
+                        }
+                    )
+                    row = session.get(LaunchplaneOrdinaryAgentReadAttemptRow, item.attempt_id)
+                    assert row is not None
+                    row.state, row.revision, row.payload = (
+                        recovered.state,
+                        recovered.revision,
+                        self._payload_dict(recovered),
+                    )
+                    missing_outcome_records[item.attempt_id] = recovered
+                elif (
+                    item.state in {"reserved", "reading"}
+                    and item.result is None
+                    and len(item.custody_attempt_ids)
+                    >= effect_contracts.MAX_CUSTODY_MINT_ATTEMPTS_PER_DISPATCH_CHILD
+                    and all(
+                        (observed := custody_by_id.get(identifier)) is not None
+                        and observed.state == "closed"
+                        and observed.close_reason == "not_dispatched"
+                        for identifier in item.custody_attempt_ids
+                    )
+                ):
+                    exhausted = item.model_copy(
+                        update={
+                            "state": "exhausted",
+                            "reason_code": "read_custody_attempts_exhausted",
+                            "next_due_at": None,
+                            "revision": item.revision + 1,
+                            "updated_at": now,
+                        }
+                    )
+                    row = session.get(LaunchplaneOrdinaryAgentReadAttemptRow, item.attempt_id)
+                    assert row is not None
+                    row.state, row.revision, row.payload = (
+                        exhausted.state,
+                        exhausted.revision,
+                        self._payload_dict(exhausted),
+                    )
+                    exhausted_custody_records[item.attempt_id] = exhausted
+            maintenance_updates = {
+                **restored_records,
+                **missing_outcome_records,
+                **exhausted_custody_records,
+            }
+            if maintenance_updates:
                 qualification_records = tuple(
-                    restored_records.get(item.attempt_id, item) for item in qualification_records
+                    maintenance_updates.get(item.attempt_id, item) for item in qualification_records
                 )
                 current = tuple(
                     item
@@ -26469,7 +26547,7 @@ class PostgresRecordStore(HumanSessionStore):
                         self._payload_dict(updated),
                     )
                     terminalized[item.attempt_id] = updated
-                if terminal_records or custody_changed or restored_records:
+                if terminal_records or custody_changed or maintenance_updates:
                     session.commit()
                 if qualification_records:
                     latest_history = qualification_records[-1]
@@ -26478,13 +26556,13 @@ class PostgresRecordStore(HumanSessionStore):
 
             active = next((item for item in current if item.state in {"reserved", "reading"}), None)
             if active is not None:
-                if custody_changed or restored_records:
+                if custody_changed or maintenance_updates:
                     session.commit()
                 return active
             if current:
                 latest = current[-1]
                 if latest.state in {"completed", "fenced", "exhausted"}:
-                    if custody_changed or restored_records:
+                    if custody_changed or maintenance_updates:
                         session.commit()
                     return latest
                 if latest.next_due_at is not None and latest.next_due_at > now:
@@ -26493,24 +26571,29 @@ class PostgresRecordStore(HumanSessionStore):
                     )
             failures = sum(item.state == "incomplete" for item in qualification_records)
             if failures >= effect_contracts.MAX_SNAPSHOT_PROVIDER_ATTEMPTS:
-                latest = next(
+                latest_incomplete = next(
                     (item for item in reversed(current) if item.state == "incomplete"),
-                    next(
+                    None,
+                )
+                if latest_incomplete is None:
+                    latest_incomplete = next(
                         item
                         for item in reversed(qualification_records)
                         if item.state == "incomplete"
-                    ),
-                )
-                exhausted = latest.model_copy(
+                    )
+                exhausted = latest_incomplete.model_copy(
                     update={
                         "state": "exhausted",
                         "reason_code": "read_attempts_exhausted",
                         "next_due_at": None,
-                        "revision": latest.revision + 1,
+                        "revision": latest_incomplete.revision + 1,
                         "updated_at": now,
                     }
                 )
-                latest_row = session.get(LaunchplaneOrdinaryAgentReadAttemptRow, latest.attempt_id)
+                latest_row = session.get(
+                    LaunchplaneOrdinaryAgentReadAttemptRow,
+                    latest_incomplete.attempt_id,
+                )
                 assert latest_row is not None
                 latest_row.state, latest_row.revision, latest_row.payload = (
                     exhausted.state,
@@ -26520,7 +26603,7 @@ class PostgresRecordStore(HumanSessionStore):
                 session.commit()
                 return exhausted
             if setup is None:
-                if custody_changed or restored_records:
+                if custody_changed or maintenance_updates:
                     session.commit()
                 raise OrdinaryAgentSessionAdmissionDenied("qualification_setup_required")
             # Only a successor attempt may demand fresh principal/session/lease

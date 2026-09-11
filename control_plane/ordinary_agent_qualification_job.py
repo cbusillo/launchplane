@@ -35,6 +35,7 @@ from control_plane.ordinary_agent_custody import (
 from control_plane.contracts.ordinary_agent_custody import OrdinaryAgentCustodyIssueAttempt
 from control_plane.ordinary_agent_github_transport import (
     DeadlineMergeTrainGitHubTransport,
+    OrdinaryAgentProviderDeferred,
     require_installation_provider_ready,
 )
 from control_plane.ordinary_agent_qualification import observe_repository_administrator
@@ -140,6 +141,21 @@ def advance_ordinary_agent_qualification_job(
             next_due_at=retry_at if attempt.state == "fenced" else None,
             reason_code=attempt.reason_code or "qualification_attempt_closed",
         )
+    if attempt.github_installation_id is not None:
+        try:
+            require_installation_provider_ready(
+                app_id=attempt.github_app_id,
+                installation_id=attempt.github_installation_id,
+                resource_classes=("core", "graphql", "secondary"),
+                read_provider_wait=store.read_provider_wait,
+                utc_now=utc_now,
+            )
+        except OrdinaryAgentProviderDeferred as error:
+            return OrdinaryAgentJobAttemptDisposition(
+                status="waiting",
+                next_due_at=error.retry_not_before or retry_at,
+                reason_code=error.reason_code,
+            )
     try:
         reservation = store.reserve_ordinary_agent_qualification_custody_attempt(
             claim_fence=claimed.claim_fence,
@@ -151,11 +167,11 @@ def advance_ordinary_agent_qualification_job(
     transport: DeadlineMergeTrainGitHubTransport | None = None
     recorded: OrdinaryAgentQualificationAttemptRecord | None = None
     result_denial: OrdinaryAgentSessionAdmissionDenied | None = None
-    read_authority_denied = False
     readiness_denial: OrdinaryAgentSessionAdmissionDenied | None = None
+    provider_deferral: OrdinaryAgentProviderDeferred | None = None
 
     def require_pre_mint_readiness(app_id: int, installation_id: int) -> None:
-        nonlocal readiness_denial
+        nonlocal provider_deferral, readiness_denial
         try:
             store.require_ordinary_agent_qualification_runtime_readiness(
                 claim_fence=claimed.claim_fence,
@@ -164,13 +180,17 @@ def advance_ordinary_agent_qualification_job(
         except OrdinaryAgentSessionAdmissionDenied as error:
             readiness_denial = error
             raise
-        require_installation_provider_ready(
-            app_id=app_id,
-            installation_id=installation_id,
-            resource_classes=("core", "graphql", "secondary"),
-            read_provider_wait=store.read_provider_wait,
-            utc_now=utc_now,
-        )
+        try:
+            require_installation_provider_ready(
+                app_id=app_id,
+                installation_id=installation_id,
+                resource_classes=("core", "graphql", "secondary"),
+                read_provider_wait=store.read_provider_wait,
+                utc_now=utc_now,
+            )
+        except OrdinaryAgentProviderDeferred as error:
+            provider_deferral = error
+            raise
 
     try:
         started = monotonic()
@@ -211,9 +231,7 @@ def advance_ordinary_agent_qualification_job(
                     claim_fence=claimed.claim_fence, attempt_id=attempt.attempt_id
                 )
             except OrdinaryAgentSessionAdmissionDenied as error:
-                if error.reason_code != "qualification_read_authority_lost":
-                    readiness_denial = error
-                read_authority_denied = True
+                readiness_denial = error
                 raise
             observed = observe_repository_administrator(
                 transport=transport, setup=setup, observed_at=int(utc_now().timestamp())
@@ -239,6 +257,12 @@ def advance_ordinary_agent_qualification_job(
                 next_due_at=int(utc_now().timestamp()) + 30,
                 reason_code=readiness_denial.reason_code,
             )
+        if provider_deferral is not None:
+            return OrdinaryAgentJobAttemptDisposition(
+                status="waiting",
+                next_due_at=provider_deferral.retry_not_before or retry_at,
+                reason_code=provider_deferral.reason_code,
+            )
         reason = _failure_reason(error)
         try:
             recorded = store.record_ordinary_agent_qualification_failure(
@@ -258,12 +282,6 @@ def advance_ordinary_agent_qualification_job(
                 status="reconciliation_required",
                 next_due_at=retry_at,
                 reason_code=reason,
-            )
-        if read_authority_denied:
-            return OrdinaryAgentJobAttemptDisposition(
-                status="waiting",
-                next_due_at=recorded.next_due_at or retry_at,
-                reason_code="qualification_read_authority_lost",
             )
         return OrdinaryAgentJobAttemptDisposition(
             status="waiting", next_due_at=recorded.next_due_at, reason_code=recorded.reason_code
@@ -411,6 +429,7 @@ def _denied_disposition(
         "installed_outcome_invalid",
         "installed_outcome_mismatch",
         "inventory_drift",
+        "job_not_dispatchable",
         "policy_source_inadmissible",
         "read_custody_fenced",
         "read_outcome_required",
