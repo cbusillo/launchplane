@@ -10,8 +10,25 @@ union. Dedicated client routes propose connections and sessions; signed-browser
 routes review, approve, cancel and revoke their persisted domain operations.
 The service worker recovers approved enrollment and expires private delivery
 capsules. This source integration is not a deployed installation or a merge
-permission: ordinary-worker runtime qualification and the separately reviewed
-activation package remain prerequisites to live execution.
+permission. The ordinary finite-job runtime remains dormant, and guarded
+delivery remains unavailable until Launchplane has a separately reviewed,
+independent provider-readiness observation and receipt.
+
+The source also contains a dormant finite-job worker surface:
+`uv run launchplane service ordinary-agent-workers run-once` performs one
+PostgreSQL-backed fair scan, and `run` provides the long-lived polling loop.
+Both use the ordinary finite-job claim/advance path, an immutable code-owned
+schema/protocol support descriptor, and process-local scan telemetry. They do
+not use privileged-operation worker accounting. Startup performs an exact
+Alembic/relation probe and creates no policy, grant, activation, credential,
+session, lease, or provider record.
+
+The matching definition is kept in
+`docker-compose.ordinary-agent-workers.yml` and is intentionally outside the
+deployed `docker-compose.yml` invocation. Its profile and startup script are
+structural source wiring only. A separately reviewed enablement must add the
+compose file/profile to an explicit deployment invocation and establish the
+required readiness evidence first; source presence does not start a process.
 
 The older `proposed_ordinary_agent_v1` evidence models and their pure eligibility
 result remain inert fixture contracts. They do not authenticate a caller or
@@ -52,10 +69,13 @@ offered by the server clock, and the planner enforces a maximum of 30 days.
 The first setup state is always desired `guarded` and effective
 `qualification_only`. That record has `authorizes_execution = false`; it creates
 no principal, credential, session, grant, provider request, worker registration,
-or policy write. The schema-v3 write fence above remains unchanged. A later
-readiness implementation must still join current policy authority, qualification,
-protection and merge identity, protocol/schema compatibility, and cleanup
-evidence before deriving effective guarded state.
+or policy write. The schema-v3 write fence above remains unchanged. Qualification
+runtime readiness joins current activation, policy, inventory, custody, managed
+secret and protocol support. Guarded runtime readiness additionally requires
+current positive qualification evidence. It then fails closed with
+`provider_readiness_unavailable`: this source slice has no trusted independent
+producer proving current provider protection and the exclusive Launchplane merge
+identity, so it cannot derive effective guarded state.
 
 Activation revocation is a new reviewed `revoke_activation` operation rather
 than the generic pre-execution approval revoke. It writes terminal desired and
@@ -64,8 +84,9 @@ new activation ID and binds the exact predecessor. Expired guarded replacement
 supersedes the old record and appends both changes atomically; revoked predecessors
 never revive. Append-only operation-bound install/revoke events provide recovery
 evidence even after later revocation or supersession changes the current
-projection. Known custody cleanup and history remain maintainable, while this
-slice still has no guarded execution consumer.
+projection. Known custody cleanup and history remain maintainable. The dormant
+guarded consumer is wired behind the provider-readiness denial above and cannot
+claim guarded work.
 
 Ordinary rules participate only in structural policy normalization, managed-set
 replacement and reporting. Their managed set and rule IDs remain semantic
@@ -384,14 +405,25 @@ One finite request is one job. Historical schema-v1 requests remain byte- and
 identity-compatible guarded-delivery records. Schema v2 is a discriminated JSON
 payload: `guarded_delivery` retains the exact base, PR/head, stack-edit and
 refresh scope, while `qualification` has no base, PR or stack-edit fields.
+Both variants remain in the strict public schema so clients can preserve the
+target contract, but current guarded admission and continuation fail with
+`provider_readiness_unavailable` before a lease budget or job row is written.
+The runtime capability fields report compiled dispatcher and handler
+registration only; they do not report deployment, activation or provider
+readiness.
 Version-2 intent and scope identities use a fixed v2 domain plus the schema
-version and purpose, so the two purposes cannot share an identity. Qualification
+version and purpose, so the two purposes cannot share an identity. The finite
+request row stores the original validated v2 client intent in nullable metadata,
+separate from the mutable job payload. Exact retries therefore return the current
+job after lifecycle or permitted-head-refresh progress, while changed original
+intent conflicts. Historical v1 rows have no such metadata and cannot be replayed
+through the v2 client endpoint. Qualification
 requires a `preflight` lease with a positive finite action allowance, charges
 zero PRs against that lease, and guarded delivery requires `guarded_merge`.
 Existing merge, snapshot, landing and effect paths refuse qualification. The
-separate qualification advancer is a dormant, direct-call-only source slice:
-it has no ingress, dispatcher registration, worker assembly, activation record,
-provider setup resolver, or production loop wiring.
+separate qualification advancer is selected by the exhaustive dormant ordinary
+worker dispatcher. Its setup and readiness come from current activation records;
+the checked compose profile remains disabled until a later activation change.
 
 The dormant advancer reserves a schema-v2 controller-free read attempt and one
 read-only `merge_train_snapshot` custody lease. Its only provider observation is
@@ -404,7 +436,16 @@ The first logical qualification attempt consumes one `preflight` action across
 all binding revisions; retries never recharge it. Current authority is required
 to reserve, mint, and read, while recording an already-issued response or cleanup
 uncertainty remains possible after expiry or revocation. A positive response is
-not complete or readiness-valid until its custody attempt has closed.
+not complete or readiness-valid until its custody attempt has closed. Qualification
+maintenance honors each persisted retry deadline, waits through recorded residual
+token expiry, and conservatively treats a mint with unknown outcome as live through
+its dispatch deadline plus the provider's maximum token lifetime and clock-skew
+allowance. Once that bound passes, it closes custody as known-expired and retires a
+terminal request without starting fresh provider work or charging another action.
+If custody is already safely closed but its worker left no outcome, maintenance
+marks the attempt incomplete with `read_outcome_missing` and permits a successor
+only through fresh readiness. That marker carries no provider-failure counts, and
+the logical request is not charged again.
 
 Admission charges a guarded request's PR count once against the lease; effect
 reservations spend the action allowance. Existing-job checks do not spend

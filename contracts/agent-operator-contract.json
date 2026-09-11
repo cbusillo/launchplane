@@ -45,6 +45,32 @@
     },
     "operations": [
       {
+        "idempotency": "body",
+        "identity_dependencies": [
+          "read_ordinary_agent_proof"
+        ],
+        "method": "POST",
+        "modes": [
+          "finite-admission"
+        ],
+        "operation_id": "admit_ordinary_agent_job",
+        "path": "/v1/agent/ordinary-agent-jobs",
+        "purpose": "Admit one finite qualification or guarded-delivery job from authenticated caller intent.",
+        "response_statuses": [
+          "200",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [
+          "purpose_specific_readiness",
+          "idempotent_replay"
+        ],
+        "schema_fingerprint_sha256": "16e155d93c63fe1f4b71011132b4cd2d371ace2fc7ad26bd906da0b6974e32a7",
+        "supported_surfaces": [
+          "ordinary_agent_client"
+        ]
+      },
+      {
         "idempotency": "none",
         "identity_dependencies": [
           "read_ordinary_agent_proof"
@@ -565,8 +591,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "148362f9fbca956922bf5c11d0ff2f3cead3889c"
+    "source_commit_sha": "6ee2f992af5d43553050ecb145cd4be34f6ddb44"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "b30ee5d945f65c8285030fbf9ab3bcd2f917b176801342bef24b4783b61cb24a"
+  "semantic_digest_sha256": "f4fa8fcec07ad2b6d11f641a0d0207a80a3d787b424025bf238f2c145535b6e2"
 }

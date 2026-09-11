@@ -29,6 +29,14 @@ from control_plane.ordinary_agent_enrollment_worker import (
     OrdinaryAgentEnrollmentRecoveryState,
     recover_ordinary_agent_enrollments_once,
 )
+from control_plane.ordinary_agent_job_worker import OrdinaryAgentJobScanState
+from control_plane.ordinary_agent_worker_runtime import (
+    DEFAULT_ORDINARY_AGENT_WORKER_SUPPORT,
+    OrdinaryAgentJobAdvancer,
+    OrdinaryAgentWorkerTelemetry,
+    ordinary_agent_worker_result_payload,
+    run_ordinary_agent_worker_once,
+)
 from control_plane.privileged_operation_worker import (
     OrdinaryAgentDeliveryCleanupState,
     PrivilegedOperationExecutionStore,
@@ -37,9 +45,11 @@ from control_plane.privileged_operation_worker import (
     run_ordinary_agent_delivery_cleanup_once,
 )
 from control_plane.contracts.driver_descriptor import DriverContextView
+from control_plane.contracts.ordinary_agent_effect import OrdinaryAgentJobWorkerStore
 from control_plane.drivers.registry import build_driver_context_view
 from control_plane.service import serve_launchplane_service
 from control_plane.storage.factory import build_privileged_operation_worker_store
+from control_plane.storage.factory import build_ordinary_agent_worker_store
 from control_plane.workflows.odoo_stable_operation_worker import (
     DEFAULT_ODOO_STABLE_WORKER_ERROR_BACKOFF_SECONDS,
     DEFAULT_ODOO_STABLE_WORKER_HEARTBEAT_SECONDS,
@@ -74,6 +84,9 @@ from control_plane.dokploy import source as dokploy_source
 _PRIVILEGED_OPERATION_WORKER_SCHEMA_PROBE_EVIDENCE = (
     b"launchplane-privileged-operation-worker-schema-probe-completed-v1\n"
 )
+_ORDINARY_AGENT_WORKER_SCHEMA_PROBE_EVIDENCE = (
+    b"launchplane-ordinary-agent-worker-schema-probe-completed-v1\n"
+)
 
 
 def _consume_privileged_operation_worker_schema_probe_evidence(file_descriptor: int) -> None:
@@ -88,6 +101,31 @@ def _consume_privileged_operation_worker_schema_probe_evidence(file_descriptor: 
         ) from error
     if evidence != _PRIVILEGED_OPERATION_WORKER_SCHEMA_PROBE_EVIDENCE:
         raise click.ClickException("Privileged-operation worker startup probe evidence is invalid.")
+
+
+def _consume_ordinary_agent_worker_schema_probe_evidence(file_descriptor: int) -> None:
+    try:
+        with os.fdopen(file_descriptor, "rb", closefd=True) as evidence_file:
+            evidence = evidence_file.read(len(_ORDINARY_AGENT_WORKER_SCHEMA_PROBE_EVIDENCE) + 1)
+    except OSError as error:
+        raise click.ClickException(
+            "Ordinary-agent worker startup probe evidence is unavailable."
+        ) from error
+    if evidence != _ORDINARY_AGENT_WORKER_SCHEMA_PROBE_EVIDENCE:
+        raise click.ClickException("Ordinary-agent worker startup probe evidence is invalid.")
+
+
+def _build_ordinary_agent_worker_dispatcher(*, record_store: object) -> OrdinaryAgentJobAdvancer:
+    """Load the domain-owned exhaustive dispatcher at the composition root."""
+
+    from control_plane.ordinary_agent_job_dispatcher import (
+        build_ordinary_agent_job_dispatcher,
+    )
+
+    return build_ordinary_agent_job_dispatcher(
+        record_store=record_store,
+        support=DEFAULT_ORDINARY_AGENT_WORKER_SUPPORT,
+    )
 
 
 _SERVICE_TARGET_TYPE_ENV_KEYS = ("LAUNCHPLANE_DOKPLOY_TARGET_TYPE",)
@@ -466,6 +504,173 @@ def service_odoo_workers() -> None:
 @service.group("privileged-operation-workers")
 def service_privileged_operation_workers() -> None:
     """Run Launchplane-owned privileged-operation workers."""
+
+
+@service.group("ordinary-agent-workers")
+def service_ordinary_agent_workers() -> None:
+    """Run the dormant ordinary finite-job worker."""
+
+
+@service_ordinary_agent_workers.command("run-once")
+@click.option(
+    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
+)
+@click.option(
+    "--database-url",
+    envvar=_DATABASE_URL_ENV_KEYS,
+    required=True,
+    help="Postgres connection string for Launchplane shared-service core records.",
+)
+@click.option(
+    "--lease-owner",
+    default="",
+    help="Worker lease owner id. Defaults to a generated process-local id.",
+)
+@click.option("--lease-seconds", type=click.IntRange(min=1, max=300), default=30, show_default=True)
+def service_ordinary_agent_workers_run_once(
+    state_dir: Path,
+    database_url: str,
+    lease_owner: str,
+    lease_seconds: int,
+) -> None:
+    """Run one fair ordinary finite-job scan."""
+
+    del state_dir  # Ordinary worker state is DB-backed; retain the common CLI shape.
+    if not database_url.strip():
+        raise click.ClickException(
+            "Ordinary-agent workers require --database-url or LAUNCHPLANE_DATABASE_URL."
+        )
+    generated_lease_owner = (
+        f"{socket.gethostname()}:{uuid.uuid4()}" if not lease_owner.strip() else lease_owner
+    )
+    store = build_ordinary_agent_worker_store(database_url=database_url)
+    telemetry = OrdinaryAgentWorkerTelemetry()
+    result = run_ordinary_agent_worker_once(
+        record_store=cast(OrdinaryAgentJobWorkerStore, store),
+        state=OrdinaryAgentJobScanState(),
+        telemetry=telemetry,
+        worker_id=generated_lease_owner,
+        lease_seconds=lease_seconds,
+        dispatcher=_build_ordinary_agent_worker_dispatcher(record_store=store),
+    )
+    click.echo(
+        json.dumps(
+            ordinary_agent_worker_result_payload(result, telemetry), indent=2, sort_keys=True
+        )
+    )
+
+
+@service_ordinary_agent_workers.command("run")
+@click.option(
+    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
+)
+@click.option(
+    "--database-url",
+    envvar=_DATABASE_URL_ENV_KEYS,
+    required=True,
+    help="Postgres connection string for Launchplane shared-service core records.",
+)
+@click.option(
+    "--lease-owner",
+    default="",
+    help="Worker lease owner id. Defaults to a generated process-local id.",
+)
+@click.option("--lease-seconds", type=click.IntRange(min=1, max=300), default=30, show_default=True)
+@click.option("--poll-seconds", type=click.IntRange(min=1, max=300), default=15, show_default=True)
+@click.option(
+    "--max-consecutive-errors", type=click.IntRange(min=1, max=100), default=3, show_default=True
+)
+@click.option("--schema-probe-fd", type=click.IntRange(min=3, max=255), required=True, hidden=True)
+def service_ordinary_agent_workers_run(
+    state_dir: Path,
+    database_url: str,
+    lease_owner: str,
+    lease_seconds: int,
+    poll_seconds: int,
+    max_consecutive_errors: int,
+    schema_probe_fd: int,
+) -> None:
+    """Run the ordinary finite worker until SIGTERM/SIGINT."""
+
+    del state_dir
+    if not database_url.strip():
+        raise click.ClickException(
+            "Ordinary-agent workers require --database-url or LAUNCHPLANE_DATABASE_URL."
+        )
+    _consume_ordinary_agent_worker_schema_probe_evidence(schema_probe_fd)
+    generated_lease_owner = (
+        f"{socket.gethostname()}:{uuid.uuid4()}" if not lease_owner.strip() else lease_owner
+    )
+    stop_event = Event()
+
+    def request_stop(_signal_number: int, _frame: object) -> None:
+        stop_event.set()
+
+    previous_sigterm = signal.signal(signal.SIGTERM, request_stop)
+    previous_sigint = signal.signal(signal.SIGINT, request_stop)
+    telemetry = OrdinaryAgentWorkerTelemetry()
+    scan_state = OrdinaryAgentJobScanState()
+    store = None
+    try:
+        click.echo(json.dumps({"event": "ordinary_agent_worker_started"}, sort_keys=True))
+        store = build_ordinary_agent_worker_store(
+            database_url=database_url,
+            schema_probe_completed=True,
+            on_schema_probe_succeeded=lambda: click.echo(
+                json.dumps(
+                    {"event": "ordinary_agent_worker_schema_probe_succeeded"}, sort_keys=True
+                )
+            ),
+        )
+        dispatcher = _build_ordinary_agent_worker_dispatcher(record_store=store)
+        consecutive_errors = 0
+        while not stop_event.is_set():
+            cycle_started = time.monotonic()
+            try:
+                result = run_ordinary_agent_worker_once(
+                    record_store=cast(OrdinaryAgentJobWorkerStore, store),
+                    state=scan_state,
+                    telemetry=telemetry,
+                    worker_id=generated_lease_owner,
+                    lease_seconds=lease_seconds,
+                    dispatcher=dispatcher,
+                )
+            except Exception as error:  # noqa: BLE001 - bounded process retry loop.
+                consecutive_errors += 1
+                click.echo(
+                    json.dumps(
+                        {
+                            "event": "ordinary_agent_worker_error",
+                            "consecutive_errors": consecutive_errors,
+                            "error_type": type(error).__name__,
+                        },
+                        sort_keys=True,
+                    )
+                )
+                if consecutive_errors >= max_consecutive_errors:
+                    raise click.ClickException(
+                        "Ordinary-agent workers exited after "
+                        f"{consecutive_errors} consecutive polling errors."
+                    ) from error
+                stop_event.wait(poll_seconds)
+                continue
+            consecutive_errors = 0
+            click.echo(
+                json.dumps(
+                    {
+                        "event": "ordinary_agent_worker_poll",
+                        **ordinary_agent_worker_result_payload(result, telemetry),
+                    },
+                    sort_keys=True,
+                )
+            )
+            stop_event.wait(max(0.0, poll_seconds - (time.monotonic() - cycle_started)))
+    finally:
+        if store is not None:
+            store.close()
+        signal.signal(signal.SIGTERM, previous_sigterm)
+        signal.signal(signal.SIGINT, previous_sigint)
+    click.echo(json.dumps({"event": "ordinary_agent_worker_stopped"}, sort_keys=True))
 
 
 @service_privileged_operation_workers.command("run-once")

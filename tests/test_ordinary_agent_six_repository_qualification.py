@@ -7,7 +7,7 @@ from email.message import Message
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from urllib.error import HTTPError
 
 from cryptography.hazmat.primitives import serialization
@@ -15,6 +15,9 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from sqlalchemy import select
 
 from control_plane.contracts.ordinary_agent_custody import OrdinaryAgentCustodyIssueAttempt
+from control_plane.contracts.ordinary_agent_activation import (
+    OrdinaryAgentDeliveryActivationRecord,
+)
 from control_plane.contracts.ordinary_agent_effect import OrdinaryAgentClaimedJob
 from control_plane.contracts.ordinary_agent_effect import OrdinaryAgentEffectRecord
 from control_plane.contracts.ordinary_agent_effect import OrdinaryAgentJobAttemptDisposition
@@ -78,6 +81,13 @@ class OrdinaryAgentSixRepositoryQualificationTests(unittest.TestCase):
                 self.store,
                 "_database_mutation_timestamp",
                 side_effect=lambda _: self.clock.now().isoformat(),
+            )
+        )
+        self.enterContext(
+            patch.object(
+                self.store,
+                "_require_and_project_guarded_readiness",
+                return_value=(Mock(spec=OrdinaryAgentDeliveryActivationRecord), self.clock.epoch),
             )
         )
         self.enterContext(

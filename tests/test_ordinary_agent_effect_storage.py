@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from dataclasses import replace
 import unittest
 import hashlib
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.merge_train_batch import (
@@ -12,6 +12,9 @@ from control_plane.contracts.merge_train_batch import (
     build_ordinary_merge_train_candidate_ref,
 )
 from control_plane.contracts.ordinary_agent_custody import OrdinaryAgentCustodyCandidate
+from control_plane.contracts.ordinary_agent_activation import (
+    OrdinaryAgentDeliveryActivationRecord,
+)
 from control_plane.contracts.ordinary_agent import OrdinaryAgentPullRequest
 from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
 from control_plane.contracts import ordinary_agent_snapshot as snapshots
@@ -78,6 +81,13 @@ class OrdinaryAgentEffectStorageTests(unittest.TestCase):
                 }
             )
         self.store = self.fixture.store
+        readiness = patch.object(
+            self.store,
+            "_require_and_project_guarded_readiness",
+            return_value=(Mock(spec=OrdinaryAgentDeliveryActivationRecord), self.fixture.now),
+        )
+        readiness.start()
+        fixture.addCleanup(readiness.stop)
         self.merge_policy = MergeTrainPolicyRecord.model_validate(
             {
                 "record_id": "effect-test-policy",

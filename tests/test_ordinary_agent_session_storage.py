@@ -6,11 +6,17 @@ from pathlib import Path
 from typing import Any
 from tempfile import TemporaryDirectory
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from sqlalchemy import select
 
 from control_plane.contracts.ordinary_agent import OrdinaryAgentPullRequest
+from control_plane.contracts.ordinary_agent_client import (
+    OrdinaryAgentGuardedDeliveryFiniteClientRequest,
+)
+from control_plane.contracts.ordinary_agent_activation import (
+    OrdinaryAgentDeliveryActivationRecord,
+)
 from control_plane.contracts.ordinary_agent_lifecycle import (
     OrdinaryAgentEnrollApplyEnvelope,
     OrdinaryAgentEnrollmentIntent,
@@ -33,11 +39,16 @@ from control_plane.contracts.ordinary_agent_session_lifecycle import (
     OrdinaryAgentLeaseRecord,
     OrdinaryAgentQualificationFiniteRequestV2,
 )
+from control_plane.contracts.ordinary_agent_effect import (
+    OrdinaryAgentJobClaimRejected,
+    OrdinaryAgentJobCursor,
+)
 from control_plane.ordinary_agent_authentication import parse_ordinary_agent_token
 from control_plane.ordinary_agent_session_lifecycle import OrdinaryAgentSessionAdmissionDenied
 from control_plane.storage.postgres import (
     PostgresRecordStore,
     LaunchplaneOrdinaryAgentFiniteRequestRow,
+    LaunchplaneOrdinaryAgentJobClaimRow,
     LaunchplaneOrdinaryAgentLeaseRow,
     LaunchplaneOrdinaryAgentSessionRow,
 )
@@ -82,6 +93,13 @@ class OrdinaryAgentSessionStorageTests(unittest.TestCase):
                 self.store,
                 "_database_mutation_timestamp",
                 return_value=datetime.fromtimestamp(self.now, timezone.utc).isoformat(),
+            )
+        )
+        self.enterContext(
+            patch.object(
+                self.store,
+                "_require_and_project_guarded_readiness",
+                return_value=(Mock(spec=OrdinaryAgentDeliveryActivationRecord), self.now),
             )
         )
         self.policy, inventory = setup_ordinary_agent_authority(self.store)
@@ -231,6 +249,183 @@ class OrdinaryAgentSessionStorageTests(unittest.TestCase):
         self.clock.return_value = datetime.fromtimestamp(self.now + 200, timezone.utc).isoformat()
         with self.assertRaisesRegex(OrdinaryAgentSessionAdmissionDenied, "finite_job_expired"):
             self.store.reauthorize_ordinary_agent_finite_job(request_id=original.request_id)
+
+    def test_malformed_job_payload_advances_trusted_cursor_to_later_supported_row(self) -> None:
+        self.enroll()
+        first = self.store.admit_ordinary_agent_finite_request(
+            proof=self.proof, request=self.request
+        )
+        second = self.request.model_copy(
+            update={"request_id": "finite-request-two", "idempotency_key": "request-two"}
+        )
+        with self.store._session_factory() as session:
+            first_row = session.get(LaunchplaneOrdinaryAgentFiniteRequestRow, first.request_id)
+            assert first_row is not None
+            first_row.payload = {"schema_version": 99, "untrusted_request_id": "zzzz"}
+            session.add(
+                LaunchplaneOrdinaryAgentFiniteRequestRow(
+                    request_id=second.request_id,
+                    principal_id=second.principal_id,
+                    session_id=second.session_id,
+                    lease_id=second.lease_id,
+                    idempotency_key=second.idempotency_key,
+                    intent_sha256="f" * 64,
+                    payload=self.store._payload_dict(second),
+                )
+            )
+            session.add(
+                LaunchplaneOrdinaryAgentJobClaimRow(
+                    request_id=second.request_id,
+                    worker_id="",
+                    generation=0,
+                    claim_expires_at=0,
+                    next_due_at=self.now,
+                    status="pending",
+                    reason_code=None,
+                    released_controller=None,
+                )
+            )
+            session.commit()
+
+        with self.assertRaises(OrdinaryAgentJobClaimRejected) as raised:
+            self.store.claim_due_ordinary_agent_job(worker_id="worker", lease_seconds=30)
+        self.assertEqual(
+            raised.exception.cursor, OrdinaryAgentJobCursor(request_id=first.request_id)
+        )
+        claimed = self.store.claim_due_ordinary_agent_job(
+            worker_id="worker", lease_seconds=30, after=raised.exception.cursor
+        )
+        self.assertIsNotNone(claimed)
+        assert claimed is not None
+        self.assertEqual(claimed.request, second)
+        with self.store._session_factory() as session:
+            poison_claim = session.get(LaunchplaneOrdinaryAgentJobClaimRow, first.request_id)
+            assert poison_claim is not None
+            self.assertEqual(poison_claim.generation, 0)
+            self.assertEqual(poison_claim.status, "pending")
+
+    def test_client_intent_replay_survives_lifecycle_and_binding_progress(self) -> None:
+        self.enroll()
+        lease = self.issued.leases[0]
+        intent = OrdinaryAgentGuardedDeliveryFiniteClientRequest(
+            idempotency_key="client-replay",
+            session_id=self.issued.session.session_id,
+            lease_id=lease.lease_id,
+            base_sha="a" * 40,
+            pull_requests=(OrdinaryAgentPullRequest(number=12, head_sha="b" * 40),),
+            permitted_stack_edit_pull_requests=(),
+            refresh_allowance=1,
+        )
+        admitted = self.store.admit_ordinary_agent_client_request(proof=self.proof, request=intent)
+        progressed = admitted.model_copy(
+            update={
+                "base_sha": "c" * 40,
+                "pull_requests": (OrdinaryAgentPullRequest(number=12, head_sha="d" * 40),),
+                "binding_revision": 2,
+                "refresh_used": 1,
+                "status": "completed",
+                "execution_record_ids": ("effect-one",),
+            }
+        )
+        with self.store._session_factory() as session:
+            row = session.get(LaunchplaneOrdinaryAgentFiniteRequestRow, admitted.request_id)
+            assert row is not None
+            row.payload = self.store._payload_dict(progressed)
+            session.commit()
+
+        self.clock.return_value = datetime.fromtimestamp(lease.expires_at, timezone.utc).isoformat()
+
+        self.assertEqual(
+            self.store.admit_ordinary_agent_client_request(proof=self.proof, request=intent),
+            progressed,
+        )
+        with self.assertRaisesRegex(OrdinaryAgentSessionAdmissionDenied, "idempotency_conflict"):
+            self.store.admit_ordinary_agent_client_request(
+                proof=self.proof,
+                request=intent.model_copy(update={"base_sha": "e" * 40}),
+            )
+
+    def test_guarded_capability_denial_does_not_charge_or_persist_admission(self) -> None:
+        self.enroll()
+        lease = self.issued.leases[0]
+        intent = OrdinaryAgentGuardedDeliveryFiniteClientRequest(
+            idempotency_key="guarded-provider-readiness-gap",
+            session_id=self.issued.session.session_id,
+            lease_id=lease.lease_id,
+            base_sha="a" * 40,
+            pull_requests=(OrdinaryAgentPullRequest(number=12, head_sha="b" * 40),),
+            permitted_stack_edit_pull_requests=(),
+            refresh_allowance=0,
+        )
+        guarded_readiness = PostgresRecordStore._require_and_project_guarded_readiness.__get__(
+            self.store, PostgresRecordStore
+        )
+
+        with (
+            patch.object(
+                self.store,
+                "_require_and_project_guarded_readiness",
+                wraps=guarded_readiness,
+            ),
+            patch.object(
+                self.store,
+                "_require_ordinary_agent_runtime_readiness",
+                side_effect=OrdinaryAgentSessionAdmissionDenied("provider_readiness_unavailable"),
+            ),
+            self.assertRaisesRegex(
+                OrdinaryAgentSessionAdmissionDenied, "provider_readiness_unavailable"
+            ),
+        ):
+            self.store.admit_ordinary_agent_client_request(proof=self.proof, request=intent)
+
+        with self.store._session_factory() as session:
+            persisted_lease_row = session.get(LaunchplaneOrdinaryAgentLeaseRow, lease.lease_id)
+            assert persisted_lease_row is not None
+            persisted_lease = OrdinaryAgentLeaseRecord.model_validate(persisted_lease_row.payload)
+            request_row = session.scalar(
+                select(LaunchplaneOrdinaryAgentFiniteRequestRow).where(
+                    LaunchplaneOrdinaryAgentFiniteRequestRow.idempotency_key
+                    == intent.idempotency_key
+                )
+            )
+        self.assertEqual(persisted_lease, lease)
+        self.assertIsNone(request_row)
+
+    def test_client_admission_rechecks_lease_against_post_readiness_time(self) -> None:
+        self.enroll()
+        lease = self.issued.leases[0]
+        intent = OrdinaryAgentGuardedDeliveryFiniteClientRequest(
+            idempotency_key="readiness-crossed-lease-expiry",
+            session_id=self.issued.session.session_id,
+            lease_id=lease.lease_id,
+            base_sha="a" * 40,
+            pull_requests=(OrdinaryAgentPullRequest(number=12, head_sha="b" * 40),),
+            permitted_stack_edit_pull_requests=(),
+            refresh_allowance=0,
+        )
+
+        with (
+            patch.object(
+                self.store,
+                "_require_and_project_guarded_readiness",
+                return_value=(Mock(spec=OrdinaryAgentDeliveryActivationRecord), lease.expires_at),
+            ),
+            self.assertRaisesRegex(OrdinaryAgentSessionAdmissionDenied, "lease_unavailable"),
+        ):
+            self.store.admit_ordinary_agent_client_request(proof=self.proof, request=intent)
+
+        with self.store._session_factory() as session:
+            persisted_lease_row = session.get(LaunchplaneOrdinaryAgentLeaseRow, lease.lease_id)
+            assert persisted_lease_row is not None
+            persisted_lease = OrdinaryAgentLeaseRecord.model_validate(persisted_lease_row.payload)
+            request_row = session.scalar(
+                select(LaunchplaneOrdinaryAgentFiniteRequestRow).where(
+                    LaunchplaneOrdinaryAgentFiniteRequestRow.idempotency_key
+                    == intent.idempotency_key
+                )
+            )
+        self.assertEqual(persisted_lease, lease)
+        self.assertIsNone(request_row)
 
     def test_reauthorization_rejects_exhausted_v1_guarded_request(self) -> None:
         self.enroll()

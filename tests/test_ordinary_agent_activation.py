@@ -30,6 +30,7 @@ from control_plane.contracts.privileged_operation import (
 from control_plane.contracts.repository_inventory import RepositoryInventoryRecord
 from control_plane.ordinary_agent_activation import (
     OrdinaryAgentDeliveryActivationPlanningError,
+    _runtime_capability,
     _runtime_supports_authz_policy_schema_v3_enable,
     ordinary_agent_delivery_activation_duration_options,
     plan_ordinary_agent_delivery_activation,
@@ -103,6 +104,19 @@ def _inventory() -> OrdinaryAgentDeliveryInventoryReference:
 
 
 class OrdinaryAgentDeliveryActivationContractTests(unittest.TestCase):
+    def test_runtime_capability_reports_composed_worker_handlers(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(directory) / "launchplane.sqlite3")
+            )
+            store.ensure_schema()
+            self.addCleanup(store.close)
+
+            capability = _runtime_capability(store, observed_at="2026-09-10T21:00:00Z")
+
+        self.assertTrue(capability.qualification_advancer_registered)
+        self.assertTrue(capability.guarded_worker_registered)
+
     def test_policy_write_capability_requires_consumed_runtime_seams_without_self_gate(
         self,
     ) -> None:

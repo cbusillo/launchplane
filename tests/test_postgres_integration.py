@@ -19,7 +19,7 @@ from alembic import command as alembic_command
 from alembic.config import Config as AlembicConfig
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from sqlalchemy import create_engine, event, inspect, text
+from sqlalchemy import create_engine, event, inspect, select, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError, OperationalError
@@ -3079,6 +3079,16 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
 
             try:
                 with (
+                    patch.object(
+                        PostgresRecordStore,
+                        "_require_ordinary_agent_runtime_readiness",
+                        return_value=(object(), (), scenario.fixture.now),
+                    ),
+                    patch.object(
+                        PostgresRecordStore,
+                        "_ordinary_agent_qualification_setup_from_activation",
+                        return_value=scenario.setup,
+                    ),
                     patch.object(first_store, "_payload_dict", side_effect=fail_after_charge),
                     patch.object(
                         second_store,
@@ -7706,6 +7716,351 @@ class RealPostgresOrdinaryAgentSessionTests(unittest.TestCase):
             preflight = next(lease for lease in replayed.leases if lease.action == "preflight")
             self.assertEqual(preflight.budget.pull_requests_used, 0)
 
+    def test_cancelled_qualification_restores_closed_attestation_without_provider_work(
+        self,
+    ) -> None:
+        from datetime import datetime, timezone
+
+        from control_plane.contracts.ordinary_agent_snapshot import (
+            OrdinaryAgentProviderRequestCounts,
+        )
+        from control_plane.ordinary_agent_qualification_job import (
+            advance_ordinary_agent_qualification_job,
+        )
+
+        with _store_for_fresh_head_database() as store:
+            scenario = QualificationStorageScenario(
+                self, store=store, request_id="postgres-qualification-cancelled-recovery"
+            )
+            claimed = scenario.claim(lease_seconds=120)
+            completed, reservation = scenario.record_positive(claimed=claimed)
+            store.mark_ordinary_agent_custody_cleanup_unknown(
+                attempt_id=reservation.custody_attempt_id
+            )
+            store.record_ordinary_agent_qualification_failure(
+                attempt_id=completed.attempt_id,
+                custody_attempt_id=reservation.custody_attempt_id,
+                reason_code="cleanup_unknown",
+                counts=OrdinaryAgentProviderRequestCounts(
+                    rest_core_requests=0, graphql_requests=0, graphql_points=0
+                ),
+            )
+            store.close_ordinary_agent_custody_issue_attempt(
+                attempt_id=reservation.custody_attempt_id,
+                reason="confirmed_revoked",
+            )
+            store.cancel_ordinary_agent_session(
+                proof=scenario.fixture.proof,
+                session_id=scenario.session.session_id,
+            )
+
+            disposition = advance_ordinary_agent_qualification_job(
+                claimed=claimed,
+                store=store,
+                setup_resolver=lambda **_: (_ for _ in ()).throw(
+                    AssertionError("historical recovery must not resolve fresh setup")
+                ),
+                api_request=lambda **_: (_ for _ in ()).throw(
+                    AssertionError("historical recovery must not call the provider")
+                ),
+                utc_now=lambda: datetime.fromtimestamp(scenario.fixture.now, timezone.utc),
+            )
+
+            self.assertEqual(disposition.status, "completed")
+            self.assertEqual(disposition.reason_code, "qualification_attested")
+            self.assertEqual(scenario.persisted_lease().budget.actions_used, 1)
+
+    def test_qualification_unknown_custody_is_paced_across_postgres_reclaim(self) -> None:
+        import hashlib
+
+        from control_plane.contracts.canonical_json import canonical_json_sha256
+        from control_plane.contracts.ordinary_agent_custody import (
+            GITHUB_TOKEN_MAXIMUM_LIFETIME_SECONDS,
+            KNOWN_TOKEN_CLOCK_SKEW_SECONDS,
+        )
+        from control_plane.contracts.ordinary_agent_snapshot import (
+            OrdinaryAgentProviderRequestCounts,
+        )
+        from control_plane.ordinary_agent_qualification_job import (
+            advance_ordinary_agent_qualification_job,
+        )
+        from control_plane.github_app_identity import ordinary_agent_effect_permissions
+
+        with _store_for_fresh_head_database() as store:
+            scenario = QualificationStorageScenario(
+                self, store=store, request_id="postgres-qualification-unknown-custody"
+            )
+            claimed = scenario.claim(lease_seconds=120)
+            attempt = scenario.reserve_attempt(claimed)
+            reservation = scenario.reserve_custody(claimed=claimed, attempt=attempt)
+            acquired, _ = store.acquire_ordinary_agent_custody_issue_attempt(
+                attempt_id=reservation.custody_attempt_id,
+                idempotency_key_sha256=hashlib.sha256(
+                    reservation.idempotency_key.encode()
+                ).hexdigest(),
+                request_sha256=canonical_json_sha256(
+                    {
+                        "candidate": reservation.candidate.model_dump(mode="json"),
+                        "request": reservation.request_payload,
+                    }
+                ),
+                candidate=reservation.candidate,
+                requested_permissions=ordinary_agent_effect_permissions(
+                    reservation.candidate.effect_profile
+                ),
+                dispatch_window_seconds=30,
+            )
+            self.assertEqual(acquired, "acquired")
+            store.mark_ordinary_agent_custody_issue_unknown(
+                attempt_id=reservation.custody_attempt_id
+            )
+            unknown = store.read_ordinary_agent_custody_issue_attempt(
+                reservation.custody_attempt_id
+            )
+            conservative_expiry = (
+                int(datetime.fromisoformat(unknown.dispatch_deadline).timestamp())
+                + GITHUB_TOKEN_MAXIMUM_LIFETIME_SECONDS
+                + KNOWN_TOKEN_CLOCK_SKEW_SECONDS
+            )
+            store.record_ordinary_agent_qualification_failure(
+                attempt_id=attempt.attempt_id,
+                custody_attempt_id=reservation.custody_attempt_id,
+                reason_code="provider_transport",
+                counts=OrdinaryAgentProviderRequestCounts(
+                    rest_core_requests=1, graphql_requests=0, graphql_points=0
+                ),
+            )
+
+            def advance(current: Any, observed_at: int) -> Any:
+                return advance_ordinary_agent_qualification_job(
+                    claimed=current,
+                    store=store,
+                    setup_resolver=lambda **_: (_ for _ in ()).throw(
+                        AssertionError("unknown custody must not resolve fresh setup")
+                    ),
+                    api_request=lambda **_: (_ for _ in ()).throw(
+                        AssertionError("unknown custody must not call the provider")
+                    ),
+                    utc_now=lambda: datetime.fromtimestamp(observed_at, timezone.utc),
+                )
+
+            waiting = advance(claimed, scenario.fixture.now)
+            self.assertEqual(waiting.status, "waiting")
+            self.assertEqual(waiting.reason_code, "read_custody_fenced")
+            self.assertEqual(waiting.next_due_at, conservative_expiry)
+            store.finish_ordinary_agent_job_attempt(
+                claim_fence=claimed.claim_fence, disposition=waiting
+            )
+            self.assertIsNone(
+                store.claim_due_ordinary_agent_job(worker_id="postgres-too-early", lease_seconds=30)
+            )
+
+            scenario.fixture.clock.return_value = datetime.fromtimestamp(
+                conservative_expiry - 1, timezone.utc
+            ).isoformat()
+            self.assertIsNone(
+                store.claim_due_ordinary_agent_job(
+                    worker_id="postgres-before-conservative-expiry", lease_seconds=30
+                )
+            )
+            scenario.fixture.clock.return_value = datetime.fromtimestamp(
+                conservative_expiry, timezone.utc
+            ).isoformat()
+            reclaimed = scenario.claim(worker_id="postgres-known-expiry", lease_seconds=30)
+            terminal = advance(reclaimed, conservative_expiry)
+            self.assertEqual(terminal.status, "blocked")
+            self.assertEqual(terminal.reason_code, "qualification_request_terminal")
+            store.finish_ordinary_agent_job_attempt(
+                claim_fence=reclaimed.claim_fence, disposition=terminal
+            )
+            self.assertIsNone(
+                store.claim_due_ordinary_agent_job(worker_id="postgres-terminal", lease_seconds=30)
+            )
+            closed = store.read_ordinary_agent_custody_issue_attempt(reservation.custody_attempt_id)
+            self.assertEqual(closed.state, "closed")
+            self.assertEqual(closed.close_reason, "known_expired")
+            self.assertEqual(scenario.persisted_lease().budget.actions_used, 1)
+
+    def test_cancelled_postgres_qualification_closes_at_known_custody_expiry(self) -> None:
+        from control_plane.ordinary_agent_qualification_job import (
+            advance_ordinary_agent_qualification_job,
+        )
+
+        with _store_for_fresh_head_database() as store:
+            scenario = QualificationStorageScenario(
+                self, store=store, request_id="postgres-qualification-cancelled-issued"
+            )
+            claimed = scenario.claim(lease_seconds=120)
+            attempt = scenario.reserve_attempt(claimed)
+            reservation = scenario.reserve_custody(claimed=claimed, attempt=attempt)
+            scenario.issue(reservation)
+            store.cancel_ordinary_agent_session(
+                proof=scenario.fixture.proof,
+                session_id=scenario.session.session_id,
+            )
+
+            def no_new_work(**_: object) -> Any:
+                raise AssertionError("cancelled maintenance must not start provider work")
+
+            waiting = advance_ordinary_agent_qualification_job(
+                claimed=claimed,
+                store=store,
+                setup_resolver=no_new_work,
+                api_request=no_new_work,
+                utc_now=lambda: datetime.fromtimestamp(scenario.fixture.now, timezone.utc),
+            )
+            self.assertEqual(waiting.status, "waiting")
+            self.assertEqual(waiting.next_due_at, scenario.fixture.now + 360)
+            store.finish_ordinary_agent_job_attempt(
+                claim_fence=claimed.claim_fence, disposition=waiting
+            )
+            self.assertIsNone(
+                store.claim_due_ordinary_agent_job(
+                    worker_id="postgres-before-expiry", lease_seconds=30
+                )
+            )
+
+            scenario.fixture.clock.return_value = datetime.fromtimestamp(
+                scenario.fixture.now + 360, timezone.utc
+            ).isoformat()
+            reclaimed = scenario.claim(worker_id="postgres-known-expiry", lease_seconds=30)
+            terminal = advance_ordinary_agent_qualification_job(
+                claimed=reclaimed,
+                store=store,
+                setup_resolver=no_new_work,
+                api_request=no_new_work,
+                utc_now=lambda: datetime.fromtimestamp(scenario.fixture.now + 360, timezone.utc),
+            )
+            self.assertEqual(terminal.status, "blocked")
+            self.assertEqual(terminal.reason_code, "qualification_request_terminal")
+            store.finish_ordinary_agent_job_attempt(
+                claim_fence=reclaimed.claim_fence, disposition=terminal
+            )
+            self.assertIsNone(
+                store.claim_due_ordinary_agent_job(worker_id="postgres-terminal", lease_seconds=30)
+            )
+            custody = store.read_ordinary_agent_custody_issue_attempt(
+                reservation.custody_attempt_id
+            )
+            self.assertEqual(custody.state, "closed")
+            self.assertEqual(custody.close_reason, "known_expired")
+            self.assertEqual(scenario.persisted_lease().budget.actions_used, 1)
+
+    def test_postgres_closed_missing_outcome_reserves_qualification_successor(self) -> None:
+        from control_plane.contracts.ordinary_agent_effect import (
+            OrdinaryAgentQualificationAttemptRecord,
+            parse_ordinary_agent_read_attempt,
+        )
+        from control_plane.ordinary_agent_session_lifecycle import (
+            OrdinaryAgentSessionAdmissionDenied,
+        )
+        from control_plane.storage.postgres import LaunchplaneOrdinaryAgentReadAttemptRow
+
+        with _store_for_fresh_head_database() as store:
+            scenario = QualificationStorageScenario(
+                self, store=store, request_id="postgres-qualification-missing-outcome"
+            )
+            claimed = scenario.claim(lease_seconds=120)
+            attempt = scenario.reserve_attempt(claimed)
+            reservation = scenario.reserve_custody(claimed=claimed, attempt=attempt)
+            scenario.issue(reservation)
+            store.close_ordinary_agent_custody_issue_attempt(
+                attempt_id=reservation.custody_attempt_id,
+                reason="confirmed_revoked",
+            )
+
+            with self.assertRaisesRegex(
+                OrdinaryAgentSessionAdmissionDenied, "qualification_setup_required"
+            ):
+                store.reserve_ordinary_agent_qualification_attempt(
+                    claim_fence=claimed.claim_fence, setup=None
+                )
+            successor = store.reserve_ordinary_agent_qualification_attempt(
+                claim_fence=claimed.claim_fence, setup=scenario.setup
+            )
+
+            with store._session_factory() as session:
+                row = session.get(LaunchplaneOrdinaryAgentReadAttemptRow, attempt.attempt_id)
+                assert row is not None
+                recovered = parse_ordinary_agent_read_attempt(row.payload)
+            self.assertIsInstance(recovered, OrdinaryAgentQualificationAttemptRecord)
+            assert isinstance(recovered, OrdinaryAgentQualificationAttemptRecord)
+            self.assertEqual(recovered.state, "incomplete")
+            self.assertEqual(recovered.reason_code, "read_outcome_missing")
+            self.assertIsNone(recovered.failure_counts)
+            self.assertEqual(successor.attempt_ordinal, 2)
+            self.assertEqual(scenario.persisted_lease().budget.actions_used, 1)
+
+    def test_guarded_provider_gap_rolls_back_postgres_admission_budget_and_history(
+        self,
+    ) -> None:
+        from control_plane.contracts.ordinary_agent import OrdinaryAgentPullRequest
+        from control_plane.contracts.ordinary_agent_client import (
+            OrdinaryAgentGuardedDeliveryFiniteClientRequest,
+        )
+        from control_plane.contracts.ordinary_agent_session_lifecycle import (
+            OrdinaryAgentLeaseRecord,
+        )
+        from control_plane.ordinary_agent_session_lifecycle import (
+            OrdinaryAgentSessionAdmissionDenied,
+        )
+        from control_plane.storage.postgres import (
+            LaunchplaneOrdinaryAgentFiniteRequestRow,
+            LaunchplaneOrdinaryAgentLeaseRow,
+        )
+        from tests import test_ordinary_agent_session_storage as session_tests
+
+        with _store_for_fresh_head_database() as store:
+            fixture = session_tests.OrdinaryAgentSessionStorageTests()
+            self.addCleanup(fixture.doCleanups)
+            fixture.prepare_store(store)
+            fixture.enroll()
+            lease = fixture.issued.leases[0]
+            intent = OrdinaryAgentGuardedDeliveryFiniteClientRequest(
+                idempotency_key="postgres-guarded-provider-gap",
+                session_id=fixture.issued.session.session_id,
+                lease_id=lease.lease_id,
+                base_sha="a" * 40,
+                pull_requests=(OrdinaryAgentPullRequest(number=12, head_sha="b" * 40),),
+                permitted_stack_edit_pull_requests=(),
+                refresh_allowance=0,
+            )
+            guarded_readiness = PostgresRecordStore._require_and_project_guarded_readiness.__get__(
+                store, PostgresRecordStore
+            )
+            with (
+                patch.object(
+                    store,
+                    "_require_and_project_guarded_readiness",
+                    wraps=guarded_readiness,
+                ),
+                patch.object(
+                    store,
+                    "_require_ordinary_agent_runtime_readiness",
+                    side_effect=OrdinaryAgentSessionAdmissionDenied(
+                        "provider_readiness_unavailable"
+                    ),
+                ),
+                self.assertRaisesRegex(
+                    OrdinaryAgentSessionAdmissionDenied,
+                    "provider_readiness_unavailable",
+                ),
+            ):
+                store.admit_ordinary_agent_client_request(proof=fixture.proof, request=intent)
+
+            with store._session_factory() as session:
+                lease_row = session.get(LaunchplaneOrdinaryAgentLeaseRow, lease.lease_id)
+                assert lease_row is not None
+                persisted_lease = OrdinaryAgentLeaseRecord.model_validate(lease_row.payload)
+                request_row = session.scalar(
+                    select(LaunchplaneOrdinaryAgentFiniteRequestRow).where(
+                        LaunchplaneOrdinaryAgentFiniteRequestRow.idempotency_key
+                        == intent.idempotency_key
+                    )
+                )
+            self.assertEqual(persisted_lease, lease)
+            self.assertIsNone(request_row)
+
     def test_qualification_reservation_and_finish_share_request_then_claim_lock_order(
         self,
     ) -> None:
@@ -7780,18 +8135,30 @@ class RealPostgresOrdinaryAgentSessionTests(unittest.TestCase):
             )
             executor = ThreadPoolExecutor(max_workers=2)
             try:
-                reservation_future = executor.submit(
-                    reservation_store.reserve_ordinary_agent_qualification_attempt,
-                    claim_fence=claimed.claim_fence,
-                    setup=scenario.setup,
-                )
-                self.assertTrue(request_locked.wait(timeout=10))
-                finish_future = executor.submit(finish_waiting)
-                self.assertTrue(finish_request_lock_attempted.wait(timeout=10))
-                self.assertFalse(finish_completed.wait(timeout=0.2))
-                release_reservation.set()
-                attempt = reservation_future.result(timeout=10)
-                finished = finish_future.result(timeout=10)
+                with (
+                    patch.object(
+                        PostgresRecordStore,
+                        "_require_ordinary_agent_runtime_readiness",
+                        return_value=(object(), (), scenario.fixture.now),
+                    ),
+                    patch.object(
+                        PostgresRecordStore,
+                        "_ordinary_agent_qualification_setup_from_activation",
+                        return_value=scenario.setup,
+                    ),
+                ):
+                    reservation_future = executor.submit(
+                        reservation_store.reserve_ordinary_agent_qualification_attempt,
+                        claim_fence=claimed.claim_fence,
+                        setup=scenario.setup,
+                    )
+                    self.assertTrue(request_locked.wait(timeout=10))
+                    finish_future = executor.submit(finish_waiting)
+                    self.assertTrue(finish_request_lock_attempted.wait(timeout=10))
+                    self.assertFalse(finish_completed.wait(timeout=0.2))
+                    release_reservation.set()
+                    attempt = reservation_future.result(timeout=10)
+                    finished = finish_future.result(timeout=10)
             finally:
                 release_reservation.set()
                 executor.shutdown(wait=True)

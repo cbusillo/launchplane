@@ -11,6 +11,7 @@ from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.ordinary_agent_effect import (
     OrdinaryAgentClaimedJob,
     OrdinaryAgentJobAttemptDisposition,
+    OrdinaryAgentJobClaimFence,
     OrdinaryAgentProviderQuotaKey,
     OrdinaryAgentProviderWaitObservation,
     OrdinaryAgentProviderWaitRecord,
@@ -34,6 +35,7 @@ from control_plane.ordinary_agent_custody import (
 from control_plane.contracts.ordinary_agent_custody import OrdinaryAgentCustodyIssueAttempt
 from control_plane.ordinary_agent_github_transport import (
     DeadlineMergeTrainGitHubTransport,
+    OrdinaryAgentProviderDeferred,
     require_installation_provider_ready,
 )
 from control_plane.ordinary_agent_qualification import observe_repository_administrator
@@ -76,6 +78,13 @@ class _QualificationStore(
         self, attempt_id: str
     ) -> OrdinaryAgentCustodyIssueAttempt: ...
 
+    def reserve_ordinary_agent_qualification_attempt(
+        self,
+        *,
+        claim_fence: OrdinaryAgentJobClaimFence,
+        setup: OrdinaryAgentQualificationSetup | None,
+    ) -> OrdinaryAgentQualificationAttemptRecord: ...
+
 
 def advance_ordinary_agent_qualification_job(
     *,
@@ -95,24 +104,58 @@ def advance_ordinary_agent_qualification_job(
         return OrdinaryAgentJobAttemptDisposition(
             status="blocked", reason_code="qualification_controller_fence"
         )
-    setup = setup_resolver(request=claimed.request)
-    if setup is None:
-        return OrdinaryAgentJobAttemptDisposition(
-            status="blocked", reason_code="qualification_setup_unavailable"
-        )
+    retry_at = int(utc_now().timestamp()) + 30
     try:
         attempt = store.reserve_ordinary_agent_qualification_attempt(
-            claim_fence=claimed.claim_fence, setup=setup
+            claim_fence=claimed.claim_fence, setup=None
         )
     except OrdinaryAgentSessionAdmissionDenied as error:
-        return _denied_disposition(error)
+        if error.reason_code != "qualification_setup_required":
+            return _denied_disposition(error, retry_at=retry_at)
+        try:
+            setup = setup_resolver(request=claimed.request)
+        except OrdinaryAgentSessionAdmissionDenied as setup_error:
+            return OrdinaryAgentJobAttemptDisposition(
+                status="waiting",
+                next_due_at=retry_at,
+                reason_code=setup_error.reason_code,
+            )
+        if setup is None:
+            return OrdinaryAgentJobAttemptDisposition(
+                status="waiting",
+                next_due_at=retry_at,
+                reason_code="qualification_setup_unavailable",
+            )
+        try:
+            attempt = store.reserve_ordinary_agent_qualification_attempt(
+                claim_fence=claimed.claim_fence, setup=setup
+            )
+        except OrdinaryAgentSessionAdmissionDenied as setup_error:
+            return _denied_disposition(setup_error, retry_at=retry_at)
+    setup = attempt.setup
     if attempt.state == "completed":
-        return _completed_disposition(store=store, attempt=attempt)
+        return _completed_disposition(store=store, attempt=attempt, retry_at=retry_at)
     if attempt.state in {"fenced", "exhausted"}:
         return OrdinaryAgentJobAttemptDisposition(
             status="reconciliation_required" if attempt.state == "fenced" else "blocked",
+            next_due_at=retry_at if attempt.state == "fenced" else None,
             reason_code=attempt.reason_code or "qualification_attempt_closed",
         )
+    if attempt.github_installation_id is not None:
+        try:
+            require_installation_provider_ready(
+                app_id=attempt.github_app_id,
+                installation_id=attempt.github_installation_id,
+                resource_classes=("core", "graphql", "secondary"),
+                read_provider_wait=store.read_provider_wait,
+                utc_now=utc_now,
+            )
+        except OrdinaryAgentProviderDeferred as error:
+            return OrdinaryAgentJobAttemptDisposition(
+                status="waiting",
+                next_due_at=error.retry_not_before or retry_at,
+                reason_code=error.reason_code,
+            )
     try:
         reservation = store.reserve_ordinary_agent_qualification_custody_attempt(
             claim_fence=claimed.claim_fence,
@@ -120,11 +163,35 @@ def advance_ordinary_agent_qualification_job(
             expected_attempt_revision=attempt.revision,
         )
     except OrdinaryAgentSessionAdmissionDenied as error:
-        return _denied_disposition(error)
+        return _denied_disposition(error, retry_at=retry_at)
     transport: DeadlineMergeTrainGitHubTransport | None = None
     recorded: OrdinaryAgentQualificationAttemptRecord | None = None
     result_denial: OrdinaryAgentSessionAdmissionDenied | None = None
-    read_authority_denied = False
+    readiness_denial: OrdinaryAgentSessionAdmissionDenied | None = None
+    provider_deferral: OrdinaryAgentProviderDeferred | None = None
+
+    def require_pre_mint_readiness(app_id: int, installation_id: int) -> None:
+        nonlocal provider_deferral, readiness_denial
+        try:
+            store.require_ordinary_agent_qualification_runtime_readiness(
+                claim_fence=claimed.claim_fence,
+                attempt_id=attempt.attempt_id,
+            )
+        except OrdinaryAgentSessionAdmissionDenied as error:
+            readiness_denial = error
+            raise
+        try:
+            require_installation_provider_ready(
+                app_id=app_id,
+                installation_id=installation_id,
+                resource_classes=("core", "graphql", "secondary"),
+                read_provider_wait=store.read_provider_wait,
+                utc_now=utc_now,
+            )
+        except OrdinaryAgentProviderDeferred as error:
+            provider_deferral = error
+            raise
+
     try:
         started = monotonic()
         with ordinary_agent_provider_token_lease(
@@ -137,13 +204,7 @@ def advance_ordinary_agent_qualification_job(
             monotonic=monotonic,
             utc_now=utc_now,
             quota_writer=store.record_provider_wait,
-            before_token_mint=lambda app_id, installation_id: require_installation_provider_ready(
-                app_id=app_id,
-                installation_id=installation_id,
-                resource_classes=("core", "graphql", "secondary"),
-                read_provider_wait=store.read_provider_wait,
-                utc_now=utc_now,
-            ),
+            before_token_mint=require_pre_mint_readiness,
         ) as lease:
             expires_at = datetime.fromisoformat(
                 lease.installation_token.expires_at.replace("Z", "+00:00")
@@ -162,11 +223,15 @@ def advance_ordinary_agent_qualification_job(
                 monotonic=monotonic,
             )
             try:
+                store.require_ordinary_agent_qualification_runtime_readiness(
+                    claim_fence=claimed.claim_fence,
+                    attempt_id=attempt.attempt_id,
+                )
                 store.require_ordinary_agent_qualification_read_authority(
                     claim_fence=claimed.claim_fence, attempt_id=attempt.attempt_id
                 )
-            except OrdinaryAgentSessionAdmissionDenied:
-                read_authority_denied = True
+            except OrdinaryAgentSessionAdmissionDenied as error:
+                readiness_denial = error
                 raise
             observed = observe_repository_administrator(
                 transport=transport, setup=setup, observed_at=int(utc_now().timestamp())
@@ -186,6 +251,18 @@ def advance_ordinary_agent_qualification_job(
             except OrdinaryAgentSessionAdmissionDenied as error:
                 result_denial = error
     except Exception as error:
+        if readiness_denial is not None:
+            return OrdinaryAgentJobAttemptDisposition(
+                status="waiting",
+                next_due_at=int(utc_now().timestamp()) + 30,
+                reason_code=readiness_denial.reason_code,
+            )
+        if provider_deferral is not None:
+            return OrdinaryAgentJobAttemptDisposition(
+                status="waiting",
+                next_due_at=provider_deferral.retry_not_before or retry_at,
+                reason_code=provider_deferral.reason_code,
+            )
         reason = _failure_reason(error)
         try:
             recorded = store.record_ordinary_agent_qualification_failure(
@@ -196,28 +273,32 @@ def advance_ordinary_agent_qualification_job(
             )
         except OrdinaryAgentSessionAdmissionDenied:
             return OrdinaryAgentJobAttemptDisposition(
-                status="reconciliation_required", reason_code="qualification_history_conflict"
+                status="waiting",
+                next_due_at=retry_at,
+                reason_code="qualification_history_conflict",
             )
         if reason == "cleanup_unknown":
             return OrdinaryAgentJobAttemptDisposition(
-                status="reconciliation_required", reason_code=reason
-            )
-        if read_authority_denied:
-            return OrdinaryAgentJobAttemptDisposition(
-                status="blocked", reason_code="qualification_read_authority_lost"
+                status="reconciliation_required",
+                next_due_at=retry_at,
+                reason_code=reason,
             )
         return OrdinaryAgentJobAttemptDisposition(
             status="waiting", next_due_at=recorded.next_due_at, reason_code=recorded.reason_code
         )
     if result_denial is not None:
         return OrdinaryAgentJobAttemptDisposition(
-            status="reconciliation_required", reason_code=result_denial.reason_code
+            status="waiting",
+            next_due_at=retry_at,
+            reason_code=result_denial.reason_code,
         )
     if recorded is None:
         return OrdinaryAgentJobAttemptDisposition(
-            status="reconciliation_required", reason_code="qualification_outcome_missing"
+            status="waiting",
+            next_due_at=retry_at,
+            reason_code="qualification_outcome_missing",
         )
-    return _completed_disposition(store=store, attempt=recorded)
+    return _completed_disposition(store=store, attempt=recorded, retry_at=retry_at)
 
 
 def _attestation(
@@ -276,25 +357,36 @@ def _attestation(
 
 
 def _completed_disposition(
-    *, store: _QualificationStore, attempt: OrdinaryAgentQualificationAttemptRecord
+    *,
+    store: _QualificationStore,
+    attempt: OrdinaryAgentQualificationAttemptRecord,
+    retry_at: int,
 ) -> OrdinaryAgentJobAttemptDisposition:
     if attempt.state in {"fenced", "exhausted"}:
         return OrdinaryAgentJobAttemptDisposition(
             status="reconciliation_required" if attempt.state == "fenced" else "blocked",
+            next_due_at=retry_at if attempt.state == "fenced" else None,
             reason_code=attempt.reason_code or "qualification_attempt_closed",
         )
     if not attempt.custody_attempt_ids:
         return OrdinaryAgentJobAttemptDisposition(
-            status="reconciliation_required", reason_code="read_custody_fenced"
+            status="blocked", reason_code="qualification_outcome_missing"
         )
     custody = store.read_ordinary_agent_custody_issue_attempt(attempt.custody_attempt_ids[-1])
     if custody.state != "closed":
+        residual_retry = (
+            int(datetime.fromisoformat(custody.residual_expires_at).timestamp())
+            if custody.residual_expires_at is not None
+            else retry_at
+        )
         return OrdinaryAgentJobAttemptDisposition(
-            status="reconciliation_required", reason_code="read_custody_fenced"
+            status="waiting",
+            next_due_at=max(retry_at, residual_retry),
+            reason_code="read_custody_fenced",
         )
     if attempt.result is None:
         return OrdinaryAgentJobAttemptDisposition(
-            status="reconciliation_required", reason_code="qualification_outcome_missing"
+            status="blocked", reason_code="qualification_outcome_missing"
         )
     if attempt.result.status == "qualified" and attempt.attestation is not None:
         return OrdinaryAgentJobAttemptDisposition(
@@ -320,9 +412,30 @@ def _failure_reason(
 
 def _denied_disposition(
     error: OrdinaryAgentSessionAdmissionDenied,
+    *,
+    retry_at: int,
 ) -> OrdinaryAgentJobAttemptDisposition:
     if error.retry_not_before is not None:
         return OrdinaryAgentJobAttemptDisposition(
             status="waiting", next_due_at=error.retry_not_before, reason_code=error.reason_code
+        )
+    if error.reason_code in {
+        "activation_expired",
+        "activation_not_current",
+        "activation_projection_mismatch",
+        "custody_binding_conflict",
+        "custody_unavailable",
+        "database_revision_incompatible",
+        "installed_outcome_invalid",
+        "installed_outcome_mismatch",
+        "inventory_drift",
+        "job_not_dispatchable",
+        "policy_source_inadmissible",
+        "read_custody_fenced",
+        "read_outcome_required",
+        "setup_operation_inadmissible",
+    }:
+        return OrdinaryAgentJobAttemptDisposition(
+            status="waiting", next_due_at=retry_at, reason_code=error.reason_code
         )
     return OrdinaryAgentJobAttemptDisposition(status="blocked", reason_code=error.reason_code)

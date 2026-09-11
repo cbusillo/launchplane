@@ -530,6 +530,15 @@ class OrdinaryAgentJobCursor(StrictFrozenModel):
     request_id: Identifier
 
 
+class OrdinaryAgentJobClaimRejected(ValueError):
+    """One row-local persisted payload was rejected without claiming authority."""
+
+    def __init__(self, *, cursor: OrdinaryAgentJobCursor, reason_code: str) -> None:
+        super().__init__(reason_code)
+        self.cursor = cursor
+        self.reason_code = reason_code
+
+
 class OrdinaryAgentJobClaimFence(StrictFrozenModel):
     request_id: Identifier
     worker_id: Identifier
@@ -852,6 +861,10 @@ class OrdinaryAgentQualificationStore(Protocol):
     ) -> OrdinaryAgentQualificationReadCustodyReservation: ...
 
     def require_ordinary_agent_qualification_read_authority(
+        self, *, claim_fence: OrdinaryAgentJobClaimFence, attempt_id: str
+    ) -> None: ...
+
+    def require_ordinary_agent_qualification_runtime_readiness(
         self, *, claim_fence: OrdinaryAgentJobClaimFence, attempt_id: str
     ) -> None: ...
 

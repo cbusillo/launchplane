@@ -19258,6 +19258,77 @@
         "title": "OrdinaryAgentEnrollmentClientRequest",
         "type": "object"
       },
+      "OrdinaryAgentGuardedDeliveryFiniteClientRequest": {
+        "additionalProperties": false,
+        "description": "Caller intent for a finite guarded delivery request.",
+        "properties": {
+          "base_sha": {
+            "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
+            "title": "Base Sha",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "lease_id": {
+            "pattern": "^[a-z][a-z0-9_-]{2,127}$",
+            "title": "Lease Id",
+            "type": "string"
+          },
+          "permitted_stack_edit_pull_requests": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Permitted Stack Edit Pull Requests",
+            "type": "array"
+          },
+          "pull_requests": {
+            "items": {
+              "$ref": "#/components/schemas/OrdinaryAgentPullRequest"
+            },
+            "minItems": 1,
+            "title": "Pull Requests",
+            "type": "array"
+          },
+          "purpose": {
+            "const": "guarded_delivery",
+            "default": "guarded_delivery",
+            "title": "Purpose",
+            "type": "string"
+          },
+          "refresh_allowance": {
+            "maximum": 9.223372036854776e+18,
+            "minimum": 0.0,
+            "title": "Refresh Allowance",
+            "type": "integer"
+          },
+          "schema_version": {
+            "const": 2,
+            "default": 2,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "session_id": {
+            "pattern": "^[a-z][a-z0-9_-]{2,127}$",
+            "title": "Session Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "idempotency_key",
+          "session_id",
+          "lease_id",
+          "base_sha",
+          "pull_requests",
+          "permitted_stack_edit_pull_requests",
+          "refresh_allowance"
+        ],
+        "title": "OrdinaryAgentGuardedDeliveryFiniteClientRequest",
+        "type": "object"
+      },
       "OrdinaryAgentJobBinding": {
         "additionalProperties": false,
         "description": "Immutable attribution of controller history to one finite job revision.",
@@ -19485,6 +19556,69 @@
           "actions"
         ],
         "title": "OrdinaryAgentPolicyRule",
+        "type": "object"
+      },
+      "OrdinaryAgentPullRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "head_sha": {
+            "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
+            "title": "Head Sha",
+            "type": "string"
+          },
+          "number": {
+            "exclusiveMinimum": 0.0,
+            "maximum": 9.223372036854776e+18,
+            "title": "Number",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "number",
+          "head_sha"
+        ],
+        "title": "OrdinaryAgentPullRequest",
+        "type": "object"
+      },
+      "OrdinaryAgentQualificationFiniteClientRequest": {
+        "additionalProperties": false,
+        "description": "Caller intent for a finite qualification request.\n\nThe authenticated principal, target, request identity, timing and lifecycle\nfields are deliberately absent.  Those values are reconstructed by the\nadmission transaction from the credential and locked server records.",
+        "properties": {
+          "idempotency_key": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "lease_id": {
+            "pattern": "^[a-z][a-z0-9_-]{2,127}$",
+            "title": "Lease Id",
+            "type": "string"
+          },
+          "purpose": {
+            "const": "qualification",
+            "default": "qualification",
+            "title": "Purpose",
+            "type": "string"
+          },
+          "schema_version": {
+            "const": 2,
+            "default": 2,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "session_id": {
+            "pattern": "^[a-z][a-z0-9_-]{2,127}$",
+            "title": "Session Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "idempotency_key",
+          "session_id",
+          "lease_id"
+        ],
+        "title": "OrdinaryAgentQualificationFiniteClientRequest",
         "type": "object"
       },
       "OrdinaryAgentSessionAttenuation": {
@@ -43608,6 +43742,72 @@
           }
         },
         "summary": "Read Enrollment",
+        "tags": [
+          "ordinary-agent"
+        ]
+      }
+    },
+    "/v1/agent/ordinary-agent-jobs": {
+      "post": {
+        "operationId": "admit_ordinary_agent_job",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "discriminator": {
+                  "mapping": {
+                    "guarded_delivery": "#/components/schemas/OrdinaryAgentGuardedDeliveryFiniteClientRequest",
+                    "qualification": "#/components/schemas/OrdinaryAgentQualificationFiniteClientRequest"
+                  },
+                  "propertyName": "purpose"
+                },
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/OrdinaryAgentQualificationFiniteClientRequest"
+                  },
+                  {
+                    "$ref": "#/components/schemas/OrdinaryAgentGuardedDeliveryFiniteClientRequest"
+                  }
+                ],
+                "title": "Envelope"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrdinaryAgentJobView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Admit Job",
         "tags": [
           "ordinary-agent"
         ]

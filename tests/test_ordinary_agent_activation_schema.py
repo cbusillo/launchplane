@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -18,6 +19,20 @@ from control_plane.storage.schema_migration import alembic_config
 
 
 class OrdinaryAgentDeliveryActivationSchemaTests(unittest.TestCase):
+    def test_migration_preserves_existing_application_loggers(self) -> None:
+        application_logger = logging.getLogger("control_plane.merge_train_controller_run_once")
+        original_disabled = application_logger.disabled
+        self.addCleanup(setattr, application_logger, "disabled", original_disabled)
+        application_logger.disabled = False
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = (
+                f"sqlite+pysqlite:///{Path(temporary_directory_name) / 'records.sqlite3'}"
+            )
+
+            command.upgrade(alembic_config(database_url), EXPECTED_ALEMBIC_HEAD_REVISION)
+
+        self.assertFalse(application_logger.disabled)
+
     def test_migration_adds_exact_tables_checks_indexes_and_head_membership(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             database_url = (
@@ -29,7 +44,7 @@ class OrdinaryAgentDeliveryActivationSchemaTests(unittest.TestCase):
             engine = create_engine(database_url)
             self.addCleanup(engine.dispose)
 
-            self.assertEqual(RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS, ("e0f2a4c6d8b1",))
+            self.assertEqual(RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS, ("a3c5e7f9b1d4",))
             self.assertEqual(ordinary_agent_delivery_activation_schema_invariant_errors(engine), [])
             revision, digest, valid = ordinary_agent_delivery_activation_schema_capability(engine)
             self.assertEqual(revision, EXPECTED_ALEMBIC_HEAD_REVISION)
