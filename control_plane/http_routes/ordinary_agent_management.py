@@ -4,7 +4,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from time import time
-from typing import Annotated
+from typing import Annotated, cast
 from urllib.parse import urlencode
 
 from fastapi import Depends, HTTPException, Path, Request
@@ -15,12 +15,14 @@ from control_plane.contracts.ordinary_agent_client import (
     ORDINARY_AGENT_ENROLLMENT_PROPOSE_ACTION,
     OrdinaryAgentDisconnectRequest,
     OrdinaryAgentEnrollmentClientRequest,
+    OrdinaryAgentFiniteClientRequest,
     OrdinaryAgentOperationClientResponse,
     OrdinaryAgentSessionClientRequest,
 )
 from control_plane.contracts.ordinary_agent_effect import OrdinaryAgentJobView
 from control_plane.contracts.ordinary_agent_session_lifecycle import (
     OrdinaryAgentConnectionView,
+    OrdinaryAgentFiniteRequest,
     OrdinaryAgentSessionOperationView,
 )
 from control_plane.http_routes.support import ApiRouteRegistrar, ReadRouteDependencies
@@ -56,6 +58,7 @@ from control_plane.storage.postgres import PostgresRecordStore
 
 ORDINARY_AGENT_ENROLLMENT_PROPOSALS_ROUTE = "/v1/agent/ordinary-agent-enrollments"
 ORDINARY_AGENT_SESSION_PROPOSALS_ROUTE = "/v1/agent/ordinary-agent-session-proposals"
+ORDINARY_AGENT_FINITE_REQUESTS_ROUTE = "/v1/agent/ordinary-agent-jobs"
 ORDINARY_AGENT_OPERATION_ROUTE = "/v1/ordinary-agent-operations/{principal_id}/{operation_id}"
 PrincipalId = Annotated[str, Path(pattern=r"^[a-z][a-z0-9_-]{2,127}$")]
 OperationId = Annotated[str, Path(pattern=r"^[a-z0-9][a-z0-9._-]{2,127}$")]
@@ -281,6 +284,25 @@ def register_ordinary_agent_management_routes(
         with _operation_errors():
             return store.read_ordinary_agent_job(proof=proof, request_id=request_id)
 
+    def admit_job(
+        envelope: OrdinaryAgentFiniteClientRequest,
+        proof: Annotated[OrdinaryAgentTokenProof, Depends(read_ordinary_agent_proof)],
+        store: Annotated[PostgresRecordStore, Depends(get_record_store)],
+    ) -> OrdinaryAgentJobView:
+        with _operation_errors():
+            admit_client_request = cast(
+                Callable[..., object],
+                getattr(store, "admit_ordinary_agent_client_request"),
+            )
+            request = cast(
+                OrdinaryAgentFiniteRequest,
+                admit_client_request(
+                    proof=proof,
+                    request=envelope,
+                ),
+            )
+            return store.read_ordinary_agent_job(proof=proof, request_id=request.request_id)
+
     def human_read_job(
         principal_id: PrincipalId,
         request_id: PrincipalId,
@@ -484,7 +506,15 @@ def register_ordinary_agent_management_routes(
         tags=["ordinary-agent"],
     )
     app.add_api_route(
-        "/v1/agent/ordinary-agent-jobs/{request_id}",
+        ORDINARY_AGENT_FINITE_REQUESTS_ROUTE,
+        admit_job,
+        methods=["POST"],
+        operation_id="admit_ordinary_agent_job",
+        response_model=OrdinaryAgentJobView,
+        tags=["ordinary-agent"],
+    )
+    app.add_api_route(
+        ORDINARY_AGENT_FINITE_REQUESTS_ROUTE + "/{request_id}",
         read_job,
         methods=["GET"],
         operation_id="read_ordinary_agent_job",

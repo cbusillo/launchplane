@@ -168,6 +168,12 @@ class _FailingActivationStore(PostgresRecordStore):
             raise RuntimeError("injected event failure")
 
 
+class _FailingDerivedActivationStore(PostgresRecordStore):
+    def _after_ordinary_agent_delivery_activation_write_step(self, step_name: str) -> None:
+        if step_name == "derived_event_inserted":
+            raise RuntimeError("injected derived event failure")
+
+
 class OrdinaryAgentDeliveryActivationStorageTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary_directory = TemporaryDirectory()
@@ -248,6 +254,93 @@ class OrdinaryAgentDeliveryActivationStorageTests(unittest.TestCase):
         )
         self.assertEqual(setup_result, (installed, installed_event))
         self.assertEqual(revoke_result, (revoked, revoked_event))
+
+    def test_derived_readiness_transitions_are_exact_atomic_and_replayable(self) -> None:
+        installed = _record(
+            operation_id="activation-setup-readiness",
+            installed_at="2026-09-10T20:00:00Z",
+            expires_at="2026-09-12T20:00:00Z",
+        )
+        installed_event = _event(
+            installed, action="installed", source_operation_id=installed.source_setup_operation_id
+        )
+        self.store.install_ordinary_agent_delivery_activation(installed, installed_event)
+
+        derived = self.store.transition_ordinary_agent_delivery_activation_readiness(
+            expected_record=installed,
+            action="guarded_derived",
+            occurred_at="2026-09-10T21:00:00Z",
+            evidence_ids=(
+                "qualification-attestation",
+                "provider-protection",
+                "qualification-attestation",
+            ),
+        )
+        replayed = self.store.transition_ordinary_agent_delivery_activation_readiness(
+            expected_record=installed,
+            action="guarded_derived",
+            occurred_at="2026-09-10T21:00:00Z",
+            evidence_ids=("provider-protection", "qualification-attestation"),
+        )
+
+        self.assertEqual(derived.status, "written")
+        self.assertEqual(replayed.status, "replayed")
+        self.assertEqual(derived.record.effective_state, "guarded")
+        self.assertEqual(derived.record.updated_at, "2026-09-10T21:00:00+00:00")
+        self.assertEqual(
+            derived.event.evidence_ids,
+            ("provider-protection", "qualification-attestation"),
+        )
+        self.assertEqual(derived.event.source_operation_id, "")
+
+        lost = self.store.transition_ordinary_agent_delivery_activation_readiness(
+            expected_record=derived.record,
+            action="readiness_lost",
+            occurred_at="2026-09-10T22:00:00Z",
+            evidence_ids=("credential-revoked",),
+            invalidation_reason="credential_revoked",
+        )
+        self.assertEqual(lost.record.effective_state, "qualification_only")
+        self.assertEqual(lost.event.invalidation_reason, "credential_revoked")
+        with self.assertRaises(OrdinaryAgentDeliveryActivationConflictError):
+            self.store.transition_ordinary_agent_delivery_activation_readiness(
+                expected_record=installed,
+                action="guarded_derived",
+                occurred_at="2026-09-10T23:00:00Z",
+                evidence_ids=("stale-evidence",),
+            )
+
+    def test_derived_readiness_rolls_back_projection_when_event_insert_fails(self) -> None:
+        installed = _record(
+            operation_id="activation-setup-readiness-rollback",
+            installed_at="2026-09-10T20:00:00Z",
+            expires_at="2026-09-12T20:00:00Z",
+        )
+        installed_event = _event(
+            installed, action="installed", source_operation_id=installed.source_setup_operation_id
+        )
+        self.store.install_ordinary_agent_delivery_activation(installed, installed_event)
+        failing = _FailingDerivedActivationStore(database_url=self.database_url)
+        self.addCleanup(failing.close)
+
+        with self.assertRaisesRegex(RuntimeError, "injected derived event failure"):
+            failing.transition_ordinary_agent_delivery_activation_readiness(
+                expected_record=installed,
+                action="guarded_derived",
+                occurred_at="2026-09-10T21:00:00Z",
+                evidence_ids=("qualification-attestation",),
+            )
+
+        self.assertEqual(
+            self.store.read_ordinary_agent_delivery_activation_record(installed.activation_id),
+            installed,
+        )
+        self.assertEqual(
+            self.store.list_ordinary_agent_delivery_activation_event_records(
+                activation_id=installed.activation_id
+            ),
+            (installed_event,),
+        )
 
     def test_expired_guarded_replacement_is_atomic_and_old_never_revives(self) -> None:
         first = _record(

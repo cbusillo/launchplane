@@ -82,6 +82,15 @@ class OperationSpec:
 OPERATION_SPECS = (
     OperationSpec(
         "POST",
+        "/v1/agent/ordinary-agent-jobs",
+        "Admit one finite qualification or guarded-delivery job from authenticated caller intent.",
+        ("ordinary_agent_client",),
+        ("finite-admission",),
+        "body",
+        ("purpose_specific_readiness", "idempotent_replay"),
+    ),
+    OperationSpec(
+        "POST",
         "/v1/agent/ordinary-agent-session-proposals/{operation_id}/cancel",
         "Cancel this ordinary principal's issued session.",
         ("ordinary_agent_client",),
@@ -550,7 +559,7 @@ def build_agent_operator_contract(
             if isinstance(parameter, Mapping)
         }
         has_idempotency_header = "idempotency-key" in parameter_names
-        if (spec.idempotency != "none") != has_idempotency_header:
+        if (spec.idempotency not in {"none", "body"}) != has_idempotency_header:
             raise AgentOperatorContractError(
                 f"Idempotency metadata differs from OpenAPI: {spec.method} {spec.path}"
             )

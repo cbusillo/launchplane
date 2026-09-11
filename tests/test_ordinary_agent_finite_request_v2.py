@@ -6,6 +6,15 @@ from unittest.mock import Mock
 from pydantic import ValidationError
 
 from control_plane.contracts.ordinary_agent import OrdinaryAgentPullRequest, OrdinaryAgentTarget
+from control_plane.contracts.ordinary_agent_client import (
+    OrdinaryAgentFiniteRequestServerFields,
+    build_ordinary_agent_finite_request_from_client,
+    ordinary_agent_finite_client_intent_matches,
+    ordinary_agent_finite_client_intent_sha256,
+    ordinary_agent_finite_request_deadlines,
+    ordinary_agent_finite_request_id,
+    parse_ordinary_agent_finite_client_request,
+)
 from control_plane.contracts.ordinary_agent_effect import (
     OrdinaryAgentClaimedJob,
     OrdinaryAgentJobClaimFence,
@@ -105,6 +114,161 @@ class OrdinaryAgentFiniteRequestV2Tests(unittest.TestCase):
             )
         with self.assertRaises(ValidationError):
             parse_ordinary_agent_finite_request({**qualification.model_dump(), "schema_version": 3})
+
+    def test_client_v2_shapes_contain_only_caller_intent(self) -> None:
+        qualification = parse_ordinary_agent_finite_client_request(
+            {
+                "schema_version": 2,
+                "purpose": "qualification",
+                "idempotency_key": "idempotency-client",
+                "session_id": "session-one",
+                "lease_id": "lease-one",
+            }
+        )
+        self.assertEqual(
+            set(qualification.model_dump()),
+            {"schema_version", "purpose", "idempotency_key", "session_id", "lease_id"},
+        )
+        guarded = parse_ordinary_agent_finite_client_request(
+            {
+                "schema_version": 2,
+                "purpose": "guarded_delivery",
+                "idempotency_key": "idempotency-client-guarded",
+                "session_id": "session-one",
+                "lease_id": "lease-one",
+                "base_sha": "a" * 40,
+                "pull_requests": [{"number": 12, "head_sha": "b" * 40}],
+                "permitted_stack_edit_pull_requests": [],
+                "refresh_allowance": 2,
+            }
+        )
+        self.assertEqual(
+            set(guarded.model_dump()),
+            {
+                "schema_version",
+                "purpose",
+                "idempotency_key",
+                "session_id",
+                "lease_id",
+                "base_sha",
+                "pull_requests",
+                "permitted_stack_edit_pull_requests",
+                "refresh_allowance",
+            },
+        )
+        for value in (
+            {**qualification.model_dump(), "target": self.target.model_dump()},
+            {**qualification.model_dump(), "base_sha": "a" * 40},
+            {**guarded.model_dump(), "principal_id": "agent_one"},
+            {**guarded.model_dump(), "schema_version": 1},
+            {**guarded.model_dump(), "purpose": "unknown"},
+        ):
+            with self.assertRaises(ValidationError):
+                parse_ordinary_agent_finite_client_request(value)
+
+    def test_client_identity_and_request_id_are_stable_and_server_derived(self) -> None:
+        request = parse_ordinary_agent_finite_client_request(
+            {
+                "schema_version": 2,
+                "purpose": "qualification",
+                "idempotency_key": "idempotency-client",
+                "session_id": "session-one",
+                "lease_id": "lease-one",
+            }
+        )
+        self.assertEqual(
+            ordinary_agent_finite_request_id(
+                principal_id="agent_one", idempotency_key="idempotency-client"
+            ),
+            ordinary_agent_finite_request_id(
+                principal_id="agent_one", idempotency_key="idempotency-client"
+            ),
+        )
+        self.assertNotEqual(
+            ordinary_agent_finite_request_id(
+                principal_id="agent_one", idempotency_key="idempotency-client"
+            ),
+            ordinary_agent_finite_request_id(
+                principal_id="agent_two", idempotency_key="idempotency-client"
+            ),
+        )
+        self.assertRegex(
+            ordinary_agent_finite_request_id(
+                principal_id="agent_one", idempotency_key="idempotency-client"
+            ),
+            r"^ordinary-request-[0-9a-f]{32}$",
+        )
+        before = ordinary_agent_finite_client_intent_sha256(request)
+        rebuilt = request.model_copy(update={"idempotency_key": "different"})
+        self.assertNotEqual(before, ordinary_agent_finite_client_intent_sha256(rebuilt))
+
+    def test_server_builder_derives_authority_and_fresh_timing_fields(self) -> None:
+        request = parse_ordinary_agent_finite_client_request(
+            {
+                "schema_version": 2,
+                "purpose": "guarded_delivery",
+                "idempotency_key": "idempotency-client",
+                "session_id": "session-one",
+                "lease_id": "lease-one",
+                "base_sha": "a" * 40,
+                "pull_requests": [{"number": 12, "head_sha": "b" * 40}],
+                "permitted_stack_edit_pull_requests": [],
+                "refresh_allowance": 2,
+            }
+        )
+        persisted = build_ordinary_agent_finite_request_from_client(
+            request,
+            server=OrdinaryAgentFiniteRequestServerFields(
+                principal_id="agent_one",
+                target=self.target,
+                admitted_at=1_800_000_000,
+                lease_expires_at=1_800_000_500,
+                continuation_expires_at=1_800_000_200,
+                binding_revision=1,
+                request_lifetime_seconds=100,
+                refresh_allowance_ceiling=2,
+            ),
+        )
+        self.assertIsInstance(persisted, OrdinaryAgentGuardedDeliveryFiniteRequestV2)
+        assert isinstance(persisted, OrdinaryAgentGuardedDeliveryFiniteRequestV2)
+        self.assertEqual(
+            persisted.request_id,
+            ordinary_agent_finite_request_id(
+                principal_id="agent_one", idempotency_key="idempotency-client"
+            ),
+        )
+        self.assertEqual(persisted.principal_id, "agent_one")
+        self.assertEqual(persisted.target, self.target)
+        self.assertEqual(persisted.expires_at, 1_800_000_100)
+        self.assertEqual(persisted.refresh_allowance_total, 2)
+        self.assertEqual(persisted.status, "waiting")
+        self.assertEqual(persisted.refresh_used, 0)
+        self.assertTrue(ordinary_agent_finite_client_intent_matches(request, persisted))
+        self.assertFalse(
+            ordinary_agent_finite_client_intent_matches(
+                request.model_copy(update={"refresh_allowance": 1}), persisted
+            )
+        )
+        with self.assertRaisesRegex(ValueError, "refresh allowance exceeds server ceiling"):
+            build_ordinary_agent_finite_request_from_client(
+                request.model_copy(update={"refresh_allowance": 3}),
+                server=OrdinaryAgentFiniteRequestServerFields(
+                    principal_id="agent_one",
+                    target=self.target,
+                    admitted_at=1_800_000_000,
+                    lease_expires_at=1_800_000_500,
+                    continuation_expires_at=1_800_000_200,
+                    refresh_allowance_ceiling=2,
+                ),
+            )
+
+    def test_deadline_builder_fails_when_locked_lease_is_expired(self) -> None:
+        with self.assertRaisesRegex(ValueError, "lease must outlive admission"):
+            ordinary_agent_finite_request_deadlines(
+                admitted_at=100,
+                lease_expires_at=100,
+                continuation_expires_at=None,
+            )
 
     def test_variant_preserving_lifecycle_updates_do_not_adapt_shape(self) -> None:
         qualification = OrdinaryAgentQualificationFiniteRequestV2.model_validate(self.common)

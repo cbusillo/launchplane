@@ -7,6 +7,7 @@ from typing import Literal
 from control_plane.contracts.ordinary_agent_effect import (
     OrdinaryAgentClaimedJob,
     OrdinaryAgentJobAttemptDisposition,
+    OrdinaryAgentJobClaimRejected,
     OrdinaryAgentJobCursor,
     OrdinaryAgentJobWorkerStore,
 )
@@ -42,6 +43,9 @@ def run_ordinary_agent_job_once(
         claimed = record_store.claim_due_ordinary_agent_job(
             worker_id=worker_id, lease_seconds=lease_seconds, after=state.after
         )
+    except OrdinaryAgentJobClaimRejected as error:
+        state.after = error.cursor
+        return OrdinaryAgentJobScanResult(failure_phase="claim")
     except Exception:
         return OrdinaryAgentJobScanResult(failure_phase="claim")
     if claimed is None:

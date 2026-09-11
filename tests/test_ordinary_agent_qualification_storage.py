@@ -7,6 +7,7 @@ import hashlib
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import Mock, patch
 
 from sqlalchemy import event
 
@@ -29,6 +30,9 @@ from control_plane.contracts.ordinary_agent_qualification import (
     OrdinaryAgentQualificationSetup,
     OrdinaryRepositoryAdminObservation,
     qualification_identity,
+)
+from control_plane.contracts.ordinary_agent_activation import (
+    OrdinaryAgentDeliveryActivationRecord,
 )
 from control_plane.contracts.ordinary_agent_session_lifecycle import (
     OrdinaryAgentJobBinding,
@@ -123,6 +127,22 @@ class QualificationStorageScenario:
             administrator_login_normalized=self.fixture.human.identity.login.casefold(),
             attestation_expires_at=self.fixture.now + 90,
         )
+        # These tests isolate qualification attempt/custody persistence. Runtime
+        # activation resolution has dedicated end-to-end storage coverage.
+        readiness = patch.object(
+            self.store,
+            "_require_ordinary_agent_runtime_readiness",
+            return_value=(Mock(spec=OrdinaryAgentDeliveryActivationRecord), (), self.fixture.now),
+        )
+        setup_resolution = patch.object(
+            self.store,
+            "_ordinary_agent_qualification_setup_from_activation",
+            return_value=self.setup,
+        )
+        readiness.start()
+        setup_resolution.start()
+        test_case.addCleanup(readiness.stop)
+        test_case.addCleanup(setup_resolution.stop)
 
     def claim(
         self, *, worker_id: str = "qualification-worker", lease_seconds: int = 60

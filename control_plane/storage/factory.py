@@ -49,6 +49,29 @@ PRIVILEGED_OPERATION_WORKER_REQUIRED_RELATIONS = (
     "launchplane_ordinary_agent_delivery_audits",
 )
 
+# Keep the ordinary worker probe narrower than the privileged worker probe.
+# The worker only needs the finite-job, custody, read, effect, activation, and
+# policy records it may inspect; it does not depend on privileged-operation
+# accounting or heartbeats.
+ORDINARY_AGENT_WORKER_CONNECT_TIMEOUT_SECONDS = 10
+ORDINARY_AGENT_WORKER_STATEMENT_TIMEOUT_MILLISECONDS = 30_000
+ORDINARY_AGENT_WORKER_REQUIRED_RELATIONS = (
+    "launchplane_ordinary_agent_principals",
+    "launchplane_ordinary_agent_sessions",
+    "launchplane_ordinary_agent_leases",
+    "launchplane_ordinary_agent_finite_requests",
+    "launchplane_ordinary_agent_job_claims",
+    "launchplane_ordinary_agent_read_attempts",
+    "launchplane_ordinary_agent_read_custody",
+    "launchplane_ordinary_agent_read_outcomes",
+    "launchplane_ordinary_agent_custody_issue_attempts",
+    "launchplane_ordinary_agent_effects",
+    "launchplane_ordinary_agent_effect_custody",
+    "launchplane_ordinary_agent_delivery_activations",
+    "launchplane_ordinary_agent_delivery_activation_events",
+    "launchplane_authz_policies",
+)
+
 
 class PrivilegedOperationWorkerSchemaError(RuntimeError):
     pass
@@ -113,6 +136,48 @@ def build_privileged_operation_worker_store(
         postgres_connect_timeout_seconds=PRIVILEGED_OPERATION_WORKER_CONNECT_TIMEOUT_SECONDS,
         postgres_statement_timeout_milliseconds=(
             PRIVILEGED_OPERATION_WORKER_STATEMENT_TIMEOUT_MILLISECONDS
+        ),
+    )
+
+
+def build_ordinary_agent_worker_store(
+    *,
+    database_url: str | None = None,
+    schema_probe_completed: bool = False,
+    on_schema_probe_succeeded: Callable[[], None] | None = None,
+) -> PostgresRecordStore:
+    """Build an ordinary-worker store after the exact runtime schema probe."""
+
+    resolved_database_url = resolve_database_url(database_url)
+    if resolved_database_url is None:
+        raise ValueError(
+            "Launchplane ordinary-agent workers require --database-url or LAUNCHPLANE_DATABASE_URL."
+        )
+    if not schema_probe_completed:
+        startup_probe = PostgresRecordStore(
+            database_url=resolved_database_url,
+            postgres_connect_timeout_seconds=ORDINARY_AGENT_WORKER_CONNECT_TIMEOUT_SECONDS,
+            postgres_statement_timeout_milliseconds=(
+                ORDINARY_AGENT_WORKER_STATEMENT_TIMEOUT_MILLISECONDS
+            ),
+        )
+        try:
+            startup_probe.verify_runtime_schema_compatibility(
+                required_relations=ORDINARY_AGENT_WORKER_REQUIRED_RELATIONS
+            )
+        except RuntimeError as error:
+            raise RuntimeError(
+                "Launchplane ordinary-agent worker schema is not runtime-compatible."
+            ) from error
+        finally:
+            startup_probe.close()
+    if on_schema_probe_succeeded is not None:
+        on_schema_probe_succeeded()
+    return PostgresRecordStore(
+        database_url=resolved_database_url,
+        postgres_connect_timeout_seconds=ORDINARY_AGENT_WORKER_CONNECT_TIMEOUT_SECONDS,
+        postgres_statement_timeout_milliseconds=(
+            ORDINARY_AGENT_WORKER_STATEMENT_TIMEOUT_MILLISECONDS
         ),
     )
 

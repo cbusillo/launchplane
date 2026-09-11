@@ -125,6 +125,26 @@ def advance_ordinary_agent_qualification_job(
     recorded: OrdinaryAgentQualificationAttemptRecord | None = None
     result_denial: OrdinaryAgentSessionAdmissionDenied | None = None
     read_authority_denied = False
+    readiness_denial: OrdinaryAgentSessionAdmissionDenied | None = None
+
+    def require_pre_mint_readiness(app_id: int, installation_id: int) -> None:
+        nonlocal readiness_denial
+        try:
+            store.require_ordinary_agent_qualification_runtime_readiness(
+                claim_fence=claimed.claim_fence,
+                attempt_id=attempt.attempt_id,
+            )
+        except OrdinaryAgentSessionAdmissionDenied as error:
+            readiness_denial = error
+            raise
+        require_installation_provider_ready(
+            app_id=app_id,
+            installation_id=installation_id,
+            resource_classes=("core", "graphql", "secondary"),
+            read_provider_wait=store.read_provider_wait,
+            utc_now=utc_now,
+        )
+
     try:
         started = monotonic()
         with ordinary_agent_provider_token_lease(
@@ -137,13 +157,7 @@ def advance_ordinary_agent_qualification_job(
             monotonic=monotonic,
             utc_now=utc_now,
             quota_writer=store.record_provider_wait,
-            before_token_mint=lambda app_id, installation_id: require_installation_provider_ready(
-                app_id=app_id,
-                installation_id=installation_id,
-                resource_classes=("core", "graphql", "secondary"),
-                read_provider_wait=store.read_provider_wait,
-                utc_now=utc_now,
-            ),
+            before_token_mint=require_pre_mint_readiness,
         ) as lease:
             expires_at = datetime.fromisoformat(
                 lease.installation_token.expires_at.replace("Z", "+00:00")
@@ -162,10 +176,16 @@ def advance_ordinary_agent_qualification_job(
                 monotonic=monotonic,
             )
             try:
+                store.require_ordinary_agent_qualification_runtime_readiness(
+                    claim_fence=claimed.claim_fence,
+                    attempt_id=attempt.attempt_id,
+                )
                 store.require_ordinary_agent_qualification_read_authority(
                     claim_fence=claimed.claim_fence, attempt_id=attempt.attempt_id
                 )
-            except OrdinaryAgentSessionAdmissionDenied:
+            except OrdinaryAgentSessionAdmissionDenied as error:
+                if error.reason_code != "qualification_read_authority_lost":
+                    readiness_denial = error
                 read_authority_denied = True
                 raise
             observed = observe_repository_administrator(
@@ -186,6 +206,10 @@ def advance_ordinary_agent_qualification_job(
             except OrdinaryAgentSessionAdmissionDenied as error:
                 result_denial = error
     except Exception as error:
+        if readiness_denial is not None:
+            return OrdinaryAgentJobAttemptDisposition(
+                status="blocked", reason_code=readiness_denial.reason_code
+            )
         reason = _failure_reason(error)
         try:
             recorded = store.record_ordinary_agent_qualification_failure(

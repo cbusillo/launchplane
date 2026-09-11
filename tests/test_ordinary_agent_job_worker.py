@@ -7,7 +7,9 @@ from control_plane.contracts.ordinary_agent import OrdinaryAgentPullRequest
 from control_plane.contracts.ordinary_agent_effect import (
     OrdinaryAgentClaimedJob,
     OrdinaryAgentJobAttemptDisposition,
+    OrdinaryAgentJobClaimRejected,
     OrdinaryAgentJobClaimFence,
+    OrdinaryAgentJobCursor,
     OrdinaryAgentJobView,
     OrdinaryAgentJobWorkerStore,
 )
@@ -22,6 +24,27 @@ from tests.support.ordinary_agent_lifecycle import TARGET
 
 
 class OrdinaryAgentJobWorkerTests(unittest.TestCase):
+    def test_row_local_claim_rejection_advances_only_the_trusted_cursor(self) -> None:
+        store = Mock(spec=OrdinaryAgentJobWorkerStore)
+        store.claim_due_ordinary_agent_job.side_effect = OrdinaryAgentJobClaimRejected(
+            cursor=OrdinaryAgentJobCursor(request_id="job-poison"),
+            reason_code="request_variant_unsupported",
+        )
+        state = OrdinaryAgentJobScanState()
+        advance = Mock()
+
+        result = run_ordinary_agent_job_once(
+            record_store=store,
+            state=state,
+            worker_id="worker-one",
+            lease_seconds=30,
+            advance_job=advance,
+        )
+
+        self.assertEqual(result.failure_phase, "claim")
+        self.assertEqual(state.after, OrdinaryAgentJobCursor(request_id="job-poison"))
+        advance.assert_not_called()
+
     def test_failed_job_does_not_starve_next_job_and_finish_status_is_authoritative(self) -> None:
         def claim(request_id: str) -> OrdinaryAgentClaimedJob:
             return OrdinaryAgentClaimedJob(

@@ -149,6 +149,11 @@ checkout.
   `service outbox-workers run-once` and `service outbox-workers run` operate
   PostgreSQL transactional outbox deliveries for external workflow dispatch and
   notification effects.
+  `service ordinary-agent-workers run-once` and `run` are a dormant,
+  PostgreSQL-only finite-job worker definition. They use an independent scan
+  cursor and telemetry surface, perform an exact startup schema/relation probe,
+  and remain outside the deployed compose invocation until a separately
+  reviewed readiness and enablement step.
 - `ship`: plan, resolve, and execute artifact-backed deploy requests.
 - `storage provider-target-audit`: run the read-only provider-target parity
   preflight before backfill or provider-target authority cutover.

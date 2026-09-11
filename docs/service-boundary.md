@@ -86,6 +86,18 @@ cleanup scope so the store is always closed.
 
 - CLI: `uv run launchplane service serve`
 - server runtime: FastAPI served directly by Uvicorn
+
+The ordinary finite worker is a separate, dormant process boundary. Its source
+CLI is `uv run launchplane service ordinary-agent-workers run-once` or `run`.
+The worker uses PostgreSQL-backed finite-job claims, an injected purpose
+dispatcher, and independent process-local scan/error telemetry. Startup probes
+the exact compatible Alembic revision and ordinary-job relations before the
+loop. It has no HTTP route, does not share privileged-operation worker error
+accounting, and does not create policy, grant, activation, or provider state.
+The compose definition lives in the uninvoked
+`docker-compose.ordinary-agent-workers.yml` profile; adding that file/profile
+to a deployment remains a separately reviewed activation step.
+
 - native FastAPI health route: `GET /v1/health`, backed by a Pydantic response
   model and included in OpenAPI as a service contract proof
 - native FastAPI Launchplane service runtime reads:

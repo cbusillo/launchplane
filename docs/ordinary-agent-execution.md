@@ -13,6 +13,22 @@ capsules. This source integration is not a deployed installation or a merge
 permission: ordinary-worker runtime qualification and the separately reviewed
 activation package remain prerequisites to live execution.
 
+The source also contains a dormant finite-job worker surface:
+`uv run launchplane service ordinary-agent-workers run-once` performs one
+PostgreSQL-backed fair scan, and `run` provides the long-lived polling loop.
+Both use the ordinary finite-job claim/advance path, an immutable code-owned
+schema/protocol support descriptor, and process-local scan telemetry. They do
+not use privileged-operation worker accounting. Startup performs an exact
+Alembic/relation probe and creates no policy, grant, activation, credential,
+session, lease, or provider record.
+
+The matching definition is kept in
+`docker-compose.ordinary-agent-workers.yml` and is intentionally outside the
+deployed `docker-compose.yml` invocation. Its profile and startup script are
+structural source wiring only. A separately reviewed enablement must add the
+compose file/profile to an explicit deployment invocation and establish the
+required readiness evidence first; source presence does not start a process.
+
 The older `proposed_ordinary_agent_v1` evidence models and their pure eligibility
 result remain inert fixture contracts. They do not authenticate a caller or
 perform an effect. The generic authorization evaluator still ignores ordinary

@@ -35,12 +35,18 @@ from control_plane.ordinary_agent_session_lifecycle import OrdinaryAgentSessionA
 
 class _Store:
     def __init__(
-        self, *, authority_error: str | None = None, result_denial: str | None = None
+        self,
+        *,
+        authority_error: str | None = None,
+        result_denial: str | None = None,
+        readiness_error_at: int | None = None,
     ) -> None:
         self.authority_error = authority_error
         self.result_denial = result_denial
         self.received_claim: OrdinaryAgentJobClaimFence | None = None
         self.failure_calls = 0
+        self.readiness_error_at = readiness_error_at
+        self.readiness_calls = 0
 
     def reserve_ordinary_agent_qualification_attempt(
         self, *, claim_fence: object, setup: object
@@ -64,6 +70,13 @@ class _Store:
     ) -> None:
         if self.authority_error == "qualification_read_authority_lost":
             raise OrdinaryAgentSessionAdmissionDenied("qualification_read_authority_lost")
+
+    def require_ordinary_agent_qualification_runtime_readiness(
+        self, *, claim_fence: OrdinaryAgentJobClaimFence, attempt_id: str
+    ) -> None:
+        self.readiness_calls += 1
+        if self.readiness_calls == self.readiness_error_at:
+            raise OrdinaryAgentSessionAdmissionDenied("activation_not_current")
 
     def record_ordinary_agent_qualification_failure(
         self, **kwargs: object
@@ -224,6 +237,66 @@ class OrdinaryAgentQualificationJobTests(unittest.TestCase):
         self.assertEqual(disposition.status, "blocked")
         self.assertEqual(disposition.reason_code, "qualification_read_authority_lost")
         self.assertEqual(store.failure_calls, 1)
+
+    def test_pre_mint_readiness_denial_is_not_recorded_as_provider_failure(self) -> None:
+        store = _Store(readiness_error_at=1)
+
+        @contextmanager
+        def denied_before_mint(**kwargs: object) -> Iterator[object]:
+            callback = kwargs["before_token_mint"]
+            assert callable(callback)
+            callback(1, 2)
+            raise AssertionError("readiness denial must prevent token mint")
+            yield
+
+        with patch(
+            "control_plane.ordinary_agent_qualification_job.ordinary_agent_provider_token_lease",
+            denied_before_mint,
+        ):
+            disposition = advance_ordinary_agent_qualification_job(
+                claimed=self.claimed(), store=cast(Any, store), setup_resolver=lambda **_: _setup()
+            )
+
+        self.assertEqual(disposition.status, "blocked")
+        self.assertEqual(disposition.reason_code, "activation_not_current")
+        self.assertEqual(store.failure_calls, 0)
+
+    def test_pre_get_readiness_denial_preserves_reason_without_provider_failure(self) -> None:
+        store = _Store(readiness_error_at=2)
+
+        @contextmanager
+        def minted(**kwargs: object) -> Iterator[object]:
+            callback = kwargs["before_token_mint"]
+            assert callable(callback)
+            callback(1, 2)
+
+            class Lease:
+                class Token:
+                    token = "provider-token"
+                    installation_id = 2
+                    expires_at = "2030-01-01T00:00:00Z"
+
+                installation_token = Token()
+
+            yield Lease()
+
+        with (
+            patch(
+                "control_plane.ordinary_agent_qualification_job.ordinary_agent_provider_token_lease",
+                minted,
+            ),
+            patch(
+                "control_plane.ordinary_agent_qualification_job.observe_repository_administrator"
+            ) as provider_get,
+        ):
+            disposition = advance_ordinary_agent_qualification_job(
+                claimed=self.claimed(), store=cast(Any, store), setup_resolver=lambda **_: _setup()
+            )
+
+        self.assertEqual(disposition.status, "blocked")
+        self.assertEqual(disposition.reason_code, "activation_not_current")
+        self.assertEqual(store.failure_calls, 0)
+        provider_get.assert_not_called()
 
     def test_fenced_positive_attempt_never_completes_after_closed_custody(self) -> None:
         attempt = _attempt().model_copy(
