@@ -6,6 +6,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
+from control_plane.authz_grant_service import execute_managed_authz_policy_reconcile
 from control_plane.contracts.authz_policy_record import (
     AuthzPolicySchemaWriteNotActivatedError,
     LaunchplaneAuthzPolicyRecord,
@@ -32,7 +33,10 @@ from control_plane.privileged_operation_service import (
 from control_plane.privileged_operation_worker import (
     execute_approved_privileged_operations_once,
 )
-from control_plane.service_auth import LaunchplaneAuthzPolicy
+from control_plane.ordinary_agent_activation import (
+    OrdinaryAgentDeliveryActivationPlanningError,
+)
+from control_plane.service_auth import GitHubHumanIdentity, LaunchplaneAuthzPolicy
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.support.stores import _sqlite_database_url
 
@@ -226,6 +230,35 @@ class OrdinaryAgentDeliveryActivationWorkerTests(unittest.TestCase):
                 self.assertFalse(activation.authorizes_execution)
                 secret_executor.assert_not_called()
                 policy_executor.assert_not_called()
+                assert isinstance(policy_package.request, ManagedAuthzPolicySetProposalInput)
+
+                with (
+                    patch.object(
+                        store,
+                        "ordinary_agent_delivery_activation_schema_capability",
+                        return_value=("incompatible", "0" * 64, False),
+                    ),
+                    self.assertRaises(OrdinaryAgentDeliveryActivationPlanningError),
+                ):
+                    execute_managed_authz_policy_reconcile(
+                        record_store=store,
+                        request=policy_package.request.reconcile_request(
+                            mode="apply",
+                            reviewed_plan_sha256=policy_package.evidence.plan_digest,
+                        ),
+                        identity=GitHubHumanIdentity(
+                            login="activation-reviewer",
+                            github_id=101,
+                            name="Activation Reviewer",
+                            email="activation-reviewer@example.test",
+                            organizations=frozenset(),
+                            teams=frozenset(),
+                            role="admin",
+                        ),
+                        immutable_applying_github_id=101,
+                        trace_id="launchplane_req_incompatible_runtime",
+                        now_timestamp=lambda: (FIXED_NOW + timedelta(minutes=4)).isoformat(),
+                    )
 
                 approve_privileged_operation(
                     record_store=store,

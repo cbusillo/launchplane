@@ -30681,6 +30681,9 @@ class PostgresRecordStore(HumanSessionStore):
     def _deny_authz_policy_schema_v3(reason_code: str) -> NoReturn:
         raise AuthzPolicySchemaV3TransitionDeniedError(reason_code)
 
+    def _after_authz_policy_schema_v3_lock_step(self, _step_name: str) -> None:
+        return None
+
     def _locked_authz_transition_operation(
         self, session: Any, operation_id: str
     ) -> PrivilegedOperationRecord:
@@ -30716,6 +30719,7 @@ class PostgresRecordStore(HumanSessionStore):
         current_record: LaunchplaneAuthzPolicyRecord,
         replacement_record: LaunchplaneAuthzPolicyRecord | None,
         evidence: AuthzPolicySchemaV3WriteEvidence | None,
+        confirmation_consumption: SoloAdministrationConfirmationConsumptionBinding | None = None,
     ) -> None:
         # A null replacement is an exact-CAS no-op.  It deliberately performs no
         # fresh authority decision, including after a schema-3 activation expires.
@@ -30814,8 +30818,17 @@ class PostgresRecordStore(HumanSessionStore):
             session, activation.policy_package.policy_operation_id
         )
 
-        inventory_statement = select(LaunchplaneRepositoryInventoryRow).where(
-            LaunchplaneRepositoryInventoryRow.record_id == activation.inventory.record_id
+        self._lock_repository_inventory_write(
+            session, repository_id=str(activation.scope.target.repository_id)
+        )
+        inventory_statement = (
+            select(LaunchplaneRepositoryInventoryRow)
+            .where(
+                LaunchplaneRepositoryInventoryRow.repository_id
+                == str(activation.scope.target.repository_id)
+            )
+            .order_by(LaunchplaneRepositoryInventoryRow.inventory_revision.desc())
+            .limit(1)
         )
         if self.database_dialect_name == "postgresql":
             inventory_statement = inventory_statement.with_for_update()
@@ -30823,9 +30836,12 @@ class PostgresRecordStore(HumanSessionStore):
         if inventory_row is None:
             self._deny_authz_policy_schema_v3("inventory_missing")
         assert inventory_row is not None
-        inventory = self._read_payload(
-            model_type=RepositoryInventoryRecord, payload=inventory_row.payload
-        )
+        try:
+            inventory = self._read_payload(
+                model_type=RepositoryInventoryRecord, payload=inventory_row.payload
+            )
+        except ValueError:
+            self._deny_authz_policy_schema_v3("inventory_binding_mismatch")
         if (
             inventory_row.record_id != inventory.record_id
             or inventory_row.repository_id != inventory.repository_id
@@ -30846,6 +30862,24 @@ class PostgresRecordStore(HumanSessionStore):
             versions = tuple(session.scalars(text("select version_num from alembic_version")))
             if len(versions) != 1 or versions[0] not in RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS:
                 self._deny_authz_policy_schema_v3("database_revision_incompatible")
+
+        # Confirmation lifecycle writes lock this row independently. Acquire it
+        # after every activation/source/inventory lock so expiry is evaluated
+        # against a database timestamp sampled after the final mutable lock.
+        if confirmation_consumption is not None:
+            confirmation_statement = (
+                select(LaunchplaneSoloAdministrationConfirmationRow.confirmation_id)
+                .where(
+                    LaunchplaneSoloAdministrationConfirmationRow.confirmation_id
+                    == confirmation_consumption.confirmation_id
+                )
+                .limit(1)
+            )
+            if self.database_dialect_name == "postgresql":
+                confirmation_statement = confirmation_statement.with_for_update()
+            if session.scalar(confirmation_statement) is None:
+                raise FileNotFoundError(confirmation_consumption.confirmation_id)
+            self._after_authz_policy_schema_v3_lock_step("confirmation")
         db_now = datetime.fromisoformat(self._database_mutation_timestamp(session))
 
         expected_key = transition.added_or_changed_ordinary_rule_keys[0].split("\x1f", 1)
@@ -31000,6 +31034,7 @@ class PostgresRecordStore(HumanSessionStore):
             current_record=current_record,
             replacement_record=replacement_record,
             evidence=schema_v3_write_evidence,
+            confirmation_consumption=confirmation_consumption,
         )
 
         if confirmation_consumption is not None:

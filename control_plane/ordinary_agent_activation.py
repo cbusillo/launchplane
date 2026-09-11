@@ -388,6 +388,14 @@ def resolve_authz_policy_schema_v3_enable_evidence(
             "Authz policy transition requires one current matching activation."
         )
     activation = matching[0]
+    current_capability = _runtime_capability(
+        record_store,
+        observed_at=observed_at.isoformat(),
+    )
+    if not _runtime_supports_authz_policy_schema_v3_enable(current_capability):
+        raise OrdinaryAgentDeliveryActivationPlanningError(
+            "Authz policy transition requires current compatible runtime support."
+        )
     source = resolve_ordinary_agent_delivery_activation_setup_source(
         record_store,
         policy_operation_id=activation.policy_package.policy_operation_id,
@@ -494,6 +502,57 @@ def _model_schema_version(model_type: type[BaseModel]) -> int:
             f"{model_type.__name__} has no concrete schema version."
         )
     return version
+
+
+def _runtime_supports_authz_policy_schema_v3_enable(
+    capability: OrdinaryAgentDeliveryRuntimeCapabilityEvidence,
+) -> bool:
+    """Require the process and schema seams consumed by one enabling write.
+
+    ``policy_v3_write_supported`` reports this feature and therefore cannot be
+    used to authorize itself. Qualification advancement, guarded execution,
+    and provider/image evidence belong to later runtime phases.
+    """
+    return (
+        capability.database_revision_compatible
+        and capability.activation_schema_invariants_valid
+        and capability.finite_request_versions
+        == tuple(
+            sorted(
+                {
+                    _model_schema_version(OrdinaryAgentFiniteRequestRecord),
+                    _model_schema_version(OrdinaryAgentQualificationFiniteRequestV2),
+                    _model_schema_version(OrdinaryAgentGuardedDeliveryFiniteRequestV2),
+                }
+            )
+        )
+        and capability.read_attempt_versions
+        == tuple(
+            sorted(
+                {
+                    _model_schema_version(OrdinaryAgentSnapshotAttemptRecord),
+                    _model_schema_version(OrdinaryAgentQualificationAttemptRecord),
+                }
+            )
+        )
+        and capability.custody_issue_attempt_versions
+        == (_model_schema_version(OrdinaryAgentCustodyIssueAttempt),)
+        and capability.qualification_attestation_versions
+        == (_model_schema_version(OrdinaryAgentQualificationAttestation),)
+        and capability.activation_record_versions
+        == (_model_schema_version(OrdinaryAgentDeliveryActivationRecord),)
+        and capability.activation_event_versions
+        == (_model_schema_version(OrdinaryAgentDeliveryActivationEvent),)
+        and capability.recovery_versions == (1,)
+        and capability.authz_policy_read_versions
+        == tuple(sorted(SUPPORTED_MANAGED_RULE_POLICY_SCHEMA_VERSIONS))
+        and capability.variant_parsers_registered
+        and capability.activation_storage_registered
+        and capability.activation_cas_registered
+        and capability.activation_recovery_registered
+        and capability.bounded_cleanup_registered
+        and capability.rollback_reader_registered
+    )
 
 
 def _runtime_capability(

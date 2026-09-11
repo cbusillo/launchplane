@@ -30,6 +30,7 @@ from control_plane.contracts.privileged_operation import (
 from control_plane.contracts.repository_inventory import RepositoryInventoryRecord
 from control_plane.ordinary_agent_activation import (
     OrdinaryAgentDeliveryActivationPlanningError,
+    _runtime_supports_authz_policy_schema_v3_enable,
     ordinary_agent_delivery_activation_duration_options,
     plan_ordinary_agent_delivery_activation,
     resolve_ordinary_agent_delivery_activation_setup_source,
@@ -62,7 +63,7 @@ def _capability() -> OrdinaryAgentDeliveryRuntimeCapabilityEvidence:
         activation_schema_invariants_sha256="a" * 64,
         activation_schema_invariants_valid=True,
         finite_request_versions=(1, 2),
-        read_attempt_versions=(1,),
+        read_attempt_versions=(1, 2),
         custody_issue_attempt_versions=(1,),
         qualification_attestation_versions=(1,),
         activation_record_versions=(1,),
@@ -102,6 +103,18 @@ def _inventory() -> OrdinaryAgentDeliveryInventoryReference:
 
 
 class OrdinaryAgentDeliveryActivationContractTests(unittest.TestCase):
+    def test_policy_write_capability_requires_consumed_runtime_seams_without_self_gate(
+        self,
+    ) -> None:
+        capability = _capability()
+
+        self.assertTrue(_runtime_supports_authz_policy_schema_v3_enable(capability))
+        self.assertFalse(
+            _runtime_supports_authz_policy_schema_v3_enable(
+                capability.model_copy(update={"bounded_cleanup_registered": False})
+            )
+        )
+
     def test_request_union_rejects_mixed_or_caller_asserted_setup_fields(self) -> None:
         payload = {
             "action": "setup",

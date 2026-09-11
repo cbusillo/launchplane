@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 import hashlib
 import threading
 import time
+from typing import Any
 import unittest
 from unittest.mock import patch
 
@@ -79,6 +80,8 @@ class _PausedEvidenceStore(PostgresRecordStore):
         super().__init__(database_url=database_url)
         self._evidence_boundary_entered = evidence_boundary_entered
         self._resume_evidence_check = resume_evidence_check
+        self._evidence_check_started = False
+        self._confirmation_locked = False
 
     def _require_authz_policy_schema_v3_write_evidence_locked(
         self,
@@ -87,7 +90,9 @@ class _PausedEvidenceStore(PostgresRecordStore):
         current_record: LaunchplaneAuthzPolicyRecord,
         replacement_record: LaunchplaneAuthzPolicyRecord | None,
         evidence: AuthzPolicySchemaV3WriteEvidence | None,
+        confirmation_consumption: SoloAdministrationConfirmationConsumptionBinding | None = None,
     ) -> None:
+        self._evidence_check_started = True
         self._evidence_boundary_entered.set()
         if not self._resume_evidence_check.wait(timeout=10):
             raise TimeoutError("test did not release the schema-v3 evidence boundary")
@@ -96,7 +101,17 @@ class _PausedEvidenceStore(PostgresRecordStore):
             current_record=current_record,
             replacement_record=replacement_record,
             evidence=evidence,
+            confirmation_consumption=confirmation_consumption,
         )
+
+    def _after_authz_policy_schema_v3_lock_step(self, step_name: str) -> None:
+        if step_name == "confirmation":
+            self._confirmation_locked = True
+
+    def _database_mutation_timestamp(self, session: Any) -> str:
+        if self._evidence_check_started and not self._confirmation_locked:
+            raise AssertionError("freshness timestamp was sampled before the confirmation lock")
+        return super()._database_mutation_timestamp(session)
 
 
 def _prepare_executed_activation(store: PostgresRecordStore) -> _PreparedActivation:
@@ -430,6 +445,62 @@ class AuthzPolicyWriteTransitionPostgresTests(unittest.TestCase):
                 writer.close()
 
             self.assertEqual(raised.exception.reason_code, "activation_binding_mismatch")
+            self.assertEqual(
+                store.list_authz_policy_records(status="active"),
+                (prepared.initial_policy,),
+            )
+            self.assertEqual(
+                store.read_solo_administration_confirmation(confirmation_id).state,
+                "issued",
+            )
+            self.assertIsNone(
+                store.read_idempotency_record(
+                    scope=mutation.scope,
+                    route_path=mutation.route_path,
+                    idempotency_key=mutation.idempotency_key,
+                )
+            )
+
+    def test_newer_inventory_wins_at_locked_boundary_without_partial_mutation_commit(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            prepared = _prepare_executed_activation(store)
+            mutation, confirmation_id = _mutation_with_confirmation(
+                store, prepared, suffix="inventory-race"
+            )
+            entered = threading.Event()
+            resume = threading.Event()
+            writer = _PausedEvidenceStore(
+                database_url=store.database_url,
+                evidence_boundary_entered=entered,
+                resume_evidence_check=resume,
+            )
+            try:
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(_write_candidate, writer, prepared, mutation)
+                    self.assertTrue(
+                        entered.wait(timeout=10), "writer did not reach locked boundary"
+                    )
+                    store.write_repository_inventory_record(
+                        RepositoryInventoryRecord(
+                            repository_id="1001",
+                            repository_owner_id="9001",
+                            repository="example/launchplane",
+                            inventory_state="tracked",
+                            inventory_revision=2,
+                            supersedes_record_id=prepared.activation.inventory.record_id,
+                            recorded_at=(TEST_NOW + timedelta(minutes=5)).isoformat(),
+                            source="test:a5-postgres-inventory-race",
+                            reason="Advance inventory while the policy writer is paused.",
+                        )
+                    )
+                    resume.set()
+                    with self.assertRaises(AuthzPolicySchemaV3TransitionDeniedError) as raised:
+                        future.result(timeout=10)
+            finally:
+                resume.set()
+                writer.close()
+
+            self.assertEqual(raised.exception.reason_code, "inventory_binding_mismatch")
             self.assertEqual(
                 store.list_authz_policy_records(status="active"),
                 (prepared.initial_policy,),
