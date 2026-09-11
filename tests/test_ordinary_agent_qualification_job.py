@@ -365,7 +365,8 @@ class OrdinaryAgentQualificationJobTests(unittest.TestCase):
                 claimed=self.claimed(), store=cast(Any, store), setup_resolver=lambda **_: _setup()
             )
         self.assertTrue(context_closed)
-        self.assertEqual(disposition.status, "blocked")
+        self.assertEqual(disposition.status, "waiting")
+        self.assertIsNotNone(disposition.next_due_at)
         self.assertEqual(disposition.reason_code, "qualification_read_authority_lost")
         self.assertEqual(store.failure_calls, 1)
 
@@ -450,11 +451,30 @@ class OrdinaryAgentQualificationJobTests(unittest.TestCase):
         store = SimpleNamespace(
             read_ordinary_agent_custody_issue_attempt=lambda _: SimpleNamespace(state="closed")
         )
-        disposition = _completed_disposition(store=cast(Any, store), attempt=attempt)
+        disposition = _completed_disposition(store=cast(Any, store), attempt=attempt, retry_at=100)
         self.assertEqual(disposition.status, "reconciliation_required")
+        self.assertEqual(disposition.next_due_at, 100)
         self.assertEqual(disposition.reason_code, "cleanup_unknown")
 
-    def test_store_result_denial_is_reconciliation_not_provider_failure(self) -> None:
+    def test_completed_attempt_with_open_custody_remains_paced(self) -> None:
+        attempt = _attempt().model_copy(
+            update={"state": "completed", "custody_attempt_ids": ("custody-attempt",)}
+        )
+        store = SimpleNamespace(
+            read_ordinary_agent_custody_issue_attempt=lambda _: SimpleNamespace(
+                state="issued", residual_expires_at="2030-01-01T00:10:00+00:00"
+            )
+        )
+
+        disposition = _completed_disposition(
+            store=cast(Any, store), attempt=attempt, retry_at=1_893_456_030
+        )
+
+        self.assertEqual(disposition.status, "waiting")
+        self.assertEqual(disposition.next_due_at, 1_893_456_600)
+        self.assertEqual(disposition.reason_code, "read_custody_fenced")
+
+    def test_store_result_denial_is_paced_without_provider_failure(self) -> None:
         store = _Store(result_denial="qualification_provenance_conflict")
 
         @contextmanager
@@ -482,7 +502,8 @@ class OrdinaryAgentQualificationJobTests(unittest.TestCase):
             disposition = advance_ordinary_agent_qualification_job(
                 claimed=self.claimed(), store=cast(Any, store), setup_resolver=lambda **_: _setup()
             )
-        self.assertEqual(disposition.status, "reconciliation_required")
+        self.assertEqual(disposition.status, "waiting")
+        self.assertIsNotNone(disposition.next_due_at)
         self.assertEqual(disposition.reason_code, "qualification_provenance_conflict")
         self.assertEqual(store.failure_calls, 0)
 

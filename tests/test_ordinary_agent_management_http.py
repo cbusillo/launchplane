@@ -102,6 +102,39 @@ class OrdinaryAgentManagementHTTPTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(response.status_code, 503, response.text)
 
+    async def test_finite_job_post_reports_expired_lease_as_client_state_denial(self) -> None:
+        fixture = effect_support.OrdinaryAgentEffectStorageTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        session = fixture.fixture
+        session.clock.return_value = datetime.fromtimestamp(
+            session.now + 100, timezone.utc
+        ).isoformat()
+        app = create_launchplane_fastapi_app(
+            verifier=Mock(),
+            authz_policy=session.policy.policy,
+            record_store_factory=lambda: fixture.store,
+        )
+        async with lifespan_client(app) as client:
+            response = await client.post(
+                "/v1/agent/ordinary-agent-jobs",
+                headers={"Authorization": f"Bearer {session.bundle.token.value}"},
+                json={
+                    "schema_version": 2,
+                    "purpose": "guarded_delivery",
+                    "idempotency_key": "http-expired-lease",
+                    "session_id": fixture.request.session_id,
+                    "lease_id": fixture.request.lease_id,
+                    "base_sha": "a" * 40,
+                    "pull_requests": [{"number": 12, "head_sha": "b" * 40}],
+                    "permitted_stack_edit_pull_requests": [],
+                    "refresh_allowance": 0,
+                },
+            )
+
+        self.assertEqual(response.status_code, 403, response.text)
+        self.assertEqual(response.json()["error"]["code"], "http_error")
+
     async def test_guarded_provider_readiness_gap_is_reported_as_service_unavailable(self) -> None:
         fixture = effect_support.OrdinaryAgentEffectStorageTests()
         fixture.setUp()

@@ -21539,6 +21539,12 @@ class PostgresRecordStore(HumanSessionStore):
                     raise OrdinaryAgentSessionAdmissionDenied("idempotency_conflict")
                 return persisted
 
+            if lease.expires_at <= initial_now or (
+                session_record.delegation.continuation_expires_at is not None
+                and session_record.delegation.continuation_expires_at <= initial_now
+            ):
+                raise OrdinaryAgentSessionAdmissionDenied("lease_unavailable")
+
             request_id = ordinary_agent_finite_request_id(
                 principal_id=principal.principal_id,
                 idempotency_key=request.idempotency_key,
@@ -26274,7 +26280,10 @@ class PostgresRecordStore(HumanSessionStore):
                         LaunchplaneOrdinaryAgentReadAttemptRow.request_id == request.request_id,
                         LaunchplaneOrdinaryAgentReadAttemptRow.purpose == "qualification",
                     )
-                    .order_by(LaunchplaneOrdinaryAgentReadAttemptRow.attempt_ordinal)
+                    .order_by(
+                        LaunchplaneOrdinaryAgentReadAttemptRow.binding_revision,
+                        LaunchplaneOrdinaryAgentReadAttemptRow.attempt_ordinal,
+                    )
                     .with_for_update()
                 )
             )
@@ -26293,69 +26302,226 @@ class PostgresRecordStore(HumanSessionStore):
                 for item in qualification_records
                 if item.binding_revision == request.binding_revision
             )
+            request_terminal = (
+                request.cancellation_requested_at is not None
+                or request.status in {"cancelled", "completed"}
+                or now >= (request.continuation_expires_at or request.expires_at)
+            )
+
+            maintenance_records = qualification_records
+            open_custody = False
+            custody_retry_not_before: int | None = None
+            custody_changed = False
+            custody_by_id: dict[str, OrdinaryAgentCustodyIssueAttempt | None] = {}
+            custody_observed_at = datetime.fromtimestamp(now, timezone.utc).isoformat()
+            for maintenance_record in maintenance_records:
+                for identifier in maintenance_record.custody_attempt_ids:
+                    maintenance_custody_row = session.get(
+                        LaunchplaneOrdinaryAgentCustodyIssueAttemptRow,
+                        identifier,
+                        with_for_update=True,
+                        populate_existing=True,
+                    )
+                    if maintenance_custody_row is None:
+                        # The reservation exists, but no mint attempt was ever
+                        # acquired. Current authority may safely resume it.
+                        custody_by_id[identifier] = None
+                        continue
+                    maintenance_custody = OrdinaryAgentCustodyIssueAttempt.model_validate(
+                        maintenance_custody_row.payload
+                    )
+                    residual_expiry = (
+                        int(
+                            parse_launchplane_mutation_timestamp(
+                                maintenance_custody.residual_expires_at,
+                                field_name="residual_expires_at",
+                            ).timestamp()
+                        )
+                        if maintenance_custody.residual_expires_at is not None
+                        else None
+                    )
+                    unknown_expiry = (
+                        int(
+                            parse_launchplane_mutation_timestamp(
+                                maintenance_custody.dispatch_deadline,
+                                field_name="dispatch_deadline",
+                            ).timestamp()
+                        )
+                        + GITHUB_TOKEN_MAXIMUM_LIFETIME_SECONDS
+                        + KNOWN_TOKEN_CLOCK_SKEW_SECONDS
+                        if maintenance_custody.state in {"minting", "issue_unknown"}
+                        else None
+                    )
+                    conservative_expiry = residual_expiry or unknown_expiry
+                    if (
+                        maintenance_custody.state
+                        in {"minting", "issued", "issue_unknown", "cleanup_unknown"}
+                        and conservative_expiry is not None
+                        and conservative_expiry <= now
+                    ):
+                        maintenance_custody = OrdinaryAgentCustodyIssueAttempt.model_validate(
+                            maintenance_custody.model_copy(
+                                update={
+                                    "state": "closed",
+                                    "closed_at": custody_observed_at,
+                                    "close_reason": "known_expired",
+                                    "updated_at": custody_observed_at,
+                                }
+                            ).model_dump()
+                        )
+                        self._sync_ordinary_agent_custody_issue_attempt_row(
+                            maintenance_custody_row, maintenance_custody
+                        )
+                        custody_changed = True
+                    custody_by_id[identifier] = maintenance_custody
+                    if maintenance_custody.state != "closed":
+                        open_custody = True
+                        candidate_retry = (
+                            conservative_expiry
+                            if conservative_expiry is not None and conservative_expiry > now
+                            else now + 30
+                        )
+                        custody_retry_not_before = (
+                            candidate_retry
+                            if custody_retry_not_before is None
+                            else min(custody_retry_not_before, candidate_retry)
+                        )
+            if open_custody:
+                if custody_changed:
+                    session.commit()
+                raise OrdinaryAgentSessionAdmissionDenied(
+                    "read_custody_fenced",
+                    retry_not_before=custody_retry_not_before or now + 30,
+                )
+
+            restored_records: dict[
+                str, effect_contracts.OrdinaryAgentQualificationAttemptRecord
+            ] = {}
+
+            def custody_is_closed(identifier: str) -> bool:
+                observed = custody_by_id.get(identifier)
+                return observed is not None and observed.state == "closed"
+
+            for item in qualification_records:
+                if (
+                    item.state == "fenced"
+                    and item.reason_code == "cleanup_unknown"
+                    and item.custody_attempt_ids
+                    and all(
+                        custody_is_closed(identifier) for identifier in item.custody_attempt_ids
+                    )
+                ):
+                    restored = item.model_copy(
+                        update={
+                            "state": "completed" if item.result is not None else "incomplete",
+                            "reason_code": None if item.result is not None else "cleanup_unknown",
+                            "next_due_at": None,
+                            "revision": item.revision + 1,
+                            "updated_at": now,
+                        }
+                    )
+                    row = session.get(LaunchplaneOrdinaryAgentReadAttemptRow, item.attempt_id)
+                    assert row is not None
+                    row.state, row.revision, row.payload = (
+                        restored.state,
+                        restored.revision,
+                        self._payload_dict(restored),
+                    )
+                    restored_records[item.attempt_id] = restored
+            if restored_records:
+                qualification_records = tuple(
+                    restored_records.get(item.attempt_id, item) for item in qualification_records
+                )
+                current = tuple(
+                    item
+                    for item in qualification_records
+                    if item.binding_revision == request.binding_revision
+                )
+
+            if request_terminal:
+                terminal_records = tuple(
+                    item
+                    for item in qualification_records
+                    if item.state in {"reserved", "reading", "incomplete", "fenced"}
+                )
+                terminalized: dict[
+                    str, effect_contracts.OrdinaryAgentQualificationAttemptRecord
+                ] = {}
+                for item in terminal_records:
+                    updated = item.model_copy(
+                        update={
+                            "state": "completed" if item.result is not None else "exhausted",
+                            "reason_code": (
+                                None
+                                if item.result is not None
+                                else "qualification_request_terminal"
+                            ),
+                            "next_due_at": None,
+                            "revision": item.revision + 1,
+                            "updated_at": now,
+                        }
+                    )
+                    row = session.get(LaunchplaneOrdinaryAgentReadAttemptRow, item.attempt_id)
+                    assert row is not None
+                    row.state, row.revision, row.payload = (
+                        updated.state,
+                        updated.revision,
+                        self._payload_dict(updated),
+                    )
+                    terminalized[item.attempt_id] = updated
+                if terminal_records or custody_changed or restored_records:
+                    session.commit()
+                if qualification_records:
+                    latest_history = qualification_records[-1]
+                    return terminalized.get(latest_history.attempt_id, latest_history)
+                raise OrdinaryAgentSessionAdmissionDenied("qualification_request_terminal")
+
             active = next((item for item in current if item.state in {"reserved", "reading"}), None)
             if active is not None:
+                if custody_changed or restored_records:
+                    session.commit()
                 return active
             if current:
                 latest = current[-1]
-                if latest.state == "fenced" and latest.reason_code == "cleanup_unknown":
-                    custody_rows = tuple(
-                        session.get(LaunchplaneOrdinaryAgentCustodyIssueAttemptRow, identifier)
-                        for identifier in latest.custody_attempt_ids
-                    )
-                    if custody_rows and all(
-                        item is not None and item.state == "closed" for item in custody_rows
-                    ):
-                        restored = latest.model_copy(
-                            update={
-                                "state": "completed" if latest.result is not None else "incomplete",
-                                "reason_code": None
-                                if latest.result is not None
-                                else "cleanup_unknown",
-                                "next_due_at": None,
-                                "revision": latest.revision + 1,
-                                "updated_at": now,
-                            }
-                        )
-                        latest_row = session.get(
-                            LaunchplaneOrdinaryAgentReadAttemptRow, latest.attempt_id
-                        )
-                        assert latest_row is not None
-                        latest_row.state, latest_row.revision, latest_row.payload = (
-                            restored.state,
-                            restored.revision,
-                            self._payload_dict(restored),
-                        )
-                        if restored.result is not None:
-                            session.commit()
-                            return restored
-                        latest = restored
-                        current = (*current[:-1], restored)
-                        qualification_records = tuple(
-                            restored if item.attempt_id == restored.attempt_id else item
-                            for item in qualification_records
-                        )
                 if latest.state in {"completed", "fenced", "exhausted"}:
+                    if custody_changed or restored_records:
+                        session.commit()
                     return latest
                 if latest.next_due_at is not None and latest.next_due_at > now:
                     raise OrdinaryAgentSessionAdmissionDenied(
                         "qualification_wait", retry_not_before=latest.next_due_at
                     )
-                if len(latest.custody_attempt_ids) and any(
-                    item is None or item.state != "closed"
-                    for item in (
-                        session.get(LaunchplaneOrdinaryAgentCustodyIssueAttemptRow, identifier)
-                        for identifier in latest.custody_attempt_ids
-                    )
-                ):
-                    raise OrdinaryAgentSessionAdmissionDenied("read_custody_fenced")
             failures = sum(item.state == "incomplete" for item in qualification_records)
             if failures >= effect_contracts.MAX_SNAPSHOT_PROVIDER_ATTEMPTS:
-                # Persist a closed-custody recovery even when it reveals that
-                # no successor may be reserved under the finite retry cap.
+                latest = next(
+                    (item for item in reversed(current) if item.state == "incomplete"),
+                    next(
+                        item
+                        for item in reversed(qualification_records)
+                        if item.state == "incomplete"
+                    ),
+                )
+                exhausted = latest.model_copy(
+                    update={
+                        "state": "exhausted",
+                        "reason_code": "read_attempts_exhausted",
+                        "next_due_at": None,
+                        "revision": latest.revision + 1,
+                        "updated_at": now,
+                    }
+                )
+                latest_row = session.get(LaunchplaneOrdinaryAgentReadAttemptRow, latest.attempt_id)
+                assert latest_row is not None
+                latest_row.state, latest_row.revision, latest_row.payload = (
+                    exhausted.state,
+                    exhausted.revision,
+                    self._payload_dict(exhausted),
+                )
                 session.commit()
-                raise OrdinaryAgentSessionAdmissionDenied("read_attempts_exhausted")
+                return exhausted
             if setup is None:
+                if custody_changed or restored_records:
+                    session.commit()
                 raise OrdinaryAgentSessionAdmissionDenied("qualification_setup_required")
             # Only a successor attempt may demand fresh principal/session/lease
             # authority. Historical terminal evidence and closed-custody
@@ -28571,17 +28737,39 @@ class PostgresRecordStore(HumanSessionStore):
                 )
                 .exists()
             )
-            qualification_maintenance = (
+            qualification_state_maintenance = (
                 select(LaunchplaneOrdinaryAgentReadAttemptRow.attempt_id)
                 .where(
                     LaunchplaneOrdinaryAgentReadAttemptRow.request_id
                     == LaunchplaneOrdinaryAgentJobClaimRow.request_id,
                     LaunchplaneOrdinaryAgentReadAttemptRow.purpose == "qualification",
-                    LaunchplaneOrdinaryAgentReadAttemptRow.state.in_(
-                        ("reading", "incomplete", "fenced")
-                    ),
+                    LaunchplaneOrdinaryAgentReadAttemptRow.state == "fenced",
                 )
                 .exists()
+            )
+            qualification_custody_maintenance = (
+                select(LaunchplaneOrdinaryAgentReadCustodyRow.custody_attempt_id)
+                .join(
+                    LaunchplaneOrdinaryAgentReadAttemptRow,
+                    LaunchplaneOrdinaryAgentReadAttemptRow.attempt_id
+                    == LaunchplaneOrdinaryAgentReadCustodyRow.read_attempt_id,
+                )
+                .join(
+                    LaunchplaneOrdinaryAgentCustodyIssueAttemptRow,
+                    LaunchplaneOrdinaryAgentCustodyIssueAttemptRow.attempt_id
+                    == LaunchplaneOrdinaryAgentReadCustodyRow.custody_attempt_id,
+                )
+                .where(
+                    LaunchplaneOrdinaryAgentReadAttemptRow.request_id
+                    == LaunchplaneOrdinaryAgentJobClaimRow.request_id,
+                    LaunchplaneOrdinaryAgentReadAttemptRow.purpose == "qualification",
+                    LaunchplaneOrdinaryAgentCustodyIssueAttemptRow.state != "closed",
+                )
+                .exists()
+            )
+            qualification_maintenance = or_(
+                qualification_state_maintenance,
+                qualification_custody_maintenance,
             )
             cleanup_due = or_(*cleanup_candidates) & ~unresolved
             query = select(LaunchplaneOrdinaryAgentJobClaimRow).where(

@@ -436,7 +436,12 @@ The first logical qualification attempt consumes one `preflight` action across
 all binding revisions; retries never recharge it. Current authority is required
 to reserve, mint, and read, while recording an already-issued response or cleanup
 uncertainty remains possible after expiry or revocation. A positive response is
-not complete or readiness-valid until its custody attempt has closed.
+not complete or readiness-valid until its custody attempt has closed. Qualification
+maintenance honors each persisted retry deadline, waits through recorded residual
+token expiry, and conservatively treats a mint with unknown outcome as live through
+its dispatch deadline plus the provider's maximum token lifetime and clock-skew
+allowance. Once that bound passes, it closes custody as known-expired and retires a
+terminal request without starting fresh provider work or charging another action.
 
 Admission charges a guarded request's PR count once against the lease; effect
 reservations spend the action allowance. Existing-job checks do not spend

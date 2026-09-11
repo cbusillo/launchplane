@@ -26,6 +26,10 @@ from control_plane.contracts.ordinary_agent_effect import (
     OrdinaryAgentQualificationReadCustodyReservation,
     parse_ordinary_agent_read_attempt,
 )
+from control_plane.contracts.ordinary_agent_custody import (
+    GITHUB_TOKEN_MAXIMUM_LIFETIME_SECONDS,
+    KNOWN_TOKEN_CLOCK_SKEW_SECONDS,
+)
 from control_plane.contracts.ordinary_agent_qualification import (
     OrdinaryAgentQualificationAttestation,
     OrdinaryAgentQualificationSetup,
@@ -595,6 +599,202 @@ class OrdinaryAgentQualificationStorageTests(unittest.TestCase):
         self.assertEqual(provider_calls, 0)
         self.assertEqual(self.scenario.persisted_lease().budget.actions_used, 1)
 
+    def test_issue_unknown_maintenance_is_paced_across_claim_finish_and_reclaim(
+        self,
+    ) -> None:
+        claimed = self.scenario.claim(lease_seconds=120)
+        attempt = self.scenario.reserve_attempt(claimed)
+        reservation = self.scenario.reserve_custody(claimed=claimed, attempt=attempt)
+        acquired, _ = self.scenario.store.acquire_ordinary_agent_custody_issue_attempt(
+            attempt_id=reservation.custody_attempt_id,
+            idempotency_key_sha256=hashlib.sha256(reservation.idempotency_key.encode()).hexdigest(),
+            request_sha256=canonical_json_sha256(
+                {
+                    "candidate": reservation.candidate.model_dump(mode="json"),
+                    "request": reservation.request_payload,
+                }
+            ),
+            candidate=reservation.candidate,
+            requested_permissions=ordinary_agent_effect_permissions(
+                reservation.candidate.effect_profile
+            ),
+            dispatch_window_seconds=30,
+        )
+        self.assertEqual(acquired, "acquired")
+        self.scenario.store.mark_ordinary_agent_custody_issue_unknown(
+            attempt_id=reservation.custody_attempt_id
+        )
+        unknown = self.scenario.store.read_ordinary_agent_custody_issue_attempt(
+            reservation.custody_attempt_id
+        )
+        conservative_expiry = (
+            int(datetime.fromisoformat(unknown.dispatch_deadline).timestamp())
+            + GITHUB_TOKEN_MAXIMUM_LIFETIME_SECONDS
+            + KNOWN_TOKEN_CLOCK_SKEW_SECONDS
+        )
+        self.scenario.store.record_ordinary_agent_qualification_failure(
+            attempt_id=attempt.attempt_id,
+            custody_attempt_id=reservation.custody_attempt_id,
+            reason_code="provider_transport",
+            counts=OrdinaryAgentProviderRequestCounts(
+                rest_core_requests=1, graphql_requests=0, graphql_points=0
+            ),
+        )
+
+        def advance(current: OrdinaryAgentClaimedJob) -> OrdinaryAgentJobAttemptDisposition:
+            return advance_ordinary_agent_qualification_job(
+                claimed=current,
+                store=self.scenario.store,
+                setup_resolver=lambda **_: (_ for _ in ()).throw(
+                    AssertionError("open historical custody must not resolve fresh setup")
+                ),
+                api_request=lambda **_: (_ for _ in ()).throw(
+                    AssertionError("open historical custody must not call the provider")
+                ),
+                utc_now=lambda: datetime.fromtimestamp(
+                    int(
+                        datetime.fromisoformat(self.scenario.fixture.clock.return_value).timestamp()
+                    ),
+                    timezone.utc,
+                ),
+            )
+
+        disposition = advance(claimed)
+        self.assertEqual(disposition.status, "waiting")
+        self.assertEqual(disposition.reason_code, "read_custody_fenced")
+        self.assertEqual(disposition.next_due_at, conservative_expiry)
+        self.scenario.store.finish_ordinary_agent_job_attempt(
+            claim_fence=claimed.claim_fence, disposition=disposition
+        )
+        self.assertIsNone(
+            self.scenario.store.claim_due_ordinary_agent_job(
+                worker_id="too-early", lease_seconds=30
+            )
+        )
+
+        self.scenario.fixture.clock.return_value = datetime.fromtimestamp(
+            conservative_expiry - 1, timezone.utc
+        ).isoformat()
+        self.assertIsNone(
+            self.scenario.store.claim_due_ordinary_agent_job(
+                worker_id="before-conservative-expiry", lease_seconds=30
+            )
+        )
+        self.scenario.fixture.clock.return_value = datetime.fromtimestamp(
+            conservative_expiry, timezone.utc
+        ).isoformat()
+        reclaimed = self.scenario.claim(worker_id="known-expiry", lease_seconds=30)
+        terminal = advance(reclaimed)
+        self.assertEqual(terminal.status, "blocked")
+        self.assertEqual(terminal.reason_code, "qualification_request_terminal")
+        self.scenario.store.finish_ordinary_agent_job_attempt(
+            claim_fence=reclaimed.claim_fence, disposition=terminal
+        )
+        self.assertIsNone(
+            self.scenario.store.claim_due_ordinary_agent_job(
+                worker_id="terminal-no-maintenance", lease_seconds=30
+            )
+        )
+        closed = self.scenario.store.read_ordinary_agent_custody_issue_attempt(
+            reservation.custody_attempt_id
+        )
+        self.assertEqual(closed.state, "closed")
+        self.assertEqual(closed.close_reason, "known_expired")
+        self.assertEqual(self.scenario.persisted_lease().budget.actions_used, 1)
+
+    def test_cancelled_issued_custody_waits_for_expiry_then_stops_maintenance(
+        self,
+    ) -> None:
+        claimed = self.scenario.claim(lease_seconds=120)
+        attempt = self.scenario.reserve_attempt(claimed)
+        reservation = self.scenario.reserve_custody(claimed=claimed, attempt=attempt)
+        self.scenario.issue(reservation)
+        self.scenario.store.cancel_ordinary_agent_session(
+            proof=self.scenario.fixture.proof,
+            session_id=self.scenario.session.session_id,
+        )
+
+        def no_new_work(**_: object) -> OrdinaryAgentQualificationSetup | None:
+            raise AssertionError("terminal maintenance must not start new provider work")
+
+        waiting = advance_ordinary_agent_qualification_job(
+            claimed=claimed,
+            store=self.scenario.store,
+            setup_resolver=no_new_work,
+            api_request=no_new_work,
+            utc_now=lambda: datetime.fromtimestamp(self.scenario.fixture.now, timezone.utc),
+        )
+        self.assertEqual(waiting.status, "waiting")
+        self.assertEqual(waiting.reason_code, "read_custody_fenced")
+        self.assertEqual(waiting.next_due_at, self.scenario.fixture.now + 360)
+        self.scenario.store.finish_ordinary_agent_job_attempt(
+            claim_fence=claimed.claim_fence, disposition=waiting
+        )
+        self.assertIsNone(
+            self.scenario.store.claim_due_ordinary_agent_job(
+                worker_id="before-known-expiry", lease_seconds=30
+            )
+        )
+
+        self.scenario.fixture.clock.return_value = datetime.fromtimestamp(
+            self.scenario.fixture.now + 360, timezone.utc
+        ).isoformat()
+        reclaimed = self.scenario.claim(worker_id="known-expiry", lease_seconds=30)
+        terminal = advance_ordinary_agent_qualification_job(
+            claimed=reclaimed,
+            store=self.scenario.store,
+            setup_resolver=no_new_work,
+            api_request=no_new_work,
+            utc_now=lambda: datetime.fromtimestamp(self.scenario.fixture.now + 360, timezone.utc),
+        )
+        self.assertEqual(terminal.status, "blocked")
+        self.assertEqual(terminal.reason_code, "qualification_request_terminal")
+        self.scenario.store.finish_ordinary_agent_job_attempt(
+            claim_fence=reclaimed.claim_fence, disposition=terminal
+        )
+        self.assertIsNone(
+            self.scenario.store.claim_due_ordinary_agent_job(
+                worker_id="terminal-no-maintenance", lease_seconds=30
+            )
+        )
+        custody = self.scenario.store.read_ordinary_agent_custody_issue_attempt(
+            reservation.custody_attempt_id
+        )
+        self.assertEqual(custody.state, "closed")
+        self.assertEqual(custody.close_reason, "known_expired")
+        self.assertEqual(self.scenario.persisted_lease().budget.actions_used, 1)
+
+    def test_cancelled_request_without_attempt_stops_after_one_claim(self) -> None:
+        claimed = self.scenario.claim(lease_seconds=120)
+        self.scenario.store.cancel_ordinary_agent_session(
+            proof=self.scenario.fixture.proof,
+            session_id=self.scenario.session.session_id,
+        )
+
+        disposition = advance_ordinary_agent_qualification_job(
+            claimed=claimed,
+            store=self.scenario.store,
+            setup_resolver=lambda **_: (_ for _ in ()).throw(
+                AssertionError("terminal request must not resolve fresh setup")
+            ),
+            api_request=lambda **_: (_ for _ in ()).throw(
+                AssertionError("terminal request must not call the provider")
+            ),
+            utc_now=lambda: datetime.fromtimestamp(self.scenario.fixture.now, timezone.utc),
+        )
+
+        self.assertEqual(disposition.status, "blocked")
+        self.assertEqual(disposition.reason_code, "qualification_request_terminal")
+        self.scenario.store.finish_ordinary_agent_job_attempt(
+            claim_fence=claimed.claim_fence, disposition=disposition
+        )
+        self.assertIsNone(
+            self.scenario.store.claim_due_ordinary_agent_job(
+                worker_id="terminal-no-attempt", lease_seconds=30
+            )
+        )
+        self.assertEqual(self.scenario.persisted_lease().budget.actions_used, 0)
+
     def test_qualification_setup_binds_immutable_installed_activation(self) -> None:
         installed_at = datetime.fromtimestamp(
             self.scenario.fixture.now - 10, timezone.utc
@@ -842,7 +1042,11 @@ class OrdinaryAgentQualificationStorageTests(unittest.TestCase):
         )
         self.assertEqual(fenced.state, "fenced")
         self.assertEqual(fenced.result, completed.result)
-        self.assertEqual(self.scenario.reserve_attempt(claimed).state, "fenced")
+        with self.assertRaisesRegex(
+            OrdinaryAgentSessionAdmissionDenied, "read_custody_fenced"
+        ) as raised:
+            self.scenario.reserve_attempt(claimed)
+        self.assertEqual(raised.exception.retry_not_before, self.scenario.fixture.now + 360)
 
         self.scenario.store.close_ordinary_agent_custody_issue_attempt(
             attempt_id=reservation.custody_attempt_id, reason="confirmed_revoked"
@@ -915,12 +1119,54 @@ class OrdinaryAgentQualificationStorageTests(unittest.TestCase):
                 timezone.utc,
             ).isoformat()
 
-        with self.assertRaisesRegex(OrdinaryAgentSessionAdmissionDenied, "read_attempts_exhausted"):
-            self.scenario.reserve_attempt(claimed)
+        exhausted = self.scenario.reserve_attempt(claimed)
+        self.assertEqual(exhausted.state, "exhausted")
+        self.assertEqual(exhausted.reason_code, "read_attempts_exhausted")
         with self.scenario.store._session_factory() as fresh_session:
             attempts = fresh_session.query(LaunchplaneOrdinaryAgentReadAttemptRow).all()
         self.assertEqual(len(attempts), MAX_SNAPSHOT_PROVIDER_ATTEMPTS)
         self.assertEqual(self.scenario.persisted_lease().budget.actions_used, 1)
+
+    def test_terminal_history_returns_current_binding_after_older_higher_ordinal(self) -> None:
+        claimed = self.scenario.claim(lease_seconds=120)
+        zero_counts = OrdinaryAgentProviderRequestCounts(
+            rest_core_requests=0, graphql_requests=0, graphql_points=0
+        )
+        for index in range(2):
+            attempt = self.scenario.reserve_attempt(claimed)
+            reservation = self.scenario.reserve_custody(claimed=claimed, attempt=attempt)
+            self.scenario.issue(reservation)
+            self.scenario.store.record_ordinary_agent_qualification_failure(
+                attempt_id=attempt.attempt_id,
+                custody_attempt_id=reservation.custody_attempt_id,
+                reason_code="provider_transport",
+                counts=zero_counts,
+            )
+            self.scenario.store.close_ordinary_agent_custody_issue_attempt(
+                attempt_id=reservation.custody_attempt_id, reason="confirmed_revoked"
+            )
+            self.scenario.fixture.clock.return_value = datetime.fromtimestamp(
+                self.scenario.fixture.now + (index + 1) * MIN_RECONCILIATION_BACKOFF_SECONDS,
+                timezone.utc,
+            ).isoformat()
+
+        self.scenario.rebind(binding_revision=2)
+        completed, reservation = self.scenario.record_positive(claimed=claimed)
+        self.scenario.store.close_ordinary_agent_custody_issue_attempt(
+            attempt_id=reservation.custody_attempt_id, reason="confirmed_revoked"
+        )
+        self.scenario.store.cancel_ordinary_agent_session(
+            proof=self.scenario.fixture.proof,
+            session_id=self.scenario.session.session_id,
+        )
+
+        recovered = self.scenario.store.reserve_ordinary_agent_qualification_attempt(
+            claim_fence=claimed.claim_fence, setup=None
+        )
+
+        self.assertEqual(recovered.attempt_id, completed.attempt_id)
+        self.assertEqual(recovered.binding_revision, 2)
+        self.assertEqual(recovered.state, "completed")
 
     def test_issued_result_can_be_recorded_after_session_revocation(self) -> None:
         claimed = self.scenario.claim()

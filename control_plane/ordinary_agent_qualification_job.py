@@ -133,7 +133,7 @@ def advance_ordinary_agent_qualification_job(
             return _denied_disposition(setup_error, retry_at=retry_at)
     setup = attempt.setup
     if attempt.state == "completed":
-        return _completed_disposition(store=store, attempt=attempt)
+        return _completed_disposition(store=store, attempt=attempt, retry_at=retry_at)
     if attempt.state in {"fenced", "exhausted"}:
         return OrdinaryAgentJobAttemptDisposition(
             status="reconciliation_required" if attempt.state == "fenced" else "blocked",
@@ -249,28 +249,38 @@ def advance_ordinary_agent_qualification_job(
             )
         except OrdinaryAgentSessionAdmissionDenied:
             return OrdinaryAgentJobAttemptDisposition(
-                status="reconciliation_required", reason_code="qualification_history_conflict"
+                status="waiting",
+                next_due_at=retry_at,
+                reason_code="qualification_history_conflict",
             )
         if reason == "cleanup_unknown":
             return OrdinaryAgentJobAttemptDisposition(
-                status="reconciliation_required", reason_code=reason
+                status="reconciliation_required",
+                next_due_at=retry_at,
+                reason_code=reason,
             )
         if read_authority_denied:
             return OrdinaryAgentJobAttemptDisposition(
-                status="blocked", reason_code="qualification_read_authority_lost"
+                status="waiting",
+                next_due_at=recorded.next_due_at or retry_at,
+                reason_code="qualification_read_authority_lost",
             )
         return OrdinaryAgentJobAttemptDisposition(
             status="waiting", next_due_at=recorded.next_due_at, reason_code=recorded.reason_code
         )
     if result_denial is not None:
         return OrdinaryAgentJobAttemptDisposition(
-            status="reconciliation_required", reason_code=result_denial.reason_code
+            status="waiting",
+            next_due_at=retry_at,
+            reason_code=result_denial.reason_code,
         )
     if recorded is None:
         return OrdinaryAgentJobAttemptDisposition(
-            status="reconciliation_required", reason_code="qualification_outcome_missing"
+            status="waiting",
+            next_due_at=retry_at,
+            reason_code="qualification_outcome_missing",
         )
-    return _completed_disposition(store=store, attempt=recorded)
+    return _completed_disposition(store=store, attempt=recorded, retry_at=retry_at)
 
 
 def _attestation(
@@ -329,25 +339,36 @@ def _attestation(
 
 
 def _completed_disposition(
-    *, store: _QualificationStore, attempt: OrdinaryAgentQualificationAttemptRecord
+    *,
+    store: _QualificationStore,
+    attempt: OrdinaryAgentQualificationAttemptRecord,
+    retry_at: int,
 ) -> OrdinaryAgentJobAttemptDisposition:
     if attempt.state in {"fenced", "exhausted"}:
         return OrdinaryAgentJobAttemptDisposition(
             status="reconciliation_required" if attempt.state == "fenced" else "blocked",
+            next_due_at=retry_at if attempt.state == "fenced" else None,
             reason_code=attempt.reason_code or "qualification_attempt_closed",
         )
     if not attempt.custody_attempt_ids:
         return OrdinaryAgentJobAttemptDisposition(
-            status="reconciliation_required", reason_code="read_custody_fenced"
+            status="blocked", reason_code="qualification_outcome_missing"
         )
     custody = store.read_ordinary_agent_custody_issue_attempt(attempt.custody_attempt_ids[-1])
     if custody.state != "closed":
+        residual_retry = (
+            int(datetime.fromisoformat(custody.residual_expires_at).timestamp())
+            if custody.residual_expires_at is not None
+            else retry_at
+        )
         return OrdinaryAgentJobAttemptDisposition(
-            status="reconciliation_required", reason_code="read_custody_fenced"
+            status="waiting",
+            next_due_at=max(retry_at, residual_retry),
+            reason_code="read_custody_fenced",
         )
     if attempt.result is None:
         return OrdinaryAgentJobAttemptDisposition(
-            status="reconciliation_required", reason_code="qualification_outcome_missing"
+            status="blocked", reason_code="qualification_outcome_missing"
         )
     if attempt.result.status == "qualified" and attempt.attestation is not None:
         return OrdinaryAgentJobAttemptDisposition(
@@ -391,6 +412,8 @@ def _denied_disposition(
         "installed_outcome_mismatch",
         "inventory_drift",
         "policy_source_inadmissible",
+        "read_custody_fenced",
+        "read_outcome_required",
         "setup_operation_inadmissible",
     }:
         return OrdinaryAgentJobAttemptDisposition(

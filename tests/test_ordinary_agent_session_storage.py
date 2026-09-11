@@ -333,6 +333,8 @@ class OrdinaryAgentSessionStorageTests(unittest.TestCase):
             row.payload = self.store._payload_dict(progressed)
             session.commit()
 
+        self.clock.return_value = datetime.fromtimestamp(lease.expires_at, timezone.utc).isoformat()
+
         self.assertEqual(
             self.store.admit_ordinary_agent_client_request(proof=self.proof, request=intent),
             progressed,
