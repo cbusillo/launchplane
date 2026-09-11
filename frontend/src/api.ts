@@ -27,6 +27,11 @@ import type {
   OwnerAcceptanceCurrentItemsResponse,
   OwnerAcceptanceDecision,
   OwnerAcceptanceProductDecision,
+  OrdinaryAgentDeliveryActivationOptionsResponse,
+  OrdinaryAgentDeliveryActivationRevokeRequest,
+  OrdinaryAgentDeliveryActivationSetupRequest,
+  PlanOrdinaryAgentDeliveryActivationData,
+  PlanOrdinaryAgentDeliveryActivationResponse,
   ProductActivityResponse,
   ProductEnvironmentConfigStatusResponse,
   ProductEnvironmentIncidentResponse,
@@ -45,6 +50,7 @@ import type {
   ReadHumanPrivilegedOperationResponse,
   ReadHumanPrivilegedOperationReviewData,
   ReadHumanPrivilegedOperationReviewResponse,
+  ReadOrdinaryAgentDeliveryActivationOptionsResponse,
   RankWorkGraphSnapshotData,
   RankWorkGraphSnapshotResponse,
   ReadProductOperationalReadinessData,
@@ -636,6 +642,9 @@ export function writeOwnerAcceptanceEvent(
 }
 
 export type {
+  OrdinaryAgentDeliveryActivationOptionsResponse,
+  OrdinaryAgentDeliveryActivationRevokeRequest,
+  OrdinaryAgentDeliveryActivationSetupRequest,
   PrivilegedOperationListResponse,
   PrivilegedOperationRecord,
   PrivilegedOperationSemanticReview,
@@ -659,6 +668,39 @@ export function readPrivilegedOperationPlans(
     "GET",
     undefined,
     signal,
+  );
+}
+
+export function readOrdinaryAgentDeliveryActivationOptions(
+  signal?: AbortSignal,
+): Promise<OrdinaryAgentDeliveryActivationOptionsResponse> {
+  return requestJson<ReadOrdinaryAgentDeliveryActivationOptionsResponse>(
+    "/v1/privileged-operations/ordinary-agent-delivery-activation/options",
+    "GET",
+    undefined,
+    signal,
+  );
+}
+
+export function planOrdinaryAgentDeliveryActivation(
+  requestPayload:
+    | OrdinaryAgentDeliveryActivationSetupRequest
+    | OrdinaryAgentDeliveryActivationRevokeRequest,
+  expiresInSeconds = 1800,
+): Promise<PrivilegedOperationHumanResponse> {
+  const request: PlanOrdinaryAgentDeliveryActivationData = {
+    url: BROWSER_WRITE_ROUTES.ordinaryAgentDeliveryActivationPlan,
+    body: {
+      schema_version: 1,
+      source_event_id: `ui:activation-plan:${Date.now()}`,
+      expires_in_seconds: expiresInSeconds,
+      request: requestPayload,
+    },
+  };
+  return requestJson<PlanOrdinaryAgentDeliveryActivationResponse>(
+    request.url,
+    "POST",
+    request.body,
   );
 }
 

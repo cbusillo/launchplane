@@ -10,6 +10,10 @@ server-authored review and return a challenge response without exposing owner
 authority to model tools, browser automation, shells, Code Bridge, MCP, or
 agent-controlled IPC.
 
+The historical owner-control name refers to trusted-host administrator
+confirmation. It is separate from site-Owner preview acceptance; site-Owner
+membership grants no privileged-operation approval or execution power.
+
 ## Canonical Contract
 
 `control_plane.contracts.canonical_json` defines the shared UTF-8 JSON bytes:
@@ -121,20 +125,32 @@ contains the JSON schemas, canonicalization declaration, and byte/digest golden
 vectors for every descriptor currently registered in
 `control_plane.privileged_operation_registry`.
 
-The artifact container is schema version `5`; the embedded approval, response,
+The artifact container is schema version `6`; the embedded approval, response,
 binding, signature-payload, envelope, and shadow-verifier record models remain
 schema version `1`. Version `2` added the signed-channel declarations and
 vectors. Version `3` adds deterministic server-state verification and reactive
 challenge-lifecycle vectors. Version `4` adds
 `managed-merge-train-policy-import` descriptor, schema, and vector coverage.
 Version `5` adds separate enrollment-provenance schemas, declarations,
-exhaustive caller-claim vectors, and negative storage vectors. Its compatibility
-declaration pins every version-4 top-level section while retaining the exact
+exhaustive caller-claim vectors, and negative storage vectors. Version `6` adds
+`ordinary-agent-delivery-activation` descriptor, schema, and vector coverage.
+Its compatibility declaration pins every version-5 provenance section and
+projects the additive descriptor out before checking the version-4 schema and
+vector digests, while retaining the exact
 version-2 section, descriptor-scoped vector, and schema digests already carried
 by version `4`. Consumers must reject unknown container versions.
 The preserved `signature_declaration.contract_schema_version` remains `2`
 because it identifies the unchanged signed-channel declaration; the top-level
-schema and compatibility block are authoritative for the version-5 container.
+schema and compatibility block are authoritative for the version-6 container.
+Version-5-pinned consumers reject the version-6 artifact by design; no version-5
+file is dual-published because no current repository or known client consumes
+the generated artifact.
+
+Descriptor coverage is inert serialization coverage, not adoption. The
+`ordinary-agent-delivery-activation` descriptor has no owner-control transport,
+route, enrolled session, or challenge path. Its approval remains in the existing
+browser privileged-operation flow, and the shadow verifier continues to return
+`authorizes_execution: false`.
 
 Descriptor vectors derive all synthetic identity values from the descriptor ID,
 so registering another descriptor does not churn existing vectors. Negative

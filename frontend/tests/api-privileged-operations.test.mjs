@@ -3,6 +3,8 @@ import { afterEach, test } from "node:test";
 
 import {
   approvePrivilegedOperation,
+  planOrdinaryAgentDeliveryActivation,
+  readOrdinaryAgentDeliveryActivationOptions,
   readPrivilegedOperationRawDetail,
   readPrivilegedOperationPlans,
   readPrivilegedOperationReview,
@@ -154,4 +156,56 @@ test("privileged-operation UI sends approve and revoke mutations without execute
   assert.equal(mutations[0].init.method, "POST");
   assert.equal(mutations[1].init.method, "POST");
   assert.ok(!calls.some(({ input }) => input.includes("/execute")));
+});
+
+test("activation UI reads server choices and submits their opaque references", async () => {
+  const calls = [];
+  globalThis.fetch = async (input, init = {}) => {
+    calls.push({ input: String(input), init });
+    return new Response(
+      JSON.stringify({
+        status: "ok",
+        trace_id: "trace-activation",
+        csrf_token: "csrf",
+        duration_options: [],
+        setup_options: [],
+        revoke_options: [],
+        write_status: "written",
+        record: {},
+        events: [],
+      }),
+      { headers: { "Content-Type": "application/json" }, status: 200 },
+    );
+  };
+
+  await readOrdinaryAgentDeliveryActivationOptions();
+  await planOrdinaryAgentDeliveryActivation({
+    schema_version: 1,
+    action: "setup",
+    policy_operation_id: "server-policy-operation",
+    repository_inventory_record_id: "server-inventory-record",
+    predecessor: null,
+    activation_expires_at: "2026-09-11T12:00:00Z",
+    reason: "Prepare qualification-only delivery for the selected target.",
+  });
+
+  assert.equal(
+    calls[0].input,
+    "/v1/privileged-operations/ordinary-agent-delivery-activation/options",
+  );
+  const planCall = calls.find(({ input }) =>
+    input.endsWith(
+      "/v1/privileged-operations/ordinary-agent-delivery-activation/plans",
+    ),
+  );
+  assert.ok(planCall);
+  assert.equal(planCall.init.method, "POST");
+  const body = JSON.parse(String(planCall.init.body));
+  assert.equal(body.request.policy_operation_id, "server-policy-operation");
+  assert.equal(
+    body.request.repository_inventory_record_id,
+    "server-inventory-record",
+  );
+  assert.equal(body.request.predecessor, null);
+  assert.equal(body.request.activation_expires_at, "2026-09-11T12:00:00Z");
 });

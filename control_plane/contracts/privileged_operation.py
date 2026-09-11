@@ -11,6 +11,14 @@ from control_plane.contracts.merge_train_policy import (
     MergeTrainPolicyRecord,
     normalize_merge_train_policy_timestamp,
 )
+from control_plane.contracts.ordinary_agent_activation import (
+    OrdinaryAgentDeliveryActivationExecutionEvidence,
+    OrdinaryAgentDeliveryActivationHumanEvidence,
+    OrdinaryAgentDeliveryActivationRevokeHumanEvidence,
+    OrdinaryAgentDeliveryActivationRevokeRequest,
+    OrdinaryAgentDeliveryActivationSetupHumanEvidence,
+    OrdinaryAgentDeliveryActivationSetupRequest,
+)
 from control_plane.authz_grant_service import (
     AuthzManagedPolicyDiff,
     AuthzManagedPolicyReconcileEnvelope,
@@ -38,11 +46,17 @@ MERGE_TRAIN_POLICY_OPERATION_REVOKE_ACTION = "merge_train_policy_operation.revok
 MERGE_TRAIN_POLICY_OPERATION_SUMMARY_READ_ACTION = (
     "privileged_merge_train_policy_operation_summary.read"
 )
+ORDINARY_AGENT_DELIVERY_ACTIVATION_PLAN_ACTION = "ordinary_agent_delivery_activation.plan"
+ORDINARY_AGENT_DELIVERY_ACTIVATION_READ_ACTION = "ordinary_agent_delivery_activation.read"
+ORDINARY_AGENT_DELIVERY_ACTIVATION_CANCEL_ACTION = "ordinary_agent_delivery_activation.cancel"
+ORDINARY_AGENT_DELIVERY_ACTIVATION_APPROVE_ACTION = "ordinary_agent_delivery_activation.approve"
+ORDINARY_AGENT_DELIVERY_ACTIVATION_REVOKE_ACTION = "ordinary_agent_delivery_activation.revoke"
 
 PrivilegedOperationDescriptorId = Literal[
     "managed-secret-reencryption",
     "managed-authz-policy-set",
     "managed-merge-train-policy-import",
+    "ordinary-agent-delivery-activation",
 ]
 PrivilegedOperationSafetyClass = Literal["secret_backed", "policy_admin"]
 PrivilegedOperationStatus = Literal[
@@ -422,7 +436,7 @@ class PrivilegedOperationApproval(BaseModel):
     managed_rule_id: str
     expires_at: str
     reason: str = Field(min_length=1, max_length=4000)
-    rollback_class: Literal["key_retained", "policy_cas"] = "key_retained"
+    rollback_class: Literal["key_retained", "policy_cas", "activation_revoke"] = "key_retained"
 
     @model_validator(mode="after")
     def _validate_approval(self) -> "PrivilegedOperationApproval":
@@ -613,16 +627,20 @@ PrivilegedOperationRequest: TypeAlias = (
     ManagedSecretReencryptionPlanInput
     | ManagedAuthzPolicySetProposalInput
     | ManagedMergeTrainPolicyImportProposalInput
+    | OrdinaryAgentDeliveryActivationSetupRequest
+    | OrdinaryAgentDeliveryActivationRevokeRequest
 )
 PrivilegedOperationHumanEvidence: TypeAlias = (
     ManagedSecretReencryptionHumanEvidence
     | ManagedAuthzPolicySetHumanEvidence
     | ManagedMergeTrainPolicyImportHumanEvidence
+    | OrdinaryAgentDeliveryActivationHumanEvidence
 )
 PrivilegedOperationTerminalEvidence: TypeAlias = (
     PrivilegedOperationExecutionEvidence
     | ManagedAuthzPolicySetExecutionEvidence
     | ManagedMergeTrainPolicyImportExecutionEvidence
+    | OrdinaryAgentDeliveryActivationExecutionEvidence
 )
 
 
@@ -708,6 +726,43 @@ class PrivilegedOperationRecord(BaseModel):
                 raise ValueError("Merge-train policy execution evidence does not match descriptor")
             if self.approval is not None and self.approval.rollback_class != "policy_cas":
                 raise ValueError("Merge-train policy approvals require policy-CAS rollback")
+        elif self.descriptor_id == "ordinary-agent-delivery-activation":
+            if self.safety_class != "policy_admin":
+                raise ValueError("Ordinary-agent activation requires policy-admin safety")
+            if self.requested_by.identity_type != "github_human":
+                raise ValueError("Ordinary-agent activation requires a GitHub-human requester")
+            if not isinstance(
+                self.request,
+                (
+                    OrdinaryAgentDeliveryActivationSetupRequest,
+                    OrdinaryAgentDeliveryActivationRevokeRequest,
+                ),
+            ) or not isinstance(
+                self.evidence,
+                (
+                    OrdinaryAgentDeliveryActivationSetupHumanEvidence,
+                    OrdinaryAgentDeliveryActivationRevokeHumanEvidence,
+                ),
+            ):
+                raise ValueError("Ordinary-agent activation payload types do not match descriptor")
+            if self.request.action != self.evidence.action:
+                raise ValueError("Ordinary-agent activation request and evidence actions differ")
+            if self.execution is not None:
+                if not isinstance(
+                    self.execution,
+                    OrdinaryAgentDeliveryActivationExecutionEvidence,
+                ):
+                    raise ValueError(
+                        "Ordinary-agent activation execution evidence does not match descriptor"
+                    )
+                if self.execution.action != self.request.action:
+                    raise ValueError(
+                        "Ordinary-agent activation request and execution actions differ"
+                    )
+            if self.approval is not None and self.approval.rollback_class != "activation_revoke":
+                raise ValueError(
+                    "Ordinary-agent activation approvals require activation-revoke rollback"
+                )
         else:
             raise ValueError("Unknown privileged-operation descriptor")
         object.__setattr__(self, "request_digest", _sha256(self.request_digest, "request_digest"))
@@ -952,6 +1007,7 @@ PrivilegedOperationSemanticReviewClass = Literal[
     "managed_secret_reencryption",
     "managed_authz_policy_set",
     "managed_merge_train_policy_import",
+    "ordinary_agent_delivery_activation",
 ]
 PrivilegedOperationSemanticReviewBlockerState = Literal["clear", "blocked", "error"]
 PrivilegedOperationSemanticReviewBlockerCode = Literal[
@@ -977,17 +1033,29 @@ PrivilegedOperationSemanticReviewBlockerCode = Literal[
     "operation_expired",
     "execution_failed",
     "reconciliation_required",
+    "database_revision_incompatible",
+    "activation_schema_incompatible",
+    "activation_storage_unavailable",
+    "activation_cas_unavailable",
+    "activation_recovery_unavailable",
+    "activation_rollback_reader_unavailable",
 ]
 PrivilegedOperationSemanticReviewExpiryState = Literal[
     "active",
     "past_expiry_unreconciled",
     "expired",
 ]
-PrivilegedOperationSemanticReviewRollbackClass = Literal["key_retained", "policy_cas"]
+PrivilegedOperationSemanticReviewRollbackClass = Literal[
+    "key_retained",
+    "policy_cas",
+    "activation_revoke",
+]
 PrivilegedOperationSemanticReviewTitle = Literal[
     "Managed-secret re-encryption review",
     "Managed authorization policy review",
     "Managed merge-train policy review",
+    "Review agent delivery setup",
+    "Review stopping agent delivery",
 ]
 PrivilegedOperationSemanticReviewMetricKind = Literal[
     "configured_secrets",
@@ -1007,6 +1075,8 @@ PrivilegedOperationSemanticReviewMetricKind = Literal[
     "policy_targets_changed",
     "policy_targets_removed",
     "policy_targets_unchanged",
+    "activation_scope_targets",
+    "activation_setup_blockers",
 ]
 PrivilegedOperationSemanticReviewDigestKind = Literal[
     "request",
@@ -1018,6 +1088,10 @@ PrivilegedOperationSemanticReviewDigestKind = Literal[
     "candidate_managed_set",
     "active_merge_train_policy",
     "candidate_merge_train_policy",
+    "activation_inventory",
+    "activation_policy_package",
+    "activation_record",
+    "activation_schema_invariants",
     "execution_result",
 ]
 
@@ -1126,7 +1200,12 @@ class PrivilegedOperationSemanticReviewChange(BaseModel):
 class PrivilegedOperationSemanticReviewBlastRadius(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    scope: Literal["managed_secret_store", "authorization_policy", "merge_train_policy"]
+    scope: Literal[
+        "managed_secret_store",
+        "authorization_policy",
+        "merge_train_policy",
+        "ordinary_agent_delivery_activation",
+    ]
     summary: str
     affected_count: int = Field(ge=0)
 
@@ -1237,33 +1316,46 @@ class PrivilegedOperationSemanticReview(BaseModel):
             "managed-secret-reencryption": (
                 "managed_secret_reencryption",
                 "secret_backed",
-                "Managed-secret re-encryption review",
                 "managed_secret_store",
                 "key_retained",
             ),
             "managed-authz-policy-set": (
                 "managed_authz_policy_set",
                 "policy_admin",
-                "Managed authorization policy review",
                 "authorization_policy",
                 "policy_cas",
             ),
             "managed-merge-train-policy-import": (
                 "managed_merge_train_policy_import",
                 "policy_admin",
-                "Managed merge-train policy review",
                 "merge_train_policy",
                 "policy_cas",
+            ),
+            "ordinary-agent-delivery-activation": (
+                "ordinary_agent_delivery_activation",
+                "policy_admin",
+                "ordinary_agent_delivery_activation",
+                "activation_revoke",
+            ),
+        }
+        expected_titles = {
+            "managed-secret-reencryption": frozenset({"Managed-secret re-encryption review"}),
+            "managed-authz-policy-set": frozenset({"Managed authorization policy review"}),
+            "managed-merge-train-policy-import": frozenset({"Managed merge-train policy review"}),
+            "ordinary-agent-delivery-activation": frozenset(
+                {"Review agent delivery setup", "Review stopping agent delivery"}
             ),
         }
         actual_descriptor_fields = (
             self.operation_class,
             self.safety_class,
-            self.title,
             self.blast_radius.scope,
             self.rollback.rollback_class,
         )
-        if actual_descriptor_fields != expected_descriptor_fields[self.descriptor_id]:
+        if (
+            actual_descriptor_fields != expected_descriptor_fields[self.descriptor_id]
+            or self.title not in expected_titles[self.descriptor_id]
+        ):
             raise ValueError(
                 "Privileged-operation semantic review fields do not match the descriptor"
             )
@@ -1360,6 +1452,25 @@ def privileged_operation_pre_state_digest(
                 "active_updated_at": evidence.active_updated_at,
                 "active_policy_sha256": evidence.active_policy_sha256,
                 "active_target_count": evidence.active_target_count,
+            }
+        )
+    if isinstance(evidence, OrdinaryAgentDeliveryActivationSetupHumanEvidence):
+        return _digest_payload(
+            {
+                "action": evidence.action,
+                "inventory": evidence.inventory.model_dump(mode="json"),
+                "predecessor": (
+                    evidence.predecessor.model_dump(mode="json")
+                    if evidence.predecessor is not None
+                    else None
+                ),
+            }
+        )
+    if isinstance(evidence, OrdinaryAgentDeliveryActivationRevokeHumanEvidence):
+        return _digest_payload(
+            {
+                "action": evidence.action,
+                "activation": evidence.activation.model_dump(mode="json"),
             }
         )
     return _digest_payload(
@@ -1561,6 +1672,15 @@ def privileged_operation_agent_summary(
             created_at=record.created_at,
             expires_at=record.expires_at,
         )
+    if isinstance(
+        evidence,
+        (
+            OrdinaryAgentDeliveryActivationSetupHumanEvidence,
+            OrdinaryAgentDeliveryActivationRevokeHumanEvidence,
+        ),
+    ):
+        raise ValueError("Ordinary-agent activation has no agent summary capability")
+    assert isinstance(evidence, ManagedSecretReencryptionHumanEvidence)
     return PrivilegedOperationAgentSummary(
         operation_id=record.operation_id,
         descriptor_id=record.descriptor_id,

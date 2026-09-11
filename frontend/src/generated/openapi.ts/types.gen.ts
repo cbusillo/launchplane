@@ -1380,6 +1380,168 @@ export type OrdinaryAgentConnectionView = {
     status: 'revoked';
 };
 
+export type OrdinaryAgentDeliveryActivationDurationOption = {
+    activation_expires_at: string;
+    duration_seconds: number;
+    label: string;
+};
+
+export type OrdinaryAgentDeliveryActivationExecutionEvidence = {
+    action: 'setup' | 'revoke_activation';
+    activation_id: string;
+    activation_revision: number;
+    activation_sha256: string;
+    changed: boolean;
+    desired_state: 'guarded' | 'revoked' | null;
+    effective_state: 'qualification_only' | 'guarded' | 'revoked' | null;
+    failure_code: string;
+    reconciliation_required: boolean;
+    result_digest: string;
+    result_status: 'ok' | 'error';
+    schema_version: 1;
+    source_operation_id: string;
+};
+
+export type OrdinaryAgentDeliveryActivationOptionsResponse = {
+    duration_options: Array<OrdinaryAgentDeliveryActivationDurationOption>;
+    revoke_options: Array<OrdinaryAgentDeliveryActivationRevokeOption>;
+    setup_options: Array<OrdinaryAgentDeliveryActivationSetupOption>;
+    status: 'ok';
+    trace_id: string;
+};
+
+export type OrdinaryAgentDeliveryActivationPlanEnvelope = {
+    expires_in_seconds?: number;
+    request: ({
+        action: 'setup';
+    } & OrdinaryAgentDeliveryActivationSetupRequest) | ({
+        action: 'revoke_activation';
+    } & OrdinaryAgentDeliveryActivationRevokeRequest);
+    schema_version?: 1;
+    source_event_id: string;
+};
+
+export type OrdinaryAgentDeliveryActivationReference = {
+    activation_id: string;
+    activation_sha256: string;
+    revision: number;
+};
+
+export type OrdinaryAgentDeliveryActivationRevokeHumanEvidence = {
+    action: 'revoke_activation';
+    activation: OrdinaryAgentDeliveryActivationReference;
+    authorizes_execution: false;
+    persists_state: false;
+    plan_digest: string;
+    result_status: 'ok';
+    schema_version: 1;
+    scope: OrdinaryAgentDeliveryActivationScope;
+    source_setup_operation_id: string;
+    stop_behavior: 'Revocation permanently blocks fresh work for this activation intent.';
+};
+
+export type OrdinaryAgentDeliveryActivationRevokeOption = {
+    activation: OrdinaryAgentDeliveryActivationReference;
+    label: string;
+    scope: OrdinaryAgentDeliveryActivationScope;
+};
+
+export type OrdinaryAgentDeliveryActivationRevokeRequest = {
+    action: 'revoke_activation';
+    activation_id: string;
+    expected_activation_sha256: string;
+    expected_revision: number;
+    reason: string;
+    schema_version: 1;
+};
+
+export type OrdinaryAgentDeliveryActivationScope = {
+    managed_rule_id: string;
+    managed_set_id: string;
+    target: OrdinaryAgentTarget;
+};
+
+export type OrdinaryAgentDeliveryActivationSetupHumanEvidence = {
+    action: 'setup';
+    activation_expires_at: string;
+    authorizes_execution: false;
+    blocker_codes: Array<'database_revision_incompatible' | 'activation_schema_incompatible' | 'activation_storage_unavailable' | 'activation_cas_unavailable' | 'activation_recovery_unavailable' | 'activation_rollback_reader_unavailable'>;
+    initial_behavior: 'Guarded delivery remains qualification-only until current readiness passes.';
+    inventory: OrdinaryAgentDeliveryInventoryReference;
+    persists_state: false;
+    plan_digest: string;
+    policy_package: OrdinaryAgentDeliveryPolicyPackageReference;
+    predecessor: OrdinaryAgentDeliveryActivationReference | null;
+    result_status: 'ok' | 'blocked';
+    runtime_capability: OrdinaryAgentDeliveryRuntimeCapabilityEvidence;
+    schema_version: 1;
+    scope: OrdinaryAgentDeliveryActivationScope;
+    stop_behavior: 'Revocation or readiness loss blocks fresh work while preserving bounded custody cleanup.';
+};
+
+export type OrdinaryAgentDeliveryActivationSetupOption = {
+    label: string;
+    policy_operation_id: string;
+    predecessor: OrdinaryAgentDeliveryActivationReference | null;
+    repository_inventory_record_id: string;
+    scope: OrdinaryAgentDeliveryActivationScope;
+};
+
+export type OrdinaryAgentDeliveryActivationSetupRequest = {
+    action: 'setup';
+    activation_expires_at: string;
+    policy_operation_id: string;
+    predecessor: OrdinaryAgentDeliveryActivationReference | null;
+    reason: string;
+    repository_inventory_record_id: string;
+    schema_version: 1;
+};
+
+export type OrdinaryAgentDeliveryInventoryReference = {
+    inventory_sha256: string;
+    record_id: string;
+    revision: number;
+    state: 'tracked';
+};
+
+export type OrdinaryAgentDeliveryPolicyPackageReference = {
+    candidate_policy_sha256: string;
+    desired_set_sha256: string;
+    evidence_sha256: string;
+    plan_sha256: string;
+    policy_operation_id: string;
+    request_sha256: string;
+};
+
+export type OrdinaryAgentDeliveryRuntimeCapabilityEvidence = {
+    activation_cas_registered: boolean;
+    activation_event_versions: Array<number>;
+    activation_record_versions: Array<number>;
+    activation_recovery_registered: boolean;
+    activation_schema_invariants_sha256: string;
+    activation_schema_invariants_valid: boolean;
+    activation_storage_registered: boolean;
+    authorizes_execution: false;
+    authz_policy_read_versions: Array<number>;
+    bounded_cleanup_registered: boolean;
+    custody_issue_attempt_versions: Array<number>;
+    database_revision_compatible: boolean;
+    finite_request_versions: Array<number>;
+    guarded_worker_registered: boolean;
+    observed_at: string;
+    observed_database_revision: string;
+    policy_v3_write_supported: boolean;
+    qualification_advancer_registered: boolean;
+    qualification_attestation_versions: Array<number>;
+    read_attempt_versions: Array<number>;
+    recovery_versions: Array<number>;
+    rollback_reader_registered: boolean;
+    schema_version: 1;
+    service_image_reference: string;
+    variant_parsers_registered: boolean;
+    worker_image_reference: string;
+};
+
 export type OrdinaryAgentDisconnectRequest = {
     source_event_id: string;
 };
@@ -1880,7 +2042,7 @@ export type PrivilegedOperationAgentActor = {
 
 export type PrivilegedOperationApproval = {
     approver: PrivilegedOperationActor;
-    descriptor_id: 'managed-secret-reencryption' | 'managed-authz-policy-set' | 'managed-merge-train-policy-import';
+    descriptor_id: 'managed-secret-reencryption' | 'managed-authz-policy-set' | 'managed-merge-train-policy-import' | 'ordinary-agent-delivery-activation';
     descriptor_version: number;
     evidence_digest: string;
     expires_at: string;
@@ -1894,7 +2056,7 @@ export type PrivilegedOperationApproval = {
     pre_state_digest: string;
     reason: string;
     request_digest: string;
-    rollback_class: 'key_retained' | 'policy_cas';
+    rollback_class: 'key_retained' | 'policy_cas' | 'activation_revoke';
     schema_version: number;
 };
 
@@ -1948,14 +2110,18 @@ export type PrivilegedOperationListResponse = {
 export type PrivilegedOperationRecord = {
     approval: PrivilegedOperationApproval | null;
     created_at: string;
-    descriptor_id: 'managed-secret-reencryption' | 'managed-authz-policy-set' | 'managed-merge-train-policy-import';
+    descriptor_id: 'managed-secret-reencryption' | 'managed-authz-policy-set' | 'managed-merge-train-policy-import' | 'ordinary-agent-delivery-activation';
     descriptor_version: number;
-    evidence: ManagedSecretReencryptionHumanEvidence | ManagedAuthzPolicySetHumanEvidence | ManagedMergeTrainPolicyImportHumanEvidence;
+    evidence: ManagedSecretReencryptionHumanEvidence | ManagedAuthzPolicySetHumanEvidence | ManagedMergeTrainPolicyImportHumanEvidence | ({
+        action: 'setup';
+    } & OrdinaryAgentDeliveryActivationSetupHumanEvidence) | ({
+        action: 'revoke_activation';
+    } & OrdinaryAgentDeliveryActivationRevokeHumanEvidence);
     evidence_digest: string;
-    execution: PrivilegedOperationExecutionEvidence | ManagedAuthzPolicySetExecutionEvidence | ManagedMergeTrainPolicyImportExecutionEvidence | null;
+    execution: PrivilegedOperationExecutionEvidence | ManagedAuthzPolicySetExecutionEvidence | ManagedMergeTrainPolicyImportExecutionEvidence | OrdinaryAgentDeliveryActivationExecutionEvidence | null;
     expires_at: string;
     operation_id: string;
-    request: ManagedSecretReencryptionPlanInput | ManagedAuthzPolicySetProposalInputOutput | ManagedMergeTrainPolicyImportProposalInputOutput;
+    request: ManagedSecretReencryptionPlanInput | ManagedAuthzPolicySetProposalInputOutput | ManagedMergeTrainPolicyImportProposalInputOutput | OrdinaryAgentDeliveryActivationSetupRequest | OrdinaryAgentDeliveryActivationRevokeRequest;
     request_digest: string;
     requested_by: PrivilegedOperationActor | PrivilegedOperationAgentActor;
     safety_class: 'secret_backed' | 'policy_admin';
@@ -1982,18 +2148,18 @@ export type PrivilegedOperationSemanticReview = {
     can_approve: boolean;
     can_revoke: boolean;
     change: PrivilegedOperationSemanticReviewChange;
-    descriptor_id: 'managed-secret-reencryption' | 'managed-authz-policy-set' | 'managed-merge-train-policy-import';
+    descriptor_id: 'managed-secret-reencryption' | 'managed-authz-policy-set' | 'managed-merge-train-policy-import' | 'ordinary-agent-delivery-activation';
     descriptor_version: number;
     evidence: PrivilegedOperationSemanticReviewEvidence;
     lifecycle: PrivilegedOperationSemanticReviewLifecycle;
-    operation_class: 'managed_secret_reencryption' | 'managed_authz_policy_set' | 'managed_merge_train_policy_import';
+    operation_class: 'managed_secret_reencryption' | 'managed_authz_policy_set' | 'managed_merge_train_policy_import' | 'ordinary_agent_delivery_activation';
     operation_id: string;
     persists_state: false;
     requested_by_kind: 'github_human' | 'terminal_agent';
     rollback: PrivilegedOperationSemanticReviewRollback;
     safety_class: 'secret_backed' | 'policy_admin';
     schema_version: number;
-    title: 'Managed-secret re-encryption review' | 'Managed authorization policy review' | 'Managed merge-train policy review';
+    title: 'Managed-secret re-encryption review' | 'Managed authorization policy review' | 'Managed merge-train policy review' | 'Review agent delivery setup' | 'Review stopping agent delivery';
 };
 
 export type PrivilegedOperationSemanticReviewActivityEntry = {
@@ -2009,12 +2175,12 @@ export type PrivilegedOperationSemanticReviewActivityEntry = {
 
 export type PrivilegedOperationSemanticReviewBlastRadius = {
     affected_count: number;
-    scope: 'managed_secret_store' | 'authorization_policy' | 'merge_train_policy';
+    scope: 'managed_secret_store' | 'authorization_policy' | 'merge_train_policy' | 'ordinary_agent_delivery_activation';
     summary: string;
 };
 
 export type PrivilegedOperationSemanticReviewBlocker = {
-    codes: Array<'authz_policy_admin_unreachable' | 'authz_policy_applying_admin_removed' | 'authz_policy_strict_human_admin_unreachable' | 'authz_policy_administrator_quorum_unsatisfied' | 'repository_not_exact' | 'workflow_refs_not_singleton' | 'workflow_ref_not_exact' | 'job_workflow_refs_not_singleton' | 'job_workflow_ref_not_immutable' | 'actions_not_singleton' | 'action_not_exact' | 'products_not_singleton' | 'product_not_exact' | 'contexts_not_singleton' | 'context_not_exact' | 'instances_not_singleton' | 'instance_not_exact' | 'secret_unreadable' | 'operation_past_expiry' | 'operation_expired' | 'execution_failed' | 'reconciliation_required'>;
+    codes: Array<'authz_policy_admin_unreachable' | 'authz_policy_applying_admin_removed' | 'authz_policy_strict_human_admin_unreachable' | 'authz_policy_administrator_quorum_unsatisfied' | 'repository_not_exact' | 'workflow_refs_not_singleton' | 'workflow_ref_not_exact' | 'job_workflow_refs_not_singleton' | 'job_workflow_ref_not_immutable' | 'actions_not_singleton' | 'action_not_exact' | 'products_not_singleton' | 'product_not_exact' | 'contexts_not_singleton' | 'context_not_exact' | 'instances_not_singleton' | 'instance_not_exact' | 'secret_unreadable' | 'operation_past_expiry' | 'operation_expired' | 'execution_failed' | 'reconciliation_required' | 'database_revision_incompatible' | 'activation_schema_incompatible' | 'activation_storage_unavailable' | 'activation_cas_unavailable' | 'activation_recovery_unavailable' | 'activation_rollback_reader_unavailable'>;
     operational_readiness_blocker_count: number;
     policy_safety_blocker_count: number;
     state: 'clear' | 'blocked' | 'error';
@@ -2028,7 +2194,7 @@ export type PrivilegedOperationSemanticReviewChange = {
 };
 
 export type PrivilegedOperationSemanticReviewDigest = {
-    kind: 'request' | 'human_evidence' | 'plan' | 'pre_state' | 'previous_policy' | 'candidate_policy' | 'candidate_managed_set' | 'active_merge_train_policy' | 'candidate_merge_train_policy' | 'execution_result';
+    kind: 'request' | 'human_evidence' | 'plan' | 'pre_state' | 'previous_policy' | 'candidate_policy' | 'candidate_managed_set' | 'active_merge_train_policy' | 'candidate_merge_train_policy' | 'activation_inventory' | 'activation_policy_package' | 'activation_record' | 'activation_schema_invariants' | 'execution_result';
     label: string;
     sha256: string;
 };
@@ -2054,7 +2220,7 @@ export type PrivilegedOperationSemanticReviewLifecycle = {
 };
 
 export type PrivilegedOperationSemanticReviewMetric = {
-    kind: 'configured_secrets' | 'rotation_candidates' | 'unchanged_secrets' | 'unreadable_secrets' | 'policy_rules_added' | 'policy_rules_adopted' | 'policy_rules_updated' | 'policy_rules_removed' | 'policy_rules_unchanged' | 'policy_safety_blockers' | 'operational_readiness_blockers' | 'active_policy_targets' | 'candidate_policy_targets' | 'policy_targets_added' | 'policy_targets_changed' | 'policy_targets_removed' | 'policy_targets_unchanged';
+    kind: 'configured_secrets' | 'rotation_candidates' | 'unchanged_secrets' | 'unreadable_secrets' | 'policy_rules_added' | 'policy_rules_adopted' | 'policy_rules_updated' | 'policy_rules_removed' | 'policy_rules_unchanged' | 'policy_safety_blockers' | 'operational_readiness_blockers' | 'active_policy_targets' | 'candidate_policy_targets' | 'policy_targets_added' | 'policy_targets_changed' | 'policy_targets_removed' | 'policy_targets_unchanged' | 'activation_scope_targets' | 'activation_setup_blockers';
     label: string;
     value: number;
 };
@@ -2066,7 +2232,7 @@ export type PrivilegedOperationSemanticReviewResponse = {
 };
 
 export type PrivilegedOperationSemanticReviewRollback = {
-    rollback_class: 'key_retained' | 'policy_cas';
+    rollback_class: 'key_retained' | 'policy_cas' | 'activation_revoke';
     summary: string;
 };
 
@@ -3988,6 +4154,31 @@ export type ReadPreviewReadinessResponses = {
 
 export type ReadPreviewReadinessResponse = ReadPreviewReadinessResponses[keyof ReadPreviewReadinessResponses];
 
+export type ReadOrdinaryAgentDeliveryActivationOptionsData = {
+    body?: never;
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/privileged-operations/ordinary-agent-delivery-activation/options';
+};
+
+export type ReadOrdinaryAgentDeliveryActivationOptionsErrors = {
+    403: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type ReadOrdinaryAgentDeliveryActivationOptionsError = ReadOrdinaryAgentDeliveryActivationOptionsErrors[keyof ReadOrdinaryAgentDeliveryActivationOptionsErrors];
+
+export type ReadOrdinaryAgentDeliveryActivationOptionsResponses = {
+    200: OrdinaryAgentDeliveryActivationOptionsResponse;
+};
+
+export type ReadOrdinaryAgentDeliveryActivationOptionsResponse = ReadOrdinaryAgentDeliveryActivationOptionsResponses[keyof ReadOrdinaryAgentDeliveryActivationOptionsResponses];
+
 export type ListHumanPrivilegedOperationsData = {
     body?: never;
     headers?: {
@@ -3997,7 +4188,7 @@ export type ListHumanPrivilegedOperationsData = {
     path?: never;
     query?: {
         status?: 'planned' | 'approved' | 'revoked' | 'executing' | 'executed' | 'execution_failed' | 'expired' | 'cancelled' | null;
-        descriptor_id?: 'managed-secret-reencryption' | 'managed-authz-policy-set' | 'managed-merge-train-policy-import';
+        descriptor_id?: 'managed-secret-reencryption' | 'managed-authz-policy-set' | 'managed-merge-train-policy-import' | 'ordinary-agent-delivery-activation';
         limit?: number;
     };
     url: '/v1/privileged-operations/plans';
@@ -4742,6 +4933,31 @@ export type WriteOwnerAcceptanceEventResponses = {
 };
 
 export type WriteOwnerAcceptanceEventResponse = WriteOwnerAcceptanceEventResponses[keyof WriteOwnerAcceptanceEventResponses];
+
+export type PlanOrdinaryAgentDeliveryActivationData = {
+    body: OrdinaryAgentDeliveryActivationPlanEnvelope;
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/privileged-operations/ordinary-agent-delivery-activation/plans';
+};
+
+export type PlanOrdinaryAgentDeliveryActivationErrors = {
+    403: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type PlanOrdinaryAgentDeliveryActivationError = PlanOrdinaryAgentDeliveryActivationErrors[keyof PlanOrdinaryAgentDeliveryActivationErrors];
+
+export type PlanOrdinaryAgentDeliveryActivationResponses = {
+    200: PrivilegedOperationHumanResponse;
+};
+
+export type PlanOrdinaryAgentDeliveryActivationResponse = PlanOrdinaryAgentDeliveryActivationResponses[keyof PlanOrdinaryAgentDeliveryActivationResponses];
 
 export type ApproveHumanPrivilegedOperationData = {
     body: PrivilegedOperationApprovalEnvelope;

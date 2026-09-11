@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+import hashlib
+import json
 import re
 from typing import Any, Protocol
 
@@ -10,8 +12,12 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
 AUTHZ_COMPATIBILITY_FLOOR_REVISION = "f3b5d7e9a1c2"
-EXPECTED_ALEMBIC_HEAD_REVISION = "d8a0b2c4e6f9"
+EXPECTED_ALEMBIC_HEAD_REVISION = "e0f2a4c6d8b1"
 RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS = (EXPECTED_ALEMBIC_HEAD_REVISION,)
+ORDINARY_AGENT_DELIVERY_ACTIVATION_TABLE = "launchplane_ordinary_agent_delivery_activations"
+ORDINARY_AGENT_DELIVERY_ACTIVATION_EVENT_TABLE = (
+    "launchplane_ordinary_agent_delivery_activation_events"
+)
 _AUTHZ_POLICY_TABLE = "launchplane_authz_policies"
 _AUTHZ_POLICY_WRITE_FENCE_TRIGGER = "launchplane_authz_policy_write_fence"
 _AUTHZ_POLICY_WRITE_FENCE_FUNCTION = "launchplane_fence_authz_policy_write"
@@ -28,6 +34,11 @@ class SchemaInspectorProtocol(Protocol):
         raise NotImplementedError
 
     def get_pk_constraint(self, table_name: str) -> Mapping[str, object]:
+        raise NotImplementedError
+
+
+class SchemaCheckInspectorProtocol(SchemaInspectorProtocol, Protocol):
+    def get_check_constraints(self, table_name: str) -> Sequence[Mapping[str, object]]:
         raise NotImplementedError
 
 
@@ -58,7 +69,76 @@ class CriticalPrimaryKey:
     column_names: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class CriticalCheckConstraint:
+    table_name: str
+    constraint_name: str
+    expression: str
+
+
+ORDINARY_AGENT_ACTIVATION_COLUMN_NAMES: Mapping[str, tuple[str, ...]] = {
+    ORDINARY_AGENT_DELIVERY_ACTIVATION_TABLE: (
+        "activation_id",
+        "repository_id",
+        "repository",
+        "base_branch",
+        "managed_set_id",
+        "managed_rule_id",
+        "source_setup_operation_id",
+        "desired_state",
+        "effective_state",
+        "activation_expires_at",
+        "revision",
+        "installed_at",
+        "updated_at",
+        "revoked_at",
+        "superseded_by_activation_id",
+        "superseded_at",
+        "activation_sha256",
+        "payload",
+    ),
+    ORDINARY_AGENT_DELIVERY_ACTIVATION_EVENT_TABLE: (
+        "event_id",
+        "activation_id",
+        "sequence",
+        "action",
+        "previous_revision",
+        "previous_activation_sha256",
+        "resulting_revision",
+        "resulting_activation_sha256",
+        "resulting_desired_state",
+        "resulting_effective_state",
+        "occurred_at",
+        "source_operation_id",
+        "payload",
+    ),
+}
+
+ORDINARY_AGENT_ACTIVATION_POSTGRES_COLUMN_TYPES: tuple[CriticalColumnType, ...] = (
+    CriticalColumnType(
+        ORDINARY_AGENT_DELIVERY_ACTIVATION_TABLE, "repository_id", ("bigint", "int8")
+    ),
+    CriticalColumnType(ORDINARY_AGENT_DELIVERY_ACTIVATION_TABLE, "revision", ("bigint", "int8")),
+    CriticalColumnType(ORDINARY_AGENT_DELIVERY_ACTIVATION_TABLE, "payload", ("jsonb",)),
+    CriticalColumnType(
+        ORDINARY_AGENT_DELIVERY_ACTIVATION_EVENT_TABLE, "sequence", ("bigint", "int8")
+    ),
+    CriticalColumnType(
+        ORDINARY_AGENT_DELIVERY_ACTIVATION_EVENT_TABLE,
+        "previous_revision",
+        ("bigint", "int8"),
+    ),
+    CriticalColumnType(
+        ORDINARY_AGENT_DELIVERY_ACTIVATION_EVENT_TABLE,
+        "resulting_revision",
+        ("bigint", "int8"),
+    ),
+    CriticalColumnType(ORDINARY_AGENT_DELIVERY_ACTIVATION_EVENT_TABLE, "payload", ("jsonb",)),
+)
+
+
 CRITICAL_POSTGRES_COLUMN_TYPES: tuple[CriticalColumnType, ...] = (
+    *ORDINARY_AGENT_ACTIVATION_POSTGRES_COLUMN_TYPES,
     CriticalColumnType("launchplane_ordinary_agent_effects", "binding_revision", ("bigint",)),
     CriticalColumnType("launchplane_ordinary_agent_effects", "action_ordinal", ("bigint",)),
     CriticalColumnType("launchplane_ordinary_agent_effects", "revision", ("bigint",)),
@@ -707,7 +787,117 @@ _ODOO_STABLE_ACTIVE_OPERATION_PREDICATE_TOKENS = (
     "reconciliation_required",
 )
 
+ORDINARY_AGENT_ACTIVATION_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
+    CriticalIndex(
+        ORDINARY_AGENT_DELIVERY_ACTIVATION_TABLE,
+        "launchplane_ordinary_agent_activation_setup_operation_uidx",
+        ("source_setup_operation_id",),
+        unique=True,
+    ),
+    CriticalIndex(
+        ORDINARY_AGENT_DELIVERY_ACTIVATION_TABLE,
+        "launchplane_ordinary_agent_activation_current_scope_uidx",
+        (
+            "repository_id",
+            "base_branch",
+            "managed_set_id",
+            "managed_rule_id",
+        ),
+        unique=True,
+        predicate_expression="revoked_at is null and superseded_at is null",
+    ),
+    CriticalIndex(
+        ORDINARY_AGENT_DELIVERY_ACTIVATION_TABLE,
+        "launchplane_ordinary_agent_activation_scope_history_idx",
+        (
+            "repository_id",
+            "base_branch",
+            "managed_set_id",
+            "managed_rule_id",
+            "installed_at",
+        ),
+    ),
+    CriticalIndex(
+        ORDINARY_AGENT_DELIVERY_ACTIVATION_EVENT_TABLE,
+        "launchplane_ordinary_agent_activation_event_sequence_uidx",
+        ("activation_id", "sequence"),
+        unique=True,
+    ),
+    CriticalIndex(
+        ORDINARY_AGENT_DELIVERY_ACTIVATION_EVENT_TABLE,
+        "launchplane_agent_activation_event_source_idx",
+        ("source_operation_id", "action"),
+    ),
+)
+
+ORDINARY_AGENT_ACTIVATION_PRIMARY_KEYS: tuple[CriticalPrimaryKey, ...] = (
+    CriticalPrimaryKey(ORDINARY_AGENT_DELIVERY_ACTIVATION_TABLE, ("activation_id",)),
+    CriticalPrimaryKey(ORDINARY_AGENT_DELIVERY_ACTIVATION_EVENT_TABLE, ("event_id",)),
+)
+
+ORDINARY_AGENT_ACTIVATION_CHECK_CONSTRAINTS: tuple[CriticalCheckConstraint, ...] = (
+    CriticalCheckConstraint(
+        ORDINARY_AGENT_DELIVERY_ACTIVATION_TABLE,
+        "launchplane_ordinary_agent_activation_desired_state_ck",
+        "desired_state in ('guarded', 'revoked')",
+    ),
+    CriticalCheckConstraint(
+        ORDINARY_AGENT_DELIVERY_ACTIVATION_TABLE,
+        "launchplane_ordinary_agent_activation_effective_state_ck",
+        "effective_state in ('qualification_only', 'guarded', 'revoked')",
+    ),
+    CriticalCheckConstraint(
+        ORDINARY_AGENT_DELIVERY_ACTIVATION_TABLE,
+        "launchplane_ordinary_agent_activation_revision_ck",
+        "revision >= 1",
+    ),
+    CriticalCheckConstraint(
+        ORDINARY_AGENT_DELIVERY_ACTIVATION_TABLE,
+        "launchplane_ordinary_agent_activation_state_ck",
+        "((desired_state = 'guarded' and effective_state in "
+        "('qualification_only', 'guarded') and revoked_at is null) or "
+        "(desired_state = 'revoked' and effective_state = 'revoked' "
+        "and revoked_at is not null))",
+    ),
+    CriticalCheckConstraint(
+        ORDINARY_AGENT_DELIVERY_ACTIVATION_TABLE,
+        "launchplane_ordinary_agent_activation_supersession_ck",
+        "((superseded_by_activation_id is null and superseded_at is null) or "
+        "(superseded_by_activation_id is not null and superseded_at is not null "
+        "and revoked_at is null))",
+    ),
+    CriticalCheckConstraint(
+        ORDINARY_AGENT_DELIVERY_ACTIVATION_EVENT_TABLE,
+        "launchplane_ordinary_agent_activation_event_action_ck",
+        "action in ('installed', 'guarded_derived', 'readiness_lost', 'revoked', 'superseded')",
+    ),
+    CriticalCheckConstraint(
+        ORDINARY_AGENT_DELIVERY_ACTIVATION_EVENT_TABLE,
+        "launchplane_ordinary_agent_activation_event_revision_floor_ck",
+        "sequence >= 1 and previous_revision >= 0 and resulting_revision >= 1",
+    ),
+    CriticalCheckConstraint(
+        ORDINARY_AGENT_DELIVERY_ACTIVATION_EVENT_TABLE,
+        "launchplane_ordinary_agent_activation_event_transition_ck",
+        "((action = 'installed' and sequence = 1 and previous_revision = 0 "
+        "and previous_activation_sha256 is null and resulting_revision = 1) or "
+        "(action <> 'installed' and previous_revision >= 1 "
+        "and previous_activation_sha256 is not null "
+        "and resulting_revision = previous_revision + 1))",
+    ),
+    CriticalCheckConstraint(
+        ORDINARY_AGENT_DELIVERY_ACTIVATION_EVENT_TABLE,
+        "launchplane_ordinary_agent_activation_event_source_ck",
+        "((action in ('installed', 'revoked', 'superseded') "
+        "and source_operation_id is not null) or "
+        "(action in ('guarded_derived', 'readiness_lost') "
+        "and source_operation_id is null))",
+    ),
+)
+
+
 CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
+    *ORDINARY_AGENT_ACTIVATION_SCHEMA_INDEXES,
     CriticalIndex(
         "launchplane_ordinary_agent_effects",
         "ordinary_effect_charge_uq",
@@ -1523,6 +1713,7 @@ CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
 )
 
 CRITICAL_PRIMARY_KEYS: tuple[CriticalPrimaryKey, ...] = (
+    *ORDINARY_AGENT_ACTIVATION_PRIMARY_KEYS,
     CriticalPrimaryKey("launchplane_ordinary_agent_effects", ("effect_id",)),
     CriticalPrimaryKey("launchplane_ordinary_agent_semantic_dispatches", ("child_id",)),
     CriticalPrimaryKey("launchplane_ordinary_agent_semantic_outcomes", ("child_id",)),
@@ -1698,6 +1889,126 @@ CRITICAL_PRIMARY_KEYS: tuple[CriticalPrimaryKey, ...] = (
 )
 
 
+def ordinary_agent_delivery_activation_schema_invariants_sha256() -> str:
+    payload = {
+        "revision": EXPECTED_ALEMBIC_HEAD_REVISION,
+        "columns": {
+            table_name: list(column_names)
+            for table_name, column_names in sorted(ORDINARY_AGENT_ACTIVATION_COLUMN_NAMES.items())
+        },
+        "postgres_types": [
+            {
+                "table_name": item.table_name,
+                "column_name": item.column_name,
+                "accepted_type_tokens": list(item.accepted_type_tokens),
+            }
+            for item in ORDINARY_AGENT_ACTIVATION_POSTGRES_COLUMN_TYPES
+        ],
+        "indexes": [
+            {
+                "table_name": item.table_name,
+                "index_name": item.index_name,
+                "column_names": list(item.column_names),
+                "unique": item.unique,
+                "predicate_expression": item.predicate_expression,
+            }
+            for item in ORDINARY_AGENT_ACTIVATION_SCHEMA_INDEXES
+        ],
+        "primary_keys": [
+            {"table_name": item.table_name, "column_names": list(item.column_names)}
+            for item in ORDINARY_AGENT_ACTIVATION_PRIMARY_KEYS
+        ],
+        "checks": [
+            {
+                "table_name": item.table_name,
+                "constraint_name": item.constraint_name,
+                "expression": item.expression,
+            }
+            for item in ORDINARY_AGENT_ACTIVATION_CHECK_CONSTRAINTS
+        ],
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def ordinary_agent_delivery_activation_schema_invariant_errors(engine: Engine) -> list[str]:
+    inspector = inspect(engine)
+    table_names = set(inspector.get_table_names())
+    required_tables = set(ORDINARY_AGENT_ACTIVATION_COLUMN_NAMES)
+    missing_tables = sorted(required_tables - table_names)
+    errors = [f"missing required activation table {table_name}" for table_name in missing_tables]
+    present_tables = required_tables & table_names
+    for table_name in sorted(present_tables):
+        observed_columns = {
+            _schema_metadata_text(column.get("name", ""))
+            for column in inspector.get_columns(table_name)
+        }
+        expected_columns = set(ORDINARY_AGENT_ACTIVATION_COLUMN_NAMES[table_name])
+        if observed_columns != expected_columns:
+            errors.append(
+                f"{table_name} columns are {', '.join(sorted(observed_columns)) or '<none>'}; "
+                f"expected {', '.join(sorted(expected_columns))}"
+            )
+    if engine.url.get_backend_name() == "postgresql":
+        errors.extend(
+            critical_column_type_errors(
+                inspector,
+                table_names=present_tables,
+                expected_types=ORDINARY_AGENT_ACTIVATION_POSTGRES_COLUMN_TYPES,
+            )
+        )
+        index_definitions = postgres_index_definitions(engine)
+    else:
+        index_definitions = None
+    errors.extend(
+        critical_index_errors(
+            inspector=inspector,
+            table_names=present_tables,
+            expected_indexes=ORDINARY_AGENT_ACTIVATION_SCHEMA_INDEXES,
+            index_definitions=index_definitions,
+        )
+    )
+    errors.extend(
+        critical_primary_key_errors(
+            inspector,
+            table_names=present_tables,
+            expected_keys=ORDINARY_AGENT_ACTIVATION_PRIMARY_KEYS,
+        )
+    )
+    errors.extend(
+        critical_check_constraint_errors(
+            inspector,
+            table_names=present_tables,
+            expected_checks=ORDINARY_AGENT_ACTIVATION_CHECK_CONSTRAINTS,
+        )
+    )
+    return errors
+
+
+def ordinary_agent_delivery_activation_schema_capability(
+    engine: Engine,
+) -> tuple[str, str, bool]:
+    expected_digest = ordinary_agent_delivery_activation_schema_invariants_sha256()
+    if engine.url.get_backend_name() == "sqlite":
+        observed_revision = EXPECTED_ALEMBIC_HEAD_REVISION
+        revision_valid = True
+    else:
+        try:
+            observed_revision = _verify_alembic_head(engine)
+            revision_valid = True
+        except RuntimeError:
+            revision_valid = False
+            try:
+                with engine.connect() as connection:
+                    rows = connection.execute(text("select version_num from alembic_version"))
+                    revisions = tuple(str(row[0]).strip() for row in rows if str(row[0]).strip())
+                observed_revision = revisions[0] if len(revisions) == 1 else "incompatible"
+            except SQLAlchemyError:
+                observed_revision = "missing"
+    errors = ordinary_agent_delivery_activation_schema_invariant_errors(engine)
+    return observed_revision, expected_digest, revision_valid and not errors
+
+
 def verify_postgres_schema_invariants(engine: Engine) -> None:
     backend_name = engine.url.get_backend_name()
     if backend_name != "postgresql":
@@ -1707,16 +2018,22 @@ def verify_postgres_schema_invariants(engine: Engine) -> None:
         )
     _verify_alembic_head(engine)
     inspector = inspect(engine)
+    table_names = set(inspector.get_table_names())
     errors = [
         *critical_column_type_errors(inspector),
         *critical_index_errors(
             inspector=inspector,
-            table_names=set(inspector.get_table_names()),
+            table_names=table_names,
             index_definitions=postgres_index_definitions(engine),
         ),
         *critical_primary_key_errors(
             inspector,
-            table_names=set(inspector.get_table_names()),
+            table_names=table_names,
+        ),
+        *critical_check_constraint_errors(
+            inspector,
+            table_names=table_names,
+            expected_checks=ORDINARY_AGENT_ACTIVATION_CHECK_CONSTRAINTS,
         ),
         *authz_policy_write_fence_errors(engine),
         *merge_train_policy_write_fence_errors(engine),
@@ -1765,9 +2082,10 @@ def critical_primary_key_errors(
     inspector: SchemaInspectorProtocol,
     *,
     table_names: set[str] | None = None,
+    expected_keys: tuple[CriticalPrimaryKey, ...] = CRITICAL_PRIMARY_KEYS,
 ) -> list[str]:
     errors: list[str] = []
-    for expected_key in CRITICAL_PRIMARY_KEYS:
+    for expected_key in expected_keys:
         if table_names is not None and expected_key.table_name not in table_names:
             continue
         constraint = inspector.get_pk_constraint(expected_key.table_name)
@@ -1782,6 +2100,39 @@ def critical_primary_key_errors(
             errors.append(
                 f"{expected_key.table_name} has primary key ({observed_summary}); "
                 f"expected ({expected_summary})"
+            )
+    return errors
+
+
+def critical_check_constraint_errors(
+    inspector: SchemaCheckInspectorProtocol,
+    *,
+    table_names: set[str],
+    expected_checks: tuple[CriticalCheckConstraint, ...],
+) -> list[str]:
+    errors: list[str] = []
+    for expected_check in expected_checks:
+        if expected_check.table_name not in table_names:
+            continue
+        checks_by_name = {
+            _schema_metadata_text(check.get("name", "")): check
+            for check in inspector.get_check_constraints(expected_check.table_name)
+        }
+        observed = checks_by_name.get(expected_check.constraint_name)
+        if observed is None:
+            errors.append(
+                f"{expected_check.table_name} missing required check "
+                f"{expected_check.constraint_name}"
+            )
+            continue
+        observed_expression = _canonical_predicate_expression(
+            _schema_metadata_text(observed.get("sqltext", ""))
+        )
+        expected_expression = _canonical_predicate_expression(expected_check.expression)
+        if observed_expression != expected_expression:
+            errors.append(
+                f"{expected_check.constraint_name} has expression "
+                f"{observed_expression or '<none>'}; expected {expected_expression}"
             )
     return errors
 
@@ -1936,6 +2287,7 @@ def ordinary_effect_write_fence_errors(engine: Engine) -> list[str]:
         "read_custody",
         "read_outcomes",
         "candidate_check_observations",
+        "delivery_activation_events",
     ):
         errors.extend(
             _postgres_write_fence_errors(
@@ -2117,7 +2469,7 @@ def _canonical_predicate_expression(value: str) -> str:
     if " where " in normalized:
         normalized = normalized.split(" where ", maxsplit=1)[1]
     normalized = re.sub(r"::character\s+varying(?:\[\])?", "", normalized)
-    normalized = re.sub(r"::[a-z0-9_]+", "", normalized)
+    normalized = re.sub(r"::[a-z0-9_]+(?:\[\])?", "", normalized)
     normalized = re.sub(
         r"\b([a-z_][a-z0-9_.]*)\s*=\s*any\s*\(\s*array\s*\[(.*?)\]\s*\)",
         lambda match: f"{match.group(1)} in ({match.group(2)})",

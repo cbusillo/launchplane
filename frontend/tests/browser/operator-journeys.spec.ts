@@ -1889,7 +1889,7 @@ test.describe("operator journeys", () => {
       }),
     ).toHaveAttribute("aria-current", "page");
     await expect(
-      page.getByText("Human-governed approval — internal execution only"),
+      page.getByText("Review each change before approving it"),
     ).toBeVisible();
     await expect(page.getByText("Would rotate")).toBeVisible();
     await expect(page.getByText("18", { exact: true }).first()).toBeVisible();
@@ -1916,6 +1916,24 @@ test.describe("operator journeys", () => {
       page.getByRole("button", { name: "Approve plan" }),
     ).toBeVisible();
     await expect(page.getByRole("button", { name: /execute/i })).toHaveCount(0);
+    await page.getByRole("button", { name: "Agent delivery" }).click();
+    await expect(
+      page.getByRole("heading", { name: "Set up or stop agent delivery" }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("combobox", { name: "Project and branch" }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("combobox", { name: "Allow delivery for" }),
+    ).toBeVisible();
+    await expect(page.getByRole("textbox")).toHaveCount(0);
+    await page.getByRole("button", { name: "Stop delivery" }).click();
+    await expect(
+      page.getByRole("button", { name: "Review stop" }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("combobox", { name: "Allow delivery for" }),
+    ).toHaveCount(0);
     await assertDocumentBasics(page);
     await captureScreenshot(
       page,
@@ -1923,6 +1941,47 @@ test.describe("operator journeys", () => {
       "privileged-operation-merge-train-policy-review",
     );
     diagnostics.assertClean();
+  });
+
+  test("agent delivery setup submits the selected server expiry", async ({ page }) => {
+    let activationPlanRequest: {
+      request?: { activation_expires_at?: string };
+    } | null = null;
+    await page.route("**/v1/auth/session", async (route) => {
+      await route.fulfill({
+        json: { csrf_token: "fixture-activation-csrf" },
+      });
+    });
+    await page.route(
+      "**/v1/privileged-operations/ordinary-agent-delivery-activation/plans",
+      async (route) => {
+        activationPlanRequest = route.request().postDataJSON() as {
+          request?: { activation_expires_at?: string };
+        };
+        await route.fulfill({
+          json: {
+            status: "ok",
+            trace_id: "fixture-activation-plan",
+            write_status: "written",
+            record: {},
+            events: [],
+          },
+        });
+      },
+    );
+    await page.goto("/ui/engineering/privileged-operations?fixture=products");
+    await page.getByRole("button", { name: "Agent delivery" }).click();
+    await page
+      .getByRole("combobox", { name: "Project and branch" })
+      .selectOption({ index: 1 });
+    await page
+      .getByRole("combobox", { name: "Allow delivery for" })
+      .selectOption({ label: "7 days" });
+    await page.getByRole("button", { name: "Review setup" }).click();
+
+    await expect
+      .poll(() => activationPlanRequest?.request?.activation_expires_at)
+      .toBe("2026-08-29T16:00:00+00:00");
   });
 });
 

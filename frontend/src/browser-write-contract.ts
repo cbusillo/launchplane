@@ -9,6 +9,7 @@ import type {
   DryRunProductPromotionData,
   RankWorkGraphSnapshotData,
   RevokeHumanPrivilegedOperationData,
+  PlanOrdinaryAgentDeliveryActivationData,
   WriteOwnerAcceptanceEventData,
 } from "./generated/openapi.ts";
 
@@ -31,6 +32,8 @@ export const BROWSER_WRITE_ROUTES = {
     "/v1/privileged-operations/plans/{operation_id}/approve" satisfies ApproveHumanPrivilegedOperationData["url"],
   privilegedOperationRevoke:
     "/v1/privileged-operations/plans/{operation_id}/revoke" satisfies RevokeHumanPrivilegedOperationData["url"],
+  ordinaryAgentDeliveryActivationPlan:
+    "/v1/privileged-operations/ordinary-agent-delivery-activation/plans" satisfies PlanOrdinaryAgentDeliveryActivationData["url"],
 } as const;
 
 export type BrowserWriteRoute =

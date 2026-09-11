@@ -490,6 +490,44 @@ image starts this empty-table maintenance scan automatically, but does not by
 itself enroll an agent or add an authorization rule, route, or grant. The
 privileged-operation heartbeat is not cleanup evidence.
 
+The source-owned activation administration descriptor is
+`ordinary-agent-delivery-activation`. Its human lifecycle uses the distinct
+`ordinary_agent_delivery_activation.plan`, `.read`, `.cancel`, `.approve`, and
+`.revoke` actions. Each action must appear literally on the one matching managed
+rule; the legacy empty-action compatibility behavior used by other descriptors
+does not authorize this family. The descriptor has no terminal-agent proposal or
+summary capability.
+
+Setup resolves a stored managed-policy proposal and current repository inventory
+on the server. A schema-v2 source policy requires the explicit
+`migrate_v2_to_v3` proposal mode. A schema-v3 source policy uses an ordinary
+schema-v3 reconcile with migration mode `reject`; renewal does not repeat a
+completed migration. The source operation may be planned, approved, executing,
+or executed, and its request, evidence, plan, managed-set, and full candidate
+policy digests are recomputed. It must identify exactly one ordinary-agent rule
+and target. Other reviewed rule families remain governed by that policy
+operation rather than forcing an artificial package split.
+
+An approved setup writes only an inert activation record with desired state
+`guarded` and effective state `qualification_only`. A separate approved
+`revoke_activation` request performs exact activation CAS and makes both states
+terminal `revoked`. Replacing an expired guarded intent atomically supersedes the
+old projection, appends its event, and installs a new activation ID; a revoked
+predecessor stays unchanged. Recovery follows the append-only event bound to the
+setup or revoke operation, so later legitimate transitions do not erase the
+original result. Scope history and current-row uniqueness use the immutable
+repository ID, branch, managed set, and managed rule; the repository name remains
+display context and a rename cannot create a second current intent. The operator
+UI offers server-resolved targets and server-clock expiry choices from one hour
+through 30 days without requiring typed record IDs, digests, issue IDs, or
+free-form reasons. The planner rejects any setup expiry beyond 30 days.
+
+This descriptor makes no provider call, installs no authorization grant,
+registers no ordinary worker, derives no guarded readiness, and does not lift the
+schema-v3 policy write fence. Runtime capability evidence records installed
+schema and compiled parser/storage support; absent qualification, guarded worker,
+or policy-v3 write support remains absent or false.
+
 Activation remains a separately owner-approved DB-native administration event;
 it is not authorized by landing code. Keep #2204 open until actual migration,
 rollback, read-back, and soak evidence exists, and keep #2177 open until its

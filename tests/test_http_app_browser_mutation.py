@@ -49,6 +49,7 @@ class FastApiBrowserMutationBoundaryTests(unittest.IsolatedAsyncioTestCase):
             "/v1/owner-acceptance/events",
             "/v1/product-config/apply",
             "/v1/privileged-operations/plans",
+            "/v1/privileged-operations/ordinary-agent-delivery-activation/plans",
             "/v1/privileged-operations/plans/{operation_id}/approve",
             "/v1/privileged-operations/plans/{operation_id}/cancel",
             "/v1/privileged-operations/plans/{operation_id}/revoke",
