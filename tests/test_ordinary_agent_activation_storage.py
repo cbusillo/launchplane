@@ -253,9 +253,11 @@ class OrdinaryAgentDeliveryActivationStorageTests(unittest.TestCase):
             patch.object(
                 self.store,
                 "_require_ordinary_agent_runtime_readiness",
-                side_effect=OrdinaryAgentSessionAdmissionDenied("inventory_drift"),
+                side_effect=OrdinaryAgentSessionAdmissionDenied("provider_readiness_unavailable"),
             ),
-            self.assertRaisesRegex(OrdinaryAgentSessionAdmissionDenied, "inventory_drift"),
+            self.assertRaisesRegex(
+                OrdinaryAgentSessionAdmissionDenied, "provider_readiness_unavailable"
+            ),
             self.store._session_factory() as session,
         ):
             self.store._begin_serialized_write(session)
@@ -269,7 +271,7 @@ class OrdinaryAgentDeliveryActivationStorageTests(unittest.TestCase):
         )
         loss_events = tuple(item for item in events if item.action == "readiness_lost")
         self.assertEqual(len(loss_events), 1)
-        self.assertEqual(loss_events[0].invalidation_reason, "inventory_drift")
+        self.assertEqual(loss_events[0].invalidation_reason, "provider_readiness_unavailable")
 
     def test_revoke_is_exact_and_original_setup_recovery_is_historical(self) -> None:
         installed = _record(

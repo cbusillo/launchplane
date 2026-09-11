@@ -29347,6 +29347,11 @@ class PostgresRecordStore(HumanSessionStore):
                     attestation.attestation_sha256,
                 )
             )
+            # Guarded derivation requires a separate current persisted receipt
+            # for provider protection and exclusive Launchplane merge identity.
+            # No trusted producer exists yet, so never infer either fact from
+            # configured merge policy, request snapshots, or activation state.
+            raise OrdinaryAgentSessionAdmissionDenied("provider_readiness_unavailable")
         return activation, tuple(sorted(set(evidence_ids))), now
 
     def _ordinary_agent_qualification_setup_from_activation(
@@ -29405,6 +29410,7 @@ class PostgresRecordStore(HumanSessionStore):
                 "installed_outcome_mismatch",
                 "inventory_drift",
                 "policy_source_inadmissible",
+                "provider_readiness_unavailable",
                 "qualification_attestation_required",
                 "setup_operation_inadmissible",
             }
