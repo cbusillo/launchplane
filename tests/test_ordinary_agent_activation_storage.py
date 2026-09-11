@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
+from typing import Any, cast
 import unittest
+from unittest.mock import patch
 
 from control_plane.contracts.ordinary_agent import OrdinaryAgentTarget
 from control_plane.contracts.ordinary_agent_activation import (
@@ -22,6 +25,7 @@ from control_plane.storage.postgres import (
     PostgresRecordStore,
 )
 from control_plane.storage.schema_invariants import EXPECTED_ALEMBIC_HEAD_REVISION
+from control_plane.ordinary_agent_session_lifecycle import OrdinaryAgentSessionAdmissionDenied
 
 
 def _scope(*, repository_id: int = 1001) -> OrdinaryAgentDeliveryActivationScope:
@@ -216,6 +220,56 @@ class OrdinaryAgentDeliveryActivationStorageTests(unittest.TestCase):
             ),
             (event,),
         )
+
+    def test_guarded_readiness_loss_commits_only_derived_projection_before_denial(self) -> None:
+        installed = _record(
+            operation_id="activation-readiness-loss",
+            installed_at="2026-09-10T20:00:00Z",
+            expires_at="2026-09-11T20:00:00Z",
+        )
+        self.store.install_ordinary_agent_delivery_activation(
+            installed,
+            _event(
+                installed,
+                action="installed",
+                source_operation_id=installed.source_setup_operation_id,
+            ),
+        )
+        guarded = self.store.transition_ordinary_agent_delivery_activation_readiness(
+            expected_record=installed,
+            action="guarded_derived",
+            occurred_at="2026-09-10T20:01:00Z",
+            evidence_ids=("qualification-attestation",),
+        ).record
+        context = SimpleNamespace(
+            request=SimpleNamespace(target=installed.scope.target),
+            lease=SimpleNamespace(
+                managed_set_id=installed.scope.managed_set_id,
+                managed_rule_id=installed.scope.managed_rule_id,
+            ),
+        )
+
+        with (
+            patch.object(
+                self.store,
+                "_require_ordinary_agent_runtime_readiness",
+                side_effect=OrdinaryAgentSessionAdmissionDenied("inventory_drift"),
+            ),
+            self.assertRaisesRegex(OrdinaryAgentSessionAdmissionDenied, "inventory_drift"),
+            self.store._session_factory() as session,
+        ):
+            self.store._begin_serialized_write(session)
+            self.store._require_and_project_guarded_readiness(session, context=cast(Any, context))
+
+        lost = self.store.read_ordinary_agent_delivery_activation_record(guarded.activation_id)
+        self.assertEqual(lost.revision, guarded.revision + 1)
+        self.assertEqual(lost.effective_state, "qualification_only")
+        events = self.store.list_ordinary_agent_delivery_activation_event_records(
+            activation_id=guarded.activation_id
+        )
+        loss_events = tuple(item for item in events if item.action == "readiness_lost")
+        self.assertEqual(len(loss_events), 1)
+        self.assertEqual(loss_events[0].invalidation_reason, "inventory_drift")
 
     def test_revoke_is_exact_and_original_setup_recovery_is_historical(self) -> None:
         installed = _record(

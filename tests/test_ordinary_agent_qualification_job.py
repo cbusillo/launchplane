@@ -240,6 +240,7 @@ class OrdinaryAgentQualificationJobTests(unittest.TestCase):
 
     def test_pre_mint_readiness_denial_is_not_recorded_as_provider_failure(self) -> None:
         store = _Store(readiness_error_at=1)
+        observed = datetime(2030, 1, 1, tzinfo=timezone.utc)
 
         @contextmanager
         def denied_before_mint(**kwargs: object) -> Iterator[object]:
@@ -254,15 +255,20 @@ class OrdinaryAgentQualificationJobTests(unittest.TestCase):
             denied_before_mint,
         ):
             disposition = advance_ordinary_agent_qualification_job(
-                claimed=self.claimed(), store=cast(Any, store), setup_resolver=lambda **_: _setup()
+                claimed=self.claimed(),
+                store=cast(Any, store),
+                setup_resolver=lambda **_: _setup(),
+                utc_now=lambda: observed,
             )
 
-        self.assertEqual(disposition.status, "blocked")
+        self.assertEqual(disposition.status, "waiting")
+        self.assertEqual(disposition.next_due_at, int(observed.timestamp()) + 30)
         self.assertEqual(disposition.reason_code, "activation_not_current")
         self.assertEqual(store.failure_calls, 0)
 
     def test_pre_get_readiness_denial_preserves_reason_without_provider_failure(self) -> None:
         store = _Store(readiness_error_at=2)
+        observed = datetime(2030, 1, 1, tzinfo=timezone.utc)
 
         @contextmanager
         def minted(**kwargs: object) -> Iterator[object]:
@@ -290,10 +296,14 @@ class OrdinaryAgentQualificationJobTests(unittest.TestCase):
             ) as provider_get,
         ):
             disposition = advance_ordinary_agent_qualification_job(
-                claimed=self.claimed(), store=cast(Any, store), setup_resolver=lambda **_: _setup()
+                claimed=self.claimed(),
+                store=cast(Any, store),
+                setup_resolver=lambda **_: _setup(),
+                utc_now=lambda: observed,
             )
 
-        self.assertEqual(disposition.status, "blocked")
+        self.assertEqual(disposition.status, "waiting")
+        self.assertEqual(disposition.next_due_at, int(observed.timestamp()) + 30)
         self.assertEqual(disposition.reason_code, "activation_not_current")
         self.assertEqual(store.failure_calls, 0)
         provider_get.assert_not_called()

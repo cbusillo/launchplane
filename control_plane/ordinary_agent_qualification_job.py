@@ -105,7 +105,7 @@ def advance_ordinary_agent_qualification_job(
             claim_fence=claimed.claim_fence, setup=setup
         )
     except OrdinaryAgentSessionAdmissionDenied as error:
-        return _denied_disposition(error)
+        return _denied_disposition(error, retry_at=int(utc_now().timestamp()) + 30)
     if attempt.state == "completed":
         return _completed_disposition(store=store, attempt=attempt)
     if attempt.state in {"fenced", "exhausted"}:
@@ -120,7 +120,7 @@ def advance_ordinary_agent_qualification_job(
             expected_attempt_revision=attempt.revision,
         )
     except OrdinaryAgentSessionAdmissionDenied as error:
-        return _denied_disposition(error)
+        return _denied_disposition(error, retry_at=int(utc_now().timestamp()) + 30)
     transport: DeadlineMergeTrainGitHubTransport | None = None
     recorded: OrdinaryAgentQualificationAttemptRecord | None = None
     result_denial: OrdinaryAgentSessionAdmissionDenied | None = None
@@ -208,7 +208,9 @@ def advance_ordinary_agent_qualification_job(
     except Exception as error:
         if readiness_denial is not None:
             return OrdinaryAgentJobAttemptDisposition(
-                status="blocked", reason_code=readiness_denial.reason_code
+                status="waiting",
+                next_due_at=int(utc_now().timestamp()) + 30,
+                reason_code=readiness_denial.reason_code,
             )
         reason = _failure_reason(error)
         try:
@@ -344,9 +346,27 @@ def _failure_reason(
 
 def _denied_disposition(
     error: OrdinaryAgentSessionAdmissionDenied,
+    *,
+    retry_at: int,
 ) -> OrdinaryAgentJobAttemptDisposition:
     if error.retry_not_before is not None:
         return OrdinaryAgentJobAttemptDisposition(
             status="waiting", next_due_at=error.retry_not_before, reason_code=error.reason_code
+        )
+    if error.reason_code in {
+        "activation_expired",
+        "activation_not_current",
+        "activation_projection_mismatch",
+        "custody_binding_conflict",
+        "custody_unavailable",
+        "database_revision_incompatible",
+        "installed_outcome_invalid",
+        "installed_outcome_mismatch",
+        "inventory_drift",
+        "policy_source_inadmissible",
+        "setup_operation_inadmissible",
+    }:
+        return OrdinaryAgentJobAttemptDisposition(
+            status="waiting", next_due_at=retry_at, reason_code=error.reason_code
         )
     return OrdinaryAgentJobAttemptDisposition(status="blocked", reason_code=error.reason_code)

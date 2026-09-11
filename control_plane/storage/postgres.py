@@ -29243,11 +29243,7 @@ class PostgresRecordStore(HumanSessionStore):
         session: Any,
         *,
         context: _OrdinaryAgentCurrentJobContext,
-    ) -> tuple[OrdinaryAgentDeliveryActivationRecord | None, int]:
-        # Persisted v1 bytes retain their established execution/recovery contract.
-        # New ingress emits v2, whose fresh authority is activation-gated below.
-        if isinstance(context.request, OrdinaryAgentFiniteRequestRecord):
-            return None, context.now
+    ) -> tuple[OrdinaryAgentDeliveryActivationRecord, int]:
         try:
             activation, evidence_ids, observed_at = self._require_ordinary_agent_runtime_readiness(
                 session, context=context, purpose="guarded_delivery"
