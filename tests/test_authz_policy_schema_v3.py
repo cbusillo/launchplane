@@ -29,6 +29,9 @@ from control_plane.contracts.authz_policy_record import (
     authz_policy_sha256,
     build_authz_policy_record_id,
 )
+from control_plane.contracts.authz_policy_write_transition import (
+    AuthzPolicySchemaV3TransitionDeniedError,
+)
 from control_plane.contracts.ordinary_agent import (
     OrdinaryAgentPolicySnapshot,
     OrdinaryAgentPrincipal,
@@ -736,11 +739,21 @@ class AuthzPolicySchemaV3CompatibilityTests(unittest.TestCase):
                         request=request,
                     )
 
-    def test_v3_apply_stays_fenced_after_successful_dry_run(self) -> None:
-        active = _schema_v3_policy()
+    def test_v3_unchanged_apply_reaches_noop_after_successful_dry_run(self) -> None:
+        source = _schema_v3_policy()
+        active = source.model_copy(
+            update={
+                "ordinary_agents": (
+                    source.ordinary_agents[0].model_copy(
+                        update={"actions": ("preflight", "self_read")}
+                    ),
+                )
+            }
+        )
         dry_run = AuthzManagedPolicyReconcileEnvelope(
             product="launchplane",
             managed_set_id="ordinary-agent.pilot",
+            reason="prove the unchanged schema-v3 path",
             desired_policy=active,
         )
         _, _, _, diff = plan_managed_authz_policy_reconcile(
@@ -750,31 +763,28 @@ class AuthzPolicySchemaV3CompatibilityTests(unittest.TestCase):
             {
                 **dry_run.model_dump(mode="json"),
                 "mode": "apply",
-                "reason": "prove the write fence",
                 "reviewed_plan_sha256": diff.plan_sha256,
             }
         )
 
         store = _PolicyStore(active)
-        with self.assertRaisesRegex(
-            AuthzPolicySchemaWriteNotActivatedError,
-            "authz_policy_schema_v3_write_not_activated",
-        ):
-            execute_managed_authz_policy_reconcile(
-                record_store=store,
-                request=apply,
-                identity=GitHubHumanIdentity(
-                    login="admin",
-                    github_id=101,
-                    name="Admin",
-                    email="admin@example.test",
-                    organizations=frozenset(),
-                    teams=frozenset(),
-                    role="admin",
-                ),
-                trace_id="launchplane_req_v3_apply_fence",
-                now_timestamp=lambda: "2026-09-10T00:00:00Z",
-            )
+        result = execute_managed_authz_policy_reconcile(
+            record_store=store,
+            request=apply,
+            identity=GitHubHumanIdentity(
+                login="admin",
+                github_id=101,
+                name="Admin",
+                email="admin@example.test",
+                organizations=frozenset(),
+                teams=frozenset(),
+                role="admin",
+            ),
+            trace_id="launchplane_req_v3_apply_noop",
+            now_timestamp=lambda: "2026-09-10T00:00:00Z",
+        )
+        self.assertFalse(result.changed)
+        self.assertIsNone(result.schema_v3_write_evidence)
         self.assertEqual(store.record.policy, active)
 
 
@@ -805,7 +815,7 @@ class AuthzPolicySchemaV3StoreFenceTests(unittest.TestCase):
             )
             replacement = _record(_schema_v3_policy(), revision=2)
 
-            with self.assertRaises(AuthzPolicySchemaWriteNotActivatedError):
+            with self.assertRaises(AuthzPolicySchemaV3TransitionDeniedError):
                 store.compare_and_write_authz_policy_record(
                     expected_record=active,
                     replacement_record=replacement,
@@ -835,15 +845,16 @@ class AuthzPolicySchemaV3StoreFenceTests(unittest.TestCase):
                     ),
                 )
 
-            for candidate in (replacement, None):
-                with (
-                    self.subTest(replacement=candidate is not None),
-                    self.assertRaises(AuthzPolicySchemaWriteNotActivatedError),
-                ):
-                    store.compare_and_write_authz_policy_record(
-                        expected_record=active,
-                        replacement_record=candidate,
-                    )
+            with self.assertRaises(AuthzPolicySchemaV3TransitionDeniedError):
+                store.compare_and_write_authz_policy_record(
+                    expected_record=active,
+                    replacement_record=replacement,
+                )
+            unchanged = store.compare_and_write_authz_policy_record(
+                expected_record=active,
+                replacement_record=None,
+            )
+            self.assertEqual(unchanged.status, "unchanged")
 
             self.assertEqual(store.list_authz_policy_records(status="active"), (active,))
             self.assertEqual(store.list_authz_policy_records(status="superseded"), ())

@@ -523,10 +523,16 @@ through 30 days without requiring typed record IDs, digests, issue IDs, or
 free-form reasons. The planner rejects any setup expiry beyond 30 days.
 
 This descriptor makes no provider call, installs no authorization grant,
-registers no ordinary worker, derives no guarded readiness, and does not lift the
-schema-v3 policy write fence. Runtime capability evidence records installed
-schema and compiled parser/storage support; absent qualification, guarded worker,
-or policy-v3 write support remains absent or false.
+registers no ordinary worker, and derives no guarded readiness. The schema-v3
+write transition is separately mediated: a complete reviewed policy candidate
+may add or change exactly one ordinary rule only when it matches a current,
+unrevoked typed activation and its executed setup provenance. Exact ordinary-rule
+removal and unrelated schema-v3 maintenance remain possible after activation
+revocation or expiry; raw schema-v3 seed and unbound replacement stay fenced.
+Runtime capability evidence records installed schema and compiled
+parser/storage/write-handler support. `policy_v3_write_supported` reports the
+presence of this mediated typed handler and is not itself authority or a raw
+write bypass. Qualification and guarded-worker support remain separate.
 
 Activation remains a separately owner-approved DB-native administration event;
 it is not authorized by landing code. Keep #2204 open until actual migration,

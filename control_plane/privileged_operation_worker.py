@@ -11,6 +11,11 @@ from typing import Any, Literal, Protocol, cast
 from control_plane import secrets as control_plane_secrets
 from control_plane import authz_grant_service
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
+from control_plane.contracts.authz_policy_write_transition import (
+    AUTHZ_POLICY_SCHEMA_V3_TRANSITION_DENIED,
+    AuthzPolicySchemaV3TransitionDeniedError,
+    AuthzPolicySchemaV3WriteEvidence,
+)
 from control_plane.contracts.durable_operation_authorization import (
     DurableOperationAuthorization,
     DurableOperationCallerIdentity,
@@ -204,6 +209,7 @@ class PrivilegedOperationExecutionStore(PrivilegedOperationStore, Protocol):
         *,
         expected_record: LaunchplaneAuthzPolicyRecord,
         replacement_record: LaunchplaneAuthzPolicyRecord | None,
+        schema_v3_write_evidence: AuthzPolicySchemaV3WriteEvidence | None = None,
         mutation: DbOnlyMutationRequest | None = None,
     ) -> Any: ...
 
@@ -995,10 +1001,10 @@ def _execute_managed_authz_policy_set(
         "revision": expected_result_record.revision,
         "policy_sha256": expected_result_record.policy_sha256,
     }
-    write_result = store.compare_and_write_authz_policy_record(
-        expected_record=route_result.previous_authz_policy_record,
-        replacement_record=(route_result.authz_policy_record if route_result.changed else None),
-        mutation=DbOnlyMutationRequest(
+    write_arguments: dict[str, object] = {
+        "expected_record": route_result.previous_authz_policy_record,
+        "replacement_record": route_result.authz_policy_record if route_result.changed else None,
+        "mutation": DbOnlyMutationRequest(
             scope=PRIVILEGED_OPERATION_EXECUTION_SCOPE,
             route_path=PRIVILEGED_POLICY_OPERATION_WRITE_ROUTE,
             idempotency_key=record.operation_id,
@@ -1009,7 +1015,10 @@ def _execute_managed_authz_policy_set(
             response_payload=response_payload,
             lease_seconds=PRIVILEGED_OPERATION_EXECUTION_LEASE_SECONDS,
         ),
-    )
+    }
+    if route_result.schema_v3_write_evidence is not None:
+        write_arguments["schema_v3_write_evidence"] = route_result.schema_v3_write_evidence
+    write_result = store.compare_and_write_authz_policy_record(**cast(Any, write_arguments))
     if write_result.status == "stale":
         raise ValueError("approved_plan_drift")
     if write_result.status not in {"written", "unchanged", "replayed"}:
@@ -1268,6 +1277,8 @@ def _result_count(payload: dict[str, object], field_name: str) -> int:
 def _failure_code(error: Exception) -> str:
     if isinstance(error, authz_grant_service.AuthzPolicySafetyError):
         return error.code
+    if isinstance(error, AuthzPolicySchemaV3TransitionDeniedError):
+        return f"{AUTHZ_POLICY_SCHEMA_V3_TRANSITION_DENIED}:{error.reason_code}"
     known_codes = {
         "approval_provenance_missing",
         "approval_managed_rule_drift",

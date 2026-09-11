@@ -4,17 +4,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import inspect
 from typing import Any, cast
 
 from pydantic import BaseModel
 
 from control_plane.authz_grant_service import plan_managed_authz_policy_reconcile
 from control_plane.contracts.authz_policy_record import (
-    AuthzPolicySchemaWriteNotActivatedError,
     LaunchplaneAuthzPolicyRecord,
-    require_authz_policy_schema_write_activated,
+    authz_policy_sha256,
 )
-from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.ordinary_agent_activation import (
     OrdinaryAgentDeliveryActivationDurationOption,
     OrdinaryAgentDeliveryActivationRecord,
@@ -32,6 +31,14 @@ from control_plane.contracts.ordinary_agent_activation import (
     OrdinaryAgentDeliveryPolicyPackageReference,
     OrdinaryAgentDeliveryRuntimeCapabilityEvidence,
 )
+from control_plane.contracts.authz_policy_write_transition import (
+    AuthzPolicyImmutableHumanCallerBinding,
+    AuthzPolicySchemaV3OrdinaryEnableEvidence,
+    AuthzPolicySchemaV3TransitionDeniedError,
+    classify_authz_policy_schema_v3_transition,
+    require_authz_policy_source_status,
+)
+from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.ordinary_agent_custody import OrdinaryAgentCustodyIssueAttempt
 from control_plane.contracts.ordinary_agent_effect import (
     OrdinaryAgentQualificationAttemptRecord,
@@ -62,7 +69,6 @@ from control_plane.service_auth import LaunchplaneAuthzPolicy
 from control_plane.storage.schema_invariants import RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS
 
 
-_ADMISSIBLE_POLICY_OPERATION_STATUSES = frozenset({"planned", "approved", "executing", "executed"})
 _ACTIVATION_DURATION_OPTIONS = (
     (60 * 60, "1 hour"),
     (24 * 60 * 60, "1 day"),
@@ -142,16 +148,16 @@ def _require_admissible_policy_operation(
         raise OrdinaryAgentDeliveryActivationPlanningError(
             "Activation setup requires a managed authz policy operation."
         )
-    if record.status not in _ADMISSIBLE_POLICY_OPERATION_STATUSES:
+    try:
+        require_authz_policy_source_status(
+            status=record.status,
+            expires_at=record.expires_at,
+            observed_at=observed_at,
+        )
+    except AuthzPolicySchemaV3TransitionDeniedError as error:
         raise OrdinaryAgentDeliveryActivationPlanningError(
             "Referenced policy operation status is not admissible for activation setup."
-        )
-    if record.status in {"planned", "approved"} and observed_at >= datetime.fromisoformat(
-        record.expires_at
-    ):
-        raise OrdinaryAgentDeliveryActivationPlanningError(
-            "Referenced policy operation has passed its finite approval lifetime."
-        )
+        ) from error
     if not isinstance(record.request, ManagedAuthzPolicySetProposalInput) or not isinstance(
         record.evidence,
         ManagedAuthzPolicySetHumanEvidence,
@@ -350,6 +356,128 @@ def resolve_ordinary_agent_delivery_activation_setup_source(
     )
 
 
+def resolve_authz_policy_schema_v3_enable_evidence(
+    record_store: object,
+    *,
+    current_record: LaunchplaneAuthzPolicyRecord,
+    candidate_policy: LaunchplaneAuthzPolicy,
+    github_id: int,
+    observed_at: datetime,
+) -> AuthzPolicySchemaV3OrdinaryEnableEvidence:
+    transition = classify_authz_policy_schema_v3_transition(current_record.policy, candidate_policy)
+    if transition.kind not in {"v2_to_v3_enable", "v3_enable_or_expand"}:
+        raise OrdinaryAgentDeliveryActivationPlanningError(
+            "Authz policy transition does not require ordinary activation evidence."
+        )
+    managed_set_id, managed_rule_id = transition.added_or_changed_ordinary_rule_keys[0].split(
+        "\x1f", 1
+    )
+    matching = tuple(
+        record
+        for record in _activation_records(record_store)
+        if record.scope.managed_set_id == managed_set_id
+        and record.scope.managed_rule_id == managed_rule_id
+        and record.desired_state == "guarded"
+        and record.effective_state in {"qualification_only", "guarded"}
+        and not record.revoked_at
+        and not record.superseded_at
+        and observed_at < datetime.fromisoformat(record.activation_expires_at)
+    )
+    if len(matching) != 1:
+        raise OrdinaryAgentDeliveryActivationPlanningError(
+            "Authz policy transition requires one current matching activation."
+        )
+    activation = matching[0]
+    source = resolve_ordinary_agent_delivery_activation_setup_source(
+        record_store,
+        policy_operation_id=activation.policy_package.policy_operation_id,
+        repository_inventory_record_id=activation.inventory.record_id,
+        observed_at=observed_at,
+    )
+    if source.scope != activation.scope or source.policy_package != activation.policy_package:
+        raise OrdinaryAgentDeliveryActivationPlanningError(
+            "Activation policy package no longer resolves exactly."
+        )
+    if activation.policy_package.candidate_policy_sha256 != authz_policy_sha256(candidate_policy):
+        raise OrdinaryAgentDeliveryActivationPlanningError(
+            "Activation does not bind the complete candidate policy."
+        )
+    setup_operation = _read_policy_operation(record_store, activation.source_setup_operation_id)
+    from control_plane.contracts.ordinary_agent_activation import (
+        OrdinaryAgentDeliveryActivationExecutionEvidence,
+        OrdinaryAgentDeliveryActivationSetupHumanEvidence,
+        OrdinaryAgentDeliveryActivationSetupRequest,
+    )
+
+    if (
+        setup_operation.descriptor_id != "ordinary-agent-delivery-activation"
+        or setup_operation.status != "executed"
+        or not isinstance(setup_operation.request, OrdinaryAgentDeliveryActivationSetupRequest)
+        or not isinstance(
+            setup_operation.evidence, OrdinaryAgentDeliveryActivationSetupHumanEvidence
+        )
+        or setup_operation.approval is None
+        or not isinstance(
+            setup_operation.execution, OrdinaryAgentDeliveryActivationExecutionEvidence
+        )
+        or setup_operation.execution.action != "setup"
+        or setup_operation.execution.result_status != "ok"
+    ):
+        raise OrdinaryAgentDeliveryActivationPlanningError(
+            "Activation setup operation is not one successful terminal setup."
+        )
+    if (
+        canonical_json_sha256(setup_operation.approval.model_dump(mode="json"))
+        != activation.source_setup_approval_sha256
+    ):
+        raise OrdinaryAgentDeliveryActivationPlanningError(
+            "Activation setup approval digest changed."
+        )
+    recovery = getattr(
+        record_store, "recover_ordinary_agent_delivery_activation_by_source_operation", None
+    )
+    if not callable(recovery):
+        raise OrdinaryAgentDeliveryActivationPlanningError(
+            "Activation setup recovery is unavailable."
+        )
+    recovered = recovery(activation.source_setup_operation_id)
+    installed_record, installed_event = recovered
+    execution = setup_operation.execution
+    if (
+        installed_event.action != "installed"
+        or installed_event.sequence != 1
+        or execution.activation_id != installed_record.activation_id
+        or execution.activation_revision != installed_record.revision
+        or execution.activation_sha256 != installed_record.activation_sha256
+        or execution.source_operation_id != activation.source_setup_operation_id
+    ):
+        raise OrdinaryAgentDeliveryActivationPlanningError(
+            "Activation setup execution does not match its installed outcome."
+        )
+    package = activation.policy_package
+    return AuthzPolicySchemaV3OrdinaryEnableEvidence(
+        caller=AuthzPolicyImmutableHumanCallerBinding(github_id=github_id),
+        expected_record_id=current_record.record_id,
+        expected_revision=current_record.revision,
+        expected_policy_sha256=current_record.policy_sha256,
+        candidate_policy_sha256=package.candidate_policy_sha256,
+        activation_id=activation.activation_id,
+        activation_revision=activation.revision,
+        activation_sha256=activation.activation_sha256,
+        source_setup_operation_id=activation.source_setup_operation_id,
+        policy_operation_id=package.policy_operation_id,
+        policy_request_sha256=package.request_sha256,
+        policy_evidence_sha256=package.evidence_sha256,
+        policy_plan_sha256=package.plan_sha256,
+        desired_set_sha256=package.desired_set_sha256,
+        repository_id=activation.scope.target.repository_id,
+        repository=activation.scope.target.repository,
+        base_branch=activation.scope.target.base_branch,
+        managed_set_id=managed_set_id,
+        managed_rule_id=managed_rule_id,
+    )
+
+
 def ordinary_agent_delivery_activation_plan_sha256(payload: dict[str, object]) -> str:
     return canonical_json_sha256(
         {
@@ -422,12 +550,12 @@ def _runtime_capability(
     rollback_reader_registered = callable(
         getattr(record_store, "read_ordinary_agent_delivery_activation_record", None)
     )
-    try:
-        require_authz_policy_schema_write_activated(LaunchplaneAuthzPolicy(schema_version=3))
-    except AuthzPolicySchemaWriteNotActivatedError:
-        policy_v3_write_supported = False
-    else:
-        policy_v3_write_supported = True
+    compare_write = getattr(record_store, "compare_and_write_authz_policy_record", None)
+    policy_v3_write_supported = (
+        callable(classify_authz_policy_schema_v3_transition)
+        and callable(compare_write)
+        and "schema_v3_write_evidence" in inspect.signature(compare_write).parameters
+    )
     return OrdinaryAgentDeliveryRuntimeCapabilityEvidence(
         observed_database_revision=observed_revision or "unavailable",
         database_revision_compatible=(

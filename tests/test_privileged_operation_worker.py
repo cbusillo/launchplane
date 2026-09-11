@@ -19,10 +19,12 @@ from control_plane.authz_grant_service import execute_managed_authz_policy_recon
 from control_plane.cli import main
 from control_plane.contracts.authz_policy_record import (
     AuthzPolicyCompareWriteResult,
-    AuthzPolicySchemaWriteNotActivatedError,
     LaunchplaneAuthzPolicyRecord,
     authz_policy_sha256,
     build_authz_policy_record_id,
+)
+from control_plane.contracts.authz_policy_write_transition import (
+    AuthzPolicySchemaV3TransitionDeniedError,
 )
 from control_plane.contracts.privileged_operation import (
     AUTHZ_POLICY_OPERATION_APPROVE_ACTION,
@@ -630,7 +632,7 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
             )
         )
 
-    def test_worker_keeps_explicit_v3_migration_apply_fenced(self) -> None:
+    def test_worker_terminally_denies_unqualified_v3_migration_apply(self) -> None:
         apply_errors: list[Exception] = []
 
         def capture_apply_fence(**kwargs: Any) -> Any:
@@ -695,10 +697,13 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
         self.assertEqual(record.request.schema_migration, "migrate_v2_to_v3")
         self.assertIsInstance(record.execution, ManagedAuthzPolicySetExecutionEvidence)
         assert isinstance(record.execution, ManagedAuthzPolicySetExecutionEvidence)
-        self.assertEqual(record.execution.failure_code, "privileged_operation_execution_error")
+        self.assertEqual(
+            record.execution.failure_code,
+            "authz_policy_schema_v3_transition_denied:ordinary_enable_scope_not_singleton",
+        )
         self.assertFalse(record.execution.reconciliation_required)
         self.assertEqual(len(apply_errors), 1)
-        self.assertIsInstance(apply_errors[0], AuthzPolicySchemaWriteNotActivatedError)
+        self.assertIsInstance(apply_errors[0], AuthzPolicySchemaV3TransitionDeniedError)
         self.assertEqual(active_records, (approval_policy,))
 
     def test_worker_rejects_org_scoped_approver_as_continuity_admin(self) -> None:

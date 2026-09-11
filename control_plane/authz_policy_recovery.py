@@ -7,6 +7,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from control_plane.authz_grant_service import (
     AuthzManagedPolicyReconcileEnvelope,
+)
+from control_plane.service_auth import (
     authz_policy_allows_immutable_github_id_administration,
     strict_immutable_github_human_administrator_ids,
 )

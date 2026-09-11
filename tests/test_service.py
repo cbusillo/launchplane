@@ -42,6 +42,9 @@ from control_plane.contracts.authz_policy_record import (
     authz_policy_sha256,
     build_authz_policy_record_id,
 )
+from control_plane.contracts.authz_policy_write_transition import (
+    AuthzPolicySchemaV3TransitionDeniedError,
+)
 from control_plane.contracts.driver_descriptor import DriverActionDescriptor, DriverDescriptor
 from control_plane.dokploy import DokploySourceOfTruth, DokployTargetDefinition
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
@@ -6399,6 +6402,18 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 payload=apply_payload,
                 headers={"Idempotency-Key": "managed-authz-noop"},
             )
+            with patch.object(
+                PostgresRecordStore,
+                "compare_and_write_authz_policy_record",
+                side_effect=AuthzPolicySchemaV3TransitionDeniedError("activation_revoked"),
+            ):
+                denied_status, denied_response = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/authz-policies/managed-rule-sets/reconcile",
+                    payload=apply_payload,
+                    headers={"Idempotency-Key": "managed-authz-noop-denied"},
+                )
             store = PostgresRecordStore(database_url=database_url)
             try:
                 active_records = store.list_authz_policy_records(status="active")
@@ -6412,6 +6427,11 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertFalse(apply_response["result"]["changed"])
         self.assertEqual(replay_status, 202)
         self.assertEqual(replay_response["result"], apply_response["result"])
+        self.assertEqual(denied_status, 409)
+        self.assertEqual(
+            denied_response["error"]["code"], "authz_policy_schema_v3_transition_denied"
+        )
+        self.assertIn("activation_revoked", denied_response["error"]["message"])
         self.assertEqual(len(active_records), 1)
         self.assertEqual(active_records[0].revision, 1)
         self.assertEqual(superseded_records, ())

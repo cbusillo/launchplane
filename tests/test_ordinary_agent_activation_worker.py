@@ -44,14 +44,20 @@ def _active_policy() -> LaunchplaneAuthzPolicy:
     return LaunchplaneAuthzPolicy.model_validate(
         {
             "schema_version": 2,
+            "administrator_quorum": 1,
             "github_humans": [
                 {
                     "managed_set_id": "ordinary-agent.activation-administrators",
                     "managed_rule_id": "activation-reviewer",
                     "github_ids": [101],
+                    "roles": ["admin"],
                     "products": ["launchplane"],
                     "contexts": ["launchplane"],
-                    "actions": ["ordinary_agent_delivery_activation.approve"],
+                    "actions": [
+                        "authz_policy_grant.write",
+                        "authz_policy_operation.approve",
+                        "ordinary_agent_delivery_activation.approve",
+                    ],
                 }
             ],
         }
@@ -83,7 +89,11 @@ def _approval(
         managed_rule_id="activation-reviewer",
         expires_at=record.expires_at,
         reason="Reviewed the qualification-only activation transition.",
-        rollback_class="activation_revoke",
+        rollback_class=(
+            "policy_cas"
+            if record.descriptor_id == "managed-authz-policy-set"
+            else "activation_revoke"
+        ),
     )
 
 
@@ -217,6 +227,23 @@ class OrdinaryAgentDeliveryActivationWorkerTests(unittest.TestCase):
                 secret_executor.assert_not_called()
                 policy_executor.assert_not_called()
 
+                approve_privileged_operation(
+                    record_store=store,
+                    operation_id=policy_package.operation_id,
+                    approval=_approval(policy_package, policy_record=active_policy_record),
+                    source_event_id="approve-activation-policy-package",
+                    now=lambda: FIXED_NOW + timedelta(minutes=4),
+                )
+                policy_results = execute_approved_privileged_operations_once(
+                    record_store=store,
+                    now=lambda: FIXED_NOW + timedelta(minutes=5),
+                )
+                self.assertEqual(policy_results[0].operation_id, policy_package.operation_id)
+                self.assertEqual(policy_results[0].status, "executed", policy_results)
+                active_policy_record = store.list_authz_policy_records(status="active", limit=1)[0]
+                self.assertEqual(active_policy_record.policy.schema_version, 3)
+                self.assertEqual(len(active_policy_record.policy.ordinary_agents), 1)
+
                 revoke_plan = create_typed_privileged_operation_plan(
                     record_store=store,
                     descriptor_id="ordinary-agent-delivery-activation",
@@ -233,18 +260,18 @@ class OrdinaryAgentDeliveryActivationWorkerTests(unittest.TestCase):
                         expected_activation_sha256=activation.activation_sha256,
                         reason="Stop this activation intent.",
                     ),
-                    now=lambda: FIXED_NOW + timedelta(minutes=4),
+                    now=lambda: FIXED_NOW + timedelta(minutes=6),
                 ).record
                 approve_privileged_operation(
                     record_store=store,
                     operation_id=revoke_plan.operation_id,
                     approval=_approval(revoke_plan, policy_record=active_policy_record),
                     source_event_id="approve-activation-stop",
-                    now=lambda: FIXED_NOW + timedelta(minutes=5),
+                    now=lambda: FIXED_NOW + timedelta(minutes=7),
                 )
                 revoke_results = execute_approved_privileged_operations_once(
                     record_store=store,
-                    now=lambda: FIXED_NOW + timedelta(minutes=6),
+                    now=lambda: FIXED_NOW + timedelta(minutes=8),
                 )
                 revoked = store.read_ordinary_agent_delivery_activation_record(
                     activation.activation_id

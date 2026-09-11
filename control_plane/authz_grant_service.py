@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from fnmatch import fnmatchcase
 import hashlib
 import json
@@ -20,7 +21,14 @@ from control_plane.contracts.authz_policy_record import (
     LaunchplaneAuthzPolicyRecord,
     authz_policy_sha256,
     build_authz_policy_record_id,
-    require_authz_policy_schema_write_activated,
+)
+from control_plane.contracts.authz_policy_write_transition import (
+    AuthzPolicyGitHubActionsCallerBinding,
+    AuthzPolicyImmutableHumanCallerBinding,
+    AuthzPolicySchemaV3MaintenanceEvidence,
+    AuthzPolicySchemaV3CallerBinding,
+    AuthzPolicySchemaV3WriteEvidence,
+    classify_authz_policy_schema_v3_transition,
 )
 from control_plane.contracts.authz_access_read import (
     AuthzManagedSetCollectionSummary,
@@ -72,8 +80,11 @@ from control_plane.service_auth import (
     TerminalAgentIdentity,
     TerminalAgentPolicyRule,
     action_safety,
+    authz_policy_allows_immutable_github_id_administration,
     effective_administrator_quorum,
+    is_strict_immutable_github_human_administrator_rule,
     migrate_authz_policy_to_schema_v2,
+    strict_immutable_github_human_administrator_ids,
 )
 
 
@@ -486,6 +497,7 @@ class AuthzManagedPolicyRouteResult(BaseModel):
     changed: bool
     result: dict[str, object]
     driver_result: dict[str, object]
+    schema_v3_write_evidence: AuthzPolicySchemaV3WriteEvidence | None = None
 
 
 AuthzManagedRuleChangeKind: TypeAlias = Literal["added", "adopted", "updated", "removed"]
@@ -752,7 +764,7 @@ def summarize_authz_policy_health(
     strict_human_administrator_rules = tuple(
         rule
         for rule in policy.github_humans
-        if _is_strict_immutable_github_human_administrator_rule(rule)
+        if is_strict_immutable_github_human_administrator_rule(rule)
     )
     strict_human_administrator_ids = strict_immutable_github_human_administrator_ids(policy)
     administrator_quorum = effective_administrator_quorum(policy)
@@ -1746,33 +1758,6 @@ def _authz_rule_allows_identity(
     )
 
 
-def _is_strict_immutable_github_human_administrator_rule(
-    rule: GitHubHumanPolicyRule,
-) -> bool:
-    return bool(
-        rule.github_ids
-        and "admin" in rule.roles
-        and _AUTHZ_POLICY_ADMIN_ACTION in rule.actions
-        and rule.products == ("launchplane",)
-        and rule.contexts == ("launchplane",)
-        and not rule.logins
-        and not rule.organizations
-        and not rule.teams
-        and not rule.instances
-    )
-
-
-def strict_immutable_github_human_administrator_ids(
-    policy: LaunchplaneAuthzPolicy,
-) -> frozenset[int]:
-    return frozenset(
-        github_id
-        for rule in policy.github_humans
-        if _is_strict_immutable_github_human_administrator_rule(rule)
-        for github_id in rule.github_ids
-    )
-
-
 def authz_policy_administrator_quorum_satisfied(
     *,
     policy: LaunchplaneAuthzPolicy,
@@ -1780,14 +1765,6 @@ def authz_policy_administrator_quorum_satisfied(
     return len(
         strict_immutable_github_human_administrator_ids(policy)
     ) >= effective_administrator_quorum(policy)
-
-
-def authz_policy_allows_immutable_github_id_administration(
-    *,
-    policy: LaunchplaneAuthzPolicy,
-    github_id: int,
-) -> bool:
-    return github_id > 0 and github_id in strict_immutable_github_human_administrator_ids(policy)
 
 
 def authz_policy_retains_reachable_github_id_administration(
@@ -2076,8 +2053,6 @@ def plan_managed_authz_policy_reconcile(
         raise AuthzPolicyConflictError("Multiple active Launchplane authz policy records found.")
     current_record = active_records[0]
     current_policy = current_record.policy
-    if request.mode == "apply":
-        require_authz_policy_schema_write_activated(current_policy, request.desired_policy)
     base_policy = _resolve_managed_authz_reconcile_base(
         current_policy=current_policy,
         schema_migration=request.schema_migration,
@@ -2382,6 +2357,60 @@ def execute_managed_authz_policy_reconcile(
                 "blockers remain. Review the dry-run evidence and submit an exact candidate."
             ),
         )
+    schema_v3_write_evidence: AuthzPolicySchemaV3WriteEvidence | None = None
+    if request.mode == "apply" and managed_diff.changed and updated_policy.schema_version == 3:
+        transition = classify_authz_policy_schema_v3_transition(current_policy, updated_policy)
+        if transition.kind == "v3_maintenance":
+            caller: AuthzPolicySchemaV3CallerBinding
+            if immutable_applying_github_id:
+                caller = AuthzPolicyImmutableHumanCallerBinding(
+                    github_id=immutable_applying_github_id
+                )
+            elif isinstance(identity, GitHubActionsIdentity):
+                caller = AuthzPolicyGitHubActionsCallerBinding(
+                    repository=identity.repository,
+                    repository_owner=identity.repository_owner,
+                    workflow_ref=identity.workflow_ref,
+                    job_workflow_ref=identity.job_workflow_ref,
+                    ref=identity.ref,
+                    ref_type=identity.ref_type,
+                    event_name=identity.event_name,
+                    environment=identity.environment,
+                    subject=identity.subject,
+                    sha=identity.sha,
+                    raw_claims=identity.raw_claims,
+                    repository_id=identity.repository_id,
+                    repository_owner_id=identity.repository_owner_id,
+                )
+            else:
+                raise AuthzPolicySafetyError(
+                    code="authz_policy_applying_admin_removed",
+                    message="Schema-v3 maintenance requires its exact authenticated caller binding.",
+                )
+            schema_v3_write_evidence = AuthzPolicySchemaV3MaintenanceEvidence(
+                caller=caller,
+                expected_record_id=current_record.record_id,
+                expected_revision=current_record.revision,
+                expected_policy_sha256=current_record.policy_sha256,
+                candidate_policy_sha256=authz_policy_sha256(updated_policy),
+            )
+        elif transition.kind in {"v2_to_v3_enable", "v3_enable_or_expand"}:
+            if immutable_applying_github_id < 1:
+                raise AuthzPolicySafetyError(
+                    code="authz_policy_applying_admin_removed",
+                    message="Ordinary authority enabling requires an immutable human administrator.",
+                )
+            from control_plane.ordinary_agent_activation import (
+                resolve_authz_policy_schema_v3_enable_evidence,
+            )
+
+            schema_v3_write_evidence = resolve_authz_policy_schema_v3_enable_evidence(
+                record_store,
+                current_record=current_record,
+                candidate_policy=updated_policy,
+                github_id=immutable_applying_github_id,
+                observed_at=datetime.fromisoformat(now_timestamp()),
+            )
     diff = managed_diff.model_dump(mode="json")
     audit = authz_managed_policy_reconcile_audit_payload(
         request=request,
@@ -2438,4 +2467,5 @@ def execute_managed_authz_policy_reconcile(
         changed=changed,
         result=result,
         driver_result=driver_result,
+        schema_v3_write_evidence=schema_v3_write_evidence,
     )
