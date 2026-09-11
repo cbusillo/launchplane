@@ -9,6 +9,7 @@ from typing import cast
 from pydantic import ValidationError
 
 import control_plane.authz_grant_service as control_plane_authz_grant_service
+import control_plane.service_auth as control_plane_service_auth
 from control_plane.authz_grant_service import (
     AuthzManagedPolicyReconcileEnvelope,
     AuthzPolicyConflictError,
@@ -21,7 +22,6 @@ from control_plane.authz_grant_service import (
     preview_authz_candidate_policy,
     summarize_active_authz_policy_record,
     summarize_active_authz_policy_health_record,
-    strict_immutable_github_human_administrator_ids,
 )
 from control_plane.contracts.authz_access_read import AuthzPolicyCandidatePreviewRequest
 from control_plane.contracts.authz_policy_record import (
@@ -40,6 +40,7 @@ from control_plane.service_auth import (
     LocalOperatorPolicyRule,
     TerminalAgentPolicyRule,
     effective_administrator_quorum,
+    strict_immutable_github_human_administrator_ids,
 )
 
 
@@ -398,14 +399,14 @@ class AuthzManagedPolicyServiceTests(unittest.TestCase):
         )
 
         self.assertTrue(
-            control_plane_authz_grant_service.authz_policy_allows_immutable_github_id_administration(
+            control_plane_service_auth.authz_policy_allows_immutable_github_id_administration(
                 policy=policy,
                 github_id=101,
             )
         )
         for github_id in (103, 104, 105, 106, 107, 108, 109, 110):
             self.assertFalse(
-                control_plane_authz_grant_service.authz_policy_allows_immutable_github_id_administration(
+                control_plane_service_auth.authz_policy_allows_immutable_github_id_administration(
                     policy=policy,
                     github_id=github_id,
                 )

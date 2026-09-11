@@ -14,7 +14,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Mutable
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path as FilePath
-from typing import Annotated, Any, Literal, NoReturn, Protocol, Self, cast
+from typing import Annotated, Any, Literal, NoReturn, NotRequired, Protocol, Self, TypedDict, cast
 from uuid import uuid4
 import click
 import fastapi.exceptions as fastapi_exceptions
@@ -236,6 +236,11 @@ from control_plane.contracts.authz_policy_record import (
     LaunchplaneAuthzPolicyRecord,
     authz_policy_sha256,
     build_authz_policy_record_id,
+)
+from control_plane.contracts.authz_policy_write_transition import (
+    AUTHZ_POLICY_SCHEMA_V3_TRANSITION_DENIED,
+    AuthzPolicySchemaV3TransitionDeniedError,
+    AuthzPolicySchemaV3WriteEvidence,
 )
 from control_plane.contracts.durable_operation_authorization import (
     DurableOperationCancellationRequest,
@@ -746,6 +751,7 @@ from control_plane.service_auth import (
     TerminalAgentIdentity,
     TokenVerifier,
     agent_authz_audit,
+    authz_policy_allows_immutable_github_id_administration,
     bearer_identity_from_token,
     clear_authz_evaluation,
     current_authz_evaluation,
@@ -1180,6 +1186,19 @@ _EVERY_CODE_WORK_REQUEST_HEARTBEAT_ROUTE = "/v1/every-code/work-requests/heartbe
 _EVERY_CODE_WORK_REQUEST_RECOVER_STALE_ROUTE = "/v1/every-code/work-requests/recover-stale"
 _AGENT_WRITE_INTENT_MAX_AGE = timedelta(hours=24)
 _DB_ONLY_MUTATION_LEASE = timedelta(minutes=5)
+
+
+class _SchemaV3WriteEvidenceArguments(TypedDict):
+    schema_v3_write_evidence: NotRequired[AuthzPolicySchemaV3WriteEvidence]
+
+
+def _schema_v3_write_evidence_arguments(route_result: Any) -> _SchemaV3WriteEvidenceArguments:
+    evidence = route_result.schema_v3_write_evidence
+    return {"schema_v3_write_evidence": evidence} if evidence is not None else {}
+
+
+def _schema_v3_transition_denial_message(error: AuthzPolicySchemaV3TransitionDeniedError) -> str:
+    return f"Schema-v3 policy transition denied: {error.reason_code}."
 
 
 class ProductProfileWriteStore(Protocol):
@@ -14520,7 +14539,7 @@ def create_launchplane_fastapi_app(
                 database_store=database_store,
                 trace_id=trace_id,
             )
-            if not control_plane_authz_grant_service.authz_policy_allows_immutable_github_id_administration(
+            if not authz_policy_allows_immutable_github_id_administration(
                 policy=active_record.policy,
                 github_id=browser_github_id,
             ):
@@ -14657,6 +14676,13 @@ def create_launchplane_fastapi_app(
                     "Refresh the policy state and retry."
                 ),
             ) from error
+        except AuthzPolicySchemaV3TransitionDeniedError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code=AUTHZ_POLICY_SCHEMA_V3_TRANSITION_DENIED,
+                message=_schema_v3_transition_denial_message(error),
+            ) from error
         except ValueError as error:
             raise _launchplane_http_error(
                 status_code=503,
@@ -14734,6 +14760,7 @@ def create_launchplane_fastapi_app(
                 replacement_record=(
                     route_result.authz_policy_record if route_result.changed else None
                 ),
+                **_schema_v3_write_evidence_arguments(route_result),
                 mutation=mutation,
                 confirmation_consumption=confirmation_consumption,
             )
@@ -14750,6 +14777,13 @@ def create_launchplane_fastapi_app(
                 trace_id=trace_id,
                 code="solo_administration_confirmation_invalid",
                 message="The solo-administration confirmation is expired, consumed, or does not match this apply.",
+            ) from error
+        except AuthzPolicySchemaV3TransitionDeniedError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code=AUTHZ_POLICY_SCHEMA_V3_TRANSITION_DENIED,
+                message=_schema_v3_transition_denial_message(error),
             ) from error
         if write_result.status == "replayed":
             if write_result.idempotency_record is None:
@@ -14828,7 +14862,7 @@ def create_launchplane_fastapi_app(
         identity: GitHubHumanIdentity,
         trace_id: str,
     ) -> None:
-        if not control_plane_authz_grant_service.authz_policy_allows_immutable_github_id_administration(
+        if not authz_policy_allows_immutable_github_id_administration(
             policy=active_record.policy,
             github_id=identity.github_id,
         ):
@@ -14975,6 +15009,13 @@ def create_launchplane_fastapi_app(
                 code="authz_policy_conflict",
                 message=str(error),
             ) from error
+        except AuthzPolicySchemaV3TransitionDeniedError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code=AUTHZ_POLICY_SCHEMA_V3_TRANSITION_DENIED,
+                message=_schema_v3_transition_denial_message(error),
+            ) from error
         except ValueError as error:
             raise _launchplane_http_error(
                 status_code=503,
@@ -15108,21 +15149,30 @@ def create_launchplane_fastapi_app(
             route_result=route_result,
             trace_id=trace_id,
         )
-        write_result = database_store.compare_and_write_authz_policy_record(
-            expected_record=route_result.previous_authz_policy_record,
-            replacement_record=route_result.authz_policy_record,
-            mutation=DbOnlyMutationRequest(
-                scope=activation_scope,
-                route_path=_AUTHZ_POLICY_OPERATION_ACTIVATION_APPLY_ROUTE,
-                idempotency_key=normalized_idempotency_key,
-                request_fingerprint=payload_fingerprint,
-                lease_owner=trace_id,
-                response_status_code=202,
-                response_trace_id=trace_id,
-                response_payload=accepted_response.model_dump(mode="json", exclude_none=True),
-                lease_seconds=int(_DB_ONLY_MUTATION_LEASE.total_seconds()),
-            ),
-        )
+        try:
+            write_result = database_store.compare_and_write_authz_policy_record(
+                expected_record=route_result.previous_authz_policy_record,
+                replacement_record=route_result.authz_policy_record,
+                **_schema_v3_write_evidence_arguments(route_result),
+                mutation=DbOnlyMutationRequest(
+                    scope=activation_scope,
+                    route_path=_AUTHZ_POLICY_OPERATION_ACTIVATION_APPLY_ROUTE,
+                    idempotency_key=normalized_idempotency_key,
+                    request_fingerprint=payload_fingerprint,
+                    lease_owner=trace_id,
+                    response_status_code=202,
+                    response_trace_id=trace_id,
+                    response_payload=accepted_response.model_dump(mode="json", exclude_none=True),
+                    lease_seconds=int(_DB_ONLY_MUTATION_LEASE.total_seconds()),
+                ),
+            )
+        except AuthzPolicySchemaV3TransitionDeniedError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code=AUTHZ_POLICY_SCHEMA_V3_TRANSITION_DENIED,
+                message=_schema_v3_transition_denial_message(error),
+            ) from error
         if write_result.status == "replayed":
             if write_result.idempotency_record is None:
                 raise RuntimeError("Replayed activation write requires evidence.")
@@ -15239,7 +15289,7 @@ def create_launchplane_fastapi_app(
             database_store=database_store,
             trace_id=trace_id,
         )
-        if not control_plane_authz_grant_service.authz_policy_allows_immutable_github_id_administration(
+        if not authz_policy_allows_immutable_github_id_administration(
             policy=active_record.policy,
             github_id=identity.github_id,
         ):
@@ -15319,6 +15369,13 @@ def create_launchplane_fastapi_app(
                 trace_id=trace_id,
                 code=error.code,
                 message=str(error),
+            ) from error
+        except AuthzPolicySchemaV3TransitionDeniedError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code=AUTHZ_POLICY_SCHEMA_V3_TRANSITION_DENIED,
+                message=_schema_v3_transition_denial_message(error),
             ) from error
         except (control_plane_authz_grant_service.AuthzPolicyConflictError, ValueError) as error:
             raise _launchplane_http_error(
@@ -15659,6 +15716,7 @@ def create_launchplane_fastapi_app(
             write_result = database_store.compare_and_write_authz_policy_record(
                 expected_record=route_result.previous_authz_policy_record,
                 replacement_record=route_result.authz_policy_record,
+                **_schema_v3_write_evidence_arguments(route_result),
                 mutation=DbOnlyMutationRequest(
                     scope=recovery_scope,
                     route_path=_AUTHZ_POLICY_RECOVERY_CANDIDATE_APPLY_ROUTE,
@@ -15672,6 +15730,13 @@ def create_launchplane_fastapi_app(
                 ),
                 confirmation_consumption=confirmation_consumption,
             )
+        except AuthzPolicySchemaV3TransitionDeniedError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code=AUTHZ_POLICY_SCHEMA_V3_TRANSITION_DENIED,
+                message=_schema_v3_transition_denial_message(error),
+            ) from error
         except (FileNotFoundError, SoloAdministrationConfirmationConflictError) as error:
             raise _launchplane_http_error(
                 status_code=409,
@@ -15761,7 +15826,7 @@ def create_launchplane_fastapi_app(
             database_store=database_store,
             trace_id=trace_id,
         )
-        if not control_plane_authz_grant_service.authz_policy_allows_immutable_github_id_administration(
+        if not authz_policy_allows_immutable_github_id_administration(
             policy=active_record.policy,
             github_id=identity.github_id,
         ):
@@ -16601,7 +16666,7 @@ def create_launchplane_fastapi_app(
             database_store=database_store,
             trace_id=trace_id,
         )
-        if not control_plane_authz_grant_service.authz_policy_allows_immutable_github_id_administration(
+        if not authz_policy_allows_immutable_github_id_administration(
             policy=active_record.policy,
             github_id=identity.github_id,
         ):
@@ -16654,7 +16719,7 @@ def create_launchplane_fastapi_app(
             or not diff.quorum_satisfied
             or diff.policy_safety_blocker_count
             or diff.operational_readiness_blocked_rule_count
-            or not control_plane_authz_grant_service.authz_policy_allows_immutable_github_id_administration(
+            or not authz_policy_allows_immutable_github_id_administration(
                 policy=candidate_policy,
                 github_id=identity.github_id,
             )
@@ -16756,7 +16821,7 @@ def create_launchplane_fastapi_app(
             record.github_id != identity.github_id
             or record.human_session_id_sha256
             != solo_administration_confirmation_human_session_id_sha256(session.session_id)
-            or not control_plane_authz_grant_service.authz_policy_allows_immutable_github_id_administration(
+            or not authz_policy_allows_immutable_github_id_administration(
                 policy=active_record.policy,
                 github_id=identity.github_id,
             )

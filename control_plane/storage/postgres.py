@@ -13,7 +13,7 @@ from pathlib import Path
 import secrets
 from threading import Lock
 import time
-from typing import Any, Literal, NamedTuple, ParamSpec, Protocol, TypeVar, cast, overload
+from typing import Any, Literal, NamedTuple, NoReturn, ParamSpec, Protocol, TypeVar, cast, overload
 
 from pydantic import BaseModel, TypeAdapter
 from sqlalchemy import (
@@ -70,6 +70,16 @@ from control_plane.contracts.authz_policy_record import (
     LaunchplaneAuthzPolicyRecord,
     build_authz_policy_record_id,
     require_authz_policy_schema_write_activated,
+)
+from control_plane.contracts.authz_policy_write_transition import (
+    AuthzPolicyGitHubActionsCallerBinding,
+    AuthzPolicyImmutableHumanCallerBinding,
+    AuthzPolicySchemaV3MaintenanceEvidence,
+    AuthzPolicySchemaV3OrdinaryEnableEvidence,
+    AuthzPolicySchemaV3TransitionDeniedError,
+    AuthzPolicySchemaV3WriteEvidence,
+    classify_authz_policy_schema_v3_transition,
+    require_authz_policy_source_status,
 )
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.ordinary_agent_provider import (
@@ -296,6 +306,7 @@ from control_plane.contracts.product_owner import (
     ProductOwnerRoutingRecord,
 )
 from control_plane.contracts.privileged_operation import (
+    ManagedAuthzPolicySetHumanEvidence,
     PrivilegedOperationConflictError,
     PrivilegedOperationEventRecord,
     PrivilegedOperationEventWriteStatus,
@@ -440,8 +451,11 @@ from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.ordinary_agent import OrdinaryAgentPullRequest, OrdinaryAgentTarget
 from control_plane.contracts.ordinary_agent_activation import (
     OrdinaryAgentDeliveryActivationEvent,
+    OrdinaryAgentDeliveryActivationExecutionEvidence,
     OrdinaryAgentDeliveryActivationRecord,
     OrdinaryAgentDeliveryActivationReference,
+    OrdinaryAgentDeliveryActivationSetupHumanEvidence,
+    OrdinaryAgentDeliveryActivationSetupRequest,
 )
 from control_plane.contracts.ordinary_agent_snapshot import (
     MAX_ORDINARY_LANDING_ENTRIES,
@@ -565,7 +579,14 @@ from control_plane.contracts.verireel_prod_backup_gate_operation import (
     VeriReelProdBackupGateOperationRecord,
     build_cancelled_verireel_prod_backup_gate_record,
 )
-from control_plane.service_auth import GitHubHumanIdentity, TerminalAgentIdentity
+from control_plane.service_auth import (
+    GitHubActionsIdentity,
+    GitHubHumanIdentity,
+    TerminalAgentIdentity,
+    authz_policy_allows_immutable_github_id_administration,
+    effective_administrator_quorum,
+    strict_immutable_github_human_administrator_ids,
+)
 from control_plane.service_human_auth import HumanSessionStore, LaunchplaneHumanSession
 from control_plane.storage import landing_authority
 from control_plane.storage.filesystem import FilesystemRecordStore
@@ -30494,13 +30515,10 @@ class PostgresRecordStore(HumanSessionStore):
         *,
         expected_record: LaunchplaneAuthzPolicyRecord,
         replacement_record: LaunchplaneAuthzPolicyRecord | None,
+        schema_v3_write_evidence: AuthzPolicySchemaV3WriteEvidence | None = None,
         mutation: DbOnlyMutationRequest | None = None,
         confirmation_consumption: SoloAdministrationConfirmationConsumptionBinding | None = None,
     ) -> AuthzPolicyCompareWriteResult:
-        require_authz_policy_schema_write_activated(
-            expected_record.policy,
-            *(record.policy for record in (replacement_record,) if record is not None),
-        )
         if confirmation_consumption is None and mutation is not None:
             confirmation_consumption = mutation.confirmation_consumption
         if expected_record.status != "active":
@@ -30536,6 +30554,7 @@ class PostgresRecordStore(HumanSessionStore):
                     statement=statement,
                     expected_record=expected_record,
                     replacement_record=replacement_record,
+                    schema_v3_write_evidence=schema_v3_write_evidence,
                     confirmation_consumption=confirmation_consumption,
                 )
 
@@ -30568,6 +30587,7 @@ class PostgresRecordStore(HumanSessionStore):
                     statement=statement,
                     expected_record=expected_record,
                     replacement_record=replacement_record,
+                    schema_v3_write_evidence=schema_v3_write_evidence,
                     reservation_row=reservation_row,
                     mutation_reservation=stored_reservation,
                     mutation=mutation,
@@ -30650,11 +30670,327 @@ class PostgresRecordStore(HumanSessionStore):
                 statement=statement,
                 expected_record=expected_record,
                 replacement_record=replacement_record,
+                schema_v3_write_evidence=schema_v3_write_evidence,
                 confirmation_consumption=confirmation_consumption,
                 reservation_row=reservation_row,
                 mutation_reservation=reclaimed_reservation,
                 mutation=mutation,
             )
+
+    @staticmethod
+    def _deny_authz_policy_schema_v3(reason_code: str) -> NoReturn:
+        raise AuthzPolicySchemaV3TransitionDeniedError(reason_code)
+
+    def _after_authz_policy_schema_v3_lock_step(self, _step_name: str) -> None:
+        return None
+
+    def _locked_authz_transition_operation(
+        self, session: Any, operation_id: str
+    ) -> PrivilegedOperationRecord:
+        statement = select(LaunchplanePrivilegedOperationRow).where(
+            LaunchplanePrivilegedOperationRow.operation_id == operation_id
+        )
+        if self.database_dialect_name == "postgresql":
+            statement = statement.with_for_update()
+        row = session.scalar(statement)
+        if row is None:
+            self._deny_authz_policy_schema_v3("source_operation_missing")
+        assert row is not None
+        try:
+            record = self._read_payload(model_type=PrivilegedOperationRecord, payload=row.payload)
+        except ValueError:
+            self._deny_authz_policy_schema_v3("source_operation_payload_invalid")
+        if (
+            row.operation_id != record.operation_id
+            or row.descriptor_id != record.descriptor_id
+            or row.status != record.status
+            or row.requester_github_id != getattr(record.requested_by, "github_id", 0)
+            or row.created_at != record.created_at
+            or row.updated_at != record.updated_at
+            or row.expires_at != record.expires_at
+        ):
+            self._deny_authz_policy_schema_v3("source_operation_projection_mismatch")
+        return record
+
+    def _require_authz_policy_schema_v3_write_evidence_locked(
+        self,
+        *,
+        session: Any,
+        current_record: LaunchplaneAuthzPolicyRecord,
+        replacement_record: LaunchplaneAuthzPolicyRecord | None,
+        evidence: AuthzPolicySchemaV3WriteEvidence | None,
+        confirmation_consumption: SoloAdministrationConfirmationConsumptionBinding | None = None,
+    ) -> None:
+        # A null replacement is an exact-CAS no-op.  It deliberately performs no
+        # fresh authority decision, including after a schema-3 activation expires.
+        if replacement_record is None:
+            return
+        if (
+            current_record.policy.schema_version < 3
+            and replacement_record.policy.schema_version < 3
+        ):
+            require_authz_policy_schema_write_activated(
+                current_record.policy, replacement_record.policy
+            )
+            return
+        try:
+            transition = classify_authz_policy_schema_v3_transition(
+                current_record.policy, replacement_record.policy
+            )
+        except AuthzPolicySchemaV3TransitionDeniedError:
+            raise
+        if evidence is None:
+            self._deny_authz_policy_schema_v3("write_evidence_missing")
+        assert evidence is not None
+        if (
+            evidence.expected_record_id != current_record.record_id
+            or evidence.expected_revision != current_record.revision
+            or evidence.expected_policy_sha256 != current_record.policy_sha256
+            or evidence.candidate_policy_sha256 != replacement_record.policy_sha256
+        ):
+            self._deny_authz_policy_schema_v3("policy_binding_mismatch")
+
+        caller = evidence.caller
+        if isinstance(caller, AuthzPolicyImmutableHumanCallerBinding):
+            current_allowed = authz_policy_allows_immutable_github_id_administration(
+                policy=current_record.policy, github_id=caller.github_id
+            )
+            candidate_allowed = authz_policy_allows_immutable_github_id_administration(
+                policy=replacement_record.policy, github_id=caller.github_id
+            )
+        elif isinstance(caller, AuthzPolicyGitHubActionsCallerBinding):
+            identity = GitHubActionsIdentity(**caller.model_dump(exclude={"kind"}))
+            current_allowed = current_record.policy.allows(
+                identity=identity,
+                action="authz_policy_grant.write",
+                product="launchplane",
+                context="launchplane",
+            )
+            candidate_allowed = replacement_record.policy.allows(
+                identity=identity,
+                action="authz_policy_grant.write",
+                product="launchplane",
+                context="launchplane",
+            )
+        else:
+            self._deny_authz_policy_schema_v3("caller_binding_unsupported")
+        if not current_allowed:
+            self._deny_authz_policy_schema_v3("caller_not_current_administrator")
+        if not candidate_allowed:
+            self._deny_authz_policy_schema_v3("caller_not_candidate_administrator")
+        candidate_administrators = strict_immutable_github_human_administrator_ids(
+            replacement_record.policy
+        )
+        if not candidate_administrators:
+            self._deny_authz_policy_schema_v3("candidate_strict_human_administrator_missing")
+        if len(candidate_administrators) < effective_administrator_quorum(
+            replacement_record.policy
+        ):
+            self._deny_authz_policy_schema_v3("candidate_administrator_quorum_unsatisfied")
+
+        if transition.kind == "v3_maintenance":
+            if not isinstance(evidence, AuthzPolicySchemaV3MaintenanceEvidence):
+                self._deny_authz_policy_schema_v3("maintenance_evidence_required")
+            return
+        if transition.kind not in {"v2_to_v3_enable", "v3_enable_or_expand"} or not isinstance(
+            evidence, AuthzPolicySchemaV3OrdinaryEnableEvidence
+        ):
+            self._deny_authz_policy_schema_v3("ordinary_enable_evidence_required")
+        assert isinstance(evidence, AuthzPolicySchemaV3OrdinaryEnableEvidence)
+
+        activation_statement = select(LaunchplaneOrdinaryAgentDeliveryActivationRow).where(
+            LaunchplaneOrdinaryAgentDeliveryActivationRow.activation_id == evidence.activation_id
+        )
+        if self.database_dialect_name == "postgresql":
+            activation_statement = activation_statement.with_for_update()
+        activation_row = session.scalar(activation_statement)
+        if activation_row is None:
+            self._deny_authz_policy_schema_v3("activation_missing")
+        assert activation_row is not None
+        try:
+            activation = self._ordinary_agent_delivery_activation_from_row(activation_row)
+        except (ValueError, OrdinaryAgentDeliveryActivationConflictError):
+            self._deny_authz_policy_schema_v3("activation_projection_mismatch")
+        setup_operation = self._locked_authz_transition_operation(
+            session, activation.source_setup_operation_id
+        )
+        policy_operation = self._locked_authz_transition_operation(
+            session, activation.policy_package.policy_operation_id
+        )
+
+        self._lock_repository_inventory_write(
+            session, repository_id=str(activation.scope.target.repository_id)
+        )
+        inventory_statement = (
+            select(LaunchplaneRepositoryInventoryRow)
+            .where(
+                LaunchplaneRepositoryInventoryRow.repository_id
+                == str(activation.scope.target.repository_id)
+            )
+            .order_by(LaunchplaneRepositoryInventoryRow.inventory_revision.desc())
+            .limit(1)
+        )
+        if self.database_dialect_name == "postgresql":
+            inventory_statement = inventory_statement.with_for_update()
+        inventory_row = session.scalar(inventory_statement)
+        if inventory_row is None:
+            self._deny_authz_policy_schema_v3("inventory_missing")
+        assert inventory_row is not None
+        try:
+            inventory = self._read_payload(
+                model_type=RepositoryInventoryRecord, payload=inventory_row.payload
+            )
+        except ValueError:
+            self._deny_authz_policy_schema_v3("inventory_binding_mismatch")
+        if (
+            inventory_row.record_id != inventory.record_id
+            or inventory_row.repository_id != inventory.repository_id
+            or inventory_row.repository_owner_id != inventory.repository_owner_id
+            or inventory_row.repository != inventory.repository
+            or inventory_row.inventory_state != inventory.inventory_state
+            or inventory_row.inventory_revision != inventory.inventory_revision
+            or inventory.record_id != activation.inventory.record_id
+            or inventory.inventory_revision != activation.inventory.revision
+            or inventory.inventory_digest != activation.inventory.inventory_sha256
+            or inventory.inventory_state != activation.inventory.state
+            or int(inventory.repository_id) != activation.scope.target.repository_id
+            or inventory.repository.casefold() != activation.scope.target.repository.casefold()
+        ):
+            self._deny_authz_policy_schema_v3("inventory_binding_mismatch")
+
+        if self.database_dialect_name == "postgresql":
+            versions = tuple(session.scalars(text("select version_num from alembic_version")))
+            if len(versions) != 1 or versions[0] not in RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS:
+                self._deny_authz_policy_schema_v3("database_revision_incompatible")
+
+        # Confirmation lifecycle writes lock this row independently. Acquire it
+        # after every activation/source/inventory lock so expiry is evaluated
+        # against a database timestamp sampled after the final mutable lock.
+        if confirmation_consumption is not None:
+            confirmation_statement = (
+                select(LaunchplaneSoloAdministrationConfirmationRow.confirmation_id)
+                .where(
+                    LaunchplaneSoloAdministrationConfirmationRow.confirmation_id
+                    == confirmation_consumption.confirmation_id
+                )
+                .limit(1)
+            )
+            if self.database_dialect_name == "postgresql":
+                confirmation_statement = confirmation_statement.with_for_update()
+            if session.scalar(confirmation_statement) is None:
+                raise FileNotFoundError(confirmation_consumption.confirmation_id)
+            self._after_authz_policy_schema_v3_lock_step("confirmation")
+        db_now = datetime.fromisoformat(self._database_mutation_timestamp(session))
+
+        expected_key = transition.added_or_changed_ordinary_rule_keys[0].split("\x1f", 1)
+        package = activation.policy_package
+        scope = activation.scope
+        if (
+            activation.activation_id != evidence.activation_id
+            or activation.revision != evidence.activation_revision
+            or activation.activation_sha256 != evidence.activation_sha256
+            or activation.source_setup_operation_id != evidence.source_setup_operation_id
+            or activation.desired_state != "guarded"
+            or activation.effective_state not in {"qualification_only", "guarded"}
+            or activation.revoked_at
+            or activation.superseded_at
+            or db_now >= datetime.fromisoformat(activation.activation_expires_at)
+            or (scope.managed_set_id, scope.managed_rule_id) != tuple(expected_key)
+            or scope.target.repository_id != evidence.repository_id
+            or scope.target.repository.casefold() != evidence.repository.casefold()
+            or scope.target.base_branch != evidence.base_branch
+            or scope.managed_set_id != evidence.managed_set_id
+            or scope.managed_rule_id != evidence.managed_rule_id
+            or package.policy_operation_id != evidence.policy_operation_id
+            or package.request_sha256 != evidence.policy_request_sha256
+            or package.evidence_sha256 != evidence.policy_evidence_sha256
+            or package.plan_sha256 != evidence.policy_plan_sha256
+            or package.desired_set_sha256 != evidence.desired_set_sha256
+            or package.candidate_policy_sha256 != evidence.candidate_policy_sha256
+        ):
+            self._deny_authz_policy_schema_v3("activation_binding_mismatch")
+
+        if (
+            setup_operation.descriptor_id != "ordinary-agent-delivery-activation"
+            or setup_operation.status != "executed"
+            or not isinstance(setup_operation.request, OrdinaryAgentDeliveryActivationSetupRequest)
+            or not isinstance(
+                setup_operation.evidence, OrdinaryAgentDeliveryActivationSetupHumanEvidence
+            )
+            or setup_operation.approval is None
+            or not isinstance(
+                setup_operation.execution, OrdinaryAgentDeliveryActivationExecutionEvidence
+            )
+            or setup_operation.execution.action != "setup"
+            or setup_operation.execution.result_status != "ok"
+            or not setup_operation.execution.changed
+            or setup_operation.execution.reconciliation_required
+        ):
+            self._deny_authz_policy_schema_v3("setup_operation_inadmissible")
+        assert isinstance(setup_operation.request, OrdinaryAgentDeliveryActivationSetupRequest)
+        assert isinstance(
+            setup_operation.evidence, OrdinaryAgentDeliveryActivationSetupHumanEvidence
+        )
+        assert setup_operation.approval is not None
+        assert isinstance(
+            setup_operation.execution, OrdinaryAgentDeliveryActivationExecutionEvidence
+        )
+        setup_evidence = setup_operation.evidence
+        setup_request = setup_operation.request
+        if (
+            canonical_json_sha256(setup_operation.approval.model_dump(mode="json"))
+            != activation.source_setup_approval_sha256
+            or setup_evidence.scope != activation.scope
+            or setup_evidence.policy_package != activation.policy_package
+            or setup_evidence.inventory != activation.inventory
+            or setup_evidence.activation_expires_at != activation.activation_expires_at
+            or setup_evidence.predecessor != activation.predecessor
+            or setup_request.policy_operation_id != activation.policy_package.policy_operation_id
+            or setup_request.repository_inventory_record_id != activation.inventory.record_id
+            or setup_request.activation_expires_at != activation.activation_expires_at
+            or setup_request.predecessor != activation.predecessor
+        ):
+            self._deny_authz_policy_schema_v3("setup_operation_binding_mismatch")
+        try:
+            installed, installed_event = self._ordinary_agent_delivery_activation_operation_outcome(
+                session, activation.source_setup_operation_id
+            )
+        except (FileNotFoundError, ValueError, OrdinaryAgentDeliveryActivationConflictError):
+            self._deny_authz_policy_schema_v3("installed_outcome_invalid")
+        execution = setup_operation.execution
+        if (
+            installed_event.action != "installed"
+            or installed_event.sequence != 1
+            or execution.activation_id != installed.activation_id
+            or execution.activation_revision != installed.revision
+            or execution.activation_sha256 != installed.activation_sha256
+            or execution.desired_state != installed.desired_state
+            or execution.effective_state != installed.effective_state
+            or execution.source_operation_id != activation.source_setup_operation_id
+        ):
+            self._deny_authz_policy_schema_v3("installed_outcome_mismatch")
+
+        try:
+            require_authz_policy_source_status(
+                status=policy_operation.status,
+                expires_at=policy_operation.expires_at,
+                observed_at=db_now,
+            )
+        except AuthzPolicySchemaV3TransitionDeniedError:
+            raise
+        if (
+            policy_operation.descriptor_id != "managed-authz-policy-set"
+            or not isinstance(policy_operation.evidence, ManagedAuthzPolicySetHumanEvidence)
+            or canonical_json_sha256(policy_operation.request.model_dump(mode="json"))
+            != package.request_sha256
+            or canonical_json_sha256(policy_operation.evidence.model_dump(mode="json"))
+            != package.evidence_sha256
+            or policy_operation.evidence.plan_digest != package.plan_sha256
+            or policy_operation.evidence.diff.desired_set_sha256 != package.desired_set_sha256
+            or policy_operation.evidence.diff.desired_policy_sha256
+            != package.candidate_policy_sha256
+        ):
+            self._deny_authz_policy_schema_v3("policy_source_binding_mismatch")
 
     def _compare_and_write_authz_policy_locked(
         self,
@@ -30663,6 +30999,7 @@ class PostgresRecordStore(HumanSessionStore):
         statement: Any,
         expected_record: LaunchplaneAuthzPolicyRecord,
         replacement_record: LaunchplaneAuthzPolicyRecord | None,
+        schema_v3_write_evidence: AuthzPolicySchemaV3WriteEvidence | None = None,
         reservation_row: LaunchplaneIdempotencyRow | None = None,
         mutation_reservation: LaunchplaneIdempotencyRecord | None = None,
         mutation: DbOnlyMutationRequest | None = None,
@@ -30691,6 +31028,14 @@ class PostgresRecordStore(HumanSessionStore):
                 session.delete(reservation_row)
                 session.commit()
             return AuthzPolicyCompareWriteResult(status="stale", current_record=current_record)
+
+        self._require_authz_policy_schema_v3_write_evidence_locked(
+            session=session,
+            current_record=current_record,
+            replacement_record=replacement_record,
+            evidence=schema_v3_write_evidence,
+            confirmation_consumption=confirmation_consumption,
+        )
 
         if confirmation_consumption is not None:
             if replacement_record is None:

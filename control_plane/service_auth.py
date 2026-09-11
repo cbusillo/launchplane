@@ -1247,6 +1247,39 @@ class LaunchplaneAuthzPolicy(BaseModel):
         return None
 
 
+def strict_immutable_github_human_administrator_ids(
+    policy: LaunchplaneAuthzPolicy,
+) -> frozenset[int]:
+    return frozenset(
+        github_id
+        for rule in policy.github_humans
+        if is_strict_immutable_github_human_administrator_rule(rule)
+        for github_id in rule.github_ids
+    )
+
+
+def is_strict_immutable_github_human_administrator_rule(
+    rule: GitHubHumanPolicyRule,
+) -> bool:
+    return bool(
+        rule.github_ids
+        and "admin" in rule.roles
+        and "authz_policy_grant.write" in rule.actions
+        and rule.products == ("launchplane",)
+        and rule.contexts == ("launchplane",)
+        and not rule.logins
+        and not rule.organizations
+        and not rule.teams
+        and not rule.instances
+    )
+
+
+def authz_policy_allows_immutable_github_id_administration(
+    *, policy: LaunchplaneAuthzPolicy, github_id: int
+) -> bool:
+    return github_id > 0 and github_id in strict_immutable_github_human_administrator_ids(policy)
+
+
 def matching_github_human_policy_rules(
     *,
     policy: LaunchplaneAuthzPolicy,
