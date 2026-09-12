@@ -11,6 +11,7 @@ import {
   readPrivilegedOperationReview,
   readPrivilegedOperationRawDetail,
   revokePrivilegedOperation,
+  type AuthorizationCandidateId,
   type PrivilegedOperationDescriptorId,
   type PrivilegedOperationListResponse,
   type PrivilegedOperationSemanticReview,
@@ -52,7 +53,11 @@ function DefaultPrivilegedOperationsRoute({
 }: {
   fixtureMode: DevFixtureMode;
 }) {
-  const operationId = new URLSearchParams(window.location.search).get("operation_id");
+  const query = new URLSearchParams(window.location.search);
+  const operationId = query.get("operation_id");
+  const reviewFixture = query.get("review") === "product-evidence"
+    ? "product-evidence"
+    : "default";
   const [descriptorId, setDescriptorId] =
     useState<PrivilegedOperationDescriptorId>("managed-secret-reencryption");
   const loader = useCallback(
@@ -62,7 +67,7 @@ function DefaultPrivilegedOperationsRoute({
     ): Promise<PrivilegedOperationListResponse> => {
       if (fixtureMode) {
         await fixtureDelay(signal);
-        return privilegedOperationFixture(fixtureMode, descriptorId);
+        return privilegedOperationFixture(fixtureMode, descriptorId, reviewFixture);
       }
       if (operationId !== null) {
         const result = await readPrivilegedOperationReview(operationId, signal);
@@ -75,11 +80,11 @@ function DefaultPrivilegedOperationsRoute({
       }
       return readPrivilegedOperationPlans(signal, descriptorId);
     },
-    [descriptorId, fixtureMode, operationId],
+    [descriptorId, fixtureMode, operationId, reviewFixture],
   );
   const resource = useEngineeringResource(
     loader,
-    `privileged-operations:${operationId ?? descriptorId}:${fixtureMode}`,
+    `privileged-operations:${operationId ?? descriptorId}:${fixtureMode}:${reviewFixture}`,
   );
 
   return (
@@ -175,29 +180,82 @@ function DefaultPrivilegedOperationsRoute({
 }
 
 function AccessPolicyComposer({ refresh }: { refresh: () => void }) {
+  return (
+    <div className="privileged-operation-access-policy-options">
+      <AuthorizationCandidateCard
+        candidateId="ordinary-agent-delivery-administration"
+        headingId="ordinary-agent-delivery-administration-heading"
+        title="Prepare delivery administrator access"
+        description="Prepare access to administer ordinary-agent delivery, or prepare removal of access that was already installed. This creates a plan for review; it does not start delivery. Installed access remains until a removal plan is approved and applied."
+        addLabel="Prepare setup access"
+        removeLabel="Prepare removal"
+        alreadyAddedMessage="Setup access is already installed."
+        alreadyRemovedMessage="Administrator access is already removed."
+        refresh={refresh}
+        warning="Stop ordinary-agent delivery before preparing removal. The service will refuse removal while an active delivery could lose its stop controls."
+      />
+      <AuthorizationCandidateCard
+        candidateId="administrator-product-evidence-read"
+        headingId="administrator-product-evidence-read-heading"
+        title="Prepare project evidence access"
+        description="Prepare standing read access for this administrator to project and environment evidence across all current and future projects. If installed, access remains until a separately governed removal. This creates a plan for review; it does not approve or apply the access."
+        addLabel="Prepare evidence access"
+        removeLabel="Prepare evidence removal"
+        alreadyAddedMessage="Project evidence access is already installed."
+        alreadyRemovedMessage="Project evidence access is already removed."
+        refresh={refresh}
+      />
+    </div>
+  );
+}
+
+function AuthorizationCandidateCard({
+  addLabel,
+  alreadyAddedMessage,
+  alreadyRemovedMessage,
+  candidateId,
+  description,
+  headingId,
+  refresh,
+  removeLabel,
+  title,
+  warning,
+}: {
+  addLabel: string;
+  alreadyAddedMessage: string;
+  alreadyRemovedMessage: string;
+  candidateId: AuthorizationCandidateId;
+  description: string;
+  headingId: string;
+  refresh: () => void;
+  removeLabel: string;
+  title: string;
+  warning?: string;
+}) {
   const [pendingIntent, setPendingIntent] =
     useState<AuthorizationCandidateIntent | null>(null);
   const [message, setMessage] = useState("");
   const [traceId, setTraceId] = useState("");
-  const retryKeys =
-    useRef<Partial<Record<AuthorizationCandidateIntent, string>>>({});
+  const retryKeys = useRef<Partial<Record<string, string>>>({});
 
   async function prepare(intent: AuthorizationCandidateIntent) {
     setPendingIntent(intent);
     setMessage("");
     setTraceId("");
+    const retryKey = `${candidateId}:${intent}`;
     const sourceEventId =
-      retryKeys.current[intent] ??
-      `ui:authorization-candidate:${intent}:${crypto.randomUUID()}`;
-    retryKeys.current[intent] = sourceEventId;
+      retryKeys.current[retryKey] ??
+      `ui:authorization-candidate:${candidateId}:${intent}:${crypto.randomUUID()}`;
+    retryKeys.current[retryKey] = sourceEventId;
     try {
       const response = await prepareAuthorizationCandidate(
+        candidateId,
         intent,
         sourceEventId,
       );
       setTraceId(response.trace_id);
       if (response.state === "planned" && response.operation_id) {
-        delete retryKeys.current[intent];
+        delete retryKeys.current[retryKey];
         window.location.assign(
           `/ui/engineering/privileged-operations?operation_id=${encodeURIComponent(response.operation_id)}`,
         );
@@ -208,12 +266,8 @@ function AccessPolicyComposer({ refresh }: { refresh: () => void }) {
           "The plan was prepared, but its review is not available yet.",
         );
       } else {
-        delete retryKeys.current[intent];
-        setMessage(
-          intent === "add"
-            ? "Setup access is already installed."
-            : "Administrator access is already removed.",
-        );
+        delete retryKeys.current[retryKey];
+        setMessage(intent === "add" ? alreadyAddedMessage : alreadyRemovedMessage);
         refresh();
       }
     } catch (error) {
@@ -229,27 +283,23 @@ function AccessPolicyComposer({ refresh }: { refresh: () => void }) {
   }
 
   return (
-    <section className="privileged-operation-card">
+    <section
+      aria-labelledby={headingId}
+      className="privileged-operation-card"
+    >
       <header>
         <div>
           <span className="engineering-kicker">Access policy</span>
-          <h2>Prepare delivery administrator access</h2>
-          <p>
-            Prepare access to administer ordinary-agent delivery, or prepare
-            removal of access that was already installed. This creates a plan
-            for review; it does not start delivery. Installed access remains
-            until a removal plan is approved and applied.
-          </p>
+          <h2 id={headingId}>{title}</h2>
+          <p>{description}</p>
         </div>
       </header>
-      <div className="privileged-operation-warning" role="note">
-        <ShieldAlert size={18} aria-hidden="true" />
-        <span>
-          Stop ordinary-agent delivery before preparing removal. The service
-          will refuse removal while an active delivery could lose its stop
-          controls.
-        </span>
-      </div>
+      {warning ? (
+        <div className="privileged-operation-warning" role="note">
+          <ShieldAlert size={18} aria-hidden="true" />
+          <span>{warning}</span>
+        </div>
+      ) : null}
       <div className="privileged-operation-actions activation-plan-actions">
         <button
           disabled={pendingIntent !== null}
@@ -258,7 +308,7 @@ function AccessPolicyComposer({ refresh }: { refresh: () => void }) {
         >
           {pendingIntent === "add"
             ? "Preparing access…"
-            : "Prepare setup access"}
+            : addLabel}
         </button>
         <button
           disabled={pendingIntent !== null}
@@ -267,7 +317,7 @@ function AccessPolicyComposer({ refresh }: { refresh: () => void }) {
         >
           {pendingIntent === "remove"
             ? "Preparing removal…"
-            : "Prepare removal"}
+            : removeLabel}
         </button>
       </div>
       {message ? (
@@ -576,6 +626,8 @@ function PrivilegedOperationPlanCard({
     managed_merge_train_policy_import: "Managed merge-train policy",
     ordinary_agent_delivery_activation: "Agent delivery",
   }[review.operation_class];
+  const isProductEvidenceReview =
+    review.title === "Review administrator product evidence access";
 
   return (
     <article className="privileged-operation-card">
@@ -608,14 +660,16 @@ function PrivilegedOperationPlanCard({
         </div>
       ) : null}
 
-      <dl className="privileged-operation-metrics">
-        {review.change.metrics.slice(0, 8).map((metric) => (
-          <div key={metric.kind}>
-            <dt>{metric.label}</dt>
-            <dd>{metric.value}</dd>
-          </div>
-        ))}
-      </dl>
+      {isProductEvidenceReview ? null : (
+        <dl className="privileged-operation-metrics">
+          {review.change.metrics.slice(0, 8).map((metric) => (
+            <div key={metric.kind}>
+              <dt>{metric.label}</dt>
+              <dd>{metric.value}</dd>
+            </div>
+          ))}
+        </dl>
+      )}
 
       <p>{review.change.summary}</p>
 
@@ -644,6 +698,16 @@ function PrivilegedOperationPlanCard({
 
       <details className="privileged-operation-policy-review">
         <summary>Technical details</summary>
+        {isProductEvidenceReview ? (
+          <dl className="privileged-operation-metrics">
+            {review.change.metrics.slice(0, 8).map((metric) => (
+              <div key={metric.kind}>
+                <dt>{metric.label}</dt>
+                <dd>{metric.value}</dd>
+              </div>
+            ))}
+          </dl>
+        ) : null}
         <dl className="privileged-operation-details">
           {review.evidence.digests.map((digest) => (
             <div key={`${digest.kind}:${digest.sha256}`}>
@@ -740,6 +804,7 @@ async function fixtureDelay(signal: AbortSignal): Promise<void> {
 function privilegedOperationFixture(
   fixtureMode: Exclude<DevFixtureMode, "">,
   descriptorId: PrivilegedOperationDescriptorId,
+  reviewFixture: "default" | "product-evidence" = "default",
 ): PrivilegedOperationListResponse {
   if (fixtureMode === "error") {
     throw new LaunchplaneApiError(
@@ -769,7 +834,11 @@ function privilegedOperationFixture(
     total: 1,
     reviews:
       descriptorId === "managed-authz-policy-set"
-        ? [policyFixtureReview()]
+        ? [
+            reviewFixture === "product-evidence"
+              ? productEvidenceFixtureReview()
+              : policyFixtureReview(),
+          ]
         : descriptorId === "managed-merge-train-policy-import"
           ? [mergeTrainPolicyFixtureReview()]
           : descriptorId === "ordinary-agent-delivery-activation"
@@ -880,6 +949,32 @@ function policyFixtureReview(): PrivilegedOperationSemanticReview {
       "Rollback is bounded by authorization policy CAS and record digest evidence.",
     metrics: [
       { kind: "policy_rules_added", label: "Added", value: 1 },
+      { kind: "policy_rules_updated", label: "Updated", value: 0 },
+      { kind: "policy_rules_removed", label: "Removed", value: 0 },
+      { kind: "policy_safety_blockers", label: "Safety blockers", value: 0 },
+    ],
+  });
+}
+
+function productEvidenceFixtureReview(): PrivilegedOperationSemanticReview {
+  return semanticReviewFixture({
+    operationClass: "managed_authz_policy_set",
+    descriptorId: "managed-authz-policy-set",
+    safetyClass: "policy_admin",
+    title: "Review administrator product evidence access",
+    requestedByKind: "github_human",
+    createdAt: "2026-09-03T10:01:00+00:00",
+    expiresAt: "2026-09-03T23:01:00+00:00",
+    scope: "authorization_policy",
+    blastRadius:
+      "Project-level and environment-level product evidence for all current and future projects.",
+    rollbackClass: "policy_cas",
+    rollback:
+      "Rollback is bounded by authorization policy CAS and record digest evidence.",
+    summary:
+      "Allow the requesting administrator to read project-level and environment-level product evidence for all current and future projects. This read-only access is standing until a separately governed removal; the Approve-by deadline only bounds this plan. It grants no writes or agent authority.",
+    metrics: [
+      { kind: "policy_rules_added", label: "Added", value: 2 },
       { kind: "policy_rules_updated", label: "Updated", value: 0 },
       { kind: "policy_rules_removed", label: "Removed", value: 0 },
       { kind: "policy_safety_blockers", label: "Safety blockers", value: 0 },

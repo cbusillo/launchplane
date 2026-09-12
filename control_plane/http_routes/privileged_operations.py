@@ -39,9 +39,10 @@ from control_plane.contracts.ordinary_agent_delivery_authorization_inputs import
     OrdinaryAgentDeliveryAuthorizationCandidateInputsResponse,
 )
 from control_plane.authz_candidate_preparation import (
+    AuthorizationCandidateId,
     AuthorizationCandidatePreparationError,
-    compile_ordinary_agent_delivery_administration_candidate,
-    is_ordinary_agent_delivery_administration_request,
+    authorization_candidate_request_matches,
+    compile_authorization_candidate,
 )
 from control_plane.durable_operation_authorization import (
     ManagedRuleAuthorizationError,
@@ -187,7 +188,7 @@ class OrdinaryAgentDeliveryActivationPlanEnvelope(BaseModel):
 class AuthorizationCandidatePrepareEnvelope(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    candidate_id: Literal["ordinary-agent-delivery-administration"]
+    candidate_id: AuthorizationCandidateId
     intent: Literal["add", "remove"]
     source_event_id: str = Field(min_length=1, max_length=128)
 
@@ -1199,18 +1200,16 @@ def register_privileged_operation_routes(
             except FileNotFoundError:
                 replay = None
             if replay is not None:
-                expected_active = envelope.intent == "add"
                 request = replay.request
                 if (
                     replay.requested_by != actor
                     or replay.source_event_id != envelope.source_event_id
                     or not isinstance(request, ManagedAuthzPolicySetProposalInput)
-                    or not is_ordinary_agent_delivery_administration_request(request)
-                    or bool(request.desired_policy.github_humans) != expected_active
-                    or (
-                        expected_active
-                        and request.desired_policy.github_humans[0].github_ids
-                        != (identity.github_id,)
+                    or not authorization_candidate_request_matches(
+                        candidate_id=envelope.candidate_id,
+                        request=request,
+                        github_id=identity.github_id,
+                        intent=envelope.intent,
                     )
                 ):
                     raise PrivilegedOperationConflictError(
@@ -1221,7 +1220,8 @@ def register_privileged_operation_routes(
                     state="planned",
                     operation_id=operation_id,
                 )
-            state, candidate = compile_ordinary_agent_delivery_administration_candidate(
+            state, candidate = compile_authorization_candidate(
+                candidate_id=envelope.candidate_id,
                 current_policy=policy_record.policy,
                 github_id=identity.github_id,
                 intent=envelope.intent,
@@ -1267,7 +1267,13 @@ def register_privileged_operation_routes(
                     "Agent delivery activation history exceeds the safe preparation window.",
                 ),
             }
-            code, message = preparation_errors[error.reason_code]
+            code, message = preparation_errors.get(
+                error.reason_code,
+                (
+                    "authorization_candidate_preparation_conflict",
+                    "The authorization candidate cannot be prepared from current state.",
+                ),
+            )
             raise dependencies.common.http_error(
                 status_code=409,
                 trace_id=trace_id,

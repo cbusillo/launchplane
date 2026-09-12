@@ -1655,6 +1655,12 @@
   gap: 1rem;
 }
 
+.privileged-operation-access-policy-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+}
+
 .privileged-operation-toolbar {
   display: flex;
   align-items: center;
@@ -2086,6 +2092,10 @@
 }
 
 @media (max-width: 760px) {
+  .privileged-operation-access-policy-options {
+    grid-template-columns: 1fr;
+  }
+
   .privileged-operation-toolbar {
     align-items: stretch;
     flex-direction: column;
