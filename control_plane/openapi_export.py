@@ -203,6 +203,9 @@ UI_OPENAPI_READ_OPERATIONS: dict[str, str] = {
     "/v1/privileged-operations/ordinary-agent-delivery-activation/options": (
         "read_ordinary_agent_delivery_activation_options"
     ),
+    "/v1/privileged-operations/authorization-candidates/ordinary-agent-delivery/inputs": (
+        "read_ordinary_agent_delivery_authorization_candidate_inputs"
+    ),
 }
 
 

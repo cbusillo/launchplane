@@ -1990,6 +1990,134 @@ test.describe("operator journeys", () => {
     diagnostics.assertClean();
   });
 
+  test("agent delivery setup prerequisites load only after the explicit read", async ({
+    page,
+  }, testInfo) => {
+    const requestedMethods: string[] = [];
+    const endpoint =
+      "/v1/privileged-operations/authorization-candidates/ordinary-agent-delivery/inputs";
+    await page.route(`**${endpoint}`, async (route) => {
+      requestedMethods.push(route.request().method());
+      await route.fulfill({
+        json: {
+          status: "ok",
+          schema_version: 1,
+          trace_id: "browser-preparation-inputs",
+          observed_at: "2026-09-12T14:32:00Z",
+          authorization_policy: {
+            record_id: "authorization-policy-r7",
+            revision: 7,
+            schema_version: 2,
+            policy_sha256: "1".repeat(64),
+          },
+          inventory_state: "complete",
+          merge_policy_state: "available",
+          merge_policy: {
+            record_id: "merge-train-policy-r4",
+            policy_sha256: "2".repeat(64),
+            updated_at: "2026-09-12T14:25:00Z",
+          },
+          repositories: [
+            {
+              record_id: "repository-inventory-1001-r3",
+              repository_id: "1001",
+              repository: "example/launchplane",
+              inventory_revision: 3,
+              inventory_sha256: "3".repeat(64),
+              recorded_at: "2026-09-12T14:30:00Z",
+              configured_branches: ["main", "release"],
+            },
+            {
+              record_id: "repository-inventory-1002-r1",
+              repository_id: "1002",
+              repository: "example/without-branches",
+              inventory_revision: 1,
+              inventory_sha256: "4".repeat(64),
+              recorded_at: "2026-09-12T14:29:00Z",
+              configured_branches: [],
+            },
+          ],
+          diagnostics: [],
+        },
+      });
+    });
+    const mutationRequests: string[] = [];
+    page.on("request", (request) => {
+      if (request.method() !== "GET") mutationRequests.push(request.url());
+    });
+    const diagnostics = monitorBrowser(page);
+
+    await page.goto(
+      "/ui/engineering/privileged-operations?fixture=products&preparation=api",
+    );
+    await page.getByRole("button", { name: "Agent delivery" }).click();
+    const preparation = page.getByRole("region", {
+      name: "Check current configuration",
+    });
+    await expect(
+      preparation.getByRole("button", { name: "Check setup prerequisites" }),
+    ).toBeVisible();
+    await expect(preparation.locator("input, select, textarea")).toHaveCount(0);
+    expect(requestedMethods).toEqual([]);
+
+    await preparation
+      .getByRole("button", { name: "Check setup prerequisites" })
+      .click();
+    await expect(page.getByText("example/launchplane", { exact: true })).toBeVisible();
+    await expect(page.getByText("main", { exact: true })).toBeVisible();
+    await expect(page.getByText("release", { exact: true })).toBeVisible();
+    await expect(page.getByText("Missing branch configuration")).toBeVisible();
+    await expect(page.getByText("Configured", { exact: true })).toHaveCount(2);
+    await expect(
+      page.getByText(
+        "This check does not inspect agent registration or preview readiness.",
+      ),
+    ).toBeVisible();
+    expect(requestedMethods).toEqual(["GET"]);
+    expect(mutationRequests).toEqual([]);
+    await expect(page.getByText("browser-preparation-inputs")).toBeHidden();
+    await preparation.getByText("Technical provenance").click();
+    await expect(preparation.getByText("Trace ID")).toBeVisible();
+    await expect(page.getByText("browser-preparation-inputs")).toBeVisible();
+    await assertDocumentBasics(page);
+    await captureScreenshot(page, testInfo, "agent-delivery-preparation-inputs");
+    diagnostics.assertClean();
+  });
+
+  test("agent delivery setup prerequisites distinguish incomplete read states", async ({
+    page,
+  }) => {
+    const diagnostics = monitorBrowser(page);
+
+    for (const state of ["empty", "missing", "truncated", "denied"] as const) {
+      const fixture = state === "empty" ? "empty" : "products";
+      await page.goto(
+        `/ui/engineering/privileged-operations?fixture=${fixture}&preparation=${state}`,
+      );
+      await page.getByRole("button", { name: "Agent delivery" }).click();
+      if (state === "empty") {
+        await expect(page.getByText("No eligible activation choice")).toBeVisible();
+      }
+      await page
+        .getByRole("button", { name: "Check setup prerequisites" })
+        .click();
+      if (state === "empty") {
+        await expect(page.getByText("No configured repositories were returned.")).toBeVisible();
+      } else if (state === "missing") {
+        await expect(page.getByText("The merge policy is missing.")).toBeVisible();
+        await expect(page.getByText("Branch configuration not verified")).toBeVisible();
+        await expect(page.getByText("Missing branch configuration")).toHaveCount(0);
+      } else if (state === "truncated") {
+        await expect(page.getByText("The repository inventory is truncated.", { exact: false })).toBeVisible();
+        await expect(page.getByText("The merge policy is truncated.")).toBeVisible();
+      } else {
+        await expect(page.getByText("Setup-prerequisite access denied")).toBeVisible();
+      }
+      await assertDocumentBasics(page);
+    }
+    diagnostics.assertClean();
+  });
+
   test("agent delivery setup submits the selected server expiry", async ({ page }) => {
     let activationPlanRequest: {
       request?: { activation_expires_at?: string };

@@ -1076,6 +1076,80 @@
         "title": "AuthSessionResponse",
         "type": "object"
       },
+      "AuthorizationCandidateInputDiagnostic": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "title": "AuthorizationCandidateInputDiagnostic",
+        "type": "object"
+      },
+      "AuthorizationCandidateMergePolicyProvenance": {
+        "additionalProperties": false,
+        "properties": {
+          "policy_sha256": {
+            "title": "Policy Sha256",
+            "type": "string"
+          },
+          "record_id": {
+            "title": "Record Id",
+            "type": "string"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "record_id",
+          "policy_sha256",
+          "updated_at"
+        ],
+        "title": "AuthorizationCandidateMergePolicyProvenance",
+        "type": "object"
+      },
+      "AuthorizationCandidatePolicyProvenance": {
+        "additionalProperties": false,
+        "properties": {
+          "policy_sha256": {
+            "title": "Policy Sha256",
+            "type": "string"
+          },
+          "record_id": {
+            "title": "Record Id",
+            "type": "string"
+          },
+          "revision": {
+            "minimum": 1.0,
+            "title": "Revision",
+            "type": "integer"
+          },
+          "schema_version": {
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "record_id",
+          "revision",
+          "schema_version",
+          "policy_sha256"
+        ],
+        "title": "AuthorizationCandidatePolicyProvenance",
+        "type": "object"
+      },
       "AuthorizationCandidatePrepareEnvelope": {
         "additionalProperties": false,
         "properties": {
@@ -18986,6 +19060,139 @@
           "reason"
         ],
         "title": "OrdinaryAgentDeliveryActivationSetupRequest",
+        "type": "object"
+      },
+      "OrdinaryAgentDeliveryAuthorizationCandidateInputsResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "authorization_policy": {
+            "$ref": "#/components/schemas/AuthorizationCandidatePolicyProvenance"
+          },
+          "diagnostics": {
+            "items": {
+              "$ref": "#/components/schemas/AuthorizationCandidateInputDiagnostic"
+            },
+            "title": "Diagnostics",
+            "type": "array"
+          },
+          "inventory_state": {
+            "enum": [
+              "complete",
+              "unavailable",
+              "truncated",
+              "ambiguous"
+            ],
+            "title": "Inventory State",
+            "type": "string"
+          },
+          "merge_policy": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AuthorizationCandidateMergePolicyProvenance"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "merge_policy_state": {
+            "enum": [
+              "available",
+              "missing",
+              "ambiguous",
+              "unavailable",
+              "truncated"
+            ],
+            "title": "Merge Policy State",
+            "type": "string"
+          },
+          "observed_at": {
+            "title": "Observed At",
+            "type": "string"
+          },
+          "repositories": {
+            "items": {
+              "$ref": "#/components/schemas/OrdinaryAgentDeliveryAuthorizationCandidateRepository"
+            },
+            "title": "Repositories",
+            "type": "array"
+          },
+          "schema_version": {
+            "const": 1,
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "observed_at",
+          "authorization_policy",
+          "inventory_state",
+          "merge_policy_state",
+          "merge_policy",
+          "repositories",
+          "diagnostics"
+        ],
+        "title": "OrdinaryAgentDeliveryAuthorizationCandidateInputsResponse",
+        "type": "object"
+      },
+      "OrdinaryAgentDeliveryAuthorizationCandidateRepository": {
+        "additionalProperties": false,
+        "properties": {
+          "configured_branches": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Configured Branches",
+            "type": "array"
+          },
+          "inventory_revision": {
+            "minimum": 1.0,
+            "title": "Inventory Revision",
+            "type": "integer"
+          },
+          "inventory_sha256": {
+            "title": "Inventory Sha256",
+            "type": "string"
+          },
+          "record_id": {
+            "title": "Record Id",
+            "type": "string"
+          },
+          "recorded_at": {
+            "title": "Recorded At",
+            "type": "string"
+          },
+          "repository": {
+            "title": "Repository",
+            "type": "string"
+          },
+          "repository_id": {
+            "title": "Repository Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "record_id",
+          "repository_id",
+          "repository",
+          "inventory_revision",
+          "inventory_sha256",
+          "recorded_at"
+        ],
+        "title": "OrdinaryAgentDeliveryAuthorizationCandidateRepository",
         "type": "object"
       },
       "OrdinaryAgentDeliveryBinding": {
@@ -70917,6 +71124,79 @@
         "summary": "Read one private health endpoint record"
       }
     },
+    "/v1/privileged-operations/authorization-candidates/ordinary-agent-delivery/inputs": {
+      "get": {
+        "operationId": "read_ordinary_agent_delivery_authorization_candidate_inputs",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrdinaryAgentDeliveryAuthorizationCandidateInputsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read ordinary-agent delivery authorization candidate inputs",
+        "tags": [
+          "privileged-operations"
+        ]
+      }
+    },
     "/v1/privileged-operations/authorization-candidates/prepare": {
       "post": {
         "operationId": "prepare_authorization_candidate",
@@ -82700,6 +82980,7 @@
     "/v1/owner-acceptance/owner-evaluation": "evaluate_owner_product_review",
     "/v1/owner-acceptance/queue": "list_owner_acceptance_queue",
     "/v1/previews/readiness": "read_preview_readiness",
+    "/v1/privileged-operations/authorization-candidates/ordinary-agent-delivery/inputs": "read_ordinary_agent_delivery_authorization_candidate_inputs",
     "/v1/privileged-operations/ordinary-agent-delivery-activation/options": "read_ordinary_agent_delivery_activation_options",
     "/v1/privileged-operations/plans": "list_human_privileged_operations",
     "/v1/privileged-operations/plans/{operation_id}": "read_human_privileged_operation",

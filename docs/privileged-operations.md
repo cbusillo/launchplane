@@ -16,6 +16,14 @@ authorization plan for review. They do not approve or apply it. See
 [Preparing Agent Delivery Administration](authorization-authority.md#preparing-agent-delivery-administration)
 for eligibility, collision, removal, and production-activation boundaries.
 
+The Agent delivery workbench also offers a read-only preparation-input check at
+`GET /v1/privileged-operations/authorization-candidates/ordinary-agent-delivery/inputs`.
+It uses the existing strict policy-administrator and managed-proposal authority
+to resolve current repository and configured-branch metadata on the server.
+It creates no plan or access and does not inspect agent registration or preview
+readiness. See [Inspecting Pilot Preparation Inputs](authorization-authority.md#inspecting-pilot-preparation-inputs)
+for current-record selection and incomplete-read behavior.
+
 ## Approval And Execution Boundary
 
 Planning remains typed and dry-run-only. Phase 2 adds a separate finite human

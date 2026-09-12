@@ -158,6 +158,24 @@ export type AuthSessionResponse = {
     trace_id: string;
 };
 
+export type AuthorizationCandidateInputDiagnostic = {
+    code: string;
+    message: string;
+};
+
+export type AuthorizationCandidateMergePolicyProvenance = {
+    policy_sha256: string;
+    record_id: string;
+    updated_at: string;
+};
+
+export type AuthorizationCandidatePolicyProvenance = {
+    policy_sha256: string;
+    record_id: string;
+    revision: number;
+    schema_version: number;
+};
+
 export type AuthorizationCandidatePrepareEnvelope = {
     candidate_id: 'ordinary-agent-delivery-administration';
     intent: 'add' | 'remove';
@@ -1508,6 +1526,29 @@ export type OrdinaryAgentDeliveryActivationSetupRequest = {
     reason: string;
     repository_inventory_record_id: string;
     schema_version: 1;
+};
+
+export type OrdinaryAgentDeliveryAuthorizationCandidateInputsResponse = {
+    authorization_policy: AuthorizationCandidatePolicyProvenance;
+    diagnostics: Array<AuthorizationCandidateInputDiagnostic>;
+    inventory_state: 'complete' | 'unavailable' | 'truncated' | 'ambiguous';
+    merge_policy: AuthorizationCandidateMergePolicyProvenance | null;
+    merge_policy_state: 'available' | 'missing' | 'ambiguous' | 'unavailable' | 'truncated';
+    observed_at: string;
+    repositories: Array<OrdinaryAgentDeliveryAuthorizationCandidateRepository>;
+    schema_version: 1;
+    status: 'ok';
+    trace_id: string;
+};
+
+export type OrdinaryAgentDeliveryAuthorizationCandidateRepository = {
+    configured_branches: Array<string>;
+    inventory_revision: number;
+    inventory_sha256: string;
+    record_id: string;
+    recorded_at: string;
+    repository: string;
+    repository_id: string;
 };
 
 export type OrdinaryAgentDeliveryInventoryReference = {
@@ -4193,6 +4234,31 @@ export type ReadPreviewReadinessResponses = {
 };
 
 export type ReadPreviewReadinessResponse = ReadPreviewReadinessResponses[keyof ReadPreviewReadinessResponses];
+
+export type ReadOrdinaryAgentDeliveryAuthorizationCandidateInputsData = {
+    body?: never;
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/privileged-operations/authorization-candidates/ordinary-agent-delivery/inputs';
+};
+
+export type ReadOrdinaryAgentDeliveryAuthorizationCandidateInputsErrors = {
+    403: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type ReadOrdinaryAgentDeliveryAuthorizationCandidateInputsError = ReadOrdinaryAgentDeliveryAuthorizationCandidateInputsErrors[keyof ReadOrdinaryAgentDeliveryAuthorizationCandidateInputsErrors];
+
+export type ReadOrdinaryAgentDeliveryAuthorizationCandidateInputsResponses = {
+    200: OrdinaryAgentDeliveryAuthorizationCandidateInputsResponse;
+};
+
+export type ReadOrdinaryAgentDeliveryAuthorizationCandidateInputsResponse = ReadOrdinaryAgentDeliveryAuthorizationCandidateInputsResponses[keyof ReadOrdinaryAgentDeliveryAuthorizationCandidateInputsResponses];
 
 export type ReadOrdinaryAgentDeliveryActivationOptionsData = {
     body?: never;

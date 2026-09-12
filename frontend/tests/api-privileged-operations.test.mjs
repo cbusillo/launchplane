@@ -5,6 +5,7 @@ import {
   approvePrivilegedOperation,
   planOrdinaryAgentDeliveryActivation,
   prepareAuthorizationCandidate,
+  readOrdinaryAgentDeliveryAuthorizationCandidateInputs,
   readOrdinaryAgentDeliveryActivationOptions,
   readPrivilegedOperationRawDetail,
   readPrivilegedOperationPlans,
@@ -39,6 +40,49 @@ test("privileged-operation UI performs one read-only list request", async () => 
   assert.equal(calls[0].input, "/v1/privileged-operations/plans");
   assert.equal(calls[0].init.method, "GET");
   assert.equal(response.total, 0);
+});
+
+test("setup-prerequisite check performs one parameterless read", async () => {
+  const calls = [];
+  globalThis.fetch = async (input, init = {}) => {
+    calls.push({ input: String(input), init });
+    return new Response(
+      JSON.stringify({
+        status: "ok",
+        schema_version: 1,
+        trace_id: "trace-preparation-inputs",
+        observed_at: "2026-09-12T14:32:00Z",
+        authorization_policy: {
+          record_id: "authorization-policy-r7",
+          revision: 7,
+          schema_version: 2,
+          policy_sha256: "1".repeat(64),
+        },
+        inventory_state: "complete",
+        merge_policy_state: "available",
+        merge_policy: {
+          record_id: "merge-train-policy-r4",
+          policy_sha256: "2".repeat(64),
+          updated_at: "2026-09-12T14:25:00Z",
+        },
+        repositories: [],
+        diagnostics: [],
+      }),
+      { headers: { "Content-Type": "application/json" }, status: 200 },
+    );
+  };
+
+  const response =
+    await readOrdinaryAgentDeliveryAuthorizationCandidateInputs();
+
+  assert.equal(calls.length, 1);
+  assert.equal(
+    calls[0].input,
+    "/v1/privileged-operations/authorization-candidates/ordinary-agent-delivery/inputs",
+  );
+  assert.equal(calls[0].init.method, "GET");
+  assert.equal(calls[0].init.body, undefined);
+  assert.equal(response.inventory_state, "complete");
 });
 
 test("privileged-operation UI scopes policy plan reads by descriptor", async () => {

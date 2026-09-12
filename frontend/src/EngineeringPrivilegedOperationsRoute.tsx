@@ -31,6 +31,7 @@ import {
 } from "./EngineeringRouteUi";
 import { formatTime } from "./format";
 import { EngineeringOrdinaryAgentJobRoute } from "./EngineeringOrdinaryAgentJobRoute";
+import { EngineeringOrdinaryAgentPreparationInputs } from "./EngineeringOrdinaryAgentPreparationInputs";
 import { EngineeringOrdinaryAgentRoute } from "./EngineeringOrdinaryAgentRoute";
 
 export function EngineeringPrivilegedOperationsRoute({ fixtureMode }: { fixtureMode: DevFixtureMode }) {
@@ -333,7 +334,7 @@ function OrdinaryAgentDeliveryActivationComposer({
     async (signal: AbortSignal): Promise<OrdinaryAgentDeliveryActivationOptionsResponse> => {
       if (fixtureMode) {
         await fixtureDelay(signal);
-        return activationOptionsFixture();
+        return activationOptionsFixture(fixtureMode);
       }
       return readOrdinaryAgentDeliveryActivationOptions(signal);
     },
@@ -504,6 +505,9 @@ function OrdinaryAgentDeliveryActivationComposer({
           );
         }}
       </EngineeringResourceGate>
+      {intent === "setup" ? (
+        <EngineeringOrdinaryAgentPreparationInputs fixtureMode={fixtureMode} />
+      ) : null}
       {message ? (
         <p className="privileged-operation-terminal-reason">{message}</p>
       ) : null}
@@ -774,7 +778,9 @@ function privilegedOperationFixture(
   };
 }
 
-function activationOptionsFixture(): OrdinaryAgentDeliveryActivationOptionsResponse {
+function activationOptionsFixture(
+  fixtureMode: Exclude<DevFixtureMode, "">,
+): OrdinaryAgentDeliveryActivationOptionsResponse {
   const scope = {
     target: {
       repository_id: 1001,
@@ -809,7 +815,7 @@ function activationOptionsFixture(): OrdinaryAgentDeliveryActivationOptionsRespo
         label: "30 days",
       },
     ],
-    setup_options: [
+    setup_options: fixtureMode === "empty" ? [] : [
       {
         policy_operation_id:
           "privileged-operation-11111111111111111111111111111111",
@@ -820,7 +826,7 @@ function activationOptionsFixture(): OrdinaryAgentDeliveryActivationOptionsRespo
           "example/launchplane · main · prepared Aug 22, 2026 at 16:00:00 UTC",
       },
     ],
-    revoke_options: [
+    revoke_options: fixtureMode === "empty" ? [] : [
       {
         activation: {
           activation_id:
