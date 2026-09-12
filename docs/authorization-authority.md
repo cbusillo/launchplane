@@ -542,6 +542,46 @@ it is not authorized by landing code. Keep #2204 open until actual migration,
 rollback, read-back, and soak evidence exists, and keep #2177 open until its
 handoff criteria are complete.
 
+### Preparing Agent Delivery Administration
+
+The Access policy workbench can prepare the closed
+`ordinary-agent-delivery-administration` candidate with an add or remove intent.
+Preparation derives the immutable GitHub ID from the signed-in browser session
+and the schema from the single active policy record. It requires existing
+managed `authz_policy_operation.propose` authority and strict immutable-ID
+administrator authority; it cannot repair missing policy-administration access.
+The browser supplies no principal, policy fragment, managed IDs, scope, actions,
+quorum change, or routine reason.
+
+The candidate owns a separate managed set for one pilot administrator. Its rule
+contains exactly the five explicit Agent delivery activation lifecycle actions,
+the authenticated immutable ID, the admin role, and global Launchplane scope.
+An occupied set with a different identity or shape refuses preparation. Adding
+access also refuses conflicting explicit activation authority; overlapping
+authority does not prevent removing this isolated set. Legacy empty-action rules remain
+unchanged and do not count as explicit activation authority. The foundational
+policy-operation set and all unrelated policy content remain untouched.
+
+Both intents create ordinary `managed-authz-policy-set` plans through the
+existing planner. Preparation may persist a planned operation and event; it
+does not write policy, approve a plan, change schema or quorum, enroll an agent,
+start a worker, or call a provider. Existing approval, current-policy checks,
+worker execution, CAS, and read-back still govern any policy change. Already
+satisfied intents create no new plan. Removal proposes an empty desired fragment
+for only this set and refuses while an unstopped current activation could lose
+its stop controls. Revoking an operation approval before worker claim and
+removing an already-installed administration rule are different operations.
+If an activation starts after removal was prepared, the policy write refuses
+under the shared authorization lock. Stop that activation before preparing a
+fresh removal; re-planning alone does not clear this condition.
+
+The five lifecycle actions are prepared together because an approved activation
+setup still writes only a qualification-only intent. They do not authorize the
+separate ordinary-agent policy, provider, or worker changes. The production
+freeze and separately reviewed pilot amendment and administrator confirmation
+remain in force. This composer is a constrained input path for an existing
+policy administrator, not a replacement bootstrap or total-lockout recovery.
+
 **Preserved history:** Phase 1 introduced planning-only actions without grants.
 That history does not describe the deployed Phase 2 worker flow.
 

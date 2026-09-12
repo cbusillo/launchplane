@@ -21,6 +21,7 @@ from control_plane.contracts.privileged_operation import (
     PrivilegedOperationSemanticReview,
     PrivilegedOperationStatus,
     PrivilegedOperationSummary,
+    build_privileged_operation_id_for_actor,
     normalize_privileged_operation_source_event_id,
     privileged_operation_agent_summary,
     privileged_operation_pre_state_digest,
@@ -34,6 +35,11 @@ from control_plane.contracts.ordinary_agent_activation import (
     OrdinaryAgentDeliveryActivationSetupRequest,
 )
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
+from control_plane.authz_candidate_preparation import (
+    AuthorizationCandidatePreparationError,
+    compile_ordinary_agent_delivery_administration_candidate,
+    is_ordinary_agent_delivery_administration_request,
+)
 from control_plane.durable_operation_authorization import (
     ManagedRuleAuthorizationError,
     managed_github_id_action_allows,
@@ -76,6 +82,7 @@ from control_plane.service_auth import (
     LaunchplaneAuthzPolicy,
     LaunchplaneIdentity,
     TerminalAgentIdentity,
+    authz_policy_allows_immutable_github_id_administration,
 )
 
 
@@ -93,6 +100,7 @@ ORDINARY_AGENT_DELIVERY_ACTIVATION_OPTIONS_ROUTE = (
 ORDINARY_AGENT_DELIVERY_ACTIVATION_PLANS_ROUTE = (
     "/v1/privileged-operations/ordinary-agent-delivery-activation/plans"
 )
+AUTHORIZATION_CANDIDATE_PREPARE_ROUTE = "/v1/privileged-operations/authorization-candidates/prepare"
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,6 +173,31 @@ class OrdinaryAgentDeliveryActivationPlanEnvelope(BaseModel):
     def _validate_envelope(self) -> "OrdinaryAgentDeliveryActivationPlanEnvelope":
         self.source_event_id = normalize_privileged_operation_source_event_id(self.source_event_id)
         return self
+
+
+class AuthorizationCandidatePrepareEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    candidate_id: Literal["ordinary-agent-delivery-administration"]
+    intent: Literal["add", "remove"]
+    source_event_id: str = Field(min_length=1, max_length=128)
+
+    @model_validator(mode="after")
+    def _validate_envelope(self) -> "AuthorizationCandidatePrepareEnvelope":
+        self.source_event_id = normalize_privileged_operation_source_event_id(self.source_event_id)
+        return self
+
+
+class AuthorizationCandidatePrepareResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    trace_id: str
+    state: Literal["planned", "already_satisfied"]
+    operation_id: str | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
 
 
 class PrivilegedPolicyOperationAgentProposalEnvelope(BaseModel):
@@ -1107,6 +1140,171 @@ def register_privileged_operation_routes(
             summary=privileged_operation_agent_summary(result.record),
         )
 
+    def prepare_authorization_candidate(
+        envelope: AuthorizationCandidatePrepareEnvelope,
+        identity: Annotated[
+            GitHubHumanIdentity,
+            Depends(dependencies.read_github_human_mutation_identity),
+        ],
+        record_store: Annotated[object, Depends(dependencies.common.get_record_store)],
+    ) -> AuthorizationCandidatePrepareResponse:
+        trace_id = dependencies.common.next_trace_id()
+        descriptor_id: PrivilegedOperationDescriptorId = "managed-authz-policy-set"
+        propose_action = descriptor_action(descriptor_id, "plan_action")
+        require_managed_rule(
+            identity=identity,
+            action=propose_action,
+            trace_id=trace_id,
+            descriptor_id=descriptor_id,
+        )
+        policy_record, _managed_set_id, _managed_rule_id = require_immutable_approval_rule(
+            identity=identity,
+            action=propose_action,
+            trace_id=trace_id,
+            descriptor_id=descriptor_id,
+        )
+        if not authz_policy_allows_immutable_github_id_administration(
+            policy=policy_record.policy,
+            github_id=identity.github_id,
+        ):
+            raise dependencies.common.http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Identity cannot prepare this authorization candidate.",
+            )
+        actor = PrivilegedOperationActor(
+            identity_type="github_human",
+            github_id=identity.github_id,
+            login=identity.login,
+        )
+        operation_id = build_privileged_operation_id_for_actor(
+            descriptor_id=descriptor_id,
+            actor=actor,
+            source_event_id=envelope.source_event_id,
+        )
+        try:
+            store = require_privileged_operation_store(record_store)
+            try:
+                replay = store.read_privileged_operation_record(operation_id)
+            except FileNotFoundError:
+                replay = None
+            if replay is not None:
+                expected_active = envelope.intent == "add"
+                request = replay.request
+                if (
+                    replay.requested_by != actor
+                    or replay.source_event_id != envelope.source_event_id
+                    or not isinstance(request, ManagedAuthzPolicySetProposalInput)
+                    or not is_ordinary_agent_delivery_administration_request(request)
+                    or bool(request.desired_policy.github_humans) != expected_active
+                    or (
+                        expected_active
+                        and request.desired_policy.github_humans[0].github_ids
+                        != (identity.github_id,)
+                    )
+                ):
+                    raise PrivilegedOperationConflictError(
+                        "Authorization candidate replay changed the original request."
+                    )
+                return AuthorizationCandidatePrepareResponse(
+                    trace_id=trace_id,
+                    state="planned",
+                    operation_id=operation_id,
+                )
+            state, candidate = compile_ordinary_agent_delivery_administration_candidate(
+                current_policy=policy_record.policy,
+                github_id=identity.github_id,
+                intent=envelope.intent,
+                record_store=record_store,
+            )
+            if state == "already_satisfied":
+                return AuthorizationCandidatePrepareResponse(
+                    trace_id=trace_id,
+                    state=state,
+                )
+            if candidate is None:
+                raise AuthorizationCandidatePreparationError(
+                    "candidate_set_conflict", "Authorization candidate compiler returned no plan."
+                )
+            result = create_typed_privileged_operation_plan(
+                record_store=record_store,
+                descriptor_id=descriptor_id,
+                actor=actor,
+                source_kind="browser_api",
+                source_event_id=envelope.source_event_id,
+                request=candidate,
+            )
+        except AuthorizationCandidatePreparationError as error:
+            preparation_errors = {
+                "candidate_set_conflict": (
+                    "authorization_candidate_set_conflict",
+                    "The candidate administration set is occupied or has an unexpected shape.",
+                ),
+                "candidate_action_overlap": (
+                    "authorization_candidate_action_overlap",
+                    "Agent delivery administration already overlaps another explicit rule.",
+                ),
+                "current_activation_requires_stop": (
+                    "authorization_candidate_activation_current",
+                    "Stop the current agent delivery setup before removing its administration access.",
+                ),
+                "activation_storage_unavailable": (
+                    "authorization_candidate_activation_state_unavailable",
+                    "Agent delivery activation state is unavailable; removal cannot be prepared safely.",
+                ),
+                "activation_history_truncated": (
+                    "authorization_candidate_activation_history_truncated",
+                    "Agent delivery activation history exceeds the safe preparation window.",
+                ),
+            }
+            code, message = preparation_errors[error.reason_code]
+            raise dependencies.common.http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code=code,
+                message=message,
+            ) from error
+        except PrivilegedOperationConflictError as error:
+            raise dependencies.common.http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="privileged_operation_plan_conflict",
+                message="Privileged-operation plan request conflicts with existing state.",
+            ) from error
+        except (
+            PrivilegedOperationPlannerError,
+            PrivilegedOperationPlanningStoreError,
+            PrivilegedOperationStoreUnavailableError,
+            TypeError,
+            ValueError,
+        ) as error:
+            raise dependencies.common.http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="privileged_operation_planning_unavailable",
+                message="Authorization candidate preparation is unavailable.",
+            ) from error
+        return AuthorizationCandidatePrepareResponse(
+            trace_id=trace_id,
+            state="planned",
+            operation_id=result.record.operation_id,
+        )
+
+    app.add_api_route(
+        AUTHORIZATION_CANDIDATE_PREPARE_ROUTE,
+        prepare_authorization_candidate,
+        methods=["POST"],
+        response_model=AuthorizationCandidatePrepareResponse,
+        responses={
+            403: {"model": dependencies.common.error_response_model},
+            409: {"model": dependencies.common.error_response_model},
+            503: {"model": dependencies.common.error_response_model},
+        },
+        summary="Prepare a closed authorization candidate",
+        operation_id="prepare_authorization_candidate",
+        tags=["privileged-operations"],
+    )
     app.add_api_route(
         ORDINARY_AGENT_DELIVERY_ACTIVATION_PLANS_ROUTE,
         plan_ordinary_agent_delivery_activation,

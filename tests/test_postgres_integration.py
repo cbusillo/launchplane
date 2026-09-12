@@ -25,6 +25,11 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError, OperationalError
 
 from control_plane import authz_grant_service, authz_policy_activation
+from control_plane.authz_candidate_preparation import (
+    ORDINARY_AGENT_DELIVERY_ADMINISTRATION_ACTIONS,
+    ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_RULE_ID,
+    ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_SET_ID,
+)
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from tests.test_change_impact import _policy as _change_impact_policy
 from tests.test_change_impact_policy_audit import _audit as _change_impact_audit
@@ -123,11 +128,14 @@ from control_plane.contracts.privileged_operation import (
     ManagedSecretReencryptionPlanInput,
     PRIVILEGED_SECRET_OPERATION_APPROVE_ACTION,
     PrivilegedOperationActor,
+    PrivilegedOperationApproval,
     PrivilegedOperationEventRecord,
     PrivilegedOperationRecord,
+    build_privileged_operation_id,
     privileged_operation_evidence_digest,
     privileged_operation_record_digest,
     privileged_operation_request_digest,
+    privileged_operation_pre_state_digest,
 )
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
@@ -201,14 +209,21 @@ from control_plane.service_auth import (
     LocalAdminPolicyRule,
 )
 from control_plane.storage.postgres import (
+    LaunchplanePrivilegedOperationRow,
     DbOnlyMutationRequest,
     LaunchplaneEveryCodeWorkRequestRow,
     LaunchplaneOwnerControlIssuedChallengeRow,
     MutationReservationResult,
+    OrdinaryAgentDeliveryActivationConflictError,
     OrdinaryAgentPersistenceError,
     OutboxWithIdempotencyRequest,
     PostgresRecordStore,
 )
+from tests.test_ordinary_agent_activation_storage import (
+    _event as _activation_event,
+    _record as _activation_record,
+)
+from tests.test_privileged_operation import _record as _privileged_operation_record
 from control_plane.storage.factory import (
     PrivilegedOperationWorkerSchemaError,
     build_privileged_operation_worker_store,
@@ -754,6 +769,25 @@ class _BlockingEveryCodeFinishStore(PostgresRecordStore):
             self._finish_row_synced.set()
             if not self._release_finish.wait(timeout=10):
                 raise TimeoutError("timed out waiting to release Every Code finish transaction")
+
+
+class _BlockingAuthzLockStore(PostgresRecordStore):
+    def __init__(
+        self,
+        *,
+        database_url: str,
+        lock_acquired: threading.Event,
+        release_lock_holder: threading.Event,
+    ) -> None:
+        super().__init__(database_url=database_url)
+        self._test_lock_acquired = lock_acquired
+        self._test_release_lock_holder = release_lock_holder
+
+    def _lock_active_authz_policy(self, session: Any) -> None:
+        super()._lock_active_authz_policy(session)
+        self._test_lock_acquired.set()
+        if not self._test_release_lock_holder.wait(timeout=10):
+            raise TimeoutError("timed out waiting to release authorization lock holder")
 
 
 def _mutation_reservation(
@@ -3228,6 +3262,173 @@ def _owner_control_shadow_envelope(
 
 
 class RealPostgresStorageConcurrencyTests(unittest.TestCase):
+    def test_delivery_administration_removal_and_activation_install_serialize_both_orders(
+        self,
+    ) -> None:
+        def arrange(
+            database_url: str,
+        ) -> tuple[
+            PostgresRecordStore,
+            LaunchplaneAuthzPolicyRecord,
+            LaunchplaneAuthzPolicyRecord,
+            Any,
+            Any,
+        ]:
+            store = PostgresRecordStore(database_url=database_url)
+            policy = LaunchplaneAuthzPolicy(
+                schema_version=2,
+                github_humans=(
+                    GitHubHumanPolicyRule(
+                        managed_set_id=(ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_SET_ID),
+                        managed_rule_id=(ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_RULE_ID),
+                        github_ids=(123,),
+                        roles=("admin",),
+                        products=("launchplane",),
+                        contexts=("launchplane",),
+                        actions=ORDINARY_AGENT_DELIVERY_ADMINISTRATION_ACTIONS,
+                    ),
+                ),
+            )
+            active = store.seed_authz_policy_if_absent(
+                LaunchplaneAuthzPolicyRecord(
+                    record_id="delivery-administration-race-active",
+                    source="test:delivery-administration-race",
+                    updated_at="2026-09-12T16:00:00Z",
+                    policy=policy,
+                )
+            )
+            replacement = LaunchplaneAuthzPolicyRecord(
+                record_id="delivery-administration-race-removed",
+                revision=active.revision + 1,
+                source="test:delivery-administration-race",
+                updated_at="2026-09-12T16:01:00Z",
+                policy=LaunchplaneAuthzPolicy(schema_version=2),
+            )
+            source_actor = PrivilegedOperationActor(
+                identity_type="github_human", github_id=123, login="postgres-pilot"
+            )
+            source = _privileged_operation_record().model_copy(
+                update={
+                    "operation_id": build_privileged_operation_id(
+                        github_id=123,
+                        source_event_id="delivery-administration-race",
+                    ),
+                    "requested_by": source_actor,
+                }
+            )
+            approval = PrivilegedOperationApproval(
+                approver=source_actor,
+                descriptor_id=source.descriptor_id,
+                descriptor_version=source.descriptor_version,
+                request_digest=source.request_digest,
+                evidence_digest=source.evidence_digest,
+                plan_digest=source.evidence.plan_digest,
+                pre_state_digest=privileged_operation_pre_state_digest(source.evidence),
+                policy_record_id=active.record_id,
+                policy_revision=active.revision,
+                policy_sha256=active.policy_sha256,
+                policy_source=active.source,
+                managed_set_id=ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_SET_ID,
+                managed_rule_id=ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_RULE_ID,
+                expires_at=source.expires_at,
+                reason="Approve the bounded activation setup.",
+                rollback_class="key_retained",
+            )
+            source = source.model_copy(update={"status": "approved", "approval": approval})
+            with store._session_factory() as session:
+                session.add(
+                    LaunchplanePrivilegedOperationRow(
+                        operation_id=source.operation_id,
+                        descriptor_id=source.descriptor_id,
+                        status=source.status,
+                        requester_github_id=source_actor.github_id,
+                        created_at=source.created_at,
+                        updated_at=source.updated_at,
+                        expires_at=source.expires_at,
+                        payload=source.model_dump(mode="json"),
+                    )
+                )
+                session.commit()
+            activation = _activation_record(
+                operation_id=source.operation_id,
+                installed_at="2026-09-12T16:02:00Z",
+                expires_at="2026-09-12T17:02:00Z",
+            )
+            return (
+                store,
+                active,
+                replacement,
+                activation,
+                _activation_event(
+                    activation,
+                    action="installed",
+                    source_operation_id=activation.source_setup_operation_id,
+                ),
+            )
+
+        for first_action in ("activation", "removal"):
+            with self.subTest(first_action=first_action), _isolated_postgres_database() as url:
+                migrate_schema(database_url=url)
+                base_store, active, replacement, activation, activation_event = arrange(url)
+                lock_acquired = threading.Event()
+                release_winner = threading.Event()
+                winner = _BlockingAuthzLockStore(
+                    database_url=url,
+                    lock_acquired=lock_acquired,
+                    release_lock_holder=release_winner,
+                )
+                loser = PostgresRecordStore(database_url=url)
+                try:
+
+                    def install(store: PostgresRecordStore) -> str:
+                        try:
+                            return store.install_ordinary_agent_delivery_activation(
+                                activation, activation_event
+                            ).status
+                        except OrdinaryAgentDeliveryActivationConflictError:
+                            return "conflict"
+
+                    def remove(store: PostgresRecordStore) -> str:
+                        return store.compare_and_write_authz_policy_record(
+                            expected_record=active,
+                            replacement_record=replacement,
+                        ).status
+
+                    first = install if first_action == "activation" else remove
+                    second = remove if first_action == "activation" else install
+                    with ThreadPoolExecutor(max_workers=2) as executor:
+                        first_future = executor.submit(first, winner)
+                        self.assertTrue(lock_acquired.wait(timeout=10))
+                        second_future = executor.submit(second, loser)
+                        time.sleep(0.1)
+                        self.assertFalse(second_future.done())
+                        release_winner.set()
+                        outcomes = (
+                            first_future.result(timeout=10),
+                            second_future.result(timeout=10),
+                        )
+
+                    if first_action == "activation":
+                        self.assertEqual(outcomes, ("written", "reconciliation_required"))
+                        self.assertEqual(
+                            len(base_store.list_ordinary_agent_delivery_activation_records()), 1
+                        )
+                        self.assertEqual(
+                            base_store.list_authz_policy_records(status="active")[0], active
+                        )
+                    else:
+                        self.assertEqual(outcomes, ("written", "conflict"))
+                        self.assertEqual(
+                            base_store.list_ordinary_agent_delivery_activation_records(), ()
+                        )
+                        self.assertEqual(
+                            base_store.list_authz_policy_records(status="active")[0], replacement
+                        )
+                finally:
+                    winner.close()
+                    loser.close()
+                    base_store.close()
+
     def test_concurrent_qualification_first_attempt_charges_once_after_competing_rollback(
         self,
     ) -> None:

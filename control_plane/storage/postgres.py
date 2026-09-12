@@ -76,6 +76,12 @@ from control_plane.contracts.solo_administration_confirmation import (
     revoke_solo_administration_confirmation,
 )
 from control_plane.contracts.authz_denial_record import AuthzDenialRecord
+from control_plane.authz_candidate_preparation import (
+    ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_RULE_ID,
+    ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_SET_ID,
+    ordinary_agent_delivery_administration_github_id,
+    ordinary_agent_delivery_administration_state,
+)
 from control_plane.contracts.authz_policy_record import (
     AuthzPolicyCompareWriteResult,
     LaunchplaneAuthzPolicyRecord,
@@ -33014,6 +33020,7 @@ class PostgresRecordStore(HumanSessionStore):
                 )
         with self._session_factory() as session:
             self._begin_serialized_write(session)
+            self._lock_active_authz_policy(session)
             self._lock_ordinary_agent_delivery_activation_scope(session, record)
             source_row = session.scalar(
                 select(LaunchplaneOrdinaryAgentDeliveryActivationRow).where(
@@ -33092,6 +33099,37 @@ class PostgresRecordStore(HumanSessionStore):
                 return OrdinaryAgentDeliveryActivationWriteResult(
                     "replayed", replay_record, replay_event
                 )
+
+            source_operation_row = session.scalar(
+                select(LaunchplanePrivilegedOperationRow).where(
+                    LaunchplanePrivilegedOperationRow.operation_id
+                    == record.source_setup_operation_id
+                )
+            )
+            if source_operation_row is not None:
+                source_operation = self._read_payload(
+                    model_type=PrivilegedOperationRecord,
+                    payload=source_operation_row.payload,
+                )
+                approval = source_operation.approval
+                if (
+                    approval is not None
+                    and approval.managed_set_id
+                    == ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_SET_ID
+                ):
+                    active_policy_record = self._locked_active_authz_policy_record(session)
+                    if (
+                        approval.managed_rule_id
+                        != ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_RULE_ID
+                        or ordinary_agent_delivery_administration_state(
+                            active_policy_record.policy,
+                            github_id=approval.approver.github_id,
+                        )
+                        != "active"
+                    ):
+                        raise OrdinaryAgentDeliveryActivationConflictError(
+                            "Activation setup lost its delivery administration authority."
+                        )
 
             statement = select(LaunchplaneOrdinaryAgentDeliveryActivationRow).where(
                 *cast(Any, self._ordinary_agent_delivery_activation_scope_filters(record))
@@ -34122,6 +34160,42 @@ class PostgresRecordStore(HumanSessionStore):
             evidence=schema_v3_write_evidence,
             confirmation_consumption=confirmation_consumption,
         )
+
+        administration_github_id = ordinary_agent_delivery_administration_github_id(
+            current_record.policy
+        )
+        removes_delivery_administration = (
+            administration_github_id > 0
+            and replacement_record is not None
+            and ordinary_agent_delivery_administration_state(
+                replacement_record.policy,
+                github_id=administration_github_id,
+            )
+            != "active"
+        )
+        if removes_delivery_administration:
+            activation_statement = (
+                select(LaunchplaneOrdinaryAgentDeliveryActivationRow)
+                .where(
+                    LaunchplaneOrdinaryAgentDeliveryActivationRow.revoked_at.is_(None),
+                    LaunchplaneOrdinaryAgentDeliveryActivationRow.superseded_at.is_(None),
+                )
+                .limit(1)
+            )
+            if not self.database_url.startswith("sqlite"):
+                activation_statement = activation_statement.with_for_update()
+            activation_row = session.scalar(activation_statement)
+            if activation_row is not None:
+                activation = self._ordinary_agent_delivery_activation_from_row(activation_row)
+                if activation.revoked_at or activation.superseded_by_activation_id:
+                    raise ValueError("Current activation projection is inconsistent.")
+                if reservation_row is not None:
+                    session.delete(reservation_row)
+                    session.commit()
+                return AuthzPolicyCompareWriteResult(
+                    status="reconciliation_required",
+                    current_record=current_record,
+                )
 
         if confirmation_consumption is not None:
             if replacement_record is None:

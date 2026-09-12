@@ -1916,6 +1916,12 @@ test.describe("operator journeys", () => {
       page.getByRole("button", { name: "Approve plan" }),
     ).toBeVisible();
     await expect(page.getByRole("button", { name: /execute/i })).toHaveCount(0);
+    await assertDocumentBasics(page);
+    await captureScreenshot(
+      page,
+      testInfo,
+      "privileged-operation-merge-train-policy-review",
+    );
     await page.getByRole("button", { name: "Agent delivery" }).click();
     await expect(
       page.getByRole("heading", { name: "Set up or stop agent delivery" }),
@@ -1934,12 +1940,53 @@ test.describe("operator journeys", () => {
     await expect(
       page.getByRole("combobox", { name: "Allow delivery for" }),
     ).toHaveCount(0);
+    await page.getByRole("button", { name: "Access policy" }).click();
+    await expect(
+      page.getByRole("heading", {
+        name: "Prepare delivery administrator access",
+      }),
+    ).toBeVisible();
+    await expect(
+      page.getByText(
+        "This creates a plan for review; it does not start delivery.",
+        { exact: false },
+      ),
+    ).toBeVisible();
+    await expect(
+      page.getByText(
+        "Installed access remains until a removal plan is approved and applied.",
+        { exact: false },
+      ),
+    ).toBeVisible();
+    await expect(
+      page.getByText(
+        "Stop ordinary-agent delivery before preparing removal.",
+        { exact: false },
+      ),
+    ).toBeVisible();
+    await expect(page.getByRole("textbox")).toHaveCount(0);
+    const setupAccessButton = page.getByRole("button", {
+      name: "Prepare setup access",
+    });
+    const removalButton = page.getByRole("button", {
+      name: "Prepare removal",
+    });
+    const [setupBox, removalBox] = await Promise.all([
+      setupAccessButton.boundingBox(),
+      removalButton.boundingBox(),
+    ]);
+    expect(setupBox?.height).toBeGreaterThanOrEqual(44);
+    expect(removalBox?.height).toBeGreaterThanOrEqual(44);
+    expect(
+      setupBox && removalBox
+        ? Math.max(
+            removalBox.x - (setupBox.x + setupBox.width),
+            removalBox.y - (setupBox.y + setupBox.height),
+          )
+        : 0,
+    ).toBeGreaterThanOrEqual(12);
     await assertDocumentBasics(page);
-    await captureScreenshot(
-      page,
-      testInfo,
-      "privileged-operation-merge-train-policy-review",
-    );
+    await captureScreenshot(page, testInfo, "access-policy-preparation");
     diagnostics.assertClean();
   });
 
@@ -1982,6 +2029,66 @@ test.describe("operator journeys", () => {
     await expect
       .poll(() => activationPlanRequest?.request?.activation_expires_at)
       .toBe("2026-08-29T16:00:00+00:00");
+  });
+
+  test("access preparation preserves its retry identity after an uncertain failure", async ({ page }) => {
+    const sourceEventIds: string[] = [];
+    await page.route("**/v1/auth/session", async (route) => {
+      await route.fulfill({ json: { csrf_token: "fixture-access-policy-csrf" } });
+    });
+    await page.route(
+      "**/v1/privileged-operations/authorization-candidates/prepare",
+      async (route) => {
+        const request = route.request().postDataJSON() as {
+          source_event_id: string;
+        };
+        sourceEventIds.push(request.source_event_id);
+        if (sourceEventIds.length === 1) {
+          await route.fulfill({
+            status: 503,
+            json: {
+              trace_id: "trace-access-policy-uncertain",
+              error: {
+                code: "service_unavailable",
+                message: "Preparation outcome is uncertain.",
+              },
+            },
+          });
+          return;
+        }
+        if (sourceEventIds.length === 2) {
+          await route.fulfill({
+            json: {
+              trace_id: "trace-access-policy-missing-review",
+              state: "planned",
+            },
+          });
+          return;
+        }
+        await route.fulfill({
+          json: {
+            trace_id: "trace-access-policy-replay",
+            state: "already_satisfied",
+          },
+        });
+      },
+    );
+
+    await page.goto("/ui/engineering/privileged-operations?fixture=products");
+    await page.getByRole("button", { name: "Access policy" }).click();
+    await page.getByRole("button", { name: "Prepare setup access" }).click();
+    await expect(page.getByText("Preparation outcome is uncertain.")).toBeVisible();
+    await expect(page.getByText("Trace: trace-access-policy-uncertain")).toBeVisible();
+    await page.getByRole("button", { name: "Prepare setup access" }).click();
+    await expect(
+      page.getByText("The plan was prepared, but its review is not available yet."),
+    ).toBeVisible();
+    await page.getByRole("button", { name: "Prepare setup access" }).click();
+    await expect(page.getByText("Setup access is already installed.")).toBeVisible();
+
+    expect(sourceEventIds).toHaveLength(3);
+    expect(sourceEventIds[1]).toBe(sourceEventIds[0]);
+    expect(sourceEventIds[2]).toBe(sourceEventIds[0]);
   });
 });
 
