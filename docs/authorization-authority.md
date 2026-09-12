@@ -604,6 +604,36 @@ freeze and separately reviewed pilot amendment and administrator confirmation
 remain in force. This composer is a constrained input path for an existing
 policy administrator, not a replacement bootstrap or total-lockout recovery.
 
+### Inspecting Pilot Preparation Inputs
+
+The Agent delivery workbench offers **Check setup prerequisites** when preparing
+delivery. Its parameterless read uses the existing managed
+`authz_policy_operation.propose` authority and strict immutable-ID policy
+administrator checks against the current runtime and active DB policy. The five
+activation lifecycle actions alone do not authorize this inspection.
+
+The response reports current authorization-policy provenance, tracked repository
+inventory, and branches explicitly configured in the unique active merge-train
+policy. Inventory contains no branch default. Selection uses the highest
+inventory revision first, so a retired latest record never revives an older
+tracked record. Multiple configured branches are valid; conflicting current
+records, unavailable storage, and incomplete bounded reads remain explicit.
+An incomplete read cannot establish that no configuration exists.
+
+These are configuration inputs, not proof of pilot eligibility, preview health,
+or delivery readiness. The read does not inspect agent registration. Initial
+enrollment follows installation of its exact ordinary-agent policy rule and
+requires the principal to be absent; an existing enrolled principal is not a
+prerequisite for preparing the first policy package.
+
+This inspection returns only bounded record provenance and repository/branch
+metadata needed for policy preparation. It reads no product-environment details,
+provider state, App bindings, credentials, or secrets, and persists no proposal,
+grant, session, activation, or operation. It cannot repair missing administrator
+authority or replace the separately reviewed policy, activation, custody, and
+worker-start steps. Any later preparation action must resolve its inputs again
+from current records.
+
 **Preserved history:** Phase 1 introduced planning-only actions without grants.
 That history does not describe the deployed Phase 2 worker flow.
 

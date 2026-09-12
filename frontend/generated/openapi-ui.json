@@ -1521,6 +1521,79 @@
         "summary": "Read preview readiness"
       }
     },
+    "/v1/privileged-operations/authorization-candidates/ordinary-agent-delivery/inputs": {
+      "get": {
+        "operationId": "read_ordinary_agent_delivery_authorization_candidate_inputs",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrdinaryAgentDeliveryAuthorizationCandidateInputsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read ordinary-agent delivery authorization candidate inputs",
+        "tags": [
+          "privileged-operations"
+        ]
+      }
+    },
     "/v1/privileged-operations/ordinary-agent-delivery-activation/options": {
       "get": {
         "operationId": "read_ordinary_agent_delivery_activation_options",
@@ -6091,6 +6164,80 @@
           "trace_id"
         ],
         "title": "AuthSessionResponse",
+        "type": "object"
+      },
+      "AuthorizationCandidateInputDiagnostic": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "title": "AuthorizationCandidateInputDiagnostic",
+        "type": "object"
+      },
+      "AuthorizationCandidateMergePolicyProvenance": {
+        "additionalProperties": false,
+        "properties": {
+          "policy_sha256": {
+            "title": "Policy Sha256",
+            "type": "string"
+          },
+          "record_id": {
+            "title": "Record Id",
+            "type": "string"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "policy_sha256",
+          "record_id",
+          "updated_at"
+        ],
+        "title": "AuthorizationCandidateMergePolicyProvenance",
+        "type": "object"
+      },
+      "AuthorizationCandidatePolicyProvenance": {
+        "additionalProperties": false,
+        "properties": {
+          "policy_sha256": {
+            "title": "Policy Sha256",
+            "type": "string"
+          },
+          "record_id": {
+            "title": "Record Id",
+            "type": "string"
+          },
+          "revision": {
+            "minimum": 1,
+            "title": "Revision",
+            "type": "integer"
+          },
+          "schema_version": {
+            "minimum": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "policy_sha256",
+          "record_id",
+          "revision",
+          "schema_version"
+        ],
+        "title": "AuthorizationCandidatePolicyProvenance",
         "type": "object"
       },
       "AuthorizationCandidatePrepareEnvelope": {
@@ -14218,6 +14365,142 @@
           "schema_version"
         ],
         "title": "OrdinaryAgentDeliveryActivationSetupRequest",
+        "type": "object"
+      },
+      "OrdinaryAgentDeliveryAuthorizationCandidateInputsResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "authorization_policy": {
+            "$ref": "#/components/schemas/AuthorizationCandidatePolicyProvenance"
+          },
+          "diagnostics": {
+            "items": {
+              "$ref": "#/components/schemas/AuthorizationCandidateInputDiagnostic"
+            },
+            "title": "Diagnostics",
+            "type": "array"
+          },
+          "inventory_state": {
+            "enum": [
+              "complete",
+              "unavailable",
+              "truncated",
+              "ambiguous"
+            ],
+            "title": "Inventory State",
+            "type": "string"
+          },
+          "merge_policy": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AuthorizationCandidateMergePolicyProvenance"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "merge_policy_state": {
+            "enum": [
+              "available",
+              "missing",
+              "ambiguous",
+              "unavailable",
+              "truncated"
+            ],
+            "title": "Merge Policy State",
+            "type": "string"
+          },
+          "observed_at": {
+            "title": "Observed At",
+            "type": "string"
+          },
+          "repositories": {
+            "items": {
+              "$ref": "#/components/schemas/OrdinaryAgentDeliveryAuthorizationCandidateRepository"
+            },
+            "title": "Repositories",
+            "type": "array"
+          },
+          "schema_version": {
+            "const": 1,
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "authorization_policy",
+          "diagnostics",
+          "inventory_state",
+          "merge_policy",
+          "merge_policy_state",
+          "observed_at",
+          "repositories",
+          "schema_version",
+          "status",
+          "trace_id"
+        ],
+        "title": "OrdinaryAgentDeliveryAuthorizationCandidateInputsResponse",
+        "type": "object"
+      },
+      "OrdinaryAgentDeliveryAuthorizationCandidateRepository": {
+        "additionalProperties": false,
+        "properties": {
+          "configured_branches": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Configured Branches",
+            "type": "array"
+          },
+          "inventory_revision": {
+            "minimum": 1,
+            "title": "Inventory Revision",
+            "type": "integer"
+          },
+          "inventory_sha256": {
+            "title": "Inventory Sha256",
+            "type": "string"
+          },
+          "record_id": {
+            "title": "Record Id",
+            "type": "string"
+          },
+          "recorded_at": {
+            "title": "Recorded At",
+            "type": "string"
+          },
+          "repository": {
+            "title": "Repository",
+            "type": "string"
+          },
+          "repository_id": {
+            "title": "Repository Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "configured_branches",
+          "inventory_revision",
+          "inventory_sha256",
+          "record_id",
+          "recorded_at",
+          "repository",
+          "repository_id"
+        ],
+        "title": "OrdinaryAgentDeliveryAuthorizationCandidateRepository",
         "type": "object"
       },
       "OrdinaryAgentDeliveryInventoryReference": {

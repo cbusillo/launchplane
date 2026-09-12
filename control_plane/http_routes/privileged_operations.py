@@ -35,6 +35,9 @@ from control_plane.contracts.ordinary_agent_activation import (
     OrdinaryAgentDeliveryActivationSetupRequest,
 )
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
+from control_plane.contracts.ordinary_agent_delivery_authorization_inputs import (
+    OrdinaryAgentDeliveryAuthorizationCandidateInputsResponse,
+)
 from control_plane.authz_candidate_preparation import (
     AuthorizationCandidatePreparationError,
     compile_ordinary_agent_delivery_administration_candidate,
@@ -53,6 +56,9 @@ from control_plane.ordinary_agent_activation import (
     OrdinaryAgentDeliveryActivationPlanningError,
     list_ordinary_agent_delivery_activation_options,
     ordinary_agent_delivery_activation_duration_options,
+)
+from control_plane.ordinary_agent_delivery_authorization_inputs import (
+    read_ordinary_agent_delivery_authorization_candidate_inputs,
 )
 from control_plane.privileged_operation_registry import (
     PrivilegedOperationPlannerError,
@@ -101,6 +107,9 @@ ORDINARY_AGENT_DELIVERY_ACTIVATION_PLANS_ROUTE = (
     "/v1/privileged-operations/ordinary-agent-delivery-activation/plans"
 )
 AUTHORIZATION_CANDIDATE_PREPARE_ROUTE = "/v1/privileged-operations/authorization-candidates/prepare"
+ORDINARY_AGENT_DELIVERY_AUTHORIZATION_CANDIDATE_INPUTS_ROUTE = (
+    "/v1/privileged-operations/authorization-candidates/ordinary-agent-delivery/inputs"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1291,6 +1300,75 @@ def register_privileged_operation_routes(
             operation_id=result.record.operation_id,
         )
 
+    def read_ordinary_agent_delivery_authorization_inputs(
+        identity: Annotated[
+            GitHubHumanIdentity,
+            Depends(dependencies.read_github_human_identity),
+        ],
+        record_store: Annotated[object, Depends(dependencies.common.get_record_store)],
+    ) -> OrdinaryAgentDeliveryAuthorizationCandidateInputsResponse:
+        trace_id = dependencies.common.next_trace_id()
+        descriptor_id: PrivilegedOperationDescriptorId = "managed-authz-policy-set"
+        propose_action = descriptor_action(descriptor_id, "plan_action")
+        if not isinstance(identity, GitHubHumanIdentity):
+            raise dependencies.common.http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Only authorized humans can inspect authorization candidate inputs.",
+            )
+        require_managed_rule(
+            identity=identity,
+            action=propose_action,
+            trace_id=trace_id,
+            descriptor_id=descriptor_id,
+        )
+        policy_record, _managed_set_id, _managed_rule_id = require_immutable_approval_rule(
+            identity=identity,
+            action=propose_action,
+            trace_id=trace_id,
+            descriptor_id=descriptor_id,
+        )
+        if policy_record.status != "active":
+            raise dependencies.common.http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="authz_policy_unavailable",
+                message="The active authorization policy record is unavailable.",
+            )
+        if not authz_policy_allows_immutable_github_id_administration(
+            policy=policy_record.policy,
+            github_id=identity.github_id,
+        ):
+            raise dependencies.common.http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Identity cannot inspect authorization candidate inputs.",
+            )
+        observed_at = (
+            datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+        )
+        return read_ordinary_agent_delivery_authorization_candidate_inputs(
+            record_store=record_store,
+            policy_record=policy_record,
+            trace_id=trace_id,
+            observed_at=observed_at,
+        )
+
+    app.add_api_route(
+        ORDINARY_AGENT_DELIVERY_AUTHORIZATION_CANDIDATE_INPUTS_ROUTE,
+        read_ordinary_agent_delivery_authorization_inputs,
+        methods=["GET"],
+        response_model=OrdinaryAgentDeliveryAuthorizationCandidateInputsResponse,
+        responses={
+            403: {"model": dependencies.common.error_response_model},
+            503: {"model": dependencies.common.error_response_model},
+        },
+        summary="Read ordinary-agent delivery authorization candidate inputs",
+        operation_id="read_ordinary_agent_delivery_authorization_candidate_inputs",
+        tags=["privileged-operations"],
+    )
     app.add_api_route(
         AUTHORIZATION_CANDIDATE_PREPARE_ROUTE,
         prepare_authorization_candidate,

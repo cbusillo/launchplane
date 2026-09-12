@@ -28,6 +28,7 @@ import type {
   OwnerAcceptanceDecision,
   OwnerAcceptanceProductDecision,
   OrdinaryAgentDeliveryActivationOptionsResponse,
+  OrdinaryAgentDeliveryAuthorizationCandidateInputsResponse,
   OrdinaryAgentDeliveryActivationRevokeRequest,
   OrdinaryAgentDeliveryActivationSetupRequest,
   PlanOrdinaryAgentDeliveryActivationData,
@@ -645,6 +646,7 @@ export function writeOwnerAcceptanceEvent(
 
 export type {
   OrdinaryAgentDeliveryActivationOptionsResponse,
+  OrdinaryAgentDeliveryAuthorizationCandidateInputsResponse,
   OrdinaryAgentDeliveryActivationRevokeRequest,
   OrdinaryAgentDeliveryActivationSetupRequest,
   PrivilegedOperationListResponse,
@@ -702,6 +704,17 @@ export function readOrdinaryAgentDeliveryActivationOptions(
 ): Promise<OrdinaryAgentDeliveryActivationOptionsResponse> {
   return requestJson<ReadOrdinaryAgentDeliveryActivationOptionsResponse>(
     "/v1/privileged-operations/ordinary-agent-delivery-activation/options",
+    "GET",
+    undefined,
+    signal,
+  );
+}
+
+export function readOrdinaryAgentDeliveryAuthorizationCandidateInputs(
+  signal?: AbortSignal,
+): Promise<OrdinaryAgentDeliveryAuthorizationCandidateInputsResponse> {
+  return requestJson<OrdinaryAgentDeliveryAuthorizationCandidateInputsResponse>(
+    "/v1/privileged-operations/authorization-candidates/ordinary-agent-delivery/inputs",
     "GET",
     undefined,
     signal,

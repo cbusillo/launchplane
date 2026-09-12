@@ -19344,9 +19344,8 @@ class PostgresRecordStore(HumanSessionStore):
                 LaunchplaneMergeTrainPolicyRow.updated_at.desc(),
                 LaunchplaneMergeTrainPolicyRow.record_id.desc(),
             ),
+            limit=limit,
         )
-        if limit is not None:
-            return records[:limit]
         return records
 
     def read_merge_train_run_record(self, run_id: str) -> MergeTrainRunRecord:
