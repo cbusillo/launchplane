@@ -404,6 +404,28 @@ direct database write, borrowed credential, future endpoint, or manual merge may
 substitute for the supported path or authorize its own installation. That bounded
 amendment does not lift the broader authorization freeze.
 
+That amendment may stage one administrator-only prerequisite for the pilot: the
+isolated `operator.ordinary-agent-delivery-administration` managed set for one
+authenticated immutable-ID-bound pilot administrator with the exact
+`ordinary_agent_delivery_activation.plan`, `.read`, `.cancel`, `.approve`, and
+`.revoke` actions, the `admin` role, and global Launchplane product/context
+scope. This setup surface changes neither policy schema nor quorum and grants no
+ordinary-agent execution-policy access, enrollment, worker start, provider call,
+or delivery readiness. It remains prospective and must stay bound to the
+independently reviewed current exact package recorded in
+[#2058 amendment](https://github.com/cbusillo/launchplane/issues/2058) and the
+ordinary-agent delivery prerequisites in
+[#2369](https://github.com/cbusillo/launchplane/issues/2369). Installation requires
+a fresh expected-image privileged-worker heartbeat, concrete human confirmation
+at the time of action, supported managed-policy approval and worker CAS with read-back,
+and data-aware rollback by isolated removal after the activation is stopped;
+the installed set is standing access until an authorized isolated removal,
+not until the operation's approval expiry. The same administrator can plan and
+approve activation setup; that quorum-one self-approval risk remains explicit
+and does not satisfy the separate retirement criteria for solo administration.
+Source merge alone activates none of these
+effects, and the broader freeze remains in force.
+
 After parity and administration gates pass, protected desired-set secrets and
 routine authorization workflows must be retired. GitHub may remain an identity
 provider and transport for already-authorized workloads. No total-lockout
