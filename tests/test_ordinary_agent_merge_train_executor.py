@@ -24,7 +24,12 @@ from control_plane.merge_train_github import (
     RecordingMergeTrainGitHubTransport,
     MergeTrainGitHubError,
 )
-from control_plane.ordinary_agent_custody import OrdinaryAgentProviderTokenLease
+from control_plane.ordinary_agent_custody import (
+    OrdinaryAgentCustodyCleanupUnknown,
+    OrdinaryAgentPreDispatchAdmissionCleanupUnknown,
+    OrdinaryAgentProviderTokenLease,
+)
+from control_plane.ordinary_agent_session_lifecycle import OrdinaryAgentSessionAdmissionDenied
 from control_plane.ordinary_agent_effect_lifecycle import require_completed_effect_proof
 from control_plane.ordinary_agent_effect_lifecycle import classify_effect_reconciliation
 from control_plane.ordinary_agent_effect_recovery import recover_ordinary_effect
@@ -40,6 +45,52 @@ from tests.test_ordinary_agent_effect_lifecycle import effect_record
 
 
 class OrdinaryAgentMergeTrainEffectExecutorTests(unittest.TestCase):
+    def test_pre_dispatch_readiness_denial_survives_token_cleanup_failure(self) -> None:
+        effect = CandidateRefPrepareEffect(
+            lineage=MergeTrainEffectLineage(
+                repository="example/repo", base_branch="main", batch_id="batch-one"
+            ),
+            candidate_ref="refs/heads/candidate",
+            base_sha="a" * 40,
+        )
+        record = effect_record(effects.CandidateRefPrepareCommand(effect=effect))
+        store = _dispatch_store(record)
+        denial = OrdinaryAgentSessionAdmissionDenied(
+            "provider_readiness_refresh_required", retry_not_before=90
+        )
+        store.checkpoint_ordinary_semantic_dispatch.side_effect = denial
+
+        @contextmanager
+        def cleanup_fails(**_: object) -> Iterator[OrdinaryAgentProviderTokenLease]:
+            try:
+                with _provider_lease() as lease:
+                    yield lease
+            except Exception as body_error:
+                raise OrdinaryAgentCustodyCleanupUnknown(body_error=body_error) from OSError(
+                    "revoke unknown"
+                )
+
+        executor = OrdinaryAgentMergeTrainEffectExecutor(
+            record=record,
+            controller_fence=record.controller_fence,
+            effect_store=store,
+            custody_store=Mock(),
+            secret_store=Mock(),
+            monotonic=lambda: 0,
+        )
+        with (
+            patch(
+                "control_plane.ordinary_agent_merge_train_executor."
+                "ordinary_agent_provider_token_lease",
+                cleanup_fails,
+            ),
+            self.assertRaises(OrdinaryAgentPreDispatchAdmissionCleanupUnknown) as raised,
+        ):
+            executor.prepare_candidate_ref(effect)
+
+        self.assertIs(raised.exception.admission_error, denial)
+        store.record_ordinary_semantic_outcome.assert_not_called()
+
     def test_post_merge_proof_read_failure_stays_unknown_while_write_rejection_is_terminal(
         self,
     ) -> None:

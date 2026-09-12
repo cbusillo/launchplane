@@ -55,6 +55,17 @@ from control_plane.contracts.privileged_operation import (
     privileged_operation_pre_state_digest,
     privileged_operation_record_digest,
 )
+from control_plane.contracts.privileged_operation_identity import (
+    MANAGED_MERGE_TRAIN_POLICY_IMPORT_PRE_EFFECT_DENIED,
+    PRIVILEGED_MERGE_TRAIN_POLICY_WRITE_ROUTE,
+    PRIVILEGED_OPERATION_EXECUTION_ROUTE,
+    PRIVILEGED_OPERATION_EXECUTION_SCOPE,
+    PRIVILEGED_POLICY_OPERATION_WRITE_ROUTE,
+    ManagedMergeTrainPolicyImportPreEffectDeniedError,
+    merge_train_policy_import_request_fingerprint,
+    privileged_operation_execution_fingerprint,
+    privileged_operation_provider_target_key,
+)
 from control_plane.contracts.privileged_operation_worker_heartbeat import (
     PRIVILEGED_OPERATION_WORKER_HEARTBEAT_FUTURE_SKEW_SECONDS,
     PRIVILEGED_OPERATION_WORKER_HEARTBEAT_RETENTION_SECONDS,
@@ -78,14 +89,6 @@ from control_plane.service_auth import AuthorizationTarget, GitHubHumanIdentity
 from control_plane.storage.postgres import DbOnlyMutationRequest
 
 
-PRIVILEGED_OPERATION_EXECUTION_SCOPE = "privileged-operation-execution"
-PRIVILEGED_OPERATION_EXECUTION_ROUTE = "service-internal:privileged-operation-worker"
-PRIVILEGED_POLICY_OPERATION_WRITE_ROUTE = (
-    "service-internal:privileged-operation-worker:managed-authz-policy-set"
-)
-PRIVILEGED_MERGE_TRAIN_POLICY_WRITE_ROUTE = (
-    "service-internal:privileged-operation-worker:managed-merge-train-policy-import"
-)
 PRIVILEGED_OPERATION_EXECUTION_LEASE_SECONDS = 300
 ORDINARY_AGENT_DELIVERY_CLEANUP_MAX_BACKOFF_SECONDS = 300
 
@@ -264,25 +267,6 @@ def _digest(payload: object) -> str:
 
 def privileged_operation_execution_token(operation_id: str) -> str:
     return hashlib.sha256(f"privileged-operation:{operation_id}".encode("utf-8")).hexdigest()
-
-
-def privileged_operation_execution_fingerprint(record: PrivilegedOperationRecord) -> str:
-    if record.approval is None:
-        raise ValueError("Privileged operation has no approval evidence.")
-    return _digest(
-        {
-            "operation_id": record.operation_id,
-            "descriptor_id": record.descriptor_id,
-            "descriptor_version": record.descriptor_version,
-            "request_digest": record.request_digest,
-            "evidence_digest": record.evidence_digest,
-            "approval": record.approval.model_dump(mode="json"),
-        }
-    )
-
-
-def privileged_operation_provider_target_key(record: PrivilegedOperationRecord) -> str:
-    return f"privileged-operation-target:{record.descriptor_id}:global"
 
 
 def require_privileged_operation_execution_store(
@@ -494,7 +478,107 @@ def _complete_reservation(
         response_payload=response_payload,
     )
     result = store.complete_mutation_reservation(completion=completion)
-    return result.status in {"completed", "replayed"}
+    return result.status in {"completed", "replayed"} and _completed_reservation_matches(
+        result.record,
+        reservation=reservation,
+        response_status_code=response_status_code,
+        response_trace_id=f"privileged-operation:{operation_id}",
+        response_payload=response_payload,
+    )
+
+
+def _reservation_transition_identity(
+    record: LaunchplaneIdempotencyRecord,
+) -> tuple[object, ...]:
+    return (
+        record.schema_version,
+        record.record_id,
+        record.scope,
+        record.route_path,
+        record.idempotency_key,
+        record.request_fingerprint,
+        record.lease_owner,
+        record.lease_expires_at,
+        record.attempt,
+        record.reconciliation_key,
+        record.provider_target_key,
+        record.provider_effect_phase,
+        record.provider_effect_started_at,
+        record.created_at,
+    )
+
+
+def _completed_reservation_matches(
+    record: object,
+    *,
+    reservation: LaunchplaneIdempotencyRecord,
+    response_status_code: int,
+    response_trace_id: str,
+    response_payload: dict[str, object],
+) -> bool:
+    return (
+        isinstance(record, LaunchplaneIdempotencyRecord)
+        and record.state == "completed"
+        and _reservation_transition_identity(record)
+        == _reservation_transition_identity(reservation)
+        and record.response_status_code == response_status_code
+        and record.response_trace_id == response_trace_id
+        and record.response_payload == response_payload
+        and bool(record.recorded_at)
+    )
+
+
+def _settle_managed_merge_train_policy_pre_effect_denial(
+    *,
+    store: PrivilegedOperationExecutionStore,
+    reservation: LaunchplaneIdempotencyRecord,
+    operation_id: str,
+    now: Callable[[], datetime],
+) -> bool:
+    response_status_code = 409
+    response_trace_id = f"privileged-operation:{operation_id}"
+    response_payload: dict[str, object] = {
+        "status": "execution_failed",
+        "failure_code": MANAGED_MERGE_TRAIN_POLICY_IMPORT_PRE_EFFECT_DENIED,
+    }
+    completion = complete_launchplane_mutation_reservation(
+        reservation,
+        response_status_code=response_status_code,
+        response_trace_id=response_trace_id,
+        completed_at=_timestamp(now()),
+        response_payload=response_payload,
+    )
+    result = store.complete_mutation_reservation(completion=completion)
+    if result.status in {"completed", "replayed"}:
+        return _completed_reservation_matches(
+            result.record,
+            reservation=reservation,
+            response_status_code=response_status_code,
+            response_trace_id=response_trace_id,
+            response_payload=response_payload,
+        )
+    reconciled_reservation = result.record
+    if (
+        result.status != "reconcile_required"
+        or not isinstance(reconciled_reservation, LaunchplaneIdempotencyRecord)
+        or reconciled_reservation.state != "reconcile_required"
+        or _reservation_transition_identity(reconciled_reservation)
+        != _reservation_transition_identity(reservation)
+    ):
+        return False
+    adoption = store.adopt_reconciled_mutation(
+        reservation=reconciled_reservation,
+        response_status_code=response_status_code,
+        response_trace_id=response_trace_id,
+        response_payload=response_payload,
+    )
+    return adoption.status in {"adopted", "replayed"} and _completed_reservation_matches(
+        adoption.record,
+        reservation=reconciled_reservation,
+        response_status_code=response_status_code,
+        response_trace_id=response_trace_id,
+        response_payload=response_payload,
+    )
 
 
 def _mark_reconciliation_required(
@@ -1098,7 +1182,7 @@ def _execute_managed_merge_train_policy_import(
             scope=PRIVILEGED_OPERATION_EXECUTION_SCOPE,
             route_path=PRIVILEGED_MERGE_TRAIN_POLICY_WRITE_ROUTE,
             idempotency_key=record.operation_id,
-            request_fingerprint=_merge_train_policy_import_request_fingerprint(record),
+            request_fingerprint=merge_train_policy_import_request_fingerprint(record),
             lease_owner=record.operation_id,
             response_status_code=200,
             response_trace_id=f"privileged-operation:{record.operation_id}",
@@ -1143,25 +1227,6 @@ def _execute_managed_merge_train_policy_import(
         superseded_record=superseded_record,
         changed=changed,
         authorization_policy_sha256=authorization.policy_sha256,
-    )
-
-
-def _merge_train_policy_import_request_fingerprint(record: PrivilegedOperationRecord) -> str:
-    if record.approval is None:
-        raise ValueError("approval_provenance_missing")
-    if not isinstance(record.request, ManagedMergeTrainPolicyImportProposalInput):
-        raise ValueError("executor_result_error")
-    if not isinstance(record.evidence, ManagedMergeTrainPolicyImportHumanEvidence):
-        raise ValueError("executor_result_error")
-    return _digest(
-        {
-            "operation_id": record.operation_id,
-            "active_record_id": record.evidence.active_record_id,
-            "active_policy_sha256": record.evidence.active_policy_sha256,
-            "candidate_record_id": record.request.record.record_id,
-            "candidate_policy_sha256": record.request.record.policy_sha256,
-            "plan_digest": record.approval.plan_digest,
-        }
     )
 
 
@@ -1230,7 +1295,7 @@ def _recover_managed_merge_train_policy_import(
     lookup = store.lookup_existing_mutation_reservation(
         route_path=PRIVILEGED_MERGE_TRAIN_POLICY_WRITE_ROUTE,
         idempotency_key=record.operation_id,
-        request_fingerprint=_merge_train_policy_import_request_fingerprint(record),
+        request_fingerprint=merge_train_policy_import_request_fingerprint(record),
     )
     if lookup.status != "found" or lookup.record is None or lookup.record.state != "completed":
         raise ValueError("execution_recovery_failed")
@@ -1285,6 +1350,8 @@ def _failure_code(error: Exception) -> str:
         return error.code
     if isinstance(error, AuthzPolicySchemaV3TransitionDeniedError):
         return f"{AUTHZ_POLICY_SCHEMA_V3_TRANSITION_DENIED}:{error.reason_code}"
+    if isinstance(error, ManagedMergeTrainPolicyImportPreEffectDeniedError):
+        return MANAGED_MERGE_TRAIN_POLICY_IMPORT_PRE_EFFECT_DENIED
     known_codes = {
         "approval_provenance_missing",
         "approval_managed_rule_drift",
@@ -1598,20 +1665,27 @@ def execute_approved_privileged_operations_once(
         except Exception as error:
             failure_code = _failure_code(error)
             reconciliation_required = effect_completed
-            if reconciliation_required:
-                _mark_reconciliation_required(
+            if isinstance(error, ManagedMergeTrainPolicyImportPreEffectDeniedError):
+                reconciliation_required = not _settle_managed_merge_train_policy_pre_effect_denial(
                     store=store,
                     reservation=reservation,
                     operation_id=claimed.operation_id,
+                    now=now,
                 )
-            else:
-                _complete_reservation(
+            elif not reconciliation_required:
+                reconciliation_required = not _complete_reservation(
                     store=store,
                     reservation=reservation,
                     operation_id=claimed.operation_id,
                     response_status_code=409,
                     response_payload={"status": "execution_failed", "failure_code": failure_code},
                     now=now,
+                )
+            if reconciliation_required:
+                _mark_reconciliation_required(
+                    store=store,
+                    reservation=reservation,
+                    operation_id=claimed.operation_id,
                 )
             operation_execution = _failed_execution_evidence(
                 record=claimed,

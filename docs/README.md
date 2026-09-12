@@ -58,6 +58,9 @@ delivery pilot and its DB-native activation/rollback amendment are prepared.
   host hygiene evidence, budgets, and future apply boundary.
 - [ordinary-agent-execution.md](ordinary-agent-execution.md) — ordinary-agent
   identity, private delivery, scope, eligibility and administration boundaries.
+- [provider-delivery-inspection.md](provider-delivery-inspection.md) — automatic
+  provider-protection inspection, governed expectations, custody and guarded
+  readiness evidence.
 - [agent-context-boundary.md](agent-context-boundary.md) — public-safe agent
   context, caller profiles, scoped intent, redaction, and provenance boundary.
 - [agent-operator-contract.md](agent-operator-contract.md) — generated,

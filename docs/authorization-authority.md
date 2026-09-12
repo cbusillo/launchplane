@@ -82,9 +82,12 @@ secrets and transports them to that endpoint through GitHub Actions OIDC.
 Reconciliation planning accepts schema-v2 and schema-v3 desired managed sets.
 It resolves only the explicit v1-to-v2, v2-to-v3, and same-schema transitions,
 preserves unrelated managed sets across all six policy collections, and reports
-ordinary-agent rules as structural policy content. Schema-v3 planning remains
-read-only: apply and every schema-v3 storage seed, compare-write, deletion, and
-downgrade retain the `authz_policy_schema_v3_write_not_activated` fence.
+ordinary-agent rules as structural policy content. Planning is read-only.
+Raw schema-v3 seeds, unbound replacements, deletion and downgrade remain fenced.
+The separately mediated A5 transition described below requires exact reviewed
+operation and activation evidence under the storage locks; a planned candidate
+or compiled handler alone cannot enable a rule. Exact removal and unrelated
+schema-v3 maintenance preserve the documented post-stop boundary.
 
 That workflow is transitional compatibility infrastructure. The database remains
 the live decision authority, but GitHub-hosted desired sets still make GitHub

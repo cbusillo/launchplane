@@ -43,6 +43,10 @@ from control_plane.ordinary_agent_session_approval import (
     revoke_ordinary_agent_session,
 )
 from control_plane.ordinary_agent_session_lifecycle import OrdinaryAgentSessionAdmissionDenied
+from control_plane.provider_delivery_readiness import (
+    ensure_provider_delivery_readiness_for_client,
+    provider_delivery_retry_after_seconds,
+)
 from control_plane.service_auth import (
     AuthorizationTarget,
     LaunchplaneIdentity,
@@ -72,16 +76,51 @@ class OrdinaryAgentManagementDependencies:
 
 
 @contextmanager
-def _operation_errors() -> Iterator[None]:
+def _operation_errors(
+    *,
+    http_error: Callable[..., HTTPException] | None = None,
+    next_trace_id: Callable[[], str] | None = None,
+) -> Iterator[None]:
     try:
         yield
     except HTTPException:
         raise
     except OrdinaryAgentSessionAdmissionDenied as error:
-        if error.reason_code == "provider_readiness_unavailable":
+        provider_codes = {
+            "provider_readiness_refresh_required",
+            "provider_readiness_in_progress",
+            "provider_wait",
+            "provider_inspection_deadline",
+            "provider_inspection_attempts_exhausted",
+            "provider_inspection_custody_fenced",
+            "provider_inspection_permission_denied",
+            "provider_inspection_profile_unavailable",
+            "protection_expectation_unavailable",
+            "ordinary_merge_method_unsupported",
+            "provider_protection_not_ready",
+            "provider_protection_inconclusive",
+            "provider_inspection_abandoned",
+            "provider_inspection_late_result",
+        }
+        if error.reason_code in provider_codes:
+            retry_after = str(provider_delivery_retry_after_seconds(error))
+            message = "Provider delivery readiness is unavailable; retry the same request key."
+            if http_error is not None and next_trace_id is not None:
+                structured = http_error(
+                    status_code=503,
+                    trace_id=next_trace_id(),
+                    code=error.reason_code,
+                    message=message,
+                )
+                structured.headers = {
+                    **(structured.headers or {}),
+                    "Retry-After": retry_after,
+                }
+                raise structured from None
             raise HTTPException(
                 503,
-                "Guarded delivery is unavailable until Launchplane can verify repository protection.",
+                message,
+                headers={"Retry-After": retry_after},
             ) from None
         raise HTTPException(403, "This agent operation is unavailable.") from None
     except PermissionError:
@@ -293,11 +332,32 @@ def register_ordinary_agent_management_routes(
         proof: Annotated[OrdinaryAgentTokenProof, Depends(read_ordinary_agent_proof)],
         store: Annotated[PostgresRecordStore, Depends(get_record_store)],
     ) -> OrdinaryAgentJobView:
-        with _operation_errors():
-            request = store.admit_ordinary_agent_client_request(
-                proof=proof,
-                request=envelope,
-            )
+        with _operation_errors(
+            http_error=common.http_error,
+            next_trace_id=common.next_trace_id,
+        ):
+            try:
+                request = store.admit_ordinary_agent_client_request(
+                    proof=proof,
+                    request=envelope,
+                )
+            except OrdinaryAgentSessionAdmissionDenied as error:
+                if error.reason_code != "provider_readiness_refresh_required":
+                    raise
+                try:
+                    ensure_provider_delivery_readiness_for_client(
+                        store=store,
+                        proof=proof,
+                        request=envelope,
+                    )
+                except OrdinaryAgentSessionAdmissionDenied as ensure_error:
+                    if ensure_error.reason_code != "provider_readiness_admission_replay_required":
+                        raise
+                # One exact re-entry repeats authoritative admission checks.
+                request = store.admit_ordinary_agent_client_request(
+                    proof=proof,
+                    request=envelope,
+                )
             return store.read_ordinary_agent_job(proof=proof, request_id=request.request_id)
 
     def human_read_job(

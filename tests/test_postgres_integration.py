@@ -12,7 +12,7 @@ import threading
 import time
 from typing import Any
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from uuid import uuid4
 
 from alembic import command as alembic_command
@@ -25,6 +25,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError, OperationalError
 
 from control_plane import authz_grant_service, authz_policy_activation
+from control_plane.contracts.canonical_json import canonical_json_sha256
 from tests.test_change_impact import _policy as _change_impact_policy
 from tests.test_change_impact_policy_audit import _audit as _change_impact_audit
 from control_plane.contracts.change_impact_audit import ChangeImpactPolicyAuditedWriteResult
@@ -105,6 +106,14 @@ from control_plane.contracts.outbox_delivery import (
     OutboxDeliveryRecord,
     build_outbox_delivery_id,
     build_outbox_dedupe_key,
+)
+from control_plane.contracts.privileged_operation_identity import (
+    MANAGED_MERGE_TRAIN_POLICY_IMPORT_PRE_EFFECT_DENIED,
+    PRIVILEGED_MERGE_TRAIN_POLICY_WRITE_ROUTE,
+    PRIVILEGED_OPERATION_EXECUTION_ROUTE,
+    PRIVILEGED_OPERATION_EXECUTION_SCOPE,
+    merge_train_policy_import_request_fingerprint,
+    privileged_operation_execution_fingerprint,
 )
 from control_plane.contracts.privileged_operation_worker_heartbeat import (
     PrivilegedOperationWorkerHeartbeatRecord,
@@ -238,6 +247,12 @@ from tests.support.ordinary_agent_lifecycle import (
     setup_ordinary_agent_authority,
 )
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_record
+from tests.test_privileged_operation_worker import (
+    FIXED_NOW as PRIVILEGED_OPERATION_FIXED_NOW,
+    _merge_train_policy_admin_record,
+    _merge_train_policy_record_with_provider_expectation,
+    _prepare_approved_merge_train_policy_import,
+)
 from tests.test_odoo_prod_retained_volume_backup_import_storage import (
     _retained_operation_for_restore_lane,
 )
@@ -1293,6 +1308,176 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
         self.assertEqual(
             [record.record_id for record in superseded_records], [active_record.record_id]
         )
+
+    def test_governed_merge_train_policy_expectation_import_replays_completed_inner(
+        self,
+    ) -> None:
+        with _store_for_fresh_head_database() as store:
+            approval_policy = store.seed_authz_policy_if_absent(_merge_train_policy_admin_record())
+            active_record = build_test_merge_train_policy_record(
+                repository="cbusillo/sellyouroutboard",
+                record_id="merge-train-policy-active",
+                updated_at="2026-08-22T19:00:00+00:00",
+            )
+            replacement_record = _merge_train_policy_record_with_provider_expectation(active_record)
+            operation_id = _prepare_approved_merge_train_policy_import(
+                store,
+                approval_policy=approval_policy,
+                active_record=active_record,
+                candidate_record=replacement_record,
+            )
+
+            completed = execute_approved_privileged_operations_once(
+                record_store=store,
+                lease_owner="postgres-integration-worker",
+                now=lambda: PRIVILEGED_OPERATION_FIXED_NOW,
+            )
+            operation = store.read_privileged_operation_record(operation_id)
+            replayed = store.compare_and_write_merge_train_policy_record(
+                expected_record=active_record,
+                replacement_record=replacement_record,
+                mutation=DbOnlyMutationRequest(
+                    scope=PRIVILEGED_OPERATION_EXECUTION_SCOPE,
+                    route_path=PRIVILEGED_MERGE_TRAIN_POLICY_WRITE_ROUTE,
+                    idempotency_key=operation_id,
+                    request_fingerprint=merge_train_policy_import_request_fingerprint(operation),
+                    lease_owner=operation_id,
+                    response_status_code=200,
+                    response_trace_id="postgres-integration-replay",
+                    response_payload={"status": "ok"},
+                ),
+            )
+            current = store.list_merge_train_policy_records(status="active", limit=2)
+
+        self.assertEqual([record.operation_id for record in completed], [operation_id])
+        self.assertEqual(operation.status, "executed")
+        self.assertEqual(replayed.status, "replayed")
+        self.assertEqual(current, (replacement_record,))
+
+    def test_governed_merge_train_policy_expectation_import_denies_expired_outer_after_lock(
+        self,
+    ) -> None:
+        with _store_for_fresh_head_database() as store:
+            approval_policy = store.seed_authz_policy_if_absent(_merge_train_policy_admin_record())
+            active_record = build_test_merge_train_policy_record(
+                repository="cbusillo/sellyouroutboard",
+                record_id="merge-train-policy-active",
+                updated_at="2026-08-22T19:00:00+00:00",
+            )
+            replacement_record = _merge_train_policy_record_with_provider_expectation(active_record)
+            operation_id = _prepare_approved_merge_train_policy_import(
+                store,
+                approval_policy=approval_policy,
+                active_record=active_record,
+                candidate_record=replacement_record,
+            )
+            entered_policy_lock = threading.Event()
+            original_policy_lock = store._lock_merge_train_policy_write
+
+            def observe_policy_lock(session: object) -> None:
+                entered_policy_lock.set()
+                original_policy_lock(session)
+
+            engine = create_engine(store.database_url)
+            executor = ThreadPoolExecutor(max_workers=1)
+            try:
+                with engine.connect() as connection:
+                    transaction = connection.begin()
+                    connection.execute(
+                        text(
+                            "select pg_advisory_xact_lock("
+                            "hashtextextended('launchplane:active-merge-train-policy', 0))"
+                        )
+                    )
+                    with (
+                        patch.object(
+                            store,
+                            "_lock_merge_train_policy_write",
+                            side_effect=observe_policy_lock,
+                        ),
+                        patch(
+                            "control_plane.privileged_operation_worker."
+                            "PRIVILEGED_OPERATION_EXECUTION_LEASE_SECONDS",
+                            1,
+                        ),
+                    ):
+                        future = executor.submit(
+                            execute_approved_privileged_operations_once,
+                            record_store=store,
+                            lease_owner="postgres-integration-worker",
+                            now=lambda: PRIVILEGED_OPERATION_FIXED_NOW,
+                        )
+                        reached_lock = entered_policy_lock.wait(timeout=10)
+                        if reached_lock:
+                            time.sleep(1.5)
+                        transaction.commit()
+                        completed = future.result(timeout=15)
+            finally:
+                executor.shutdown(wait=True, cancel_futures=True)
+                engine.dispose()
+
+            operation = store.read_privileged_operation_record(operation_id)
+            current_after_denial = store.list_merge_train_policy_records(status="active", limit=2)
+            inner_lookup = store.lookup_existing_mutation_reservation(
+                route_path=PRIVILEGED_MERGE_TRAIN_POLICY_WRITE_ROUTE,
+                idempotency_key=operation_id,
+                request_fingerprint=merge_train_policy_import_request_fingerprint(operation),
+            )
+            outer_lookup = store.lookup_existing_mutation_reservation(
+                route_path=PRIVILEGED_OPERATION_EXECUTION_ROUTE,
+                idempotency_key=operation_id,
+                request_fingerprint=privileged_operation_execution_fingerprint(operation),
+            )
+            retry_record = replacement_record.model_copy(
+                update={
+                    "record_id": "merge-train-policy-expectation-retry",
+                    "updated_at": "2026-08-22T20:01:00+00:00",
+                }
+            )
+            retry_operation_id = _prepare_approved_merge_train_policy_import(
+                store,
+                approval_policy=approval_policy,
+                active_record=active_record,
+                candidate_record=retry_record,
+                source_event_id="postgres-expectation-retry",
+            )
+            retried = execute_approved_privileged_operations_once(
+                record_store=store,
+                lease_owner="postgres-integration-worker-retry",
+                now=lambda: PRIVILEGED_OPERATION_FIXED_NOW,
+            )
+            retry_operation = store.read_privileged_operation_record(retry_operation_id)
+            current_after_retry = store.list_merge_train_policy_records(status="active", limit=2)
+
+        self.assertTrue(reached_lock)
+        self.assertEqual([record.operation_id for record in completed], [operation_id])
+        self.assertEqual(operation.status, "execution_failed")
+        self.assertIsNotNone(operation.execution)
+        assert operation.execution is not None
+        self.assertEqual(
+            operation.execution.failure_code,
+            MANAGED_MERGE_TRAIN_POLICY_IMPORT_PRE_EFFECT_DENIED,
+        )
+        self.assertFalse(operation.execution.reconciliation_required)
+        self.assertEqual(current_after_denial, (active_record,))
+        self.assertEqual(inner_lookup.status, "missing")
+        self.assertIsNotNone(outer_lookup.record)
+        assert outer_lookup.record is not None
+        self.assertEqual(outer_lookup.record.state, "completed")
+        self.assertEqual(outer_lookup.record.response_status_code, 409)
+        self.assertEqual(
+            outer_lookup.record.response_payload,
+            {
+                "status": "execution_failed",
+                "failure_code": MANAGED_MERGE_TRAIN_POLICY_IMPORT_PRE_EFFECT_DENIED,
+            },
+        )
+        self.assertEqual(
+            [record.operation_id for record in retried],
+            [retry_operation_id],
+        )
+        self.assertEqual(retry_operation.status, "executed")
+        self.assertEqual(current_after_retry, (retry_record,))
 
     def test_merge_train_policy_database_trigger_fences_direct_active_writes(self) -> None:
         with _store_for_fresh_head_database() as store:
@@ -7773,7 +7958,6 @@ class RealPostgresOrdinaryAgentSessionTests(unittest.TestCase):
     def test_qualification_unknown_custody_is_paced_across_postgres_reclaim(self) -> None:
         import hashlib
 
-        from control_plane.contracts.canonical_json import canonical_json_sha256
         from control_plane.contracts.ordinary_agent_custody import (
             GITHUB_TOKEN_MAXIMUM_LIFETIME_SECONDS,
             KNOWN_TOKEN_CLOCK_SKEW_SECONDS,
@@ -8322,3 +8506,207 @@ class RealPostgresOrdinaryAgentSessionTests(unittest.TestCase):
             first = store.list_pending_approved_ordinary_agent_enrollments(limit=1)
             page = store.list_pending_approved_ordinary_agent_enrollments(after=first[0])
             self.assertEqual([reference.operation_id for reference in page], [intent.operation_id])
+
+
+class RealPostgresProviderDeliveryReadinessTests(unittest.TestCase):
+    def test_repository_single_flight_and_capability_retry_charge_once(self) -> None:
+        from control_plane.contracts.merge_train_policy import (
+            ProviderDeliveryProtectionExpectationV1,
+            ProviderRequiredStatusCheckExpectationV1,
+        )
+        from control_plane.contracts.provider_delivery_readiness import (
+            ProviderDeliveryInspectionBindingV1,
+            ProviderDeliveryInspectionReservationV1,
+            ProviderDeliveryReadinessDecision,
+        )
+        from control_plane.github_app_identity import GitHubAppIdentity
+        from control_plane.provider_delivery_inspection_profile import (
+            ResolvedProviderDeliveryInspectionProfile,
+        )
+        from control_plane.storage.postgres import (
+            _OrdinaryAgentRuntimePrerequisites,
+            LaunchplaneOrdinaryAgentLeaseRow,
+            LaunchplaneProviderDeliveryInspectionRow,
+        )
+        from control_plane.ordinary_agent_session_lifecycle import (
+            OrdinaryAgentSessionAdmissionDenied,
+        )
+        from tests import test_ordinary_agent_effect_storage as effect_tests
+        from tests import test_ordinary_agent_session_storage as session_tests
+
+        with _store_for_fresh_head_database() as store:
+            session_fixture = session_tests.OrdinaryAgentSessionStorageTests()
+            self.addCleanup(session_fixture.doCleanups)
+            session_fixture.prepare_store(store, pull_request_limit=2)
+            effect_fixture = effect_tests.OrdinaryAgentEffectStorageTests()
+            effect_fixture.prepare_effect_fixture(session_fixture)
+            expectation = ProviderDeliveryProtectionExpectationV1(
+                required_status_checks=(
+                    ProviderRequiredStatusCheckExpectationV1(context="ci", app_id=9001),
+                ),
+                strict_required_status_checks_policy=True,
+                code_scanning_tools=(),
+                pull_request=None,
+                allowed_merge_methods=("merge",),
+            )
+            binding = ProviderDeliveryInspectionBindingV1(
+                target=effect_fixture.request.target,
+                repository_owner_id=456,
+                inventory_record_id="inventory-r1",
+                inventory_revision=1,
+                inventory_sha256="1" * 64,
+                installed_activation_sha256="2" * 64,
+                ordinary_delivery_app_id=42,
+                ordinary_delivery_installation_id=43,
+                merge_policy_record_id="policy-r1",
+                merge_policy_sha256="3" * 64,
+                merge_policy_semantics_sha256="4" * 64,
+                expectation_sha256=canonical_json_sha256(expectation.model_dump(mode="json")),
+                inspection_profile_id="provider-delivery-inspection-v1",
+                inspection_profile_sha256="6" * 64,
+                inspection_app_id=700,
+                inspection_secret_id="secret",
+                inspection_secret_binding_id="binding",
+                inspection_secret_version_id="version",
+                permission_sha256="7" * 64,
+            )
+            profile = ResolvedProviderDeliveryInspectionProfile(
+                identity=GitHubAppIdentity(app_id=700, private_key="private"),
+                profile_id=binding.inspection_profile_id,
+                profile_sha256=binding.inspection_profile_sha256,
+                app_id=700,
+                secret_id="secret",
+                secret_binding_id="binding",
+                secret_version_id="version",
+                permissions=(
+                    "administration:write",
+                    "contents:read",
+                    "metadata:read",
+                ),
+            )
+
+            def actions_used() -> int:
+                with store._session_factory() as session:
+                    row = session.get(
+                        LaunchplaneOrdinaryAgentLeaseRow,
+                        effect_fixture.request.lease_id,
+                    )
+                    assert row is not None
+                    return int(row.payload["budget"]["actions_used"])
+
+            barrier = threading.Barrier(2)
+
+            def reserve() -> object:
+                barrier.wait(timeout=10)
+                return store.reserve_provider_delivery_inspection_for_job(
+                    request_id=effect_fixture.request.request_id,
+                    profile=profile,
+                )
+
+            before = actions_used()
+            activation = Mock()
+            activation.activation_expires_at = datetime.fromtimestamp(
+                effect_fixture.request.expires_at + 60, timezone.utc
+            ).isoformat()
+            with (
+                patch.object(
+                    store,
+                    "_require_ordinary_agent_runtime_prerequisites",
+                    side_effect=lambda *_args, **_kwargs: _OrdinaryAgentRuntimePrerequisites(
+                        activation=activation,
+                        evidence_ids=(),
+                        custody_valid_from=0,
+                        custody_expires_at=effect_fixture.request.expires_at,
+                        qualification_expires_at=effect_fixture.request.expires_at,
+                        observed_at=session_fixture.now,
+                    ),
+                ),
+                patch.object(
+                    store,
+                    "_provider_delivery_binding_locked",
+                    return_value=(binding, expectation),
+                ),
+                ThreadPoolExecutor(max_workers=2) as pool,
+            ):
+                results = tuple(
+                    future.result(timeout=15)
+                    for future in (pool.submit(reserve), pool.submit(reserve))
+                )
+                reservations = tuple(
+                    item
+                    for item in results
+                    if isinstance(item, ProviderDeliveryInspectionReservationV1)
+                )
+                decisions = tuple(
+                    item for item in results if isinstance(item, ProviderDeliveryReadinessDecision)
+                )
+                self.assertEqual(len(reservations), 1)
+                self.assertEqual(
+                    [(item.status, item.reason_code) for item in decisions],
+                    [("in_progress", "provider_readiness_in_progress")],
+                )
+                first = reservations[0].attempt
+                self.assertEqual(actions_used(), before + 1)
+
+                closed = store.close_provider_delivery_inspection_without_token(
+                    attempt_id=first.attempt_id,
+                    expected_revision=first.revision,
+                )
+                deferred = store.finish_provider_delivery_inspection(
+                    attempt_id=closed.attempt_id,
+                    expected_revision=closed.revision,
+                    capability_reason="provider_wait",
+                    retry_not_before=session_fixture.now + 15,
+                )
+                session_fixture.now = deferred.retry_not_before or 0
+                session_fixture.clock.return_value = datetime.fromtimestamp(
+                    session_fixture.now, timezone.utc
+                ).isoformat()
+                successor = store.reserve_provider_delivery_inspection_for_job(
+                    request_id=effect_fixture.request.request_id,
+                    profile=profile,
+                )
+                assert isinstance(successor, ProviderDeliveryInspectionReservationV1)
+                self.assertEqual(
+                    (
+                        successor.attempt.generation,
+                        successor.attempt.provider_attempt_ordinal,
+                        successor.attempt.action_ordinal,
+                    ),
+                    (first.generation, 2, first.action_ordinal),
+                )
+                self.assertEqual(actions_used(), before + 1)
+
+                with store._session_factory() as session:
+                    row = session.get(
+                        LaunchplaneProviderDeliveryInspectionRow,
+                        successor.attempt.attempt_id,
+                        with_for_update=True,
+                    )
+                    assert row is not None
+                    now = store._ordinary_agent_database_epoch(session)
+                    crashed = successor.attempt.model_copy(
+                        update={
+                            "inspection_started_at": now - 61,
+                            "dispatch_deadline": now - 16,
+                            "publication_deadline": now - 1,
+                        }
+                    )
+                    store._sync_provider_delivery_inspection_row(row, crashed)
+                    session.commit()
+                recovered = store.reserve_provider_delivery_inspection_for_job(
+                    request_id=effect_fixture.request.request_id,
+                    profile=profile,
+                )
+                assert isinstance(recovered, ProviderDeliveryReadinessDecision)
+                self.assertEqual(
+                    (recovered.status, recovered.reason_code),
+                    ("capability_unavailable", "provider_inspection_abandoned"),
+                )
+                with self.assertRaises(OrdinaryAgentSessionAdmissionDenied):
+                    store.finish_provider_delivery_inspection(
+                        attempt_id=successor.attempt.attempt_id,
+                        expected_revision=successor.attempt.revision,
+                        capability_reason="provider_wait",
+                    )
+                self.assertEqual(actions_used(), before + 1)

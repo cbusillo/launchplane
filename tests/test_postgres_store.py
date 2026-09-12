@@ -624,6 +624,29 @@ def _merge_train_policy_db_only_mutation(
     )
 
 
+def _merge_train_policy_record_with_provider_expectation(
+    record: MergeTrainPolicyRecord,
+    *,
+    record_id: str,
+    updated_at: str,
+) -> MergeTrainPolicyRecord:
+    policy_payload = record.policy.model_dump(mode="json")
+    policy_payload["policies"][0]["provider_delivery_protection_expectation"] = {
+        "required_status_checks": [{"context": "build", "app_id": 100}],
+        "strict_required_status_checks_policy": True,
+        "code_scanning_tools": [],
+        "pull_request": None,
+        "allowed_merge_methods": ["merge"],
+    }
+    return MergeTrainPolicyRecord(
+        record_id=record_id,
+        status="active",
+        source="test",
+        updated_at=updated_at,
+        policy=type(record.policy).model_validate(policy_payload),
+    )
+
+
 def _tenant_technical_human_waiver_authz_policy_record(
     *,
     github_ids: tuple[int, ...] = (301,),
@@ -8047,6 +8070,49 @@ env_var = "GH_TOKEN"
         self.assertEqual(
             [record.record_id for record in superseded_records], [active_record.record_id]
         )
+
+    def test_merge_train_policy_raw_and_bare_cas_cannot_add_provider_expectation(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            try:
+                active = build_test_merge_train_policy_record(
+                    repository="cbusillo/sellyouroutboard",
+                    record_id="merge-train-policy-active",
+                    updated_at="2026-05-13T21:00:00Z",
+                )
+                candidate = _merge_train_policy_record_with_provider_expectation(
+                    active,
+                    record_id="merge-train-policy-candidate",
+                    updated_at="2026-05-13T22:00:00Z",
+                )
+                store.write_merge_train_policy_record(active)
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "cannot change provider delivery protection expectations",
+                ):
+                    store.write_merge_train_policy_record(candidate)
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "expectation changes require a governed import",
+                ):
+                    store.compare_and_write_merge_train_policy_record(
+                        expected_record=active,
+                        replacement_record=candidate,
+                    )
+
+                current = store.list_merge_train_policy_records(status="active", limit=2)
+            finally:
+                store.close()
+
+        self.assertEqual(current, (active,))
 
     def test_merge_train_policy_compare_write_rejects_record_id_from_history(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

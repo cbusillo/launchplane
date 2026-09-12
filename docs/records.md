@@ -39,8 +39,7 @@ rehearsal parity only.
 
 ### Ordinary-Agent Lifecycle
 
-Four DB-backed tables hold the authoritative but currently unreachable
-ordinary-agent lifecycle boundary:
+Four DB-backed tables hold the authoritative ordinary-agent lifecycle boundary:
 
 - `launchplane_ordinary_agent_principals` stores linear principal revisions and
   enforces one current revision per principal.
@@ -66,9 +65,12 @@ supply response content or run callbacks while locks are held.
 
 The internal mutation requires its exact code-owned scope and route, uses the
 operation ID as its idempotency key, and binds the complete apply envelope in the
-request fingerprint. The entry point has no HTTP route, descriptor registration,
-worker dispatch, or filesystem import path. Schema-v3 policy persistence remains
-fenced, so the tables alone cannot activate an ordinary agent.
+request fingerprint. This internal apply envelope has no public client route or
+filesystem import path. The controlled worker constructs it from the approved
+enrollment operation and fresh administrator evidence. The separate A5 mediated
+policy transition and activation gates still apply; tables or source presence
+alone cannot activate an ordinary agent. See
+[ordinary agent execution](ordinary-agent-execution.md) for the complete flow.
 
 The supervised privileged-operation worker performs bounded expiry maintenance
 for private ordinary-agent delivery rows. The database clock and the delivery
@@ -77,6 +79,29 @@ audit rows needed for credential and key-retirement custody. Cleanup failure has
 separate redacted telemetry and process-local backoff, so a poisoned delivery
 cannot block unrelated privileged-operation execution. The worker's normal poll
 heartbeat does not assert cleanup success.
+
+### Provider Delivery Inspection
+
+`launchplane_provider_delivery_inspections` stores private demand generations,
+bounded provider attempts, independent token custody and terminal observations.
+Its logical repository flight remains occupied until terminal history and
+release commit together; closed token custody alone does not release it.
+Database uniqueness and state constraints fence concurrent generations,
+repository custody and completion sequence. The migration creates empty
+storage, not an inspection profile, credential, expectation or activation.
+
+The payload retains normalized provider facts and immutable provenance, never a
+private key, token or raw provider response. A ready receipt binds current
+target and selected semantics; containing-policy history and producing-caller
+identity remain provenance. The latest conclusive protection observation
+governs within its original freshness window. Capability failures provide
+pacing without replacing an unexpired conclusive ready observation.
+
+Recovery uses expected state/revision and current database time, preserves
+unknown custody until its conservative expiry, and cannot let a stale finisher
+overwrite a newer result. The store retains terminal audit history and adds no
+automatic deletion. See [provider delivery inspection](provider-delivery-inspection.md)
+for publication deadlines, charging, guarded consumers and runtime prerequisites.
 
 ## Schema Migrations
 

@@ -194,6 +194,31 @@ class OrdinaryAgentLandingStorageTests(unittest.TestCase):
             semantic_ordinal=1,
         )
 
+    def test_new_preparation_readiness_denial_rolls_back_charge_and_record(self) -> None:
+        with self.store._session_factory() as session:
+            lease_row = session.get(LaunchplaneOrdinaryAgentLeaseRow, self.request.lease_id)
+            assert lease_row is not None
+            before = OrdinaryAgentLeaseRecord.model_validate(lease_row.payload)
+        with (
+            patch.object(
+                self.store,
+                "_require_and_project_guarded_readiness",
+                side_effect=OrdinaryAgentSessionAdmissionDenied(
+                    "provider_readiness_refresh_required",
+                    retry_not_before=self.fixture.fixture.now + 1,
+                ),
+            ),
+            self.assertRaises(OrdinaryAgentSessionAdmissionDenied),
+        ):
+            self.reserve()
+        with self.store._session_factory() as session:
+            lease_row = session.get(LaunchplaneOrdinaryAgentLeaseRow, self.request.lease_id)
+            assert lease_row is not None
+            self.assertEqual(OrdinaryAgentLeaseRecord.model_validate(lease_row.payload), before)
+            self.assertEqual(
+                len(list(session.query(LaunchplaneOrdinaryAgentLandingPreparationRow))), 0
+            )
+
     def observed_proposal(
         self, *, check_age_seconds: int = 0
     ) -> tuple[OrdinaryAgentLandingPreparation, MergeAdmissionProposal]:
@@ -429,6 +454,44 @@ class OrdinaryAgentLandingStorageTests(unittest.TestCase):
         self.assertEqual(
             self.store.read_merge_admission_record(proposal.record.admission_id), proposal.record
         )
+
+    def test_final_send_fence_denial_commits_no_child_and_replay_needs_no_refresh(
+        self,
+    ) -> None:
+        preparation, proposal = self.observed_proposal()
+        with (
+            patch.object(
+                self.store,
+                "_require_and_project_guarded_readiness",
+                side_effect=OrdinaryAgentSessionAdmissionDenied(
+                    "provider_readiness_refresh_required",
+                    retry_not_before=self.fixture.fixture.now + 1,
+                ),
+            ) as readiness,
+            self.assertRaisesRegex(
+                OrdinaryAgentSessionAdmissionDenied,
+                "provider_readiness_refresh_required",
+            ),
+        ):
+            self.finalize(preparation, proposal)
+        readiness.assert_called_once()
+        with self.store._session_factory() as session:
+            self.assertIsNone(
+                session.get(LaunchplaneMergeAdmissionRow, proposal.record.admission_id)
+            )
+            self.assertEqual(len(list(session.query(LaunchplaneOrdinaryAgentEffectRow))), 0)
+
+        created = self.finalize(preparation, proposal)
+        with patch.object(
+            self.store,
+            "_require_and_project_guarded_readiness",
+            side_effect=AssertionError("exact replay must not require live readiness"),
+        ) as replay_readiness:
+            replay = self.finalize(preparation, proposal)
+
+        self.assertEqual((created.disposition, replay.disposition), ("created", "replay"))
+        self.assertEqual(created.child, replay.child)
+        replay_readiness.assert_not_called()
 
     def test_failure_after_flush_leaves_no_orphan_admission_or_effect(self) -> None:
         preparation, proposal = self.observed_proposal()

@@ -21,6 +21,7 @@ from control_plane.ordinary_agent_custody import (
     resolve_ordinary_agent_github_app_identity,
 )
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.ordinary_agent_session_lifecycle import OrdinaryAgentSessionAdmissionDenied
 
 
 def _candidate(
@@ -363,7 +364,12 @@ class OrdinaryAgentCustodyTests(unittest.TestCase):
                 }
             raise OSError("revoke outcome unknown")
 
-        with self.assertRaisesRegex(OrdinaryAgentCustodyCleanupUnknown, "cleanup outcome"):
+        denial = OrdinaryAgentSessionAdmissionDenied(
+            "provider_readiness_refresh_required", retry_not_before=int(now.timestamp()) + 30
+        )
+        with self.assertRaisesRegex(
+            OrdinaryAgentCustodyCleanupUnknown, "cleanup outcome"
+        ) as raised:
             with ordinary_agent_provider_token_lease(
                 record_store=self.store,
                 secret_store=self.store,
@@ -373,7 +379,9 @@ class OrdinaryAgentCustodyTests(unittest.TestCase):
                 api_request=api_request,
                 utc_now=lambda: now,
             ):
-                pass
+                raise denial
+
+        self.assertIs(raised.exception.body_error, denial)
 
         attempt_id = "custody_" + hashlib.sha256(b"unknown-revoke").hexdigest()
         attempt = self.store.read_ordinary_agent_custody_issue_attempt(attempt_id)

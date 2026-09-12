@@ -1254,6 +1254,7 @@ export type MergeTrainRepositoryPolicyOutput = {
     github_token: MergeTrainGitHubTokenSource;
     merge_identity: MergeTrainIdentity;
     merge_method: 'merge' | 'squash' | 'rebase';
+    provider_delivery_protection_expectation?: ProviderDeliveryProtectionExpectationV1 | null;
     repository: string;
     scheduler: MergeTrainSchedulerPolicy;
     service_authz: MergeTrainServiceAuthz;
@@ -3342,6 +3343,33 @@ export type PromotionRecordOutput = {
     schema_version: number;
     source_health: HealthcheckEvidence;
     to_instance: string;
+};
+
+export type ProviderCodeScanningToolExpectationV1 = {
+    alerts_threshold: 'none' | 'errors' | 'errors_and_warnings' | 'all';
+    security_alerts_threshold: 'none' | 'critical' | 'high_or_higher' | 'medium_or_higher' | 'all';
+    tool: string;
+};
+
+export type ProviderDeliveryProtectionExpectationV1 = {
+    allowed_merge_methods: Array<'merge' | 'squash' | 'rebase'>;
+    code_scanning_tools: Array<ProviderCodeScanningToolExpectationV1>;
+    pull_request: ProviderPullRequestExpectationV1 | null;
+    required_status_checks: Array<ProviderRequiredStatusCheckExpectationV1>;
+    strict_required_status_checks_policy: boolean;
+};
+
+export type ProviderPullRequestExpectationV1 = {
+    dismiss_stale_reviews_on_push: boolean;
+    require_code_owner_review: boolean;
+    require_last_push_approval: boolean;
+    required_approving_review_count: number;
+    required_review_thread_resolution: boolean;
+};
+
+export type ProviderRequiredStatusCheckExpectationV1 = {
+    app_id: number;
+    context: string;
 };
 
 export type ProviderTargetRecord = {

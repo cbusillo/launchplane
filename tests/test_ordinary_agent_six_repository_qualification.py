@@ -6,6 +6,7 @@ from collections.abc import Callable
 from email.message import Message
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from datetime import datetime, timezone
 import unittest
 from unittest.mock import Mock, patch
 from urllib.error import HTTPError
@@ -14,6 +15,14 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from sqlalchemy import select
 
+from control_plane.contracts.canonical_json import canonical_json_sha256
+from control_plane.contracts.merge_train_policy import (
+    MergeTrainPolicyRecord,
+    MergeTrainRepositoryPolicy,
+    ProviderDeliveryProtectionExpectationV1,
+    ProviderRequiredStatusCheckExpectationV1,
+    merge_train_repository_policy_delivery_semantics_sha256,
+)
 from control_plane.contracts.ordinary_agent_custody import OrdinaryAgentCustodyIssueAttempt
 from control_plane.contracts.ordinary_agent_activation import (
     OrdinaryAgentDeliveryActivationRecord,
@@ -29,6 +38,15 @@ from control_plane.contracts.ordinary_agent_session_lifecycle import (
     OrdinaryAgentFiniteRequestRecord,
     OrdinaryAgentLeaseRecord,
 )
+from control_plane.contracts.provider_delivery_inspection import (
+    ProviderDeliveryInspectionFactsV1,
+    ProviderDeliveryInspectionResultV1,
+)
+from control_plane.contracts.provider_delivery_readiness import (
+    ProviderDeliveryInspectionAttemptV1,
+    ProviderDeliveryInspectionBindingV1,
+)
+from control_plane.github_app_identity import GitHubAppIdentity, GitHubAppInstallationToken
 from control_plane.ordinary_agent_job_worker import (
     OrdinaryAgentJobScanState,
     run_ordinary_agent_job_once,
@@ -38,7 +56,16 @@ from control_plane.ordinary_agent_merge_train_job import (
     advance_ordinary_agent_merge_train_job,
 )
 from control_plane.merge_train_github import MergeTrainGitHubError
+from control_plane.ordinary_agent_session_lifecycle import OrdinaryAgentSessionAdmissionDenied
+from control_plane.provider_delivery_inspection_profile import (
+    PROVIDER_DELIVERY_INSPECTION_PERMISSIONS,
+    ResolvedProviderDeliveryInspectionProfile,
+)
+from control_plane.provider_delivery_readiness import (
+    ensure_provider_delivery_readiness_for_job,
+)
 from control_plane.storage.postgres import (
+    _OrdinaryAgentRuntimePrerequisites,
     LaunchplaneOrdinaryAgentCustodyIssueAttemptRow,
     LaunchplaneOrdinaryAgentEffectRow,
     LaunchplaneOrdinaryAgentFiniteRequestRow,
@@ -46,6 +73,7 @@ from control_plane.storage.postgres import (
     LaunchplaneOrdinaryAgentLandingPreparationRow,
     LaunchplaneOrdinaryAgentLeaseRow,
     LaunchplaneOrdinaryAgentNoOpLandingFinalizationRow,
+    LaunchplaneProviderDeliveryInspectionRow,
     PostgresRecordStore,
 )
 from tests.support.ordinary_agent_qualification import (
@@ -83,11 +111,53 @@ class OrdinaryAgentSixRepositoryQualificationTests(unittest.TestCase):
                 side_effect=lambda _: self.clock.now().isoformat(),
             )
         )
+        self.inspection_profile = ResolvedProviderDeliveryInspectionProfile(
+            identity=GitHubAppIdentity(app_id=654_321, private_key=self.private_key),
+            profile_id="provider-delivery-inspection-v1",
+            profile_sha256="6" * 64,
+            app_id=654_321,
+            secret_id="qualification-inspection-key",
+            secret_binding_id="qualification-inspection-binding",
+            secret_version_id="qualification-inspection-key-v1",
+            permissions=PROVIDER_DELIVERY_INSPECTION_PERMISSIONS,
+        )
+        self.provider_expectation = ProviderDeliveryProtectionExpectationV1(
+            required_status_checks=(
+                ProviderRequiredStatusCheckExpectationV1(context="required", app_id=100),
+            ),
+            strict_required_status_checks_policy=False,
+            code_scanning_tools=(),
+            pull_request=None,
+            allowed_merge_methods=("merge",),
+        )
+        self.provider_readiness_demands = 0
+        self.provider_inspection_runs: list[tuple[str, int, str]] = []
         self.enterContext(
             patch.object(
                 self.store,
-                "_require_and_project_guarded_readiness",
-                return_value=(Mock(spec=OrdinaryAgentDeliveryActivationRecord), self.clock.epoch),
+                "_require_ordinary_agent_runtime_prerequisites",
+                side_effect=self._runtime_prerequisites,
+            )
+        )
+        self.enterContext(
+            patch.object(
+                self.store,
+                "_provider_delivery_binding_locked",
+                side_effect=self._provider_delivery_binding,
+            )
+        )
+        self.enterContext(
+            patch.object(
+                self.store,
+                "_provider_delivery_expectation_locked",
+                side_effect=self._provider_delivery_expectation,
+            )
+        )
+        self.enterContext(
+            patch(
+                "control_plane.provider_delivery_readiness."
+                "resolve_provider_delivery_inspection_profile",
+                return_value=self.inspection_profile,
             )
         )
         self.enterContext(
@@ -105,14 +175,181 @@ class OrdinaryAgentSixRepositoryQualificationTests(unittest.TestCase):
         request_expires_in: int = 10_000,
         continuation_expires_in: int = 20_000,
     ) -> OrdinaryQualificationFleet:
-        self.fleet = OrdinaryQualificationFleet.create(
-            store=self.store,
-            clock=self.clock,
-            repository_count=repository_count,
-            request_expires_in=request_expires_in,
-            continuation_expires_in=continuation_expires_in,
-        )
+        # The historical journey starts from already admitted jobs. Keep its
+        # activation/qualification setup outside this test's scope, then exercise
+        # the permanent S2 continuation consumer and storage path below.
+        with patch.object(
+            self.store,
+            "_require_and_project_guarded_readiness",
+            return_value=(Mock(spec=OrdinaryAgentDeliveryActivationRecord), int(self.clock.epoch)),
+        ):
+            self.fleet = OrdinaryQualificationFleet.create(
+                store=self.store,
+                clock=self.clock,
+                repository_count=repository_count,
+                request_expires_in=request_expires_in,
+                continuation_expires_in=continuation_expires_in,
+            )
         return self.fleet
+
+    def _runtime_prerequisites(
+        self, _session: object, *, context: object, purpose: str
+    ) -> _OrdinaryAgentRuntimePrerequisites:
+        request = context.request  # type: ignore[attr-defined]
+        terminal_at = request.continuation_expires_at or request.expires_at
+        activation = Mock(spec=OrdinaryAgentDeliveryActivationRecord)
+        activation.activation_expires_at = datetime.fromtimestamp(
+            terminal_at + 60, timezone.utc
+        ).isoformat()
+        activation.effective_state = "guarded"
+        return _OrdinaryAgentRuntimePrerequisites(
+            activation=activation,
+            evidence_ids=(f"qualification-{purpose}",),
+            custody_valid_from=request.admitted_at,
+            custody_expires_at=terminal_at,
+            qualification_expires_at=terminal_at,
+            observed_at=int(self.clock.epoch),
+        )
+
+    def _provider_delivery_binding(
+        self,
+        _session: object,
+        *,
+        context: object,
+        activation: object,
+        expected_profile: ResolvedProviderDeliveryInspectionProfile | None = None,
+    ) -> tuple[ProviderDeliveryInspectionBindingV1, object]:
+        del activation
+        if expected_profile is not None:
+            self.assertEqual(expected_profile, self.inspection_profile)
+        assert self.fleet is not None
+        request = context.request  # type: ignore[attr-defined]
+        repository = self.fleet.provider.repositories[request.target.repository]
+        _, governed_repository_policy, expectation = self._provider_delivery_expectation(
+            _session, context=context
+        )
+        binding = ProviderDeliveryInspectionBindingV1(
+            target=request.target,
+            repository_owner_id=repository.owner_id,
+            inventory_record_id=f"qualification-inventory-{repository.repository_id}",
+            inventory_revision=1,
+            inventory_sha256=canonical_json_sha256(
+                {"repository_id": repository.repository_id, "revision": 1}
+            ),
+            installed_activation_sha256=canonical_json_sha256(
+                {"repository_id": repository.repository_id, "activation": "installed"}
+            ),
+            ordinary_delivery_app_id=self.fleet.provider.app_id,
+            ordinary_delivery_installation_id=repository.installation_id,
+            merge_policy_record_id=self.fleet.merge_policy.record_id,
+            merge_policy_sha256=self.fleet.merge_policy.policy_sha256,
+            merge_policy_semantics_sha256=(
+                merge_train_repository_policy_delivery_semantics_sha256(governed_repository_policy)
+            ),
+            expectation_sha256=canonical_json_sha256(expectation.model_dump(mode="json")),
+            inspection_profile_id=self.inspection_profile.profile_id,
+            inspection_profile_sha256=self.inspection_profile.profile_sha256,
+            inspection_app_id=self.inspection_profile.app_id,
+            inspection_secret_id=self.inspection_profile.secret_id,
+            inspection_secret_binding_id=self.inspection_profile.secret_binding_id,
+            inspection_secret_version_id=self.inspection_profile.secret_version_id,
+            permission_sha256=canonical_json_sha256(
+                {"permissions": PROVIDER_DELIVERY_INSPECTION_PERMISSIONS}
+            ),
+        )
+        return binding, expectation
+
+    def _provider_delivery_expectation(
+        self, _session: object, *, context: object
+    ) -> tuple[
+        MergeTrainPolicyRecord,
+        MergeTrainRepositoryPolicy,
+        ProviderDeliveryProtectionExpectationV1,
+    ]:
+        assert self.fleet is not None
+        request = context.request  # type: ignore[attr-defined]
+        repository_policy = self.fleet.merge_policy.policy.find_repository_policy(
+            repository=request.target.repository,
+            base_branch=request.target.base_branch,
+        )
+        governed_repository_policy = repository_policy.model_copy(
+            update={"provider_delivery_protection_expectation": self.provider_expectation}
+        )
+        return self.fleet.merge_policy, governed_repository_policy, self.provider_expectation
+
+    def _ensure_provider_readiness(self, *, store: object, request_id: str) -> object:
+        self.provider_readiness_demands += 1
+
+        def inspect(**kwargs: object) -> ProviderDeliveryInspectionResultV1:
+            # A concurrent caller reaches the real repository single-flight while
+            # the winner owns it and does not dispatch or pay for another attempt.
+            with self.assertRaises(OrdinaryAgentSessionAdmissionDenied) as follower:
+                ensure_provider_delivery_readiness_for_job(
+                    store=self.store,
+                    request_id=request_id,
+                    inspect=lambda **_: self.fail("single-flight follower dispatched"),
+                    wall_time=lambda: self.clock.epoch,
+                )
+            self.assertEqual(follower.exception.reason_code, "provider_readiness_in_progress")
+
+            expectation = kwargs["expectation"]
+            assert isinstance(expectation, ProviderDeliveryProtectionExpectationV1)
+            repository = str(kwargs["repository"])
+            repository_id = kwargs["repository_id"]
+            owner_id = kwargs["repository_owner_id"]
+            ordinary_app_id = kwargs["ordinary_delivery_app_id"]
+            assert isinstance(repository_id, int) and not isinstance(repository_id, bool)
+            assert isinstance(owner_id, int) and not isinstance(owner_id, bool)
+            assert isinstance(ordinary_app_id, int) and not isinstance(ordinary_app_id, bool)
+            installation_id = 700_000 + repository_id
+            kwargs["before_token_mint"](  # type: ignore[operator]
+                self.inspection_profile.app_id, installation_id
+            )
+            kwargs["token_issued"](  # type: ignore[operator]
+                GitHubAppInstallationToken(
+                    token=f"qualification-inspection-{repository_id}",
+                    app_id=self.inspection_profile.app_id,
+                    installation_id=installation_id,
+                    repository_id=repository_id,
+                    repository=repository,
+                    expires_at=datetime.fromtimestamp(
+                        self.clock.epoch + 3_600, timezone.utc
+                    ).isoformat(),
+                )
+            )
+            kwargs["token_cleanup"]("confirmed_revoked")  # type: ignore[operator]
+            observed_at = int(self.clock.epoch)
+            raw_sha = canonical_json_sha256({"repository": repository, "observed_at": observed_at})
+            self.provider_inspection_runs.append(
+                (repository, observed_at, follower.exception.reason_code)
+            )
+            facts = ProviderDeliveryInspectionFactsV1(
+                repository_id=repository_id,
+                repository_owner_id=owner_id,
+                repository=repository,
+                base_branch=str(kwargs["base_branch"]),
+                ordinary_delivery_app_id=ordinary_app_id,
+                applicable_ruleset_ids=(10, 20),
+                update_ruleset_id=10,
+                classic_protection_present=False,
+                effective_protection=expectation,
+                raw_observation_sha256=raw_sha,
+                provider_request_count=7,
+            )
+            return ProviderDeliveryInspectionResultV1(
+                status="ready",
+                reason_codes=("provider_protection_ready",),
+                facts=facts,
+                raw_observation_sha256=raw_sha,
+                provider_request_count=7,
+            )
+
+        return ensure_provider_delivery_readiness_for_job(
+            store=store,  # type: ignore[arg-type]
+            request_id=request_id,
+            inspect=inspect,
+            wall_time=lambda: self.clock.epoch,
+        )
 
     def run_worker(
         self,
@@ -141,6 +378,7 @@ class OrdinaryAgentSixRepositoryQualificationTests(unittest.TestCase):
                         effect_transport_factory=provider.transport_for,
                         monotonic=self.clock.monotonic,
                         utc_now=self.clock.now,
+                        ensure_provider_readiness=self._ensure_provider_readiness,
                     )
                 if dispositions is not None:
                     dispositions.append(disposition)
@@ -243,6 +481,7 @@ class OrdinaryAgentSixRepositoryQualificationTests(unittest.TestCase):
                             effect_transport_factory=provider.transport_for,
                             monotonic=self.clock.monotonic,
                             utc_now=self.clock.now,
+                            ensure_provider_readiness=self._ensure_provider_readiness,
                         )
                 except Exception as error:
                     worker_failures.append(error)
@@ -337,6 +576,14 @@ class OrdinaryAgentSixRepositoryQualificationTests(unittest.TestCase):
                     )
                 )
             )
+            inspection_rows = tuple(
+                session.scalars(
+                    select(LaunchplaneProviderDeliveryInspectionRow).order_by(
+                        LaunchplaneProviderDeliveryInspectionRow.repository_id,
+                        LaunchplaneProviderDeliveryInspectionRow.repository_completion_sequence,
+                    )
+                )
+            )
         leases = tuple(OrdinaryAgentLeaseRecord.model_validate(row.payload) for row in lease_rows)
         persisted_requests = tuple(
             OrdinaryAgentFiniteRequestRecord.model_validate(row.payload) for row in request_rows
@@ -347,10 +594,36 @@ class OrdinaryAgentSixRepositoryQualificationTests(unittest.TestCase):
         custody_attempts = tuple(
             OrdinaryAgentCustodyIssueAttempt.model_validate(row.payload) for row in custody_rows
         )
+        inspections = tuple(
+            ProviderDeliveryInspectionAttemptV1.model_validate(row.payload)
+            for row in inspection_rows
+        )
         self.assertEqual(
             [(lease.budget.actions_used, lease.budget.pull_requests_used) for lease in leases],
-            [(6, 2)] * 6,
+            [(7, 2)] * 6,
         )
+        self.assertEqual(
+            [
+                (
+                    inspection.generation,
+                    inspection.action_ordinal,
+                    inspection.inspection_phase,
+                    inspection.custody_phase,
+                    inspection.terminal_status,
+                    inspection.provider_request_count,
+                )
+                for inspection in inspections
+            ],
+            [(1, 1, "terminal", "closed", "ready", 7)] * 6,
+        )
+        self.assertEqual(len(self.provider_inspection_runs), 6)
+        self.assertTrue(
+            all(
+                follower_reason == "provider_readiness_in_progress"
+                for _, _, follower_reason in self.provider_inspection_runs
+            )
+        )
+        self.assertGreater(self.provider_readiness_demands, len(self.provider_inspection_runs))
         self.assertEqual(
             [(request.status, request.refresh_used) for request in persisted_requests],
             [("completed", 0)] * 6,
@@ -373,7 +646,7 @@ class OrdinaryAgentSixRepositoryQualificationTests(unittest.TestCase):
         )
         self.assertEqual(
             [effect.action_ordinal for effect in effects],
-            [ordinal for _ in range(6) for ordinal in range(1, 7)],
+            [ordinal for _ in range(6) for ordinal in range(2, 8)],
         )
         self.assertEqual(
             [
@@ -547,6 +820,119 @@ class OrdinaryAgentSixRepositoryQualificationTests(unittest.TestCase):
                 ("snapshot", "MergeTrainGitHubError"),
                 ("candidate_prepare", "MergeTrainGitHubError"),
             ],
+        )
+
+    def test_twenty_minute_continuation_refreshes_without_new_client_authority(self) -> None:
+        fleet = self.create_fleet(1)
+        request = fleet.requests[0]
+        repository = next(iter(fleet.provider.repositories.values()))
+        repository.required_checks_pending = True
+        initial_epoch = int(self.clock.epoch)
+        pending_until = initial_epoch + 1_200
+        states = {"twenty-minute-worker": OrdinaryAgentJobScanState()}
+        waiting_schedule: list[int] = []
+
+        while self.clock.epoch < pending_until:
+            processed = self.run_worker(
+                fleet=fleet,
+                states=states,
+                worker_id="twenty-minute-worker",
+            )
+            view = self.views(fleet)[0]
+            self.assertNotEqual(view.status, "completed")
+            if processed:
+                assert view.next_due_at is not None
+                waiting_schedule.append(view.next_due_at - initial_epoch)
+            if view.next_due_at is not None and view.next_due_at > self.clock.epoch:
+                self.clock.advance_to(min(view.next_due_at, pending_until))
+
+        self.assertEqual(waiting_schedule, [60, 180, 420, 900, 1_800])
+        self.assertEqual(
+            [
+                call.phase
+                for call in fleet.provider.calls
+                if call.phase in {"candidate_prepare", "candidate_merge", "landing_merge"}
+            ],
+            [],
+        )
+        pending_calls = len(fleet.provider.calls)
+        pending_winners = len(self.provider_inspection_runs)
+        self.assertGreaterEqual(pending_winners, 2)
+
+        # CI becoming ready does not itself invoke provider readiness or mutate
+        # delivery. The job remains paced to its persisted source-check deadline.
+        repository.required_checks_pending = False
+        self.assertEqual(
+            self.run_worker(
+                fleet=fleet,
+                states=states,
+                worker_id="twenty-minute-worker",
+            ),
+            0,
+        )
+        self.assertEqual(len(fleet.provider.calls), pending_calls)
+        self.assertEqual(len(self.provider_inspection_runs), pending_winners)
+        next_due = self.views(fleet)[0].next_due_at
+        assert next_due is not None and next_due > self.clock.epoch
+        self.clock.advance_to(next_due)
+
+        # The next actual continuation demand renews stale readiness and resumes
+        # the same finite job; no refresh endpoint or replacement client key is used.
+        states = {"ci-resume-worker": OrdinaryAgentJobScanState()}
+        completed = self.pump_until(
+            fleet=fleet,
+            states=states,
+            predicate=lambda views: views[0].status == "completed",
+        )[0]
+
+        self.assertEqual((completed.completed_effects, completed.total_effects), (6, 6))
+        inspections = self._inspection_attempts()
+        winner_count = len(inspections)
+        self.assertEqual(winner_count, len(self.provider_inspection_runs))
+        self.assertEqual(
+            [
+                (
+                    item.demand_id,
+                    item.generation,
+                    item.action_ordinal,
+                    item.terminal_status,
+                )
+                for item in inspections
+            ],
+            [
+                (request.request_id, generation, generation, "ready")
+                for generation in range(1, winner_count + 1)
+            ],
+        )
+        self.assertGreater(winner_count, pending_winners)
+        with self.store._session_factory() as session:
+            lease_rows = tuple(session.scalars(select(LaunchplaneOrdinaryAgentLeaseRow)))
+            request_rows = tuple(session.scalars(select(LaunchplaneOrdinaryAgentFiniteRequestRow)))
+        self.assertEqual(len(lease_rows), 1)
+        self.assertEqual(len(request_rows), 1)
+        lease = OrdinaryAgentLeaseRecord.model_validate(lease_rows[0].payload)
+        persisted = OrdinaryAgentFiniteRequestRecord.model_validate(request_rows[0].payload)
+        self.assertEqual(
+            (lease.budget.actions_used, lease.budget.pull_requests_used),
+            (winner_count + 6, 2),
+        )
+        self.assertEqual(
+            (
+                persisted.request_id,
+                persisted.idempotency_key,
+                persisted.session_id,
+                persisted.lease_id,
+                persisted.refresh_used,
+                persisted.status,
+            ),
+            (
+                request.request_id,
+                request.idempotency_key,
+                request.session_id,
+                request.lease_id,
+                0,
+                "completed",
+            ),
         )
 
     def test_completed_landing_restarts_without_provider_resend_before_later_cleanup(
@@ -909,6 +1295,18 @@ class OrdinaryAgentSixRepositoryQualificationTests(unittest.TestCase):
                     select(LaunchplaneOrdinaryAgentEffectRow).order_by(
                         LaunchplaneOrdinaryAgentEffectRow.request_id,
                         LaunchplaneOrdinaryAgentEffectRow.action_ordinal,
+                    )
+                )
+            )
+
+    def _inspection_attempts(self) -> tuple[ProviderDeliveryInspectionAttemptV1, ...]:
+        with self.store._session_factory() as session:
+            return tuple(
+                ProviderDeliveryInspectionAttemptV1.model_validate(row.payload)
+                for row in session.scalars(
+                    select(LaunchplaneProviderDeliveryInspectionRow).order_by(
+                        LaunchplaneProviderDeliveryInspectionRow.repository_id,
+                        LaunchplaneProviderDeliveryInspectionRow.repository_completion_sequence,
                     )
                 )
             )

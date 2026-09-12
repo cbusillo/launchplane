@@ -16744,6 +16744,17 @@
             "title": "Merge Method",
             "type": "string"
           },
+          "provider_delivery_protection_expectation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProviderDeliveryProtectionExpectationV1"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
+          },
           "repository": {
             "title": "Repository",
             "type": "string"
@@ -16822,6 +16833,17 @@
             ],
             "title": "Merge Method",
             "type": "string"
+          },
+          "provider_delivery_protection_expectation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProviderDeliveryProtectionExpectationV1"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
           },
           "repository": {
             "title": "Repository",
@@ -33522,6 +33544,163 @@
           "protected_artifacts"
         ],
         "title": "ProtectedArtifactsResponse",
+        "type": "object"
+      },
+      "ProviderCodeScanningToolExpectationV1": {
+        "additionalProperties": false,
+        "properties": {
+          "alerts_threshold": {
+            "enum": [
+              "none",
+              "errors",
+              "errors_and_warnings",
+              "all"
+            ],
+            "title": "Alerts Threshold",
+            "type": "string"
+          },
+          "security_alerts_threshold": {
+            "enum": [
+              "none",
+              "critical",
+              "high_or_higher",
+              "medium_or_higher",
+              "all"
+            ],
+            "title": "Security Alerts Threshold",
+            "type": "string"
+          },
+          "tool": {
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Tool",
+            "type": "string"
+          }
+        },
+        "required": [
+          "tool",
+          "alerts_threshold",
+          "security_alerts_threshold"
+        ],
+        "title": "ProviderCodeScanningToolExpectationV1",
+        "type": "object"
+      },
+      "ProviderDeliveryProtectionExpectationV1": {
+        "additionalProperties": false,
+        "properties": {
+          "allowed_merge_methods": {
+            "items": {
+              "enum": [
+                "merge",
+                "squash",
+                "rebase"
+              ],
+              "type": "string"
+            },
+            "maxItems": 3,
+            "minItems": 1,
+            "title": "Allowed Merge Methods",
+            "type": "array"
+          },
+          "code_scanning_tools": {
+            "items": {
+              "$ref": "#/components/schemas/ProviderCodeScanningToolExpectationV1"
+            },
+            "maxItems": 32,
+            "title": "Code Scanning Tools",
+            "type": "array"
+          },
+          "pull_request": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProviderPullRequestExpectationV1"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "required_status_checks": {
+            "items": {
+              "$ref": "#/components/schemas/ProviderRequiredStatusCheckExpectationV1"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "title": "Required Status Checks",
+            "type": "array"
+          },
+          "strict_required_status_checks_policy": {
+            "title": "Strict Required Status Checks Policy",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "required_status_checks",
+          "strict_required_status_checks_policy",
+          "code_scanning_tools",
+          "pull_request",
+          "allowed_merge_methods"
+        ],
+        "title": "ProviderDeliveryProtectionExpectationV1",
+        "type": "object"
+      },
+      "ProviderPullRequestExpectationV1": {
+        "additionalProperties": false,
+        "properties": {
+          "dismiss_stale_reviews_on_push": {
+            "title": "Dismiss Stale Reviews On Push",
+            "type": "boolean"
+          },
+          "require_code_owner_review": {
+            "title": "Require Code Owner Review",
+            "type": "boolean"
+          },
+          "require_last_push_approval": {
+            "title": "Require Last Push Approval",
+            "type": "boolean"
+          },
+          "required_approving_review_count": {
+            "maximum": 6.0,
+            "minimum": 0.0,
+            "title": "Required Approving Review Count",
+            "type": "integer"
+          },
+          "required_review_thread_resolution": {
+            "title": "Required Review Thread Resolution",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "dismiss_stale_reviews_on_push",
+          "require_code_owner_review",
+          "require_last_push_approval",
+          "required_approving_review_count",
+          "required_review_thread_resolution"
+        ],
+        "title": "ProviderPullRequestExpectationV1",
+        "type": "object"
+      },
+      "ProviderRequiredStatusCheckExpectationV1": {
+        "additionalProperties": false,
+        "properties": {
+          "app_id": {
+            "exclusiveMinimum": 0.0,
+            "maximum": 9.223372036854776e+18,
+            "title": "App Id",
+            "type": "integer"
+          },
+          "context": {
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Context",
+            "type": "string"
+          }
+        },
+        "required": [
+          "context",
+          "app_id"
+        ],
+        "title": "ProviderRequiredStatusCheckExpectationV1",
         "type": "object"
       },
       "ProviderTargetRecord": {
@@ -67489,6 +67668,17 @@
                         "title": "Merge Method",
                         "type": "string"
                       },
+                      "provider_delivery_protection_expectation": {
+                        "anyOf": [
+                          {
+                            "$ref": "#/$defs/ProviderDeliveryProtectionExpectationV1"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "x-launchplane-optional-response": true
+                      },
                       "repository": {
                         "title": "Repository",
                         "type": "string"
@@ -67564,6 +67754,163 @@
                       }
                     },
                     "title": "MergeTrainServiceAuthz",
+                    "type": "object"
+                  },
+                  "ProviderCodeScanningToolExpectationV1": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "alerts_threshold": {
+                        "enum": [
+                          "none",
+                          "errors",
+                          "errors_and_warnings",
+                          "all"
+                        ],
+                        "title": "Alerts Threshold",
+                        "type": "string"
+                      },
+                      "security_alerts_threshold": {
+                        "enum": [
+                          "none",
+                          "critical",
+                          "high_or_higher",
+                          "medium_or_higher",
+                          "all"
+                        ],
+                        "title": "Security Alerts Threshold",
+                        "type": "string"
+                      },
+                      "tool": {
+                        "maxLength": 512,
+                        "minLength": 1,
+                        "title": "Tool",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "tool",
+                      "alerts_threshold",
+                      "security_alerts_threshold"
+                    ],
+                    "title": "ProviderCodeScanningToolExpectationV1",
+                    "type": "object"
+                  },
+                  "ProviderDeliveryProtectionExpectationV1": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "allowed_merge_methods": {
+                        "items": {
+                          "enum": [
+                            "merge",
+                            "squash",
+                            "rebase"
+                          ],
+                          "type": "string"
+                        },
+                        "maxItems": 3,
+                        "minItems": 1,
+                        "title": "Allowed Merge Methods",
+                        "type": "array"
+                      },
+                      "code_scanning_tools": {
+                        "items": {
+                          "$ref": "#/$defs/ProviderCodeScanningToolExpectationV1"
+                        },
+                        "maxItems": 32,
+                        "title": "Code Scanning Tools",
+                        "type": "array"
+                      },
+                      "pull_request": {
+                        "anyOf": [
+                          {
+                            "$ref": "#/$defs/ProviderPullRequestExpectationV1"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "required_status_checks": {
+                        "items": {
+                          "$ref": "#/$defs/ProviderRequiredStatusCheckExpectationV1"
+                        },
+                        "maxItems": 100,
+                        "minItems": 1,
+                        "title": "Required Status Checks",
+                        "type": "array"
+                      },
+                      "strict_required_status_checks_policy": {
+                        "title": "Strict Required Status Checks Policy",
+                        "type": "boolean"
+                      }
+                    },
+                    "required": [
+                      "required_status_checks",
+                      "strict_required_status_checks_policy",
+                      "code_scanning_tools",
+                      "pull_request",
+                      "allowed_merge_methods"
+                    ],
+                    "title": "ProviderDeliveryProtectionExpectationV1",
+                    "type": "object"
+                  },
+                  "ProviderPullRequestExpectationV1": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "dismiss_stale_reviews_on_push": {
+                        "title": "Dismiss Stale Reviews On Push",
+                        "type": "boolean"
+                      },
+                      "require_code_owner_review": {
+                        "title": "Require Code Owner Review",
+                        "type": "boolean"
+                      },
+                      "require_last_push_approval": {
+                        "title": "Require Last Push Approval",
+                        "type": "boolean"
+                      },
+                      "required_approving_review_count": {
+                        "maximum": 6,
+                        "minimum": 0,
+                        "title": "Required Approving Review Count",
+                        "type": "integer"
+                      },
+                      "required_review_thread_resolution": {
+                        "title": "Required Review Thread Resolution",
+                        "type": "boolean"
+                      }
+                    },
+                    "required": [
+                      "dismiss_stale_reviews_on_push",
+                      "require_code_owner_review",
+                      "require_last_push_approval",
+                      "required_approving_review_count",
+                      "required_review_thread_resolution"
+                    ],
+                    "title": "ProviderPullRequestExpectationV1",
+                    "type": "object"
+                  },
+                  "ProviderRequiredStatusCheckExpectationV1": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "app_id": {
+                        "exclusiveMinimum": 0,
+                        "maximum": 9223372036854775807,
+                        "title": "App Id",
+                        "type": "integer"
+                      },
+                      "context": {
+                        "maxLength": 512,
+                        "minLength": 1,
+                        "title": "Context",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "context",
+                      "app_id"
+                    ],
+                    "title": "ProviderRequiredStatusCheckExpectationV1",
                     "type": "object"
                   }
                 },

@@ -20,9 +20,17 @@ from control_plane.cli_storage_secrets import normalize_secret_scope
 from control_plane.contracts.driver_descriptor import DriverContextView, DriverDescriptor
 from control_plane.contracts.driver_descriptor import DriverView
 from control_plane.contracts.merge_train_policy import (
+    MergeTrainPolicy,
+    MergeTrainRepositoryPolicy,
     MergeTrainPolicyRecord,
+    ProviderCodeScanningToolExpectationV1,
+    ProviderDeliveryProtectionExpectationV1,
+    ProviderPullRequestExpectationV1,
+    ProviderRequiredStatusCheckExpectationV1,
     build_merge_train_policy_record_id,
+    merge_train_policy_provider_expectation_projection,
     merge_train_policy_sha256,
+    merge_train_repository_policy_delivery_semantics_sha256,
     parse_merge_train_policy_toml,
 )
 from control_plane.merge_train_policy_source import MergeTrainPolicyStoreMissingError
@@ -34,7 +42,232 @@ from tests.merge_train_policy_fixtures import build_test_merge_train_policy_with
 CLI_MAIN = cast(Command, main)
 
 
+def _provider_delivery_expectation(
+    *,
+    pull_request: ProviderPullRequestExpectationV1 | None = None,
+) -> ProviderDeliveryProtectionExpectationV1:
+    return ProviderDeliveryProtectionExpectationV1(
+        required_status_checks=(
+            ProviderRequiredStatusCheckExpectationV1(context=" unit ", app_id=200),
+            ProviderRequiredStatusCheckExpectationV1(context="build", app_id=100),
+        ),
+        strict_required_status_checks_policy=True,
+        code_scanning_tools=(
+            ProviderCodeScanningToolExpectationV1(
+                tool=" Zeta Scanner ",
+                alerts_threshold="errors",
+                security_alerts_threshold="high_or_higher",
+            ),
+            ProviderCodeScanningToolExpectationV1(
+                tool="CodeQL",
+                alerts_threshold="errors_and_warnings",
+                security_alerts_threshold="medium_or_higher",
+            ),
+        ),
+        pull_request=pull_request,
+        allowed_merge_methods=("rebase", "merge", "squash"),
+    )
+
+
 class MergeTrainPolicyTests(unittest.TestCase):
+    def test_provider_delivery_expectation_normalizes_exact_provider_semantics(self) -> None:
+        pull_request = ProviderPullRequestExpectationV1(
+            dismiss_stale_reviews_on_push=False,
+            require_code_owner_review=False,
+            require_last_push_approval=False,
+            required_approving_review_count=0,
+            required_review_thread_resolution=True,
+        )
+
+        expectation = _provider_delivery_expectation(pull_request=pull_request)
+
+        self.assertEqual(
+            [(check.context, check.app_id) for check in expectation.required_status_checks],
+            [("build", 100), ("unit", 200)],
+        )
+        self.assertEqual(
+            [tool.tool for tool in expectation.code_scanning_tools],
+            ["CodeQL", "Zeta Scanner"],
+        )
+        self.assertEqual(expectation.allowed_merge_methods, ("merge", "squash", "rebase"))
+        self.assertEqual(expectation.pull_request, pull_request)
+
+    def test_provider_delivery_expectation_accepts_proven_absent_optional_rule_families(
+        self,
+    ) -> None:
+        expectation = ProviderDeliveryProtectionExpectationV1(
+            required_status_checks=(
+                ProviderRequiredStatusCheckExpectationV1(context="build", app_id=100),
+            ),
+            strict_required_status_checks_policy=True,
+            code_scanning_tools=(),
+            pull_request=None,
+            allowed_merge_methods=("merge",),
+        )
+
+        self.assertEqual(expectation.code_scanning_tools, ())
+        self.assertIsNone(expectation.pull_request)
+        self.assertIn("pull_request", expectation.model_dump(mode="json", exclude_none=True))
+
+    def test_provider_delivery_expectation_rejects_ambiguous_or_unsafe_shapes(self) -> None:
+        valid_payload = {
+            "required_status_checks": [
+                {"context": "build", "app_id": 100},
+            ],
+            "strict_required_status_checks_policy": True,
+            "code_scanning_tools": [],
+            "pull_request": None,
+            "allowed_merge_methods": ["merge"],
+        }
+        invalid_payloads = {
+            "duplicate status identity": {
+                **valid_payload,
+                "required_status_checks": [
+                    {"context": "Build", "app_id": 100},
+                    {"context": "build", "app_id": 100},
+                ],
+            },
+            "duplicate scanning tool": {
+                **valid_payload,
+                "code_scanning_tools": [
+                    {
+                        "tool": "CodeQL",
+                        "alerts_threshold": "errors",
+                        "security_alerts_threshold": "high_or_higher",
+                    },
+                    {
+                        "tool": "CodeQL",
+                        "alerts_threshold": "none",
+                        "security_alerts_threshold": "none",
+                    },
+                ],
+            },
+            "merge method unavailable": {
+                **valid_payload,
+                "allowed_merge_methods": ["squash", "rebase"],
+            },
+            "duplicate merge method": {
+                **valid_payload,
+                "allowed_merge_methods": ["merge", "merge"],
+            },
+            "missing explicit pull request family": {
+                key: value for key, value in valid_payload.items() if key != "pull_request"
+            },
+            "unknown field": {**valid_payload, "unknown": True},
+        }
+
+        for case, payload in invalid_payloads.items():
+            with self.subTest(case=case), self.assertRaises(ValidationError):
+                ProviderDeliveryProtectionExpectationV1.model_validate(payload)
+        with self.assertRaises(ValidationError):
+            ProviderPullRequestExpectationV1(
+                dismiss_stale_reviews_on_push=False,
+                require_code_owner_review=False,
+                require_last_push_approval=False,
+                required_approving_review_count=7,
+                required_review_thread_resolution=False,
+            )
+
+    def test_absent_provider_delivery_expectation_preserves_legacy_bytes_and_digest(self) -> None:
+        legacy_policy = build_test_merge_train_policy()
+        explicit_none_payload = legacy_policy.model_dump(mode="json")
+        explicit_none_payload["policies"][0]["provider_delivery_protection_expectation"] = None
+        explicit_none_policy = MergeTrainPolicy.model_validate(explicit_none_payload)
+
+        self.assertNotIn(
+            "provider_delivery_protection_expectation",
+            explicit_none_policy.model_dump(mode="json")["policies"][0],
+        )
+        self.assertEqual(explicit_none_policy.policy_sha256, legacy_policy.policy_sha256)
+
+    def test_provider_delivery_serialization_schema_retains_typed_policy_fields(self) -> None:
+        schema = MergeTrainRepositoryPolicy.model_json_schema(mode="serialization")
+        properties = schema["properties"]
+        expectation_schema = schema["$defs"]["ProviderDeliveryProtectionExpectationV1"]
+
+        self.assertFalse(schema["additionalProperties"])
+        self.assertIn("merge_identity", properties)
+        self.assertIn("github_token", properties)
+        self.assertIn("enqueue", properties)
+        self.assertIn("provider_delivery_protection_expectation", properties)
+        self.assertNotIn("provider_delivery_protection_expectation", schema["required"])
+        self.assertTrue(
+            properties["provider_delivery_protection_expectation"][
+                "x-launchplane-optional-response"
+            ]
+        )
+        self.assertFalse(expectation_schema["additionalProperties"])
+        self.assertEqual(
+            set(expectation_schema["required"]),
+            {
+                "required_status_checks",
+                "strict_required_status_checks_policy",
+                "code_scanning_tools",
+                "pull_request",
+                "allowed_merge_methods",
+            },
+        )
+        self.assertIn(
+            {"type": "null"},
+            expectation_schema["properties"]["pull_request"]["anyOf"],
+        )
+
+    def test_provider_expectation_projection_tracks_effective_active_policy_only(self) -> None:
+        policy_payload = build_test_merge_train_policy().model_dump(mode="json")
+        expectation = _provider_delivery_expectation()
+        policy_payload["policies"][0]["provider_delivery_protection_expectation"] = (
+            expectation.model_dump(mode="json")
+        )
+        record = MergeTrainPolicyRecord(
+            record_id="merge-train-policy-provider-expectation",
+            source="test",
+            updated_at="2026-09-11T12:00:00Z",
+            policy=MergeTrainPolicy.model_validate(policy_payload),
+        )
+
+        self.assertEqual(
+            merge_train_policy_provider_expectation_projection(record),
+            {"cbusillo/sellyouroutboard:main": expectation.model_dump(mode="json")},
+        )
+        self.assertEqual(
+            merge_train_policy_provider_expectation_projection(
+                record.model_copy(update={"status": "superseded"})
+            ),
+            {},
+        )
+
+    def test_delivery_semantics_digest_includes_consumed_fields_and_excludes_credentials(
+        self,
+    ) -> None:
+        repository_policy = build_test_merge_train_policy().policies[0]
+        excluded_change_payload = repository_policy.model_dump(mode="json")
+        excluded_change_payload["merge_identity"]["name"] = "replacement-identity"
+        excluded_change_payload["service_authz"]["context"] = "replacement-context"
+        excluded_change_payload["github_token"]["env_var"] = "REPLACEMENT_TOKEN"
+        excluded_change_payload["scheduler"]["enabled"] = True
+        excluded_change = MergeTrainRepositoryPolicy.model_validate(excluded_change_payload)
+        selected_change_payload = repository_policy.model_dump(mode="json")
+        selected_change_payload["enqueue_label"] = "new-ready-label"
+        selected_change = MergeTrainRepositoryPolicy.model_validate(selected_change_payload)
+        expectation_change_payload = repository_policy.model_dump(mode="json")
+        expectation_change_payload["provider_delivery_protection_expectation"] = (
+            _provider_delivery_expectation().model_dump(mode="json")
+        )
+        expectation_change = MergeTrainRepositoryPolicy.model_validate(expectation_change_payload)
+
+        self.assertEqual(
+            merge_train_repository_policy_delivery_semantics_sha256(repository_policy),
+            merge_train_repository_policy_delivery_semantics_sha256(excluded_change),
+        )
+        self.assertNotEqual(
+            merge_train_repository_policy_delivery_semantics_sha256(repository_policy),
+            merge_train_repository_policy_delivery_semantics_sha256(selected_change),
+        )
+        self.assertNotEqual(
+            merge_train_repository_policy_delivery_semantics_sha256(repository_policy),
+            merge_train_repository_policy_delivery_semantics_sha256(expectation_change),
+        )
+
     def test_policy_can_include_multiple_repository_branch_entries(self) -> None:
         policy = build_test_merge_train_policy_with_codex_skills()
 

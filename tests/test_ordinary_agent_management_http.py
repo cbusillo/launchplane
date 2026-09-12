@@ -6,6 +6,21 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import Mock, patch
 
+from control_plane.contracts.merge_train_policy import (
+    ProviderDeliveryProtectionExpectationV1,
+    ProviderRequiredStatusCheckExpectationV1,
+)
+from control_plane.contracts.canonical_json import canonical_json_sha256
+from control_plane.contracts.provider_delivery_inspection import (
+    ProviderDeliveryInspectionFactsV1,
+    ProviderDeliveryInspectionResultV1,
+)
+from control_plane.contracts.provider_delivery_readiness import (
+    ProviderDeliveryInspectionBindingV1,
+)
+from control_plane.github_app_identity import GitHubAppIdentity, GitHubAppInstallationToken
+from control_plane.ordinary_agent_authentication import OrdinaryAgentTokenProof
+from control_plane.contracts.ordinary_agent_client import OrdinaryAgentFiniteClientRequest
 from control_plane.contracts.ordinary_agent_lifecycle import OrdinaryAgentEnrollmentIntent
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.ordinary_agent_enrollment_worker import (
@@ -17,6 +32,13 @@ from control_plane.ordinary_agent_session_approval import (
     disconnect_ordinary_agent_principal,
 )
 from control_plane.ordinary_agent_session_lifecycle import OrdinaryAgentSessionAdmissionDenied
+from control_plane.provider_delivery_inspection_profile import (
+    ResolvedProviderDeliveryInspectionProfile,
+)
+from control_plane.provider_delivery_readiness import (
+    ensure_provider_delivery_readiness_for_client,
+)
+from control_plane.storage.postgres import _OrdinaryAgentRuntimePrerequisites
 from control_plane.service_auth import (
     BearerIdentityConfig,
     GitHubHumanIdentity,
@@ -25,6 +47,7 @@ from control_plane.service_auth import (
 from control_plane.service_human_auth import GitHubOAuthConfig, HumanSessionManager
 from control_plane.storage.postgres import PostgresRecordStore
 from tests import test_ordinary_agent_effect_storage as effect_support
+from tests import test_ordinary_agent_session_storage as session_support
 from tests.support.http import lifespan_client
 from tests.support.ordinary_agent_lifecycle import (
     ADMIN_GITHUB_ID,
@@ -134,6 +157,11 @@ class OrdinaryAgentManagementHTTPTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 403, response.text)
         self.assertEqual(response.json()["error"]["code"], "http_error")
+        self.assertEqual(
+            response.json()["error"]["message"],
+            "This agent operation is unavailable.",
+        )
+        self.assertNotIn("retry-after", response.headers)
 
     async def test_guarded_provider_readiness_gap_is_reported_as_service_unavailable(self) -> None:
         fixture = effect_support.OrdinaryAgentEffectStorageTests()
@@ -148,7 +176,11 @@ class OrdinaryAgentManagementHTTPTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(
             PostgresRecordStore,
             "admit_ordinary_agent_client_request",
-            side_effect=OrdinaryAgentSessionAdmissionDenied("provider_readiness_unavailable"),
+            side_effect=OrdinaryAgentSessionAdmissionDenied(
+                "provider_inspection_profile_unavailable",
+                retry_not_before=session.now + 30,
+                server_observed_at=session.now,
+            ),
         ):
             async with lifespan_client(app) as client:
                 response = await client.post(
@@ -169,9 +201,333 @@ class OrdinaryAgentManagementHTTPTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 503, response.text)
         self.assertEqual(
-            response.json()["error"]["message"],
-            "Guarded delivery is unavailable until Launchplane can verify repository protection.",
+            response.json()["error"]["code"],
+            "provider_inspection_profile_unavailable",
         )
+        self.assertEqual(
+            response.json()["error"]["message"],
+            "Provider delivery readiness is unavailable; retry the same request key.",
+        )
+        self.assertEqual(response.headers["retry-after"], "30")
+
+    async def test_guarded_merge_method_configuration_is_paced_service_unavailable(self) -> None:
+        fixture = effect_support.OrdinaryAgentEffectStorageTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        session = fixture.fixture
+        app = create_launchplane_fastapi_app(
+            verifier=Mock(),
+            authz_policy=session.policy.policy,
+            record_store_factory=lambda: fixture.store,
+        )
+        with patch.object(
+            PostgresRecordStore,
+            "admit_ordinary_agent_client_request",
+            side_effect=OrdinaryAgentSessionAdmissionDenied(
+                "ordinary_merge_method_unsupported",
+                retry_not_before=session.now + 12,
+                server_observed_at=session.now,
+            ),
+        ):
+            async with lifespan_client(app) as client:
+                response = await client.post(
+                    "/v1/agent/ordinary-agent-jobs",
+                    headers={"Authorization": f"Bearer {session.bundle.token.value}"},
+                    json={
+                        "schema_version": 2,
+                        "purpose": "guarded_delivery",
+                        "idempotency_key": "http-guarded-merge-method-unsupported",
+                        "session_id": fixture.request.session_id,
+                        "lease_id": fixture.request.lease_id,
+                        "base_sha": "a" * 40,
+                        "pull_requests": [{"number": 12, "head_sha": "b" * 40}],
+                        "permitted_stack_edit_pull_requests": [],
+                        "refresh_allowance": 0,
+                    },
+                )
+
+        self.assertEqual(response.status_code, 503, response.text)
+        self.assertEqual(response.json()["error"]["code"], "ordinary_merge_method_unsupported")
+        self.assertEqual(
+            response.json()["error"]["message"],
+            "Provider delivery readiness is unavailable; retry the same request key.",
+        )
+        self.assertEqual(response.headers["retry-after"], "12")
+
+    async def test_guarded_admission_refreshes_once_then_reenters_authoritative_admission(
+        self,
+    ) -> None:
+        fixture = effect_support.OrdinaryAgentEffectStorageTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        session = fixture.fixture
+        app = create_launchplane_fastapi_app(
+            verifier=Mock(),
+            authz_policy=session.policy.policy,
+            record_store_factory=lambda: fixture.store,
+        )
+        with (
+            patch.object(
+                PostgresRecordStore,
+                "admit_ordinary_agent_client_request",
+                side_effect=[
+                    OrdinaryAgentSessionAdmissionDenied(
+                        "provider_readiness_refresh_required",
+                        retry_not_before=session.now + 1,
+                        server_observed_at=session.now,
+                    ),
+                    fixture.request,
+                ],
+            ) as admit,
+            patch(
+                "control_plane.http_routes.ordinary_agent_management."
+                "ensure_provider_delivery_readiness_for_client",
+            ) as ensure,
+        ):
+            async with lifespan_client(app) as client:
+                response = await client.post(
+                    "/v1/agent/ordinary-agent-jobs",
+                    headers={"Authorization": f"Bearer {session.bundle.token.value}"},
+                    json={
+                        "schema_version": 2,
+                        "purpose": "guarded_delivery",
+                        "idempotency_key": "http-guarded-provider-refresh",
+                        "session_id": fixture.request.session_id,
+                        "lease_id": fixture.request.lease_id,
+                        "base_sha": "a" * 40,
+                        "pull_requests": [{"number": 12, "head_sha": "b" * 40}],
+                        "permitted_stack_edit_pull_requests": [],
+                        "refresh_allowance": 0,
+                    },
+                )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(admit.call_count, 2)
+        ensure.assert_called_once()
+
+    async def test_concurrent_same_key_admission_during_refresh_returns_exact_replay(
+        self,
+    ) -> None:
+        fixture = effect_support.OrdinaryAgentEffectStorageTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        session = fixture.fixture
+        app = create_launchplane_fastapi_app(
+            verifier=Mock(),
+            authz_policy=session.policy.policy,
+            record_store_factory=lambda: fixture.store,
+        )
+        with (
+            patch.object(
+                PostgresRecordStore,
+                "admit_ordinary_agent_client_request",
+                side_effect=[
+                    OrdinaryAgentSessionAdmissionDenied("provider_readiness_refresh_required"),
+                    fixture.request,
+                ],
+            ) as admit,
+            patch(
+                "control_plane.http_routes.ordinary_agent_management."
+                "ensure_provider_delivery_readiness_for_client",
+                side_effect=OrdinaryAgentSessionAdmissionDenied(
+                    "provider_readiness_admission_replay_required"
+                ),
+            ) as ensure,
+        ):
+            async with lifespan_client(app) as client:
+                response = await client.post(
+                    "/v1/agent/ordinary-agent-jobs",
+                    headers={"Authorization": f"Bearer {session.bundle.token.value}"},
+                    json={
+                        "schema_version": 2,
+                        "purpose": "guarded_delivery",
+                        "idempotency_key": "http-guarded-concurrent-replay",
+                        "session_id": fixture.request.session_id,
+                        "lease_id": fixture.request.lease_id,
+                        "base_sha": "a" * 40,
+                        "pull_requests": [{"number": 12, "head_sha": "b" * 40}],
+                        "permitted_stack_edit_pull_requests": [],
+                        "refresh_allowance": 0,
+                    },
+                )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(admit.call_count, 2)
+        ensure.assert_called_once()
+
+    async def test_first_guarded_admission_publishes_ready_receipt_then_reenters(self) -> None:
+        session = session_support.OrdinaryAgentSessionStorageTests()
+        session.setUp(pull_request_limit=2)
+        self.addCleanup(session.doCleanups)
+        fixture = effect_support.OrdinaryAgentEffectStorageTests()
+        fixture.prepare_effect_fixture(session)
+        expectation = ProviderDeliveryProtectionExpectationV1(
+            required_status_checks=(
+                ProviderRequiredStatusCheckExpectationV1(context="ci", app_id=9001),
+            ),
+            strict_required_status_checks_policy=True,
+            code_scanning_tools=(),
+            pull_request=None,
+            allowed_merge_methods=("merge",),
+        )
+        binding = ProviderDeliveryInspectionBindingV1(
+            target=fixture.request.target,
+            repository_owner_id=456,
+            inventory_record_id="inventory-r1",
+            inventory_revision=1,
+            inventory_sha256="1" * 64,
+            installed_activation_sha256="2" * 64,
+            ordinary_delivery_app_id=42,
+            ordinary_delivery_installation_id=43,
+            merge_policy_record_id="policy-r1",
+            merge_policy_sha256="3" * 64,
+            merge_policy_semantics_sha256="4" * 64,
+            expectation_sha256=canonical_json_sha256(expectation.model_dump(mode="json")),
+            inspection_profile_id="provider-delivery-inspection-v1",
+            inspection_profile_sha256="6" * 64,
+            inspection_app_id=700,
+            inspection_secret_id="secret",
+            inspection_secret_binding_id="binding",
+            inspection_secret_version_id="version",
+            permission_sha256="7" * 64,
+        )
+        profile = ResolvedProviderDeliveryInspectionProfile(
+            identity=GitHubAppIdentity(app_id=700, private_key="private"),
+            profile_id=binding.inspection_profile_id,
+            profile_sha256=binding.inspection_profile_sha256,
+            app_id=700,
+            secret_id="secret",
+            secret_binding_id="binding",
+            secret_version_id="version",
+            permissions=("administration:write", "contents:read", "metadata:read"),
+        )
+        facts = ProviderDeliveryInspectionFactsV1(
+            repository_id=fixture.request.target.repository_id,
+            repository_owner_id=456,
+            repository=fixture.request.target.repository,
+            base_branch=fixture.request.target.base_branch,
+            ordinary_delivery_app_id=42,
+            applicable_ruleset_ids=(10,),
+            update_ruleset_id=10,
+            classic_protection_present=False,
+            effective_protection=expectation,
+            raw_observation_sha256="8" * 64,
+            provider_request_count=7,
+        )
+        inspection_result = ProviderDeliveryInspectionResultV1(
+            status="ready",
+            reason_codes=("provider_protection_ready",),
+            facts=facts,
+            raw_observation_sha256="8" * 64,
+            provider_request_count=7,
+        )
+        events: list[str] = []
+
+        def inspect(**kwargs: object) -> object:
+            events.append("inspect")
+            kwargs["before_token_mint"](700, 701)  # type: ignore[operator]
+            kwargs["token_issued"](  # type: ignore[operator]
+                GitHubAppInstallationToken(
+                    token="token",
+                    app_id=700,
+                    installation_id=701,
+                    repository_id=fixture.request.target.repository_id,
+                    repository=fixture.request.target.repository,
+                    expires_at=datetime.fromtimestamp(session.now + 600, timezone.utc).isoformat(),
+                )
+            )
+            kwargs["token_cleanup"]("confirmed_revoked")  # type: ignore[operator]
+            return inspection_result
+
+        original_readiness = PostgresRecordStore._require_and_project_guarded_readiness
+        activation = Mock(effective_state="guarded")
+        target_policy = fixture.merge_policy.policy.policies[0]
+
+        def ensure(
+            *,
+            store: PostgresRecordStore,
+            proof: OrdinaryAgentTokenProof,
+            request: OrdinaryAgentFiniteClientRequest,
+        ) -> object:
+            return ensure_provider_delivery_readiness_for_client(
+                store=store,
+                proof=proof,
+                request=request,
+                inspect=inspect,
+                wall_time=lambda: session.now,
+            )
+
+        app = create_launchplane_fastapi_app(
+            verifier=Mock(),
+            authz_policy=session.policy.policy,
+            record_store_factory=lambda: fixture.store,
+        )
+        with (
+            patch.object(
+                fixture.store,
+                "_require_and_project_guarded_readiness",
+                side_effect=lambda db, *, context, provider_required_margin_seconds=0: (
+                    original_readiness(
+                        fixture.store,
+                        db,
+                        context=context,
+                        provider_required_margin_seconds=provider_required_margin_seconds,
+                    )
+                ),
+            ),
+            patch.object(
+                fixture.store,
+                "_require_ordinary_agent_runtime_prerequisites",
+                return_value=_OrdinaryAgentRuntimePrerequisites(
+                    activation=activation,
+                    evidence_ids=(),
+                    custody_valid_from=0,
+                    custody_expires_at=fixture.request.expires_at,
+                    qualification_expires_at=fixture.request.expires_at,
+                    observed_at=session.now,
+                ),
+            ),
+            patch.object(
+                fixture.store,
+                "_provider_delivery_expectation_locked",
+                return_value=(fixture.merge_policy, target_policy, expectation),
+            ),
+            patch.object(
+                fixture.store,
+                "_provider_delivery_binding_locked",
+                return_value=(binding, expectation),
+            ),
+            patch(
+                "control_plane.provider_delivery_readiness."
+                "resolve_provider_delivery_inspection_profile",
+                return_value=profile,
+            ),
+            patch(
+                "control_plane.http_routes.ordinary_agent_management."
+                "ensure_provider_delivery_readiness_for_client",
+                side_effect=ensure,
+            ) as ensure_call,
+        ):
+            async with lifespan_client(app) as client:
+                response = await client.post(
+                    "/v1/agent/ordinary-agent-jobs",
+                    headers={"Authorization": f"Bearer {session.bundle.token.value}"},
+                    json={
+                        "schema_version": 2,
+                        "purpose": "guarded_delivery",
+                        "idempotency_key": "http-guarded-provider-actual-refresh",
+                        "session_id": fixture.request.session_id,
+                        "lease_id": fixture.request.lease_id,
+                        "base_sha": "a" * 40,
+                        "pull_requests": [{"number": 12, "head_sha": "b" * 40}],
+                        "permitted_stack_edit_pull_requests": [],
+                        "refresh_allowance": 0,
+                    },
+                )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        ensure_call.assert_called_once()
+        self.assertEqual(events, ["inspect"])
 
     async def test_job_reads_use_current_ordinary_or_signed_administrator_identity(self) -> None:
         fixture = effect_support.OrdinaryAgentEffectStorageTests()

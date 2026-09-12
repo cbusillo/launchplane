@@ -107,6 +107,12 @@ Each repository policy contains:
   `advisory`, matching the current shadow-only review contract. A future
   enforcement rollout must replace the active DB-backed policy deliberately
   with `required`.
+- `provider_delivery_protection_expectation`: Optional exact provider-protection
+  expectation for ordinary guarded delivery. Absence preserves legacy policy
+  bytes and digests and supplies no ordinary readiness capability. Only the
+  governed `managed-merge-train-policy-import` lifecycle may change its effective
+  active projection, including removal. It is separate from authorization
+  policy schema 3; see [provider delivery inspection](provider-delivery-inspection.md).
 - `failure_policy`: Whether Launchplane pauses the whole train or continues
   after marking the blocked pull request.
 - `enqueue`: Requirements for who may enqueue. Human authority remains role-based

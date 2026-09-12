@@ -13,7 +13,18 @@ from pathlib import Path
 import secrets
 from threading import Lock
 import time
-from typing import Any, Literal, NamedTuple, NoReturn, ParamSpec, Protocol, TypeVar, cast, overload
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Literal,
+    NamedTuple,
+    NoReturn,
+    ParamSpec,
+    Protocol,
+    TypeVar,
+    cast,
+    overload,
+)
 
 from pydantic import BaseModel, TypeAdapter
 from sqlalchemy import (
@@ -96,6 +107,31 @@ from control_plane.contracts.ordinary_agent_custody import (
     OrdinaryAgentCustodyConflictError,
     OrdinaryAgentCustodyIssueAttempt,
 )
+from control_plane.contracts.provider_delivery_readiness import (
+    PROVIDER_INSPECTION_MAX_ATTEMPTS,
+    PROVIDER_INSPECTION_PUBLICATION_ELIGIBILITY_SECONDS,
+    PROVIDER_INSPECTION_TOTAL_SECONDS,
+    PROVIDER_READINESS_FRESHNESS_SECONDS,
+    PROVIDER_READINESS_REQUIRED_MARGIN_SECONDS,
+    ProviderDeliveryInspectionAttemptV1,
+    ProviderDeliveryInspectionBindingV1,
+    ProviderDeliveryInspectionReservationV1,
+    ProviderDeliveryObservationClass,
+    ProviderDeliveryObservationStatus,
+    ProviderDeliveryReadinessDecision,
+    ProviderDeliveryReadinessReason,
+    ProviderDeliveryReadinessReceiptV1,
+    provider_delivery_inspection_attempt_id,
+    provider_delivery_binding_is_current,
+    provider_delivery_facts_match_binding,
+    provider_delivery_ready_facts_match_binding,
+    provider_delivery_readiness_receipt_id,
+)
+
+if TYPE_CHECKING:
+    from control_plane.provider_delivery_inspection_profile import (
+        ResolvedProviderDeliveryInspectionProfile,
+    )
 from control_plane.contracts.change_impact import ChangeImpactPolicyRecord
 from control_plane.contracts.change_impact_audit import (
     ChangeImpactPolicyAuditRecord,
@@ -160,6 +196,7 @@ from control_plane.contracts.generic_web_rollback import GenericWebRollbackPlanR
 from control_plane.contracts.idempotency_record import (
     LaunchplaneIdempotencyRecord,
     build_launchplane_mutation_reservation,
+    build_launchplane_mutation_reservation_id,
     complete_launchplane_mutation_reservation,
     format_launchplane_mutation_timestamp,
     parse_launchplane_mutation_timestamp,
@@ -266,6 +303,10 @@ from control_plane.contracts.merge_train_run_record import MergeTrainRunRecord
 from control_plane.contracts.merge_train_policy import (
     MergeTrainPolicyCompareWriteResult,
     MergeTrainPolicyRecord,
+    MergeTrainRepositoryPolicy,
+    ProviderDeliveryProtectionExpectationV1,
+    merge_train_policy_provider_expectation_projection,
+    merge_train_repository_policy_delivery_semantics_sha256,
 )
 from control_plane.contracts.merge_train_pr_feedback_record import (
     MergeTrainPrFeedbackRecord,
@@ -317,6 +358,16 @@ from control_plane.contracts.privileged_operation import (
     privileged_operation_plan_replay_digest,
     privileged_operation_record_digest,
     validate_privileged_operation_transition,
+)
+from control_plane.contracts.privileged_operation_identity import (
+    ManagedMergeTrainPolicyImportPreEffectDeniedError,
+    PRIVILEGED_MERGE_TRAIN_POLICY_WRITE_ROUTE,
+    PRIVILEGED_OPERATION_EXECUTION_ROUTE,
+    PRIVILEGED_OPERATION_EXECUTION_SCOPE,
+    merge_train_policy_import_request_fingerprint,
+    privileged_operation_execution_fingerprint,
+    privileged_operation_provider_target_key,
+    require_managed_merge_train_policy_import_execution_identity,
 )
 from control_plane.contracts.privileged_operation_worker_heartbeat import (
     PrivilegedOperationWorkerHeartbeatRecord,
@@ -2769,6 +2820,113 @@ class LaunchplaneOrdinaryAgentCandidateCheckObservationRow(Base):
     binding_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
     candidate_sha: Mapped[str] = mapped_column(String, nullable=False)
     observation_ordinal: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneProviderDeliveryInspectionRow(Base):
+    """One charged generation attempt and its private terminal observation."""
+
+    __tablename__ = "launchplane_provider_delivery_inspections"
+    __table_args__ = (
+        CheckConstraint("generation > 0", name="provider_delivery_generation_ck"),
+        CheckConstraint(
+            "provider_attempt_ordinal BETWEEN 1 AND 3",
+            name="provider_delivery_attempt_ordinal_ck",
+        ),
+        CheckConstraint("action_ordinal > 0", name="provider_delivery_action_ordinal_ck"),
+        CheckConstraint("repository_id > 0", name="provider_delivery_repository_id_ck"),
+        CheckConstraint("revision > 0", name="provider_delivery_revision_ck"),
+        CheckConstraint(
+            "inspection_phase IN ('active', 'terminal')",
+            name="provider_delivery_inspection_phase_ck",
+        ),
+        CheckConstraint(
+            "custody_phase IN ('reserved', 'minting', 'issued', 'issue_unknown', "
+            "'cleanup_unknown', 'closed')",
+            name="provider_delivery_custody_phase_ck",
+        ),
+        CheckConstraint(
+            "dispatch_deadline = inspection_started_at + 45 AND "
+            "publication_deadline = inspection_started_at + 60",
+            name="provider_delivery_deadline_ck",
+        ),
+        CheckConstraint(
+            "(inspection_phase = 'active' AND terminal_class IS NULL "
+            "AND terminal_status IS NULL AND repository_completion_sequence IS NULL "
+            "AND receipt_id IS NULL) OR "
+            "(inspection_phase = 'terminal' AND custody_phase = 'closed' "
+            "AND terminal_class IS NOT NULL AND terminal_status IS NOT NULL "
+            "AND repository_completion_sequence IS NOT NULL)",
+            name="provider_delivery_terminal_ck",
+        ),
+        UniqueConstraint(
+            "demand_id",
+            "generation",
+            "provider_attempt_ordinal",
+            name="provider_delivery_attempt_uq",
+        ),
+        UniqueConstraint(
+            "repository_id",
+            "repository_completion_sequence",
+            name="provider_delivery_completion_sequence_uq",
+        ),
+        UniqueConstraint("receipt_id", name="provider_delivery_receipt_uq"),
+        Index(
+            "provider_delivery_generation_charge_uq",
+            "demand_id",
+            "generation",
+            unique=True,
+            postgresql_where=text("provider_attempt_ordinal = 1"),
+            sqlite_where=text("provider_attempt_ordinal = 1"),
+        ),
+        Index(
+            "provider_delivery_repository_flight_uq",
+            "repository_id",
+            unique=True,
+            postgresql_where=text("inspection_phase = 'active'"),
+            sqlite_where=text("inspection_phase = 'active'"),
+        ),
+        Index(
+            "provider_delivery_repository_custody_uq",
+            "repository_id",
+            unique=True,
+            postgresql_where=text(
+                "custody_phase IN ('minting', 'issued', 'issue_unknown', 'cleanup_unknown')"
+            ),
+            sqlite_where=text(
+                "custody_phase IN ('minting', 'issued', 'issue_unknown', 'cleanup_unknown')"
+            ),
+        ),
+        Index(
+            "provider_delivery_target_observation_idx",
+            "repository_id",
+            "base_branch",
+            "repository_completion_sequence",
+        ),
+    )
+
+    attempt_id: Mapped[str] = mapped_column(String, primary_key=True)
+    demand_id: Mapped[str] = mapped_column(String, nullable=False)
+    generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    provider_attempt_ordinal: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    action_ordinal: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    profile_id: Mapped[str] = mapped_column(String, nullable=False)
+    profile_sha256: Mapped[str] = mapped_column(String, nullable=False)
+    repository_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    repository: Mapped[str] = mapped_column(String, nullable=False)
+    base_branch: Mapped[str] = mapped_column(String, nullable=False)
+    inspection_phase: Mapped[str] = mapped_column(String, nullable=False)
+    custody_phase: Mapped[str] = mapped_column(String, nullable=False)
+    revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    inspection_started_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    dispatch_deadline: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    publication_deadline: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    token_expires_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    next_retry_not_before: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    terminal_class: Mapped[str | None] = mapped_column(String, nullable=True)
+    terminal_status: Mapped[str | None] = mapped_column(String, nullable=True)
+    repository_completion_sequence: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    receipt_id: Mapped[str | None] = mapped_column(String, nullable=True)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -5632,6 +5790,16 @@ class _OrdinaryAgentCurrentJobContext:
     principal: OrdinaryAgentPrincipalRecord
     credential: OrdinaryAgentAuthenticationCredentialRecord
     now: int
+
+
+@dataclass(frozen=True)
+class _OrdinaryAgentRuntimePrerequisites:
+    activation: OrdinaryAgentDeliveryActivationRecord
+    evidence_ids: tuple[str, ...]
+    custody_valid_from: int
+    custody_expires_at: int
+    qualification_expires_at: int | None
+    observed_at: int
 
 
 def _require_guarded_finite_request(
@@ -17593,21 +17761,51 @@ class PostgresRecordStore(HumanSessionStore):
         with self._session_factory() as session:
             self._begin_serialized_write(session)
             self._lock_merge_train_policy_write(session)
-            existing_row = session.get(LaunchplaneMergeTrainPolicyRow, record.record_id)
+            active_statement = select(LaunchplaneMergeTrainPolicyRow).where(
+                LaunchplaneMergeTrainPolicyRow.status == "active"
+            )
+            if not self.database_url.startswith("sqlite"):
+                active_statement = active_statement.with_for_update()
+            active_rows = tuple(session.scalars(active_statement).all())
+            if len(active_rows) > 1:
+                raise ValueError("Merge-train policy state has multiple active records.")
+            current_record = (
+                self._read_payload(
+                    model_type=MergeTrainPolicyRecord,
+                    payload=active_rows[0].payload,
+                )
+                if active_rows
+                else None
+            )
+            if current_record is not None and (
+                active_rows[0].status != "active" or current_record.status != "active"
+            ):
+                raise ValueError("Merge-train policy active projection is inconsistent.")
+            existing_row = session.get(
+                LaunchplaneMergeTrainPolicyRow,
+                record.record_id,
+                with_for_update=not self.database_url.startswith("sqlite"),
+            )
             if existing_row is not None and existing_row.policy_sha256 != record.policy_sha256:
                 raise ValueError(
                     "Merge-train policy record ID cannot be reused for different policy content."
                 )
+            prospective_record = current_record
             if record.status == "active":
-                active_rows = tuple(
-                    session.scalars(
-                        select(LaunchplaneMergeTrainPolicyRow).where(
-                            LaunchplaneMergeTrainPolicyRow.status == "active",
-                            LaunchplaneMergeTrainPolicyRow.record_id != record.record_id,
-                        )
-                    ).all()
+                prospective_record = record
+            elif current_record is not None and current_record.record_id == record.record_id:
+                prospective_record = None
+            if merge_train_policy_provider_expectation_projection(
+                current_record
+            ) != merge_train_policy_provider_expectation_projection(prospective_record):
+                raise ValueError(
+                    "Raw merge-train policy writes cannot change provider delivery "
+                    "protection expectations."
                 )
+            if record.status == "active":
                 for active_row in active_rows:
+                    if active_row.record_id == record.record_id:
+                        continue
                     active_record = self._read_payload(
                         model_type=MergeTrainPolicyRecord,
                         payload=active_row.payload,
@@ -17633,6 +17831,156 @@ class PostgresRecordStore(HumanSessionStore):
             orm_model=LaunchplaneMergeTrainPolicyRow,
             filters=(LaunchplaneMergeTrainPolicyRow.record_id == record_id,),
         )
+
+    @staticmethod
+    def _idempotency_row_matches_record(
+        row: LaunchplaneIdempotencyRow,
+        record: LaunchplaneIdempotencyRecord,
+    ) -> bool:
+        return (
+            row.record_id == record.record_id
+            and row.scope == record.scope
+            and row.route_path == record.route_path
+            and row.idempotency_key == record.idempotency_key
+            and row.request_fingerprint == record.request_fingerprint
+            and row.state == record.state
+            and row.lease_owner == record.lease_owner
+            and row.lease_expires_at == record.lease_expires_at
+            and row.attempt == record.attempt
+            and row.reconciliation_key == record.reconciliation_key
+            and row.provider_target_key == record.provider_target_key
+            and row.created_at == record.created_at
+            and row.updated_at == record.updated_at
+            and row.response_status_code == record.response_status_code
+            and row.response_trace_id == record.response_trace_id
+            and row.recorded_at == record.recorded_at
+        )
+
+    def _require_governed_merge_train_policy_expectation_change(
+        self,
+        *,
+        session: Any,
+        expected_record: MergeTrainPolicyRecord,
+        replacement_record: MergeTrainPolicyRecord,
+        reservation_row: LaunchplaneIdempotencyRow,
+        mutation_reservation: LaunchplaneIdempotencyRecord,
+        mutation: DbOnlyMutationRequest,
+    ) -> None:
+        error = "managed_merge_train_policy_import_identity_mismatch"
+        operation_id = mutation.idempotency_key.strip()
+        if (
+            mutation.scope != PRIVILEGED_OPERATION_EXECUTION_SCOPE
+            or mutation.route_path != PRIVILEGED_MERGE_TRAIN_POLICY_WRITE_ROUTE
+            or not operation_id
+            or mutation.lease_owner != operation_id
+        ):
+            raise ManagedMergeTrainPolicyImportPreEffectDeniedError(error)
+        operation_statement = select(LaunchplanePrivilegedOperationRow).where(
+            LaunchplanePrivilegedOperationRow.operation_id == operation_id
+        )
+        if not self.database_url.startswith("sqlite"):
+            operation_statement = operation_statement.with_for_update()
+        operation_row = session.scalar(operation_statement)
+        if operation_row is None:
+            raise ManagedMergeTrainPolicyImportPreEffectDeniedError(error)
+        operation = self._read_payload(
+            model_type=PrivilegedOperationRecord,
+            payload=operation_row.payload,
+        )
+        if (
+            operation_row.operation_id != operation_id
+            or operation.operation_id != operation_id
+            or operation_row.descriptor_id != operation.descriptor_id
+            or operation_row.status != operation.status
+            or operation_row.requester_github_id != getattr(operation.requested_by, "github_id", 0)
+            or operation_row.created_at != operation.created_at
+            or operation_row.updated_at != operation.updated_at
+            or operation_row.expires_at != operation.expires_at
+        ):
+            raise ManagedMergeTrainPolicyImportPreEffectDeniedError(error)
+        try:
+            require_managed_merge_train_policy_import_execution_identity(
+                operation,
+                expected_record=expected_record,
+                replacement_record=replacement_record,
+            )
+        except ValueError as identity_error:
+            raise ManagedMergeTrainPolicyImportPreEffectDeniedError(error) from identity_error
+        inner_fingerprint = merge_train_policy_import_request_fingerprint(operation)
+        expected_inner_record_id = build_launchplane_mutation_reservation_id(
+            scope=PRIVILEGED_OPERATION_EXECUTION_SCOPE,
+            route_path=PRIVILEGED_MERGE_TRAIN_POLICY_WRITE_ROUTE,
+            idempotency_key=operation_id,
+        )
+        if (
+            mutation.request_fingerprint != inner_fingerprint
+            or mutation_reservation.record_id != expected_inner_record_id
+            or mutation_reservation.scope != PRIVILEGED_OPERATION_EXECUTION_SCOPE
+            or mutation_reservation.route_path != PRIVILEGED_MERGE_TRAIN_POLICY_WRITE_ROUTE
+            or mutation_reservation.idempotency_key != operation_id
+            or mutation_reservation.request_fingerprint != inner_fingerprint
+            or mutation_reservation.state != "running"
+            or mutation_reservation.lease_owner != operation_id
+            or mutation_reservation.reconciliation_key
+            or mutation_reservation.provider_target_key
+            or mutation_reservation.provider_effect_phase
+            or mutation_reservation.provider_effect_started_at
+            or not self._idempotency_row_matches_record(
+                reservation_row,
+                mutation_reservation,
+            )
+        ):
+            raise ManagedMergeTrainPolicyImportPreEffectDeniedError(error)
+        outer_row = session.scalar(
+            self._idempotency_statement(
+                scope=PRIVILEGED_OPERATION_EXECUTION_SCOPE,
+                route_path=PRIVILEGED_OPERATION_EXECUTION_ROUTE,
+                idempotency_key=operation_id,
+                for_update=True,
+            )
+        )
+        if outer_row is None:
+            raise ManagedMergeTrainPolicyImportPreEffectDeniedError(error)
+        outer_reservation = self._read_payload(
+            model_type=LaunchplaneIdempotencyRecord,
+            payload=outer_row.payload,
+        )
+        outer_fingerprint = privileged_operation_execution_fingerprint(operation)
+        expected_outer_record_id = build_launchplane_mutation_reservation_id(
+            scope=PRIVILEGED_OPERATION_EXECUTION_SCOPE,
+            route_path=PRIVILEGED_OPERATION_EXECUTION_ROUTE,
+            idempotency_key=operation_id,
+        )
+        if (
+            outer_reservation.record_id != expected_outer_record_id
+            or outer_reservation.scope != PRIVILEGED_OPERATION_EXECUTION_SCOPE
+            or outer_reservation.route_path != PRIVILEGED_OPERATION_EXECUTION_ROUTE
+            or outer_reservation.idempotency_key != operation_id
+            or outer_reservation.request_fingerprint != outer_fingerprint
+            or outer_reservation.state != "running"
+            or outer_reservation.reconciliation_key != operation_id
+            or outer_reservation.provider_target_key
+            != privileged_operation_provider_target_key(operation)
+            or outer_reservation.provider_effect_phase
+            or outer_reservation.provider_effect_started_at
+            or not self._idempotency_row_matches_record(outer_row, outer_reservation)
+        ):
+            raise ManagedMergeTrainPolicyImportPreEffectDeniedError(error)
+        observed_at = self._database_mutation_timestamp(session)
+        if parse_launchplane_mutation_timestamp(
+            mutation_reservation.lease_expires_at,
+            field_name="inner_lease_expires_at",
+        ) <= parse_launchplane_mutation_timestamp(
+            observed_at,
+            field_name="observed_at",
+        ) or parse_launchplane_mutation_timestamp(
+            outer_reservation.lease_expires_at,
+            field_name="outer_lease_expires_at",
+        ) <= parse_launchplane_mutation_timestamp(
+            observed_at,
+            field_name="observed_at",
+        ):
+            raise ManagedMergeTrainPolicyImportPreEffectDeniedError(error)
 
     def compare_and_write_merge_train_policy_record(
         self,
@@ -17844,6 +18192,23 @@ class PostgresRecordStore(HumanSessionStore):
                 session.commit()
             return MergeTrainPolicyCompareWriteResult(
                 status="record_id_conflict", current_record=current_record
+            )
+
+        expectation_projection_changed = merge_train_policy_provider_expectation_projection(
+            current_record
+        ) != merge_train_policy_provider_expectation_projection(replacement_record)
+        if expectation_projection_changed:
+            if reservation_row is None or mutation_reservation is None or mutation is None:
+                raise ValueError(
+                    "Merge-train policy expectation changes require a governed import."
+                )
+            self._require_governed_merge_train_policy_expectation_change(
+                session=session,
+                expected_record=current_record,
+                replacement_record=replacement_record,
+                reservation_row=reservation_row,
+                mutation_reservation=mutation_reservation,
+                mutation=mutation,
             )
 
         result_record = current_record
@@ -21587,8 +21952,30 @@ class PostgresRecordStore(HumanSessionStore):
                 else "guarded_delivery"
             )
             if purpose == "guarded_delivery":
+                # Reject every deterministic non-provider denial before a
+                # readiness demand can reserve or charge provider work.
+                require_ordinary_agent_current_job_authority(
+                    policy=policy,
+                    principal=principal,
+                    credential=credential,
+                    session=session_record,
+                    lease=lease,
+                    request=provisional,
+                    now=initial_now,
+                )
+                build_ordinary_agent_request_admission_write_set(
+                    policy=policy,
+                    principal=principal,
+                    credential=credential,
+                    session=session_record,
+                    lease=lease,
+                    request=provisional,
+                    now=initial_now,
+                )
                 _, observed_at = self._require_and_project_guarded_readiness(
-                    session, context=provisional_context
+                    session,
+                    context=provisional_context,
+                    provider_required_margin_seconds=(PROVIDER_READINESS_REQUIRED_MARGIN_SECONDS),
                 )
             else:
                 _, _, observed_at = self._require_ordinary_agent_runtime_readiness(
@@ -21711,7 +22098,14 @@ class PostgresRecordStore(HumanSessionStore):
             )
             if context.request.binding_revision != expected_binding_revision:
                 raise OrdinaryAgentSessionAdmissionDenied("binding_revision_conflict")
-            self._require_and_project_guarded_readiness(session, context=context)
+            _, readiness_observed_at = self._require_and_project_guarded_readiness(
+                session, context=context
+            )
+            claim = self._require_ordinary_agent_claim(
+                session,
+                claim_fence=claim_fence,
+                now=readiness_observed_at,
+            )
             binding = OrdinaryAgentJobBinding(
                 request_id=context.request.request_id,
                 scope_sha256=context.request.scope_sha256,
@@ -21825,6 +22219,13 @@ class PostgresRecordStore(HumanSessionStore):
                     raise OrdinaryAgentSessionAdmissionDenied("record_predecessor_conflict")
             elif record.status == "idle" and claim.released_controller is not None:
                 raise OrdinaryAgentSessionAdmissionDenied("record_predecessor_conflict")
+            final_observed_at = self._ordinary_agent_database_epoch(session)
+            claim = self._require_ordinary_agent_claim(
+                session,
+                claim_fence=claim_fence,
+                now=final_observed_at,
+            )
+            observed_at = datetime.fromtimestamp(final_observed_at, timezone.utc).isoformat()
             updated = MergeTrainControllerStateRecord.model_validate(
                 {
                     **record.model_dump(),
@@ -22253,7 +22654,12 @@ class PostgresRecordStore(HumanSessionStore):
             binding_revision=expected_binding_revision,
         )
         now_text = self._database_mutation_timestamp(session)
-        claim = session.get(LaunchplaneOrdinaryAgentJobClaimRow, request_id, populate_existing=True)
+        claim = session.get(
+            LaunchplaneOrdinaryAgentJobClaimRow,
+            request_id,
+            populate_existing=True,
+            with_for_update=True,
+        )
         if claim is None or claim.status != "running" or claim.claim_expires_at <= context.now:
             raise OrdinaryAgentSessionAdmissionDenied("job_claim_lost")
         current_fence = OrdinaryAgentJobClaimFence(
@@ -22282,6 +22688,70 @@ class PostgresRecordStore(HumanSessionStore):
             policy_sha256=record.policy_sha256,
         )
         return context, row, record
+
+    def _recheck_ordinary_agent_controller_fences_at(
+        self,
+        session: Any,
+        *,
+        context: _OrdinaryAgentCurrentJobContext,
+        controller_fence: OrdinaryAgentControllerFence,
+        now: int,
+    ) -> MergeTrainControllerStateRecord:
+        """Recheck already-locked job/controller authority at a final DB-time sample."""
+        require_ordinary_agent_current_job_authority(
+            policy=context.policy,
+            principal=context.principal,
+            credential=context.credential,
+            session=context.session,
+            lease=context.lease,
+            request=context.request,
+            now=now,
+        )
+        claim = session.get(
+            LaunchplaneOrdinaryAgentJobClaimRow,
+            context.request.request_id,
+            populate_existing=True,
+        )
+        controller_row = session.get(
+            LaunchplaneMergeTrainControllerStateRow,
+            controller_fence.controller_key,
+            populate_existing=True,
+        )
+        if claim is None or controller_row is None:
+            raise OrdinaryAgentSessionAdmissionDenied("job_claim_lost")
+        controller = MergeTrainControllerStateRecord.model_validate(controller_row.payload)
+        claim_fence = OrdinaryAgentJobClaimFence(
+            request_id=context.request.request_id,
+            worker_id=claim.worker_id,
+            generation=claim.generation,
+        )
+        binding = OrdinaryAgentJobBinding(
+            request_id=context.request.request_id,
+            scope_sha256=context.request.scope_sha256,
+            binding_revision=context.request.binding_revision,
+        )
+        if (
+            claim.status != "running"
+            or claim.claim_expires_at <= now
+            or controller.ordinary_job_binding != binding
+            or controller.status != "running"
+            or controller.lease_owner != controller_fence.lease_owner
+            or controller.lease_acquired_at != controller_fence.lease_acquired_at
+            or controller.lease_owner
+            != "ordinary-job-" + canonical_json_sha256(claim_fence.model_dump())
+        ):
+            raise OrdinaryAgentSessionAdmissionDenied("job_claim_lost")
+        if (
+            not controller.lease_expires_at
+            or int(
+                parse_launchplane_mutation_timestamp(
+                    controller.lease_expires_at, field_name="lease_expires_at"
+                ).timestamp()
+            )
+            <= now
+        ):
+            raise OrdinaryAgentSessionAdmissionDenied("controller_binding_conflict")
+        return controller
 
     def _ordinary_agent_bound_effect_results(
         self,
@@ -23463,9 +23933,28 @@ class PostgresRecordStore(HumanSessionStore):
                         }
                     ):
                         raise OrdinaryAgentSessionAdmissionDenied("landing_retry_history_conflict")
+            if (
+                reused_effect is None
+                and session.get(LaunchplaneOrdinaryAgentEffectRow, effect_id) is not None
+            ):
+                raise OrdinaryAgentSessionAdmissionDenied("landing_retry_history_conflict")
+            if custody.token_expires_at is None:
+                raise OrdinaryAgentSessionAdmissionDenied("custody_binding_conflict")
+            # Final fresh fence before this transaction publishes the
+            # provider-send child. Exact replay returned above without a live
+            # readiness dependency.
+            _, readiness_observed_at = self._require_and_project_guarded_readiness(
+                session, context=context
+            )
+            now, custody = self._require_ordinary_landing_time(session, record=record)
+            assert custody.token_expires_at is not None
+            self._recheck_ordinary_agent_controller_fences_at(
+                session,
+                context=context,
+                controller_fence=controller_fence,
+                now=max(readiness_observed_at, now),
+            )
             if reused_effect is None:
-                if session.get(LaunchplaneOrdinaryAgentEffectRow, effect_id) is not None:
-                    raise OrdinaryAgentSessionAdmissionDenied("landing_retry_history_conflict")
                 effect = OrdinaryAgentEffectRecord(
                     effect_id=effect_id,
                     request_id=record.request_id,
@@ -23506,8 +23995,6 @@ class PostgresRecordStore(HumanSessionStore):
                         "reason_code": None,
                     }
                 )
-            if custody.token_expires_at is None:
-                raise OrdinaryAgentSessionAdmissionDenied("custody_binding_conflict")
             child = effect_contracts.OrdinaryAgentSemanticDispatchAttemptRecord(
                 child_id="dispatch-"
                 + canonical_json_sha256(
@@ -24536,6 +25023,15 @@ class PostgresRecordStore(HumanSessionStore):
             budget = context.lease.budget
             if budget.actions_used >= budget.action_limit:
                 raise OrdinaryAgentSessionAdmissionDenied("budget_exhausted")
+            _, allocation_observed_at = self._require_and_project_guarded_readiness(
+                session, context=context
+            )
+            self._recheck_ordinary_agent_controller_fences_at(
+                session,
+                context=context,
+                controller_fence=controller_fence,
+                now=allocation_observed_at,
+            )
             custody_key = "landing-" + canonical_json_sha256({"landing": preparation_id})
             record = effect_contracts.OrdinaryAgentLandingPreparation(
                 preparation_id=preparation_id,
@@ -24565,7 +25061,7 @@ class PostgresRecordStore(HumanSessionStore):
                 custody_attempt_id="custody_" + hashlib.sha256(custody_key.encode()).hexdigest(),
                 idempotency_key=custody_key,
                 candidate=candidate,
-                reserved_at=context.now,
+                reserved_at=allocation_observed_at,
             )
             lease = context.lease.model_copy(
                 update={
@@ -24862,6 +25358,15 @@ class PostgresRecordStore(HumanSessionStore):
                 attempt_ordinal=attempt_ordinal,
             )
             custody_key = "landing-" + canonical_json_sha256({"landing": preparation_id})
+            _, allocation_observed_at = self._require_and_project_guarded_readiness(
+                session, context=context
+            )
+            self._recheck_ordinary_agent_controller_fences_at(
+                session,
+                context=context,
+                controller_fence=controller_fence,
+                now=allocation_observed_at,
+            )
             record = effect_contracts.OrdinaryAgentLandingPreparation(
                 preparation_id=preparation_id,
                 request_id=request_id,
@@ -24892,7 +25397,7 @@ class PostgresRecordStore(HumanSessionStore):
                 custody_attempt_id="custody_" + hashlib.sha256(custody_key.encode()).hexdigest(),
                 idempotency_key=custody_key,
                 candidate=candidate,
-                reserved_at=context.now,
+                reserved_at=allocation_observed_at,
             )
             session.add(
                 LaunchplaneOrdinaryAgentLandingPreparationRow(
@@ -25007,6 +25512,15 @@ class PostgresRecordStore(HumanSessionStore):
             budget = context.lease.budget
             if budget.actions_used >= budget.action_limit:
                 raise OrdinaryAgentSessionAdmissionDenied("budget_exhausted")
+            _, allocation_observed_at = self._require_and_project_guarded_readiness(
+                session, context=context
+            )
+            self._recheck_ordinary_agent_controller_fences_at(
+                session,
+                context=context,
+                controller_fence=controller_fence,
+                now=allocation_observed_at,
+            )
             ordinal = budget.actions_used + 1
             record = OrdinaryAgentEffectRecord(
                 effect_id=effect_id,
@@ -25028,8 +25542,8 @@ class PostgresRecordStore(HumanSessionStore):
                 credential_id=context.credential.credential_id,
                 credential_version=context.credential.credential_version,
                 credential_digest=context.credential.credential_digest,
-                reserved_at=context.now,
-                updated_at=context.now,
+                reserved_at=allocation_observed_at,
+                updated_at=allocation_observed_at,
             )
             lease = context.lease.model_copy(
                 update={
@@ -25722,7 +26236,6 @@ class PostgresRecordStore(HumanSessionStore):
                 provider_custody_attempt_id=custody_attempt_id,
                 check_provider_wait=True,
             )
-            self._require_and_project_guarded_readiness(session, context=context)
             reservation_row = session.get(
                 LaunchplaneOrdinaryAgentEffectCustodyRow, custody_attempt_id
             )
@@ -25774,52 +26287,17 @@ class PostgresRecordStore(HumanSessionStore):
                     actual.token_expires_at, field_name="token_expires_at"
                 ).timestamp()
             )
+            self._require_and_project_guarded_readiness(session, context=context)
             now = self._ordinary_agent_database_epoch(session)
-            require_ordinary_agent_current_job_authority(
-                policy=context.policy,
-                principal=context.principal,
-                credential=context.credential,
-                session=context.session,
-                lease=context.lease,
-                request=context.request,
-                now=now,
-            )
             # Time can pass while quota/authority rows are locked. Recheck the
             # already-locked controller and current claim immediately before
             # recording permission to send the provider request.
-            controller_row = session.get(
-                LaunchplaneMergeTrainControllerStateRow, controller_fence.controller_key
+            self._recheck_ordinary_agent_controller_fences_at(
+                session,
+                context=context,
+                controller_fence=controller_fence,
+                now=now,
             )
-            assert controller_row is not None
-            controller = MergeTrainControllerStateRecord.model_validate(controller_row.payload)
-            current_claim = session.get(
-                LaunchplaneOrdinaryAgentJobClaimRow,
-                context.request.request_id,
-                populate_existing=True,
-            )
-            if (
-                current_claim is None
-                or current_claim.status != "running"
-                or current_claim.claim_expires_at <= now
-                or controller.lease_owner
-                != "ordinary-job-"
-                + canonical_json_sha256(
-                    OrdinaryAgentJobClaimFence(
-                        request_id=context.request.request_id,
-                        worker_id=current_claim.worker_id,
-                        generation=current_claim.generation,
-                    ).model_dump()
-                )
-            ):
-                raise OrdinaryAgentSessionAdmissionDenied("job_claim_lost")
-            if (
-                not controller.lease_expires_at
-                or parse_launchplane_mutation_timestamp(
-                    controller.lease_expires_at, field_name="lease_expires_at"
-                ).timestamp()
-                <= now
-            ):
-                raise OrdinaryAgentSessionAdmissionDenied("controller_binding_conflict")
             if (
                 expiry != fixed_token_expires_at
                 or expiry - now < effect_contracts.MIN_PROVIDER_TOKEN_TTL_AT_DISPATCH_SECONDS
@@ -25901,7 +26379,15 @@ class PostgresRecordStore(HumanSessionStore):
             context, row, record = self._ordinary_agent_reserved_effect_context(
                 session, effect_id=effect_id
             )
-            self._require_and_project_guarded_readiness(session, context=context)
+            _, readiness_observed_at = self._require_and_project_guarded_readiness(
+                session, context=context
+            )
+            self._recheck_ordinary_agent_controller_fences_at(
+                session,
+                context=context,
+                controller_fence=record.controller_fence,
+                now=readiness_observed_at,
+            )
             if (
                 record.revision != expected_effect_revision
                 or record.dispatch_count
@@ -25931,6 +26417,7 @@ class PostgresRecordStore(HumanSessionStore):
                         reservation_row.payload
                     )
                 )
+                final_observed_at = self._ordinary_agent_database_epoch(session)
                 if (
                     OrdinaryAgentCustodyIssueAttempt.model_validate(actual.payload).token_expires_at
                     is None
@@ -25943,7 +26430,7 @@ class PostgresRecordStore(HumanSessionStore):
                             "request": reservation.request_payload,
                         }
                     )
-                    or not record.reserved_at <= typed_observation.observed_at <= context.now
+                    or not record.reserved_at <= typed_observation.observed_at <= final_observed_at
                     or observation.kind != "label"
                     or not observation.present
                     or observation.repository.lower() != record.target.repository.lower()
@@ -25952,6 +26439,14 @@ class PostgresRecordStore(HumanSessionStore):
                 ):
                     raise OrdinaryAgentSessionAdmissionDenied("effect_observation_conflict")
                 state = "completed_observed"
+            if disposition == "candidate_ref_retained_no_conditional_delete":
+                final_observed_at = self._ordinary_agent_database_epoch(session)
+            self._recheck_ordinary_agent_controller_fences_at(
+                session,
+                context=context,
+                controller_fence=record.controller_fence,
+                now=final_observed_at,
+            )
             session.add(
                 LaunchplaneOrdinaryAgentEffectCompletionRow(
                     effect_id=effect_id,
@@ -25962,7 +26457,7 @@ class PostgresRecordStore(HumanSessionStore):
                 update={
                     "state": state,
                     "revision": record.revision + 1,
-                    "updated_at": context.now,
+                    "updated_at": final_observed_at,
                     "reason_code": disposition,
                 }
             )
@@ -29218,6 +29713,1325 @@ class PostgresRecordStore(HumanSessionStore):
             session.commit()
             return record
 
+    @staticmethod
+    def _provider_delivery_inspection_from_row(
+        row: LaunchplaneProviderDeliveryInspectionRow,
+    ) -> ProviderDeliveryInspectionAttemptV1:
+        return ProviderDeliveryInspectionAttemptV1.model_validate(row.payload)
+
+    def _sync_provider_delivery_inspection_row(
+        self,
+        row: LaunchplaneProviderDeliveryInspectionRow,
+        record: ProviderDeliveryInspectionAttemptV1,
+    ) -> None:
+        row.profile_id = record.binding.inspection_profile_id
+        row.profile_sha256 = record.binding.inspection_profile_sha256
+        row.inspection_phase = record.inspection_phase
+        row.custody_phase = record.custody_phase
+        row.revision = record.revision
+        row.token_expires_at = record.token_expires_at
+        row.next_retry_not_before = record.next_retry_not_before
+        row.terminal_class = record.terminal_class
+        row.terminal_status = record.terminal_status
+        row.repository_completion_sequence = record.repository_completion_sequence
+        row.receipt_id = record.receipt_id
+        row.payload = self._payload_dict(record)
+
+    def _provider_delivery_repository_lock(self, session: Any, repository_id: int) -> None:
+        if self.database_dialect_name == "postgresql":
+            session.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+                {"key": f"provider-delivery-inspection:{repository_id}"},
+            )
+
+    def _provider_delivery_profile_locked(
+        self,
+        session: Any,
+        *,
+        expected: ResolvedProviderDeliveryInspectionProfile | None = None,
+    ) -> tuple[str, str, int, str, str, str, str]:
+        from control_plane.provider_delivery_inspection_profile import (
+            PROVIDER_DELIVERY_INSPECTION_APP_ID_ENV_KEY,
+            PROVIDER_DELIVERY_INSPECTION_INTEGRATION,
+            PROVIDER_DELIVERY_INSPECTION_PERMISSIONS,
+            PROVIDER_DELIVERY_INSPECTION_PRIVATE_KEY_BINDING,
+        )
+
+        runtime_row = session.get(
+            LaunchplaneRuntimeEnvironmentRow,
+            ("context", "launchplane", ""),
+            with_for_update=self.database_dialect_name == "postgresql",
+        )
+        if runtime_row is None:
+            raise OrdinaryAgentSessionAdmissionDenied("provider_inspection_profile_unavailable")
+        runtime = RuntimeEnvironmentRecord.model_validate(runtime_row.payload)
+        raw_app_id = runtime.env.get(PROVIDER_DELIVERY_INSPECTION_APP_ID_ENV_KEY)
+        if isinstance(raw_app_id, bool):
+            app_id = 0
+        elif isinstance(raw_app_id, int):
+            app_id = raw_app_id
+        elif isinstance(raw_app_id, str) and raw_app_id.strip().isdecimal():
+            app_id = int(raw_app_id.strip())
+        else:
+            app_id = 0
+        secret_rows = tuple(
+            session.scalars(
+                select(LaunchplaneSecretRow)
+                .where(
+                    LaunchplaneSecretRow.integration == PROVIDER_DELIVERY_INSPECTION_INTEGRATION,
+                    LaunchplaneSecretRow.context == "launchplane",
+                    LaunchplaneSecretRow.instance == "",
+                )
+                .with_for_update()
+            ).all()
+        )
+        binding_rows = tuple(
+            session.scalars(
+                select(LaunchplaneSecretBindingRow)
+                .where(
+                    LaunchplaneSecretBindingRow.integration
+                    == PROVIDER_DELIVERY_INSPECTION_INTEGRATION,
+                    LaunchplaneSecretBindingRow.context == "launchplane",
+                    LaunchplaneSecretBindingRow.instance == "",
+                    LaunchplaneSecretBindingRow.binding_key
+                    == PROVIDER_DELIVERY_INSPECTION_PRIVATE_KEY_BINDING,
+                )
+                .with_for_update()
+            ).all()
+        )
+        exact_secrets = tuple(
+            (row, SecretRecord.model_validate(row.payload))
+            for row in secret_rows
+            if row.status == "configured"
+            and SecretRecord.model_validate(row.payload).scope == "context"
+            and SecretRecord.model_validate(row.payload).policy == "write_only"
+        )
+        exact_bindings = tuple(
+            (row, SecretBinding.model_validate(row.payload))
+            for row in binding_rows
+            if row.status == "configured"
+        )
+        if app_id < 1 or len(exact_secrets) != 1 or len(exact_bindings) != 1:
+            raise OrdinaryAgentSessionAdmissionDenied("provider_inspection_profile_unavailable")
+        secret_row, secret_record = exact_secrets[0]
+        binding_row, binding = exact_bindings[0]
+        version_row = session.get(
+            LaunchplaneSecretVersionRow,
+            secret_record.current_version_id,
+            with_for_update=self.database_dialect_name == "postgresql",
+        )
+        if (
+            binding.secret_id != secret_record.secret_id
+            or version_row is None
+            or version_row.secret_id != secret_record.secret_id
+        ):
+            raise OrdinaryAgentSessionAdmissionDenied("provider_inspection_profile_unavailable")
+        profile_id = "provider-delivery-inspection-v1"
+        profile_sha256 = canonical_json_sha256(
+            {
+                "schema_version": 1,
+                "profile_id": profile_id,
+                "app_id": app_id,
+                "secret_id": secret_record.secret_id,
+                "secret_binding_id": binding.binding_id,
+                "secret_version_id": version_row.version_id,
+                "permissions": PROVIDER_DELIVERY_INSPECTION_PERMISSIONS,
+                "repository_scope": "exact_repository_id",
+                "endpoint_contract": "provider-delivery-inspection-github-v1",
+            }
+        )
+        if expected is not None and (
+            expected.profile_id != profile_id
+            or expected.profile_sha256 != profile_sha256
+            or expected.app_id != app_id
+            or expected.secret_id != secret_record.secret_id
+            or expected.secret_binding_id != binding.binding_id
+            or expected.secret_version_id != version_row.version_id
+            or expected.permissions != PROVIDER_DELIVERY_INSPECTION_PERMISSIONS
+        ):
+            raise OrdinaryAgentSessionAdmissionDenied("provider_inspection_profile_unavailable")
+        return (
+            profile_id,
+            profile_sha256,
+            app_id,
+            secret_record.secret_id,
+            binding.binding_id,
+            version_row.version_id,
+            canonical_json_sha256({"permissions": PROVIDER_DELIVERY_INSPECTION_PERMISSIONS}),
+        )
+
+    def _provider_delivery_expectation_locked(
+        self,
+        session: Any,
+        *,
+        context: _OrdinaryAgentCurrentJobContext,
+    ) -> tuple[
+        MergeTrainPolicyRecord,
+        MergeTrainRepositoryPolicy,
+        ProviderDeliveryProtectionExpectationV1,
+    ]:
+        policy_rows = tuple(
+            session.scalars(
+                select(LaunchplaneMergeTrainPolicyRow)
+                .where(LaunchplaneMergeTrainPolicyRow.status == "active")
+                .with_for_update()
+            ).all()
+        )
+        if len(policy_rows) != 1:
+            raise OrdinaryAgentSessionAdmissionDenied("protection_expectation_unavailable")
+        merge_policy = MergeTrainPolicyRecord.model_validate(policy_rows[0].payload)
+        try:
+            target_policy = merge_policy.policy.find_repository_policy(
+                repository=context.request.target.repository,
+                base_branch=context.request.target.base_branch,
+            )
+        except ValueError as error:
+            raise OrdinaryAgentSessionAdmissionDenied(
+                "protection_expectation_unavailable"
+            ) from error
+        if target_policy.merge_method != "merge":
+            raise OrdinaryAgentSessionAdmissionDenied("ordinary_merge_method_unsupported")
+        expectation = target_policy.provider_delivery_protection_expectation
+        if expectation is None:
+            raise OrdinaryAgentSessionAdmissionDenied("protection_expectation_unavailable")
+        return merge_policy, target_policy, expectation
+
+    def _provider_delivery_binding_locked(
+        self,
+        session: Any,
+        *,
+        context: _OrdinaryAgentCurrentJobContext,
+        activation: OrdinaryAgentDeliveryActivationRecord,
+        expected_profile: ResolvedProviderDeliveryInspectionProfile | None = None,
+    ) -> tuple[
+        ProviderDeliveryInspectionBindingV1,
+        ProviderDeliveryProtectionExpectationV1,
+    ]:
+        merge_policy, target_policy, expectation = self._provider_delivery_expectation_locked(
+            session, context=context
+        )
+        profile = self._provider_delivery_profile_locked(session, expected=expected_profile)
+        custody_row = session.get(
+            LaunchplaneOrdinaryAgentCredentialCustodyRow,
+            context.principal.custody_record_id,
+            with_for_update=self.database_dialect_name == "postgresql",
+        )
+        if custody_row is None:
+            raise OrdinaryAgentSessionAdmissionDenied("custody_unavailable")
+        custody = OrdinaryAgentCredentialCustodyRecord.model_validate(custody_row.payload)
+        if custody.github_installation_id is None:
+            raise OrdinaryAgentSessionAdmissionDenied("custody_unavailable")
+        if profile[2] == custody.github_app_id:
+            raise OrdinaryAgentSessionAdmissionDenied("provider_inspection_profile_unavailable")
+        setup = self._locked_authz_transition_operation(
+            session, activation.source_setup_operation_id
+        )
+        execution = setup.execution
+        if not isinstance(execution, OrdinaryAgentDeliveryActivationExecutionEvidence):
+            raise OrdinaryAgentSessionAdmissionDenied("installed_outcome_invalid")
+        inventory_row = session.get(
+            LaunchplaneRepositoryInventoryRow,
+            activation.inventory.record_id,
+            with_for_update=self.database_dialect_name == "postgresql",
+        )
+        if inventory_row is None:
+            raise OrdinaryAgentSessionAdmissionDenied("inventory_drift")
+        inventory = RepositoryInventoryRecord.model_validate(inventory_row.payload)
+        return (
+            ProviderDeliveryInspectionBindingV1(
+                target=context.request.target,
+                repository_owner_id=int(inventory.repository_owner_id),
+                inventory_record_id=activation.inventory.record_id,
+                inventory_revision=activation.inventory.revision,
+                inventory_sha256=activation.inventory.inventory_sha256,
+                installed_activation_sha256=execution.activation_sha256,
+                ordinary_delivery_app_id=custody.github_app_id,
+                ordinary_delivery_installation_id=custody.github_installation_id,
+                merge_policy_record_id=merge_policy.record_id,
+                merge_policy_sha256=merge_policy.policy_sha256,
+                merge_policy_semantics_sha256=(
+                    merge_train_repository_policy_delivery_semantics_sha256(target_policy)
+                ),
+                expectation_sha256=canonical_json_sha256(expectation.model_dump(mode="json")),
+                inspection_profile_id=profile[0],
+                inspection_profile_sha256=profile[1],
+                inspection_app_id=profile[2],
+                inspection_secret_id=profile[3],
+                inspection_secret_binding_id=profile[4],
+                inspection_secret_version_id=profile[5],
+                permission_sha256=profile[6],
+            ),
+            expectation,
+        )
+
+    def _provider_delivery_active_retry_not_before(
+        self, record: ProviderDeliveryInspectionAttemptV1, *, now: int
+    ) -> int:
+        if now < record.publication_deadline:
+            return record.publication_deadline
+        if record.custody_phase in {"minting", "issue_unknown"}:
+            return (
+                record.dispatch_deadline
+                + GITHUB_TOKEN_MAXIMUM_LIFETIME_SECONDS
+                + (KNOWN_TOKEN_CLOCK_SKEW_SECONDS)
+            )
+        if record.custody_phase in {"issued", "cleanup_unknown"}:
+            return (record.token_expires_at or record.dispatch_deadline) + (
+                KNOWN_TOKEN_CLOCK_SKEW_SECONDS
+            )
+        return record.publication_deadline
+
+    def _provider_delivery_readiness_decision_locked(
+        self,
+        session: Any,
+        *,
+        context: _OrdinaryAgentCurrentJobContext,
+        activation: OrdinaryAgentDeliveryActivationRecord,
+        required_margin_seconds: int,
+        prerequisites: _OrdinaryAgentRuntimePrerequisites,
+        current_binding: ProviderDeliveryInspectionBindingV1 | None = None,
+    ) -> ProviderDeliveryReadinessDecision:
+        binding = current_binding
+        if binding is None:
+            binding, _ = self._provider_delivery_binding_locked(
+                session, context=context, activation=activation
+            )
+        self._provider_delivery_repository_lock(session, context.request.target.repository_id)
+        eligibility_cutoff = self._ordinary_agent_database_epoch(session)
+        rows = tuple(
+            session.scalars(
+                select(LaunchplaneProviderDeliveryInspectionRow)
+                .where(
+                    LaunchplaneProviderDeliveryInspectionRow.repository_id
+                    == context.request.target.repository_id,
+                    LaunchplaneProviderDeliveryInspectionRow.base_branch
+                    == context.request.target.base_branch,
+                    LaunchplaneProviderDeliveryInspectionRow.inspection_phase == "terminal",
+                    LaunchplaneProviderDeliveryInspectionRow.next_retry_not_before
+                    > eligibility_cutoff,
+                )
+                .order_by(
+                    LaunchplaneProviderDeliveryInspectionRow.repository_completion_sequence.desc()
+                )
+            ).all()
+        )
+        # All lifecycle/configuration rows were locked before the repository
+        # fence. Resample DB time here, then recheck only those locked values;
+        # row discovery after the repository lock would invert that order.
+        now = self._ordinary_agent_database_epoch(session)
+        self._recheck_ordinary_agent_runtime_prerequisites_at(
+            context=context,
+            prerequisites=prerequisites,
+            now=now,
+        )
+        matching = tuple(
+            record
+            for row in rows
+            if provider_delivery_binding_is_current(
+                (record := self._provider_delivery_inspection_from_row(row)).binding,
+                binding,
+            )
+        )
+        conclusive = next(
+            (record for record in matching if record.terminal_class == "protection_conclusive"),
+            None,
+        )
+        if conclusive is not None:
+            due = conclusive.next_retry_not_before or (
+                conclusive.observation_anchor + PROVIDER_READINESS_FRESHNESS_SECONDS
+            )
+            if conclusive.terminal_status == "ready" and due > now + required_margin_seconds:
+                if conclusive.receipt_id is None or conclusive.facts is None:
+                    raise OrdinaryAgentSessionAdmissionDenied(
+                        "provider_readiness_refresh_required", retry_not_before=now + 1
+                    )
+                receipt = ProviderDeliveryReadinessReceiptV1(
+                    receipt_id=conclusive.receipt_id,
+                    attempt_id=conclusive.attempt_id,
+                    demand_id=conclusive.demand_id,
+                    generation=conclusive.generation,
+                    action_ordinal=conclusive.action_ordinal,
+                    inspection_installation_id=cast(int, conclusive.inspection_installation_id),
+                    binding=conclusive.binding,
+                    facts=conclusive.facts,
+                    reason_codes=conclusive.reason_codes,
+                    provider_request_count=conclusive.provider_request_count,
+                    repository_completion_sequence=(conclusive.repository_completion_sequence or 1),
+                    observed_at=conclusive.observation_anchor,
+                    expires_at=due,
+                    completed_at=conclusive.completed_at or now,
+                )
+                return ProviderDeliveryReadinessDecision(
+                    status="ready",
+                    reason_code="provider_protection_ready",
+                    server_observed_at=now,
+                    receipt=receipt,
+                )
+            if due > now and conclusive.terminal_status != "ready":
+                status: Literal["protection_not_ready", "semantic_inconclusive"] = (
+                    "protection_not_ready"
+                    if conclusive.terminal_status == "protection_not_ready"
+                    else "semantic_inconclusive"
+                )
+                reason: ProviderDeliveryReadinessReason = (
+                    "provider_protection_not_ready"
+                    if status == "protection_not_ready"
+                    else "provider_protection_inconclusive"
+                )
+                return ProviderDeliveryReadinessDecision(
+                    status=status,
+                    reason_code=reason,
+                    server_observed_at=now,
+                    retry_not_before=due,
+                )
+        capability = next(
+            (record for record in matching if record.terminal_class == "capability_unavailable"),
+            None,
+        )
+        if capability is not None and (capability.next_retry_not_before or 0) > now:
+            return ProviderDeliveryReadinessDecision(
+                status="capability_unavailable",
+                reason_code=(
+                    capability.reason_codes[0] if capability.reason_codes else "provider_wait"
+                ),
+                server_observed_at=now,
+                retry_not_before=capability.next_retry_not_before,
+            )
+        active_row = session.scalar(
+            select(LaunchplaneProviderDeliveryInspectionRow).where(
+                LaunchplaneProviderDeliveryInspectionRow.repository_id
+                == context.request.target.repository_id,
+                LaunchplaneProviderDeliveryInspectionRow.inspection_phase == "active",
+            )
+        )
+        if active_row is not None:
+            active = self._provider_delivery_inspection_from_row(active_row)
+            return ProviderDeliveryReadinessDecision(
+                status="in_progress",
+                reason_code="provider_readiness_in_progress",
+                server_observed_at=now,
+                retry_not_before=max(
+                    now + 1,
+                    self._provider_delivery_active_retry_not_before(active, now=now),
+                ),
+            )
+        return ProviderDeliveryReadinessDecision(
+            status="refresh_required",
+            reason_code="provider_readiness_refresh_required",
+            server_observed_at=now,
+            retry_not_before=now + 1,
+        )
+
+    def _terminalize_provider_delivery_inspection_locked(
+        self,
+        session: Any,
+        *,
+        row: LaunchplaneProviderDeliveryInspectionRow,
+        record: ProviderDeliveryInspectionAttemptV1,
+        terminal_class: ProviderDeliveryObservationClass,
+        terminal_status: ProviderDeliveryObservationStatus,
+        reason_codes: tuple[ProviderDeliveryReadinessReason, ...],
+        completed_at: int,
+        facts: object | None = None,
+        inspection_result: object | None = None,
+        provider_request_count: int = 0,
+    ) -> ProviderDeliveryInspectionAttemptV1:
+        current = self._provider_delivery_inspection_from_row(row)
+        if current != record or current.inspection_phase != "active":
+            raise OrdinaryAgentSessionAdmissionDenied("provider_readiness_in_progress")
+        completion_sequence = (
+            session.scalar(
+                select(
+                    func.max(
+                        LaunchplaneProviderDeliveryInspectionRow.repository_completion_sequence
+                    )
+                ).where(
+                    LaunchplaneProviderDeliveryInspectionRow.repository_id
+                    == record.binding.target.repository_id
+                )
+            )
+            or 0
+        ) + 1
+        receipt_id = (
+            provider_delivery_readiness_receipt_id(attempt_id=record.attempt_id)
+            if terminal_status == "ready"
+            else None
+        )
+        due = (
+            max(
+                record.observation_anchor + PROVIDER_READINESS_FRESHNESS_SECONDS,
+                record.next_retry_not_before or 0,
+            )
+            if terminal_class == "protection_conclusive"
+            else record.next_retry_not_before or completed_at + 15
+        )
+        updated = record.model_copy(
+            update={
+                "revision": record.revision + 1,
+                "inspection_phase": "terminal",
+                "custody_phase": "closed",
+                "terminal_class": terminal_class,
+                "terminal_status": terminal_status,
+                "reason_codes": reason_codes,
+                "repository_completion_sequence": completion_sequence,
+                "receipt_id": receipt_id,
+                "facts": facts,
+                "inspection_result": inspection_result,
+                "provider_request_count": provider_request_count,
+                "next_retry_not_before": due,
+                "completed_at": completed_at,
+            }
+        )
+        self._sync_provider_delivery_inspection_row(row, updated)
+        session.flush()
+        return updated
+
+    def _recover_provider_delivery_inspection_locked(
+        self,
+        session: Any,
+        *,
+        repository_id: int,
+        now: int,
+    ) -> ProviderDeliveryInspectionAttemptV1 | None:
+        row = session.scalar(
+            select(LaunchplaneProviderDeliveryInspectionRow)
+            .where(
+                LaunchplaneProviderDeliveryInspectionRow.repository_id == repository_id,
+                LaunchplaneProviderDeliveryInspectionRow.inspection_phase == "active",
+            )
+            .with_for_update()
+        )
+        if row is None:
+            return None
+        record = self._provider_delivery_inspection_from_row(row)
+        safe_expiry = self._provider_delivery_active_retry_not_before(record, now=now)
+        if now < record.publication_deadline or (
+            record.custody_phase != "closed" and now < safe_expiry
+        ):
+            return record
+        recovered = record
+        if recovered.custody_phase != "closed":
+            recovered = recovered.model_copy(
+                update={
+                    "revision": recovered.revision + 1,
+                    "custody_phase": "closed",
+                }
+            )
+            self._sync_provider_delivery_inspection_row(row, recovered)
+        return self._terminalize_provider_delivery_inspection_locked(
+            session,
+            row=row,
+            record=recovered,
+            terminal_class="capability_unavailable",
+            terminal_status="capability_unavailable",
+            reason_codes=("provider_inspection_abandoned",),
+            completed_at=now,
+        )
+
+    def _reserve_provider_delivery_inspection_locked(
+        self,
+        session: Any,
+        *,
+        context: _OrdinaryAgentCurrentJobContext,
+        prerequisites: _OrdinaryAgentRuntimePrerequisites,
+        client_intent_sha256: str,
+        profile: ResolvedProviderDeliveryInspectionProfile,
+    ) -> ProviderDeliveryReadinessDecision | ProviderDeliveryInspectionReservationV1:
+        repository_id = context.request.target.repository_id
+        binding, expectation = self._provider_delivery_binding_locked(
+            session,
+            context=context,
+            activation=prerequisites.activation,
+            expected_profile=profile,
+        )
+        self._provider_delivery_repository_lock(session, repository_id)
+        now = self._ordinary_agent_database_epoch(session)
+        recovered = self._recover_provider_delivery_inspection_locked(
+            session, repository_id=repository_id, now=now
+        )
+        recovered_terminal = recovered is not None and recovered.inspection_phase == "terminal"
+        if recovered is not None and recovered.inspection_phase == "active":
+            return ProviderDeliveryReadinessDecision(
+                status="in_progress",
+                reason_code="provider_readiness_in_progress",
+                server_observed_at=now,
+                retry_not_before=max(
+                    now + 1,
+                    self._provider_delivery_active_retry_not_before(recovered, now=now),
+                ),
+            )
+        decision = self._provider_delivery_readiness_decision_locked(
+            session,
+            context=context,
+            activation=prerequisites.activation,
+            prerequisites=prerequisites,
+            required_margin_seconds=PROVIDER_READINESS_REQUIRED_MARGIN_SECONDS,
+            current_binding=binding,
+        )
+        if decision.status != "refresh_required":
+            if recovered_terminal:
+                session.commit()
+            return decision
+        demand_rows = tuple(
+            session.scalars(
+                select(LaunchplaneProviderDeliveryInspectionRow)
+                .where(
+                    LaunchplaneProviderDeliveryInspectionRow.demand_id == context.request.request_id
+                )
+                .order_by(
+                    LaunchplaneProviderDeliveryInspectionRow.generation,
+                    LaunchplaneProviderDeliveryInspectionRow.provider_attempt_ordinal,
+                )
+                .with_for_update()
+            ).all()
+        )
+        history = tuple(self._provider_delivery_inspection_from_row(row) for row in demand_rows)
+        if any(item.client_intent_sha256 != client_intent_sha256 for item in history):
+            raise OrdinaryAgentSessionAdmissionDenied("idempotency_conflict")
+        latest = history[-1] if history else None
+        retry_same_generation = (
+            latest is not None
+            and latest.terminal_class == "capability_unavailable"
+            and latest.provider_attempt_ordinal < PROVIDER_INSPECTION_MAX_ATTEMPTS
+            and latest.next_retry_not_before is not None
+            and latest.next_retry_not_before <= now
+            and "provider_inspection_attempts_exhausted" not in latest.reason_codes
+            and provider_delivery_binding_is_current(latest.binding, binding)
+        )
+        if retry_same_generation:
+            assert latest is not None
+            generation = latest.generation
+            attempt_ordinal = latest.provider_attempt_ordinal + 1
+            action_ordinal = latest.action_ordinal
+        else:
+            if context.lease.budget.actions_used + 2 > context.lease.budget.action_limit:
+                raise OrdinaryAgentSessionAdmissionDenied("budget_exhausted")
+            generation = max((item.generation for item in history), default=0) + 1
+            attempt_ordinal = 1
+            action_ordinal = context.lease.budget.actions_used + 1
+            charged_lease = context.lease.model_copy(
+                update={
+                    "revision": context.lease.revision + 1,
+                    "budget": context.lease.budget.model_copy(
+                        update={"actions_used": action_ordinal}
+                    ),
+                }
+            )
+            context.lease_row.revision = charged_lease.revision
+            context.lease_row.payload = self._payload_dict(charged_lease)
+        attempt = ProviderDeliveryInspectionAttemptV1(
+            attempt_id=provider_delivery_inspection_attempt_id(
+                demand_id=context.request.request_id,
+                generation=generation,
+                provider_attempt_ordinal=attempt_ordinal,
+            ),
+            demand_id=context.request.request_id,
+            client_intent_sha256=client_intent_sha256,
+            principal_id=context.request.principal_id,
+            session_id=context.request.session_id,
+            lease_id=context.request.lease_id,
+            generation=generation,
+            provider_attempt_ordinal=attempt_ordinal,
+            action_ordinal=action_ordinal,
+            binding=binding,
+            inspection_started_at=now,
+            observation_anchor=now,
+            dispatch_deadline=now + PROVIDER_INSPECTION_TOTAL_SECONDS,
+            publication_deadline=(now + PROVIDER_INSPECTION_PUBLICATION_ELIGIBILITY_SECONDS),
+        )
+        session.add(
+            LaunchplaneProviderDeliveryInspectionRow(
+                attempt_id=attempt.attempt_id,
+                demand_id=attempt.demand_id,
+                generation=attempt.generation,
+                provider_attempt_ordinal=attempt.provider_attempt_ordinal,
+                action_ordinal=attempt.action_ordinal,
+                profile_id=binding.inspection_profile_id,
+                profile_sha256=binding.inspection_profile_sha256,
+                repository_id=binding.target.repository_id,
+                repository=binding.target.repository,
+                base_branch=binding.target.base_branch,
+                inspection_phase=attempt.inspection_phase,
+                custody_phase=attempt.custody_phase,
+                revision=attempt.revision,
+                inspection_started_at=attempt.inspection_started_at,
+                dispatch_deadline=attempt.dispatch_deadline,
+                publication_deadline=attempt.publication_deadline,
+                token_expires_at=None,
+                next_retry_not_before=None,
+                terminal_class=None,
+                terminal_status=None,
+                repository_completion_sequence=None,
+                receipt_id=None,
+                payload=self._payload_dict(attempt),
+            )
+        )
+        session.commit()
+        return ProviderDeliveryInspectionReservationV1(attempt=attempt, expectation=expectation)
+
+    @_private_ordinary_agent_operation
+    def precheck_provider_delivery_inspection_for_job(self, *, request_id: str) -> None:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            context = self._ordinary_agent_current_chain_context(session, request_id=request_id)
+            _require_guarded_finite_request(context.request)
+            self._require_ordinary_agent_runtime_prerequisites(
+                session, context=context, purpose="guarded_delivery"
+            )
+            self._provider_delivery_expectation_locked(session, context=context)
+
+    @_private_ordinary_agent_operation
+    def precheck_provider_delivery_inspection_for_client(
+        self,
+        *,
+        proof: OrdinaryAgentTokenProof,
+        request: OrdinaryAgentFiniteClientRequest,
+    ) -> None:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            policy, principal, credential, _, now = self._ordinary_agent_session_context(
+                session, proof
+            )
+            session_record, lease_rows = self._ordinary_agent_session_rows(
+                session, session_id=request.session_id, principal_id=principal.principal_id
+            )
+            lease_row = next((row for row in lease_rows if row.lease_id == request.lease_id), None)
+            if lease_row is None:
+                raise OrdinaryAgentSessionAdmissionDenied("lease_unavailable")
+            lease = OrdinaryAgentLeaseRecord.model_validate(lease_row.payload)
+            provisional = build_ordinary_agent_finite_request_from_client(
+                request,
+                server=OrdinaryAgentFiniteRequestServerFields(
+                    principal_id=principal.principal_id,
+                    target=lease.target,
+                    admitted_at=now,
+                    lease_expires_at=lease.expires_at,
+                    continuation_expires_at=session_record.delegation.continuation_expires_at,
+                    refresh_allowance_ceiling=session_record.delegation.refresh_allowance,
+                ),
+            )
+            if not is_guarded_ordinary_agent_finite_request(provisional):
+                raise OrdinaryAgentSessionAdmissionDenied("request_purpose_unsupported")
+            require_ordinary_agent_current_job_authority(
+                policy=policy,
+                principal=principal,
+                credential=credential,
+                session=session_record,
+                lease=lease,
+                request=provisional,
+                now=now,
+            )
+            build_ordinary_agent_request_admission_write_set(
+                policy=policy,
+                principal=principal,
+                credential=credential,
+                session=session_record,
+                lease=lease,
+                request=provisional,
+                now=now,
+            )
+            context = _OrdinaryAgentCurrentJobContext(
+                provisional,
+                LaunchplaneOrdinaryAgentFiniteRequestRow(
+                    request_id=provisional.request_id,
+                    principal_id=principal.principal_id,
+                    session_id=session_record.session_id,
+                    lease_id=lease.lease_id,
+                    idempotency_key=request.idempotency_key,
+                    intent_sha256=ordinary_agent_finite_client_intent_sha256(request),
+                    client_intent_payload=self._payload_dict(request),
+                    payload=self._payload_dict(provisional),
+                ),
+                session_record,
+                lease,
+                lease_row,
+                policy,
+                principal,
+                credential,
+                now,
+            )
+            self._require_ordinary_agent_runtime_prerequisites(
+                session, context=context, purpose="guarded_delivery"
+            )
+            self._provider_delivery_expectation_locked(session, context=context)
+
+    @_private_ordinary_agent_operation
+    def reserve_provider_delivery_inspection_for_job(
+        self,
+        *,
+        request_id: str,
+        profile: ResolvedProviderDeliveryInspectionProfile,
+    ) -> ProviderDeliveryReadinessDecision | ProviderDeliveryInspectionReservationV1:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            context = self._ordinary_agent_current_chain_context(session, request_id=request_id)
+            _require_guarded_finite_request(context.request)
+            prerequisites = self._require_ordinary_agent_runtime_prerequisites(
+                session, context=context, purpose="guarded_delivery"
+            )
+            return self._reserve_provider_delivery_inspection_locked(
+                session,
+                context=context,
+                prerequisites=prerequisites,
+                client_intent_sha256=context.request_row.intent_sha256,
+                profile=profile,
+            )
+
+    @_private_ordinary_agent_operation
+    def reserve_provider_delivery_inspection_for_client(
+        self,
+        *,
+        proof: OrdinaryAgentTokenProof,
+        request: OrdinaryAgentFiniteClientRequest,
+        profile: ResolvedProviderDeliveryInspectionProfile,
+    ) -> ProviderDeliveryReadinessDecision | ProviderDeliveryInspectionReservationV1:
+        client_intent_sha256 = ordinary_agent_finite_client_intent_sha256(request)
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            policy, principal, credential, _, now = self._ordinary_agent_session_context(
+                session, proof
+            )
+            session_record, lease_rows = self._ordinary_agent_session_rows(
+                session, session_id=request.session_id, principal_id=principal.principal_id
+            )
+            lease_row = next((row for row in lease_rows if row.lease_id == request.lease_id), None)
+            if lease_row is None:
+                raise OrdinaryAgentSessionAdmissionDenied("lease_unavailable")
+            lease = OrdinaryAgentLeaseRecord.model_validate(lease_row.payload)
+            request_id = ordinary_agent_finite_request_id(
+                principal_id=principal.principal_id,
+                idempotency_key=request.idempotency_key,
+            )
+            admitted_row = session.get(
+                LaunchplaneOrdinaryAgentFiniteRequestRow,
+                request_id,
+                with_for_update=self.database_dialect_name == "postgresql",
+            )
+            if admitted_row is not None:
+                if (
+                    admitted_row.principal_id == principal.principal_id
+                    and admitted_row.idempotency_key == request.idempotency_key
+                    and admitted_row.intent_sha256 == client_intent_sha256
+                    and admitted_row.client_intent_payload is not None
+                    and parse_ordinary_agent_finite_client_request(
+                        admitted_row.client_intent_payload
+                    )
+                    == request
+                ):
+                    raise OrdinaryAgentSessionAdmissionDenied(
+                        "provider_readiness_admission_replay_required"
+                    )
+                raise OrdinaryAgentSessionAdmissionDenied("idempotency_conflict")
+            provisional = build_ordinary_agent_finite_request_from_client(
+                request,
+                server=OrdinaryAgentFiniteRequestServerFields(
+                    principal_id=principal.principal_id,
+                    target=lease.target,
+                    admitted_at=now,
+                    lease_expires_at=lease.expires_at,
+                    continuation_expires_at=session_record.delegation.continuation_expires_at,
+                    refresh_allowance_ceiling=session_record.delegation.refresh_allowance,
+                ),
+            )
+            if not is_guarded_ordinary_agent_finite_request(provisional):
+                raise OrdinaryAgentSessionAdmissionDenied("request_purpose_unsupported")
+            require_ordinary_agent_current_job_authority(
+                policy=policy,
+                principal=principal,
+                credential=credential,
+                session=session_record,
+                lease=lease,
+                request=provisional,
+                now=now,
+            )
+            build_ordinary_agent_request_admission_write_set(
+                policy=policy,
+                principal=principal,
+                credential=credential,
+                session=session_record,
+                lease=lease,
+                request=provisional,
+                now=now,
+            )
+            context = _OrdinaryAgentCurrentJobContext(
+                provisional,
+                LaunchplaneOrdinaryAgentFiniteRequestRow(
+                    request_id=request_id,
+                    principal_id=principal.principal_id,
+                    session_id=session_record.session_id,
+                    lease_id=lease.lease_id,
+                    idempotency_key=request.idempotency_key,
+                    intent_sha256=client_intent_sha256,
+                    client_intent_payload=self._payload_dict(request),
+                    payload=self._payload_dict(provisional),
+                ),
+                session_record,
+                lease,
+                lease_row,
+                policy,
+                principal,
+                credential,
+                now,
+            )
+            prerequisites = self._require_ordinary_agent_runtime_prerequisites(
+                session, context=context, purpose="guarded_delivery"
+            )
+            return self._reserve_provider_delivery_inspection_locked(
+                session,
+                context=context,
+                prerequisites=prerequisites,
+                client_intent_sha256=client_intent_sha256,
+                profile=profile,
+            )
+
+    def _provider_delivery_attempt_for_transition(
+        self,
+        session: Any,
+        *,
+        attempt_id: str,
+        expected_revision: int,
+    ) -> tuple[LaunchplaneProviderDeliveryInspectionRow, ProviderDeliveryInspectionAttemptV1]:
+        locator = session.get(
+            LaunchplaneProviderDeliveryInspectionRow,
+            attempt_id,
+        )
+        if locator is None:
+            raise OrdinaryAgentSessionAdmissionDenied("provider_readiness_in_progress")
+        self._provider_delivery_repository_lock(session, locator.repository_id)
+        row = session.get(
+            LaunchplaneProviderDeliveryInspectionRow,
+            attempt_id,
+            with_for_update=self.database_dialect_name == "postgresql",
+            populate_existing=True,
+        )
+        assert row is not None
+        record = self._provider_delivery_inspection_from_row(row)
+        if record.revision != expected_revision or record.inspection_phase != "active":
+            raise OrdinaryAgentSessionAdmissionDenied("provider_readiness_in_progress")
+        return row, record
+
+    @_private_ordinary_agent_operation
+    def mark_provider_delivery_inspection_minting(
+        self,
+        *,
+        attempt_id: str,
+        expected_revision: int,
+        app_id: int,
+        installation_id: int,
+    ) -> ProviderDeliveryInspectionAttemptV1:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            row, record = self._provider_delivery_attempt_for_transition(
+                session, attempt_id=attempt_id, expected_revision=expected_revision
+            )
+            self._provider_delivery_repository_lock(session, record.binding.target.repository_id)
+            if (
+                record.custody_phase != "reserved"
+                or app_id != record.binding.inspection_app_id
+                or installation_id < 1
+            ):
+                raise OrdinaryAgentSessionAdmissionDenied("provider_inspection_custody_fenced")
+            updated = record.model_copy(
+                update={
+                    "revision": record.revision + 1,
+                    "custody_phase": "minting",
+                    "inspection_installation_id": installation_id,
+                }
+            )
+            self._sync_provider_delivery_inspection_row(row, updated)
+            session.commit()
+            return updated
+
+    @_private_ordinary_agent_operation
+    def mark_provider_delivery_inspection_issued(
+        self,
+        *,
+        attempt_id: str,
+        expected_revision: int,
+        app_id: int,
+        installation_id: int,
+        repository_id: int,
+        token_expires_at: int,
+    ) -> ProviderDeliveryInspectionAttemptV1:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            row, record = self._provider_delivery_attempt_for_transition(
+                session, attempt_id=attempt_id, expected_revision=expected_revision
+            )
+            self._provider_delivery_repository_lock(session, record.binding.target.repository_id)
+            if (
+                record.custody_phase != "minting"
+                or app_id != record.binding.inspection_app_id
+                or installation_id != record.inspection_installation_id
+                or repository_id != record.binding.target.repository_id
+                or token_expires_at <= record.observation_anchor
+            ):
+                raise OrdinaryAgentSessionAdmissionDenied("provider_inspection_custody_fenced")
+            updated = record.model_copy(
+                update={
+                    "revision": record.revision + 1,
+                    "custody_phase": "issued",
+                    "token_expires_at": token_expires_at,
+                }
+            )
+            self._sync_provider_delivery_inspection_row(row, updated)
+            session.commit()
+            return updated
+
+    @_private_ordinary_agent_operation
+    def mark_provider_delivery_inspection_issue_unknown(
+        self, *, attempt_id: str, expected_revision: int
+    ) -> ProviderDeliveryInspectionAttemptV1:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            row, record = self._provider_delivery_attempt_for_transition(
+                session, attempt_id=attempt_id, expected_revision=expected_revision
+            )
+            self._provider_delivery_repository_lock(session, record.binding.target.repository_id)
+            if record.custody_phase != "minting" or record.token_expires_at is not None:
+                return record
+            updated = record.model_copy(
+                update={
+                    "revision": record.revision + 1,
+                    "custody_phase": "issue_unknown",
+                }
+            )
+            self._sync_provider_delivery_inspection_row(row, updated)
+            session.commit()
+            return updated
+
+    @_private_ordinary_agent_operation
+    def close_provider_delivery_inspection_custody(
+        self,
+        *,
+        attempt_id: str,
+        expected_revision: int,
+        outcome: Literal["confirmed_revoked", "cleanup_unknown"],
+    ) -> ProviderDeliveryInspectionAttemptV1:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            row, record = self._provider_delivery_attempt_for_transition(
+                session, attempt_id=attempt_id, expected_revision=expected_revision
+            )
+            self._provider_delivery_repository_lock(session, record.binding.target.repository_id)
+            if record.custody_phase not in {"issued", "cleanup_unknown"} and not (
+                outcome == "confirmed_revoked" and record.custody_phase == "minting"
+            ):
+                raise OrdinaryAgentSessionAdmissionDenied("provider_inspection_custody_fenced")
+            updated = record.model_copy(
+                update={
+                    "revision": record.revision + 1,
+                    "custody_phase": (
+                        "closed" if outcome == "confirmed_revoked" else "cleanup_unknown"
+                    ),
+                }
+            )
+            self._sync_provider_delivery_inspection_row(row, updated)
+            session.commit()
+            return updated
+
+    @_private_ordinary_agent_operation
+    def close_provider_delivery_inspection_without_token(
+        self, *, attempt_id: str, expected_revision: int
+    ) -> ProviderDeliveryInspectionAttemptV1:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            row, record = self._provider_delivery_attempt_for_transition(
+                session, attempt_id=attempt_id, expected_revision=expected_revision
+            )
+            if record.custody_phase != "reserved":
+                raise OrdinaryAgentSessionAdmissionDenied("provider_inspection_custody_fenced")
+            updated = record.model_copy(
+                update={
+                    "revision": record.revision + 1,
+                    "custody_phase": "closed",
+                }
+            )
+            self._sync_provider_delivery_inspection_row(row, updated)
+            session.commit()
+            return updated
+
+    @_private_ordinary_agent_operation
+    def finish_provider_delivery_inspection(
+        self,
+        *,
+        attempt_id: str,
+        expected_revision: int,
+        result: object | None = None,
+        capability_reason: ProviderDeliveryReadinessReason | None = None,
+        retry_not_before: int | None = None,
+        proof: OrdinaryAgentTokenProof | None = None,
+        client_request: OrdinaryAgentFiniteClientRequest | None = None,
+    ) -> ProviderDeliveryReadinessDecision:
+        from control_plane.contracts.provider_delivery_inspection import (
+            ProviderDeliveryInspectionResultV1,
+        )
+
+        parsed_result = (
+            ProviderDeliveryInspectionResultV1.model_validate(result)
+            if result is not None
+            else None
+        )
+        locator_session = self._session_factory()
+        try:
+            locator = locator_session.get(LaunchplaneProviderDeliveryInspectionRow, attempt_id)
+            if locator is None:
+                raise OrdinaryAgentSessionAdmissionDenied("provider_readiness_in_progress")
+            located = self._provider_delivery_inspection_from_row(locator)
+        finally:
+            locator_session.close()
+        current_context: _OrdinaryAgentCurrentJobContext | None = None
+        current_activation: OrdinaryAgentDeliveryActivationRecord | None = None
+        current_prerequisites: _OrdinaryAgentRuntimePrerequisites | None = None
+        current_binding: ProviderDeliveryInspectionBindingV1 | None = None
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            if parsed_result is not None:
+                try:
+                    request_row = session.get(
+                        LaunchplaneOrdinaryAgentFiniteRequestRow, located.demand_id
+                    )
+                    if request_row is not None:
+                        current_context = self._ordinary_agent_current_chain_context(
+                            session, request_id=located.demand_id
+                        )
+                    else:
+                        if proof is None or client_request is None:
+                            raise OrdinaryAgentSessionAdmissionDenied(
+                                "provider_inspection_abandoned"
+                            )
+                        policy, principal, credential, _, preadmission_now = (
+                            self._ordinary_agent_session_context(session, proof)
+                        )
+                        session_record, lease_rows = self._ordinary_agent_session_rows(
+                            session,
+                            session_id=client_request.session_id,
+                            principal_id=principal.principal_id,
+                        )
+                        lease_row = next(
+                            (
+                                item
+                                for item in lease_rows
+                                if item.lease_id == client_request.lease_id
+                            ),
+                            None,
+                        )
+                        if lease_row is None:
+                            raise OrdinaryAgentSessionAdmissionDenied("lease_unavailable")
+                        lease = OrdinaryAgentLeaseRecord.model_validate(lease_row.payload)
+                        provisional = build_ordinary_agent_finite_request_from_client(
+                            client_request,
+                            server=OrdinaryAgentFiniteRequestServerFields(
+                                principal_id=principal.principal_id,
+                                target=lease.target,
+                                admitted_at=preadmission_now,
+                                lease_expires_at=lease.expires_at,
+                                continuation_expires_at=(
+                                    session_record.delegation.continuation_expires_at
+                                ),
+                                refresh_allowance_ceiling=(
+                                    session_record.delegation.refresh_allowance
+                                ),
+                            ),
+                        )
+                        if (
+                            not is_guarded_ordinary_agent_finite_request(provisional)
+                            or provisional.request_id != located.demand_id
+                            or ordinary_agent_finite_client_intent_sha256(client_request)
+                            != located.client_intent_sha256
+                        ):
+                            raise OrdinaryAgentSessionAdmissionDenied("request_binding_conflict")
+                        require_ordinary_agent_current_job_authority(
+                            policy=policy,
+                            principal=principal,
+                            credential=credential,
+                            session=session_record,
+                            lease=lease,
+                            request=provisional,
+                            now=preadmission_now,
+                        )
+                        build_ordinary_agent_request_admission_write_set(
+                            policy=policy,
+                            principal=principal,
+                            credential=credential,
+                            session=session_record,
+                            lease=lease,
+                            request=provisional,
+                            now=preadmission_now,
+                        )
+                        current_context = _OrdinaryAgentCurrentJobContext(
+                            provisional,
+                            LaunchplaneOrdinaryAgentFiniteRequestRow(
+                                request_id=provisional.request_id,
+                                principal_id=principal.principal_id,
+                                session_id=session_record.session_id,
+                                lease_id=lease.lease_id,
+                                idempotency_key=client_request.idempotency_key,
+                                intent_sha256=located.client_intent_sha256,
+                                client_intent_payload=self._payload_dict(client_request),
+                                payload=self._payload_dict(provisional),
+                            ),
+                            session_record,
+                            lease,
+                            lease_row,
+                            policy,
+                            principal,
+                            credential,
+                            preadmission_now,
+                        )
+                    current_prerequisites = self._require_ordinary_agent_runtime_prerequisites(
+                        session,
+                        context=current_context,
+                        purpose="guarded_delivery",
+                    )
+                    current_activation = current_prerequisites.activation
+                    current_binding, _ = self._provider_delivery_binding_locked(
+                        session,
+                        context=current_context,
+                        activation=current_activation,
+                    )
+                except OrdinaryAgentSessionAdmissionDenied:
+                    parsed_result = None
+                    capability_reason = "provider_inspection_abandoned"
+            self._provider_delivery_repository_lock(session, located.binding.target.repository_id)
+            row, record = self._provider_delivery_attempt_for_transition(
+                session, attempt_id=attempt_id, expected_revision=expected_revision
+            )
+            now = self._ordinary_agent_database_epoch(session)
+            if (
+                parsed_result is not None
+                and current_context is not None
+                and current_prerequisites is not None
+            ):
+                try:
+                    self._recheck_ordinary_agent_runtime_prerequisites_at(
+                        context=current_context,
+                        prerequisites=current_prerequisites,
+                        now=now,
+                    )
+                except OrdinaryAgentSessionAdmissionDenied:
+                    parsed_result = None
+                    capability_reason = "provider_readiness_refresh_required"
+            if record.custody_phase != "closed":
+                return ProviderDeliveryReadinessDecision(
+                    status="in_progress",
+                    reason_code="provider_inspection_custody_fenced",
+                    server_observed_at=now,
+                    retry_not_before=max(
+                        now + 1,
+                        self._provider_delivery_active_retry_not_before(record, now=now),
+                    ),
+                )
+            if parsed_result is not None:
+                assert current_binding is not None
+                if not provider_delivery_binding_is_current(record.binding, current_binding):
+                    parsed_result = None
+                    capability_reason = "provider_readiness_refresh_required"
+                elif parsed_result.facts is not None and not provider_delivery_facts_match_binding(
+                    parsed_result.facts, record.binding
+                ):
+                    parsed_result = None
+                    capability_reason = "provider_inspection_abandoned"
+                elif (
+                    parsed_result.status == "ready"
+                    and parsed_result.facts is not None
+                    and not provider_delivery_ready_facts_match_binding(
+                        parsed_result.facts, record.binding
+                    )
+                ):
+                    parsed_result = None
+                    capability_reason = "provider_inspection_abandoned"
+            if parsed_result is not None and now >= record.publication_deadline:
+                parsed_result = None
+                capability_reason = "provider_inspection_late_result"
+            if parsed_result is None:
+                reason = capability_reason or "provider_wait"
+                if record.provider_attempt_ordinal >= PROVIDER_INSPECTION_MAX_ATTEMPTS:
+                    reason = "provider_inspection_attempts_exhausted"
+                record = record.model_copy(
+                    update={
+                        "next_retry_not_before": max(
+                            retry_not_before or 0,
+                            record.observation_anchor
+                            + (
+                                PROVIDER_READINESS_FRESHNESS_SECONDS
+                                if reason == "provider_inspection_attempts_exhausted"
+                                else 1
+                            ),
+                            now + 1,
+                        )
+                    }
+                )
+                self._sync_provider_delivery_inspection_row(row, record)
+                terminal = self._terminalize_provider_delivery_inspection_locked(
+                    session,
+                    row=row,
+                    record=record,
+                    terminal_class="capability_unavailable",
+                    terminal_status="capability_unavailable",
+                    reason_codes=(reason,),
+                    completed_at=now,
+                )
+                session.commit()
+                return ProviderDeliveryReadinessDecision(
+                    status="capability_unavailable",
+                    reason_code=reason,
+                    server_observed_at=now,
+                    retry_not_before=terminal.next_retry_not_before,
+                )
+            terminal_status: ProviderDeliveryObservationStatus = parsed_result.status
+            reason = (
+                "provider_protection_ready"
+                if parsed_result.status == "ready"
+                else "provider_protection_not_ready"
+                if parsed_result.status == "protection_not_ready"
+                else "provider_protection_inconclusive"
+            )
+            terminal = self._terminalize_provider_delivery_inspection_locked(
+                session,
+                row=row,
+                record=record,
+                terminal_class="protection_conclusive",
+                terminal_status=terminal_status,
+                reason_codes=(reason,),
+                completed_at=now,
+                facts=parsed_result.facts,
+                inspection_result=parsed_result,
+                provider_request_count=parsed_result.provider_request_count,
+            )
+            session.commit()
+            if terminal_status == "ready":
+                receipt = ProviderDeliveryReadinessReceiptV1(
+                    receipt_id=cast(str, terminal.receipt_id),
+                    attempt_id=terminal.attempt_id,
+                    demand_id=terminal.demand_id,
+                    generation=terminal.generation,
+                    action_ordinal=terminal.action_ordinal,
+                    inspection_installation_id=cast(int, terminal.inspection_installation_id),
+                    binding=terminal.binding,
+                    facts=cast(Any, terminal.facts),
+                    reason_codes=terminal.reason_codes,
+                    provider_request_count=terminal.provider_request_count,
+                    repository_completion_sequence=cast(
+                        int, terminal.repository_completion_sequence
+                    ),
+                    observed_at=terminal.observation_anchor,
+                    expires_at=cast(int, terminal.next_retry_not_before),
+                    completed_at=cast(int, terminal.completed_at),
+                )
+                return ProviderDeliveryReadinessDecision(
+                    status="ready",
+                    reason_code="provider_protection_ready",
+                    server_observed_at=now,
+                    receipt=receipt,
+                )
+            return ProviderDeliveryReadinessDecision(
+                status=terminal_status,
+                reason_code=reason,
+                server_observed_at=now,
+                retry_not_before=terminal.next_retry_not_before,
+            )
+
     def _ordinary_agent_current_chain_context(
         self, session: Any, *, request_id: str
     ) -> _OrdinaryAgentCurrentJobContext:
@@ -29265,13 +31079,13 @@ class PostgresRecordStore(HumanSessionStore):
             request, row, record, lease, lease_row, policy, principal, credential, now
         )
 
-    def _require_ordinary_agent_runtime_readiness(
+    def _require_ordinary_agent_runtime_prerequisites(
         self,
         session: Any,
         *,
         context: _OrdinaryAgentCurrentJobContext,
         purpose: Literal["qualification", "guarded_delivery"],
-    ) -> tuple[OrdinaryAgentDeliveryActivationRecord, tuple[str, ...], int]:
+    ) -> _OrdinaryAgentRuntimePrerequisites:
         """Resolve current purpose-specific readiness from rows in this transaction."""
         expected_action = "preflight" if purpose == "qualification" else "guarded_merge"
         if context.lease.action != expected_action:
@@ -29620,6 +31434,7 @@ class PostgresRecordStore(HumanSessionStore):
             raise OrdinaryAgentSessionAdmissionDenied("custody_binding_conflict")
         if datetime.fromisoformat(activation.activation_expires_at).timestamp() <= now:
             raise OrdinaryAgentSessionAdmissionDenied("activation_expired")
+        qualification_expires_at: int | None = None
         if purpose == "guarded_delivery":
             current_attestations = sorted(
                 (item for item in attestations if now < item[3].expires_at),
@@ -29628,6 +31443,7 @@ class PostgresRecordStore(HumanSessionStore):
             if not current_attestations:
                 raise OrdinaryAgentSessionAdmissionDenied("qualification_attestation_required")
             attestation = current_attestations[0][3]
+            qualification_expires_at = attestation.expires_at
             evidence_ids.extend(
                 (
                     attestation.request_id,
@@ -29635,12 +31451,78 @@ class PostgresRecordStore(HumanSessionStore):
                     attestation.attestation_sha256,
                 )
             )
-            # Guarded derivation requires a separate current persisted receipt
-            # for provider protection and exclusive Launchplane merge identity.
-            # No trusted producer exists yet, so never infer either fact from
-            # configured merge policy, request snapshots, or activation state.
-            raise OrdinaryAgentSessionAdmissionDenied("provider_readiness_unavailable")
-        return activation, tuple(sorted(set(evidence_ids))), now
+        return _OrdinaryAgentRuntimePrerequisites(
+            activation=activation,
+            evidence_ids=tuple(sorted(set(evidence_ids))),
+            custody_valid_from=custody.valid_from,
+            custody_expires_at=custody.expires_at,
+            qualification_expires_at=qualification_expires_at,
+            observed_at=now,
+        )
+
+    @staticmethod
+    def _recheck_ordinary_agent_runtime_prerequisites_at(
+        *,
+        context: _OrdinaryAgentCurrentJobContext,
+        prerequisites: _OrdinaryAgentRuntimePrerequisites,
+        now: int,
+    ) -> None:
+        """Recheck the already-locked prerequisite snapshot without discovering rows."""
+        require_ordinary_agent_current_job_authority(
+            policy=context.policy,
+            principal=context.principal,
+            credential=context.credential,
+            session=context.session,
+            lease=context.lease,
+            request=context.request,
+            now=now,
+        )
+        if not prerequisites.custody_valid_from <= now < prerequisites.custody_expires_at:
+            raise OrdinaryAgentSessionAdmissionDenied("custody_binding_conflict")
+        activation_expires_at = prerequisites.activation.activation_expires_at
+        if (
+            isinstance(activation_expires_at, str)
+            and datetime.fromisoformat(activation_expires_at).timestamp() <= now
+        ):
+            raise OrdinaryAgentSessionAdmissionDenied("activation_expired")
+        if (
+            prerequisites.qualification_expires_at is not None
+            and prerequisites.qualification_expires_at <= now
+        ):
+            raise OrdinaryAgentSessionAdmissionDenied("qualification_attestation_required")
+
+    def _require_ordinary_agent_runtime_readiness(
+        self,
+        session: Any,
+        *,
+        context: _OrdinaryAgentCurrentJobContext,
+        purpose: Literal["qualification", "guarded_delivery"],
+        provider_required_margin_seconds: int = 0,
+    ) -> tuple[OrdinaryAgentDeliveryActivationRecord, tuple[str, ...], int]:
+        prerequisites = self._require_ordinary_agent_runtime_prerequisites(
+            session, context=context, purpose=purpose
+        )
+        observed_at = prerequisites.observed_at
+        if purpose == "guarded_delivery":
+            decision = self._provider_delivery_readiness_decision_locked(
+                session,
+                context=context,
+                activation=prerequisites.activation,
+                prerequisites=prerequisites,
+                required_margin_seconds=provider_required_margin_seconds,
+            )
+            if decision.status != "ready":
+                raise OrdinaryAgentSessionAdmissionDenied(
+                    decision.reason_code,
+                    retry_not_before=decision.retry_not_before,
+                    server_observed_at=decision.server_observed_at,
+                )
+            assert decision.receipt is not None
+            observed_at = decision.server_observed_at
+            evidence_ids = (*prerequisites.evidence_ids, decision.receipt.receipt_id)
+        else:
+            evidence_ids = prerequisites.evidence_ids
+        return prerequisites.activation, tuple(sorted(set(evidence_ids))), observed_at
 
     def _ordinary_agent_qualification_setup_from_activation(
         self,
@@ -29686,10 +31568,14 @@ class PostgresRecordStore(HumanSessionStore):
         session: Any,
         *,
         context: _OrdinaryAgentCurrentJobContext,
+        provider_required_margin_seconds: int = 0,
     ) -> tuple[OrdinaryAgentDeliveryActivationRecord, int]:
         try:
             activation, evidence_ids, observed_at = self._require_ordinary_agent_runtime_readiness(
-                session, context=context, purpose="guarded_delivery"
+                session,
+                context=context,
+                purpose="guarded_delivery",
+                provider_required_margin_seconds=provider_required_margin_seconds,
             )
         except OrdinaryAgentSessionAdmissionDenied as error:
             loss_reasons = {
@@ -29703,6 +31589,9 @@ class PostgresRecordStore(HumanSessionStore):
                 "installed_outcome_mismatch",
                 "inventory_drift",
                 "policy_source_inadmissible",
+                "provider_inspection_profile_unavailable",
+                "provider_protection_not_ready",
+                "protection_expectation_unavailable",
                 "qualification_attestation_required",
                 "setup_operation_inadmissible",
             }
@@ -30002,6 +31891,15 @@ class PostgresRecordStore(HumanSessionStore):
             )
             if second_unresolved_effect is not None:
                 raise OrdinaryAgentSessionAdmissionDenied("prior_effect_unresolved")
+            _, readiness_observed_at = self._require_and_project_guarded_readiness(
+                session, context=context
+            )
+            controller = self._recheck_ordinary_agent_controller_fences_at(
+                session,
+                context=context,
+                controller_fence=controller_fence,
+                now=readiness_observed_at,
+            )
             transition_at = self._database_mutation_timestamp(session)
             effect_updated_at = self._ordinary_agent_database_epoch(session)
             context.request_row.payload = self._payload_dict(updated)
