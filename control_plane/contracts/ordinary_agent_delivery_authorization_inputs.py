@@ -4,6 +4,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from control_plane.contracts.merge_train_policy import normalize_merge_train_policy_timestamp
 from control_plane.contracts.repository_inventory import (
     normalize_sha256,
     normalize_utc_timestamp,
@@ -46,7 +47,7 @@ class AuthorizationCandidateMergePolicyProvenance(BaseModel):
     def _validate(self) -> AuthorizationCandidateMergePolicyProvenance:
         self.record_id = required_token(self.record_id, "merge policy record_id")
         self.policy_sha256 = normalize_sha256(self.policy_sha256, "merge policy policy_sha256")
-        self.updated_at = normalize_utc_timestamp(self.updated_at, "merge policy updated_at")
+        self.updated_at = normalize_merge_train_policy_timestamp(self.updated_at)
         return self
 
 

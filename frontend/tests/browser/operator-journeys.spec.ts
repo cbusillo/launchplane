@@ -2067,7 +2067,7 @@ test.describe("operator journeys", () => {
     await expect(page.getByText("main", { exact: true })).toBeVisible();
     await expect(page.getByText("release", { exact: true })).toBeVisible();
     await expect(page.getByText("Missing branch configuration")).toBeVisible();
-    await expect(page.getByText("Configured", { exact: true })).toHaveCount(2);
+    await expect(page.getByText("Tracked", { exact: true })).toHaveCount(2);
     await expect(
       page.getByText(
         "This check does not inspect agent registration or preview readiness.",
@@ -2110,6 +2110,7 @@ test.describe("operator journeys", () => {
       } else if (state === "truncated") {
         await expect(page.getByText("The repository inventory is truncated.", { exact: false })).toBeVisible();
         await expect(page.getByText("The merge policy is truncated.")).toBeVisible();
+        await expect(page.getByText("No configured repositories were returned.")).toBeVisible();
       } else {
         await expect(page.getByText("Setup-prerequisite access denied")).toBeVisible();
       }

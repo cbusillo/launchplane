@@ -237,11 +237,11 @@ function PreparationInputsResult({
             <li key={repository.record_id}>
               <header>
                 <strong>{repository.repository}</strong>
-                <span>Configured</span>
+                <span>Tracked</span>
               </header>
               <div>
                 <span>Configured branches</span>
-                {repository.configured_branches.length ? (
+                {mergePolicyAvailable && repository.configured_branches.length ? (
                   <ul>
                     {repository.configured_branches.map((branch) => (
                       <li key={branch}>
@@ -462,7 +462,7 @@ async function preparationInputsFixture(
       : mode === "truncated" || mode === "ambiguous"
         ? mode
         : "available";
-  const repositories = mode === "empty"
+  const repositories = mode === "empty" || mode === "truncated"
     ? []
     : [
         {
@@ -473,7 +473,7 @@ async function preparationInputsFixture(
           inventory_sha256: "3".repeat(64),
           recorded_at: "2026-09-12T14:30:00Z",
           configured_branches:
-            mode === "missing" ? [] : ["main", "release"],
+            mergePolicyState === "available" ? ["main", "release"] : [],
         },
         ...(mode === "products"
           ? [{

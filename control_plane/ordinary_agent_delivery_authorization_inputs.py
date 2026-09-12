@@ -23,6 +23,8 @@ from control_plane.contracts.repository_inventory import (
 )
 
 
+# This bounds historical rows, not repository count. Reaching it must report
+# incomplete evidence; a latest-per-repository storage read can replace the scan.
 MAX_AUTHORIZATION_INPUT_SOURCE_RECORDS = 1000
 MAX_AUTHORIZATION_INPUT_MERGE_TARGETS = 1000
 

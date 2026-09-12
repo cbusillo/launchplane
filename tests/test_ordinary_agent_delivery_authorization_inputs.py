@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import datetime
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -209,7 +210,13 @@ class OrdinaryAgentDeliveryAuthorizationInputServiceTests(unittest.TestCase):
             reason="retired",
         )
         store = _ReadStore(
-            inventories=(retired_current, older, retired, current),
+            inventories=(
+                retired_current,
+                older,
+                retired,
+                current,
+                _inventory(repository_id=303, repository="example/without-branches"),
+            ),
             merge_policies=(
                 _merge_policy_with_branches(
                     repository="Example/Alpha", branches=("release", "main")
@@ -221,12 +228,35 @@ class OrdinaryAgentDeliveryAuthorizationInputServiceTests(unittest.TestCase):
 
         self.assertEqual(response.inventory_state, "complete")
         self.assertEqual(response.merge_policy_state, "available")
-        self.assertEqual(len(response.repositories), 1)
+        self.assertEqual(len(response.repositories), 2)
         self.assertEqual(response.repositories[0].record_id, current.record_id)
         self.assertEqual(response.repositories[0].configured_branches, ("main", "release"))
+        self.assertEqual(response.repositories[1].configured_branches, ())
+        self.assertIn("configured_branches_missing", {item.code for item in response.diagnostics})
         self.assertNotIn("example/retired", {item.repository for item in response.repositories})
         self.assertEqual(store.inventory_reads, 1)
         self.assertEqual(store.merge_policy_reads, 1)
+
+    def test_valid_offset_timestamp_preserves_available_merge_policy(self) -> None:
+        payload = _merge_policy_with_branches(
+            repository="example/alpha", branches=("main",)
+        ).model_dump(mode="json")
+        payload["updated_at"] = "2026-09-12T14:00:00+02:00"
+        policy = MergeTrainPolicyRecord.model_validate(payload)
+
+        response = self._read(
+            _ReadStore(
+                inventories=(_inventory(repository_id=101, repository="example/alpha"),),
+                merge_policies=(policy,),
+            )
+        )
+
+        self.assertEqual(response.merge_policy_state, "available")
+        assert response.merge_policy is not None
+        self.assertEqual(
+            datetime.fromisoformat(response.merge_policy.updated_at),
+            datetime.fromisoformat(policy.updated_at),
+        )
 
     def test_inventory_tie_is_ambiguous_and_retired_latest_never_falls_back(self) -> None:
         tied_a = _inventory(repository_id=101, repository="example/alpha", revision=2)
@@ -439,7 +469,12 @@ class OrdinaryAgentDeliveryAuthorizationInputHttpTests(unittest.IsolatedAsyncioT
         for label, policy, identity in cases:
             with self.subTest(label=label):
                 store = _ReadStore()
-                app = _app(store=store, runtime_policy=policy, identity=identity)
+                app = _app(
+                    store=store,
+                    runtime_policy=policy,
+                    persisted_policy=_policy(),
+                    identity=identity,
+                )
                 async with lifespan_client(app) as client:
                     response = await client.get(_ROUTE)
                 self.assertEqual(response.status_code, 403, response.text)
