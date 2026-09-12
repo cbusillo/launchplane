@@ -4390,6 +4390,89 @@
         ]
       }
     },
+    "/v1/privileged-operations/authorization-candidates/prepare": {
+      "post": {
+        "operationId": "prepare_authorization_candidate",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AuthorizationCandidatePrepareEnvelope"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthorizationCandidatePrepareResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Prepare a closed authorization candidate",
+        "tags": [
+          "privileged-operations"
+        ]
+      }
+    },
     "/v1/privileged-operations/ordinary-agent-delivery-activation/plans": {
       "post": {
         "operationId": "plan_ordinary_agent_delivery_activation",
@@ -6008,6 +6091,72 @@
           "trace_id"
         ],
         "title": "AuthSessionResponse",
+        "type": "object"
+      },
+      "AuthorizationCandidatePrepareEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "candidate_id": {
+            "const": "ordinary-agent-delivery-administration",
+            "title": "Candidate Id",
+            "type": "string"
+          },
+          "intent": {
+            "enum": [
+              "add",
+              "remove"
+            ],
+            "title": "Intent",
+            "type": "string"
+          },
+          "source_event_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Source Event Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "candidate_id",
+          "intent",
+          "source_event_id"
+        ],
+        "title": "AuthorizationCandidatePrepareEnvelope",
+        "type": "object"
+      },
+      "AuthorizationCandidatePrepareResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "operation_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Operation Id",
+            "x-launchplane-optional-response": true
+          },
+          "state": {
+            "enum": [
+              "planned",
+              "already_satisfied"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "state",
+          "trace_id"
+        ],
+        "title": "AuthorizationCandidatePrepareResponse",
         "type": "object"
       },
       "AuthzManagedCompatibilityRetirement": {
@@ -17975,6 +18124,7 @@
             "enum": [
               "Managed-secret re-encryption review",
               "Managed authorization policy review",
+              "Review agent delivery administration",
               "Managed merge-train policy review",
               "Review agent delivery setup",
               "Review stopping agent delivery"

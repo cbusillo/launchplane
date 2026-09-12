@@ -158,6 +158,18 @@ export type AuthSessionResponse = {
     trace_id: string;
 };
 
+export type AuthorizationCandidatePrepareEnvelope = {
+    candidate_id: 'ordinary-agent-delivery-administration';
+    intent: 'add' | 'remove';
+    source_event_id: string;
+};
+
+export type AuthorizationCandidatePrepareResponse = {
+    operation_id?: string | null;
+    state: 'planned' | 'already_satisfied';
+    trace_id: string;
+};
+
 export type AuthzManagedCompatibilityRetirement = {
     managed_rule_id: string;
     match_type: 'github_actions_name_only_authorization_narrowing';
@@ -2160,7 +2172,7 @@ export type PrivilegedOperationSemanticReview = {
     rollback: PrivilegedOperationSemanticReviewRollback;
     safety_class: 'secret_backed' | 'policy_admin';
     schema_version: number;
-    title: 'Managed-secret re-encryption review' | 'Managed authorization policy review' | 'Managed merge-train policy review' | 'Review agent delivery setup' | 'Review stopping agent delivery';
+    title: 'Managed-secret re-encryption review' | 'Managed authorization policy review' | 'Review agent delivery administration' | 'Managed merge-train policy review' | 'Review agent delivery setup' | 'Review stopping agent delivery';
 };
 
 export type PrivilegedOperationSemanticReviewActivityEntry = {
@@ -4961,6 +4973,31 @@ export type WriteOwnerAcceptanceEventResponses = {
 };
 
 export type WriteOwnerAcceptanceEventResponse = WriteOwnerAcceptanceEventResponses[keyof WriteOwnerAcceptanceEventResponses];
+
+export type PrepareAuthorizationCandidateData = {
+    body: AuthorizationCandidatePrepareEnvelope;
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/privileged-operations/authorization-candidates/prepare';
+};
+
+export type PrepareAuthorizationCandidateErrors = {
+    403: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type PrepareAuthorizationCandidateError = PrepareAuthorizationCandidateErrors[keyof PrepareAuthorizationCandidateErrors];
+
+export type PrepareAuthorizationCandidateResponses = {
+    200: AuthorizationCandidatePrepareResponse;
+};
+
+export type PrepareAuthorizationCandidateResponse = PrepareAuthorizationCandidateResponses[keyof PrepareAuthorizationCandidateResponses];
 
 export type PlanOrdinaryAgentDeliveryActivationData = {
     body: OrdinaryAgentDeliveryActivationPlanEnvelope;

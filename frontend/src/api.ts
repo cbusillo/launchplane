@@ -32,6 +32,8 @@ import type {
   OrdinaryAgentDeliveryActivationSetupRequest,
   PlanOrdinaryAgentDeliveryActivationData,
   PlanOrdinaryAgentDeliveryActivationResponse,
+  PrepareAuthorizationCandidateData,
+  PrepareAuthorizationCandidateResponse,
   ProductActivityResponse,
   ProductEnvironmentConfigStatusResponse,
   ProductEnvironmentIncidentResponse,
@@ -654,6 +656,30 @@ export type {
 export type PrivilegedOperationDescriptorId = NonNullable<
   ListHumanPrivilegedOperationsData["query"]
 >["descriptor_id"];
+
+export type AuthorizationCandidateIntent =
+  PrepareAuthorizationCandidateData["body"]["intent"];
+
+export function prepareAuthorizationCandidate(
+  intent: AuthorizationCandidateIntent,
+  sourceEventId: string,
+  signal?: AbortSignal,
+): Promise<PrepareAuthorizationCandidateResponse> {
+  const request: PrepareAuthorizationCandidateData = {
+    url: BROWSER_WRITE_ROUTES.authorizationCandidatePrepare,
+    body: {
+      candidate_id: "ordinary-agent-delivery-administration",
+      intent,
+      source_event_id: sourceEventId,
+    },
+  };
+  return requestJson<PrepareAuthorizationCandidateResponse>(
+    request.url,
+    "POST",
+    request.body,
+    signal,
+  );
+}
 
 export function readPrivilegedOperationPlans(
   signal?: AbortSignal,

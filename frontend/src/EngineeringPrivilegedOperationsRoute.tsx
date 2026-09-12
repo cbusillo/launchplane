@@ -1,10 +1,11 @@
 import { KeyRound, ShieldAlert } from "lucide-react";
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 
 import {
   LaunchplaneApiError,
   approvePrivilegedOperation,
   planOrdinaryAgentDeliveryActivation,
+  prepareAuthorizationCandidate,
   readOrdinaryAgentDeliveryActivationOptions,
   readPrivilegedOperationPlans,
   readPrivilegedOperationReview,
@@ -14,6 +15,7 @@ import {
   type PrivilegedOperationListResponse,
   type PrivilegedOperationSemanticReview,
   type OrdinaryAgentDeliveryActivationOptionsResponse,
+  type AuthorizationCandidateIntent,
 } from "./api";
 import type { DevFixtureMode } from "./dev-fixture-loader";
 import {
@@ -159,11 +161,126 @@ function DefaultPrivilegedOperationsRoute({
                 refresh={resource.refresh}
               />
             ) : null}
+            {descriptorId === "managed-authz-policy-set" &&
+            operationId === null ? (
+              <AccessPolicyComposer refresh={resource.refresh} />
+            ) : null}
             <PrivilegedOperationPlanList data={data} refresh={resource.refresh} />
           </>
         )}
       </EngineeringResourceGate>
     </EngineeringRouteFrame>
+  );
+}
+
+function AccessPolicyComposer({ refresh }: { refresh: () => void }) {
+  const [pendingIntent, setPendingIntent] =
+    useState<AuthorizationCandidateIntent | null>(null);
+  const [message, setMessage] = useState("");
+  const [traceId, setTraceId] = useState("");
+  const retryKeys =
+    useRef<Partial<Record<AuthorizationCandidateIntent, string>>>({});
+
+  async function prepare(intent: AuthorizationCandidateIntent) {
+    setPendingIntent(intent);
+    setMessage("");
+    setTraceId("");
+    const sourceEventId =
+      retryKeys.current[intent] ??
+      `ui:authorization-candidate:${intent}:${crypto.randomUUID()}`;
+    retryKeys.current[intent] = sourceEventId;
+    try {
+      const response = await prepareAuthorizationCandidate(
+        intent,
+        sourceEventId,
+      );
+      setTraceId(response.trace_id);
+      if (response.state === "planned" && response.operation_id) {
+        delete retryKeys.current[intent];
+        window.location.assign(
+          `/ui/engineering/privileged-operations?operation_id=${encodeURIComponent(response.operation_id)}`,
+        );
+        return;
+      }
+      if (response.state === "planned") {
+        setMessage(
+          "The plan was prepared, but its review is not available yet.",
+        );
+      } else {
+        delete retryKeys.current[intent];
+        setMessage(
+          intent === "add"
+            ? "Setup access is already installed."
+            : "Administrator access is already removed.",
+        );
+        refresh();
+      }
+    } catch (error) {
+      if (error instanceof LaunchplaneApiError) {
+        setMessage(error.message);
+        setTraceId(error.traceId);
+      } else {
+        setMessage("The access policy plan could not be prepared.");
+      }
+    } finally {
+      setPendingIntent(null);
+    }
+  }
+
+  return (
+    <section className="privileged-operation-card">
+      <header>
+        <div>
+          <span className="engineering-kicker">Access policy</span>
+          <h2>Prepare delivery administrator access</h2>
+          <p>
+            Prepare access to administer ordinary-agent delivery, or prepare
+            removal of access that was already installed. This creates a plan
+            for review; it does not start delivery. Installed access remains
+            until a removal plan is approved and applied.
+          </p>
+        </div>
+      </header>
+      <div className="privileged-operation-warning" role="note">
+        <ShieldAlert size={18} aria-hidden="true" />
+        <span>
+          Stop ordinary-agent delivery before preparing removal. The service
+          will refuse removal while an active delivery could lose its stop
+          controls.
+        </span>
+      </div>
+      <div className="privileged-operation-actions activation-plan-actions">
+        <button
+          disabled={pendingIntent !== null}
+          onClick={() => void prepare("add")}
+          type="button"
+        >
+          {pendingIntent === "add"
+            ? "Preparing access…"
+            : "Prepare setup access"}
+        </button>
+        <button
+          disabled={pendingIntent !== null}
+          onClick={() => void prepare("remove")}
+          type="button"
+        >
+          {pendingIntent === "remove"
+            ? "Preparing removal…"
+            : "Prepare removal"}
+        </button>
+      </div>
+      {message ? (
+        <p className="privileged-operation-terminal-reason" role="status">
+          {message}
+          {traceId ? (
+            <>
+              <br />
+              Trace: {traceId}
+            </>
+          ) : null}
+        </p>
+      ) : null}
+    </section>
   );
 }
 

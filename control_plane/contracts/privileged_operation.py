@@ -1053,6 +1053,7 @@ PrivilegedOperationSemanticReviewRollbackClass = Literal[
 PrivilegedOperationSemanticReviewTitle = Literal[
     "Managed-secret re-encryption review",
     "Managed authorization policy review",
+    "Review agent delivery administration",
     "Managed merge-train policy review",
     "Review agent delivery setup",
     "Review stopping agent delivery",
@@ -1340,7 +1341,12 @@ class PrivilegedOperationSemanticReview(BaseModel):
         }
         expected_titles = {
             "managed-secret-reencryption": frozenset({"Managed-secret re-encryption review"}),
-            "managed-authz-policy-set": frozenset({"Managed authorization policy review"}),
+            "managed-authz-policy-set": frozenset(
+                {
+                    "Managed authorization policy review",
+                    "Review agent delivery administration",
+                }
+            ),
             "managed-merge-train-policy-import": frozenset({"Managed merge-train policy review"}),
             "ordinary-agent-delivery-activation": frozenset(
                 {"Review agent delivery setup", "Review stopping agent delivery"}

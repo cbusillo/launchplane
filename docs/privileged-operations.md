@@ -9,6 +9,13 @@ plane work that cannot safely be delegated through static administrator
 credentials. The boundary is separate from Owner Acceptance, Agent Write
 Intents, workflow authorization, and ordinary operator mutations.
 
+The Access policy workbench includes closed candidate preparation for Agent
+delivery administration. Its add and remove controls derive the signed-in
+administrator and policy inputs on the server and create a standard managed
+authorization plan for review. They do not approve or apply it. See
+[Preparing Agent Delivery Administration](authorization-authority.md#preparing-agent-delivery-administration)
+for eligibility, collision, removal, and production-activation boundaries.
+
 ## Approval And Execution Boundary
 
 Planning remains typed and dry-run-only. Phase 2 adds a separate finite human

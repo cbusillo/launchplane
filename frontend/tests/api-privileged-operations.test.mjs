@@ -4,6 +4,7 @@ import { afterEach, test } from "node:test";
 import {
   approvePrivilegedOperation,
   planOrdinaryAgentDeliveryActivation,
+  prepareAuthorizationCandidate,
   readOrdinaryAgentDeliveryActivationOptions,
   readPrivilegedOperationRawDetail,
   readPrivilegedOperationPlans,
@@ -208,4 +209,34 @@ test("activation UI reads server choices and submits their opaque references", a
   );
   assert.equal(body.request.predecessor, null);
   assert.equal(body.request.activation_expires_at, "2026-09-11T12:00:00Z");
+});
+
+test("access-policy composer submits only the closed candidate intent and retry key", async () => {
+  const calls = [];
+  globalThis.fetch = async (input, init = {}) => {
+    calls.push({ input: String(input), init });
+    const payload = String(input).endsWith("/v1/auth/session")
+      ? { csrf_token: "csrf-access-policy" }
+      : { trace_id: "trace-access-policy", state: "already_satisfied" };
+    return new Response(JSON.stringify(payload), {
+      headers: { "Content-Type": "application/json" },
+      status: 200,
+    });
+  };
+
+  const response = await prepareAuthorizationCandidate(
+    "remove",
+    "ui:stable-access-policy-retry",
+  );
+
+  assert.equal(response.state, "already_satisfied");
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1].input, "/v1/privileged-operations/authorization-candidates/prepare");
+  assert.equal(calls[1].init.method, "POST");
+  assert.equal(calls[1].init.headers["X-CSRF-Token"], "csrf-access-policy");
+  assert.deepEqual(JSON.parse(String(calls[1].init.body)), {
+    candidate_id: "ordinary-agent-delivery-administration",
+    intent: "remove",
+    source_event_id: "ui:stable-access-policy-retry",
+  });
 });

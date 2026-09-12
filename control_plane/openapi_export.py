@@ -207,6 +207,9 @@ UI_OPENAPI_READ_OPERATIONS: dict[str, str] = {
 
 
 UI_OPENAPI_WRITE_OPERATIONS: dict[str, str] = {
+    "/v1/privileged-operations/authorization-candidates/prepare": (
+        "prepare_authorization_candidate"
+    ),
     "/v1/privileged-operations/ordinary-agent-delivery-activation/plans": (
         "plan_ordinary_agent_delivery_activation"
     ),
