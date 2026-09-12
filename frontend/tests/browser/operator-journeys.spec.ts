@@ -1942,6 +1942,11 @@ test.describe("operator journeys", () => {
     ).toHaveCount(0);
     await page.getByRole("button", { name: "Access policy" }).click();
     await expect(
+      page.getByRole("heading", { name: "Managed authorization policy review" }),
+    ).toBeVisible();
+    await expect(page.getByText("Added", { exact: true })).toBeVisible();
+    await expect(page.getByText("1", { exact: true }).first()).toBeVisible();
+    await expect(
       page.getByRole("heading", {
         name: "Prepare delivery administrator access",
       }),
@@ -2218,6 +2223,155 @@ test.describe("operator journeys", () => {
     expect(sourceEventIds).toHaveLength(3);
     expect(sourceEventIds[1]).toBe(sourceEventIds[0]);
     expect(sourceEventIds[2]).toBe(sourceEventIds[0]);
+  });
+
+  test("project evidence preparation has independent add and removal cards", async ({ page }) => {
+    const requests: Array<{ candidate_id: string; intent: string; source_event_id: string }> = [];
+    const attempts = new Map<string, number>();
+    await page.route("**/v1/auth/session", async (route) => {
+      await route.fulfill({ json: { csrf_token: "fixture-product-evidence-csrf" } });
+    });
+    await page.route(
+      "**/v1/privileged-operations/authorization-candidates/prepare",
+      async (route) => {
+        const body = route.request().postDataJSON() as {
+          candidate_id: string;
+          intent: string;
+          source_event_id: string;
+        };
+        requests.push(body);
+        const key = `${body.candidate_id}:${body.intent}`;
+        const attempt = (attempts.get(key) ?? 0) + 1;
+        attempts.set(key, attempt);
+        if (
+          body.candidate_id === "administrator-product-evidence-read" &&
+          body.intent === "add" &&
+          attempt === 1
+        ) {
+          await route.fulfill({
+            status: 503,
+            json: {
+              trace_id: "trace-product-evidence-uncertain",
+              error: {
+                code: "service_unavailable",
+                message: "Preparation outcome is uncertain.",
+              },
+            },
+          });
+          return;
+        }
+        await route.fulfill({
+          json: {
+            trace_id: `trace-${body.candidate_id}-${body.intent}`,
+            state: "already_satisfied",
+          },
+        });
+      },
+    );
+
+    await page.goto("/ui/engineering/privileged-operations?fixture=products");
+    await page.getByRole("button", { name: "Access policy" }).click();
+
+    const evidenceCard = page
+      .locator("section.privileged-operation-card")
+      .filter({
+        has: page.getByRole("heading", { name: "Prepare project evidence access" }),
+      });
+    await expect(evidenceCard).toBeVisible();
+    await expect(
+      evidenceCard.getByText(
+        "project and environment evidence across all current and future projects",
+        { exact: false },
+      ),
+    ).toBeVisible();
+    await expect(evidenceCard.locator("input, select, textarea")).toHaveCount(0);
+
+    await evidenceCard
+      .getByRole("button", { name: "Prepare evidence access" })
+      .click();
+    await expect(evidenceCard.getByText("Preparation outcome is uncertain.")).toBeVisible();
+    await evidenceCard
+      .getByRole("button", { name: "Prepare evidence access" })
+      .click();
+    await expect(
+      evidenceCard.getByText("Project evidence access is already installed."),
+    ).toBeVisible();
+    await evidenceCard
+      .getByRole("button", { name: "Prepare evidence removal" })
+      .click();
+    await expect(
+      evidenceCard.getByText("Project evidence access is already removed."),
+    ).toBeVisible();
+
+    const deliveryCard = page
+      .locator("section.privileged-operation-card")
+      .filter({
+        has: page.getByRole("heading", { name: "Prepare delivery administrator access" }),
+      });
+    await deliveryCard.getByRole("button", { name: "Prepare setup access" }).click();
+    await expect(deliveryCard.getByText("Setup access is already installed.")).toBeVisible();
+
+    expect(requests).toHaveLength(4);
+    expect(requests[0].candidate_id).toBe("administrator-product-evidence-read");
+    expect(requests[0].intent).toBe("add");
+    expect(requests[1]).toMatchObject({
+      candidate_id: "administrator-product-evidence-read",
+      intent: "add",
+      source_event_id: requests[0].source_event_id,
+    });
+    expect(requests[2]).toMatchObject({
+      candidate_id: "administrator-product-evidence-read",
+      intent: "remove",
+    });
+    expect(requests[2].source_event_id).not.toBe(requests[0].source_event_id);
+    expect(requests[3]).toMatchObject({
+      candidate_id: "ordinary-agent-delivery-administration",
+      intent: "add",
+    });
+    expect(requests[3].source_event_id).not.toBe(requests[0].source_event_id);
+    for (const request of requests) {
+      expect(Object.keys(request).sort()).toEqual([
+        "candidate_id",
+        "intent",
+        "source_event_id",
+      ]);
+    }
+    await expect(evidenceCard.getByRole("button", { name: /approve/i })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Refresh plans" })).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth)).toBe(false);
+    await assertDocumentBasics(page);
+    await captureScreenshot(page, test.info(), "access-policy-product-evidence-preparation");
+
+    await page.goto(
+      "/ui/engineering/privileged-operations?fixture=products&review=product-evidence",
+    );
+    await page.getByRole("button", { name: "Access policy" }).click();
+    const evidenceReview = page
+      .locator("article.privileged-operation-card")
+      .filter({
+        has: page.getByRole("heading", {
+          name: "Review administrator product evidence access",
+        }),
+      });
+    await expect(evidenceReview).toBeVisible();
+    await expect(
+      evidenceReview
+        .getByText("all current and future projects", { exact: false })
+        .first(),
+    ).toBeVisible();
+    await expect(
+      evidenceReview.locator("details").getByText("Added", { exact: true }),
+    ).toBeHidden();
+    await evidenceReview.getByText("Technical details", { exact: true }).click();
+    await expect(
+      evidenceReview.locator("details").getByText("Added", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      evidenceReview.locator("details").getByText("2", { exact: true }),
+    ).toBeVisible();
+    await expect(page.getByRole("button", { name: "Refresh plans" })).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth)).toBe(false);
+    await assertDocumentBasics(page);
   });
 });
 

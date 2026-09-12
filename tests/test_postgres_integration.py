@@ -5599,13 +5599,14 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
 
     def test_merge_train_controller_expired_active_phase_is_adopted(self) -> None:
         with _store_for_fresh_head_database() as store:
+            # Keep setup live until the checkpoint installs the short lease under test.
             first = store.acquire_merge_train_controller_state_record(
                 repository="cbusillo/sellyouroutboard",
                 base_branch="main",
                 policy_key="cbusillo/sellyouroutboard:main",
                 policy_sha256="policy-sha",
                 lease_owner="controller-a",
-                lease_seconds=1,
+                lease_seconds=30,
                 initial_active_action="postgres_store_test",
                 initial_active_phase="acquire",
                 adoptable_active_actions=("postgres_store_test",),
@@ -5623,6 +5624,7 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                 expected_lease_acquired_at=first.lease_acquired_at,
                 lease_seconds=1,
             )
+            self.assertEqual(checkpointed.status, "running")
             time.sleep(1.1)
             adopted = store.acquire_merge_train_controller_state_record(
                 repository="cbusillo/sellyouroutboard",

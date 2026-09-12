@@ -269,6 +269,7 @@ test("access-policy composer submits only the closed candidate intent and retry 
   };
 
   const response = await prepareAuthorizationCandidate(
+    "ordinary-agent-delivery-administration",
     "remove",
     "ui:stable-access-policy-retry",
   );
@@ -283,4 +284,38 @@ test("access-policy composer submits only the closed candidate intent and retry 
     intent: "remove",
     source_event_id: "ui:stable-access-policy-retry",
   });
+});
+
+test("access-policy preparation accepts the isolated product-evidence candidate without extra fields", async () => {
+  const calls = [];
+  globalThis.fetch = async (input, init = {}) => {
+    calls.push({ input: String(input), init });
+    const payload = String(input).endsWith("/v1/auth/session")
+      ? { csrf_token: "csrf-product-evidence" }
+      : {
+          trace_id: "trace-product-evidence",
+          state: "planned",
+          operation_id: "operation-product-evidence",
+        };
+    return new Response(JSON.stringify(payload), {
+      headers: { "Content-Type": "application/json" },
+      status: 200,
+    });
+  };
+
+  const response = await prepareAuthorizationCandidate(
+    "administrator-product-evidence-read",
+    "add",
+    "ui:product-evidence-add",
+  );
+
+  assert.equal(response.state, "planned");
+  assert.equal(calls.length, 2);
+  const body = JSON.parse(String(calls[1].init.body));
+  assert.deepEqual(body, {
+    candidate_id: "administrator-product-evidence-read",
+    intent: "add",
+    source_event_id: "ui:product-evidence-add",
+  });
+  assert.equal(calls[1].init.headers["X-CSRF-Token"], "csrf-product-evidence");
 });
