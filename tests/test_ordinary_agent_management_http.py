@@ -157,6 +157,11 @@ class OrdinaryAgentManagementHTTPTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 403, response.text)
         self.assertEqual(response.json()["error"]["code"], "http_error")
+        self.assertEqual(
+            response.json()["error"]["message"],
+            "This agent operation is unavailable.",
+        )
+        self.assertNotIn("retry-after", response.headers)
 
     async def test_guarded_provider_readiness_gap_is_reported_as_service_unavailable(self) -> None:
         fixture = effect_support.OrdinaryAgentEffectStorageTests()
@@ -196,10 +201,58 @@ class OrdinaryAgentManagementHTTPTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 503, response.text)
         self.assertEqual(
+            response.json()["error"]["code"],
+            "provider_inspection_profile_unavailable",
+        )
+        self.assertEqual(
             response.json()["error"]["message"],
-            "Launchplane request failed.",
+            "Provider delivery readiness is unavailable; retry the same request key.",
         )
         self.assertEqual(response.headers["retry-after"], "30")
+
+    async def test_guarded_merge_method_configuration_is_paced_service_unavailable(self) -> None:
+        fixture = effect_support.OrdinaryAgentEffectStorageTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        session = fixture.fixture
+        app = create_launchplane_fastapi_app(
+            verifier=Mock(),
+            authz_policy=session.policy.policy,
+            record_store_factory=lambda: fixture.store,
+        )
+        with patch.object(
+            PostgresRecordStore,
+            "admit_ordinary_agent_client_request",
+            side_effect=OrdinaryAgentSessionAdmissionDenied(
+                "ordinary_merge_method_unsupported",
+                retry_not_before=session.now + 12,
+                server_observed_at=session.now,
+            ),
+        ):
+            async with lifespan_client(app) as client:
+                response = await client.post(
+                    "/v1/agent/ordinary-agent-jobs",
+                    headers={"Authorization": f"Bearer {session.bundle.token.value}"},
+                    json={
+                        "schema_version": 2,
+                        "purpose": "guarded_delivery",
+                        "idempotency_key": "http-guarded-merge-method-unsupported",
+                        "session_id": fixture.request.session_id,
+                        "lease_id": fixture.request.lease_id,
+                        "base_sha": "a" * 40,
+                        "pull_requests": [{"number": 12, "head_sha": "b" * 40}],
+                        "permitted_stack_edit_pull_requests": [],
+                        "refresh_allowance": 0,
+                    },
+                )
+
+        self.assertEqual(response.status_code, 503, response.text)
+        self.assertEqual(response.json()["error"]["code"], "ordinary_merge_method_unsupported")
+        self.assertEqual(
+            response.json()["error"]["message"],
+            "Provider delivery readiness is unavailable; retry the same request key.",
+        )
+        self.assertEqual(response.headers["retry-after"], "12")
 
     async def test_guarded_admission_refreshes_once_then_reenters_authoritative_admission(
         self,

@@ -30714,7 +30714,9 @@ class PostgresRecordStore(HumanSessionStore):
                 session, attempt_id=attempt_id, expected_revision=expected_revision
             )
             self._provider_delivery_repository_lock(session, record.binding.target.repository_id)
-            if record.custody_phase not in {"issued", "cleanup_unknown"}:
+            if record.custody_phase not in {"issued", "cleanup_unknown"} and not (
+                outcome == "confirmed_revoked" and record.custody_phase == "minting"
+            ):
                 raise OrdinaryAgentSessionAdmissionDenied("provider_inspection_custody_fenced")
             updated = record.model_copy(
                 update={

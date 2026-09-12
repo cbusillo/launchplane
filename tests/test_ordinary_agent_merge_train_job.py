@@ -219,6 +219,66 @@ class OrdinaryAgentMergeTrainJobTests(unittest.TestCase):
         self.provider.assert_not_called()
         acquire.assert_not_called()
 
+    def test_expired_qualification_settles_reclaimed_job_without_new_controller(self) -> None:
+        prior = self.claim("prior-worker")
+        prior_fence = self.acquire(prior)
+        self.session.now += 31
+        self.session.clock.return_value = datetime.fromtimestamp(
+            self.session.now, timezone.utc
+        ).isoformat()
+        claimed = self.claim("replacement-worker")
+        self.assertEqual(claimed.controller_fence, prior_fence)
+        ensure = Mock(
+            side_effect=OrdinaryAgentSessionAdmissionDenied("qualification_attestation_required")
+        )
+
+        with patch.object(
+            self.store,
+            "acquire_ordinary_merge_train_controller_state_record",
+            wraps=self.store.acquire_ordinary_merge_train_controller_state_record,
+        ) as acquire:
+            disposition = self.advance(claimed, ensure_provider_readiness=ensure)
+
+        self.assertEqual(
+            (disposition.status, disposition.reason_code), ("blocked", "authority_unavailable")
+        )
+        finished = self.store.finish_ordinary_agent_job_attempt(
+            claim_fence=claimed.claim_fence, disposition=disposition
+        )
+        self.assertEqual((finished.status, finished.completed_effects), ("blocked", 0))
+        self.assertIsNone(
+            self.store.claim_due_ordinary_agent_job(worker_id="later-worker", lease_seconds=30)
+        )
+        controller = self.store.list_merge_train_controller_state_records(
+            repository=self.request.target.repository,
+            base_branch=self.request.target.base_branch,
+        )
+        self.assertEqual(len(controller), 1)
+        self.assertEqual(controller[0].status, "idle")
+        acquire.assert_not_called()
+        self.provider.assert_not_called()
+
+    def test_provider_ensure_process_failures_do_not_terminalize_the_job(self) -> None:
+        claimed = self.claim()
+        failures = (
+            OrdinaryAgentSessionAdmissionDenied("runtime_protocol_incompatible"),
+            OrdinaryAgentSessionAdmissionDenied("database_revision_incompatible"),
+            RuntimeError("profile storage temporarily unavailable"),
+        )
+        for error in failures:
+            with (
+                self.subTest(error=str(error)),
+                patch.object(
+                    self.store, "acquire_ordinary_merge_train_controller_state_record"
+                ) as acquire,
+                self.assertRaises(type(error)) as raised,
+            ):
+                self.advance(claimed, ensure_provider_readiness=Mock(side_effect=error))
+            self.assertIs(raised.exception, error)
+            acquire.assert_not_called()
+            self.store.read_ordinary_agent_job_recovery_snapshot(claim_fence=claimed.claim_fence)
+        self.provider.assert_not_called()
+
     def completed_refresh(self) -> tuple[effects.OrdinaryAgentClaimedJob, str]:
         claimed = self.claim()
         fence = self.acquire(claimed)

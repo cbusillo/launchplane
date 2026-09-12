@@ -5,6 +5,10 @@ from typing import Any
 import unittest
 from unittest.mock import Mock, patch
 
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from sqlalchemy import select
+
 from control_plane.contracts.merge_train_policy import (
     ProviderDeliveryProtectionExpectationV1,
     ProviderRequiredStatusCheckExpectationV1,
@@ -25,6 +29,9 @@ from control_plane.contracts.provider_delivery_inspection import (
 )
 from control_plane.provider_delivery_inspection_profile import (
     ResolvedProviderDeliveryInspectionProfile,
+)
+from control_plane.provider_delivery_inspection_github import (
+    inspect_provider_delivery_protection,
 )
 from control_plane.github_app_identity import GitHubAppIdentity, GitHubAppInstallationToken
 from control_plane.ordinary_agent_session_lifecycle import (
@@ -241,6 +248,219 @@ class ProviderDeliveryReadinessStorageTests(unittest.TestCase):
             ),
             (first.attempt.generation, 2, first.attempt.action_ordinal),
         )
+        self.assertEqual(self._actions_used(), before + 1)
+
+    def test_invalid_token_cleanup_closes_only_after_confirmed_revoke(self) -> None:
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        private_key = key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        ).decode()
+        profile = ResolvedProviderDeliveryInspectionProfile(
+            identity=GitHubAppIdentity(app_id=700, private_key=private_key),
+            profile_id=self.profile.profile_id,
+            profile_sha256=self.profile.profile_sha256,
+            app_id=self.profile.app_id,
+            secret_id=self.profile.secret_id,
+            secret_binding_id=self.profile.secret_binding_id,
+            secret_version_id=self.profile.secret_version_id,
+            permissions=self.profile.permissions,
+        )
+        cleanup_fails = False
+        calls: list[tuple[str, str]] = []
+        owner = self.binding.target.repository.split("/", 1)[0]
+
+        def api_request(**kwargs: object) -> object:
+            path = str(kwargs["path"])
+            method = str(kwargs.get("method", "GET"))
+            calls.append((method, path))
+            if path == "/app":
+                return {"id": 700}
+            if path == f"/repos/{self.binding.target.repository}/installation":
+                return {
+                    "id": 701,
+                    "app_id": 700,
+                    "account": {"id": 456, "login": owner},
+                    "permissions": {
+                        "administration": "write",
+                        "contents": "read",
+                        "metadata": "read",
+                    },
+                }
+            if path == "/app/installations/701/access_tokens":
+                return {
+                    "token": "invalidly-scoped-provider-token",
+                    "expires_at": datetime.fromtimestamp(
+                        self.session.now + 600, timezone.utc
+                    ).isoformat(),
+                    "permissions": {
+                        "administration": "write",
+                        "contents": "read",
+                        "metadata": "read",
+                    },
+                    "repositories": [{"id": 999, "full_name": "another/repository"}],
+                }
+            if path == "/installation/token":
+                if cleanup_fails:
+                    raise TimeoutError("token revocation outcome is unknown")
+                return None
+            raise AssertionError(path)
+
+        def inspect(**kwargs: Any) -> object:
+            return inspect_provider_delivery_protection(
+                **kwargs,
+                api_request=api_request,
+                utc_now=lambda: datetime.fromtimestamp(self.session.now, timezone.utc),
+            )
+
+        before = self._actions_used()
+        with (
+            patch.object(
+                self.store,
+                "_provider_delivery_expectation_locked",
+                return_value=(
+                    self.fixture.merge_policy,
+                    self.fixture.merge_policy.policy.policies[0],
+                    self.expectation,
+                ),
+            ),
+            patch(
+                "control_plane.provider_delivery_readiness."
+                "resolve_provider_delivery_inspection_profile",
+                return_value=profile,
+            ),
+            self.assertRaises(OrdinaryAgentSessionAdmissionDenied) as first,
+        ):
+            ensure_provider_delivery_readiness_for_job(
+                store=self.store,
+                request_id=self.fixture.request.request_id,
+                inspect=inspect,
+                wall_time=lambda: float(self.session.now),
+            )
+
+        self.assertEqual(first.exception.reason_code, "provider_wait")
+        self.assertEqual(first.exception.retry_not_before, self.session.now + 1)
+        self.assertEqual(self._actions_used(), before + 1)
+        with self.store._session_factory() as db:
+            first_row = db.scalars(
+                select(LaunchplaneProviderDeliveryInspectionRow).order_by(
+                    LaunchplaneProviderDeliveryInspectionRow.provider_attempt_ordinal
+                )
+            ).one()
+            first_attempt = self.store._provider_delivery_inspection_from_row(first_row)
+        self.assertEqual(
+            (
+                first_attempt.inspection_phase,
+                first_attempt.custody_phase,
+                first_attempt.terminal_status,
+            ),
+            ("terminal", "closed", "capability_unavailable"),
+        )
+
+        minted = sum(path.endswith("/access_tokens") for _, path in calls)
+        with (
+            patch.object(
+                self.store,
+                "_provider_delivery_expectation_locked",
+                return_value=(
+                    self.fixture.merge_policy,
+                    self.fixture.merge_policy.policy.policies[0],
+                    self.expectation,
+                ),
+            ),
+            patch(
+                "control_plane.provider_delivery_readiness."
+                "resolve_provider_delivery_inspection_profile",
+                return_value=profile,
+            ),
+            self.assertRaises(OrdinaryAgentSessionAdmissionDenied) as cached,
+        ):
+            ensure_provider_delivery_readiness_for_job(
+                store=self.store,
+                request_id=self.fixture.request.request_id,
+                inspect=lambda **_: (_ for _ in ()).throw(
+                    AssertionError("cached capability must not mint another token")
+                ),
+                wall_time=lambda: float(self.session.now),
+            )
+        self.assertEqual(cached.exception.reason_code, "provider_wait")
+        self.assertEqual(sum(path.endswith("/access_tokens") for _, path in calls), minted)
+
+        self.session.now = first.exception.retry_not_before or 0
+        self.session.clock.return_value = datetime.fromtimestamp(
+            self.session.now, timezone.utc
+        ).isoformat()
+        cleanup_fails = True
+        with (
+            patch.object(
+                self.store,
+                "_provider_delivery_expectation_locked",
+                return_value=(
+                    self.fixture.merge_policy,
+                    self.fixture.merge_policy.policy.policies[0],
+                    self.expectation,
+                ),
+            ),
+            patch(
+                "control_plane.provider_delivery_readiness."
+                "resolve_provider_delivery_inspection_profile",
+                return_value=profile,
+            ),
+            self.assertRaises(OrdinaryAgentSessionAdmissionDenied) as unknown,
+        ):
+            ensure_provider_delivery_readiness_for_job(
+                store=self.store,
+                request_id=self.fixture.request.request_id,
+                inspect=inspect,
+                wall_time=lambda: float(self.session.now),
+            )
+
+        self.assertEqual(unknown.exception.reason_code, "provider_inspection_custody_fenced")
+        self.assertEqual(self._actions_used(), before + 1)
+        with self.store._session_factory() as db:
+            rows = tuple(
+                db.scalars(
+                    select(LaunchplaneProviderDeliveryInspectionRow).order_by(
+                        LaunchplaneProviderDeliveryInspectionRow.provider_attempt_ordinal
+                    )
+                ).all()
+            )
+            attempts = tuple(self.store._provider_delivery_inspection_from_row(row) for row in rows)
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(
+            (attempts[-1].inspection_phase, attempts[-1].custody_phase),
+            ("active", "issue_unknown"),
+        )
+
+        minted = sum(path.endswith("/access_tokens") for _, path in calls)
+        with (
+            patch.object(
+                self.store,
+                "_provider_delivery_expectation_locked",
+                return_value=(
+                    self.fixture.merge_policy,
+                    self.fixture.merge_policy.policy.policies[0],
+                    self.expectation,
+                ),
+            ),
+            patch(
+                "control_plane.provider_delivery_readiness."
+                "resolve_provider_delivery_inspection_profile",
+                return_value=profile,
+            ),
+            self.assertRaises(OrdinaryAgentSessionAdmissionDenied) as fenced,
+        ):
+            ensure_provider_delivery_readiness_for_job(
+                store=self.store,
+                request_id=self.fixture.request.request_id,
+                inspect=lambda **_: (_ for _ in ()).throw(
+                    AssertionError("unknown token custody must fence a new mint")
+                ),
+                wall_time=lambda: float(self.session.now),
+            )
+        self.assertEqual(fenced.exception.reason_code, "provider_readiness_in_progress")
+        self.assertEqual(sum(path.endswith("/access_tokens") for _, path in calls), minted)
         self.assertEqual(self._actions_used(), before + 1)
 
     def test_repository_flight_shares_same_branch_cache_but_not_cross_branch(self) -> None:

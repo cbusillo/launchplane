@@ -133,18 +133,58 @@ _CONTROLLER_BLOCK_REASONS = {
     "structural_provenance_not_admitted": "protection_changed",
 }
 _AUTHORITY_REASONS = {
+    "action_not_allowed",
+    "activation_binding_mismatch",
+    "activation_expired",
+    "activation_not_current",
+    "activation_projection_mismatch",
+    "bound_rule_ambiguous",
+    "bound_rule_missing",
+    "budget_window_inactive",
+    "credential_binding_mismatch",
+    "credential_digest_rotated",
     "credential_expired",
     "credential_revoked",
+    "credential_unavailable",
+    "credential_version_rotated",
     "custody_binding_conflict",
     "custody_profile_denied",
     "custody_unavailable",
+    "effective_decision_fingerprint_mismatch",
+    "finite_job_expired",
+    "installed_outcome_invalid",
+    "installed_outcome_mismatch",
+    "inventory_drift",
+    "job_not_dispatchable",
+    "job_not_yet_valid",
+    "job_unavailable",
     "lease_expired",
+    "lease_outside_session_lifetime",
+    "lease_principal_mismatch",
     "lease_revoked",
+    "lease_session_mismatch",
+    "lease_target_mismatch",
+    "lease_unavailable",
+    "policy_source_inadmissible",
     "policy_unavailable",
+    "principal_read_only",
+    "principal_revoked",
     "principal_unavailable",
+    "qualification_attestation_required",
+    "readiness_action_mismatch",
+    "request_action_mismatch",
     "request_chain_mismatch",
+    "request_principal_mismatch",
+    "rule_principal_mismatch",
+    "rule_target_mismatch",
+    "session_binding_mismatch",
+    "session_credential_mismatch",
     "session_expired",
+    "session_outside_credential_lifetime",
+    "session_principal_mismatch",
     "session_revoked",
+    "session_unavailable",
+    "setup_operation_inadmissible",
 }
 _EFFECT_BUDGET_REASONS = {
     "budget_exhausted",
@@ -153,6 +193,7 @@ _EFFECT_BUDGET_REASONS = {
     "reconciliation_exhausted",
 }
 _PROVIDER_READINESS_REASONS = {
+    "ordinary_merge_method_unsupported",
     "provider_readiness_refresh_required",
     "provider_readiness_in_progress",
     "provider_wait",
@@ -407,14 +448,11 @@ def advance_ordinary_agent_merge_train_job(
             request_id=request.request_id,
         )
     except OrdinaryAgentSessionAdmissionDenied as error:
-        if error.reason_code not in _PROVIDER_READINESS_REASONS:
+        disposition = _expected_exception_disposition(error=error, snapshot=snapshot)
+        if disposition is None:
             raise
         controller.release_terminal_history()
-        return _waiting(
-            snapshot,
-            reason_code=error.reason_code,
-            extra_deadline=error.retry_not_before,
-        )
+        return disposition
 
     no_op_route = OrdinaryNoOpLandingRoute(store=store)
     progress = OrdinaryAgentProgressAdapter(
