@@ -15,6 +15,7 @@ from control_plane.github_app_identity import (
     GitHubAppInstallationToken,
     inspect_ordinary_agent_github_app_installation,
     mint_ordinary_agent_installation_token,
+    mint_provider_delivery_inspection_token,
     mint_repository_installation_token,
     revoke_installation_token,
 )
@@ -176,6 +177,124 @@ class GitHubAppIdentityTests(unittest.TestCase):
             },
         )
         self.assertEqual(result.permissions, ("contents:write", "pull_requests:write"))
+
+    def test_provider_inspection_mint_uses_separate_exact_write_capable_profile(self) -> None:
+        calls: list[dict[str, object]] = []
+        before_mint: list[tuple[int, int]] = []
+
+        def api_request(**kwargs: object) -> object:
+            calls.append(dict(kwargs))
+            if kwargs["path"] == "/app":
+                return {"id": 42}
+            if kwargs["path"] == "/repos/example/repo/installation":
+                return {
+                    "id": 77,
+                    "app_id": 42,
+                    "account": {"id": 456, "login": "example"},
+                    "permissions": {
+                        "administration": "write",
+                        "contents": "read",
+                        "metadata": "read",
+                    },
+                }
+            self.assertEqual(
+                kwargs["body"],
+                {
+                    "repository_ids": [123],
+                    "permissions": {
+                        "administration": "write",
+                        "contents": "read",
+                    },
+                },
+            )
+            return {
+                "token": "inspection-token-secret",
+                "expires_at": "2026-08-07T15:00:00Z",
+                "permissions": {
+                    "administration": "write",
+                    "contents": "read",
+                    "metadata": "read",
+                },
+                "repositories": [{"id": 123, "full_name": "example/repo"}],
+            }
+
+        token = mint_provider_delivery_inspection_token(
+            identity=GitHubAppIdentity(app_id=42, private_key=self.private_key),
+            repository="example/repo",
+            repository_id="123",
+            repository_owner_id="456",
+            api_request=api_request,
+            now=datetime(2026, 8, 7, 14, 0, tzinfo=timezone.utc),
+            before_token_mint=lambda app_id, installation_id: before_mint.append(
+                (app_id, installation_id)
+            ),
+        )
+
+        self.assertEqual(before_mint, [(42, 77)])
+        self.assertEqual(
+            [call["path"] for call in calls],
+            [
+                "/app",
+                "/repos/example/repo/installation",
+                "/app/installations/77/access_tokens",
+            ],
+        )
+        self.assertEqual(token.permissions, ("administration:write", "contents:read"))
+        self.assertNotIn("inspection-token-secret", repr(token))
+
+    def test_provider_inspection_mint_rejects_any_permission_expansion(self) -> None:
+        def api_request(**kwargs: object) -> object:
+            if kwargs["path"] == "/app":
+                return {"id": 42}
+            return {
+                "id": 77,
+                "app_id": 42,
+                "account": {"id": 456, "login": "example"},
+                "permissions": {
+                    "administration": "write",
+                    "contents": "read",
+                    "metadata": "read",
+                    "pull_requests": "write",
+                },
+            }
+
+        with self.assertRaisesRegex(GitHubAppIdentityError, "beyond"):
+            mint_provider_delivery_inspection_token(
+                identity=GitHubAppIdentity(app_id=42, private_key=self.private_key),
+                repository="example/repo",
+                repository_id="123",
+                repository_owner_id="456",
+                api_request=api_request,
+            )
+
+    def test_provider_inspection_mint_rejects_inventory_owner_before_post(self) -> None:
+        calls: list[str] = []
+
+        def api_request(**kwargs: object) -> object:
+            calls.append(str(kwargs["path"]))
+            if kwargs["path"] == "/app":
+                return {"id": 42}
+            return {
+                "id": 77,
+                "app_id": 42,
+                "account": {"id": 999, "login": "example"},
+                "permissions": {
+                    "administration": "write",
+                    "contents": "read",
+                    "metadata": "read",
+                },
+            }
+
+        with self.assertRaisesRegex(GitHubAppIdentityError, "inventory owner"):
+            mint_provider_delivery_inspection_token(
+                identity=GitHubAppIdentity(app_id=42, private_key=self.private_key),
+                repository="example/repo",
+                repository_id="123",
+                repository_owner_id="456",
+                api_request=api_request,
+            )
+
+        self.assertEqual(calls, ["/app", "/repos/example/repo/installation"])
 
     def test_snapshot_uses_only_the_read_profile_under_the_full_app_ceiling(self) -> None:
         observed_body: dict[str, object] = {}

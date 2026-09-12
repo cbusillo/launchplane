@@ -54,6 +54,7 @@ from control_plane.service_human_auth import GitHubOAuthConfig, HumanSessionMana
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.support.ordinary_agent_lifecycle import (
     ADMIN_GITHUB_ID,
+    TEST_CLAIM_SECRET,
     enrollment_envelope,
     enrollment_mutation,
     prepare_approved_test_issuance,
@@ -149,6 +150,7 @@ class RepositoryScenario:
     refs: dict[str, str] = field(default_factory=dict)
     commits: dict[str, tuple[str, tuple[str, ...]]] = field(default_factory=dict)
     candidate_no_op_pull_requests: set[int] = field(default_factory=set)
+    required_checks_pending: bool = False
 
     @classmethod
     def build(
@@ -487,7 +489,9 @@ def _enroll_and_admit(
             actions=("guarded_merge",),
             session_expires_at=now + 10_000,
             lease_expires_at=now + 10_000,
-            action_limit=6,
+            # Six ordinary effects plus up to four demanded provider-readiness
+            # generations in the 20-minute continuation journey below.
+            action_limit=10,
             pull_request_limit=2,
             refresh_allowance=1,
             continuation_expires_at=now + 20_000,
@@ -522,6 +526,20 @@ def _enroll_and_admit(
         )
         if applied.status != "written":
             raise AssertionError(f"qualification enrollment {index} was not written: {applied!r}")
+        delivery = store._prepare_ordinary_agent_delivery_claim(
+            operation_id=operation_id,
+            claim_secret=TEST_CLAIM_SECRET,
+        )
+        if (
+            delivery is None
+            or store._prepare_ordinary_agent_delivery_claim(
+                operation_id=operation_id,
+                claim_secret=TEST_CLAIM_SECRET,
+                expected=delivery,
+            )
+            is None
+        ):
+            raise AssertionError(f"qualification enrollment {index} was not delivered")
         proof = parse_ordinary_agent_token(issuance.token.value)
         issued = store.reconnect_ordinary_agent_session(proof=proof, operation_id=operation_id)
         lease = issued.leases[0]
@@ -1200,14 +1218,16 @@ class MeasuredOrdinaryGitHubScenario:
         tree, parent_shas = self._require_commit(scenario, sha)
         result: dict[str, object] = {"oid": sha, "tree": {"oid": tree}}
         if checks:
+            check_status = "IN_PROGRESS" if scenario.required_checks_pending else "COMPLETED"
+            check_conclusion = None if scenario.required_checks_pending else "SUCCESS"
             result["statusCheckRollup"] = {
                 "contexts": self._connection(
                     [
                         {
                             "__typename": "CheckRun",
                             "name": "required",
-                            "status": "COMPLETED",
-                            "conclusion": "SUCCESS",
+                            "status": check_status,
+                            "conclusion": check_conclusion,
                             "checkSuite": {"app": {"databaseId": 100}},
                         }
                     ]

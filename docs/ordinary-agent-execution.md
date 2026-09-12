@@ -10,9 +10,11 @@ union. Dedicated client routes propose connections and sessions; signed-browser
 routes review, approve, cancel and revoke their persisted domain operations.
 The service worker recovers approved enrollment and expires private delivery
 capsules. This source integration is not a deployed installation or a merge
-permission. The ordinary finite-job runtime remains dormant, and guarded
-delivery remains unavailable until Launchplane has a separately reviewed,
-independent provider-readiness observation and receipt.
+permission. The ordinary finite-job runtime remains dormant. Guarded delivery
+requires a current independent provider-readiness receipt and every ordinary
+qualification and activation gate. Admission and continuation obtain inspection
+evidence automatically within the same delegation; see
+[provider delivery inspection](provider-delivery-inspection.md).
 
 The source also contains a dormant finite-job worker surface:
 `uv run launchplane service ordinary-agent-workers run-once` performs one
@@ -38,15 +40,15 @@ human, workflow and operator identities retain their established behavior. The
 new terminal enrollment proposer checks one current managed capability directly
 under schema v2/v3 rather than coercing v3 through a v2-only generic helper.
 
-Schema-v3 policy writes are not activated. The authoritative store rejects a v3
-seed even when no active record exists, rejects v3 replacement records, and
-rejects replacement, deletion, downgrade, or retirement when the observed
-active record is v3. Managed reconciliation and candidate-preview paths can
-construct read-only schema-v3 plans, including an explicit v2-to-v3 migration,
-while preserving unrelated managed sets. Recovery and generated planners retain
-the active schema in their desired set. The common apply path and storage still
-reject schema-v3 persistence. This fence remains until a later activation slice
-enforces verified schema/protocol compatibility and a rollback boundary.
+Raw schema-v3 seeds, unbound replacements, deletion and downgrade stay fenced.
+Managed reconciliation and candidate-preview paths can construct read-only
+schema-v3 plans, including an explicit v2-to-v3 migration, while preserving
+unrelated managed sets. The separate A5 mediated transition permits an exact
+reviewed enabling candidate only with current typed activation and executed
+setup provenance, checked under the policy write locks. Exact ordinary-rule
+removal and unrelated schema-v3 maintenance remain possible after stop or expiry.
+Recovery and generated planners retain the active schema. Compiled handler
+support is not runtime activation or authority for an arbitrary policy write.
 
 The typed activation source slice persists a separate long-lived administration
 record without enabling delivery. A human selects a server-resolved reviewed
@@ -69,13 +71,13 @@ offered by the server clock, and the planner enforces a maximum of 30 days.
 The first setup state is always desired `guarded` and effective
 `qualification_only`. That record has `authorizes_execution = false`; it creates
 no principal, credential, session, grant, provider request, worker registration,
-or policy write. The schema-v3 write fence above remains unchanged. Qualification
+or policy write. The separate mediated schema-v3 boundary remains unchanged. Qualification
 runtime readiness joins current activation, policy, inventory, custody, managed
 secret and protocol support. Guarded runtime readiness additionally requires
-current positive qualification evidence. It then fails closed with
-`provider_readiness_unavailable`: this source slice has no trusted independent
-producer proving current provider protection and the exclusive Launchplane merge
-identity, so it cannot derive effective guarded state.
+current positive qualification evidence and independent provider protection and
+exclusive-writer evidence. A missing or expired observation triggers the bounded
+on-demand inspection path; missing inspection authority or an unsatisfied
+protection contract remains unavailable and cannot derive guarded state.
 
 Activation revocation is a new reviewed `revoke_activation` operation rather
 than the generic pre-execution approval revoke. It writes terminal desired and
@@ -85,8 +87,8 @@ supersedes the old record and appends both changes atomically; revoked predecess
 never revive. Append-only operation-bound install/revoke events provide recovery
 evidence even after later revocation or supersession changes the current
 projection. Known custody cleanup and history remain maintainable. The dormant
-guarded consumer is wired behind the provider-readiness denial above and cannot
-claim guarded work.
+guarded consumer requires the full current readiness chain before fresh work;
+source presence does not start its worker.
 
 Ordinary rules participate only in structural policy normalization, managed-set
 replacement and reporting. Their managed set and rule IDs remain semantic
@@ -142,8 +144,8 @@ capability set, even when a caller constructs an internal candidate directly.
 These storage records do not grant execution. The enrollment recovery worker
 constructs and applies the internal envelope only from a persisted, approved
 enrollment and rechecks its exact policy snapshots. Clients cannot dispatch that
-envelope directly. Production policy schema-v3 writes remain fenced pending the
-separate activation package.
+envelope directly. Production schema-v3 enabling writes require the separate
+mediated activation package and do not follow from enrollment alone.
 
 Every proposed record requires the `proposed_ordinary_agent_v1` record kind,
 `authority_state = "inert"`, and `authorizes_execution = false`. Missing markers,
@@ -406,8 +408,10 @@ identity-compatible guarded-delivery records. Schema v2 is a discriminated JSON
 payload: `guarded_delivery` retains the exact base, PR/head, stack-edit and
 refresh scope, while `qualification` has no base, PR or stack-edit fields.
 Both variants remain in the strict public schema so clients can preserve the
-target contract, but current guarded admission and continuation fail with
-`provider_readiness_unavailable` before a lease budget or job row is written.
+target contract. New guarded admission performs a pure authority, scope and
+budget precheck before any provider inspection. Only a typed refresh-needed
+result invokes the independent inspection path, with one admission reentry and
+its bounded existing-budget charge. Qualification never invokes that path.
 The runtime capability fields report compiled dispatcher and handler
 registration only; they do not report deployment, activation or provider
 readiness.

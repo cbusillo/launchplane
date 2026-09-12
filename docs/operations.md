@@ -154,6 +154,10 @@ checkout.
   cursor and telemetry surface, perform an exact startup schema/relation probe,
   and remain outside the deployed compose invocation until a separately
   reviewed readiness and enablement step.
+  Guarded ingress and continuation perform automatic
+  [provider delivery inspection](provider-delivery-inspection.md) under the
+  same finite delegation. They require a separate DB-backed inspection App and
+  governed protection expectation; source deployment configures neither.
 - `ship`: plan, resolve, and execute artifact-backed deploy requests.
 - `storage provider-target-audit`: run the read-only provider-target parity
   preflight before backfill or provider-target authority cutover.

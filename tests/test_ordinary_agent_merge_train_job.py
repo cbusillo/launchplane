@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime, timezone
 from types import SimpleNamespace
 import unittest
@@ -43,6 +44,9 @@ from control_plane.merge_train_controller_run_once import (
     MergeTrainControllerRunOnceResult,
 )
 from control_plane.ordinary_agent_github_transport import OrdinaryAgentProviderDeferred
+from control_plane.ordinary_agent_custody import (
+    OrdinaryAgentPreDispatchAdmissionCleanupUnknown,
+)
 from control_plane.ordinary_agent_merge_train_snapshot import (
     OrdinaryAgentReadmissionRequired,
     acquire_ordinary_agent_merge_train_snapshot,
@@ -173,7 +177,10 @@ class OrdinaryAgentMergeTrainJobTests(unittest.TestCase):
         )
 
     def advance(
-        self, claimed: effects.OrdinaryAgentClaimedJob
+        self,
+        claimed: effects.OrdinaryAgentClaimedJob,
+        *,
+        ensure_provider_readiness: Callable[..., object] | None = None,
     ) -> effects.OrdinaryAgentJobAttemptDisposition:
         return advance_ordinary_agent_merge_train_job(
             claimed=claimed,
@@ -182,7 +189,35 @@ class OrdinaryAgentMergeTrainJobTests(unittest.TestCase):
             effect_transport_factory=lambda _: self.provider,
             monotonic=lambda: 0,
             utc_now=lambda: datetime.fromtimestamp(self.session.now, timezone.utc),
+            ensure_provider_readiness=(ensure_provider_readiness or (lambda **_: object())),
         )
+
+    def test_provider_readiness_deferral_precedes_controller_and_provider_work(self) -> None:
+        claimed = self.claim()
+        ensure = Mock(
+            side_effect=OrdinaryAgentSessionAdmissionDenied(
+                "provider_readiness_in_progress",
+                retry_not_before=self.session.now + 20,
+                server_observed_at=self.session.now,
+            )
+        )
+
+        with patch.object(
+            self.store, "acquire_ordinary_merge_train_controller_state_record"
+        ) as acquire:
+            disposition = self.advance(claimed, ensure_provider_readiness=ensure)
+
+        self.assertEqual(
+            (disposition.status, disposition.reason_code),
+            ("waiting", "provider_readiness_in_progress"),
+        )
+        self.assertEqual(disposition.next_due_at, self.session.now + 20)
+        ensure.assert_called_once_with(
+            store=self.store,
+            request_id=self.request.request_id,
+        )
+        self.provider.assert_not_called()
+        acquire.assert_not_called()
 
     def completed_refresh(self) -> tuple[effects.OrdinaryAgentClaimedJob, str]:
         claimed = self.claim()
@@ -491,6 +526,7 @@ class OrdinaryAgentMergeTrainJobTests(unittest.TestCase):
                 api_request=provider,
                 monotonic=lambda: 0,
                 utc_now=lambda: datetime.fromtimestamp(self.session.now, timezone.utc),
+                ensure_provider_readiness=lambda **_: object(),
             )
         self.assertEqual((result.status, result.reason_code), ("waiting", None))
         refreshed = self.store.read_ordinary_agent_job_recovery_snapshot(
@@ -898,6 +934,7 @@ class OrdinaryAgentMergeTrainJobTests(unittest.TestCase):
             effect_transport_factory=lambda _: provider,
             monotonic=lambda: 0,
             utc_now=lambda: datetime.fromtimestamp(landing.fixture.fixture.now, timezone.utc),
+            ensure_provider_readiness=lambda **_: object(),
         )
 
         self.assertEqual(disposition.status, "blocked")
@@ -945,6 +982,7 @@ class OrdinaryAgentMergeTrainJobTests(unittest.TestCase):
                 effect_transport_factory=lambda _: self.provider,
                 monotonic=lambda: 0,
                 utc_now=lambda: datetime.fromtimestamp(landing.fixture.fixture.now, timezone.utc),
+                ensure_provider_readiness=lambda **_: object(),
             )
         self.assertEqual(
             (result.status, result.reason_code), ("blocked", "ordinary_readmission_required")
@@ -996,6 +1034,7 @@ class OrdinaryAgentMergeTrainJobTests(unittest.TestCase):
                 effect_transport_factory=lambda _: fail_provider,
                 monotonic=lambda: 0,
                 utc_now=lambda: datetime.fromtimestamp(landing.fixture.fixture.now, timezone.utc),
+                ensure_provider_readiness=lambda **_: object(),
             )
 
         self.assertEqual(disposition.status, "waiting")
@@ -1126,6 +1165,33 @@ class OrdinaryAgentMergeTrainJobTests(unittest.TestCase):
         )
 
         self.assertIsNone(disposition)
+
+    def test_pre_dispatch_readiness_cleanup_failure_preserves_both_retry_fences(self) -> None:
+        claimed = self.claim()
+        provider_retry = self.session.now + 90
+        custody_retry = self.session.now + 45
+        snapshot = self.store.read_ordinary_agent_job_recovery_snapshot(
+            claim_fence=claimed.claim_fence
+        ).model_copy(
+            update={
+                "custody_uncertain": True,
+                "provider_retry_not_before": custody_retry,
+            }
+        )
+        error = OrdinaryAgentPreDispatchAdmissionCleanupUnknown(
+            OrdinaryAgentSessionAdmissionDenied(
+                "provider_readiness_refresh_required",
+                retry_not_before=provider_retry,
+            )
+        )
+
+        disposition = _expected_exception_disposition(error=error, snapshot=snapshot)
+
+        assert disposition is not None
+        self.assertEqual(
+            (disposition.status, disposition.reason_code, disposition.next_due_at),
+            ("waiting", "provider_readiness_cleanup_required", provider_retry),
+        )
 
     def test_complete_result_waits_for_retryable_unadvanced_effect(self) -> None:
         fence, command = self.fixture.prepare_controller()

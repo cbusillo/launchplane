@@ -12,7 +12,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
 AUTHZ_COMPATIBILITY_FLOOR_REVISION = "f3b5d7e9a1c2"
-EXPECTED_ALEMBIC_HEAD_REVISION = "a3c5e7f9b1d4"
+EXPECTED_ALEMBIC_HEAD_REVISION = "a6c8e0f2b4d6"
 RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS = (EXPECTED_ALEMBIC_HEAD_REVISION,)
 ORDINARY_AGENT_DELIVERY_ACTIVATION_TABLE = "launchplane_ordinary_agent_delivery_activations"
 ORDINARY_AGENT_DELIVERY_ACTIVATION_EVENT_TABLE = (
@@ -139,6 +139,26 @@ ORDINARY_AGENT_ACTIVATION_POSTGRES_COLUMN_TYPES: tuple[CriticalColumnType, ...] 
 
 CRITICAL_POSTGRES_COLUMN_TYPES: tuple[CriticalColumnType, ...] = (
     *ORDINARY_AGENT_ACTIVATION_POSTGRES_COLUMN_TYPES,
+    CriticalColumnType(
+        "launchplane_provider_delivery_inspections", "generation", ("bigint", "int8")
+    ),
+    CriticalColumnType(
+        "launchplane_provider_delivery_inspections",
+        "provider_attempt_ordinal",
+        ("bigint", "int8"),
+    ),
+    CriticalColumnType(
+        "launchplane_provider_delivery_inspections", "action_ordinal", ("bigint", "int8")
+    ),
+    CriticalColumnType(
+        "launchplane_provider_delivery_inspections", "repository_id", ("bigint", "int8")
+    ),
+    CriticalColumnType(
+        "launchplane_provider_delivery_inspections",
+        "repository_completion_sequence",
+        ("bigint", "int8"),
+    ),
+    CriticalColumnType("launchplane_provider_delivery_inspections", "payload", ("jsonb",)),
     CriticalColumnType("launchplane_ordinary_agent_effects", "binding_revision", ("bigint",)),
     CriticalColumnType("launchplane_ordinary_agent_effects", "action_ordinal", ("bigint",)),
     CriticalColumnType("launchplane_ordinary_agent_effects", "revision", ("bigint",)),
@@ -898,6 +918,47 @@ ORDINARY_AGENT_ACTIVATION_CHECK_CONSTRAINTS: tuple[CriticalCheckConstraint, ...]
 
 CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
     *ORDINARY_AGENT_ACTIVATION_SCHEMA_INDEXES,
+    CriticalIndex(
+        "launchplane_provider_delivery_inspections",
+        "provider_delivery_generation_charge_uq",
+        ("demand_id", "generation"),
+        unique=True,
+        predicate_expression="provider_attempt_ordinal = 1",
+    ),
+    CriticalIndex(
+        "launchplane_provider_delivery_inspections",
+        "provider_delivery_attempt_uq",
+        ("demand_id", "generation", "provider_attempt_ordinal"),
+        unique=True,
+    ),
+    CriticalIndex(
+        "launchplane_provider_delivery_inspections",
+        "provider_delivery_repository_flight_uq",
+        ("repository_id",),
+        unique=True,
+        predicate_expression="inspection_phase = 'active'",
+    ),
+    CriticalIndex(
+        "launchplane_provider_delivery_inspections",
+        "provider_delivery_repository_custody_uq",
+        ("repository_id",),
+        unique=True,
+        predicate_expression=(
+            "custody_phase IN ('minting', 'issued', 'issue_unknown', 'cleanup_unknown')"
+        ),
+    ),
+    CriticalIndex(
+        "launchplane_provider_delivery_inspections",
+        "provider_delivery_completion_sequence_uq",
+        ("repository_id", "repository_completion_sequence"),
+        unique=True,
+    ),
+    CriticalIndex(
+        "launchplane_provider_delivery_inspections",
+        "provider_delivery_receipt_uq",
+        ("receipt_id",),
+        unique=True,
+    ),
     CriticalIndex(
         "launchplane_ordinary_agent_effects",
         "ordinary_effect_charge_uq",
@@ -1714,6 +1775,7 @@ CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
 
 CRITICAL_PRIMARY_KEYS: tuple[CriticalPrimaryKey, ...] = (
     *ORDINARY_AGENT_ACTIVATION_PRIMARY_KEYS,
+    CriticalPrimaryKey("launchplane_provider_delivery_inspections", ("attempt_id",)),
     CriticalPrimaryKey("launchplane_ordinary_agent_effects", ("effect_id",)),
     CriticalPrimaryKey("launchplane_ordinary_agent_semantic_dispatches", ("child_id",)),
     CriticalPrimaryKey("launchplane_ordinary_agent_semantic_outcomes", ("child_id",)),

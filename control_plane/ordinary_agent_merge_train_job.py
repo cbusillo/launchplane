@@ -63,6 +63,7 @@ from control_plane.ordinary_agent_controller_store import (
 from control_plane.ordinary_agent_custody import (
     OrdinaryAgentCustodyAttemptStore,
     OrdinaryAgentCustodyCleanupUnknown,
+    OrdinaryAgentPreDispatchAdmissionCleanupUnknown,
     OrdinaryAgentCustodySecretStore,
 )
 from control_plane.ordinary_agent_effect_reconciliation import reconcile_ordinary_effect_once
@@ -106,6 +107,10 @@ from control_plane.ordinary_agent_merge_train_snapshot import (
 from control_plane.ordinary_agent_session_lifecycle import (
     OrdinaryAgentSessionAdmissionDenied,
 )
+from control_plane.provider_delivery_readiness import (
+    ProviderDeliveryReadinessStore,
+    ensure_provider_delivery_readiness_for_job,
+)
 from control_plane.ordinary_agent_snapshot_reader import (
     read_ordinary_candidate_check,
     read_ordinary_controller_snapshot,
@@ -147,6 +152,21 @@ _EFFECT_BUDGET_REASONS = {
     "effect_attempts_exhausted",
     "reconciliation_exhausted",
 }
+_PROVIDER_READINESS_REASONS = {
+    "provider_readiness_refresh_required",
+    "provider_readiness_in_progress",
+    "provider_wait",
+    "provider_inspection_deadline",
+    "provider_inspection_attempts_exhausted",
+    "provider_inspection_custody_fenced",
+    "provider_inspection_permission_denied",
+    "provider_inspection_profile_unavailable",
+    "protection_expectation_unavailable",
+    "provider_protection_not_ready",
+    "provider_protection_inconclusive",
+    "provider_inspection_abandoned",
+    "provider_inspection_late_result",
+}
 _SNAPSHOT_EXHAUSTED_REASONS = {
     "read_attempts_exhausted",
     "read_recovery_evidence_unavailable",
@@ -167,6 +187,7 @@ class OrdinaryAgentMergeTrainJobStore(
     OrdinaryAgentCustodySecretStore,
     MergeAdmissionRecordStore,
     RepositoryInventoryReadStore,
+    ProviderDeliveryReadinessStore,
     Protocol,
 ):
     def list_merge_train_policy_records(
@@ -262,6 +283,7 @@ def advance_ordinary_agent_merge_train_job(
     effect_transport_factory: Callable[[str], MergeTrainGitHubTransport] | None = None,
     monotonic: Callable[[], float] = time.monotonic,
     utc_now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+    ensure_provider_readiness: Callable[..., object] = (ensure_provider_delivery_readiness_for_job),
 ) -> effects.OrdinaryAgentJobAttemptDisposition:
     """Advance one finite ordinary job step without registering a runtime worker."""
     request = claimed.request
@@ -281,8 +303,16 @@ def advance_ordinary_agent_merge_train_job(
             effect_transport_factory=effect_transport_factory,
             monotonic=monotonic,
             utc_now=utc_now,
+            ensure_provider_readiness=ensure_provider_readiness,
         )
     except Exception as error:
+        if (
+            isinstance(error, OrdinaryAgentSessionAdmissionDenied)
+            and error.reason_code in _PROVIDER_READINESS_REASONS
+            and controller.controller_acquired
+            and not controller.yield_confirmed
+        ):
+            controller.yield_acquired()
         if controller.controller_acquired and not controller.yield_confirmed:
             raise
         try:
@@ -370,6 +400,21 @@ def advance_ordinary_agent_merge_train_job(
             return _blocked(snapshot, reason_code="authority_unavailable")
     except (LookupError, TypeError, ValueError):
         return _blocked(snapshot, reason_code="authority_unavailable")
+
+    try:
+        ensure_provider_readiness(
+            store=store,
+            request_id=request.request_id,
+        )
+    except OrdinaryAgentSessionAdmissionDenied as error:
+        if error.reason_code not in _PROVIDER_READINESS_REASONS:
+            raise
+        controller.release_terminal_history()
+        return _waiting(
+            snapshot,
+            reason_code=error.reason_code,
+            extra_deadline=error.retry_not_before,
+        )
 
     no_op_route = OrdinaryNoOpLandingRoute(store=store)
     progress = OrdinaryAgentProgressAdapter(
@@ -579,6 +624,13 @@ def advance_ordinary_agent_merge_train_job(
     except Exception as error:
         if isinstance(error, MergeTrainControllerLeaseLostError):
             raise
+        if (
+            isinstance(error, OrdinaryAgentSessionAdmissionDenied)
+            and error.reason_code in _PROVIDER_READINESS_REASONS
+            and controller.controller_acquired
+            and not controller.yield_confirmed
+        ):
+            controller.yield_acquired()
         if controller.controller_acquired and not controller.yield_confirmed:
             raise
         try:
@@ -615,6 +667,7 @@ def _route_existing_history(
     effect_transport_factory: Callable[[str], MergeTrainGitHubTransport] | None,
     monotonic: Callable[[], float],
     utc_now: Callable[[], datetime],
+    ensure_provider_readiness: Callable[..., object],
 ) -> effects.OrdinaryAgentJobAttemptDisposition | None:
     request = claimed.request
     if not is_guarded_ordinary_agent_finite_request(request):
@@ -656,7 +709,12 @@ def _route_existing_history(
             controller.release_terminal_history()
             return _blocked(snapshot, reason_code="ordinary_readmission_required")
         return _rebind_completed_head_refresh(
-            claimed=claimed, store=store, controller=controller, snapshot=snapshot, history=history
+            claimed=claimed,
+            store=store,
+            controller=controller,
+            snapshot=snapshot,
+            history=history,
+            ensure_provider_readiness=ensure_provider_readiness,
         )
     if recovery.disposition == "retry" and history.effect.command.kind == "pull_request_landing":
         if ordinary_landing_history_allows_retry(history):
@@ -676,6 +734,7 @@ def _rebind_completed_head_refresh(
     controller: OrdinaryAgentControllerAdapter,
     snapshot: effects.OrdinaryAgentJobRecoverySnapshot,
     history: effects.OrdinaryAgentEffectHistory,
+    ensure_provider_readiness: Callable[..., object],
 ) -> effects.OrdinaryAgentJobAttemptDisposition:
     target = claimed.request.target
     try:
@@ -687,6 +746,10 @@ def _rebind_completed_head_refresh(
         controller.release_terminal_history()
         return _blocked(snapshot, reason_code="authority_unavailable")
     try:
+        ensure_provider_readiness(
+            store=store,
+            request_id=claimed.request.request_id,
+        )
         controller.acquire_merge_train_controller_state_record(
             repository=target.repository,
             base_branch=target.base_branch,
@@ -713,7 +776,13 @@ def _rebind_completed_head_refresh(
                 ) from None
         if isinstance(error, OrdinaryAgentSessionAdmissionDenied):
             disposition = None
-            if error.reason_code in {
+            if error.reason_code in _PROVIDER_READINESS_REASONS:
+                disposition = _waiting(
+                    snapshot,
+                    reason_code=error.reason_code,
+                    extra_deadline=error.retry_not_before,
+                )
+            elif error.reason_code in {
                 "controller_busy",
                 "target_busy",
                 "controller_action_conflict",
@@ -833,12 +902,29 @@ def _expected_exception_disposition(
             else "snapshot_unavailable",
             extra_deadline=error.retry_not_before,
         )
+    elif isinstance(error, OrdinaryAgentPreDispatchAdmissionCleanupUnknown):
+        admission_error = error.admission_error
+        mapped = _waiting(
+            snapshot,
+            reason_code="custody_cleanup_required",
+            extra_deadline=(
+                admission_error.retry_not_before
+                if isinstance(admission_error, OrdinaryAgentSessionAdmissionDenied)
+                else None
+            ),
+        )
     elif isinstance(error, OrdinaryAgentCustodyCleanupUnknown):
         mapped = _waiting(snapshot, reason_code="custody_cleanup_required")
     elif isinstance(error, OrdinaryAgentProviderEvidenceError):
         mapped = _waiting(snapshot, reason_code="snapshot_unavailable")
     elif isinstance(error, OrdinaryAgentSessionAdmissionDenied):
-        if error.reason_code in {
+        if error.reason_code in _PROVIDER_READINESS_REASONS:
+            mapped = _waiting(
+                snapshot,
+                reason_code=error.reason_code,
+                extra_deadline=error.retry_not_before,
+            )
+        elif error.reason_code in {
             "provider_wait",
             "provider_attempt_deadline",
             "source_check_wait",
@@ -881,7 +967,15 @@ def _expected_exception_disposition(
         if recovery.disposition == "terminal":
             return _blocked(snapshot, reason_code=_terminal_reason(recovery.reason_code))
     if snapshot.custody_uncertain:
-        return _waiting(snapshot, reason_code="custody_cleanup_required")
+        return _waiting(
+            snapshot,
+            reason_code=(
+                "provider_readiness_cleanup_required"
+                if isinstance(error, OrdinaryAgentPreDispatchAdmissionCleanupUnknown)
+                else "custody_cleanup_required"
+            ),
+            extra_deadline=mapped.next_due_at,
+        )
     return mapped
 
 

@@ -5,7 +5,7 @@ import os
 import shutil
 import tempfile
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager, suppress
 from datetime import datetime, timedelta, timezone
 from json import JSONDecodeError
@@ -86,6 +86,7 @@ from control_plane.contracts.merge_train_run_record import MergeTrainRunRecord
 from control_plane.contracts.merge_train_policy import (
     MergeTrainPolicyCompareWriteResult,
     MergeTrainPolicyRecord,
+    merge_train_policy_provider_expectation_projection,
 )
 from control_plane.contracts.merge_train_pr_feedback_record import (
     MergeTrainPrFeedbackRecord,
@@ -274,6 +275,28 @@ RecordModel = TypeVar("RecordModel", bound=BaseModel)
 RuntimeEnvironmentDeleteStatus = Literal["deleted", "missing", "changed"]
 CurrentAuthorityDeleteStatus = Literal["deleted", "missing", "changed"]
 ProviderTargetCreateStatus = Literal["created", "exists"]
+
+
+def _single_active_merge_train_policy_record(
+    records: Sequence[MergeTrainPolicyRecord],
+) -> MergeTrainPolicyRecord | None:
+    active_records = [record for record in records if record.status == "active"]
+    if len(active_records) > 1:
+        raise ValueError("Filesystem merge-train policy state has multiple active records.")
+    return active_records[0] if active_records else None
+
+
+def _require_unchanged_filesystem_provider_expectation_projection(
+    current_record: MergeTrainPolicyRecord | None,
+    replacement_record: MergeTrainPolicyRecord | None,
+) -> None:
+    if merge_train_policy_provider_expectation_projection(
+        current_record
+    ) != merge_train_policy_provider_expectation_projection(replacement_record):
+        raise ValueError(
+            "Filesystem merge-train policy writes cannot change provider delivery "
+            "protection expectations."
+        )
 
 
 class _AuthorityBundleStageEntry(BaseModel):
@@ -2109,6 +2132,25 @@ class FilesystemRecordStore:
                 raise ValueError(
                     "Merge-train policy record ID cannot be reused for different policy content."
                 )
+            current_active_record = _single_active_merge_train_policy_record(existing_records)
+            prospective_records = [
+                item for item in existing_records if item.record_id != record.record_id
+            ]
+            if record.status == "active":
+                prospective_records = [
+                    item.model_copy(update={"status": "superseded"})
+                    if item.status == "active"
+                    else item
+                    for item in prospective_records
+                ]
+            prospective_records.append(record)
+            prospective_active_record = _single_active_merge_train_policy_record(
+                prospective_records
+            )
+            _require_unchanged_filesystem_provider_expectation_projection(
+                current_active_record,
+                prospective_active_record,
+            )
             if record.status == "active":
                 for active_record in existing_records:
                     if (
@@ -2176,6 +2218,10 @@ class FilesystemRecordStore:
                 return MergeTrainPolicyCompareWriteResult(
                     status="record_id_conflict", current_record=current_record
                 )
+            _require_unchanged_filesystem_provider_expectation_projection(
+                current_record,
+                replacement_record,
+            )
             if current_record.policy_sha256 == replacement_record.policy_sha256:
                 return MergeTrainPolicyCompareWriteResult(
                     status="unchanged", current_record=current_record

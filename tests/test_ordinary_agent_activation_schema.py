@@ -44,7 +44,7 @@ class OrdinaryAgentDeliveryActivationSchemaTests(unittest.TestCase):
             engine = create_engine(database_url)
             self.addCleanup(engine.dispose)
 
-            self.assertEqual(RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS, ("a3c5e7f9b1d4",))
+            self.assertEqual(RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS, ("a6c8e0f2b4d6",))
             self.assertEqual(ordinary_agent_delivery_activation_schema_invariant_errors(engine), [])
             revision, digest, valid = ordinary_agent_delivery_activation_schema_capability(engine)
             self.assertEqual(revision, EXPECTED_ALEMBIC_HEAD_REVISION)

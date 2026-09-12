@@ -26,7 +26,9 @@ from control_plane.merge_train_github import (
 )
 from control_plane.ordinary_agent_custody import (
     OrdinaryAgentCustodyAttemptStore,
+    OrdinaryAgentCustodyCleanupUnknown,
     OrdinaryAgentCustodySecretStore,
+    OrdinaryAgentPreDispatchAdmissionCleanupUnknown,
     ordinary_agent_provider_token_lease,
 )
 from control_plane.ordinary_agent_github_transport import (
@@ -124,6 +126,7 @@ def execute_fresh_ordinary_landing(
     if reservation.disposition != "created":
         raise OrdinaryLandingRecoveryRequired(reservation.preparation.preparation_id)
     preparation = reservation.preparation
+    provider_child_committed = False
     try:
         with ordinary_agent_provider_token_lease(
             record_store=store,
@@ -232,6 +235,7 @@ def execute_fresh_ordinary_landing(
             )
             if finalization.disposition != "created":
                 raise OrdinaryLandingRecoveryRequired(preparation.preparation_id)
+            provider_child_committed = True
             preparation = finalization.preparation
             result_sha = FinalizedOrdinaryLandingDispatcher(
                 finalization=finalization,
@@ -262,6 +266,12 @@ def execute_fresh_ordinary_landing(
             checkpoint(entry)
             return entry
     except Exception as error:
+        if (
+            not provider_child_committed
+            and isinstance(error, OrdinaryAgentCustodyCleanupUnknown)
+            and isinstance(error.body_error, OrdinaryAgentSessionAdmissionDenied)
+        ):
+            error = OrdinaryAgentPreDispatchAdmissionCleanupUnknown(error.body_error)
         # A completed/unknown dispatch is durable before cleanup. Never rewrite
         # its consumed preparation because a later progress or cleanup step failed.
         try:

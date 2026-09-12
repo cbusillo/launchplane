@@ -62,6 +62,11 @@ _ORDINARY_AGENT_EFFECT_PERMISSION_CEILINGS: dict[str, dict[str, str]] = {
 _ORDINARY_AGENT_INSTALLATION_PERMISSION_CEILING = dict(
     permission.split(":", 1) for permission in ordinary_agent_enrollment_permissions()
 )
+_PROVIDER_DELIVERY_INSPECTION_PERMISSION_CEILING = {
+    "administration": "write",
+    "contents": "read",
+    "metadata": "read",
+}
 
 GitHubApiRequest = Callable[..., object]
 
@@ -177,6 +182,39 @@ def mint_ordinary_agent_installation_token(
         # managed key against identity.app_id and requires the same app_id in
         # its response. A separate /app request supplies no additional proof.
         confirm_app_identity_endpoint=False,
+    )
+
+
+def mint_provider_delivery_inspection_token(
+    *,
+    identity: GitHubAppIdentity,
+    repository: str,
+    repository_id: str,
+    repository_owner_id: str,
+    api_request: GitHubApiRequest = github_api_request,
+    now: datetime | None = None,
+    before_token_mint: Callable[[int, int], None] | None = None,
+    validation_error_revoke_api_request: GitHubApiRequest | None = None,
+) -> GitHubAppInstallationToken:
+    """Mint one exact-repository token for the separate inspection App."""
+    return _mint_repository_installation_token(
+        identity=identity,
+        repository=repository,
+        repository_id=repository_id,
+        repository_owner_id=repository_owner_id,
+        requested_permissions={
+            "administration": "write",
+            "contents": "read",
+        },
+        required_installation_permissions=_PROVIDER_DELIVERY_INSPECTION_PERMISSION_CEILING,
+        allowed_installation_permissions=_PROVIDER_DELIVERY_INSPECTION_PERMISSION_CEILING,
+        allowed_token_permissions=_PROVIDER_DELIVERY_INSPECTION_PERMISSION_CEILING,
+        identity_label="Provider-delivery inspection GitHub App",
+        permission_boundary_label="provider-delivery inspection",
+        api_request=api_request,
+        now=now,
+        before_token_mint=before_token_mint,
+        validation_error_revoke_api_request=validation_error_revoke_api_request,
     )
 
 
@@ -318,6 +356,7 @@ def _mint_repository_installation_token(
     identity: GitHubAppIdentity,
     repository: str,
     repository_id: str,
+    repository_owner_id: str | None = None,
     requested_permissions: Mapping[str, str],
     required_installation_permissions: Mapping[str, str],
     allowed_installation_permissions: Mapping[str, str],
@@ -328,12 +367,22 @@ def _mint_repository_installation_token(
     now: datetime | None,
     before_token_mint: Callable[[int, int], None] | None = None,
     confirm_app_identity_endpoint: bool = True,
+    validation_error_revoke_api_request: GitHubApiRequest | None = None,
 ) -> GitHubAppInstallationToken:
     normalized_repository = repository.strip()
     if normalized_repository.count("/") != 1:
         raise GitHubAppIdentityError("GitHub App repository must use owner/name.")
     owner, repo = normalized_repository.split("/", 1)
-    if not owner or not repo or not repository_id.isdecimal() or int(repository_id) < 1:
+    if (
+        not owner
+        or not repo
+        or not repository_id.isdecimal()
+        or int(repository_id) < 1
+        or (
+            repository_owner_id is not None
+            and (not repository_owner_id.isdecimal() or int(repository_owner_id) < 1)
+        )
+    ):
         raise GitHubAppIdentityError("GitHub App repository identity is invalid.")
     issued_at = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     try:
@@ -386,6 +435,29 @@ def _mint_repository_installation_token(
         != identity.app_id
     ):
         raise GitHubAppIdentityError("GitHub App installation belongs to another app.")
+    if repository_owner_id is not None:
+        account = json_object(
+            installation_payload.get("account"),
+            "GitHub App installation account",
+            error_type=GitHubAppIdentityError,
+        )
+        if (
+            required_positive_int(
+                account.get("id"),
+                "GitHub App installation account requires id.",
+                error_type=GitHubAppIdentityError,
+            )
+            != int(repository_owner_id)
+            or required_string_text(
+                account.get("login"),
+                "GitHub App installation account requires login.",
+                error_type=GitHubAppIdentityError,
+            ).casefold()
+            != owner.casefold()
+        ):
+            raise GitHubAppIdentityError(
+                "GitHub App installation account does not match repository inventory owner."
+            )
     _validate_permissions(
         installation_payload.get("permissions"),
         label="installation",
@@ -476,7 +548,10 @@ def _mint_repository_installation_token(
         )
     except Exception as validation_error:
         try:
-            _revoke_installation_token_value(token=token, api_request=api_request)
+            _revoke_installation_token_value(
+                token=token,
+                api_request=validation_error_revoke_api_request or api_request,
+            )
         except Exception as revocation_error:
             validation_error.add_note(
                 f"GitHub App installation token revocation also failed: {revocation_error}"

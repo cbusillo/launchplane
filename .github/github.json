@@ -22,6 +22,7 @@
     "uiStandards": "docs/ui-standards.md",
     "workGraphReadModel": "docs/work-graph-read-model.md",
     "mergeTrainPolicy": "docs/merge-train-policy.md",
+    "providerDeliveryInspection": "docs/provider-delivery-inspection.md",
     "mergeReadiness": "docs/merge-readiness.md",
     "governanceEvidence": "docs/governance-evidence.md",
     "mergeTrainStructuralProvenance": "docs/merge-train-structural-provenance.md",

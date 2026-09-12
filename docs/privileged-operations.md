@@ -395,6 +395,17 @@ descriptor-specific reservation, exactly one active candidate digest, and the
 expected superseded previous record when a change occurred. A stale or
 ambiguous read-back remains reconciliation-required.
 
+The governed provider-protection expectation fence can reject an import after
+waiting for locks, when the execution lease is no longer current. Its typed
+pre-write rejection proves that the policy transaction rolled back. The worker
+may settle that exact reservation as a failed, not-executed result through the
+existing completion/adoption path, including after lease expiry. This typed
+rejection is the only new expired-reservation adoption path. Generic executor
+failures do not gain that permission, and completion/adoption mismatches retain
+their reconciliation fence and report that reconciliation is still required.
+See [provider delivery inspection](provider-delivery-inspection.md) for the
+expectation's governed write boundary.
+
 ## Legacy Re-encryption Route
 
 `POST /v1/secrets/reencrypt` is retained only as an explicit migration boundary:

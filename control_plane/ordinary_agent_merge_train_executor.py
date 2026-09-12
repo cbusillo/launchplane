@@ -43,7 +43,9 @@ from control_plane.merge_train_github import (
 )
 from control_plane.ordinary_agent_custody import (
     OrdinaryAgentCustodyAttemptStore,
+    OrdinaryAgentCustodyCleanupUnknown,
     OrdinaryAgentCustodySecretStore,
+    OrdinaryAgentPreDispatchAdmissionCleanupUnknown,
     ordinary_agent_provider_token_lease,
 )
 from control_plane.ordinary_agent_github_transport import (
@@ -53,6 +55,7 @@ from control_plane.ordinary_agent_github_transport import (
 )
 from control_plane.ordinary_agent_effect_lifecycle import ordinary_agent_comment_body
 from control_plane.github_app_identity import GitHubApiRequest
+from control_plane.ordinary_agent_session_lifecycle import OrdinaryAgentSessionAdmissionDenied
 from control_plane.workflows.launchplane import github_api_request
 
 
@@ -416,12 +419,18 @@ class OrdinaryAgentMergeTrainEffectExecutor:
                         typed_outcome=outcome,
                     )
                     outcome_recorded = True
-        except Exception:
+        except Exception as error:
             if child_id is not None and not outcome_recorded:
                 self._effect_store.record_ordinary_semantic_outcome(
                     child_id=child_id,
                     typed_outcome=OrdinaryAgentUnknownOutcome(reason="response_ambiguous"),
                 )
+            if (
+                child_id is None
+                and isinstance(error, OrdinaryAgentCustodyCleanupUnknown)
+                and isinstance(error.body_error, OrdinaryAgentSessionAdmissionDenied)
+            ):
+                raise OrdinaryAgentPreDispatchAdmissionCleanupUnknown(error.body_error) from error
             raise
 
     def _require_command(self, kind: str, effect: object) -> None:

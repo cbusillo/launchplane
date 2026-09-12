@@ -98,6 +98,15 @@ The compose definition lives in the uninvoked
 `docker-compose.ordinary-agent-workers.yml` profile; adding that file/profile
 to a deployment remains a separately reviewed activation step.
 
+Ordinary guarded admission and finite continuation refresh independent provider
+protection evidence on demand within the existing delegation. This introduces
+no public preflight route or extra inspection daemon. Authenticated replay and
+pure non-provider admission checks precede inspection; provider calls occur
+outside storage transactions. Provider capability failures are paced HTTP 503
+responses, while caller authorization denial remains HTTP 403. See
+[provider delivery inspection](provider-delivery-inspection.md) for the
+governed expectation, custody and currentness contract.
+
 - native FastAPI health route: `GET /v1/health`, backed by a Pydantic response
   model and included in OpenAPI as a service contract proof
 - native FastAPI Launchplane service runtime reads:

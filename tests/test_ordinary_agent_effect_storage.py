@@ -163,6 +163,36 @@ class OrdinaryAgentEffectStorageTests(unittest.TestCase):
         )
         return effect, fence, command
 
+    def test_new_effect_allocation_readiness_denial_rolls_back_charge_and_record(self) -> None:
+        fence, command = self.prepare_controller()
+        with self.store._session_factory() as session:
+            lease_row = session.get(LaunchplaneOrdinaryAgentLeaseRow, self.request.lease_id)
+            assert lease_row is not None
+            before = OrdinaryAgentLeaseRecord.model_validate(lease_row.payload)
+        with (
+            patch.object(
+                self.store,
+                "_require_and_project_guarded_readiness",
+                side_effect=OrdinaryAgentSessionAdmissionDenied(
+                    "provider_readiness_refresh_required",
+                    retry_not_before=self.fixture.now + 1,
+                ),
+            ),
+            self.assertRaises(OrdinaryAgentSessionAdmissionDenied),
+        ):
+            self.store.reserve_ordinary_agent_effect(
+                request_id=self.request.request_id,
+                expected_binding_revision=1,
+                controller_fence=fence,
+                command=command,
+                semantic_ordinal=1,
+            )
+        with self.store._session_factory() as session:
+            lease_row = session.get(LaunchplaneOrdinaryAgentLeaseRow, self.request.lease_id)
+            assert lease_row is not None
+            self.assertEqual(OrdinaryAgentLeaseRecord.model_validate(lease_row.payload), before)
+            self.assertEqual(len(list(session.query(LaunchplaneOrdinaryAgentEffectRow))), 0)
+
     def complete_refresh(
         self,
     ) -> tuple[OrdinaryAgentEffectRecord, OrdinaryAgentControllerFence, OrdinaryAgentEffectRecord]:
@@ -278,8 +308,15 @@ class OrdinaryAgentEffectStorageTests(unittest.TestCase):
             custody_attempt_id=reservation.attempt_id,
             fixed_token_expires_at=self.fixture.now + 300,
         )
-        with self.assertRaisesRegex(
-            OrdinaryAgentSessionAdmissionDenied, "dispatch_already_checkpointed"
+        with (
+            patch.object(
+                self.store,
+                "_require_and_project_guarded_readiness",
+                side_effect=AssertionError("checkpoint replay must not require live readiness"),
+            ) as replay_readiness,
+            self.assertRaisesRegex(
+                OrdinaryAgentSessionAdmissionDenied, "dispatch_already_checkpointed"
+            ),
         ):
             self.store.checkpoint_ordinary_semantic_dispatch(
                 effect_id=effect.effect_id,
@@ -287,6 +324,7 @@ class OrdinaryAgentEffectStorageTests(unittest.TestCase):
                 custody_attempt_id=reservation.attempt_id,
                 fixed_token_expires_at=self.fixture.now + 300,
             )
+        replay_readiness.assert_not_called()
         self.store.cancel_ordinary_agent_session(
             proof=self.fixture.proof, session_id=self.request.session_id
         )
@@ -368,6 +406,30 @@ class OrdinaryAgentEffectStorageTests(unittest.TestCase):
             )
             assert request_row is not None
             before_rebind = OrdinaryAgentFiniteRequestRecord.model_validate(request_row.payload)
+        with (
+            patch.object(
+                self.store,
+                "_require_and_project_guarded_readiness",
+                side_effect=OrdinaryAgentSessionAdmissionDenied(
+                    "provider_readiness_refresh_required",
+                    retry_not_before=self.fixture.now + 1,
+                ),
+            ) as readiness,
+            self.assertRaisesRegex(
+                OrdinaryAgentSessionAdmissionDenied,
+                "provider_readiness_refresh_required",
+            ),
+        ):
+            self.store.rebind_ordinary_agent_after_head_refresh(
+                effect_id=effect.effect_id,
+                expected_effect_revision=completed.revision,
+                controller_fence=fence,
+            )
+        readiness.assert_called_once()
+        self.assertEqual(
+            self.store.read_ordinary_agent_effect(effect_id=effect.effect_id),
+            completed,
+        )
         rebound = self.store.rebind_ordinary_agent_after_head_refresh(
             effect_id=effect.effect_id,
             expected_effect_revision=completed.revision,
@@ -416,14 +478,20 @@ class OrdinaryAgentEffectStorageTests(unittest.TestCase):
             initial_active_phase="prepare",
             adoptable_active_actions=("select_next_action",),
         )
-        self.assertEqual(
-            self.store.rebind_ordinary_agent_after_head_refresh(
-                effect_id=effect.effect_id,
-                expected_effect_revision=completed.revision,
-                controller_fence=fence,
-            ),
-            rebound,
-        )
+        with patch.object(
+            self.store,
+            "_require_and_project_guarded_readiness",
+            side_effect=AssertionError("exact rebind replay must not require live readiness"),
+        ) as replay_readiness:
+            self.assertEqual(
+                self.store.rebind_ordinary_agent_after_head_refresh(
+                    effect_id=effect.effect_id,
+                    expected_effect_revision=completed.revision,
+                    controller_fence=fence,
+                ),
+                rebound,
+            )
+        replay_readiness.assert_not_called()
         current_controller = self.store.list_merge_train_controller_state_records(
             repository=self.request.target.repository,
             base_branch=self.request.target.base_branch,

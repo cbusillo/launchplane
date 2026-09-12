@@ -9,11 +9,14 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    GetJsonSchemaHandler,
     PositiveInt,
     SerializerFunctionWrapHandler,
+    field_validator,
     model_serializer,
     model_validator,
 )
+from pydantic_core import CoreSchema
 
 
 MergeTrainActorRole = Literal["repo_owner", "repo_admin"]
@@ -24,6 +27,7 @@ MergeTrainEngineeringReviewMode = Literal["advisory", "required"]
 MergeTrainPolicyRecordStatus = Literal["active", "superseded"]
 MergeTrainSchedulerRunnerMode = Literal["level1", "controller"]
 MERGE_TRAIN_POLICY_TARGETS_READ_ACTION = "merge_train.policy_targets"
+_PROVIDER_DELIVERY_ALLOWED_MERGE_METHODS = ("merge", "squash", "rebase")
 
 
 MergeTrainPolicyCompareWriteStatus = Literal[
@@ -136,6 +140,140 @@ class MergeTrainSchedulerPolicy(BaseModel):
     mutate: bool = False
 
 
+class ProviderRequiredStatusCheckExpectationV1(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    context: str = Field(min_length=1, max_length=512)
+    app_id: int = Field(strict=True, gt=0, le=2**63 - 1)
+
+    @model_validator(mode="after")
+    def _normalize_status_check(self) -> "ProviderRequiredStatusCheckExpectationV1":
+        object.__setattr__(
+            self,
+            "context",
+            _normalize_required_value(
+                self.context,
+                "provider required status check requires context",
+            ),
+        )
+        return self
+
+
+class ProviderCodeScanningToolExpectationV1(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    tool: str = Field(min_length=1, max_length=512)
+    alerts_threshold: Literal["none", "errors", "errors_and_warnings", "all"]
+    security_alerts_threshold: Literal[
+        "none",
+        "critical",
+        "high_or_higher",
+        "medium_or_higher",
+        "all",
+    ]
+
+    @model_validator(mode="after")
+    def _normalize_scanning_tool(self) -> "ProviderCodeScanningToolExpectationV1":
+        object.__setattr__(
+            self,
+            "tool",
+            _normalize_required_value(
+                self.tool,
+                "provider code scanning expectation requires tool",
+            ),
+        )
+        return self
+
+
+class ProviderPullRequestExpectationV1(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    dismiss_stale_reviews_on_push: bool
+    require_code_owner_review: bool
+    require_last_push_approval: bool
+    required_approving_review_count: int = Field(strict=True, ge=0, le=6)
+    required_review_thread_resolution: bool
+
+
+class ProviderDeliveryProtectionExpectationV1(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    required_status_checks: tuple[ProviderRequiredStatusCheckExpectationV1, ...] = Field(
+        min_length=1,
+        max_length=100,
+    )
+    strict_required_status_checks_policy: bool
+    code_scanning_tools: tuple[ProviderCodeScanningToolExpectationV1, ...] = Field(
+        max_length=32,
+    )
+    pull_request: ProviderPullRequestExpectationV1 | None
+    allowed_merge_methods: tuple[MergeTrainMergeMethod, ...] = Field(
+        min_length=1,
+        max_length=3,
+    )
+
+    @field_validator("required_status_checks")
+    @classmethod
+    def _normalize_required_status_checks(
+        cls,
+        value: tuple[ProviderRequiredStatusCheckExpectationV1, ...],
+    ) -> tuple[ProviderRequiredStatusCheckExpectationV1, ...]:
+        ordered = tuple(sorted(value, key=lambda item: (item.context.casefold(), item.app_id)))
+        identities = tuple((item.context.casefold(), item.app_id) for item in ordered)
+        if len(identities) != len(set(identities)):
+            raise ValueError("provider required status checks must be unique by context/app_id")
+        return ordered
+
+    @field_validator("code_scanning_tools")
+    @classmethod
+    def _normalize_code_scanning_tools(
+        cls,
+        value: tuple[ProviderCodeScanningToolExpectationV1, ...],
+    ) -> tuple[ProviderCodeScanningToolExpectationV1, ...]:
+        ordered = tuple(sorted(value, key=lambda item: item.tool))
+        names = tuple(item.tool for item in ordered)
+        if len(names) != len(set(names)):
+            raise ValueError("provider code scanning expectations must use unique tool names")
+        return ordered
+
+    @field_validator("allowed_merge_methods")
+    @classmethod
+    def _normalize_allowed_merge_methods(
+        cls,
+        value: tuple[MergeTrainMergeMethod, ...],
+    ) -> tuple[MergeTrainMergeMethod, ...]:
+        if len(value) != len(set(value)):
+            raise ValueError("provider allowed merge methods must be unique")
+        if "merge" not in value:
+            raise ValueError("provider allowed merge methods must include merge")
+        return tuple(
+            method for method in _PROVIDER_DELIVERY_ALLOWED_MERGE_METHODS if method in value
+        )
+
+    @model_serializer(mode="wrap")
+    def _serialize_expectation(
+        self,
+        handler: SerializerFunctionWrapHandler,
+    ) -> dict[str, Any]:
+        payload = cast(dict[str, Any], handler(self))
+        if self.pull_request is None:
+            payload["pull_request"] = None
+        return payload
+
+    @classmethod
+    def __get_pydantic_json_schema__(
+        cls,
+        core_schema: CoreSchema,
+        handler: GetJsonSchemaHandler,
+    ) -> dict[str, Any]:
+        # The wrap serializer preserves a required explicit null when a containing
+        # storage model uses exclude_none. Generate the output schema from the
+        # model fields so that serializer implementation detail does not erase it.
+        schema_without_serializer = dict(core_schema)
+        schema_without_serializer.pop("serialization", None)
+        return handler(cast(CoreSchema, schema_without_serializer))
+
+
 class MergeTrainRepositoryPolicy(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -152,6 +290,13 @@ class MergeTrainRepositoryPolicy(BaseModel):
     service_authz: MergeTrainServiceAuthz = Field(default_factory=MergeTrainServiceAuthz)
     github_token: MergeTrainGitHubTokenSource = Field(default_factory=MergeTrainGitHubTokenSource)
     scheduler: MergeTrainSchedulerPolicy = Field(default_factory=MergeTrainSchedulerPolicy)
+    provider_delivery_protection_expectation: ProviderDeliveryProtectionExpectationV1 | None = (
+        Field(
+            default=None,
+            exclude_if=lambda value: value is None,
+            json_schema_extra={"x-launchplane-optional-response": True},
+        )
+    )
 
     @model_validator(mode="after")
     def _validate_repository_policy(self) -> "MergeTrainRepositoryPolicy":
@@ -299,7 +444,55 @@ def merge_train_policy_sha256(policy: MergeTrainPolicy) -> str:
             "mutate": False,
         }:
             repository_policy.pop("scheduler", None)
+        if isinstance(repository_policy, dict) and not repository_policy.get(
+            "provider_delivery_protection_expectation"
+        ):
+            repository_policy.pop("provider_delivery_protection_expectation", None)
     encoded = json.dumps(policy_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def merge_train_policy_provider_expectation_projection(
+    record: MergeTrainPolicyRecord | None,
+) -> dict[str, dict[str, object]]:
+    if record is None or record.status != "active":
+        return {}
+    projection: dict[str, dict[str, object]] = {}
+    for repository_policy in sorted(record.policy.policies, key=lambda item: item.policy_key):
+        expectation = repository_policy.provider_delivery_protection_expectation
+        if expectation is not None:
+            projection[repository_policy.policy_key] = cast(
+                dict[str, object],
+                expectation.model_dump(mode="json"),
+            )
+    return projection
+
+
+def merge_train_repository_policy_delivery_semantics_sha256(
+    policy: MergeTrainRepositoryPolicy,
+) -> str:
+    expectation = policy.provider_delivery_protection_expectation
+    payload = {
+        "repository": policy.repository,
+        "base_branch": policy.base_branch,
+        "enqueue_label": policy.enqueue_label,
+        "blocked_label": policy.blocked_label,
+        "stack_child_disposition_label": policy.stack_child_disposition_label,
+        "merge_method": policy.merge_method,
+        "failure_policy": policy.failure_policy,
+        "engineering_review_mode": policy.engineering_review_mode,
+        "enqueue": {
+            "label_required": policy.enqueue.label_required,
+            "allowed_actor_roles": sorted(policy.enqueue.allowed_actor_roles),
+            "trusted_automation_github_user_ids": sorted(
+                policy.enqueue.trusted_automation_github_user_ids
+            ),
+        },
+        "provider_delivery_protection_expectation": (
+            expectation.model_dump(mode="json") if expectation is not None else None
+        ),
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 
 

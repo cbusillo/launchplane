@@ -52,8 +52,17 @@ class OrdinaryAgentCustodyUnavailable(OrdinaryAgentCustodyError):
 class OrdinaryAgentCustodyCleanupUnknown(OrdinaryAgentCustodyError):
     """A token may remain usable after a redacted revoke failure."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, body_error: Exception | None = None) -> None:
+        self.body_error = body_error
         super().__init__("Ordinary-agent provider credential cleanup outcome is unknown.")
+
+
+class OrdinaryAgentPreDispatchAdmissionCleanupUnknown(OrdinaryAgentCustodyCleanupUnknown):
+    """Admission failed before dispatch and token cleanup is also unresolved."""
+
+    def __init__(self, admission_error: Exception) -> None:
+        self.admission_error = admission_error
+        super().__init__(body_error=admission_error)
 
 
 @dataclass(frozen=True, slots=True)
@@ -264,6 +273,7 @@ def ordinary_agent_provider_token_lease(
 
     token: GitHubAppInstallationToken | None = None
     issued = False
+    body_error: Exception | None = None
     try:
         try:
             token = mint_ordinary_agent_installation_token(
@@ -305,10 +315,14 @@ def ordinary_agent_provider_token_lease(
             raise OrdinaryAgentCustodyError(
                 "Ordinary-agent provider token arrived after its dispatch window."
             )
-        yield OrdinaryAgentProviderTokenLease(
-            installation_token=token,
-            attempt_id=attempt_id,
-        )
+        try:
+            yield OrdinaryAgentProviderTokenLease(
+                installation_token=token,
+                attempt_id=attempt_id,
+            )
+        except Exception as error:
+            body_error = error
+            raise
     finally:
         if token is not None:
             try:
@@ -332,7 +346,7 @@ def ordinary_agent_provider_token_lease(
             except Exception as error:
                 if issued:
                     record_store.mark_ordinary_agent_custody_cleanup_unknown(attempt_id=attempt_id)
-                    raise OrdinaryAgentCustodyCleanupUnknown() from error
+                    raise OrdinaryAgentCustodyCleanupUnknown(body_error=body_error) from error
                 else:
                     record_store.mark_ordinary_agent_custody_issue_unknown(attempt_id=attempt_id)
                 raise

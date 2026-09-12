@@ -13,6 +13,7 @@ import unittest
 from unittest.mock import patch
 
 from click.testing import CliRunner
+from sqlalchemy import select
 
 from control_plane import secrets as control_plane_secrets
 from control_plane.authz_grant_service import execute_managed_authz_policy_reconcile
@@ -26,6 +27,7 @@ from control_plane.contracts.authz_policy_record import (
 from control_plane.contracts.authz_policy_write_transition import (
     AuthzPolicySchemaV3TransitionDeniedError,
 )
+from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.privileged_operation import (
     AUTHZ_POLICY_OPERATION_APPROVE_ACTION,
     AUTHZ_POLICY_OPERATION_REVOKE_ACTION,
@@ -46,6 +48,14 @@ from control_plane.contracts.privileged_operation import (
     privileged_operation_pre_state_digest,
 )
 from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
+from control_plane.contracts.privileged_operation_identity import (
+    MANAGED_MERGE_TRAIN_POLICY_IMPORT_PRE_EFFECT_DENIED,
+    PRIVILEGED_OPERATION_EXECUTION_ROUTE,
+    ManagedMergeTrainPolicyImportPreEffectDeniedError,
+    privileged_operation_execution_fingerprint,
+    privileged_operation_provider_target_key,
+    require_managed_merge_train_policy_import_execution_identity,
+)
 from control_plane.contracts.privileged_operation_worker_heartbeat import (
     PrivilegedOperationWorkerHeartbeatRecord,
 )
@@ -62,11 +72,8 @@ from control_plane.privileged_operation_service import (
 from control_plane.privileged_operation_worker import (
     _construct_approver_authorization,
     OrdinaryAgentDeliveryCleanupState,
-    PRIVILEGED_OPERATION_EXECUTION_ROUTE,
     execute_approved_privileged_operations_once,
-    privileged_operation_execution_fingerprint,
     privileged_operation_execution_token,
-    privileged_operation_provider_target_key,
     record_privileged_operation_worker_poll_heartbeat,
     require_privileged_operation_execution_store,
     run_ordinary_agent_delivery_cleanup_once,
@@ -74,6 +81,7 @@ from control_plane.privileged_operation_worker import (
 from control_plane.service_auth import LaunchplaneAuthzPolicy
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import DbOnlyMutationRequest, PostgresRecordStore
+from control_plane.storage.postgres import LaunchplaneIdempotencyRow
 from tests.support.stores import _sqlite_database_url
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_record
 
@@ -418,6 +426,7 @@ def _prepare_approved_merge_train_policy_import(
     approval_policy: LaunchplaneAuthzPolicyRecord,
     active_record: MergeTrainPolicyRecord | None = None,
     candidate_record: MergeTrainPolicyRecord | None = None,
+    source_event_id: str = "worker-merge-train-policy",
 ) -> str:
     resolved_active = active_record or build_test_merge_train_policy_record(
         repository="cbusillo/sellyouroutboard",
@@ -440,7 +449,7 @@ def _prepare_approved_merge_train_policy_import(
         descriptor_id="managed-merge-train-policy-import",
         actor=actor,
         source_kind="browser_api",
-        source_event_id="worker-merge-train-policy-plan",
+        source_event_id=f"{source_event_id}-plan",
         request=ManagedMergeTrainPolicyImportProposalInput(
             record=resolved_candidate,
             reason="Review exact merge-train policy import.",
@@ -470,9 +479,29 @@ def _prepare_approved_merge_train_policy_import(
         record_store=store,
         operation_id=planned.operation_id,
         approval=approval,
-        source_event_id="worker-merge-train-policy-approval",
+        source_event_id=f"{source_event_id}-approval",
         now=lambda: datetime(2026, 8, 22, 20, 5, tzinfo=timezone.utc),
     ).record.operation_id
+
+
+def _merge_train_policy_record_with_provider_expectation(
+    record: MergeTrainPolicyRecord,
+) -> MergeTrainPolicyRecord:
+    payload = record.policy.model_dump(mode="json")
+    payload["policies"][0]["provider_delivery_protection_expectation"] = {
+        "required_status_checks": [{"context": "build", "app_id": 100}],
+        "strict_required_status_checks_policy": True,
+        "code_scanning_tools": [],
+        "pull_request": None,
+        "allowed_merge_methods": ["merge"],
+    }
+    return MergeTrainPolicyRecord(
+        record_id="merge-train-policy-candidate-with-provider-expectation",
+        status="active",
+        source="test",
+        updated_at="2026-08-22T20:00:00Z",
+        policy=type(record.policy).model_validate(payload),
+    )
 
 
 class PrivilegedOperationWorkerTests(unittest.TestCase):
@@ -790,6 +819,307 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
         self.assertEqual(
             [item.record_id for item in superseded_records], ["merge-train-policy-active"]
         )
+
+    def test_worker_governed_import_can_add_provider_expectation(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = self._store(directory)
+            try:
+                approval_policy = store.seed_authz_policy_if_absent(
+                    _merge_train_policy_admin_record()
+                )
+                active = build_test_merge_train_policy_record(
+                    repository="cbusillo/sellyouroutboard",
+                    record_id="merge-train-policy-active",
+                    updated_at="2026-08-22T19:00:00Z",
+                )
+                candidate = _merge_train_policy_record_with_provider_expectation(active)
+                operation_id = _prepare_approved_merge_train_policy_import(
+                    store,
+                    approval_policy=approval_policy,
+                    active_record=active,
+                    candidate_record=candidate,
+                )
+
+                completed = execute_approved_privileged_operations_once(
+                    record_store=store,
+                    now=lambda: FIXED_NOW,
+                )
+
+                operation = store.read_privileged_operation_record(operation_id)
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "cannot change provider delivery protection expectations",
+                ):
+                    store.write_merge_train_policy_record(
+                        candidate.model_copy(update={"status": "superseded"})
+                    )
+                current = store.list_merge_train_policy_records(status="active", limit=2)
+            finally:
+                store.close()
+
+        self.assertEqual([item.operation_id for item in completed], [operation_id])
+        self.assertEqual(operation.status, "executed")
+        self.assertEqual(current, (candidate,))
+
+    def test_provider_expectation_import_rejects_missing_outer_execution_reservation(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as directory:
+            store = self._store(directory)
+            try:
+                approval_policy = store.seed_authz_policy_if_absent(
+                    _merge_train_policy_admin_record()
+                )
+                active = build_test_merge_train_policy_record(
+                    repository="cbusillo/sellyouroutboard",
+                    record_id="merge-train-policy-active",
+                    updated_at="2026-08-22T19:00:00Z",
+                )
+                candidate = _merge_train_policy_record_with_provider_expectation(active)
+                operation_id = _prepare_approved_merge_train_policy_import(
+                    store,
+                    approval_policy=approval_policy,
+                    active_record=active,
+                    candidate_record=candidate,
+                )
+                original_compare = store.compare_and_write_merge_train_policy_record
+
+                def remove_outer_then_compare(**kwargs: object) -> object:
+                    with store._session_factory() as db:
+                        outer = db.scalar(
+                            select(LaunchplaneIdempotencyRow).where(
+                                LaunchplaneIdempotencyRow.route_path
+                                == PRIVILEGED_OPERATION_EXECUTION_ROUTE,
+                                LaunchplaneIdempotencyRow.idempotency_key == operation_id,
+                            )
+                        )
+                        assert outer is not None
+                        db.delete(outer)
+                        db.commit()
+                    return original_compare(**kwargs)  # type: ignore[arg-type]
+
+                with patch.object(
+                    store,
+                    "compare_and_write_merge_train_policy_record",
+                    side_effect=remove_outer_then_compare,
+                ):
+                    execute_approved_privileged_operations_once(
+                        record_store=store,
+                        now=lambda: FIXED_NOW,
+                    )
+
+                operation = store.read_privileged_operation_record(operation_id)
+                current = store.list_merge_train_policy_records(status="active", limit=2)
+            finally:
+                store.close()
+
+        self.assertEqual(operation.status, "execution_failed")
+        self.assertIsInstance(operation.execution, ManagedMergeTrainPolicyImportExecutionEvidence)
+        assert isinstance(operation.execution, ManagedMergeTrainPolicyImportExecutionEvidence)
+        self.assertEqual(
+            operation.execution.failure_code,
+            MANAGED_MERGE_TRAIN_POLICY_IMPORT_PRE_EFFECT_DENIED,
+        )
+        self.assertTrue(operation.execution.reconciliation_required)
+        self.assertEqual(current, (active,))
+
+    def test_provider_expectation_pre_effect_denial_adopts_exact_reconcile_reservation(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as directory:
+            store = self._store(directory)
+            try:
+                approval_policy = store.seed_authz_policy_if_absent(
+                    _merge_train_policy_admin_record()
+                )
+                active = build_test_merge_train_policy_record(
+                    repository="cbusillo/sellyouroutboard",
+                    record_id="merge-train-policy-active",
+                    updated_at="2026-08-22T19:00:00Z",
+                )
+                candidate = _merge_train_policy_record_with_provider_expectation(active)
+                operation_id = _prepare_approved_merge_train_policy_import(
+                    store,
+                    approval_policy=approval_policy,
+                    active_record=active,
+                    candidate_record=candidate,
+                )
+                original_complete = store.complete_mutation_reservation
+
+                def reconcile_before_completion(*, completion: object) -> object:
+                    assert isinstance(completion, LaunchplaneIdempotencyRecord)
+                    lookup = store.lookup_existing_mutation_reservation(
+                        route_path=completion.route_path,
+                        idempotency_key=completion.idempotency_key,
+                        request_fingerprint=completion.request_fingerprint,
+                    )
+                    assert lookup.record is not None
+                    updated = store.mark_mutation_reconcile_required(
+                        reservation=lookup.record,
+                        reconciliation_key=operation_id,
+                    )
+                    self.assertEqual(updated.status, "updated")
+                    return original_complete(completion=completion)
+
+                with (
+                    patch.object(
+                        store,
+                        "compare_and_write_merge_train_policy_record",
+                        side_effect=ManagedMergeTrainPolicyImportPreEffectDeniedError(),
+                    ),
+                    patch.object(
+                        store,
+                        "complete_mutation_reservation",
+                        side_effect=reconcile_before_completion,
+                    ),
+                ):
+                    execute_approved_privileged_operations_once(
+                        record_store=store,
+                        now=lambda: FIXED_NOW,
+                    )
+
+                operation = store.read_privileged_operation_record(operation_id)
+                outer_lookup = store.lookup_existing_mutation_reservation(
+                    route_path=PRIVILEGED_OPERATION_EXECUTION_ROUTE,
+                    idempotency_key=operation_id,
+                    request_fingerprint=privileged_operation_execution_fingerprint(operation),
+                )
+                current = store.list_merge_train_policy_records(status="active", limit=2)
+            finally:
+                store.close()
+
+        self.assertEqual(operation.status, "execution_failed")
+        self.assertIsInstance(operation.execution, ManagedMergeTrainPolicyImportExecutionEvidence)
+        assert isinstance(operation.execution, ManagedMergeTrainPolicyImportExecutionEvidence)
+        self.assertEqual(
+            operation.execution.failure_code,
+            MANAGED_MERGE_TRAIN_POLICY_IMPORT_PRE_EFFECT_DENIED,
+        )
+        self.assertFalse(operation.execution.reconciliation_required)
+        self.assertEqual(current, (active,))
+        self.assertIsNotNone(outer_lookup.record)
+        assert outer_lookup.record is not None
+        self.assertEqual(outer_lookup.record.state, "completed")
+        self.assertEqual(outer_lookup.record.response_status_code, 409)
+        self.assertEqual(
+            outer_lookup.record.response_payload,
+            {
+                "status": "execution_failed",
+                "failure_code": MANAGED_MERGE_TRAIN_POLICY_IMPORT_PRE_EFFECT_DENIED,
+            },
+        )
+
+    def test_provider_expectation_pre_effect_denial_rejects_different_replayed_completion(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as directory:
+            store = self._store(directory)
+            try:
+                approval_policy = store.seed_authz_policy_if_absent(
+                    _merge_train_policy_admin_record()
+                )
+                active = build_test_merge_train_policy_record(
+                    repository="cbusillo/sellyouroutboard",
+                    record_id="merge-train-policy-active",
+                    updated_at="2026-08-22T19:00:00Z",
+                )
+                candidate = _merge_train_policy_record_with_provider_expectation(active)
+                operation_id = _prepare_approved_merge_train_policy_import(
+                    store,
+                    approval_policy=approval_policy,
+                    active_record=active,
+                    candidate_record=candidate,
+                )
+
+                def different_completion(*, completion: object) -> object:
+                    assert isinstance(completion, LaunchplaneIdempotencyRecord)
+                    return SimpleNamespace(
+                        status="replayed",
+                        record=completion.model_copy(
+                            update={"response_payload": {"status": "different-completion"}}
+                        ),
+                    )
+
+                with (
+                    patch.object(
+                        store,
+                        "compare_and_write_merge_train_policy_record",
+                        side_effect=ManagedMergeTrainPolicyImportPreEffectDeniedError(),
+                    ),
+                    patch.object(
+                        store,
+                        "complete_mutation_reservation",
+                        side_effect=different_completion,
+                    ),
+                ):
+                    execute_approved_privileged_operations_once(
+                        record_store=store,
+                        now=lambda: FIXED_NOW,
+                    )
+
+                operation = store.read_privileged_operation_record(operation_id)
+                outer_lookup = store.lookup_existing_mutation_reservation(
+                    route_path=PRIVILEGED_OPERATION_EXECUTION_ROUTE,
+                    idempotency_key=operation_id,
+                    request_fingerprint=privileged_operation_execution_fingerprint(operation),
+                )
+                current = store.list_merge_train_policy_records(status="active", limit=2)
+            finally:
+                store.close()
+
+        self.assertEqual(operation.status, "execution_failed")
+        self.assertIsInstance(operation.execution, ManagedMergeTrainPolicyImportExecutionEvidence)
+        assert isinstance(operation.execution, ManagedMergeTrainPolicyImportExecutionEvidence)
+        self.assertTrue(operation.execution.reconciliation_required)
+        self.assertEqual(current, (active,))
+        self.assertIsNotNone(outer_lookup.record)
+        assert outer_lookup.record is not None
+        self.assertEqual(outer_lookup.record.state, "reconcile_required")
+
+    def test_merge_train_policy_import_execution_identity_binds_stored_plan(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = self._store(directory)
+            try:
+                approval_policy = store.seed_authz_policy_if_absent(
+                    _merge_train_policy_admin_record()
+                )
+                operation_id = _prepare_approved_merge_train_policy_import(
+                    store,
+                    approval_policy=approval_policy,
+                )
+                approved = store.read_privileged_operation_record(operation_id)
+                executing = PrivilegedOperationRecord.model_validate(
+                    {**approved.model_dump(mode="json"), "status": "executing"}
+                )
+                expected_record = store.list_merge_train_policy_records(
+                    status="active",
+                    limit=1,
+                )[0]
+                request = executing.request
+                assert isinstance(request, ManagedMergeTrainPolicyImportProposalInput)
+
+                require_managed_merge_train_policy_import_execution_identity(
+                    executing,
+                    expected_record=expected_record,
+                    replacement_record=request.record,
+                )
+
+                drifted_expected = build_test_merge_train_policy_record(
+                    repository="cbusillo/drifted",
+                    record_id="merge-train-policy-drifted",
+                    updated_at="2026-08-22T19:30:00Z",
+                )
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "managed_merge_train_policy_import_identity_mismatch",
+                ):
+                    require_managed_merge_train_policy_import_execution_identity(
+                        executing,
+                        expected_record=drifted_expected,
+                        replacement_record=request.record,
+                    )
+            finally:
+                store.close()
 
     def test_worker_treats_same_policy_with_new_record_id_as_unchanged(self) -> None:
         with TemporaryDirectory() as directory:

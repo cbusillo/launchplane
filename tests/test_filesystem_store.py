@@ -78,7 +78,7 @@ from control_plane.contracts.merge_train_stack_collapse import (
     MergeTrainStackCollapseRecordStatus,
     build_merge_train_stack_collapse_id,
 )
-from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
+from control_plane.contracts.merge_train_policy import MergeTrainPolicy, MergeTrainPolicyRecord
 from control_plane.contracts.odoo_instance_override_record import OdooAddonSettingOverride
 from control_plane.contracts.odoo_instance_override_record import OdooConfigParameterOverride
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
@@ -784,6 +784,35 @@ def _merge_train_stack_collapse_plan_record(
             created_at="2026-05-14T01:29:00Z",
             updated_at=updated_at,
         ),
+    )
+
+
+def _merge_train_policy_with_provider_expectation(
+    *,
+    scheduler_enabled: bool = False,
+) -> MergeTrainPolicy:
+    policy_payload = build_test_merge_train_policy(scheduler_enabled=scheduler_enabled).model_dump(
+        mode="json"
+    )
+    policy_payload["policies"][0]["provider_delivery_protection_expectation"] = {
+        "required_status_checks": [{"context": "build", "app_id": 100}],
+        "strict_required_status_checks_policy": True,
+        "code_scanning_tools": [],
+        "pull_request": None,
+        "allowed_merge_methods": ["merge"],
+    }
+    return MergeTrainPolicy.model_validate(policy_payload)
+
+
+def _seed_existing_merge_train_policy_record(
+    state_dir: Path,
+    record: MergeTrainPolicyRecord,
+) -> None:
+    record_directory = state_dir / "launchplane_merge_train_policies"
+    record_directory.mkdir(parents=True, exist_ok=True)
+    (record_directory / f"{record.record_id}.json").write_text(
+        record.model_dump_json(indent=2),
+        encoding="utf-8",
     )
 
 
@@ -2459,6 +2488,110 @@ class FilesystemRecordStoreTests(unittest.TestCase):
         self.assertEqual(
             [record.record_id for record in superseded_records], [first_record.record_id]
         )
+
+    def test_merge_train_policy_plain_write_cannot_seed_provider_expectations(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name))
+            protected_record = MergeTrainPolicyRecord(
+                record_id="merge-train-policy-protected",
+                source="test",
+                updated_at="2026-09-11T12:00:00Z",
+                policy=_merge_train_policy_with_provider_expectation(),
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "cannot change provider delivery protection expectations",
+            ):
+                store.write_merge_train_policy_record(protected_record)
+
+            self.assertEqual(store.list_merge_train_policy_records(), ())
+
+    def test_merge_train_policy_plain_write_cannot_supersede_active_expectation_record(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            protected_record = MergeTrainPolicyRecord(
+                record_id="merge-train-policy-protected",
+                source="governed-import",
+                updated_at="2026-09-11T12:00:00Z",
+                policy=_merge_train_policy_with_provider_expectation(),
+            )
+            _seed_existing_merge_train_policy_record(state_dir, protected_record)
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "cannot change provider delivery protection expectations",
+            ):
+                store.write_merge_train_policy_record(
+                    protected_record.model_copy(update={"status": "superseded"})
+                )
+
+            self.assertEqual(
+                store.read_merge_train_policy_record(protected_record.record_id).status, "active"
+            )
+
+    def test_merge_train_policy_plain_write_allows_same_expectation_projection(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            protected_record = MergeTrainPolicyRecord(
+                record_id="merge-train-policy-protected",
+                source="governed-import",
+                updated_at="2026-09-11T12:00:00Z",
+                policy=_merge_train_policy_with_provider_expectation(),
+            )
+            replacement_record = MergeTrainPolicyRecord(
+                record_id="merge-train-policy-scheduler-change",
+                source="test",
+                updated_at="2026-09-11T12:01:00Z",
+                policy=_merge_train_policy_with_provider_expectation(scheduler_enabled=True),
+            )
+            _seed_existing_merge_train_policy_record(state_dir, protected_record)
+
+            store.write_merge_train_policy_record(replacement_record)
+
+            self.assertEqual(
+                store.list_merge_train_policy_records(status="active"),
+                (replacement_record,),
+            )
+            self.assertEqual(
+                store.read_merge_train_policy_record(protected_record.record_id).status,
+                "superseded",
+            )
+
+    def test_merge_train_policy_bare_cas_cannot_add_provider_expectation(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name))
+            active_record = MergeTrainPolicyRecord(
+                record_id="merge-train-policy-active",
+                source="test",
+                updated_at="2026-09-11T12:00:00Z",
+                policy=build_test_merge_train_policy(),
+            )
+            replacement_record = MergeTrainPolicyRecord(
+                record_id="merge-train-policy-protected",
+                source="test",
+                updated_at="2026-09-11T12:01:00Z",
+                policy=_merge_train_policy_with_provider_expectation(),
+            )
+            store.write_merge_train_policy_record(active_record)
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "cannot change provider delivery protection expectations",
+            ):
+                store.compare_and_write_merge_train_policy_record(
+                    expected_record=active_record,
+                    replacement_record=replacement_record,
+                )
+
+            self.assertEqual(
+                store.list_merge_train_policy_records(status="active"),
+                (active_record,),
+            )
 
     def test_write_and_list_merge_train_batch_candidate_records(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
