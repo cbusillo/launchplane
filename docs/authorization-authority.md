@@ -604,6 +604,50 @@ freeze and separately reviewed pilot amendment and administrator confirmation
 remain in force. This composer is a constrained input path for an existing
 policy administrator, not a replacement bootstrap or total-lockout recovery.
 
+### Preparing Administrator Product Evidence Access
+
+The Access policy workbench can prepare the closed
+`administrator-product-evidence-read` candidate. It uses the same existing
+managed proposal authority and fresh immutable-ID administrator checks as the
+delivery-administration candidate. The server derives the requesting human and
+current policy schema; the browser supplies only the candidate, add/remove
+intent, and an idempotent source event.
+
+The isolated `operator.product-evidence-read` managed set contains only
+`product_environment.read` for that human with the `admin` role and the exact
+Launchplane context. Its product selector intentionally covers all current and
+future projects. Two rules cover the existing read API's scope forms: one for
+project-level context reads and one with the explicit all-instances selector
+for environment-level reads. Neither rule adds another action or principal.
+Other agents, other humans, writes, separate secret reads, provider operations,
+Owner acceptance, merge/deploy, and delivery activation receive no authority
+from this candidate.
+
+Preparation creates only a standard `managed-authz-policy-set` plan for review.
+The active schema (2 or 3), administrator quorum, and unrelated managed sets
+are preserved. An occupied set with another identity or shape refuses
+preparation. Already satisfied add/remove intents create no operation. Reusing
+one source event for a different candidate refuses with a conflict; replay
+must match the requested candidate and the current human across every rule.
+
+Review names the requesting administrator, both read scopes, all current and
+future projects, and the standing duration. The installed access would remain
+until a separately governed removal; the plan's **Approve by** deadline does
+not expire it. Concrete administrator confirmation, current-policy checks,
+worker execution, CAS, and read-back still govern installation. The separate
+reviewed amendment in #2058 is required, and the broader freeze remains active.
+Source delivery alone adds no access.
+
+The review keeps the access scope, duration, and approval blockers visible.
+Rule counts and policy digests remain available under **Technical details**.
+
+Removal proposes an empty fragment for only this managed set. Independently
+granted read access can remain. This capability is not a stop control, so its
+removal does not depend on stopping an activation. The separate Agent delivery
+administration set retains its own stop-before-removal requirements. Neither
+intent reads denied product data through an alternate route; normal product
+reads use their existing authorization after any approved installation.
+
 ### Inspecting Pilot Preparation Inputs
 
 The Agent delivery workbench offers **Check setup prerequisites** when preparing

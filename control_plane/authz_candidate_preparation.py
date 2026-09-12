@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Final, Literal, assert_never
 
 from control_plane.contracts.ordinary_agent_activation import (
     OrdinaryAgentDeliveryActivationRecord,
@@ -18,7 +18,9 @@ from control_plane.contracts.privileged_operation import (
 from control_plane.service_auth import GitHubHumanPolicyRule, LaunchplaneAuthzPolicy
 
 
-ORDINARY_AGENT_DELIVERY_ADMINISTRATION_CANDIDATE_ID = "ordinary-agent-delivery-administration"
+ORDINARY_AGENT_DELIVERY_ADMINISTRATION_CANDIDATE_ID: Final = (
+    "ordinary-agent-delivery-administration"
+)
 ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_SET_ID = (
     "operator.ordinary-agent-delivery-administration"
 )
@@ -35,6 +37,20 @@ ORDINARY_AGENT_DELIVERY_ADMINISTRATION_REASON = (
 )
 ORDINARY_AGENT_DELIVERY_ADMINISTRATION_RELATED_ISSUE = "#2369"
 
+ADMINISTRATOR_PRODUCT_EVIDENCE_READ_CANDIDATE_ID: Final = "administrator-product-evidence-read"
+ADMINISTRATOR_PRODUCT_EVIDENCE_READ_MANAGED_SET_ID = "operator.product-evidence-read"
+ADMINISTRATOR_PRODUCT_EVIDENCE_CONTEXT_RULE_ID = "administrator-context-reader"
+ADMINISTRATOR_PRODUCT_EVIDENCE_ENVIRONMENT_RULE_ID = "administrator-environment-reader"
+ADMINISTRATOR_PRODUCT_EVIDENCE_READ_ACTIONS = ("product_environment.read",)
+ADMINISTRATOR_PRODUCT_EVIDENCE_READ_REASON = (
+    "Prepare read-only administrator access to product evidence."
+)
+ADMINISTRATOR_PRODUCT_EVIDENCE_READ_RELATED_ISSUE = "#2058"
+
+AuthorizationCandidateId = Literal[
+    "ordinary-agent-delivery-administration",
+    "administrator-product-evidence-read",
+]
 AuthorizationCandidateIntent = Literal["add", "remove"]
 AuthorizationCandidateState = Literal["available", "active", "conflict"]
 
@@ -72,6 +88,19 @@ def _rules(policy: LaunchplaneAuthzPolicy) -> tuple[tuple[str, object], ...]:
             ("ordinary_agents", policy.ordinary_agents),
         )
         for rule in rules
+    )
+
+
+def _has_only_github_human_rules(policy: LaunchplaneAuthzPolicy) -> bool:
+    return not any(
+        principal_rules
+        for principal_rules in (
+            policy.github_actions,
+            policy.terminal_agents,
+            policy.local_operators,
+            policy.local_admins,
+            policy.ordinary_agents,
+        )
     )
 
 
@@ -245,16 +274,7 @@ def is_ordinary_agent_delivery_administration_request(
         return False
     rules = request.desired_policy.github_humans
     if not rules:
-        return not any(
-            principal_rules
-            for principal_rules in (
-                request.desired_policy.github_actions,
-                request.desired_policy.terminal_agents,
-                request.desired_policy.local_operators,
-                request.desired_policy.local_admins,
-                request.desired_policy.ordinary_agents,
-            )
-        )
+        return _has_only_github_human_rules(request.desired_policy)
     rule = rules[0]
     return (
         len(rules) == 1
@@ -269,14 +289,206 @@ def is_ordinary_agent_delivery_administration_request(
         and not rule.organizations
         and not rule.teams
         and not rule.instances
-        and not any(
-            principal_rules
-            for principal_rules in (
-                request.desired_policy.github_actions,
-                request.desired_policy.terminal_agents,
-                request.desired_policy.local_operators,
-                request.desired_policy.local_admins,
-                request.desired_policy.ordinary_agents,
-            )
+        and _has_only_github_human_rules(request.desired_policy)
+    )
+
+
+def administrator_product_evidence_read_state(
+    policy: LaunchplaneAuthzPolicy,
+    *,
+    github_id: int,
+) -> AuthorizationCandidateState:
+    if github_id < 1 or policy.schema_version not in (2, 3):
+        return "conflict"
+    managed_rules = tuple(
+        (principal_type, rule)
+        for principal_type, rule in _rules(policy)
+        if getattr(rule, "managed_set_id", None)
+        == ADMINISTRATOR_PRODUCT_EVIDENCE_READ_MANAGED_SET_ID
+    )
+    if not managed_rules:
+        return "available"
+    if len(managed_rules) != 2:
+        return "conflict"
+    rules_by_id = {
+        getattr(rule, "managed_rule_id", None): (principal_type, rule)
+        for principal_type, rule in managed_rules
+    }
+    if set(rules_by_id) != {
+        ADMINISTRATOR_PRODUCT_EVIDENCE_CONTEXT_RULE_ID,
+        ADMINISTRATOR_PRODUCT_EVIDENCE_ENVIRONMENT_RULE_ID,
+    }:
+        return "conflict"
+    for managed_rule_id, (principal_type, rule) in rules_by_id.items():
+        if managed_rule_id == ADMINISTRATOR_PRODUCT_EVIDENCE_CONTEXT_RULE_ID:
+            expected_rule_instances: tuple[str, ...] | None = ()
+        elif managed_rule_id == ADMINISTRATOR_PRODUCT_EVIDENCE_ENVIRONMENT_RULE_ID:
+            expected_rule_instances = ("*",)
+        else:
+            expected_rule_instances = None
+        if (
+            expected_rule_instances is None
+            or principal_type != "github_humans"
+            or not isinstance(rule, GitHubHumanPolicyRule)
+            or rule.github_ids != (github_id,)
+            or rule.roles != ("admin",)
+            or rule.products
+            or rule.contexts != ("launchplane",)
+            or rule.actions != ADMINISTRATOR_PRODUCT_EVIDENCE_READ_ACTIONS
+            or rule.instances != expected_rule_instances
+            or rule.logins
+            or rule.organizations
+            or rule.teams
+        ):
+            return "conflict"
+    return "active"
+
+
+def compile_administrator_product_evidence_read_candidate(
+    *,
+    current_policy: LaunchplaneAuthzPolicy,
+    github_id: int,
+    intent: AuthorizationCandidateIntent,
+) -> tuple[Literal["planned", "already_satisfied"], ManagedAuthzPolicySetProposalInput | None]:
+    state = administrator_product_evidence_read_state(current_policy, github_id=github_id)
+    if state == "conflict":
+        raise AuthorizationCandidatePreparationError(
+            "candidate_set_conflict",
+            "The authorization candidate conflicts with current policy state.",
         )
+    desired_active = intent == "add"
+    if (state == "active") == desired_active:
+        return "already_satisfied", None
+    desired_policy = LaunchplaneAuthzPolicy(
+        schema_version=current_policy.schema_version,
+        github_humans=(
+            (
+                GitHubHumanPolicyRule(
+                    managed_set_id=ADMINISTRATOR_PRODUCT_EVIDENCE_READ_MANAGED_SET_ID,
+                    managed_rule_id=ADMINISTRATOR_PRODUCT_EVIDENCE_CONTEXT_RULE_ID,
+                    github_ids=(github_id,),
+                    roles=("admin",),
+                    contexts=("launchplane",),
+                    actions=ADMINISTRATOR_PRODUCT_EVIDENCE_READ_ACTIONS,
+                ),
+                GitHubHumanPolicyRule(
+                    managed_set_id=ADMINISTRATOR_PRODUCT_EVIDENCE_READ_MANAGED_SET_ID,
+                    managed_rule_id=ADMINISTRATOR_PRODUCT_EVIDENCE_ENVIRONMENT_RULE_ID,
+                    github_ids=(github_id,),
+                    roles=("admin",),
+                    contexts=("launchplane",),
+                    instances=("*",),
+                    actions=ADMINISTRATOR_PRODUCT_EVIDENCE_READ_ACTIONS,
+                ),
+            )
+            if intent == "add"
+            else ()
+        ),
+    )
+    return (
+        "planned",
+        ManagedAuthzPolicySetProposalInput(
+            managed_set_id=ADMINISTRATOR_PRODUCT_EVIDENCE_READ_MANAGED_SET_ID,
+            desired_policy=desired_policy,
+            schema_migration="reject",
+            administrator_quorum_change=None,
+            reason=ADMINISTRATOR_PRODUCT_EVIDENCE_READ_REASON,
+            related_issue=ADMINISTRATOR_PRODUCT_EVIDENCE_READ_RELATED_ISSUE,
+        ),
+    )
+
+
+def is_administrator_product_evidence_read_request(
+    request: ManagedAuthzPolicySetProposalInput,
+) -> bool:
+    """Recognize the exact authority shape, independently of audit wording."""
+    if (
+        request.managed_set_id != ADMINISTRATOR_PRODUCT_EVIDENCE_READ_MANAGED_SET_ID
+        or request.schema_migration != "reject"
+        or request.administrator_quorum_change is not None
+        or request.desired_policy.schema_version not in (2, 3)
+        or request.desired_policy.administrator_quorum is not None
+        or not _has_only_github_human_rules(request.desired_policy)
+    ):
+        return False
+    rules = request.desired_policy.github_humans
+    if not rules:
+        return True
+    if len(rules) != 2:
+        return False
+    rules_by_id = {rule.managed_rule_id: rule for rule in rules}
+    if set(rules_by_id) != {
+        ADMINISTRATOR_PRODUCT_EVIDENCE_CONTEXT_RULE_ID,
+        ADMINISTRATOR_PRODUCT_EVIDENCE_ENVIRONMENT_RULE_ID,
+    }:
+        return False
+    github_ids = {rule.github_ids for rule in rules}
+    if len(github_ids) != 1:
+        return False
+    for managed_rule_id, rule in rules_by_id.items():
+        if managed_rule_id == ADMINISTRATOR_PRODUCT_EVIDENCE_CONTEXT_RULE_ID:
+            expected_rule_instances: tuple[str, ...] | None = ()
+        elif managed_rule_id == ADMINISTRATOR_PRODUCT_EVIDENCE_ENVIRONMENT_RULE_ID:
+            expected_rule_instances = ("*",)
+        else:
+            expected_rule_instances = None
+        if (
+            expected_rule_instances is None
+            or rule.managed_set_id != ADMINISTRATOR_PRODUCT_EVIDENCE_READ_MANAGED_SET_ID
+            or len(rule.github_ids) != 1
+            or rule.roles != ("admin",)
+            or rule.products
+            or rule.contexts != ("launchplane",)
+            or rule.actions != ADMINISTRATOR_PRODUCT_EVIDENCE_READ_ACTIONS
+            or rule.instances != expected_rule_instances
+            or rule.logins
+            or rule.organizations
+            or rule.teams
+        ):
+            return False
+    return True
+
+
+def compile_authorization_candidate(
+    *,
+    candidate_id: AuthorizationCandidateId,
+    current_policy: LaunchplaneAuthzPolicy,
+    github_id: int,
+    intent: AuthorizationCandidateIntent,
+    record_store: object,
+) -> tuple[Literal["planned", "already_satisfied"], ManagedAuthzPolicySetProposalInput | None]:
+    if candidate_id == ORDINARY_AGENT_DELIVERY_ADMINISTRATION_CANDIDATE_ID:
+        return compile_ordinary_agent_delivery_administration_candidate(
+            current_policy=current_policy,
+            github_id=github_id,
+            intent=intent,
+            record_store=record_store,
+        )
+    if candidate_id == ADMINISTRATOR_PRODUCT_EVIDENCE_READ_CANDIDATE_ID:
+        return compile_administrator_product_evidence_read_candidate(
+            current_policy=current_policy,
+            github_id=github_id,
+            intent=intent,
+        )
+    assert_never(candidate_id)
+
+
+def authorization_candidate_request_matches(
+    *,
+    candidate_id: AuthorizationCandidateId,
+    request: ManagedAuthzPolicySetProposalInput,
+    github_id: int,
+    intent: AuthorizationCandidateIntent,
+) -> bool:
+    if candidate_id == ORDINARY_AGENT_DELIVERY_ADMINISTRATION_CANDIDATE_ID:
+        recognized = is_ordinary_agent_delivery_administration_request(request)
+    elif candidate_id == ADMINISTRATOR_PRODUCT_EVIDENCE_READ_CANDIDATE_ID:
+        recognized = is_administrator_product_evidence_read_request(request)
+    else:
+        assert_never(candidate_id)
+    rules = request.desired_policy.github_humans
+    return (
+        recognized
+        and bool(rules) == (intent == "add")
+        and all(rule.github_ids == (github_id,) for rule in rules)
     )

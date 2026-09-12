@@ -177,7 +177,7 @@ export type AuthorizationCandidatePolicyProvenance = {
 };
 
 export type AuthorizationCandidatePrepareEnvelope = {
-    candidate_id: 'ordinary-agent-delivery-administration';
+    candidate_id: 'ordinary-agent-delivery-administration' | 'administrator-product-evidence-read';
     intent: 'add' | 'remove';
     source_event_id: string;
 };
@@ -2213,7 +2213,7 @@ export type PrivilegedOperationSemanticReview = {
     rollback: PrivilegedOperationSemanticReviewRollback;
     safety_class: 'secret_backed' | 'policy_admin';
     schema_version: number;
-    title: 'Managed-secret re-encryption review' | 'Managed authorization policy review' | 'Review agent delivery administration' | 'Managed merge-train policy review' | 'Review agent delivery setup' | 'Review stopping agent delivery';
+    title: 'Managed-secret re-encryption review' | 'Managed authorization policy review' | 'Review agent delivery administration' | 'Review administrator product evidence access' | 'Managed merge-train policy review' | 'Review agent delivery setup' | 'Review stopping agent delivery';
 };
 
 export type PrivilegedOperationSemanticReviewActivityEntry = {

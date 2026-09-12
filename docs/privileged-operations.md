@@ -10,11 +10,17 @@ credentials. The boundary is separate from Owner Acceptance, Agent Write
 Intents, workflow authorization, and ordinary operator mutations.
 
 The Access policy workbench includes closed candidate preparation for Agent
-delivery administration. Its add and remove controls derive the signed-in
-administrator and policy inputs on the server and create a standard managed
-authorization plan for review. They do not approve or apply it. See
+delivery administration and administrator product-evidence reads. Its add and
+remove controls derive the signed-in administrator and policy inputs on the
+server and create a standard managed authorization plan for review. They do
+not approve or apply it. See
 [Preparing Agent Delivery Administration](authorization-authority.md#preparing-agent-delivery-administration)
+and [Preparing Administrator Product Evidence Access](authorization-authority.md#preparing-administrator-product-evidence-access)
 for eligibility, collision, removal, and production-activation boundaries.
+The product-evidence candidate proposes one read capability across all current
+and future projects for the requesting administrator. Its two rules cover
+project-level and environment-level reads. That standing access still requires
+separate concrete administrator confirmation and governed installation.
 
 The Agent delivery workbench also offers a read-only preparation-input check at
 `GET /v1/privileged-operations/authorization-candidates/ordinary-agent-delivery/inputs`.
@@ -43,8 +49,9 @@ route, execute action, static execution credential, or agent execution path.
   migration mode defaults to `reject`; `migrate_v2_to_v3` is accepted only with
   a schema-v3 desired policy and remains bound into planning, replay, approval,
   and worker execution. Planning persists the proposal as operation data but
-  never writes the active authorization policy, and the existing schema-v3
-  policy-write fence still rejects apply.
+  never writes the active authorization policy. The separate policy-write
+  transition and its fences are described in the authorization authority
+  [Current Transitional Model](authorization-authority.md#current-transitional-model).
   Historical requests created before the optional
   `administrator_quorum_change` field remain readable when that value is absent
   or `null`. The default migration mode is omitted from serialized request bytes

@@ -4,15 +4,27 @@ from dataclasses import dataclass
 import unittest
 
 from control_plane.authz_candidate_preparation import (
+    ADMINISTRATOR_PRODUCT_EVIDENCE_CONTEXT_RULE_ID,
+    ADMINISTRATOR_PRODUCT_EVIDENCE_ENVIRONMENT_RULE_ID,
+    ADMINISTRATOR_PRODUCT_EVIDENCE_READ_ACTIONS,
+    ADMINISTRATOR_PRODUCT_EVIDENCE_READ_MANAGED_SET_ID,
     AuthorizationCandidatePreparationError,
     ORDINARY_AGENT_DELIVERY_ADMINISTRATION_ACTIONS,
     ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_RULE_ID,
     ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_SET_ID,
+    administrator_product_evidence_read_state,
+    compile_administrator_product_evidence_read_candidate,
     compile_ordinary_agent_delivery_administration_candidate,
+    is_administrator_product_evidence_read_request,
     is_ordinary_agent_delivery_administration_request,
     ordinary_agent_delivery_administration_state,
 )
-from control_plane.service_auth import LaunchplaneAuthzPolicy
+from control_plane.service_auth import (
+    AuthorizationTarget,
+    GitHubHumanIdentity,
+    LaunchplaneAuthzPolicy,
+    TerminalAgentIdentity,
+)
 from tests.test_ordinary_agent_activation_storage import _record, _revoked
 
 
@@ -61,6 +73,28 @@ def _exact_rule(github_id: int = 123) -> dict[str, object]:
         "contexts": ["launchplane"],
         "actions": list(ORDINARY_AGENT_DELIVERY_ADMINISTRATION_ACTIONS),
     }
+
+
+def _product_evidence_fragment(
+    *, github_id: int = 123, schema_version: int = 2
+) -> LaunchplaneAuthzPolicy:
+    current_payload = _policy().model_dump(mode="json")
+    current_payload["schema_version"] = schema_version
+    current_policy = LaunchplaneAuthzPolicy.model_validate(current_payload)
+    state, request = compile_administrator_product_evidence_read_candidate(
+        current_policy=current_policy,
+        github_id=github_id,
+        intent="add",
+    )
+    assert state == "planned" and request is not None
+    return request.desired_policy
+
+
+def _policy_with_product_evidence(*, github_id: int = 123) -> LaunchplaneAuthzPolicy:
+    payload = _policy().model_dump(mode="json")
+    fragment = _product_evidence_fragment(github_id=github_id)
+    payload["github_humans"].extend(rule.model_dump(mode="json") for rule in fragment.github_humans)
+    return LaunchplaneAuthzPolicy.model_validate(payload)
 
 
 class AuthorizationCandidateCompilerTests(unittest.TestCase):
@@ -239,3 +273,229 @@ class AuthorizationCandidateCompilerTests(unittest.TestCase):
                     {**request.model_dump(mode="json"), **change}
                 )
                 self.assertFalse(is_ordinary_agent_delivery_administration_request(modified))
+
+
+class AdministratorProductEvidenceCandidateCompilerTests(unittest.TestCase):
+    def test_add_compiles_both_read_scopes_for_all_products_and_preserves_schema(self) -> None:
+        for schema_version in (2, 3):
+            with self.subTest(schema_version=schema_version):
+                current_payload = _policy().model_dump(mode="json")
+                current_payload["schema_version"] = schema_version
+                state, request = compile_administrator_product_evidence_read_candidate(
+                    current_policy=LaunchplaneAuthzPolicy.model_validate(current_payload),
+                    github_id=123,
+                    intent="add",
+                )
+                self.assertEqual(state, "planned")
+                assert request is not None
+                self.assertEqual(request.schema_migration, "reject")
+                self.assertIsNone(request.administrator_quorum_change)
+                fragment = request.desired_policy
+                self.assertEqual(fragment.schema_version, schema_version)
+                self.assertEqual(len(fragment.github_humans), 2)
+                self.assertFalse(
+                    fragment.github_actions
+                    or fragment.terminal_agents
+                    or fragment.local_operators
+                    or fragment.local_admins
+                    or fragment.ordinary_agents
+                )
+                rules = {rule.managed_rule_id: rule for rule in fragment.github_humans}
+                self.assertEqual(
+                    set(rules),
+                    {
+                        ADMINISTRATOR_PRODUCT_EVIDENCE_CONTEXT_RULE_ID,
+                        ADMINISTRATOR_PRODUCT_EVIDENCE_ENVIRONMENT_RULE_ID,
+                    },
+                )
+                self.assertEqual(
+                    rules[ADMINISTRATOR_PRODUCT_EVIDENCE_CONTEXT_RULE_ID].instances,
+                    (),
+                )
+                self.assertEqual(
+                    rules[ADMINISTRATOR_PRODUCT_EVIDENCE_ENVIRONMENT_RULE_ID].instances,
+                    ("*",),
+                )
+                for rule in rules.values():
+                    self.assertEqual(rule.github_ids, (123,))
+                    self.assertEqual(rule.roles, ("admin",))
+                    self.assertEqual(rule.products, ())
+                    self.assertEqual(rule.contexts, ("launchplane",))
+                    self.assertEqual(rule.actions, ADMINISTRATOR_PRODUCT_EVIDENCE_READ_ACTIONS)
+                    self.assertFalse(rule.logins or rule.organizations or rule.teams)
+
+                identity = GitHubHumanIdentity(
+                    login="administrator",
+                    github_id=123,
+                    name="Administrator",
+                    email="administrator@example.com",
+                    organizations=frozenset(),
+                    teams=frozenset(),
+                    role="admin",
+                )
+                self.assertTrue(
+                    fragment.allows(
+                        identity=identity,
+                        action="product_environment.read",
+                        product="future-product",
+                        context="launchplane",
+                        target=AuthorizationTarget(scope="context"),
+                    )
+                )
+                self.assertTrue(
+                    fragment.allows(
+                        identity=identity,
+                        action="product_environment.read",
+                        product="future-product",
+                        context="launchplane",
+                        target=AuthorizationTarget(scope="instance", instances=("prod",)),
+                    )
+                )
+
+                denied_cases = (
+                    (
+                        GitHubHumanIdentity(
+                            login="other",
+                            github_id=456,
+                            name="Other Administrator",
+                            email="other@example.com",
+                            organizations=frozenset(),
+                            teams=frozenset(),
+                            role="admin",
+                        ),
+                        "product_environment.read",
+                        "launchplane",
+                    ),
+                    (
+                        TerminalAgentIdentity(subject="agent:other", token_label="other"),
+                        "product_environment.read",
+                        "launchplane",
+                    ),
+                    (
+                        GitHubHumanIdentity(
+                            login="administrator",
+                            github_id=123,
+                            name="Administrator",
+                            email="administrator@example.com",
+                            organizations=frozenset(),
+                            teams=frozenset(),
+                            role="read_only",
+                        ),
+                        "product_environment.read",
+                        "launchplane",
+                    ),
+                    (identity, "product_config.apply", "launchplane"),
+                    (identity, "product_environment.read", "other-context"),
+                )
+                for denied_identity, action, context in denied_cases:
+                    with self.subTest(action=action, context=context):
+                        self.assertFalse(
+                            fragment.allows(
+                                identity=denied_identity,
+                                action=action,
+                                product="future-product",
+                                context=context,
+                                target=AuthorizationTarget(scope="context"),
+                            )
+                        )
+
+    def test_exact_set_add_remove_and_noops_are_isolated(self) -> None:
+        active = _policy_with_product_evidence()
+        self.assertEqual(
+            administrator_product_evidence_read_state(active, github_id=123),
+            "active",
+        )
+        add_state, add_request = compile_administrator_product_evidence_read_candidate(
+            current_policy=active,
+            github_id=123,
+            intent="add",
+        )
+        absent_state, absent_request = compile_administrator_product_evidence_read_candidate(
+            current_policy=_policy(),
+            github_id=123,
+            intent="remove",
+        )
+        remove_state, remove_request = compile_administrator_product_evidence_read_candidate(
+            current_policy=active,
+            github_id=123,
+            intent="remove",
+        )
+
+        self.assertEqual((add_state, add_request), ("already_satisfied", None))
+        self.assertEqual((absent_state, absent_request), ("already_satisfied", None))
+        self.assertEqual(remove_state, "planned")
+        assert remove_request is not None
+        self.assertEqual(
+            remove_request.managed_set_id, ADMINISTRATOR_PRODUCT_EVIDENCE_READ_MANAGED_SET_ID
+        )
+        self.assertEqual(remove_request.desired_policy.github_humans, ())
+        self.assertTrue(is_administrator_product_evidence_read_request(remove_request))
+
+    def test_collision_and_schema_one_fail_closed_while_unrelated_overlap_is_allowed(self) -> None:
+        occupied = _policy_with_product_evidence(github_id=456)
+        malformed_payload = _policy_with_product_evidence().model_dump(mode="json")
+        malformed_payload["github_humans"][-1]["contexts"] = ["other-context"]
+        malformed = LaunchplaneAuthzPolicy.model_validate(malformed_payload)
+        for policy in (occupied, malformed, LaunchplaneAuthzPolicy(schema_version=1)):
+            with self.subTest(policy=policy):
+                with self.assertRaises(AuthorizationCandidatePreparationError) as caught:
+                    compile_administrator_product_evidence_read_candidate(
+                        current_policy=policy,
+                        github_id=123,
+                        intent="add",
+                    )
+                self.assertEqual(caught.exception.reason_code, "candidate_set_conflict")
+
+        overlap_payload = _policy().model_dump(mode="json")
+        overlap_payload["terminal_agents"] = [
+            {
+                "managed_set_id": "unrelated.product-reader",
+                "managed_rule_id": "unrelated-reader",
+                "subjects": ["agent:reader"],
+                "actions": ["product_environment.read"],
+            }
+        ]
+        overlap = LaunchplaneAuthzPolicy.model_validate(overlap_payload)
+        state, request = compile_administrator_product_evidence_read_candidate(
+            current_policy=overlap,
+            github_id=123,
+            intent="add",
+        )
+        self.assertEqual(state, "planned")
+        self.assertIsNotNone(request)
+
+    def test_recognizer_rejects_tampering_and_rules_for_different_humans(self) -> None:
+        fragment = _product_evidence_fragment()
+        _, request = compile_administrator_product_evidence_read_candidate(
+            current_policy=_policy(),
+            github_id=123,
+            intent="add",
+        )
+        assert request is not None
+        self.assertTrue(is_administrator_product_evidence_read_request(request))
+        self.assertTrue(
+            is_administrator_product_evidence_read_request(
+                request.model_copy(
+                    update={
+                        "reason": "A different explanation for the same read capability.",
+                        "related_issue": "#999",
+                    }
+                )
+            )
+        )
+        for index, change in (
+            (0, {"github_ids": (456,)}),
+            (0, {"actions": ("driver.read",)}),
+            (1, {"contexts": ("other-context",)}),
+        ):
+            with self.subTest(index=index, change=change):
+                changed_rules = list(fragment.github_humans)
+                changed_rules[index] = changed_rules[index].model_copy(update=change)
+                changed_request = request.model_copy(
+                    update={
+                        "desired_policy": fragment.model_copy(
+                            update={"github_humans": tuple(changed_rules)}
+                        )
+                    }
+                )
+                self.assertFalse(is_administrator_product_evidence_read_request(changed_request))

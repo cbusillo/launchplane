@@ -659,26 +659,27 @@ export type PrivilegedOperationDescriptorId = NonNullable<
   ListHumanPrivilegedOperationsData["query"]
 >["descriptor_id"];
 
+export type AuthorizationCandidateId =
+  PrepareAuthorizationCandidateData["body"]["candidate_id"];
+
 export type AuthorizationCandidateIntent =
   PrepareAuthorizationCandidateData["body"]["intent"];
 
 export function prepareAuthorizationCandidate(
+  candidateId: AuthorizationCandidateId,
   intent: AuthorizationCandidateIntent,
   sourceEventId: string,
   signal?: AbortSignal,
 ): Promise<PrepareAuthorizationCandidateResponse> {
-  const request: PrepareAuthorizationCandidateData = {
-    url: BROWSER_WRITE_ROUTES.authorizationCandidatePrepare,
-    body: {
-      candidate_id: "ordinary-agent-delivery-administration",
-      intent,
-      source_event_id: sourceEventId,
-    },
-  };
+  const body = {
+    candidate_id: candidateId,
+    intent,
+    source_event_id: sourceEventId,
+  } satisfies PrepareAuthorizationCandidateData["body"];
   return requestJson<PrepareAuthorizationCandidateResponse>(
-    request.url,
+    BROWSER_WRITE_ROUTES.authorizationCandidatePrepare,
     "POST",
-    request.body,
+    body,
     signal,
   );
 }

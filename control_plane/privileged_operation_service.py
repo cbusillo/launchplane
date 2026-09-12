@@ -46,6 +46,7 @@ from control_plane.contracts.privileged_operation import (
     privileged_operation_request_digest_candidates,
 )
 from control_plane.authz_candidate_preparation import (
+    is_administrator_product_evidence_read_request,
     is_ordinary_agent_delivery_administration_request,
 )
 from control_plane.contracts.ordinary_agent_activation import (
@@ -502,25 +503,49 @@ def _build_privileged_operation_semantic_review(
                 == (record.requested_by.github_id,)
             )
         )
-        delivery_administration_add = bool(record.request.desired_policy.github_humans)
-        authz_review_title: PrivilegedOperationSemanticReviewTitle = (
-            "Review agent delivery administration"
-            if is_delivery_administration
-            else "Managed authorization policy review"
+        is_product_evidence_read = is_administrator_product_evidence_read_request(
+            record.request
+        ) and (
+            not record.request.desired_policy.github_humans
+            or (
+                record.requested_by.identity_type == "github_human"
+                and all(
+                    rule.github_ids == (record.requested_by.github_id,)
+                    for rule in record.request.desired_policy.github_humans
+                )
+            )
         )
-        authz_change_summary = (
-            (
+        adds_candidate_access = bool(record.request.desired_policy.github_humans)
+        if is_delivery_administration:
+            authz_review_title: PrivilegedOperationSemanticReviewTitle = (
+                "Review agent delivery administration"
+            )
+            authz_change_summary = (
                 "Allow the requesting pilot administrator to set up, review, approve, "
                 "and stop agent delivery. This standing access remains until removed; "
                 "it does not enroll an agent, start delivery, merge, or deploy."
-                if delivery_administration_add
+                if adds_candidate_access
                 else "Remove the pilot administrator's ability to set up, "
                 "review, approve, and stop agent delivery. This does not stop an "
                 "existing delivery setup, merge, or deploy."
             )
-            if is_delivery_administration
-            else "Managed authorization rules would be reconciled by exact policy CAS."
-        )
+        elif is_product_evidence_read:
+            authz_review_title = "Review administrator product evidence access"
+            authz_change_summary = (
+                "Allow the requesting administrator account to read project-level and "
+                "environment-level product evidence for all current and future projects. This "
+                "read-only access is standing until a separately governed removal; the Approve-by "
+                "deadline only bounds this plan. It grants no writes or agent authority."
+                if adds_candidate_access
+                else "Remove this candidate's read-only administrator access to project-level "
+                "and environment-level product evidence. Access granted elsewhere may remain; "
+                "this grants no writes or agent authority."
+            )
+        else:
+            authz_review_title = "Managed authorization policy review"
+            authz_change_summary = (
+                "Managed authorization rules would be reconciled by exact policy CAS."
+            )
         return PrivilegedOperationSemanticReview(
             operation_id=record.operation_id,
             descriptor_id=record.descriptor_id,
