@@ -11,7 +11,7 @@ from control_plane.contracts.runtime_environment_record import RuntimeEnvironmen
 from control_plane.contracts.secret_record import SecretBinding
 from control_plane.product_onboarding_service import build_product_onboarding_service_result
 from control_plane.storage.product_authority_bundle import ProductAuthorityBundle
-from control_plane.workflows.product_onboarding import apply_product_onboarding_manifest
+from control_plane.workflows.product_onboarding import plan_product_onboarding_authority_bundle
 
 
 class _ProductOnboardingStore:
@@ -93,6 +93,8 @@ class _ProductOnboardingStore:
             self.write_provider_target_record(provider_target_write.record)
         for runtime_record in bundle.runtime_environments:
             self.write_runtime_environment_record(runtime_record)
+        for runtime_write in bundle.runtime_environment_writes:
+            self.write_runtime_environment_record(runtime_write.record)
         for binding in bundle.secret_bindings:
             self.write_secret_binding(binding)
 
@@ -147,7 +149,13 @@ class ProductOnboardingServiceTests(unittest.TestCase):
             }
         )
         store = _ProductOnboardingStore()
-        onboarding_result = apply_product_onboarding_manifest(record_store=store, manifest=manifest)
+        onboarding_result, bundle = plan_product_onboarding_authority_bundle(
+            record_store=store, manifest=manifest
+        )
+        self.assertEqual(bundle.runtime_environments, ())
+        self.assertEqual(len(bundle.runtime_environment_writes), 1)
+        self.assertTrue(bundle.runtime_environment_writes[0].expected_absent)
+        store.write_product_authority_bundle(bundle)
 
         result, driver_result = build_product_onboarding_service_result(onboarding_result)
 

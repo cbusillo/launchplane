@@ -2171,7 +2171,10 @@ return a typed blocked result rather than guessing a domain.
   policy allows the requested binding. Apply commits through a product
   authority bundle, so runtime-environment records, managed-secret versions,
   current secret pointers, bindings, audit events, and idempotency completion
-  publish together or roll back together. When apply changes
+  publish together or roll back together. An intervening runtime change produces
+  `409 runtime_environment_conflict` without a partial apply. Retry using current
+  configuration and the existing authority and idempotency flow. Onboarding
+  and explicit runtime repair commands use the same stale-write guard. When apply changes
   runtime-environment keys for a tracked Dokploy target, the response includes a
   required `live_target_runtime_apply` `next_actions` item. Treat
   product-config apply as a record mutation only until that next action has

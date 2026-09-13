@@ -21,6 +21,11 @@ from control_plane.contracts.runtime_environment_record import (
     ScalarValue,
 )
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.storage.product_authority_bundle import (
+    ProductAuthorityBundle,
+    RuntimeEnvironmentConflictError,
+    RuntimeEnvironmentWrite,
+)
 from control_plane.tracked_target_logs import build_tracked_target_logs_payload
 from control_plane.runtime_key_safety import is_secret_shaped_runtime_key
 from control_plane.workflows.ship import utc_now_timestamp
@@ -90,7 +95,11 @@ def environments_put(
             assignments=assignments,
             source_label=source_label,
         )
-        postgres_store.write_runtime_environment_record(record)
+        _write_runtime_environment_record_with_expectation(
+            postgres_store=postgres_store,
+            record=record,
+            existing_records=existing_records,
+        )
     finally:
         postgres_store.close()
     click.echo(
@@ -146,7 +155,11 @@ def environments_unset(
             keys=keys,
             source_label=source_label,
         )
-        postgres_store.write_runtime_environment_record(record)
+        _write_runtime_environment_record_with_expectation(
+            postgres_store=postgres_store,
+            record=record,
+            existing_records=existing_records,
+        )
     finally:
         postgres_store.close()
     click.echo(
@@ -298,7 +311,11 @@ def environments_relabel(
             instance_name=instance_name.strip(),
             source_label=source_label,
         )
-        postgres_store.write_runtime_environment_record(record)
+        _write_runtime_environment_record_with_expectation(
+            postgres_store=postgres_store,
+            record=record,
+            existing_records=existing_records,
+        )
     finally:
         postgres_store.close()
     click.echo(
@@ -536,6 +553,37 @@ def _runtime_environment_record_matches(
         and record.context == context_name
         and record.instance == instance_name
     )
+
+
+def _write_runtime_environment_record_with_expectation(
+    *,
+    postgres_store: PostgresRecordStore,
+    record: RuntimeEnvironmentRecord,
+    existing_records: tuple[RuntimeEnvironmentRecord, ...],
+) -> None:
+    expected_record = _find_runtime_environment_record(
+        existing_records=existing_records,
+        scope=record.scope,
+        context_name=record.context,
+        instance_name=record.instance,
+    )
+    try:
+        postgres_store.write_product_authority_bundle(
+            ProductAuthorityBundle(
+                runtime_environment_writes=(
+                    RuntimeEnvironmentWrite(
+                        record=record,
+                        expected_record=expected_record,
+                        expected_absent=expected_record is None,
+                    ),
+                ),
+            )
+        )
+    except RuntimeEnvironmentConflictError as error:
+        raise click.ClickException(
+            "Runtime environment record changed before write could complete; "
+            "re-run after reviewing the current record."
+        ) from error
 
 
 def _build_runtime_environment_record_for_put(

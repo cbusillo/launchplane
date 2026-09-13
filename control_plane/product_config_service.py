@@ -25,6 +25,7 @@ from control_plane.runtime_key_safety import (
 )
 from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyTarget
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.storage.product_authority_bundle import RuntimeEnvironmentConflictError
 
 
 @dataclass(frozen=True)
@@ -132,13 +133,22 @@ def apply_product_config_service_request(
             ),
             None,
         )
-    except control_plane_product_config.ProductConfigError as error:
+    except (
+        control_plane_product_config.ProductConfigError,
+        RuntimeEnvironmentConflictError,
+    ) as error:
         return None, product_config_service_error(error)
 
 
 def product_config_service_error(
-    error: control_plane_product_config.ProductConfigError,
+    error: control_plane_product_config.ProductConfigError | RuntimeEnvironmentConflictError,
 ) -> ProductConfigServiceError:
+    if isinstance(error, RuntimeEnvironmentConflictError):
+        return ProductConfigServiceError(
+            status_code=409,
+            code="runtime_environment_conflict",
+            message="Runtime configuration changed before commit. Retry using current configuration.",
+        )
     error_code = error.code
     error_message = "Product config request failed validation."
     status_code = 400

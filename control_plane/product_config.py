@@ -26,6 +26,7 @@ from control_plane.runtime_key_safety import (
 )
 from control_plane.storage.product_authority_bundle import ProductAuthorityBundle
 from control_plane.storage.product_authority_bundle import ProductAuthorityBundleStore
+from control_plane.storage.product_authority_bundle import RuntimeEnvironmentWrite
 from control_plane.workflows.ship import utc_now_timestamp
 
 
@@ -200,8 +201,9 @@ def plan_product_config_authority_bundle(
     secrets = tuple(cast(list[dict[str, object]], normalized_payload["secrets"]))
     _require_product_config_master_key_if_needed(secrets)
 
+    existing_runtime_records = record_store.list_runtime_environment_records()
     runtime_record, runtime_summary = _plan_product_config_runtime_environment(
-        existing_records=record_store.list_runtime_environment_records(),
+        existing_records=existing_runtime_records,
         scope=str(runtime_input["scope"]),
         context_name=str(runtime_input["context"]),
         instance_name=str(runtime_input["instance"]),
@@ -266,13 +268,26 @@ def plan_product_config_authority_bundle(
                 secret_id=existing_secret_id,
             )
         )
-    runtime_records: tuple[RuntimeEnvironmentRecord, ...] = ()
-    if apply_changes and runtime_record is not None and runtime_summary["action"] != "unchanged":
-        runtime_records = (runtime_record,)
-        runtime_summary = {
-            **runtime_summary,
-            "record": summarize_runtime_environment_record(runtime_record),
-        }
+    runtime_environment_writes: tuple[RuntimeEnvironmentWrite, ...] = ()
+    if apply_changes and runtime_record is not None:
+        expected_record = _find_runtime_environment_record(
+            existing_records=existing_runtime_records,
+            scope=runtime_record.scope,
+            context_name=runtime_record.context,
+            instance_name=runtime_record.instance,
+        )
+        runtime_environment_writes = (
+            RuntimeEnvironmentWrite(
+                record=runtime_record,
+                expected_record=expected_record,
+                expected_absent=expected_record is None,
+            ),
+        )
+        if runtime_summary["action"] != "unchanged":
+            runtime_summary = {
+                **runtime_summary,
+                "record": summarize_runtime_environment_record(runtime_record),
+            }
 
     changed_secret_count = sum(
         1 for item in secret_summaries if item["action"] in {"created", "rotated"}
@@ -296,7 +311,7 @@ def plan_product_config_authority_bundle(
         },
     }
     bundle = ProductAuthorityBundle(
-        runtime_environments=runtime_records,
+        runtime_environment_writes=runtime_environment_writes,
         secret_versions=tuple(secret_versions),
         secret_records=tuple(secret_records),
         secret_bindings=tuple(secret_bindings),
@@ -913,13 +928,17 @@ def _plan_product_config_runtime_environment(
         action = "unchanged"
     planned_values: dict[str, ScalarValue] = dict(current_values)
     planned_values.update(env)
-    planned_record = RuntimeEnvironmentRecord(
-        scope=cast(RuntimeEnvironmentScope, scope),
-        context=context_name,
-        instance=instance_name,
-        env=planned_values,
-        updated_at=utc_now_timestamp(),
-        source_label=source_label.strip() or "product-config-apply",
+    planned_record = (
+        target_record
+        if not changed_keys and target_record is not None
+        else RuntimeEnvironmentRecord(
+            scope=cast(RuntimeEnvironmentScope, scope),
+            context=context_name,
+            instance=instance_name,
+            env=planned_values,
+            updated_at=utc_now_timestamp(),
+            source_label=source_label.strip() or "product-config-apply",
+        )
     )
     return (
         planned_record,

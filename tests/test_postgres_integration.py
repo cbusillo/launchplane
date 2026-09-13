@@ -154,6 +154,7 @@ from control_plane.contracts.route_binding_record import (
     RouteBindingTls,
 )
 from control_plane.contracts.runtime_identity import RuntimeIdentity
+from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.repository_inventory import RepositoryInventoryRecord
 from control_plane.contracts.tenant_merge_eligibility import (
     TenantRepositoryClassificationRecord,
@@ -235,7 +236,11 @@ from tests.test_product_retirement import _plan as _retirement_plan
 from tests.test_detached_application_retirement import (
     _plan as _detached_application_retirement_plan,
 )
-from control_plane.storage.product_authority_bundle import ProductAuthorityBundle
+from control_plane.storage.product_authority_bundle import (
+    ProductAuthorityBundle,
+    RuntimeEnvironmentConflictError,
+    RuntimeEnvironmentWrite,
+)
 from control_plane.storage.schema_invariants import (
     AUTHZ_COMPATIBILITY_FLOOR_REVISION,
     EXPECTED_ALEMBIC_HEAD_REVISION,
@@ -4972,6 +4977,102 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
         self.assertEqual(first.delivery_id, delivery.delivery_id)
         self.assertEqual(second.delivery_id, delivery.delivery_id)
         self.assertEqual([row.delivery_id for row in rows], [delivery.delivery_id])
+
+    def test_runtime_environment_guard_serializes_two_connections(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            original = RuntimeEnvironmentRecord(
+                scope="instance",
+                context="runtime-cas-product",
+                instance="prod",
+                env={"EXISTING_KEY": "original"},
+                updated_at="2026-07-01T00:00:00Z",
+                source_label="postgres-integration:seed",
+            )
+            replacements = {
+                "first": original.model_copy(
+                    update={
+                        "env": {**original.env, "FIRST_KEY": "first"},
+                        "updated_at": "2026-07-01T00:01:00Z",
+                        "source_label": "postgres-integration:first",
+                    }
+                ),
+                "second": original.model_copy(
+                    update={
+                        "env": {**original.env, "SECOND_KEY": "second"},
+                        "updated_at": "2026-07-01T00:02:00Z",
+                        "source_label": "postgres-integration:second",
+                    }
+                ),
+            }
+            store.write_runtime_environment_record(original)
+            second_store = PostgresRecordStore(database_url=store.database_url)
+            start_barrier = threading.Barrier(2)
+
+            def write_guarded(
+                active_store: PostgresRecordStore,
+                label: str,
+            ) -> tuple[str, str]:
+                trace_id = f"trace-runtime-cas-{label}"
+                idempotency_record = LaunchplaneIdempotencyRecord(
+                    record_id=build_launchplane_idempotency_record_id(response_trace_id=trace_id),
+                    scope="test-suite",
+                    route_path="/v1/test/runtime-cas",
+                    idempotency_key=f"runtime-cas-{label}",
+                    request_fingerprint=f"runtime-cas-fingerprint-{label}",
+                    response_status_code=202,
+                    response_trace_id=trace_id,
+                    recorded_at="2026-07-01T00:03:00Z",
+                    response_payload={"status": "accepted", "trace_id": trace_id},
+                )
+                start_barrier.wait(timeout=5)
+                try:
+                    active_store.write_product_authority_bundle(
+                        ProductAuthorityBundle(
+                            runtime_environment_writes=(
+                                RuntimeEnvironmentWrite(
+                                    record=replacements[label],
+                                    expected_record=original,
+                                ),
+                            ),
+                            idempotency_record=idempotency_record,
+                        )
+                    )
+                except RuntimeEnvironmentConflictError:
+                    return label, "conflict"
+                return label, "written"
+
+            try:
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    first_future = executor.submit(write_guarded, store, "first")
+                    second_future = executor.submit(write_guarded, second_store, "second")
+                    results = dict(
+                        (
+                            first_future.result(timeout=10),
+                            second_future.result(timeout=10),
+                        )
+                    )
+                loaded = store.list_runtime_environment_records(
+                    scope="instance",
+                    context_name="runtime-cas-product",
+                    instance_name="prod",
+                )
+                idempotency_records = {
+                    label: store.read_idempotency_record(
+                        scope="test-suite",
+                        route_path="/v1/test/runtime-cas",
+                        idempotency_key=f"runtime-cas-{label}",
+                    )
+                    for label in replacements
+                }
+            finally:
+                second_store.close()
+
+        self.assertEqual(sorted(results.values()), ["conflict", "written"])
+        winner = next(label for label, result in results.items() if result == "written")
+        loser = next(label for label, result in results.items() if result == "conflict")
+        self.assertEqual(loaded, (replacements[winner],))
+        self.assertIsNotNone(idempotency_records[winner])
+        self.assertIsNone(idempotency_records[loser])
 
     def test_lane_summary_waits_for_authority_bundle_commit(self) -> None:
         with _store_for_fresh_head_database() as store:

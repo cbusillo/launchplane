@@ -31,7 +31,9 @@ from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.storage.product_authority_bundle import (
     ProductAuthorityBundle,
     ProviderTargetWrite,
+    RuntimeEnvironmentConflictError,
     RuntimeEnvironmentDelete,
+    RuntimeEnvironmentWrite,
 )
 
 
@@ -417,6 +419,279 @@ def _assert_write_bundle_absent(
 
 
 class ProductAuthorityBundleTransactionTests(unittest.TestCase):
+    def test_runtime_environment_write_requires_one_matching_expectation(self) -> None:
+        record = _runtime_environment()
+
+        with self.assertRaisesRegex(ValueError, "exactly one current-record expectation"):
+            RuntimeEnvironmentWrite(record=record)
+        with self.assertRaisesRegex(ValueError, "exactly one current-record expectation"):
+            RuntimeEnvironmentWrite(
+                record=record,
+                expected_record=record,
+                expected_absent=True,
+            )
+        with self.assertRaisesRegex(ValueError, "must identify the same route"):
+            RuntimeEnvironmentWrite(
+                record=record,
+                expected_record=_runtime_environment(context="another-product"),
+            )
+
+    def test_authority_bundle_rejects_overlapping_runtime_environment_routes(self) -> None:
+        record = _runtime_environment()
+        guarded_write = RuntimeEnvironmentWrite(record=record, expected_absent=True)
+        delete = RuntimeEnvironmentDelete(
+            expected_record=record,
+            event=_runtime_delete_event(record),
+        )
+        invalid_bundles = (
+            ProductAuthorityBundle.model_construct(
+                runtime_environment_writes=(guarded_write, guarded_write),
+            ),
+            ProductAuthorityBundle.model_construct(
+                runtime_environment_writes=(guarded_write,),
+                runtime_environments=(record,),
+            ),
+            ProductAuthorityBundle.model_construct(
+                runtime_environment_writes=(guarded_write,),
+                delete_runtime_environments=(delete,),
+            ),
+            ProductAuthorityBundle.model_construct(
+                runtime_environments=(record,),
+                delete_runtime_environments=(delete,),
+            ),
+        )
+
+        for bundle in invalid_bundles:
+            with (
+                self.subTest(bundle=bundle),
+                self.assertRaisesRegex(ValueError, "duplicate guarded routes|overlapping routes"),
+            ):
+                ProductAuthorityBundle.model_validate(bundle.model_dump(mode="json"))
+
+    def test_guarded_runtime_environment_write_rejects_stale_bundle_atomically(self) -> None:
+        for store_factory in (
+            lambda root: _FailingPostgresRecordStore(
+                database_url=_sqlite_database_url(root / "launchplane.sqlite3")
+            ),
+            lambda root: FilesystemRecordStore(root),
+        ):
+            with self.subTest(store=store_factory), TemporaryDirectory() as temporary_dir:
+                root = Path(temporary_dir)
+                store = store_factory(root)
+                if isinstance(store, PostgresRecordStore):
+                    store.ensure_schema()
+                original = _runtime_environment()
+                concurrent = original.model_copy(
+                    update={
+                        "env": {"EXAMPLE_MODE": "replaced"},
+                        "updated_at": "2026-07-01T00:01:00Z",
+                        "source_label": "test:concurrent",
+                    }
+                )
+                planned = original.model_copy(
+                    update={
+                        "env": {**original.env, "INSPECTION_APP_ID": "12345"},
+                        "updated_at": "2026-07-01T00:02:00Z",
+                        "source_label": "test:planned",
+                    }
+                )
+                store.write_runtime_environment_record(original)
+                store.write_runtime_environment_record(concurrent)
+
+                with self.assertRaisesRegex(
+                    RuntimeEnvironmentConflictError,
+                    "Runtime environment changed after authority bundle planning",
+                ):
+                    store.write_product_authority_bundle(
+                        ProductAuthorityBundle(
+                            product_profiles=(_product_profile(),),
+                            runtime_environment_writes=(
+                                RuntimeEnvironmentWrite(
+                                    record=planned,
+                                    expected_record=original,
+                                ),
+                            ),
+                            secret_versions=(_secret_version(),),
+                            secret_records=(_secret_record(),),
+                            secret_bindings=(_secret_binding(),),
+                            secret_audit_events=(_secret_audit_event(),),
+                            idempotency_record=_idempotency_record(),
+                        )
+                    )
+
+                self.assertEqual(store.list_runtime_environment_records(), (concurrent,))
+                self.assertEqual(store.list_product_profile_records(), ())
+                self.assertEqual(store.list_secret_versions(secret_id="secret-example"), ())
+                self.assertEqual(store.list_secret_records(), ())
+                self.assertEqual(store.list_secret_bindings(), ())
+                self.assertEqual(store.list_secret_audit_events(secret_id="secret-example"), ())
+                self.assertIsNone(
+                    store.read_idempotency_record(
+                        scope="test-suite",
+                        route_path="/v1/test/authority-bundle/apply",
+                        idempotency_key="authority-bundle-key",
+                    )
+                )
+                close_store = getattr(store, "close", None)
+                if callable(close_store):
+                    close_store()
+
+    def test_guarded_runtime_environment_write_rejects_scalar_type_change(self) -> None:
+        for store_factory in (
+            lambda root: _FailingPostgresRecordStore(
+                database_url=_sqlite_database_url(root / "launchplane.sqlite3")
+            ),
+            lambda root: FilesystemRecordStore(root),
+        ):
+            for concurrent_value in (1, 1.0):
+                with (
+                    self.subTest(store=store_factory, concurrent_value=concurrent_value),
+                    TemporaryDirectory() as temporary_dir,
+                ):
+                    root = Path(temporary_dir)
+                    store = store_factory(root)
+                    if isinstance(store, PostgresRecordStore):
+                        store.ensure_schema()
+                    original = _runtime_environment().model_copy(
+                        update={"env": {"TYPE_SENSITIVE_VALUE": True}}
+                    )
+                    concurrent = original.model_copy(
+                        update={"env": {"TYPE_SENSITIVE_VALUE": concurrent_value}}
+                    )
+                    planned = original.model_copy(
+                        update={
+                            "env": {
+                                **original.env,
+                                "INSPECTION_APP_ID": "12345",
+                            }
+                        }
+                    )
+                    store.write_runtime_environment_record(concurrent)
+
+                    with self.assertRaises(RuntimeEnvironmentConflictError):
+                        store.write_product_authority_bundle(
+                            ProductAuthorityBundle(
+                                runtime_environment_writes=(
+                                    RuntimeEnvironmentWrite(
+                                        record=planned,
+                                        expected_record=original,
+                                    ),
+                                )
+                            )
+                        )
+
+                    self.assertEqual(
+                        store.list_runtime_environment_records(),
+                        (concurrent,),
+                    )
+                    close_store = getattr(store, "close", None)
+                    if callable(close_store):
+                        close_store()
+
+    def test_guarded_runtime_environment_write_rejects_intervening_create(self) -> None:
+        for store_factory in (
+            lambda root: _FailingPostgresRecordStore(
+                database_url=_sqlite_database_url(root / "launchplane.sqlite3")
+            ),
+            lambda root: FilesystemRecordStore(root),
+        ):
+            with self.subTest(store=store_factory), TemporaryDirectory() as temporary_dir:
+                root = Path(temporary_dir)
+                store = store_factory(root)
+                if isinstance(store, PostgresRecordStore):
+                    store.ensure_schema()
+                concurrent = _runtime_environment().model_copy(
+                    update={"source_label": "test:concurrent"}
+                )
+                planned = _runtime_environment().model_copy(
+                    update={"env": {"INSPECTION_APP_ID": "12345"}}
+                )
+                store.write_runtime_environment_record(concurrent)
+
+                with self.assertRaises(RuntimeEnvironmentConflictError):
+                    store.write_product_authority_bundle(
+                        ProductAuthorityBundle(
+                            runtime_environment_writes=(
+                                RuntimeEnvironmentWrite(record=planned, expected_absent=True),
+                            )
+                        )
+                    )
+
+                self.assertEqual(store.list_runtime_environment_records(), (concurrent,))
+                close_store = getattr(store, "close", None)
+                if callable(close_store):
+                    close_store()
+
+    def test_guarded_runtime_environment_write_creates_when_expected_absent(self) -> None:
+        for store_factory in (
+            lambda root: _FailingPostgresRecordStore(
+                database_url=_sqlite_database_url(root / "launchplane.sqlite3")
+            ),
+            lambda root: FilesystemRecordStore(root),
+        ):
+            with self.subTest(store=store_factory), TemporaryDirectory() as temporary_dir:
+                root = Path(temporary_dir)
+                store = store_factory(root)
+                if isinstance(store, PostgresRecordStore):
+                    store.ensure_schema()
+                planned = _runtime_environment().model_copy(
+                    update={"env": {"INSPECTION_APP_ID": "12345"}}
+                )
+
+                store.write_product_authority_bundle(
+                    ProductAuthorityBundle(
+                        runtime_environment_writes=(
+                            RuntimeEnvironmentWrite(record=planned, expected_absent=True),
+                        )
+                    )
+                )
+
+                self.assertEqual(store.list_runtime_environment_records(), (planned,))
+                close_store = getattr(store, "close", None)
+                if callable(close_store):
+                    close_store()
+
+    def test_guarded_unchanged_runtime_environment_preserves_original_record(self) -> None:
+        for store_factory in (
+            lambda root: _FailingPostgresRecordStore(
+                database_url=_sqlite_database_url(root / "launchplane.sqlite3")
+            ),
+            lambda root: FilesystemRecordStore(root),
+        ):
+            with self.subTest(store=store_factory), TemporaryDirectory() as temporary_dir:
+                root = Path(temporary_dir)
+                store = store_factory(root)
+                if isinstance(store, PostgresRecordStore):
+                    store.ensure_schema()
+                original = _runtime_environment().model_copy(
+                    update={"env": {"LARGE_NUMBER": 2**80, "FRACTION": 1.5, "ENABLED": True}}
+                )
+                store.write_runtime_environment_record(original)
+                bundle = ProductAuthorityBundle(
+                    runtime_environment_writes=(
+                        RuntimeEnvironmentWrite(
+                            record=original,
+                            expected_record=original,
+                        ),
+                    ),
+                    idempotency_record=_idempotency_record(),
+                )
+
+                self.assertTrue(bundle.requires_write())
+                store.write_product_authority_bundle(bundle)
+
+                self.assertEqual(store.list_runtime_environment_records(), (original,))
+                self.assertIsNotNone(
+                    store.read_idempotency_record(
+                        scope="test-suite",
+                        route_path="/v1/test/authority-bundle/apply",
+                        idempotency_key="authority-bundle-key",
+                    )
+                )
+                close_store = getattr(store, "close", None)
+                if callable(close_store):
+                    close_store()
+
     def test_postgres_authority_bundle_rejects_stale_provider_target_absence(self) -> None:
         with TemporaryDirectory() as temporary_dir:
             store = _FailingPostgresRecordStore(

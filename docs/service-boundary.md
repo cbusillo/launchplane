@@ -2073,6 +2073,18 @@ the active managed-secret root. Concurrent same-key applies that race after the
 initial replay lookup converge by re-reading the completed idempotency record
 after a transactional write conflict and returning the winner as a replay.
 
+Runtime writes carry an internal expectation of the original complete record,
+or of its absence. Product config and onboarding validate that expectation
+inside the authority-bundle transaction before replacing the runtime map. A
+concurrent change returns `409 runtime_environment_conflict` and commits none
+of the attempted bundle's companion records. A matching completed onboarding
+request is returned as an idempotent replay. Nonempty requests already
+satisfied by the planning read still validate the expectation without changing
+the record's timestamp or source; empty runtime input remains skipped. Callers
+can retry against current configuration under the existing authority and
+dry-run/idempotency contract. No runtime snapshot or additional approval input
+is required from the caller.
+
 `POST /v1/secrets/reencrypt` is a legacy migration boundary. It refuses
 `mode: "dry-run"` with `privileged_operation_planning_required` and
 `mode: "apply"` with `privileged_operation_approval_required`; neither

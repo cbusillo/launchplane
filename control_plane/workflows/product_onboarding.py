@@ -27,6 +27,7 @@ from control_plane.storage.product_authority_bundle import (
     ProductAuthorityBundle,
     ProductAuthorityBundleStore,
     ProviderTargetWrite,
+    RuntimeEnvironmentWrite,
 )
 from control_plane.workflows.provider_target_dual_write import (
     ensure_provider_target_identity_unbound_elsewhere,
@@ -433,11 +434,16 @@ def plan_product_onboarding_authority_bundle(
         (record.context, record.instance): record
         for record in record_store.list_physical_provider_target_records()
     }
+    existing_runtime_records = record_store.list_runtime_environment_records()
     runtime_environments = build_runtime_environment_records(
         manifest=manifest,
         updated_at=recorded_at,
-        existing_records=record_store.list_runtime_environment_records(),
+        existing_records=existing_runtime_records,
     )
+    existing_runtime_records_by_route = {
+        (record.scope, record.context, record.instance): record
+        for record in existing_runtime_records
+    }
     secret_binding_plan = build_secret_bindings(
         manifest=manifest,
         updated_at=recorded_at,
@@ -541,7 +547,17 @@ def plan_product_onboarding_authority_bundle(
                 ),
             )
         ),
-        runtime_environments=runtime_environments,
+        runtime_environment_writes=tuple(
+            RuntimeEnvironmentWrite(
+                record=record,
+                expected_record=existing_runtime_records_by_route.get(
+                    (record.scope, record.context, record.instance)
+                ),
+                expected_absent=(record.scope, record.context, record.instance)
+                not in existing_runtime_records_by_route,
+            )
+            for record in runtime_environments
+        ),
         secret_bindings=(*secret_bindings, *secret_binding_plan.retired_bindings),
     )
     return result, bundle

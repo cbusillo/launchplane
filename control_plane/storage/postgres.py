@@ -660,6 +660,9 @@ from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.product_authority_bundle import (
     ProductAuthorityBundle,
     ProviderTargetWrite,
+    RuntimeEnvironmentConflictError,
+    RuntimeEnvironmentWrite,
+    runtime_environment_records_match,
 )
 from control_plane.storage.schema_invariants import (
     RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS,
@@ -6247,6 +6250,11 @@ class PostgresRecordStore(HumanSessionStore):
                     self._runtime_environment_row(runtime_record),
                     step_name="write_runtime_environment",
                 )
+            for runtime_write in bundle.runtime_environment_writes:
+                self._write_runtime_environment_with_expectation(
+                    session=session,
+                    write=runtime_write,
+                )
             for version in bundle.secret_versions:
                 self._merge_authority_row(
                     session,
@@ -6288,6 +6296,57 @@ class PostgresRecordStore(HumanSessionStore):
                     step_name="write_idempotency",
                 )
             session.commit()
+
+    def _write_runtime_environment_with_expectation(
+        self,
+        *,
+        session: Any,
+        write: RuntimeEnvironmentWrite,
+    ) -> None:
+        row = session.scalar(
+            self._runtime_environment_statement(
+                scope=write.record.scope,
+                context=write.record.context,
+                instance=write.record.instance,
+                for_update=True,
+            )
+        )
+        if write.expected_absent:
+            if row is not None:
+                raise RuntimeEnvironmentConflictError(
+                    "Runtime environment changed after authority bundle planning."
+                )
+            session.add(self._runtime_environment_row(write.record))
+            try:
+                session.flush()
+            except IntegrityError as error:
+                raise RuntimeEnvironmentConflictError(
+                    "Runtime environment changed after authority bundle planning."
+                ) from error
+            self._after_product_authority_bundle_step("write_runtime_environment")
+            return
+        expected_record = write.expected_record
+        if expected_record is None:
+            raise RuntimeEnvironmentConflictError(
+                "Runtime environment write expectation is missing."
+            )
+        if row is None:
+            raise RuntimeEnvironmentConflictError(
+                "Runtime environment changed after authority bundle planning."
+            )
+        current_record = self._read_payload(
+            model_type=RuntimeEnvironmentRecord,
+            payload=_payload_from_row(row),
+        )
+        if not runtime_environment_records_match(current_record, expected_record):
+            raise RuntimeEnvironmentConflictError(
+                "Runtime environment changed after authority bundle planning."
+            )
+        self._merge_authority_row(
+            session,
+            self._runtime_environment_row(write.record),
+            step_name="write_runtime_environment",
+        )
 
     def _write_provider_target_with_expectation(
         self,

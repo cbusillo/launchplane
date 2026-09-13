@@ -34,6 +34,7 @@ from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.storage.product_authority_bundle import (
     ProductAuthorityBundle,
+    RuntimeEnvironmentConflictError,
 )
 from tests.http_app_test_support import (
     _AGENT_WRITE_INTENT_SOURCE_URL,
@@ -1811,6 +1812,142 @@ class FastApiAgentWriteIntentEvaluateTests(unittest.IsolatedAsyncioTestCase):
 
 
 class FastApiProductConfigApplyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_onboarding_runtime_conflict_replays_matching_committed_request(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            app_store = PostgresRecordStore(database_url=database_url)
+            app_store.ensure_schema()
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_product_config_policy(
+                    action="product_onboarding.apply",
+                    product="launchplane",
+                    context="launchplane",
+                ),
+                record_store_factory=lambda: app_store,
+            )
+            original_write = app_store.write_product_authority_bundle
+
+            def commit_matching_request_before_attempt(bundle: ProductAuthorityBundle) -> None:
+                original_write(bundle)
+                original_write(bundle)
+
+            with patch.object(
+                app_store,
+                "write_product_authority_bundle",
+                side_effect=commit_matching_request_before_attempt,
+            ):
+                response = await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/product-onboarding/apply",
+                    headers={
+                        "Authorization": "Bearer valid-token",
+                        "Idempotency-Key": "concurrent-onboarding",
+                    },
+                    payload={
+                        "product": "launchplane",
+                        "manifest": {
+                            "product": "example-site",
+                            "display_name": "Example site",
+                            "repository": "example/example-site",
+                            "image_repository": "ghcr.io/example/example-site",
+                            "lanes": [{"context": "example-site", "instance": "testing"}],
+                            "runtime_environments": [
+                                {
+                                    "scope": "instance",
+                                    "context": "example-site",
+                                    "instance": "testing",
+                                    "env": {"SITE_MODE": "concurrent-private-value"},
+                                }
+                            ],
+                        },
+                    },
+                )
+            runtime_records = app_store.list_runtime_environment_records()
+            completion = app_store.read_idempotency_record(
+                scope=idempotency_scope(_identity()),
+                route_path="/v1/product-onboarding/apply",
+                idempotency_key="concurrent-onboarding",
+            )
+            app_store.close()
+
+        self.assertEqual(response.status_code, 202, msg=response.text)
+        self.assertTrue(response.json()["replayed"])
+        assert completion is not None
+        self.assertEqual(response.json()["original_trace_id"], completion.response_trace_id)
+        self.assertEqual(len(runtime_records), 1)
+        self.assertEqual(runtime_records[0].env, {"SITE_MODE": "concurrent-private-value"})
+        self.assertNotIn("concurrent-private-value", response.text)
+
+    async def test_stale_runtime_apply_returns_conflict_and_preserves_concurrent_update(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            app_store = PostgresRecordStore(database_url=database_url)
+            app_store.ensure_schema()
+            baseline = RuntimeEnvironmentRecord(
+                scope="context",
+                context="example-product-test",
+                instance="",
+                env={"OTHER_SETTING": "original"},
+                updated_at="2026-01-01T00:00:00Z",
+                source_label="test",
+            )
+            app_store.write_runtime_environment_record(baseline)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_product_config_policy(
+                    action="product_config.apply",
+                    product="example-product",
+                    context="example-product-test",
+                ),
+                record_store_factory=lambda: app_store,
+            )
+            competing_record = baseline.model_copy(
+                update={"env": {"OTHER_SETTING": "concurrent-private-value"}}
+            )
+            original_write = app_store.write_product_authority_bundle
+
+            def commit_intervening_update(bundle: ProductAuthorityBundle) -> None:
+                app_store.write_runtime_environment_record(competing_record)
+                original_write(bundle)
+
+            with patch.object(
+                app_store,
+                "write_product_authority_bundle",
+                side_effect=commit_intervening_update,
+            ):
+                response = await _post_product_config_apply(
+                    app,
+                    {
+                        "mode": "apply",
+                        "product": "example-product",
+                        "context": "example-product-test",
+                        "runtime_env": {"env": {"APP_MODE": "requested-private-value"}},
+                    },
+                    idempotency_key="stale-runtime-apply",
+                )
+            runtime_records = app_store.list_runtime_environment_records()
+            completion = app_store.read_idempotency_record(
+                scope=idempotency_scope(_identity()),
+                route_path="/v1/product-config/apply",
+                idempotency_key="stale-runtime-apply",
+            )
+            app_store.close()
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["error"]["code"], "runtime_environment_conflict")
+        self.assertNotIn("concurrent-private-value", response.text)
+        self.assertNotIn("requested-private-value", response.text)
+        self.assertEqual(runtime_records, (competing_record,))
+        self.assertIsNone(completion)
+
     async def test_product_config_dry_run_returns_redacted_plan_without_writes(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -2252,7 +2389,7 @@ class FastApiProductConfigApplyTests(unittest.IsolatedAsyncioTestCase):
 
             def commit_then_report_conflict(bundle: ProductAuthorityBundle) -> None:
                 original_write(bundle)
-                raise RuntimeError("simulated concurrent idempotency conflict")
+                raise RuntimeEnvironmentConflictError("simulated concurrent runtime conflict")
 
             with patch.object(
                 app_store,

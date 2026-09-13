@@ -261,6 +261,8 @@ class _FakeProductConfigStore:
     def write_product_authority_bundle(self, bundle: ProductAuthorityBundle) -> None:
         for runtime_record in bundle.runtime_environments:
             self.write_runtime_environment_record(runtime_record)
+        for runtime_write in bundle.runtime_environment_writes:
+            self.write_runtime_environment_record(runtime_write.record)
         for version in bundle.secret_versions:
             self.write_secret_version(version)
         for secret_record in bundle.secret_records:
@@ -400,6 +402,41 @@ class RuntimeEnvironmentTests(unittest.TestCase):
         secret_binding = next(iter(store.secret_bindings.values()))
         self.assertEqual(secret_binding.binding_key, "SMTP_PASSWORD")
         self.assertEqual(store.secret_audit_events[0].actor, "operator@example.com")
+
+    def test_product_config_apply_guards_runtime_record_from_planning_snapshot(self) -> None:
+        store = _FakeProductConfigStore()
+        existing_record = RuntimeEnvironmentRecord(
+            scope="instance",
+            context="sellyouroutboard",
+            instance="prod",
+            env={"CONTACT_EMAIL_MODE": "smtp"},
+            updated_at="2026-05-01T00:00:00Z",
+            source_label="existing",
+        )
+        store.write_runtime_environment_record(existing_record)
+
+        result, bundle = control_plane_product_config.plan_product_config_authority_bundle(
+            record_store=store,
+            payload={
+                "schema_version": 1,
+                "product": "sellyouroutboard",
+                "context": "sellyouroutboard",
+                "instance": "prod",
+                "runtime_env": {"CONTACT_EMAIL_MODE": "smtp"},
+            },
+            mode="apply",
+            actor="operator@example.com",
+            source_label="new-source",
+        )
+
+        runtime_summary = cast("dict[str, object]", result["runtime_environment"])
+        self.assertEqual(runtime_summary["action"], "unchanged")
+        self.assertEqual(bundle.runtime_environments, ())
+        self.assertEqual(len(bundle.runtime_environment_writes), 1)
+        runtime_write = bundle.runtime_environment_writes[0]
+        self.assertEqual(runtime_write.expected_record, existing_record)
+        self.assertFalse(runtime_write.expected_absent)
+        self.assertEqual(runtime_write.record, existing_record)
 
     def test_product_config_dry_run_does_not_decrypt_existing_secret(self) -> None:
         class _NoSecretVersionReadStore(_FakeProductConfigStore):
