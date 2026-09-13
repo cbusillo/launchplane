@@ -247,7 +247,10 @@ from control_plane.production_backup_authority import (
 from control_plane.storage.product_authority_bundle import (
     ProductAuthorityBundle,
     ProviderTargetWrite,
+    RuntimeEnvironmentConflictError,
     RuntimeEnvironmentDelete,
+    RuntimeEnvironmentWrite,
+    runtime_environment_records_match,
 )
 from control_plane.repository_human_admission import (
     plan_repository_human_role_policy_append,
@@ -642,6 +645,16 @@ class FilesystemRecordStore:
                 model=runtime_record,
                 step_name="write_runtime_environment",
             )
+        for runtime_write in bundle.runtime_environment_writes:
+            self._validate_runtime_environment_write(runtime_write)
+            self._stage_product_authority_bundle_write(
+                stage_dir=stage_dir,
+                entries=entries,
+                record_type="launchplane_runtime_environments",
+                record_id=_runtime_environment_record_id(runtime_write.record),
+                model=runtime_write.record,
+                step_name="write_runtime_environment",
+            )
         for version in bundle.secret_versions:
             self._stage_product_authority_bundle_write(
                 stage_dir=stage_dir,
@@ -779,6 +792,34 @@ class FilesystemRecordStore:
         expected_payload = expected_record.model_dump(mode="json", exclude_none=True)
         if current_payload != expected_payload:
             raise ValueError("Provider target record changed after authority bundle planning.")
+
+    def _validate_runtime_environment_write(self, write: RuntimeEnvironmentWrite) -> None:
+        current_payload = self._read_json_file(
+            self._record_path(
+                "launchplane_runtime_environments",
+                _runtime_environment_record_id(write.record),
+            )
+        )
+        if write.expected_absent:
+            if current_payload is not None:
+                raise RuntimeEnvironmentConflictError(
+                    "Runtime environment changed after authority bundle planning."
+                )
+            return
+        expected_record = write.expected_record
+        if expected_record is None:
+            raise RuntimeEnvironmentConflictError(
+                "Runtime environment write expectation is missing."
+            )
+        if current_payload is None:
+            raise RuntimeEnvironmentConflictError(
+                "Runtime environment changed after authority bundle planning."
+            )
+        current_record = RuntimeEnvironmentRecord.model_validate(current_payload)
+        if not runtime_environment_records_match(current_record, expected_record):
+            raise RuntimeEnvironmentConflictError(
+                "Runtime environment changed after authority bundle planning."
+            )
 
     def _stage_product_authority_bundle_delete(
         self,

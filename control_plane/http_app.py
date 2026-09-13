@@ -770,7 +770,10 @@ from control_plane.service_human_auth import (
 )
 from control_plane.storage.factory import build_shared_record_store
 from control_plane.storage.factory import storage_backend_name
-from control_plane.storage.product_authority_bundle import ProductAuthorityBundle
+from control_plane.storage.product_authority_bundle import (
+    ProductAuthorityBundle,
+    RuntimeEnvironmentConflictError,
+)
 from control_plane.storage.postgres import (
     DbOnlyMutationPreflightResult,
     DbOnlyMutationRequest,
@@ -13421,15 +13424,18 @@ def create_launchplane_fastapi_app(
                 code="invalid_request",
                 message="Product config request failed validation.",
             ) from error
-        return await execute_product_config_request(
-            request=request,
-            identity=identity,
-            record_store=record_store,
-            idempotency_key=idempotency_key,
-            trace_id=trace_id,
-            route_path=_PRODUCT_CONFIG_APPLY_ROUTE,
-            product_config_request=product_config_request,
-        )
+        try:
+            return await execute_product_config_request(
+                request=request,
+                identity=identity,
+                record_store=record_store,
+                idempotency_key=idempotency_key,
+                trace_id=trace_id,
+                route_path=_PRODUCT_CONFIG_APPLY_ROUTE,
+                product_config_request=product_config_request,
+            )
+        except RuntimeEnvironmentConflictError as error:
+            raise runtime_environment_conflict_http_error(trace_id=trace_id, error=error) from error
 
     async def apply_product_environment_config(
         product: str,
@@ -13515,19 +13521,22 @@ def create_launchplane_fastapi_app(
                 code="invalid_request",
                 message="Product config request failed validation.",
             ) from error
-        return await execute_product_config_request(
-            request=request,
-            identity=identity,
-            record_store=database_store,
-            idempotency_key=idempotency_key,
-            trace_id=trace_id,
-            route_path=_PRODUCT_ENVIRONMENT_CONFIG_APPLY_ROUTE,
-            product_config_request=product_config_request,
-            expected_confirmation=product_environment_config_confirmation(
-                product=profile.product,
-                environment=lane.instance,
-            ),
-        )
+        try:
+            return await execute_product_config_request(
+                request=request,
+                identity=identity,
+                record_store=database_store,
+                idempotency_key=idempotency_key,
+                trace_id=trace_id,
+                route_path=_PRODUCT_ENVIRONMENT_CONFIG_APPLY_ROUTE,
+                product_config_request=product_config_request,
+                expected_confirmation=product_environment_config_confirmation(
+                    product=profile.product,
+                    environment=lane.instance,
+                ),
+            )
+        except RuntimeEnvironmentConflictError as error:
+            raise runtime_environment_conflict_http_error(trace_id=trace_id, error=error) from error
 
     def require_product_promotion_operator(
         *,
@@ -14202,17 +14211,30 @@ def create_launchplane_fastapi_app(
             },
             result=driver_result,
         )
-        database_store.write_product_authority_bundle(
-            authority_bundle_with_apply_idempotency(
-                bundle=authority_bundle,
+        try:
+            database_store.write_product_authority_bundle(
+                authority_bundle_with_apply_idempotency(
+                    bundle=authority_bundle,
+                    identity=identity,
+                    route_path=_PRODUCT_ONBOARDING_APPLY_ROUTE,
+                    idempotency_key=normalized_idempotency_key,
+                    request_fingerprint_value=payload_fingerprint,
+                    trace_id=trace_id,
+                    response=onboarding_response,
+                )
+            )
+        except RuntimeEnvironmentConflictError as error:
+            replay_response = replay_stored_apply_idempotency(
+                record_store=database_store,
                 identity=identity,
                 route_path=_PRODUCT_ONBOARDING_APPLY_ROUTE,
                 idempotency_key=normalized_idempotency_key,
                 request_fingerprint_value=payload_fingerprint,
                 trace_id=trace_id,
-                response=onboarding_response,
             )
-        )
+            if replay_response is not None:
+                return replay_response
+            raise runtime_environment_conflict_http_error(trace_id=trace_id, error=error) from error
         return onboarding_response
 
     async def import_merge_train_policy(
@@ -25252,6 +25274,18 @@ def create_launchplane_fastapi_app(
     )
 
     return app
+
+
+def runtime_environment_conflict_http_error(
+    *, trace_id: str, error: RuntimeEnvironmentConflictError
+) -> HTTPException:
+    service_error = control_plane_product_config_service.product_config_service_error(error)
+    return _launchplane_http_error(
+        status_code=service_error.status_code,
+        trace_id=trace_id,
+        code=service_error.code,
+        message=service_error.message,
+    )
 
 
 def merge_train_controller_fence_http_error(

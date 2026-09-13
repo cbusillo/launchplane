@@ -307,6 +307,16 @@ cannot be overwritten after planning. Lane-summary reads hold a shared bundle
 guard while assembling their multi-record view, so a bundle commit cannot split
 one response across the old and new authority graphs.
 
+Runtime read-modify-write producers also carry the original complete record or
+an expected-absent precondition. Product config, onboarding, and the explicit
+runtime repair commands check it under the same bundle guard and row lock.
+Stale plans conflict instead of erasing an intervening update; all companion
+writes roll back. Unchanged nonempty config requests still check their baseline
+and preserve the original metadata. Guarded runtime writes cannot overlap a
+legacy replacement or delete for the same route in one bundle. This preserves
+existing successful merge, unset, and relabel semantics; it does not merge
+concurrent changes automatically.
+
 Filesystem storage remains local rehearsal state, not shared runtime authority.
 Its product authority bundle path stages every replacement under
 `.product_authority_bundle_stages/` before touching live record files. A stage
