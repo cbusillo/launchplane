@@ -2373,7 +2373,258 @@ test.describe("operator journeys", () => {
     expect(await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth)).toBe(false);
     await assertDocumentBasics(page);
   });
+
+  test("ordinary target preparation is typed, inert, and reaches the existing review", async ({ page }) => {
+    const preparedBodies: Record<string, unknown>[] = [];
+    const mutationPaths: string[] = [];
+    page.on("request", (request) => {
+      if (request.method() !== "GET" && request.method() !== "HEAD") {
+        mutationPaths.push(new URL(request.url()).pathname);
+      }
+    });
+    await page.route("**/v1/privileged-operations/merge-train-targets/inputs", async (route) => {
+      await route.fulfill({
+        json: {
+          status: "ok",
+          trace_id: "browser-ordinary-target-inputs",
+          policy: {
+            record_id: "fixture-policy-record",
+            updated_at: "2026-09-12T14:25:00Z",
+            policy_sha256: "a".repeat(64),
+            configured_policy_keys: ["example/control-plane:main"],
+          },
+          tracked_repositories: [
+            {
+              repository_id: "1001",
+              repository: "example/control-plane",
+              inventory_record_id: "fixture-inventory-1001",
+              inventory_digest: "b".repeat(64),
+            },
+          ],
+        },
+      });
+    });
+    await page.route("**/v1/auth/session", async (route) => {
+      await route.fulfill({ json: { csrf_token: "browser-ordinary-target-csrf" } });
+    });
+    await page.route("**/v1/privileged-operations/merge-train-targets/prepare", async (route) => {
+      const preparedBody = route.request().postDataJSON() as Record<string, unknown>;
+      preparedBodies.push(preparedBody);
+      if (preparedBodies.length === 1) {
+        await route.fulfill({
+          status: 503,
+          json: {
+            trace_id: "browser-ordinary-target-uncertain",
+            error: {
+              code: "service_unavailable",
+              message: "Preparation outcome is uncertain.",
+            },
+          },
+        });
+        return;
+      }
+      await route.fulfill({
+        json: {
+          trace_id: "browser-ordinary-target-plan",
+          state: "planned",
+          operation_id: "ordinary-target-review-operation",
+        },
+      });
+    });
+
+    await page.goto(
+      "/ui/engineering/privileged-operations?fixture=products&preparation=api",
+    );
+    await page.getByRole("button", { name: "Merge-train policy" }).click();
+    const card = page.locator(".ordinary-target-preparation-card");
+    await expect(card.getByRole("heading", { name: "Prepare ordinary-agent delivery target" })).toBeVisible();
+    const submit = card.getByRole("button", { name: "Prepare target for review" });
+    await expect(submit).toBeDisabled();
+    await expect(card.getByText("No provider protection expectation is recorded in this setup.")).toBeVisible();
+
+    await card.getByRole("combobox", { name: "Repository" }).selectOption("1001");
+    await card.getByRole("textbox", { name: "Base branch" }).fill("main");
+    await card.getByRole("textbox", { name: "Enqueue label" }).fill("merge-train");
+    await card.getByRole("textbox", { name: "Blocked label" }).fill("merge-train-blocked");
+    await card.getByRole("combobox", { name: "Merge method" }).selectOption("merge");
+    await card.getByRole("combobox", { name: "Engineering review" }).selectOption("required");
+    await card.getByRole("combobox", { name: "Failure handling" }).selectOption("pause_train");
+    await card.getByRole("combobox", { name: "Require the enqueue label" }).selectOption("true");
+    await card.getByRole("checkbox", { name: "Repository owner" }).check();
+    await card.getByRole("combobox", { name: "Identity kind" }).selectOption("github_app");
+    await card.getByRole("textbox", { name: "Identity name" }).fill("merge-train-app");
+    await expect(submit).toBeEnabled();
+    await card.getByRole("textbox", { name: "Blocked label" }).fill("merge-train");
+    await expect(submit).toBeDisabled();
+    await expect(card.getByRole("alert")).toHaveText("Use different labels for enqueued and blocked pull requests.");
+    await card.getByRole("textbox", { name: "Blocked label" }).fill("merge-train-blocked");
+    await card.getByRole("textbox", { name: "Trusted automation GitHub IDs (optional)" }).fill("not-an-id");
+    await expect(submit).toBeDisabled();
+    await expect(card.getByRole("alert")).toContainText("Enter positive whole-number automation IDs");
+    await card.getByRole("textbox", { name: "Trusted automation GitHub IDs (optional)" }).fill("");
+    await expect(submit).toBeEnabled();
+    await submit.click();
+    await expect(card.getByText("Preparation outcome is uncertain.")).toBeVisible();
+    await submit.click();
+
+    await expect(page).toHaveURL(/\/ui\/engineering\/privileged-operations\?operation_id=ordinary-target-review-operation/);
+    expect(preparedBodies).toHaveLength(2);
+    expect(preparedBodies[0].source_event_id).toBe(preparedBodies[1].source_event_id);
+    const preparedBody = preparedBodies[1];
+    expect(Object.keys(preparedBody).sort()).toEqual([
+      "intent",
+      "schema_version",
+      "source_event_id",
+    ]);
+    const intent = (preparedBody?.intent ?? {}) as Record<string, unknown>;
+    expect(Object.keys(intent).sort()).toEqual([
+      "base_branch",
+      "blocked_label",
+      "engineering_review_mode",
+      "enqueue",
+      "enqueue_label",
+      "failure_policy",
+      "merge_identity",
+      "merge_method",
+      "repository_id",
+      "stack_child_disposition_label",
+    ]);
+    expect(JSON.stringify(preparedBody)).not.toMatch(/scheduler|token|activation/i);
+    expect(mutationPaths).toEqual([
+      "/v1/privileged-operations/merge-train-targets/prepare",
+      "/v1/privileged-operations/merge-train-targets/prepare",
+    ]);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth)).toBe(false);
+    await assertDocumentBasics(page);
+  });
+
+  test("ordinary target preparation reports empty, denied, and unavailable input evidence", async ({ page }) => {
+    let mode: "empty" | "denied" | "missing" = "empty";
+    await page.route("**/v1/privileged-operations/merge-train-targets/inputs", async (route) => {
+      if (mode === "empty") {
+        await route.fulfill({
+          json: {
+            status: "ok",
+            trace_id: "browser-ordinary-target-empty",
+            policy: {
+              record_id: "fixture-policy-record",
+              updated_at: "2026-09-12T14:25:00Z",
+              policy_sha256: "a".repeat(64),
+              configured_policy_keys: [],
+            },
+            tracked_repositories: [],
+          },
+        });
+        return;
+      }
+      await route.fulfill({
+        status: mode === "denied" ? 403 : 503,
+        json: {
+          trace_id: `browser-ordinary-target-${mode}`,
+          error: {
+            code: mode === "denied" ? "authorization_denied" : "privileged_operation_planning_unavailable",
+            message: mode === "denied"
+              ? "This browser session cannot read ordinary-agent target inputs."
+              : "Ordinary-agent target inputs are unavailable.",
+          },
+        },
+      });
+    });
+    for (const nextMode of ["empty", "denied", "missing"] as const) {
+      mode = nextMode;
+      await page.goto(
+        "/ui/engineering/privileged-operations?fixture=products&preparation=api",
+      );
+      await page.getByRole("button", { name: "Merge-train policy" }).click();
+      if (nextMode === "empty") {
+        await expect(page.getByText("No tracked repositories available")).toBeVisible();
+      } else if (nextMode === "denied") {
+        await expect(page.getByText("Access denied", { exact: true })).toBeVisible();
+      } else {
+        await expect(page.getByText("Ordinary-agent target inputs unavailable", { exact: true })).toBeVisible();
+        await expect(page.getByText("Ordinary-agent target inputs are unavailable.")).toBeVisible();
+      }
+    }
+  });
+
+  test("ordinary target preparation explains already configured and conflicting targets", async ({ page }) => {
+    let attempt = 0;
+    await page.route("**/v1/privileged-operations/merge-train-targets/inputs", async (route) => {
+      await route.fulfill({
+        json: {
+          status: "ok",
+          trace_id: "browser-ordinary-target-inputs",
+          policy: {
+            record_id: "fixture-policy-record",
+            updated_at: "2026-09-12T14:25:00Z",
+            policy_sha256: "a".repeat(64),
+            configured_policy_keys: [],
+          },
+          tracked_repositories: [
+            {
+              repository_id: "1001",
+              repository: "example/control-plane",
+              inventory_record_id: "fixture-inventory-1001",
+              inventory_digest: "b".repeat(64),
+            },
+          ],
+        },
+      });
+    });
+    await page.route("**/v1/auth/session", async (route) => {
+      await route.fulfill({ json: { csrf_token: "browser-ordinary-target-csrf" } });
+    });
+    await page.route("**/v1/privileged-operations/merge-train-targets/prepare", async (route) => {
+      attempt += 1;
+      if (attempt === 1) {
+        await route.fulfill({
+          json: {
+            trace_id: "browser-ordinary-target-already",
+            state: "already_satisfied",
+          },
+        });
+        return;
+      }
+      await route.fulfill({
+        status: 409,
+        json: {
+          trace_id: "browser-ordinary-target-conflict",
+          error: {
+            code: "ordinary_agent_merge_target_conflict",
+            message: "Ordinary-agent merge target preparation conflicts with current state.",
+          },
+        },
+      });
+    });
+    await page.goto(
+      "/ui/engineering/privileged-operations?fixture=products&preparation=api",
+    );
+    await page.getByRole("button", { name: "Merge-train policy" }).click();
+    const card = page.locator(".ordinary-target-preparation-card");
+    await fillOrdinaryTargetForm(card);
+    await card.getByRole("button", { name: "Prepare target for review" }).click();
+    await expect(card.getByText("already have the requested target.")).toBeVisible();
+    await card.getByRole("button", { name: "Prepare target for review" }).click();
+    await expect(
+      card.getByText("Ordinary-agent merge target preparation conflicts with current state."),
+    ).toBeVisible();
+    expect(attempt).toBe(2);
+  });
 });
+
+async function fillOrdinaryTargetForm(card: ReturnType<Page["locator"]>): Promise<void> {
+  await card.getByRole("combobox", { name: "Repository" }).selectOption("1001");
+  await card.getByRole("textbox", { name: "Base branch" }).fill("main");
+  await card.getByRole("textbox", { name: "Enqueue label" }).fill("merge-train");
+  await card.getByRole("textbox", { name: "Blocked label" }).fill("merge-train-blocked");
+  await card.getByRole("combobox", { name: "Merge method" }).selectOption("merge");
+  await card.getByRole("combobox", { name: "Engineering review" }).selectOption("required");
+  await card.getByRole("combobox", { name: "Failure handling" }).selectOption("pause_train");
+  await card.getByRole("combobox", { name: "Require the enqueue label" }).selectOption("true");
+  await card.getByRole("checkbox", { name: "Repository owner" }).check();
+  await card.getByRole("combobox", { name: "Identity kind" }).selectOption("github_app");
+  await card.getByRole("textbox", { name: "Identity name" }).fill("merge-train-app");
+}
 
 function monitorBrowser(
   page: Page,

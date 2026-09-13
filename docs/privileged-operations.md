@@ -32,6 +32,14 @@ It creates no plan or access and does not inspect agent registration or preview
 readiness. See [Inspecting Pilot Preparation Inputs](authorization-authority.md#inspecting-pilot-preparation-inputs)
 for current-record selection and incomplete-read behavior.
 
+The Merge-train policy workbench separately supports
+[preparing one ordinary-agent target](merge-train-policy.md#preparing-an-ordinary-agent-target).
+Its typed inputs and prepare routes use the merge-policy descriptor's existing
+human proposal authority. The server preserves unrelated policy and creates an
+inert standard import plan; the form does not require a full policy body or
+routine reasons, record IDs, timestamps, or hashes. The prepared target has no
+ambient token binding or enabled scheduler, and is not execution-ready.
+
 ## Approval And Execution Boundary
 
 Planning remains typed and dry-run-only. Phase 2 adds a separate finite human
@@ -68,7 +76,10 @@ route, execute action, static execution credential, or agent execution path.
   issue. Its planner reads exactly one active merge-train policy record and
   produces bounded active/candidate record IDs, policy digests, target counts,
   and stable target-key change buckets. Planning never writes the active
-  merge-train policy.
+  merge-train policy. Server-prepared ordinary-target requests additionally
+  retain optional preparation context that fences the original baseline and
+  permits only the one target addition. Generic historical requests omit this
+  context, preserving their request digests and execution fingerprints.
 - The Engineering UI lists redacted human evidence and may offer browser-human
   approve/revoke controls. Policy proposals include an explicit exact-policy
   review disclosure. The UI never offers an execute control.

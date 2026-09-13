@@ -1594,6 +1594,79 @@
         ]
       }
     },
+    "/v1/privileged-operations/merge-train-targets/inputs": {
+      "get": {
+        "operationId": "read_ordinary_agent_merge_train_target_inputs",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrdinaryAgentMergeTrainTargetInputsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read ordinary-agent merge target preparation inputs",
+        "tags": [
+          "privileged-operations"
+        ]
+      }
+    },
     "/v1/privileged-operations/ordinary-agent-delivery-activation/options": {
       "get": {
         "operationId": "read_ordinary_agent_delivery_activation_options",
@@ -4541,6 +4614,89 @@
           }
         },
         "summary": "Prepare a closed authorization candidate",
+        "tags": [
+          "privileged-operations"
+        ]
+      }
+    },
+    "/v1/privileged-operations/merge-train-targets/prepare": {
+      "post": {
+        "operationId": "prepare_ordinary_agent_merge_train_target",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OrdinaryAgentMergeTrainTargetPrepareEnvelope"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrdinaryAgentMergeTrainTargetPrepareResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Prepare one ordinary-agent-only merge target",
         "tags": [
           "privileged-operations"
         ]
@@ -10213,6 +10369,17 @@
       "ManagedMergeTrainPolicyImportProposalInput-Output": {
         "additionalProperties": false,
         "properties": {
+          "preparation_context": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ManagedMergeTrainPolicyPreparationContext-Output"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
+          },
           "reason": {
             "maxLength": 240,
             "minLength": 1,
@@ -10242,6 +10409,47 @@
           "schema_version"
         ],
         "title": "ManagedMergeTrainPolicyImportProposalInput",
+        "type": "object"
+      },
+      "ManagedMergeTrainPolicyPreparationContext-Output": {
+        "additionalProperties": false,
+        "description": "Server-derived fence binding an ordinary target proposal to one baseline.",
+        "properties": {
+          "expected_active_policy_sha256": {
+            "title": "Expected Active Policy Sha256",
+            "type": "string"
+          },
+          "expected_active_record_id": {
+            "title": "Expected Active Record Id",
+            "type": "string"
+          },
+          "expected_active_updated_at": {
+            "title": "Expected Active Updated At",
+            "type": "string"
+          },
+          "intent": {
+            "$ref": "#/components/schemas/OrdinaryAgentMergeTrainTargetIntent-Output"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "target_policy_key": {
+            "title": "Target Policy Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "expected_active_policy_sha256",
+          "expected_active_record_id",
+          "expected_active_updated_at",
+          "intent",
+          "schema_version",
+          "target_policy_key"
+        ],
+        "title": "ManagedMergeTrainPolicyPreparationContext",
         "type": "object"
       },
       "ManagedSecretReencryptionHumanEvidence": {
@@ -12733,6 +12941,42 @@
         "title": "MergeTrainDryRunQueueEntrySummary",
         "type": "object"
       },
+      "MergeTrainEnqueuePolicy-Input": {
+        "additionalProperties": false,
+        "properties": {
+          "allowed_actor_roles": {
+            "default": [
+              "repo_owner",
+              "repo_admin"
+            ],
+            "items": {
+              "enum": [
+                "repo_owner",
+                "repo_admin"
+              ],
+              "type": "string"
+            },
+            "title": "Allowed Actor Roles",
+            "type": "array"
+          },
+          "label_required": {
+            "default": true,
+            "title": "Label Required",
+            "type": "boolean"
+          },
+          "trusted_automation_github_user_ids": {
+            "default": [],
+            "items": {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            "title": "Trusted Automation Github User Ids",
+            "type": "array"
+          }
+        },
+        "title": "MergeTrainEnqueuePolicy",
+        "type": "object"
+      },
       "MergeTrainEnqueuePolicy-Output": {
         "additionalProperties": true,
         "type": "object"
@@ -14927,6 +15171,341 @@
           "unresolved_effects"
         ],
         "title": "OrdinaryAgentJobView",
+        "type": "object"
+      },
+      "OrdinaryAgentMergeTrainTargetInputsResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "policy": {
+            "$ref": "#/components/schemas/OrdinaryAgentMergeTrainTargetPolicyInput"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          },
+          "tracked_repositories": {
+            "items": {
+              "$ref": "#/components/schemas/OrdinaryAgentMergeTrainTargetInventoryInput"
+            },
+            "title": "Tracked Repositories",
+            "type": "array"
+          }
+        },
+        "required": [
+          "policy",
+          "status",
+          "trace_id",
+          "tracked_repositories"
+        ],
+        "title": "OrdinaryAgentMergeTrainTargetInputsResponse",
+        "type": "object"
+      },
+      "OrdinaryAgentMergeTrainTargetIntent-Input": {
+        "additionalProperties": false,
+        "description": "Explicit, non-executable engineering choices for one new policy target.",
+        "properties": {
+          "base_branch": {
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Base Branch",
+            "type": "string"
+          },
+          "blocked_label": {
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Blocked Label",
+            "type": "string"
+          },
+          "engineering_review_mode": {
+            "default": "advisory",
+            "enum": [
+              "advisory",
+              "required"
+            ],
+            "title": "Engineering Review Mode",
+            "type": "string"
+          },
+          "enqueue": {
+            "$ref": "#/components/schemas/MergeTrainEnqueuePolicy-Input"
+          },
+          "enqueue_label": {
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Enqueue Label",
+            "type": "string"
+          },
+          "failure_policy": {
+            "enum": [
+              "pause_train",
+              "continue_after_blocking_pr"
+            ],
+            "title": "Failure Policy",
+            "type": "string"
+          },
+          "merge_identity": {
+            "$ref": "#/components/schemas/MergeTrainIdentity"
+          },
+          "merge_method": {
+            "enum": [
+              "merge",
+              "squash",
+              "rebase"
+            ],
+            "title": "Merge Method",
+            "type": "string"
+          },
+          "provider_delivery_protection_expectation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProviderDeliveryProtectionExpectationV1"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
+          },
+          "repository_id": {
+            "title": "Repository Id",
+            "type": "string"
+          },
+          "stack_child_disposition_label": {
+            "default": "",
+            "maxLength": 255,
+            "title": "Stack Child Disposition Label",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repository_id",
+          "base_branch",
+          "enqueue_label",
+          "blocked_label",
+          "merge_method",
+          "failure_policy",
+          "enqueue",
+          "merge_identity"
+        ],
+        "title": "OrdinaryAgentMergeTrainTargetIntent",
+        "type": "object"
+      },
+      "OrdinaryAgentMergeTrainTargetIntent-Output": {
+        "additionalProperties": false,
+        "description": "Explicit, non-executable engineering choices for one new policy target.",
+        "properties": {
+          "base_branch": {
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Base Branch",
+            "type": "string"
+          },
+          "blocked_label": {
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Blocked Label",
+            "type": "string"
+          },
+          "engineering_review_mode": {
+            "default": "advisory",
+            "enum": [
+              "advisory",
+              "required"
+            ],
+            "title": "Engineering Review Mode",
+            "type": "string"
+          },
+          "enqueue": {
+            "$ref": "#/components/schemas/MergeTrainEnqueuePolicy-Output"
+          },
+          "enqueue_label": {
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Enqueue Label",
+            "type": "string"
+          },
+          "failure_policy": {
+            "enum": [
+              "pause_train",
+              "continue_after_blocking_pr"
+            ],
+            "title": "Failure Policy",
+            "type": "string"
+          },
+          "merge_identity": {
+            "$ref": "#/components/schemas/MergeTrainIdentity"
+          },
+          "merge_method": {
+            "enum": [
+              "merge",
+              "squash",
+              "rebase"
+            ],
+            "title": "Merge Method",
+            "type": "string"
+          },
+          "provider_delivery_protection_expectation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProviderDeliveryProtectionExpectationV1"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
+          },
+          "repository_id": {
+            "title": "Repository Id",
+            "type": "string"
+          },
+          "stack_child_disposition_label": {
+            "default": "",
+            "maxLength": 255,
+            "title": "Stack Child Disposition Label",
+            "type": "string"
+          }
+        },
+        "required": [
+          "base_branch",
+          "blocked_label",
+          "engineering_review_mode",
+          "enqueue",
+          "enqueue_label",
+          "failure_policy",
+          "merge_identity",
+          "merge_method",
+          "repository_id",
+          "stack_child_disposition_label"
+        ],
+        "title": "OrdinaryAgentMergeTrainTargetIntent",
+        "type": "object"
+      },
+      "OrdinaryAgentMergeTrainTargetInventoryInput": {
+        "additionalProperties": false,
+        "properties": {
+          "inventory_digest": {
+            "title": "Inventory Digest",
+            "type": "string"
+          },
+          "inventory_record_id": {
+            "title": "Inventory Record Id",
+            "type": "string"
+          },
+          "repository": {
+            "title": "Repository",
+            "type": "string"
+          },
+          "repository_id": {
+            "title": "Repository Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "inventory_digest",
+          "inventory_record_id",
+          "repository",
+          "repository_id"
+        ],
+        "title": "OrdinaryAgentMergeTrainTargetInventoryInput",
+        "type": "object"
+      },
+      "OrdinaryAgentMergeTrainTargetPolicyInput": {
+        "additionalProperties": false,
+        "properties": {
+          "configured_policy_keys": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Configured Policy Keys",
+            "type": "array"
+          },
+          "policy_sha256": {
+            "title": "Policy Sha256",
+            "type": "string"
+          },
+          "record_id": {
+            "title": "Record Id",
+            "type": "string"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "configured_policy_keys",
+          "policy_sha256",
+          "record_id",
+          "updated_at"
+        ],
+        "title": "OrdinaryAgentMergeTrainTargetPolicyInput",
+        "type": "object"
+      },
+      "OrdinaryAgentMergeTrainTargetPrepareEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "intent": {
+            "$ref": "#/components/schemas/OrdinaryAgentMergeTrainTargetIntent-Input"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "source_event_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Source Event Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_event_id",
+          "intent"
+        ],
+        "title": "OrdinaryAgentMergeTrainTargetPrepareEnvelope",
+        "type": "object"
+      },
+      "OrdinaryAgentMergeTrainTargetPrepareResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "operation_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Operation Id",
+            "x-launchplane-optional-response": true
+          },
+          "state": {
+            "enum": [
+              "planned",
+              "already_satisfied"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "state",
+          "trace_id"
+        ],
+        "title": "OrdinaryAgentMergeTrainTargetPrepareResponse",
         "type": "object"
       },
       "OrdinaryAgentOperationClientResponse": {

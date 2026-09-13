@@ -8,9 +8,16 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.merge_train_policy import (
+    MergeTrainEnqueuePolicy,
+    MergeTrainEngineeringReviewMode,
+    MergeTrainFailurePolicy,
+    MergeTrainIdentity,
+    MergeTrainMergeMethod,
     MergeTrainPolicyRecord,
+    ProviderDeliveryProtectionExpectationV1,
     normalize_merge_train_policy_timestamp,
 )
+from control_plane.contracts.repository_inventory import required_decimal_id
 from control_plane.contracts.ordinary_agent_activation import (
     OrdinaryAgentDeliveryActivationExecutionEvidence,
     OrdinaryAgentDeliveryActivationHumanEvidence,
@@ -330,6 +337,11 @@ class ManagedMergeTrainPolicyImportProposalInput(BaseModel):
     record: MergeTrainPolicyRecord
     reason: str = Field(min_length=1, max_length=240)
     related_issue: str = Field(default="", max_length=128)
+    preparation_context: "ManagedMergeTrainPolicyPreparationContext | None" = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
 
     @model_validator(mode="after")
     def _validate_input(self) -> "ManagedMergeTrainPolicyImportProposalInput":
@@ -340,6 +352,89 @@ class ManagedMergeTrainPolicyImportProposalInput(BaseModel):
         normalize_merge_train_policy_timestamp(self.record.updated_at)
         object.__setattr__(self, "reason", _required_token(self.reason, "reason"))
         object.__setattr__(self, "related_issue", self.related_issue.strip())
+        return self
+
+
+class OrdinaryAgentMergeTrainTargetIntent(BaseModel):
+    """Explicit, non-executable engineering choices for one new policy target."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    repository_id: str
+    base_branch: str = Field(min_length=1, max_length=255)
+    enqueue_label: str = Field(min_length=1, max_length=255)
+    blocked_label: str = Field(min_length=1, max_length=255)
+    stack_child_disposition_label: str = Field(default="", max_length=255)
+    merge_method: MergeTrainMergeMethod
+    engineering_review_mode: MergeTrainEngineeringReviewMode = "advisory"
+    failure_policy: MergeTrainFailurePolicy
+    enqueue: MergeTrainEnqueuePolicy
+    merge_identity: MergeTrainIdentity
+    provider_delivery_protection_expectation: ProviderDeliveryProtectionExpectationV1 | None = (
+        Field(
+            default=None,
+            exclude_if=lambda value: value is None,
+            json_schema_extra={"x-launchplane-optional-response": True},
+        )
+    )
+
+    @model_validator(mode="after")
+    def _validate_intent(self) -> "OrdinaryAgentMergeTrainTargetIntent":
+        object.__setattr__(
+            self,
+            "repository_id",
+            required_decimal_id(self.repository_id, "repository_id"),
+        )
+        for field_name in (
+            "base_branch",
+            "enqueue_label",
+            "blocked_label",
+            "stack_child_disposition_label",
+        ):
+            value = str(getattr(self, field_name)).strip()
+            if field_name != "stack_child_disposition_label" and not value:
+                raise ValueError(f"ordinary-agent merge target {field_name} must be non-empty")
+            object.__setattr__(self, field_name, value)
+        if self.enqueue_label == self.blocked_label:
+            raise ValueError("ordinary-agent merge target labels must differ")
+        if self.stack_child_disposition_label in {self.enqueue_label, self.blocked_label}:
+            raise ValueError("ordinary-agent merge target stack label must differ")
+        return self
+
+
+class ManagedMergeTrainPolicyPreparationContext(BaseModel):
+    """Server-derived fence binding an ordinary target proposal to one baseline."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: int = Field(default=1, ge=1)
+    intent: OrdinaryAgentMergeTrainTargetIntent
+    expected_active_record_id: str
+    expected_active_policy_sha256: str
+    expected_active_updated_at: str
+    target_policy_key: str
+
+    @model_validator(mode="after")
+    def _validate_context(self) -> "ManagedMergeTrainPolicyPreparationContext":
+        if self.schema_version != 1:
+            raise ValueError("Unsupported merge-train policy preparation context schema version.")
+        object.__setattr__(
+            self,
+            "expected_active_record_id",
+            _required_token(self.expected_active_record_id, "expected_active_record_id"),
+        )
+        object.__setattr__(
+            self,
+            "expected_active_policy_sha256",
+            _sha256(self.expected_active_policy_sha256, "expected_active_policy_sha256"),
+        )
+        object.__setattr__(
+            self,
+            "expected_active_updated_at",
+            normalize_merge_train_policy_timestamp(self.expected_active_updated_at),
+        )
+        expected_key = _required_token(self.target_policy_key, "target_policy_key")
+        object.__setattr__(self, "target_policy_key", expected_key)
         return self
 
 

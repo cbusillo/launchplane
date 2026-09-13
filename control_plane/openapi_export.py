@@ -206,10 +206,16 @@ UI_OPENAPI_READ_OPERATIONS: dict[str, str] = {
     "/v1/privileged-operations/authorization-candidates/ordinary-agent-delivery/inputs": (
         "read_ordinary_agent_delivery_authorization_candidate_inputs"
     ),
+    "/v1/privileged-operations/merge-train-targets/inputs": (
+        "read_ordinary_agent_merge_train_target_inputs"
+    ),
 }
 
 
 UI_OPENAPI_WRITE_OPERATIONS: dict[str, str] = {
+    "/v1/privileged-operations/merge-train-targets/prepare": (
+        "prepare_ordinary_agent_merge_train_target"
+    ),
     "/v1/privileged-operations/authorization-candidates/prepare": (
         "prepare_authorization_candidate"
     ),
