@@ -53,6 +53,7 @@ AuthorizationCandidateId = Literal[
 ]
 AuthorizationCandidateIntent = Literal["add", "remove"]
 AuthorizationCandidateState = Literal["available", "active", "conflict"]
+_AdministratorProductEvidenceReadState = Literal["absent", "legacy", "current", "conflict"]
 
 
 AuthorizationCandidatePreparationReason = Literal[
@@ -293,11 +294,11 @@ def is_ordinary_agent_delivery_administration_request(
     )
 
 
-def administrator_product_evidence_read_state(
+def _administrator_product_evidence_read_state(
     policy: LaunchplaneAuthzPolicy,
     *,
     github_id: int,
-) -> AuthorizationCandidateState:
+) -> _AdministratorProductEvidenceReadState:
     if github_id < 1 or policy.schema_version not in (2, 3):
         return "conflict"
     managed_rules = tuple(
@@ -307,7 +308,7 @@ def administrator_product_evidence_read_state(
         == ADMINISTRATOR_PRODUCT_EVIDENCE_READ_MANAGED_SET_ID
     )
     if not managed_rules:
-        return "available"
+        return "absent"
     if len(managed_rules) != 2:
         return "conflict"
     rules_by_id = {
@@ -319,21 +320,28 @@ def administrator_product_evidence_read_state(
         ADMINISTRATOR_PRODUCT_EVIDENCE_ENVIRONMENT_RULE_ID,
     }:
         return "conflict"
+    environment_rule_contexts: tuple[str, ...] | None = None
     for managed_rule_id, (principal_type, rule) in rules_by_id.items():
+        if not isinstance(rule, GitHubHumanPolicyRule):
+            return "conflict"
         if managed_rule_id == ADMINISTRATOR_PRODUCT_EVIDENCE_CONTEXT_RULE_ID:
             expected_rule_instances: tuple[str, ...] | None = ()
         elif managed_rule_id == ADMINISTRATOR_PRODUCT_EVIDENCE_ENVIRONMENT_RULE_ID:
             expected_rule_instances = ("*",)
+            environment_rule_contexts = rule.contexts
         else:
             expected_rule_instances = None
         if (
             expected_rule_instances is None
             or principal_type != "github_humans"
-            or not isinstance(rule, GitHubHumanPolicyRule)
             or rule.github_ids != (github_id,)
             or rule.roles != ("admin",)
             or rule.products
-            or rule.contexts != ("launchplane",)
+            or (
+                rule.contexts != ("launchplane",)
+                if managed_rule_id == ADMINISTRATOR_PRODUCT_EVIDENCE_CONTEXT_RULE_ID
+                else rule.contexts not in (("launchplane",), ())
+            )
             or rule.actions != ADMINISTRATOR_PRODUCT_EVIDENCE_READ_ACTIONS
             or rule.instances != expected_rule_instances
             or rule.logins
@@ -341,7 +349,21 @@ def administrator_product_evidence_read_state(
             or rule.teams
         ):
             return "conflict"
-    return "active"
+    return "legacy" if environment_rule_contexts == ("launchplane",) else "current"
+
+
+def administrator_product_evidence_read_state(
+    policy: LaunchplaneAuthzPolicy,
+    *,
+    github_id: int,
+) -> AuthorizationCandidateState:
+    """Report the candidate's public availability without exposing legacy detail."""
+    state = _administrator_product_evidence_read_state(policy, github_id=github_id)
+    if state == "absent":
+        return "available"
+    if state in ("legacy", "current"):
+        return "active"
+    return "conflict"
 
 
 def compile_administrator_product_evidence_read_candidate(
@@ -350,14 +372,13 @@ def compile_administrator_product_evidence_read_candidate(
     github_id: int,
     intent: AuthorizationCandidateIntent,
 ) -> tuple[Literal["planned", "already_satisfied"], ManagedAuthzPolicySetProposalInput | None]:
-    state = administrator_product_evidence_read_state(current_policy, github_id=github_id)
+    state = _administrator_product_evidence_read_state(current_policy, github_id=github_id)
     if state == "conflict":
         raise AuthorizationCandidatePreparationError(
             "candidate_set_conflict",
             "The authorization candidate conflicts with current policy state.",
         )
-    desired_active = intent == "add"
-    if (state == "active") == desired_active:
+    if (intent == "add" and state == "current") or (intent == "remove" and state == "absent"):
         return "already_satisfied", None
     desired_policy = LaunchplaneAuthzPolicy(
         schema_version=current_policy.schema_version,
@@ -376,7 +397,7 @@ def compile_administrator_product_evidence_read_candidate(
                     managed_rule_id=ADMINISTRATOR_PRODUCT_EVIDENCE_ENVIRONMENT_RULE_ID,
                     github_ids=(github_id,),
                     roles=("admin",),
-                    contexts=("launchplane",),
+                    contexts=(),
                     instances=("*",),
                     actions=ADMINISTRATOR_PRODUCT_EVIDENCE_READ_ACTIONS,
                 ),
@@ -398,8 +419,10 @@ def compile_administrator_product_evidence_read_candidate(
     )
 
 
-def is_administrator_product_evidence_read_request(
+def _is_administrator_product_evidence_read_request(
     request: ManagedAuthzPolicySetProposalInput,
+    *,
+    environment_contexts: tuple[str, ...],
 ) -> bool:
     """Recognize the exact authority shape, independently of audit wording."""
     if (
@@ -438,7 +461,11 @@ def is_administrator_product_evidence_read_request(
             or len(rule.github_ids) != 1
             or rule.roles != ("admin",)
             or rule.products
-            or rule.contexts != ("launchplane",)
+            or (
+                rule.contexts != ("launchplane",)
+                if managed_rule_id == ADMINISTRATOR_PRODUCT_EVIDENCE_CONTEXT_RULE_ID
+                else rule.contexts != environment_contexts
+            )
             or rule.actions != ADMINISTRATOR_PRODUCT_EVIDENCE_READ_ACTIONS
             or rule.instances != expected_rule_instances
             or rule.logins
@@ -447,6 +474,23 @@ def is_administrator_product_evidence_read_request(
         ):
             return False
     return True
+
+
+def is_administrator_product_evidence_read_request(
+    request: ManagedAuthzPolicySetProposalInput,
+) -> bool:
+    """Recognize the corrected shape used for new candidate preparation and replay."""
+    return _is_administrator_product_evidence_read_request(request, environment_contexts=())
+
+
+def is_legacy_administrator_product_evidence_read_request(
+    request: ManagedAuthzPolicySetProposalInput,
+) -> bool:
+    """Recognize only persisted pre-correction product-evidence records."""
+    return _is_administrator_product_evidence_read_request(
+        request,
+        environment_contexts=("launchplane",),
+    )
 
 
 def compile_authorization_candidate(

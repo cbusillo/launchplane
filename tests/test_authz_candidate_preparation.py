@@ -16,6 +16,7 @@ from control_plane.authz_candidate_preparation import (
     compile_administrator_product_evidence_read_candidate,
     compile_ordinary_agent_delivery_administration_candidate,
     is_administrator_product_evidence_read_request,
+    is_legacy_administrator_product_evidence_read_request,
     is_ordinary_agent_delivery_administration_request,
     ordinary_agent_delivery_administration_state,
 )
@@ -94,6 +95,12 @@ def _policy_with_product_evidence(*, github_id: int = 123) -> LaunchplaneAuthzPo
     payload = _policy().model_dump(mode="json")
     fragment = _product_evidence_fragment(github_id=github_id)
     payload["github_humans"].extend(rule.model_dump(mode="json") for rule in fragment.github_humans)
+    return LaunchplaneAuthzPolicy.model_validate(payload)
+
+
+def _legacy_policy_with_product_evidence(*, github_id: int = 123) -> LaunchplaneAuthzPolicy:
+    payload = _policy_with_product_evidence(github_id=github_id).model_dump(mode="json")
+    payload["github_humans"][-1]["contexts"] = ["launchplane"]
     return LaunchplaneAuthzPolicy.model_validate(payload)
 
 
@@ -316,11 +323,14 @@ class AdministratorProductEvidenceCandidateCompilerTests(unittest.TestCase):
                     rules[ADMINISTRATOR_PRODUCT_EVIDENCE_ENVIRONMENT_RULE_ID].instances,
                     ("*",),
                 )
+                context_rule = rules[ADMINISTRATOR_PRODUCT_EVIDENCE_CONTEXT_RULE_ID]
+                environment_rule = rules[ADMINISTRATOR_PRODUCT_EVIDENCE_ENVIRONMENT_RULE_ID]
+                self.assertEqual(context_rule.contexts, ("launchplane",))
+                self.assertEqual(environment_rule.contexts, ())
                 for rule in rules.values():
                     self.assertEqual(rule.github_ids, (123,))
                     self.assertEqual(rule.roles, ("admin",))
                     self.assertEqual(rule.products, ())
-                    self.assertEqual(rule.contexts, ("launchplane",))
                     self.assertEqual(rule.actions, ADMINISTRATOR_PRODUCT_EVIDENCE_READ_ACTIONS)
                     self.assertFalse(rule.logins or rule.organizations or rule.teams)
 
@@ -348,6 +358,15 @@ class AdministratorProductEvidenceCandidateCompilerTests(unittest.TestCase):
                         action="product_environment.read",
                         product="future-product",
                         context="launchplane",
+                        target=AuthorizationTarget(scope="instance", instances=("prod",)),
+                    )
+                )
+                self.assertTrue(
+                    fragment.allows(
+                        identity=identity,
+                        action="product_environment.read",
+                        product="future-product",
+                        context="foreign-context",
                         target=AuthorizationTarget(scope="instance", instances=("prod",)),
                     )
                 )
@@ -385,7 +404,6 @@ class AdministratorProductEvidenceCandidateCompilerTests(unittest.TestCase):
                         "launchplane",
                     ),
                     (identity, "product_config.apply", "launchplane"),
-                    (identity, "product_environment.read", "other-context"),
                 )
                 for denied_identity, action, context in denied_cases:
                     with self.subTest(action=action, context=context):
@@ -398,6 +416,16 @@ class AdministratorProductEvidenceCandidateCompilerTests(unittest.TestCase):
                                 target=AuthorizationTarget(scope="context"),
                             )
                         )
+
+                self.assertFalse(
+                    fragment.allows(
+                        identity=identity,
+                        action="product_environment.read",
+                        product="future-product",
+                        context="foreign-context",
+                        target=AuthorizationTarget(scope="context"),
+                    )
+                )
 
     def test_exact_set_add_remove_and_noops_are_isolated(self) -> None:
         active = _policy_with_product_evidence()
@@ -430,6 +458,35 @@ class AdministratorProductEvidenceCandidateCompilerTests(unittest.TestCase):
         )
         self.assertEqual(remove_request.desired_policy.github_humans, ())
         self.assertTrue(is_administrator_product_evidence_read_request(remove_request))
+
+    def test_legacy_set_is_corrected_or_removed_without_changing_public_state(self) -> None:
+        legacy = _legacy_policy_with_product_evidence()
+        self.assertEqual(administrator_product_evidence_read_state(legacy, github_id=123), "active")
+
+        add_state, add_request = compile_administrator_product_evidence_read_candidate(
+            current_policy=legacy,
+            github_id=123,
+            intent="add",
+        )
+        remove_state, remove_request = compile_administrator_product_evidence_read_candidate(
+            current_policy=legacy,
+            github_id=123,
+            intent="remove",
+        )
+
+        self.assertEqual(add_state, "planned")
+        assert add_request is not None
+        environment_rule = next(
+            rule
+            for rule in add_request.desired_policy.github_humans
+            if rule.managed_rule_id == ADMINISTRATOR_PRODUCT_EVIDENCE_ENVIRONMENT_RULE_ID
+        )
+        self.assertEqual(environment_rule.contexts, ())
+        self.assertTrue(is_administrator_product_evidence_read_request(add_request))
+        self.assertFalse(is_legacy_administrator_product_evidence_read_request(add_request))
+        self.assertEqual(remove_state, "planned")
+        assert remove_request is not None
+        self.assertEqual(remove_request.desired_policy.github_humans, ())
 
     def test_collision_and_schema_one_fail_closed_while_unrelated_overlap_is_allowed(self) -> None:
         occupied = _policy_with_product_evidence(github_id=456)
@@ -473,6 +530,23 @@ class AdministratorProductEvidenceCandidateCompilerTests(unittest.TestCase):
         )
         assert request is not None
         self.assertTrue(is_administrator_product_evidence_read_request(request))
+        legacy_request = request.model_copy(
+            update={
+                "desired_policy": fragment.model_copy(
+                    update={
+                        "github_humans": tuple(
+                            rule.model_copy(update={"contexts": ("launchplane",)})
+                            if rule.managed_rule_id
+                            == ADMINISTRATOR_PRODUCT_EVIDENCE_ENVIRONMENT_RULE_ID
+                            else rule
+                            for rule in fragment.github_humans
+                        )
+                    }
+                )
+            }
+        )
+        self.assertFalse(is_administrator_product_evidence_read_request(legacy_request))
+        self.assertTrue(is_legacy_administrator_product_evidence_read_request(legacy_request))
         self.assertTrue(
             is_administrator_product_evidence_read_request(
                 request.model_copy(

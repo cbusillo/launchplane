@@ -250,12 +250,18 @@ def _policy_with_product_evidence(*, github_id: int = 123) -> LaunchplaneAuthzPo
                 "managed_rule_id": ADMINISTRATOR_PRODUCT_EVIDENCE_ENVIRONMENT_RULE_ID,
                 "github_ids": [github_id],
                 "roles": ["admin"],
-                "contexts": ["launchplane"],
+                "contexts": [],
                 "instances": ["*"],
                 "actions": list(ADMINISTRATOR_PRODUCT_EVIDENCE_READ_ACTIONS),
             },
         )
     )
+    return LaunchplaneAuthzPolicy.model_validate(payload)
+
+
+def _legacy_policy_with_product_evidence(*, github_id: int = 123) -> LaunchplaneAuthzPolicy:
+    payload = _policy_with_product_evidence(github_id=github_id).model_dump(mode="json")
+    payload["github_humans"][-1]["contexts"] = ["launchplane"]
     return LaunchplaneAuthzPolicy.model_validate(payload)
 
 
@@ -632,6 +638,149 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
         summary = review.json()["review"]["change"]["summary"]
         self.assertIn("Access granted elsewhere may remain", summary)
         self.assertNotIn("Stop the current agent delivery setup", summary)
+
+    async def test_legacy_product_evidence_set_can_be_removed(self) -> None:
+        policy = _legacy_policy_with_product_evidence()
+        with TemporaryDirectory() as directory:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(directory) / "launchplane.sqlite3")
+            )
+            store.ensure_schema()
+            policy_record = store.seed_authz_policy_if_absent(_policy_record(policy))
+            app = self._app(store=store, policy=policy, policy_record_reader=lambda: policy_record)
+            async with lifespan_client(app) as client:
+                response = await client.post(
+                    "/v1/privileged-operations/authorization-candidates/prepare",
+                    json={
+                        "candidate_id": "administrator-product-evidence-read",
+                        "intent": "remove",
+                        "source_event_id": "legacy-product-evidence-remove",
+                    },
+                )
+            records = store.list_privileged_operation_records(limit=None)
+            store.close()
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["state"], "planned")
+        self.assertEqual(len(records), 1)
+        request = records[0].request
+        assert isinstance(request, ManagedAuthzPolicySetProposalInput)
+        self.assertEqual(request.desired_policy.github_humans, ())
+
+    async def test_legacy_product_evidence_add_prepares_one_inert_same_set_update(self) -> None:
+        policy = _legacy_policy_with_product_evidence()
+        legacy_rules = {
+            rule.managed_rule_id: rule
+            for rule in policy.github_humans
+            if rule.managed_set_id == ADMINISTRATOR_PRODUCT_EVIDENCE_READ_MANAGED_SET_ID
+        }
+        with TemporaryDirectory() as directory:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(directory) / "launchplane.sqlite3")
+            )
+            store.ensure_schema()
+            policy_record = store.seed_authz_policy_if_absent(_policy_record(policy))
+            app = self._app(store=store, policy=policy, policy_record_reader=lambda: policy_record)
+            payload = {
+                "candidate_id": "administrator-product-evidence-read",
+                "intent": "add",
+                "source_event_id": "legacy-product-evidence-correct",
+            }
+            async with lifespan_client(app) as client:
+                first = await client.post(
+                    "/v1/privileged-operations/authorization-candidates/prepare",
+                    json=payload,
+                )
+                replay = await client.post(
+                    "/v1/privileged-operations/authorization-candidates/prepare",
+                    json=payload,
+                )
+            records = store.list_privileged_operation_records(limit=None)
+            active_policy_record = store.list_authz_policy_records(status="active", limit=2)[0]
+            store.close()
+
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(first.json()["state"], "planned")
+        self.assertEqual(replay.status_code, 200, replay.text)
+        self.assertEqual(replay.json()["operation_id"], first.json()["operation_id"])
+        self.assertEqual(policy_record, active_policy_record)
+        self.assertEqual(len(records), 1)
+        planned = records[0]
+        assert isinstance(planned.request, ManagedAuthzPolicySetProposalInput)
+        assert isinstance(planned.evidence, ManagedAuthzPolicySetHumanEvidence)
+        self.assertEqual(
+            planned.request.managed_set_id, ADMINISTRATOR_PRODUCT_EVIDENCE_READ_MANAGED_SET_ID
+        )
+        self.assertEqual(planned.evidence.diff.updated_rule_count, 1)
+        desired_rules = {
+            rule.managed_rule_id: rule for rule in planned.request.desired_policy.github_humans
+        }
+        self.assertEqual(
+            desired_rules[ADMINISTRATOR_PRODUCT_EVIDENCE_CONTEXT_RULE_ID],
+            legacy_rules[ADMINISTRATOR_PRODUCT_EVIDENCE_CONTEXT_RULE_ID],
+        )
+        self.assertEqual(
+            desired_rules[ADMINISTRATOR_PRODUCT_EVIDENCE_ENVIRONMENT_RULE_ID].contexts,
+            (),
+        )
+        self.assertEqual(
+            legacy_rules[ADMINISTRATOR_PRODUCT_EVIDENCE_ENVIRONMENT_RULE_ID].contexts,
+            ("launchplane",),
+        )
+
+    async def test_legacy_product_evidence_review_is_limited_and_cannot_replay_as_current(
+        self,
+    ) -> None:
+        legacy_policy = _legacy_policy_with_product_evidence()
+        legacy_rules = [
+            rule.model_dump(mode="json")
+            for rule in legacy_policy.github_humans
+            if rule.managed_set_id == ADMINISTRATOR_PRODUCT_EVIDENCE_READ_MANAGED_SET_ID
+        ]
+        with TemporaryDirectory() as directory:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(directory) / "launchplane.sqlite3")
+            )
+            store.ensure_schema()
+            policy = _policy()
+            policy_record = store.seed_authz_policy_if_absent(_policy_record(policy))
+            app = self._app(store=store, policy=policy, policy_record_reader=lambda: policy_record)
+            source_event_id = "legacy-product-evidence-add"
+            async with lifespan_client(app) as client:
+                planned = await client.post(
+                    "/v1/privileged-operations/plans",
+                    json={
+                        "descriptor_id": "managed-authz-policy-set",
+                        "source_event_id": source_event_id,
+                        "request": {
+                            "managed_set_id": ADMINISTRATOR_PRODUCT_EVIDENCE_READ_MANAGED_SET_ID,
+                            "reason": "Prepare read-only administrator access to product evidence.",
+                            "related_issue": "#2058",
+                            "desired_policy": {"schema_version": 2, "github_humans": legacy_rules},
+                        },
+                    },
+                )
+                review = await client.get(
+                    "/v1/privileged-operations/plans/"
+                    f"{planned.json()['record']['operation_id']}/review"
+                )
+                replay = await client.post(
+                    "/v1/privileged-operations/authorization-candidates/prepare",
+                    json={
+                        "candidate_id": "administrator-product-evidence-read",
+                        "intent": "add",
+                        "source_event_id": source_event_id,
+                    },
+                )
+            store.close()
+
+        self.assertEqual(planned.status_code, 200, planned.text)
+        self.assertEqual(review.status_code, 200, review.text)
+        semantic_review = review.json()["review"]
+        self.assertEqual(semantic_review["title"], "Review administrator product evidence access")
+        self.assertIn("only in the Launchplane context", semantic_review["change"]["summary"])
+        self.assertEqual(replay.status_code, 409, replay.text)
+        self.assertEqual(replay.json()["detail"]["code"], "privileged_operation_plan_conflict")
 
     async def test_product_evidence_candidate_set_collision_is_bounded_conflict(self) -> None:
         policy_payload = _policy().model_dump(mode="json")

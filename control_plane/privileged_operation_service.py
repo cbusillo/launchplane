@@ -47,6 +47,7 @@ from control_plane.contracts.privileged_operation import (
 )
 from control_plane.authz_candidate_preparation import (
     is_administrator_product_evidence_read_request,
+    is_legacy_administrator_product_evidence_read_request,
     is_ordinary_agent_delivery_administration_request,
 )
 from control_plane.contracts.ordinary_agent_activation import (
@@ -503,8 +504,15 @@ def _build_privileged_operation_semantic_review(
                 == (record.requested_by.github_id,)
             )
         )
-        is_product_evidence_read = is_administrator_product_evidence_read_request(
+        is_current_product_evidence_read = is_administrator_product_evidence_read_request(
             record.request
+        )
+        is_legacy_product_evidence_read = (
+            not is_current_product_evidence_read
+            and is_legacy_administrator_product_evidence_read_request(record.request)
+        )
+        is_product_evidence_read = (
+            is_current_product_evidence_read or is_legacy_product_evidence_read
         ) and (
             not record.request.desired_policy.github_humans
             or (
@@ -533,6 +541,12 @@ def _build_privileged_operation_semantic_review(
             authz_review_title = "Review administrator product evidence access"
             authz_change_summary = (
                 "Allow the requesting administrator account to read project-level and "
+                "environment-level product evidence for all current and future projects, "
+                "only in the Launchplane context. This "
+                "read-only access is standing until a separately governed removal; the Approve-by "
+                "deadline only bounds this plan. It grants no writes or agent authority."
+                if adds_candidate_access and is_legacy_product_evidence_read
+                else "Allow the requesting administrator account to read project-level and "
                 "environment-level product evidence for all current and future projects. This "
                 "read-only access is standing until a separately governed removal; the Approve-by "
                 "deadline only bounds this plan. It grants no writes or agent authority."

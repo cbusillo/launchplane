@@ -614,11 +614,13 @@ current policy schema; the browser supplies only the candidate, add/remove
 intent, and an idempotent source event.
 
 The isolated `operator.product-evidence-read` managed set contains only
-`product_environment.read` for that human with the `admin` role and the exact
-Launchplane context. Its product selector intentionally covers all current and
-future projects. Two rules cover the existing read API's scope forms: one for
-project-level context reads and one with the explicit all-instances selector
-for environment-level reads. Neither rule adds another action or principal.
+`product_environment.read` for that human with the `admin` role. Its product
+selector intentionally covers all current and future projects. Two rules cover
+the existing read API's scope forms: the project-level context rule remains
+pinned to the Launchplane context, while the environment-level rule uses the
+explicit all-instances selector with an empty context selector so it can read
+the stored context of each environment. Neither rule adds another action or
+principal.
 Other agents, other humans, writes, separate secret reads, provider operations,
 Owner acceptance, merge/deploy, and delivery activation receive no authority
 from this candidate.
@@ -629,6 +631,12 @@ are preserved. An occupied set with another identity or shape refuses
 preparation. Already satisfied add/remove intents create no operation. Reusing
 one source event for a different candidate refuses with a conflict; replay
 must match the requested candidate and the current human across every rule.
+
+An exact pre-correction environment rule pinned to the Launchplane context is
+recognized only for correction, removal, and truthful historical review: add
+prepares the corrected same-set update, remove prepares the empty same-set
+fragment, and historical review states that the old request was limited to the
+Launchplane context. It never upgrades a persisted request or approval.
 
 Review names the requesting administrator, both read scopes, all current and
 future projects, and the standing duration. The installed access would remain
