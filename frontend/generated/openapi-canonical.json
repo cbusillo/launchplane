@@ -12489,6 +12489,132 @@
         "title": "IngressRouteAuditRecordsResponse",
         "type": "object"
       },
+      "InspectionSetupManagedSecretMetadata": {
+        "additionalProperties": false,
+        "properties": {
+          "binding_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Binding Id"
+          },
+          "current_version_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Version Id"
+          },
+          "secret_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Secret Id"
+          },
+          "state": {
+            "default": "not_evaluated",
+            "enum": [
+              "not_evaluated",
+              "metadata_recorded",
+              "secret_missing",
+              "secret_unreadable",
+              "secret_ambiguous",
+              "binding_missing",
+              "binding_unreadable",
+              "binding_ambiguous",
+              "binding_mismatch",
+              "version_pointer_missing",
+              "unavailable"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "title": "InspectionSetupManagedSecretMetadata",
+        "type": "object"
+      },
+      "InspectionSetupMetadata": {
+        "additionalProperties": false,
+        "properties": {
+          "managed_secret": {
+            "$ref": "#/components/schemas/InspectionSetupManagedSecretMetadata"
+          },
+          "runtime": {
+            "$ref": "#/components/schemas/InspectionSetupRuntimeMetadata"
+          },
+          "state": {
+            "default": "not_evaluated",
+            "enum": [
+              "not_evaluated",
+              "metadata_recorded",
+              "incomplete",
+              "unavailable"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "title": "InspectionSetupMetadata",
+        "type": "object"
+      },
+      "InspectionSetupRuntimeMetadata": {
+        "additionalProperties": false,
+        "properties": {
+          "app_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "App Id"
+          },
+          "recorded_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recorded At"
+          },
+          "state": {
+            "default": "not_evaluated",
+            "enum": [
+              "not_evaluated",
+              "metadata_recorded",
+              "record_missing",
+              "record_unreadable",
+              "record_ambiguous",
+              "app_id_missing",
+              "app_id_invalid",
+              "unavailable"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "title": "InspectionSetupRuntimeMetadata",
+        "type": "object"
+      },
       "LaunchplaneActiveAuthzPolicyResponse": {
         "additionalProperties": false,
         "properties": {
@@ -19179,6 +19305,9 @@
             },
             "title": "Diagnostics",
             "type": "array"
+          },
+          "inspection_setup": {
+            "$ref": "#/components/schemas/InspectionSetupMetadata"
           },
           "inventory_state": {
             "enum": [

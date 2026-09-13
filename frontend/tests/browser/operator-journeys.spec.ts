@@ -2078,6 +2078,12 @@ test.describe("operator journeys", () => {
         "This check does not inspect agent registration or preview readiness.",
       ),
     ).toBeVisible();
+    await expect(
+      preparation.getByText("Inspection metadata not reported"),
+    ).toBeVisible();
+    await expect(
+      preparation.getByText("App identity and installation are not verified by this read.", { exact: false }),
+    ).toBeVisible();
     expect(requestedMethods).toEqual(["GET"]);
     expect(mutationRequests).toEqual([]);
     await expect(page.getByText("browser-preparation-inputs")).toBeHidden();
@@ -2108,19 +2114,59 @@ test.describe("operator journeys", () => {
         .click();
       if (state === "empty") {
         await expect(page.getByText("No configured repositories were returned.")).toBeVisible();
+        await expect(page.getByText("Inspection not evaluated")).toBeVisible();
       } else if (state === "missing") {
         await expect(page.getByText("The merge policy is missing.")).toBeVisible();
         await expect(page.getByText("Branch configuration not verified")).toBeVisible();
         await expect(page.getByText("Missing branch configuration")).toHaveCount(0);
+        await expect(page.getByText("Inspection setup incomplete")).toBeVisible();
+        await expect(page.getByText("Missing App ID")).toBeVisible();
+        await expect(page.getByText("Missing binding")).toBeVisible();
       } else if (state === "truncated") {
         await expect(page.getByText("The repository inventory is truncated.", { exact: false })).toBeVisible();
         await expect(page.getByText("The merge policy is truncated.")).toBeVisible();
         await expect(page.getByText("No configured repositories were returned.")).toBeVisible();
+        await expect(page.getByText("Multiple records")).toBeVisible();
+        await expect(page.getByText("Multiple bindings")).toBeVisible();
       } else {
         await expect(page.getByText("Setup-prerequisite access denied")).toBeVisible();
       }
       await assertDocumentBasics(page);
     }
+    diagnostics.assertClean();
+  });
+
+  test("agent delivery setup prerequisites show recorded inspection metadata as unverified", async ({
+    page,
+  }, testInfo) => {
+    const diagnostics = monitorBrowser(page);
+    await page.goto(
+      "/ui/engineering/privileged-operations?fixture=products&preparation=products",
+    );
+    await page.getByRole("button", { name: "Agent delivery" }).click();
+    const preparation = page.getByRole("region", {
+      name: "Check current configuration",
+    });
+    await preparation
+      .getByRole("button", { name: "Check setup prerequisites" })
+      .click();
+
+    const inspection = preparation.getByRole("region", {
+      name: "Inspection setup metadata",
+    });
+    await expect(inspection.getByText("Inspection metadata recorded")).toBeVisible();
+    await expect(inspection.getByText("Metadata recorded", { exact: true })).toBeVisible();
+    await expect(inspection.getByText("Inspection App metadata")).toBeVisible();
+    await expect(inspection.getByText("Managed-secret binding metadata")).toBeVisible();
+    await expect(
+      inspection.getByText("App identity and installation are not verified by this read.", { exact: false }),
+    ).toBeVisible();
+    await expect(inspection.getByText("Recorded App ID")).toBeHidden();
+    await inspection.getByText("Inspection metadata details").click();
+    await expect(inspection.getByText("Recorded App ID")).toBeVisible();
+    await expect(inspection.getByText("Current version pointer (unverified)")).toBeVisible();
+    await assertDocumentBasics(page);
+    await captureScreenshot(page, testInfo, "agent-delivery-inspection-setup-metadata");
     diagnostics.assertClean();
   });
 

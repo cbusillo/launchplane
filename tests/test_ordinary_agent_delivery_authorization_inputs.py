@@ -7,7 +7,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import cast
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, ConfigDict
@@ -19,6 +19,8 @@ from control_plane.authz_candidate_preparation import (
 )
 from control_plane.contracts.merge_train_policy import MergeTrainPolicy, MergeTrainPolicyRecord
 from control_plane.contracts.repository_inventory import RepositoryInventoryRecord
+from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+from control_plane.contracts.secret_record import SecretBinding, SecretRecord
 from control_plane.http_routes.privileged_operations import (
     PrivilegedOperationRouteDependencies,
     register_privileged_operation_routes,
@@ -28,6 +30,10 @@ from control_plane.ordinary_agent_delivery_authorization_inputs import (
     MAX_AUTHORIZATION_INPUT_MERGE_TARGETS,
     MAX_AUTHORIZATION_INPUT_SOURCE_RECORDS,
     read_ordinary_agent_delivery_authorization_candidate_inputs,
+)
+from control_plane.provider_delivery_inspection_profile import (
+    PROVIDER_DELIVERY_INSPECTION_APP_ID_ENV_KEY,
+    PROVIDER_DELIVERY_INSPECTION_INTEGRATION,
 )
 from control_plane.service_auth import (
     GitHubHumanIdentity,
@@ -100,6 +106,54 @@ class _ReadStore:
         raise AttributeError(name)
 
 
+class _InspectionReadStore(_ReadStore):
+    def __init__(
+        self,
+        *,
+        runtime_records: tuple[object, ...] = (),
+        secret_records: tuple[object, ...] = (),
+        secret_bindings: tuple[object, ...] = (),
+        runtime_error: Exception | None = None,
+        secret_error: Exception | None = None,
+        binding_error: Exception | None = None,
+    ) -> None:
+        super().__init__()
+        self.runtime_records = runtime_records
+        self.secret_records = secret_records
+        self.secret_bindings = secret_bindings
+        self.runtime_error = runtime_error
+        self.secret_error = secret_error
+        self.binding_error = binding_error
+        self.runtime_metadata_reads = 0
+        self.secret_metadata_reads = 0
+        self.binding_metadata_reads = 0
+
+    def list_provider_delivery_inspection_setup_runtime_records(
+        self,
+    ) -> tuple[object, ...]:
+        self.runtime_metadata_reads += 1
+        if self.runtime_error is not None:
+            raise self.runtime_error
+        return self.runtime_records
+
+    def list_provider_delivery_inspection_setup_secret_records(self) -> tuple[object, ...]:
+        self.secret_metadata_reads += 1
+        if self.secret_error is not None:
+            raise self.secret_error
+        return self.secret_records
+
+    def list_provider_delivery_inspection_setup_secret_bindings(
+        self,
+    ) -> tuple[object, ...]:
+        self.binding_metadata_reads += 1
+        if self.binding_error is not None:
+            raise self.binding_error
+        return self.secret_bindings
+
+    def read_secret_version(self, version_id: str) -> object:
+        raise AssertionError(f"inspection setup metadata read secret version {version_id}")
+
+
 def _inventory(
     *,
     repository_id: int,
@@ -137,6 +191,52 @@ def _merge_policy_with_branches(
         source="test",
         updated_at="2026-09-12T12:00:00Z",
         policy=policy,
+    )
+
+
+def _inspection_runtime(
+    *, app_id: object = 42, include_app_id: bool = True
+) -> RuntimeEnvironmentRecord:
+    env: dict[str, object] = {"UNRELATED_RUNTIME_VALUE": "not-returned"}
+    if include_app_id:
+        env[PROVIDER_DELIVERY_INSPECTION_APP_ID_ENV_KEY] = app_id
+    return RuntimeEnvironmentRecord.model_validate(
+        {
+            "scope": "context",
+            "context": "launchplane",
+            "instance": "",
+            "env": env,
+            "updated_at": "2026-09-12T12:00:00Z",
+        }
+    )
+
+
+def _inspection_secret(
+    *, secret_id: str = "inspection-secret", current_version_id: str = "inspection-version-v1"
+) -> SecretRecord:
+    return SecretRecord(
+        secret_id=secret_id,
+        scope="context",
+        context="launchplane",
+        integration=PROVIDER_DELIVERY_INSPECTION_INTEGRATION,
+        name="private provider inspection key",
+        description="not returned",
+        current_version_id=current_version_id,
+        created_at="2026-09-12T12:00:00Z",
+        updated_at="2026-09-12T12:00:00Z",
+    )
+
+
+def _inspection_binding(*, secret_id: str = "inspection-secret") -> SecretBinding:
+    return SecretBinding(
+        binding_id="inspection-binding",
+        secret_id=secret_id,
+        integration=PROVIDER_DELIVERY_INSPECTION_INTEGRATION,
+        binding_key="private_key",
+        context="launchplane",
+        instance="",
+        created_at="2026-09-12T12:00:00Z",
+        updated_at="2026-09-12T12:00:00Z",
     )
 
 
@@ -195,6 +295,154 @@ class OrdinaryAgentDeliveryAuthorizationInputServiceTests(unittest.TestCase):
             trace_id="trace-test",
             observed_at="2026-09-12T12:30:00Z",
         )
+
+    def test_inspection_setup_defaults_to_not_evaluated_for_legacy_store(self) -> None:
+        response = self._read(_ReadStore())
+
+        self.assertEqual(response.inspection_setup.state, "not_evaluated")
+        self.assertEqual(response.inspection_setup.runtime.state, "not_evaluated")
+        self.assertEqual(response.inspection_setup.managed_secret.state, "not_evaluated")
+
+    @patch("control_plane.secrets._decrypt_secret_value")
+    @patch("control_plane.github_app_identity.GitHubAppIdentity")
+    @patch(
+        "control_plane.provider_delivery_inspection_profile."
+        "resolve_provider_delivery_inspection_profile"
+    )
+    def test_inspection_setup_returns_only_coherent_recorded_metadata(
+        self,
+        resolve_profile: object,
+        github_app_identity: object,
+        decrypt_secret: object,
+    ) -> None:
+        store = _InspectionReadStore(
+            runtime_records=(_inspection_runtime(app_id=2**63 - 1),),
+            secret_records=(_inspection_secret(),),
+            secret_bindings=(_inspection_binding(),),
+        )
+
+        response = self._read(store)
+
+        self.assertEqual(response.inspection_setup.state, "metadata_recorded")
+        self.assertEqual(response.inspection_setup.runtime.app_id, str(2**63 - 1))
+        self.assertEqual(response.inspection_setup.runtime.recorded_at, "2026-09-12T12:00:00Z")
+        self.assertEqual(response.inspection_setup.managed_secret.secret_id, "inspection-secret")
+        self.assertEqual(
+            response.inspection_setup.managed_secret.current_version_id,
+            "inspection-version-v1",
+        )
+        self.assertEqual(store.runtime_metadata_reads, 1)
+        self.assertEqual(store.secret_metadata_reads, 1)
+        self.assertEqual(store.binding_metadata_reads, 1)
+        for forbidden_call in (resolve_profile, github_app_identity, decrypt_secret):
+            cast(Mock, forbidden_call).assert_not_called()
+        rendered = response.model_dump_json()
+        for private_value in (
+            PROVIDER_DELIVERY_INSPECTION_APP_ID_ENV_KEY,
+            "UNRELATED_RUNTIME_VALUE",
+            "private provider inspection key",
+            "not returned",
+        ):
+            self.assertNotIn(private_value, rendered)
+
+    def test_inspection_setup_distinguishes_missing_invalid_and_partial_metadata(self) -> None:
+        cases = (
+            (
+                "runtime_missing",
+                _InspectionReadStore(
+                    secret_records=(_inspection_secret(),),
+                    secret_bindings=(_inspection_binding(),),
+                ),
+                "record_missing",
+                "metadata_recorded",
+            ),
+            (
+                "app_id_missing",
+                _InspectionReadStore(
+                    runtime_records=(_inspection_runtime(include_app_id=False),),
+                    secret_records=(_inspection_secret(),),
+                    secret_bindings=(_inspection_binding(),),
+                ),
+                "app_id_missing",
+                "metadata_recorded",
+            ),
+            (
+                "app_id_invalid",
+                _InspectionReadStore(
+                    runtime_records=(_inspection_runtime(app_id=True),),
+                    secret_records=(_inspection_secret(),),
+                    secret_bindings=(_inspection_binding(),),
+                ),
+                "app_id_invalid",
+                "metadata_recorded",
+            ),
+            (
+                "binding_missing",
+                _InspectionReadStore(
+                    runtime_records=(_inspection_runtime(),),
+                    secret_records=(_inspection_secret(),),
+                ),
+                "metadata_recorded",
+                "binding_missing",
+            ),
+            (
+                "binding_mismatch",
+                _InspectionReadStore(
+                    runtime_records=(_inspection_runtime(),),
+                    secret_records=(_inspection_secret(),),
+                    secret_bindings=(_inspection_binding(secret_id="other-secret"),),
+                ),
+                "metadata_recorded",
+                "binding_mismatch",
+            ),
+        )
+        for label, store, runtime_state, secret_state in cases:
+            with self.subTest(label=label):
+                response = self._read(store)
+                self.assertEqual(response.inspection_setup.state, "incomplete")
+                self.assertEqual(response.inspection_setup.runtime.state, runtime_state)
+                self.assertEqual(response.inspection_setup.managed_secret.state, secret_state)
+
+    def test_inspection_setup_distinguishes_ambiguity_and_unavailable_payloads(self) -> None:
+        ambiguous = self._read(
+            _InspectionReadStore(
+                runtime_records=(_inspection_runtime(), _inspection_runtime(app_id=43)),
+                secret_records=(_inspection_secret(), _inspection_secret(secret_id="other")),
+                secret_bindings=(_inspection_binding(),),
+            )
+        )
+        unavailable = self._read(
+            _InspectionReadStore(
+                runtime_error=RuntimeError("private runtime database failure"),
+                secret_error=ValueError("private malformed secret payload"),
+            )
+        )
+
+        self.assertEqual(ambiguous.inspection_setup.state, "incomplete")
+        self.assertEqual(ambiguous.inspection_setup.runtime.state, "record_ambiguous")
+        self.assertEqual(ambiguous.inspection_setup.managed_secret.state, "secret_ambiguous")
+        self.assertEqual(unavailable.inspection_setup.state, "unavailable")
+        self.assertEqual(unavailable.inspection_setup.runtime.state, "unavailable")
+        self.assertEqual(unavailable.inspection_setup.managed_secret.state, "secret_unreadable")
+        self.assertNotIn("private runtime database failure", unavailable.model_dump_json())
+        self.assertNotIn("private malformed secret payload", unavailable.model_dump_json())
+
+    def test_inspection_setup_missing_version_pointer_does_not_expose_partial_ids(self) -> None:
+        secret_without_pointer = _inspection_secret().model_copy(update={"current_version_id": ""})
+        response = self._read(
+            _InspectionReadStore(
+                runtime_records=(_inspection_runtime(),),
+                secret_records=(secret_without_pointer,),
+                secret_bindings=(_inspection_binding(),),
+            )
+        )
+
+        self.assertEqual(response.inspection_setup.state, "incomplete")
+        metadata = response.inspection_setup.managed_secret
+        self.assertEqual(metadata.state, "version_pointer_missing")
+        self.assertIsNone(metadata.secret_id)
+        self.assertIsNone(metadata.binding_id)
+        self.assertIsNone(metadata.current_version_id)
 
     def test_selects_unique_latest_tracked_inventory_and_configured_branches(self) -> None:
         older = _inventory(repository_id=101, repository="Example/Alpha")
@@ -466,27 +714,41 @@ class OrdinaryAgentDeliveryAuthorizationInputHttpTests(unittest.IsolatedAsyncioT
             ),
             ("lifecycle_only", lifecycle_policy, _human()),
         )
-        for label, policy, identity in cases:
-            with self.subTest(label=label):
-                store = _ReadStore()
-                app = _app(
-                    store=store,
-                    runtime_policy=policy,
-                    persisted_policy=_policy(),
-                    identity=identity,
-                )
-                async with lifespan_client(app) as client:
-                    response = await client.get(_ROUTE)
-                self.assertEqual(response.status_code, 403, response.text)
-                self.assertEqual(response.json()["detail"]["code"], "authorization_denied")
-                self.assertEqual(store.inventory_reads, 0)
-                self.assertEqual(store.merge_policy_reads, 0)
+        with (
+            patch(
+                "control_plane.http_routes.privileged_operations."
+                "read_ordinary_agent_delivery_authorization_candidate_inputs"
+            ) as read_inputs,
+            patch("control_plane.secrets._decrypt_secret_value") as decrypt_secret,
+            patch("control_plane.github_app_identity.GitHubAppIdentity") as github_app_identity,
+        ):
+            for label, policy, identity in cases:
+                with self.subTest(label=label):
+                    store = _InspectionReadStore()
+                    app = _app(
+                        store=store,
+                        runtime_policy=policy,
+                        persisted_policy=_policy(),
+                        identity=identity,
+                    )
+                    async with lifespan_client(app) as client:
+                        response = await client.get(_ROUTE)
+                    self.assertEqual(response.status_code, 403, response.text)
+                    self.assertEqual(response.json()["detail"]["code"], "authorization_denied")
+                    self.assertEqual(store.inventory_reads, 0)
+                    self.assertEqual(store.merge_policy_reads, 0)
+                    self.assertEqual(store.runtime_metadata_reads, 0)
+                    self.assertEqual(store.secret_metadata_reads, 0)
+                    self.assertEqual(store.binding_metadata_reads, 0)
+            read_inputs.assert_not_called()
+            decrypt_secret.assert_not_called()
+            github_app_identity.assert_not_called()
 
     async def test_fresh_database_policy_must_retain_strict_administration(self) -> None:
         persisted_payload = _policy().model_dump(mode="json")
         persisted_payload["github_humans"][1]["actions"].remove("authz_policy_grant.write")
         persisted_policy = LaunchplaneAuthzPolicy.model_validate(persisted_payload)
-        store = _ReadStore()
+        store = _InspectionReadStore()
         app = _app(
             store=store,
             runtime_policy=_policy(),
@@ -500,9 +762,12 @@ class OrdinaryAgentDeliveryAuthorizationInputHttpTests(unittest.IsolatedAsyncioT
         self.assertEqual(response.json()["detail"]["code"], "authorization_denied")
         self.assertEqual(store.inventory_reads, 0)
         self.assertEqual(store.merge_policy_reads, 0)
+        self.assertEqual(store.runtime_metadata_reads, 0)
+        self.assertEqual(store.secret_metadata_reads, 0)
+        self.assertEqual(store.binding_metadata_reads, 0)
 
     async def test_non_active_database_policy_is_unavailable_before_source_reads(self) -> None:
-        store = _ReadStore()
+        store = _InspectionReadStore()
         superseded_record = _policy_record(_policy()).model_copy(update={"status": "superseded"})
         app = _app(
             store=store,
@@ -517,6 +782,9 @@ class OrdinaryAgentDeliveryAuthorizationInputHttpTests(unittest.IsolatedAsyncioT
         self.assertEqual(response.json()["detail"]["code"], "authz_policy_unavailable")
         self.assertEqual(store.inventory_reads, 0)
         self.assertEqual(store.merge_policy_reads, 0)
+        self.assertEqual(store.runtime_metadata_reads, 0)
+        self.assertEqual(store.secret_metadata_reads, 0)
+        self.assertEqual(store.binding_metadata_reads, 0)
 
     async def test_openapi_exposes_parameterless_human_get(self) -> None:
         app = _app(store=_ReadStore(), runtime_policy=_policy())
@@ -554,3 +822,82 @@ class MergeTrainPolicyBoundedReadTests(unittest.TestCase):
 
         self.assertEqual(len(records), 2)
         self.assertEqual(read_payload.call_count, 2)
+
+
+class ProviderDeliveryInspectionSetupQueryTests(unittest.TestCase):
+    def test_postgres_queries_apply_exact_filters_and_two_row_bounds(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(directory) / "launchplane.sqlite3")
+            )
+            store.ensure_schema()
+            store.write_runtime_environment_record(_inspection_runtime())
+            store.write_runtime_environment_record(
+                RuntimeEnvironmentRecord(
+                    scope="global",
+                    env={PROVIDER_DELIVERY_INSPECTION_APP_ID_ENV_KEY: 99},
+                    updated_at="2026-09-12T12:01:00Z",
+                )
+            )
+            store.write_runtime_environment_record(
+                RuntimeEnvironmentRecord(
+                    scope="instance",
+                    context="launchplane",
+                    instance="other",
+                    env={PROVIDER_DELIVERY_INSPECTION_APP_ID_ENV_KEY: 100},
+                    updated_at="2026-09-12T12:02:00Z",
+                )
+            )
+            for index in range(3):
+                store.write_secret_record(
+                    _inspection_secret(secret_id=f"inspection-secret-{index}").model_copy(
+                        update={"name": f"inspection key {index}"}
+                    )
+                )
+                store.write_secret_binding(
+                    _inspection_binding(secret_id=f"inspection-secret-{index}").model_copy(
+                        update={"binding_id": f"inspection-binding-{index}"}
+                    )
+                )
+            store.write_secret_record(
+                _inspection_secret(secret_id="other-integration-secret").model_copy(
+                    update={"integration": "other_integration", "name": "other integration"}
+                )
+            )
+            store.write_secret_binding(
+                _inspection_binding().model_copy(
+                    update={
+                        "binding_id": "other-key-binding",
+                        "binding_key": "other_key",
+                    }
+                )
+            )
+
+            runtimes = store.list_provider_delivery_inspection_setup_runtime_records()
+            secrets = store.list_provider_delivery_inspection_setup_secret_records()
+            bindings = store.list_provider_delivery_inspection_setup_secret_bindings()
+            store.close()
+
+        self.assertEqual(runtimes, (_inspection_runtime(),))
+        self.assertEqual(len(secrets), 2)
+        self.assertEqual(len(bindings), 2)
+        self.assertTrue(
+            all(
+                record.scope == "context"
+                and record.context == "launchplane"
+                and not record.instance
+                and record.integration == PROVIDER_DELIVERY_INSPECTION_INTEGRATION
+                and record.status == "configured"
+                for record in secrets
+            )
+        )
+        self.assertTrue(
+            all(
+                binding.context == "launchplane"
+                and not binding.instance
+                and binding.integration == PROVIDER_DELIVERY_INSPECTION_INTEGRATION
+                and binding.binding_key == "private_key"
+                and binding.status == "configured"
+                for binding in bindings
+            )
+        )

@@ -36408,6 +36408,25 @@ class PostgresRecordStore(HumanSessionStore):
             ),
         )
 
+    def list_provider_delivery_inspection_setup_runtime_records(
+        self,
+    ) -> tuple[RuntimeEnvironmentRecord, ...]:
+        from control_plane.provider_delivery_inspection_profile import (
+            PROVIDER_DELIVERY_INSPECTION_CONTEXT,
+        )
+
+        return self._list_models(
+            model_type=RuntimeEnvironmentRecord,
+            orm_model=LaunchplaneRuntimeEnvironmentRow,
+            filters=(
+                LaunchplaneRuntimeEnvironmentRow.scope == "context",
+                LaunchplaneRuntimeEnvironmentRow.context == PROVIDER_DELIVERY_INSPECTION_CONTEXT,
+                LaunchplaneRuntimeEnvironmentRow.instance == "",
+            ),
+            order_by=(LaunchplaneRuntimeEnvironmentRow.updated_at.desc(),),
+            limit=2,
+        )
+
     def write_runtime_key_safety_policy_record(self, record: RuntimeKeySafetyPolicyRecord) -> None:
         self._write_row(
             LaunchplaneRuntimeKeySafetyPolicyRow(
@@ -36721,6 +36740,59 @@ class PostgresRecordStore(HumanSessionStore):
                 LaunchplaneSecretBindingRow.binding_id.desc(),
             ),
             limit=limit,
+        )
+
+    def list_provider_delivery_inspection_setup_secret_records(
+        self,
+    ) -> tuple[SecretRecord, ...]:
+        from control_plane.provider_delivery_inspection_profile import (
+            PROVIDER_DELIVERY_INSPECTION_CONTEXT,
+            PROVIDER_DELIVERY_INSPECTION_INTEGRATION,
+        )
+
+        return self._list_models(
+            model_type=SecretRecord,
+            orm_model=LaunchplaneSecretRow,
+            filters=(
+                LaunchplaneSecretRow.scope == "context",
+                LaunchplaneSecretRow.integration == PROVIDER_DELIVERY_INSPECTION_INTEGRATION,
+                LaunchplaneSecretRow.context == PROVIDER_DELIVERY_INSPECTION_CONTEXT,
+                LaunchplaneSecretRow.instance == "",
+                LaunchplaneSecretRow.status == "configured",
+                LaunchplaneSecretRow.payload["policy"].as_string() == "write_only",
+            ),
+            order_by=(
+                LaunchplaneSecretRow.updated_at.desc(),
+                LaunchplaneSecretRow.secret_id.desc(),
+            ),
+            limit=2,
+        )
+
+    def list_provider_delivery_inspection_setup_secret_bindings(
+        self,
+    ) -> tuple[SecretBinding, ...]:
+        from control_plane.provider_delivery_inspection_profile import (
+            PROVIDER_DELIVERY_INSPECTION_CONTEXT,
+            PROVIDER_DELIVERY_INSPECTION_INTEGRATION,
+            PROVIDER_DELIVERY_INSPECTION_PRIVATE_KEY_BINDING,
+        )
+
+        return self._list_models(
+            model_type=SecretBinding,
+            orm_model=LaunchplaneSecretBindingRow,
+            filters=(
+                LaunchplaneSecretBindingRow.integration == PROVIDER_DELIVERY_INSPECTION_INTEGRATION,
+                LaunchplaneSecretBindingRow.context == PROVIDER_DELIVERY_INSPECTION_CONTEXT,
+                LaunchplaneSecretBindingRow.instance == "",
+                LaunchplaneSecretBindingRow.binding_key
+                == PROVIDER_DELIVERY_INSPECTION_PRIVATE_KEY_BINDING,
+                LaunchplaneSecretBindingRow.status == "configured",
+            ),
+            order_by=(
+                LaunchplaneSecretBindingRow.updated_at.desc(),
+                LaunchplaneSecretBindingRow.binding_id.desc(),
+            ),
+            limit=2,
         )
 
     def write_secret_audit_event(self, event: SecretAuditEvent) -> None:

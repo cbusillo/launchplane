@@ -724,6 +724,25 @@ export type HealthcheckEvidence = {
     verified: boolean;
 };
 
+export type InspectionSetupManagedSecretMetadata = {
+    binding_id: string | null;
+    current_version_id: string | null;
+    secret_id: string | null;
+    state: 'not_evaluated' | 'metadata_recorded' | 'secret_missing' | 'secret_unreadable' | 'secret_ambiguous' | 'binding_missing' | 'binding_unreadable' | 'binding_ambiguous' | 'binding_mismatch' | 'version_pointer_missing' | 'unavailable';
+};
+
+export type InspectionSetupMetadata = {
+    managed_secret: InspectionSetupManagedSecretMetadata;
+    runtime: InspectionSetupRuntimeMetadata;
+    state: 'not_evaluated' | 'metadata_recorded' | 'incomplete' | 'unavailable';
+};
+
+export type InspectionSetupRuntimeMetadata = {
+    app_id: string | null;
+    recorded_at: string | null;
+    state: 'not_evaluated' | 'metadata_recorded' | 'record_missing' | 'record_unreadable' | 'record_ambiguous' | 'app_id_missing' | 'app_id_invalid' | 'unavailable';
+};
+
 export type LaunchplaneAuthzPolicyOutput = {
     [key: string]: unknown;
 };
@@ -1547,6 +1566,7 @@ export type OrdinaryAgentDeliveryActivationSetupRequest = {
 export type OrdinaryAgentDeliveryAuthorizationCandidateInputsResponse = {
     authorization_policy: AuthorizationCandidatePolicyProvenance;
     diagnostics: Array<AuthorizationCandidateInputDiagnostic>;
+    inspection_setup: InspectionSetupMetadata;
     inventory_state: 'complete' | 'unavailable' | 'truncated' | 'ambiguous';
     merge_policy: AuthorizationCandidateMergePolicyProvenance | null;
     merge_policy_state: 'available' | 'missing' | 'ambiguous' | 'unavailable' | 'truncated';

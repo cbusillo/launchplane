@@ -27,9 +27,12 @@ separate concrete administrator confirmation and governed installation.
 The Agent delivery workbench also offers a read-only preparation-input check at
 `GET /v1/privileged-operations/authorization-candidates/ordinary-agent-delivery/inputs`.
 It uses the existing strict policy-administrator and managed-proposal authority
-to resolve current repository and configured-branch metadata on the server.
-It creates no plan or access and does not inspect agent registration or preview
-readiness. See [Inspecting Pilot Preparation Inputs](authorization-authority.md#inspecting-pilot-preparation-inputs)
+to resolve current repository, configured-branch, and fixed-scope inspection-App
+setup metadata on the server. The inspection projection reports recorded
+selectors and binding pointers only; it does not read secret versions or values,
+verify App identity or installation, call providers, or grant generic secret-list
+access. It creates no plan or access and does not inspect agent registration or
+preview readiness. See [Inspecting Pilot Preparation Inputs](authorization-authority.md#inspecting-pilot-preparation-inputs)
 for current-record selection and incomplete-read behavior.
 
 The Merge-train policy workbench separately supports

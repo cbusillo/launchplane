@@ -17,6 +17,7 @@ import type {
   EvaluateOwnerAcceptanceResponse,
   EvaluateOwnerProductReviewResponse,
   GovernanceProjectionResponse,
+  InspectionSetupMetadata,
   ListHumanPrivilegedOperationsData,
   ListHumanPrivilegedOperationsResponse,
   ListOwnerAcceptanceCurrentItemsData,
@@ -78,6 +79,14 @@ import type {
   OrdinaryAgentConnectionView,
 } from "./generated/openapi.ts";
 export type { OrdinaryAgentOperationClientResponse } from "./generated/openapi.ts";
+
+export type {
+  InspectionSetupMetadata as OrdinaryAgentDeliveryInspectionSetup,
+} from "./generated/openapi.ts";
+export type OrdinaryAgentDeliveryInspectionRuntimeState =
+  InspectionSetupMetadata["runtime"]["state"];
+export type OrdinaryAgentDeliveryInspectionSecretState =
+  InspectionSetupMetadata["managed_secret"]["state"];
 import type { BrowserOperationOptions } from "./browser-operation";
 import {
   BROWSER_WRITE_ROUTES,

@@ -13,6 +13,24 @@ This document describes the source contract approved in issue #2369 under
 protection, enable an ordinary rule, or start a worker. Runtime qualification
 and activation remain separate from source and deployment evidence.
 
+## Setup metadata
+
+An authorized immutable human administrator can use **Check setup prerequisites**
+in the Agent delivery workbench to inspect the recorded inspection-App selector
+and exact managed-secret binding metadata. This uses the existing
+`authz_policy_operation.propose` setup-input boundary; it adds no new permission,
+descriptor, generic secret access, or caller-selected scope.
+
+The App-ID value comes from the code-defined key in Launchplane's DB-backed
+service-context runtime record, not from process environment or a checked-in
+default. Exact bounded reads distinguish missing, malformed, ambiguous, and
+unavailable metadata. `metadata_recorded` is a configuration observation only:
+App identity and installation remain unverified, and a current-version ID does
+not prove that its version exists or its key works. The read does not load secret
+versions, decrypt, construct an App identity, mint tokens, call providers, or
+inspect ordinary delivery-App bindings. It never feeds this display snapshot
+into a later proposal or replaces that operation's fresh record resolution.
+
 ## Independent inspection authority
 
 The inspection App is separate from the ordinary delivery App. Resolve its App

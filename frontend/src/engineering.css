@@ -2074,6 +2074,113 @@
   gap: 0.28rem;
 }
 
+.ordinary-agent-inspection-setup {
+  display: grid;
+  gap: 0.8rem;
+  padding: 0.85rem;
+  border: 1px solid rgb(103 191 255 / 18%);
+  border-radius: 0.75rem;
+  background: rgb(103 191 255 / 4%);
+}
+
+.ordinary-agent-inspection-setup > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.ordinary-agent-inspection-setup > header strong {
+  display: block;
+  margin-top: 0.25rem;
+  color: var(--muted-strong);
+}
+
+.ordinary-agent-inspection-setup > header > span {
+  flex: 0 0 auto;
+  padding: 0.24rem 0.5rem;
+  border: 1px solid rgb(103 191 255 / 30%);
+  border-radius: 999px;
+  color: #a9ddff;
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.ordinary-agent-inspection-setup > header > span[data-state="incomplete"],
+.ordinary-agent-inspection-setup > header > span[data-state="unavailable"] {
+  border-color: rgb(255 183 102 / 40%);
+  color: #ffd09a;
+}
+
+.ordinary-agent-inspection-setup > header > span[data-state="not_evaluated"] {
+  border-color: rgb(255 255 255 / 18%);
+  color: var(--muted);
+}
+
+.ordinary-agent-inspection-setup > p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.ordinary-agent-inspection-setup-components {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.7rem;
+}
+
+.ordinary-agent-inspection-setup-component {
+  min-width: 0;
+  padding: 0.7rem 0.75rem;
+  border: 1px solid rgb(255 255 255 / 7%);
+  border-radius: 0.65rem;
+  background: rgb(255 255 255 / 2.5%);
+}
+
+.ordinary-agent-inspection-setup-component > div {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.ordinary-agent-inspection-setup-component > div span {
+  color: var(--muted);
+  font-size: 0.74rem;
+  font-weight: 700;
+}
+
+.ordinary-agent-inspection-setup-component > div strong {
+  color: var(--muted-strong);
+  font-size: 0.85rem;
+  text-transform: capitalize;
+}
+
+.ordinary-agent-inspection-setup-component > div strong[data-state="metadata_recorded"] {
+  color: #a9ddff;
+}
+
+.ordinary-agent-inspection-setup-component > div strong:not([data-state="metadata_recorded"]) {
+  color: #ffd09a;
+}
+
+.ordinary-agent-inspection-setup-component p {
+  margin: 0.45rem 0 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.ordinary-agent-inspection-setup-caveat {
+  padding-left: 0.65rem;
+  border-left: 2px solid rgb(255 183 102 / 48%);
+  color: #ffd09a !important;
+}
+
+.ordinary-agent-inspection-provenance dd {
+  overflow-wrap: anywhere;
+}
+
 .privileged-operation-card {
   display: grid;
   gap: 1rem;
@@ -2298,6 +2405,15 @@
 
   .ordinary-agent-preparation-inputs > header .button {
     width: 100%;
+  }
+
+  .ordinary-agent-inspection-setup > header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .ordinary-agent-inspection-setup-components {
+    grid-template-columns: 1fr;
   }
 
   .ordinary-target-preparation-form fieldset {
