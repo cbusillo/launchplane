@@ -392,6 +392,25 @@ def plan_managed_merge_train_policy_import(
             if active_payloads[policy_key] == candidate_payloads[policy_key]
         )
     )
+    preparation_context = request.preparation_context
+    if preparation_context is not None:
+        if (
+            active_record.record_id != preparation_context.expected_active_record_id
+            or active_record.policy_sha256 != preparation_context.expected_active_policy_sha256
+            or active_updated_at != preparation_context.expected_active_updated_at
+        ):
+            raise PrivilegedOperationPlannerError(
+                "Merge-train policy preparation baseline drifted."
+            )
+        if (
+            added_keys != (preparation_context.target_policy_key,)
+            or removed_keys
+            or changed_keys
+            or len(candidate_record.policy.policies) != len(active_record.policy.policies) + 1
+        ):
+            raise PrivilegedOperationPlannerError(
+                "Merge-train policy preparation must add exactly its prepared target."
+            )
     plan_payload = {
         "schema_version": 1,
         "descriptor_id": "managed-merge-train-policy-import",

@@ -860,10 +860,20 @@ export type ManagedMergeTrainPolicyImportHumanEvidence = {
 };
 
 export type ManagedMergeTrainPolicyImportProposalInputOutput = {
+    preparation_context?: ManagedMergeTrainPolicyPreparationContextOutput | null;
     reason: string;
     record: MergeTrainPolicyRecordOutput;
     related_issue: string;
     schema_version: number;
+};
+
+export type ManagedMergeTrainPolicyPreparationContextOutput = {
+    expected_active_policy_sha256: string;
+    expected_active_record_id: string;
+    expected_active_updated_at: string;
+    intent: OrdinaryAgentMergeTrainTargetIntentOutput;
+    schema_version: number;
+    target_policy_key: string;
 };
 
 export type ManagedSecretReencryptionHumanEvidence = {
@@ -1214,6 +1224,12 @@ export type MergeTrainDryRunQueueEntrySummary = {
     required_checks_status: string;
     title: string;
     url: string;
+};
+
+export type MergeTrainEnqueuePolicyInput = {
+    allowed_actor_roles?: Array<'repo_owner' | 'repo_admin'>;
+    label_required?: boolean;
+    trusted_automation_github_user_ids?: Array<number>;
 };
 
 export type MergeTrainEnqueuePolicyOutput = {
@@ -1622,6 +1638,67 @@ export type OrdinaryAgentJobView = {
     target: OrdinaryAgentTarget;
     total_effects: number;
     unresolved_effects: number;
+};
+
+export type OrdinaryAgentMergeTrainTargetInputsResponse = {
+    policy: OrdinaryAgentMergeTrainTargetPolicyInput;
+    status: 'ok';
+    trace_id: string;
+    tracked_repositories: Array<OrdinaryAgentMergeTrainTargetInventoryInput>;
+};
+
+export type OrdinaryAgentMergeTrainTargetIntentInput = {
+    base_branch: string;
+    blocked_label: string;
+    engineering_review_mode?: 'advisory' | 'required';
+    enqueue: MergeTrainEnqueuePolicyInput;
+    enqueue_label: string;
+    failure_policy: 'pause_train' | 'continue_after_blocking_pr';
+    merge_identity: MergeTrainIdentity;
+    merge_method: 'merge' | 'squash' | 'rebase';
+    provider_delivery_protection_expectation?: ProviderDeliveryProtectionExpectationV1 | null;
+    repository_id: string;
+    stack_child_disposition_label?: string;
+};
+
+export type OrdinaryAgentMergeTrainTargetIntentOutput = {
+    base_branch: string;
+    blocked_label: string;
+    engineering_review_mode: 'advisory' | 'required';
+    enqueue: MergeTrainEnqueuePolicyOutput;
+    enqueue_label: string;
+    failure_policy: 'pause_train' | 'continue_after_blocking_pr';
+    merge_identity: MergeTrainIdentity;
+    merge_method: 'merge' | 'squash' | 'rebase';
+    provider_delivery_protection_expectation?: ProviderDeliveryProtectionExpectationV1 | null;
+    repository_id: string;
+    stack_child_disposition_label: string;
+};
+
+export type OrdinaryAgentMergeTrainTargetInventoryInput = {
+    inventory_digest: string;
+    inventory_record_id: string;
+    repository: string;
+    repository_id: string;
+};
+
+export type OrdinaryAgentMergeTrainTargetPolicyInput = {
+    configured_policy_keys: Array<string>;
+    policy_sha256: string;
+    record_id: string;
+    updated_at: string;
+};
+
+export type OrdinaryAgentMergeTrainTargetPrepareEnvelope = {
+    intent: OrdinaryAgentMergeTrainTargetIntentInput;
+    schema_version?: number;
+    source_event_id: string;
+};
+
+export type OrdinaryAgentMergeTrainTargetPrepareResponse = {
+    operation_id?: string | null;
+    state: 'planned' | 'already_satisfied';
+    trace_id: string;
 };
 
 export type OrdinaryAgentOperationClientResponse = {
@@ -4260,6 +4337,31 @@ export type ReadOrdinaryAgentDeliveryAuthorizationCandidateInputsResponses = {
 
 export type ReadOrdinaryAgentDeliveryAuthorizationCandidateInputsResponse = ReadOrdinaryAgentDeliveryAuthorizationCandidateInputsResponses[keyof ReadOrdinaryAgentDeliveryAuthorizationCandidateInputsResponses];
 
+export type ReadOrdinaryAgentMergeTrainTargetInputsData = {
+    body?: never;
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/privileged-operations/merge-train-targets/inputs';
+};
+
+export type ReadOrdinaryAgentMergeTrainTargetInputsErrors = {
+    403: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type ReadOrdinaryAgentMergeTrainTargetInputsError = ReadOrdinaryAgentMergeTrainTargetInputsErrors[keyof ReadOrdinaryAgentMergeTrainTargetInputsErrors];
+
+export type ReadOrdinaryAgentMergeTrainTargetInputsResponses = {
+    200: OrdinaryAgentMergeTrainTargetInputsResponse;
+};
+
+export type ReadOrdinaryAgentMergeTrainTargetInputsResponse = ReadOrdinaryAgentMergeTrainTargetInputsResponses[keyof ReadOrdinaryAgentMergeTrainTargetInputsResponses];
+
 export type ReadOrdinaryAgentDeliveryActivationOptionsData = {
     body?: never;
     headers?: {
@@ -5064,6 +5166,31 @@ export type PrepareAuthorizationCandidateResponses = {
 };
 
 export type PrepareAuthorizationCandidateResponse = PrepareAuthorizationCandidateResponses[keyof PrepareAuthorizationCandidateResponses];
+
+export type PrepareOrdinaryAgentMergeTrainTargetData = {
+    body: OrdinaryAgentMergeTrainTargetPrepareEnvelope;
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/privileged-operations/merge-train-targets/prepare';
+};
+
+export type PrepareOrdinaryAgentMergeTrainTargetErrors = {
+    403: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type PrepareOrdinaryAgentMergeTrainTargetError = PrepareOrdinaryAgentMergeTrainTargetErrors[keyof PrepareOrdinaryAgentMergeTrainTargetErrors];
+
+export type PrepareOrdinaryAgentMergeTrainTargetResponses = {
+    200: OrdinaryAgentMergeTrainTargetPrepareResponse;
+};
+
+export type PrepareOrdinaryAgentMergeTrainTargetResponse = PrepareOrdinaryAgentMergeTrainTargetResponses[keyof PrepareOrdinaryAgentMergeTrainTargetResponses];
 
 export type PlanOrdinaryAgentDeliveryActivationData = {
     body: OrdinaryAgentDeliveryActivationPlanEnvelope;

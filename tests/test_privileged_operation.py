@@ -20,6 +20,8 @@ from control_plane.contracts.privileged_operation import (
     ManagedMergeTrainPolicyImportAgentSummary,
     ManagedMergeTrainPolicyImportHumanEvidence,
     ManagedMergeTrainPolicyImportProposalInput,
+    ManagedMergeTrainPolicyPreparationContext,
+    OrdinaryAgentMergeTrainTargetIntent,
     ManagedSecretReencryptionHumanEvidence,
     ManagedSecretReencryptionPlanInput,
     PRIVILEGED_OPERATION_SUMMARY_READ_ACTION,
@@ -42,6 +44,14 @@ from control_plane.contracts.privileged_operation import (
     privileged_operation_record_digest,
     privileged_operation_request_digest,
     privileged_operation_request_digest_candidates,
+)
+from control_plane.contracts.merge_train_policy import (
+    MergeTrainPolicy,
+    MergeTrainPolicyRecord,
+    normalize_merge_train_policy_timestamp,
+)
+from control_plane.contracts.privileged_operation_identity import (
+    merge_train_policy_import_request_fingerprint,
 )
 from control_plane.authz_grant_service import (
     AuthzManagedPolicyDiff,
@@ -887,6 +897,162 @@ class PrivilegedOperationContractTests(unittest.TestCase):
                 "must use a new record ID",
             ):
                 plan_managed_merge_train_policy_import(store, request)
+
+    def test_merge_train_policy_preparation_context_rejects_baseline_drift_before_plan(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            store = FilesystemRecordStore(Path(temporary_directory))
+            active = build_test_merge_train_policy_record(
+                repository="cbusillo/sellyouroutboard",
+                record_id="merge-train-policy-active",
+                updated_at="2026-08-22T19:00:00+00:00",
+            )
+            target = build_test_merge_train_policy_record(
+                repository="cbusillo/codex-skills",
+                record_id="merge-train-policy-target-source",
+            ).policy.policies[0]
+            candidate_policy = MergeTrainPolicy(policies=(*active.policy.policies, target))
+            candidate = MergeTrainPolicyRecord(
+                record_id="merge-train-policy-candidate",
+                source="test",
+                updated_at="2026-08-22T20:00:00+00:00",
+                policy=candidate_policy,
+            )
+            intent = OrdinaryAgentMergeTrainTargetIntent(
+                repository_id="987654321",
+                base_branch=target.base_branch,
+                enqueue_label=target.enqueue_label,
+                blocked_label=target.blocked_label,
+                stack_child_disposition_label=target.stack_child_disposition_label,
+                merge_method=target.merge_method,
+                engineering_review_mode=target.engineering_review_mode,
+                failure_policy=target.failure_policy,
+                enqueue=target.enqueue,
+                merge_identity=target.merge_identity,
+            )
+            request = ManagedMergeTrainPolicyImportProposalInput(
+                record=candidate,
+                reason="Prepare ordinary-agent-only merge target 987654321:main.",
+                preparation_context=ManagedMergeTrainPolicyPreparationContext(
+                    intent=intent,
+                    expected_active_record_id=active.record_id,
+                    expected_active_policy_sha256=active.policy_sha256,
+                    expected_active_updated_at=normalize_merge_train_policy_timestamp(
+                        active.updated_at
+                    ),
+                    target_policy_key=target.policy_key,
+                ),
+            )
+            store.write_merge_train_policy_record(active)
+            store.write_merge_train_policy_record(
+                build_test_merge_train_policy_record(
+                    repository="cbusillo/odoo-devkit",
+                    record_id="merge-train-policy-drifted",
+                    updated_at="2026-08-22T20:00:00+00:00",
+                )
+            )
+
+            with self.assertRaisesRegex(PrivilegedOperationPlannerError, "baseline drifted"):
+                plan_managed_merge_train_policy_import(store, request)
+            self.assertEqual(store.list_privileged_operation_records(limit=None), ())
+
+    def test_historical_contextless_merge_import_replays_with_canonical_digests(self) -> None:
+        base = self._merge_train_policy_import_record()
+        assert isinstance(base.request, ManagedMergeTrainPolicyImportProposalInput)
+        assert isinstance(base.evidence, ManagedMergeTrainPolicyImportHumanEvidence)
+        historical_request = base.request.model_dump(mode="json")
+        self.assertNotIn("preparation_context", historical_request)
+        request_digest = canonical_json_sha256(historical_request)
+        evidence_digest = canonical_json_sha256(base.evidence.model_dump(mode="json"))
+        approval = PrivilegedOperationApproval(
+            approver=PrivilegedOperationActor(
+                identity_type="github_human", github_id=123, login="operator"
+            ),
+            descriptor_id="managed-merge-train-policy-import",
+            descriptor_version=1,
+            request_digest=request_digest,
+            evidence_digest=evidence_digest,
+            plan_digest=base.evidence.plan_digest,
+            pre_state_digest=privileged_operation_pre_state_digest(base.evidence),
+            policy_record_id="launchplane-authz-policy-test",
+            policy_revision=1,
+            policy_sha256="e" * 64,
+            policy_source="test",
+            managed_set_id="test-set",
+            managed_rule_id="test-rule",
+            expires_at="2026-08-22T20:30:00+00:00",
+            reason="Approve exact merge-train policy import.",
+            rollback_class="policy_cas",
+        )
+        historical_payload = base.model_dump(mode="json", exclude_none=True)
+        historical_payload.update(
+            {
+                "status": "approved",
+                "request_digest": request_digest,
+                "evidence_digest": evidence_digest,
+                "approval": approval.model_dump(mode="json"),
+            }
+        )
+        request_payload = historical_payload["request"]
+        assert isinstance(request_payload, dict)
+        request_payload.pop("preparation_context", None)
+        historical = PrivilegedOperationRecord.model_validate(historical_payload)
+        assert isinstance(historical.request, ManagedMergeTrainPolicyImportProposalInput)
+        assert isinstance(historical.evidence, ManagedMergeTrainPolicyImportHumanEvidence)
+        assert historical.approval is not None
+        expected_fingerprint = canonical_json_sha256(
+            {
+                "operation_id": historical.operation_id,
+                "active_record_id": historical.evidence.active_record_id,
+                "active_policy_sha256": historical.evidence.active_policy_sha256,
+                "candidate_record_id": historical.request.record.record_id,
+                "candidate_policy_sha256": historical.request.record.policy_sha256,
+                "plan_digest": historical.approval.plan_digest,
+            }
+        )
+
+        with TemporaryDirectory() as temporary_directory:
+            state_dir = Path(temporary_directory)
+            record_path = (
+                state_dir / "launchplane_privileged_operations" / f"{historical.operation_id}.json"
+            )
+            record_path.parent.mkdir(parents=True, exist_ok=True)
+            record_path.write_text(json.dumps(historical_payload), encoding="utf-8")
+            event = PrivilegedOperationEventRecord(
+                operation_id=historical.operation_id,
+                sequence=1,
+                action="planned",
+                occurred_at=historical.created_at,
+                source_kind="agent_api",
+                source_event_id=historical.source_event_id,
+                actor=historical.requested_by,
+                resulting_record_digest=privileged_operation_record_digest(historical),
+            )
+            event_path = (
+                state_dir / "launchplane_privileged_operation_events" / f"{event.event_id}.json"
+            )
+            event_path.parent.mkdir(parents=True, exist_ok=True)
+            event_path.write_text(
+                json.dumps(event.model_dump(mode="json", exclude_none=True)), encoding="utf-8"
+            )
+            store = FilesystemRecordStore(state_dir)
+            replay = create_typed_privileged_operation_plan(
+                record_store=store,
+                descriptor_id="managed-merge-train-policy-import",
+                actor=historical.requested_by,
+                source_kind="agent_api",
+                source_event_id=historical.source_event_id,
+                request=historical.request,
+            )
+
+        self.assertEqual(historical.request_digest, request_digest)
+        self.assertEqual(
+            merge_train_policy_import_request_fingerprint(historical), expected_fingerprint
+        )
+        self.assertEqual(replay.write_status, "replayed")
+        assert isinstance(replay.record.request, ManagedMergeTrainPolicyImportProposalInput)
+        self.assertIsNone(replay.record.request.preparation_context)
 
     def test_merge_train_policy_import_planner_rejects_record_id_from_history(self) -> None:
         with TemporaryDirectory() as temporary_directory:

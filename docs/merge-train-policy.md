@@ -33,6 +33,53 @@ If no active record exists, service routes fail closed with
 new DB-backed policy record, not by relying on checked-in config files,
 service-host env, or generic service-code conditionals.
 
+## Preparing An Ordinary-Agent Target
+
+The Engineering Ops Merge-train policy workbench can prepare one new target
+without reconstructing the active policy. The supported service surface is:
+
+- `GET /v1/privileged-operations/merge-train-targets/inputs`: current tracked
+  repository identities, active-policy provenance, and configured target keys.
+- `POST /v1/privileged-operations/merge-train-targets/prepare`: one immutable
+  repository ID, an explicit base branch, and the new target's engineering
+  choices, with a stable source-event ID for retries.
+
+Both routes use the existing descriptor's managed human proposal authority;
+the POST also requires the normal browser mutation and CSRF checks. They do not
+introduce an authorization-policy administrator requirement. Repository names
+come from current unambiguous tracked inventory. The caller supplies labels,
+merge method, review and failure policy, enqueue rules, and merge-identity
+metadata. An optional provider-protection expectation is a reviewed input;
+absence means the target remains unqualified.
+Incomplete, unavailable, or ambiguous inventory fails closed; preparation never
+selects a repository from an incomplete history scan.
+
+The server preserves all unrelated targets, derives the candidate record,
+timestamp, digest, and routine reason, then invokes the existing
+`managed-merge-train-policy-import` planner. An identical configured target
+returns `already_satisfied` without a write; a different target at the same key
+conflicts. This surface cannot update or remove a target. It returns an inert
+plan for the existing review and approval lifecycle and never installs a policy.
+
+Preparation retains the original intent and expected active-policy ID, digest,
+and normalized timestamp in the proposal. The planner rejects a changed
+baseline or any candidate difference beyond the one addition before persisting
+the plan. Retrying the same actor, source event, and intent returns the original
+operation before reading newer policy state. Changed intent and collisions with
+an operation lacking preparation context fail closed. Historical generic import
+requests omit the optional context and retain their original serialized shape.
+Generic human and terminal proposal inputs cannot supply preparation context.
+
+A prepared target has an empty token-environment binding and a disabled,
+nonmutating scheduler. Normal controller dispatch consequently cannot execute
+it. Ordinary delivery still needs its separate DB-backed custody, protection,
+eligibility, and activation evidence. `merge_identity` is policy metadata for
+this path, not proof of an installed App or credential. The shared
+`service_authz` gate does not select or grant a repository. Preparing or
+installing this policy does not activate an ordinary worker, create credentials,
+or establish preview readiness. Site Owners do not use this engineering
+administration surface.
+
 ## Separation From Tenant Repository Admission
 
 Scheduler merge train admission (`merge_train_admission`) governs pull request queueing, batch candidate construction, and landing order under active `launchplane_merge_train_policies` records.

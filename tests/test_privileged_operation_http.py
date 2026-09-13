@@ -37,6 +37,7 @@ from control_plane.contracts.privileged_operation import (
     MERGE_TRAIN_POLICY_OPERATION_SUMMARY_READ_ACTION,
     ManagedAuthzPolicySetHumanEvidence,
     ManagedAuthzPolicySetProposalInput,
+    ManagedMergeTrainPolicyImportProposalInput,
     PRIVILEGED_OPERATION_SUMMARY_READ_ACTION,
     PRIVILEGED_POLICY_OPERATION_SUMMARY_READ_ACTION,
     PRIVILEGED_SECRET_OPERATION_APPROVE_ACTION,
@@ -45,6 +46,13 @@ from control_plane.contracts.privileged_operation import (
     PRIVILEGED_SECRET_OPERATION_READ_ACTION,
     PRIVILEGED_SECRET_OPERATION_REVOKE_ACTION,
 )
+from control_plane.contracts.repository_inventory import RepositoryInventoryRecord
+from control_plane.contracts.merge_train_policy import (
+    MergeTrainGitHubTokenSource,
+    MergeTrainPolicy,
+    MergeTrainPolicyRecord,
+    MergeTrainRepositoryPolicy,
+)
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_record
 from control_plane.contracts.authz_policy_record import (
     LaunchplaneAuthzPolicyRecord,
@@ -52,6 +60,8 @@ from control_plane.contracts.authz_policy_record import (
     build_authz_policy_record_id,
 )
 from control_plane.http_routes.privileged_operations import (
+    PrivilegedOperationPlanEnvelope,
+    PrivilegedPolicyOperationAgentProposalEnvelope,
     PrivilegedOperationRouteDependencies,
     register_privileged_operation_routes,
 )
@@ -66,6 +76,7 @@ from control_plane.storage.postgres import (
     LaunchplanePrivilegedOperationRow,
     PostgresRecordStore,
 )
+from control_plane.privileged_operation_service import create_typed_privileged_operation_plan
 from tests.support.http import lifespan_client
 from tests.support.stores import _sqlite_database_url
 from tests.test_ordinary_agent_activation_storage import (
@@ -323,6 +334,65 @@ def _merge_train_policy_plan_payload(source_event_id: str) -> dict[str, object]:
     }
 
 
+def _ordinary_merge_target_payload(source_event_id: str) -> dict[str, object]:
+    return {
+        "source_event_id": source_event_id,
+        "intent": {
+            "repository_id": "987654321",
+            "base_branch": "main",
+            "enqueue_label": "ready-to-merge",
+            "blocked_label": "merge-blocked",
+            "stack_child_disposition_label": "stack-landed",
+            "merge_method": "squash",
+            "engineering_review_mode": "advisory",
+            "failure_policy": "pause_train",
+            "enqueue": {
+                "label_required": True,
+                "allowed_actor_roles": ["repo_owner", "repo_admin"],
+            },
+            "merge_identity": {"kind": "github_app", "name": "reviewed-policy-intent"},
+        },
+    }
+
+
+def _ordinary_merge_target_inventory() -> RepositoryInventoryRecord:
+    return RepositoryInventoryRecord(
+        repository_id="987654321",
+        repository_owner_id="123456",
+        repository="cbusillo/codex-skills",
+        inventory_state="tracked",
+        inventory_revision=1,
+        recorded_at="2026-08-22T20:00:00Z",
+        source="test",
+        reason="Test ordinary merge target preparation.",
+    )
+
+
+def _ordinary_target_active_policy_with_protection() -> MergeTrainPolicyRecord:
+    fixture = build_test_merge_train_policy_record(
+        repository="cbusillo/sellyouroutboard",
+        record_id="merge-train-policy-active",
+        updated_at="2026-08-22T19:00:00+00:00",
+    )
+    target_payload = fixture.policy.policies[0].model_dump(mode="json")
+    target_payload["provider_delivery_protection_expectation"] = {
+        "required_status_checks": [{"context": "CI", "app_id": 123}],
+        "strict_required_status_checks_policy": True,
+        "code_scanning_tools": [],
+        "pull_request": None,
+        "allowed_merge_methods": ["merge"],
+    }
+    target_payload["github_token"] = {"env_var": ""}
+    return MergeTrainPolicyRecord(
+        record_id=fixture.record_id,
+        source=fixture.source,
+        updated_at=fixture.updated_at,
+        policy=MergeTrainPolicy(
+            policies=(MergeTrainRepositoryPolicy.model_validate(target_payload),)
+        ),
+    )
+
+
 class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
     def _app(
         self,
@@ -330,14 +400,19 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
         store: object,
         policy: LaunchplaneAuthzPolicy,
         human_reader: Mock | None = None,
+        mutation_human_reader: Mock | None = None,
         agent_identity: TerminalAgentIdentity | None = None,
         policy_record_reader: Callable[[], object] | None = None,
     ) -> FastAPI:
         app = FastAPI()
         reader = human_reader or Mock(return_value=_human())
+        mutation_reader = mutation_human_reader or reader
 
         def read_human() -> GitHubHumanIdentity:
             return cast(GitHubHumanIdentity, reader())
+
+        def read_mutation_human() -> GitHubHumanIdentity:
+            return cast(GitHubHumanIdentity, mutation_reader())
 
         trace_counter = iter(range(1, 100))
 
@@ -365,7 +440,7 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
                 ),
                 read_bearer_identity=lambda: agent_identity or _agent(),
                 read_github_human_identity=read_human,
-                read_github_human_mutation_identity=read_human,
+                read_github_human_mutation_identity=read_mutation_human,
                 policy_reader=lambda: policy,
                 policy_record_reader=policy_record_reader or (lambda: _policy_record(policy)),
             ),
@@ -1391,6 +1466,369 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
         evidence_json = json.dumps(payload["record"]["evidence"], sort_keys=True)
         self.assertNotIn("GH_TOKEN", evidence_json)
         self.assertNotIn("launchplane-merge-train", evidence_json)
+
+    async def test_ordinary_merge_target_inputs_and_prepare_preserve_inert_route(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(Path(directory))
+            store.write_merge_train_policy_record(
+                build_test_merge_train_policy_record(
+                    repository="cbusillo/sellyouroutboard",
+                    record_id="merge-train-policy-active",
+                    updated_at="2026-08-22T19:00:00+00:00",
+                )
+            )
+            store.write_repository_inventory_record(_ordinary_merge_target_inventory())
+            app = self._app(store=store, policy=_policy())
+            payload = _ordinary_merge_target_payload("ui:ordinary-target:prepare-1")
+            async with lifespan_client(app) as client:
+                inputs = await client.get("/v1/privileged-operations/merge-train-targets/inputs")
+                prepared = await client.post(
+                    "/v1/privileged-operations/merge-train-targets/prepare",
+                    json=payload,
+                )
+                replay = await client.post(
+                    "/v1/privileged-operations/merge-train-targets/prepare",
+                    json=payload,
+                )
+
+            operation = store.read_privileged_operation_record(prepared.json()["operation_id"])
+
+        self.assertEqual(inputs.status_code, 200, inputs.text)
+        self.assertEqual(inputs.json()["tracked_repositories"][0]["repository_id"], "987654321")
+        self.assertEqual(prepared.status_code, 200, prepared.text)
+        self.assertEqual(replay.status_code, 200, replay.text)
+        self.assertEqual(replay.json()["operation_id"], prepared.json()["operation_id"])
+        request = operation.request
+        assert isinstance(request, ManagedMergeTrainPolicyImportProposalInput)
+        self.assertIsNotNone(request.preparation_context)
+        target = request.record.policy.find_repository_policy(
+            repository="cbusillo/codex-skills", base_branch="main"
+        )
+        self.assertEqual(target.github_token.env_var, "")
+        self.assertFalse(target.scheduler.enabled)
+        self.assertFalse(target.scheduler.mutate)
+        self.assertEqual(target.service_authz.action, "merge_train.run_once")
+        self.assertIsNone(target.provider_delivery_protection_expectation)
+        self.assertTrue(request.record.updated_at.endswith("Z"))
+        self.assertIn("Z-", request.record.record_id)
+        self.assertLessEqual(len(request.reason), 240)
+
+    async def test_ordinary_merge_target_preserves_existing_optional_policy_fields(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(Path(directory))
+            active = _ordinary_target_active_policy_with_protection()
+            store.write_merge_train_policy_record(
+                build_test_merge_train_policy_record(
+                    repository="cbusillo/sellyouroutboard",
+                    record_id=active.record_id,
+                    updated_at=active.updated_at,
+                )
+            )
+            store.list_merge_train_policy_records = lambda **_: (active,)  # type: ignore[method-assign]
+            store.write_repository_inventory_record(_ordinary_merge_target_inventory())
+            app = self._app(store=store, policy=_policy())
+            async with lifespan_client(app) as client:
+                prepared = await client.post(
+                    "/v1/privileged-operations/merge-train-targets/prepare",
+                    json=_ordinary_merge_target_payload("ui:ordinary-target:preserve-optional"),
+                )
+
+            operation = store.read_privileged_operation_record(prepared.json()["operation_id"])
+
+        self.assertEqual(prepared.status_code, 200, prepared.text)
+        assert isinstance(operation.request, ManagedMergeTrainPolicyImportProposalInput)
+        self.assertEqual(
+            operation.request.record.policy.policies[0].model_dump(mode="json"),
+            active.policy.policies[0].model_dump(mode="json"),
+        )
+        expectation = operation.request.record.policy.policies[
+            0
+        ].provider_delivery_protection_expectation
+        self.assertIsNotNone(expectation)
+        assert expectation is not None
+        self.assertEqual(expectation.required_status_checks[0].app_id, 123)
+
+    async def test_ordinary_merge_target_rejects_forbidden_route_controls(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(Path(directory))
+            store.write_merge_train_policy_record(build_test_merge_train_policy_record())
+            store.write_repository_inventory_record(_ordinary_merge_target_inventory())
+            app = self._app(store=store, policy=_policy())
+            payload = _ordinary_merge_target_payload("ui:ordinary-target:forbidden-controls")
+            intent = payload["intent"]
+            assert isinstance(intent, dict)
+            intent["github_token"] = {"env_var": "GH_TOKEN"}
+            async with lifespan_client(app) as client:
+                token = await client.post(
+                    "/v1/privileged-operations/merge-train-targets/prepare", json=payload
+                )
+                intent.pop("github_token")
+                intent["scheduler"] = {
+                    "enabled": True,
+                    "mutate": True,
+                }
+                scheduler = await client.post(
+                    "/v1/privileged-operations/merge-train-targets/prepare", json=payload
+                )
+
+        self.assertEqual(token.status_code, 422, token.text)
+        self.assertEqual(scheduler.status_code, 422, scheduler.text)
+
+    async def test_ordinary_merge_target_uses_mutation_identity_and_requires_merge_policy_action(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(Path(directory))
+            store.write_merge_train_policy_record(build_test_merge_train_policy_record())
+            store.write_repository_inventory_record(_ordinary_merge_target_inventory())
+            foreign_human = GitHubHumanIdentity(
+                login="foreign",
+                github_id=999,
+                name="Foreign",
+                email="foreign@example.com",
+                organizations=frozenset(),
+                teams=frozenset(),
+                role="admin",
+            )
+            app = self._app(
+                store=store,
+                policy=_policy(),
+                mutation_human_reader=Mock(return_value=foreign_human),
+            )
+            async with lifespan_client(app) as client:
+                read = await client.get("/v1/privileged-operations/merge-train-targets/inputs")
+                mutation = await client.post(
+                    "/v1/privileged-operations/merge-train-targets/prepare",
+                    json=_ordinary_merge_target_payload("ui:ordinary-target:foreign-mutation"),
+                )
+            denied_app = self._app(
+                store=store,
+                policy=_policy(include_merge_train_policy_operation=False),
+            )
+            async with lifespan_client(denied_app) as client:
+                denied = await client.get("/v1/privileged-operations/merge-train-targets/inputs")
+
+        self.assertEqual(read.status_code, 200, read.text)
+        self.assertEqual(mutation.status_code, 403, mutation.text)
+        self.assertEqual(denied.status_code, 403, denied.text)
+
+    async def test_ordinary_merge_target_contextless_operation_collision_is_conflict(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(Path(directory))
+            store.write_merge_train_policy_record(build_test_merge_train_policy_record())
+            store.write_repository_inventory_record(_ordinary_merge_target_inventory())
+            app = self._app(store=store, policy=_policy())
+            source_event_id = "ui:ordinary-target:contextless-collision"
+            generic = _merge_train_policy_plan_payload(source_event_id)
+            async with lifespan_client(app) as client:
+                generic_response = await client.post(
+                    "/v1/privileged-operations/plans", json=generic
+                )
+                collision = await client.post(
+                    "/v1/privileged-operations/merge-train-targets/prepare",
+                    json=_ordinary_merge_target_payload(source_event_id),
+                )
+
+        self.assertEqual(generic_response.status_code, 200, generic_response.text)
+        self.assertEqual(collision.status_code, 409, collision.text)
+
+    async def test_generic_policy_ingress_rejects_server_owned_target_context(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(Path(directory))
+            store.write_merge_train_policy_record(build_test_merge_train_policy_record())
+            store.write_repository_inventory_record(_ordinary_merge_target_inventory())
+            app = self._app(store=store, policy=_policy())
+            async with lifespan_client(app) as client:
+                prepared = await client.post(
+                    "/v1/privileged-operations/merge-train-targets/prepare",
+                    json=_ordinary_merge_target_payload("ui:ordinary-target:owned-context"),
+                )
+                operation = store.read_privileged_operation_record(prepared.json()["operation_id"])
+                generic = await client.post(
+                    "/v1/privileged-operations/plans",
+                    json={
+                        "descriptor_id": "managed-merge-train-policy-import",
+                        "source_event_id": "ui:ordinary-target:forged-context",
+                        "request": operation.request.model_dump(mode="json"),
+                    },
+                )
+
+        self.assertEqual(prepared.status_code, 200, prepared.text)
+        self.assertEqual(generic.status_code, 422, generic.text)
+        with self.assertRaises(ValueError):
+            PrivilegedOperationPlanEnvelope.model_validate(
+                {
+                    "descriptor_id": "managed-merge-train-policy-import",
+                    "source_event_id": "ui:ordinary-target:forged-context",
+                    "request": operation.request.model_dump(mode="json"),
+                }
+            )
+        with self.assertRaises(ValueError):
+            PrivilegedPolicyOperationAgentProposalEnvelope.model_validate(
+                {
+                    "descriptor_id": "managed-merge-train-policy-import",
+                    "source_event_id": "agent:ordinary-target:forged-context",
+                    "request": operation.request.model_dump(mode="json"),
+                }
+            )
+
+    async def test_ordinary_merge_target_refuses_ambiguous_inventory_name_mapping(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(Path(directory))
+            store.write_merge_train_policy_record(build_test_merge_train_policy_record())
+            store.write_repository_inventory_record(_ordinary_merge_target_inventory())
+            store.write_repository_inventory_record(
+                RepositoryInventoryRecord(
+                    repository_id="987654322",
+                    repository_owner_id="123456",
+                    repository="cbusillo/codex-skills",
+                    inventory_state="tracked",
+                    inventory_revision=1,
+                    recorded_at="2026-08-22T20:00:00Z",
+                    source="test",
+                    reason="Test ambiguous ordinary merge target inventory.",
+                )
+            )
+            app = self._app(store=store, policy=_policy())
+            async with lifespan_client(app) as client:
+                inputs = await client.get("/v1/privileged-operations/merge-train-targets/inputs")
+                prepared = await client.post(
+                    "/v1/privileged-operations/merge-train-targets/prepare",
+                    json=_ordinary_merge_target_payload("ui:ordinary-target:ambiguous-inventory"),
+                )
+            operations = store.list_privileged_operation_records(limit=None)
+
+        self.assertEqual(inputs.status_code, 503, inputs.text)
+        self.assertEqual(prepared.status_code, 503, prepared.text)
+        self.assertEqual(operations, ())
+
+    async def test_ordinary_merge_target_replay_survives_baseline_drift_and_rejects_changed_intent(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(Path(directory))
+            active = build_test_merge_train_policy_record(
+                repository="cbusillo/sellyouroutboard",
+                record_id="merge-train-policy-active",
+                updated_at="2026-08-22T19:00:00+00:00",
+            )
+            store.write_merge_train_policy_record(active)
+            store.write_repository_inventory_record(_ordinary_merge_target_inventory())
+            app = self._app(store=store, policy=_policy())
+            payload = _ordinary_merge_target_payload("ui:ordinary-target:stable-replay")
+            async with lifespan_client(app) as client:
+                first = await client.post(
+                    "/v1/privileged-operations/merge-train-targets/prepare", json=payload
+                )
+                store.write_merge_train_policy_record(
+                    build_test_merge_train_policy_record(
+                        repository="cbusillo/codex-skills",
+                        record_id="merge-train-policy-drifted",
+                        updated_at="2026-08-22T20:00:00+00:00",
+                    )
+                )
+                replay = await client.post(
+                    "/v1/privileged-operations/merge-train-targets/prepare", json=payload
+                )
+                changed = _ordinary_merge_target_payload("ui:ordinary-target:stable-replay")
+                changed["intent"]["merge_method"] = "rebase"  # type: ignore[index]
+                conflict = await client.post(
+                    "/v1/privileged-operations/merge-train-targets/prepare", json=changed
+                )
+
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(replay.status_code, 200, replay.text)
+        self.assertEqual(replay.json()["operation_id"], first.json()["operation_id"])
+        self.assertEqual(conflict.status_code, 409, conflict.text)
+        self.assertEqual(conflict.json()["detail"]["code"], "ordinary_agent_merge_target_conflict")
+
+    async def test_ordinary_merge_target_rejects_route_level_baseline_drift_before_write(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(Path(directory))
+            store.write_merge_train_policy_record(
+                build_test_merge_train_policy_record(
+                    repository="cbusillo/sellyouroutboard",
+                    record_id="merge-train-policy-active",
+                    updated_at="2026-08-22T19:00:00+00:00",
+                )
+            )
+            store.write_repository_inventory_record(_ordinary_merge_target_inventory())
+            app = self._app(store=store, policy=_policy())
+
+            def drift_before_planning(**kwargs: object) -> object:
+                store.write_merge_train_policy_record(
+                    build_test_merge_train_policy_record(
+                        repository="cbusillo/odoo-devkit",
+                        record_id="merge-train-policy-drifted",
+                        updated_at="2026-08-22T20:00:00+00:00",
+                    )
+                )
+                return cast(Callable[..., object], create_typed_privileged_operation_plan)(**kwargs)
+
+            with patch(
+                "control_plane.http_routes.privileged_operations.create_typed_privileged_operation_plan",
+                side_effect=drift_before_planning,
+            ):
+                async with lifespan_client(app) as client:
+                    response = await client.post(
+                        "/v1/privileged-operations/merge-train-targets/prepare",
+                        json=_ordinary_merge_target_payload("ui:ordinary-target:route-drift"),
+                    )
+            operations = store.list_privileged_operation_records(limit=None)
+
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(
+            response.json()["detail"]["code"], "ordinary_agent_merge_target_baseline_drift"
+        )
+        self.assertEqual(operations, ())
+
+    async def test_ordinary_merge_target_noop_and_conflicting_existing_key_write_nothing(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(Path(directory))
+            fixture = build_test_merge_train_policy_record(
+                repository="cbusillo/codex-skills",
+                record_id="merge-train-policy-active",
+            )
+            store.write_merge_train_policy_record(
+                MergeTrainPolicyRecord(
+                    record_id=fixture.record_id,
+                    source=fixture.source,
+                    updated_at=fixture.updated_at,
+                    policy=MergeTrainPolicy(
+                        policies=(
+                            fixture.policy.policies[0].model_copy(
+                                update={"github_token": MergeTrainGitHubTokenSource()}
+                            ),
+                        )
+                    ),
+                )
+            )
+            store.write_repository_inventory_record(_ordinary_merge_target_inventory())
+            app = self._app(store=store, policy=_policy())
+            payload = _ordinary_merge_target_payload("ui:ordinary-target:existing")
+            async with lifespan_client(app) as client:
+                conflict = await client.post(
+                    "/v1/privileged-operations/merge-train-targets/prepare", json=payload
+                )
+                payload["intent"]["merge_method"] = "merge"  # type: ignore[index]
+                payload["intent"]["merge_identity"] = {  # type: ignore[index]
+                    "kind": "github_actions_oidc",
+                    "name": "launchplane-merge-train",
+                }
+                satisfied = await client.post(
+                    "/v1/privileged-operations/merge-train-targets/prepare", json=payload
+                )
+
+            records = store.list_privileged_operation_records(limit=None)
+
+        self.assertEqual(conflict.status_code, 409, conflict.text)
+        self.assertEqual(satisfied.status_code, 200, satisfied.text)
+        self.assertEqual(satisfied.json()["state"], "already_satisfied")
+        self.assertEqual(records, ())
 
     async def test_merge_train_policy_approval_reports_history_drift_as_stale(self) -> None:
         with TemporaryDirectory() as temporary_directory:

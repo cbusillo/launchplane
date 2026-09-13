@@ -29,12 +29,16 @@ import type {
   OwnerAcceptanceProductDecision,
   OrdinaryAgentDeliveryActivationOptionsResponse,
   OrdinaryAgentDeliveryAuthorizationCandidateInputsResponse,
+  OrdinaryAgentMergeTrainTargetInputsResponse,
+  OrdinaryAgentMergeTrainTargetIntentInput,
+  OrdinaryAgentMergeTrainTargetPrepareResponse,
   OrdinaryAgentDeliveryActivationRevokeRequest,
   OrdinaryAgentDeliveryActivationSetupRequest,
   PlanOrdinaryAgentDeliveryActivationData,
   PlanOrdinaryAgentDeliveryActivationResponse,
   PrepareAuthorizationCandidateData,
   PrepareAuthorizationCandidateResponse,
+  PrepareOrdinaryAgentMergeTrainTargetData,
   ProductActivityResponse,
   ProductEnvironmentConfigStatusResponse,
   ProductEnvironmentIncidentResponse,
@@ -54,6 +58,7 @@ import type {
   ReadHumanPrivilegedOperationReviewData,
   ReadHumanPrivilegedOperationReviewResponse,
   ReadOrdinaryAgentDeliveryActivationOptionsResponse,
+  ReadOrdinaryAgentMergeTrainTargetInputsData,
   RankWorkGraphSnapshotData,
   RankWorkGraphSnapshotResponse,
   ReadProductOperationalReadinessData,
@@ -488,6 +493,41 @@ export function readMergeTrainPolicyTargets(
   );
 }
 
+export function readOrdinaryAgentMergeTrainTargetInputs(
+  signal?: AbortSignal,
+): Promise<OrdinaryAgentMergeTrainTargetInputsResponse> {
+  const request: ReadOrdinaryAgentMergeTrainTargetInputsData = {
+    url: "/v1/privileged-operations/merge-train-targets/inputs",
+  };
+  return requestJson<OrdinaryAgentMergeTrainTargetInputsResponse>(
+    request.url,
+    "GET",
+    undefined,
+    signal,
+  );
+}
+
+export function prepareOrdinaryAgentMergeTrainTarget(
+  intent: OrdinaryAgentMergeTrainTargetIntent,
+  sourceEventId: string,
+  signal?: AbortSignal,
+): Promise<OrdinaryAgentMergeTrainTargetPrepareResponse> {
+  const request: PrepareOrdinaryAgentMergeTrainTargetData = {
+    url: BROWSER_WRITE_ROUTES.ordinaryMergeTrainTargetPrepare,
+    body: {
+      schema_version: 1,
+      source_event_id: sourceEventId,
+      intent,
+    },
+  };
+  return requestJson<OrdinaryAgentMergeTrainTargetPrepareResponse>(
+    request.url,
+    "POST",
+    request.body,
+    signal,
+  );
+}
+
 export function applyProductEnvironmentConfig(
   product: string,
   environment: string,
@@ -647,6 +687,9 @@ export function writeOwnerAcceptanceEvent(
 export type {
   OrdinaryAgentDeliveryActivationOptionsResponse,
   OrdinaryAgentDeliveryAuthorizationCandidateInputsResponse,
+  OrdinaryAgentMergeTrainTargetInputsResponse,
+  OrdinaryAgentMergeTrainTargetIntentInput,
+  OrdinaryAgentMergeTrainTargetPrepareResponse,
   OrdinaryAgentDeliveryActivationRevokeRequest,
   OrdinaryAgentDeliveryActivationSetupRequest,
   PrivilegedOperationListResponse,
@@ -654,6 +697,9 @@ export type {
   PrivilegedOperationSemanticReview,
   PrivilegedOperationSemanticReviewResponse,
 };
+
+export type OrdinaryAgentMergeTrainTargetIntent =
+  OrdinaryAgentMergeTrainTargetIntentInput;
 
 export type PrivilegedOperationDescriptorId = NonNullable<
   ListHumanPrivilegedOperationsData["query"]

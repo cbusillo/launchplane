@@ -1,4 +1,7 @@
-import type { OwnerAcceptanceDecision } from "./api";
+import type {
+  OrdinaryAgentMergeTrainTargetInputsResponse,
+  OwnerAcceptanceDecision,
+} from "./api";
 import type {
   ApplyProductEnvironmentConfigData,
   DataProvenance,
@@ -1576,6 +1579,42 @@ export function mergeTrainTargetsForFixture(
             },
           ],
     trace_id: "fixture-merge-train-targets",
+  };
+}
+
+export function mergeTrainTargetInputsForFixture(
+  fixture: DataFixtureMode,
+): OrdinaryAgentMergeTrainTargetInputsResponse {
+  assertEngineeringFixtureAvailable(fixture);
+  if (fixture === "missing") {
+    throw Object.assign(
+      new Error("The active merge-train policy is not available for preparation."),
+      {
+        statusCode: 503,
+        traceId: "fixture-merge-train-target-inputs-missing",
+      },
+    );
+  }
+  return {
+    status: "ok",
+    trace_id: "fixture-merge-train-target-inputs",
+    policy: {
+      record_id: "fixture-merge-train-policy",
+      updated_at: OBSERVED_AT,
+      policy_sha256: "a".repeat(64),
+      configured_policy_keys: ["example/control-plane:main"],
+    },
+    tracked_repositories:
+      fixture === "empty"
+        ? []
+        : [
+            {
+              repository_id: "1001",
+              repository: "example/control-plane",
+              inventory_record_id: "fixture-repository-inventory-1001",
+              inventory_digest: "b".repeat(64),
+            },
+          ],
   };
 }
 

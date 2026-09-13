@@ -5,6 +5,8 @@ import {
   approvePrivilegedOperation,
   planOrdinaryAgentDeliveryActivation,
   prepareAuthorizationCandidate,
+  prepareOrdinaryAgentMergeTrainTarget,
+  readOrdinaryAgentMergeTrainTargetInputs,
   readOrdinaryAgentDeliveryAuthorizationCandidateInputs,
   readOrdinaryAgentDeliveryActivationOptions,
   readPrivilegedOperationRawDetail,
@@ -83,6 +85,89 @@ test("setup-prerequisite check performs one parameterless read", async () => {
   assert.equal(calls[0].init.method, "GET");
   assert.equal(calls[0].init.body, undefined);
   assert.equal(response.inventory_state, "complete");
+});
+
+test("ordinary target preparation reads the bounded input record", async () => {
+  const calls = [];
+  globalThis.fetch = async (input, init = {}) => {
+    calls.push({ input: String(input), init });
+    return new Response(
+      JSON.stringify({
+        status: "ok",
+        trace_id: "trace-ordinary-target-inputs",
+        policy: {
+          record_id: "merge-train-policy-r4",
+          updated_at: "2026-09-12T14:25:00Z",
+          policy_sha256: "2".repeat(64),
+          configured_policy_keys: ["example/control-plane:main"],
+        },
+        tracked_repositories: [
+          {
+            repository_id: "1001",
+            repository: "example/control-plane",
+            inventory_record_id: "repository-inventory-1001-r3",
+            inventory_digest: "3".repeat(64),
+          },
+        ],
+      }),
+      { headers: { "Content-Type": "application/json" }, status: 200 },
+    );
+  };
+
+  const response = await readOrdinaryAgentMergeTrainTargetInputs();
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].input, "/v1/privileged-operations/merge-train-targets/inputs");
+  assert.equal(calls[0].init.method, "GET");
+  assert.equal(response.tracked_repositories[0].repository_id, "1001");
+});
+
+test("ordinary target preparation posts only target intent and server replay key", async () => {
+  const calls = [];
+  globalThis.fetch = async (input, init = {}) => {
+    calls.push({ input: String(input), init });
+    const payload = String(input).endsWith("/v1/auth/session")
+      ? { csrf_token: "csrf-ordinary-target" }
+      : {
+          trace_id: "trace-ordinary-target-plan",
+          state: "planned",
+          operation_id: "ordinary-target-operation",
+        };
+    return new Response(JSON.stringify(payload), {
+      headers: { "Content-Type": "application/json" },
+      status: 200,
+    });
+  };
+
+  const response = await prepareOrdinaryAgentMergeTrainTarget(
+    {
+      repository_id: "1001",
+      base_branch: "main",
+      enqueue_label: "merge-train",
+      blocked_label: "merge-train-blocked",
+      stack_child_disposition_label: "",
+      merge_method: "merge",
+      engineering_review_mode: "required",
+      failure_policy: "pause_train",
+      enqueue: { label_required: true, allowed_actor_roles: ["repo_owner"] },
+      merge_identity: { kind: "github_app", name: "merge-train-app" },
+    },
+    "ui:ordinary-merge-target:retry",
+  );
+
+  assert.equal(response.state, "planned");
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1].input, "/v1/privileged-operations/merge-train-targets/prepare");
+  assert.equal(calls[1].init.headers["X-CSRF-Token"], "csrf-ordinary-target");
+  const body = JSON.parse(String(calls[1].init.body));
+  assert.deepEqual(Object.keys(body).sort(), ["intent", "schema_version", "source_event_id"]);
+  assert.equal(body.schema_version, 1);
+  assert.equal(body.source_event_id, "ui:ordinary-merge-target:retry");
+  assert.equal(body.intent.repository_id, "1001");
+  assert.equal(body.intent.merge_identity.name, "merge-train-app");
+  assert.equal("scheduler" in body, false);
+  assert.equal("github_token" in body, false);
+  assert.equal("reason" in body, false);
 });
 
 test("privileged-operation UI scopes policy plan reads by descriptor", async () => {

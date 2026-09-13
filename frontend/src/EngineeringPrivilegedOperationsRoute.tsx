@@ -33,6 +33,7 @@ import {
 import { formatTime } from "./format";
 import { EngineeringOrdinaryAgentJobRoute } from "./EngineeringOrdinaryAgentJobRoute";
 import { EngineeringOrdinaryAgentPreparationInputs } from "./EngineeringOrdinaryAgentPreparationInputs";
+import { EngineeringOrdinaryAgentTargetPreparation } from "./EngineeringOrdinaryAgentTargetPreparation";
 import { EngineeringOrdinaryAgentRoute } from "./EngineeringOrdinaryAgentRoute";
 
 export function EngineeringPrivilegedOperationsRoute({ fixtureMode }: { fixtureMode: DevFixtureMode }) {
@@ -165,6 +166,12 @@ function DefaultPrivilegedOperationsRoute({
               <OrdinaryAgentDeliveryActivationComposer
                 fixtureMode={fixtureMode}
                 refresh={resource.refresh}
+              />
+            ) : null}
+            {descriptorId === "managed-merge-train-policy-import" &&
+            operationId === null ? (
+              <EngineeringOrdinaryAgentTargetPreparation
+                fixtureMode={fixtureMode}
               />
             ) : null}
             {descriptorId === "managed-authz-policy-set" &&
