@@ -132,6 +132,14 @@ class OrdinaryAgentManagementHTTPTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(status.status_code, 200, status.text)
                 self.assertEqual(status.json(), qualification.json())
+                after_admission = await client.get(
+                    "/v1/agent/ordinary-agent-session-proposals/http-qualification-session",
+                    headers=headers,
+                )
+                self.assertEqual(after_admission.status_code, 200, after_admission.text)
+                admitted_selectors = after_admission.json()["operation"]["lease_selectors"]
+                self.assertEqual(admitted_selectors[0]["lease_id"], selectors[0]["lease_id"])
+                self.assertIsNone(admitted_selectors[0]["revoked_at"])
                 cancelled = await client.post(
                     "/v1/agent/ordinary-agent-session-proposals/http-qualification-session/cancel",
                     headers=headers,
@@ -228,6 +236,18 @@ class OrdinaryAgentManagementHTTPTests(unittest.IsolatedAsyncioTestCase):
                     headers={"Authorization": f"Bearer {session.bundle.token.value}"},
                 )
                 self.assertEqual(diagnostic.status_code, 403, diagnostic.text)
+                before_cancel = await client.post(
+                    "/v1/agent/ordinary-agent-jobs",
+                    headers={"Authorization": f"Bearer {session.bundle.token.value}"},
+                    json={
+                        "schema_version": 2,
+                        "purpose": "qualification",
+                        "idempotency_key": "http-corrupt-cancel-positive-control",
+                        "session_id": approved.session.session_id,
+                        "lease_id": approved.leases[0].lease_id,
+                    },
+                )
+                self.assertEqual(before_cancel.status_code, 200, before_cancel.text)
                 response = await client.post(
                     "/v1/agent/ordinary-agent-session-proposals/http-corrupt-cancel-session/cancel",
                     headers={"Authorization": f"Bearer {session.bundle.token.value}"},
