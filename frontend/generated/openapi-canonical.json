@@ -20579,6 +20579,52 @@
         "title": "OrdinaryAgentSessionClientRequest",
         "type": "object"
       },
+      "OrdinaryAgentSessionLeaseSelector": {
+        "additionalProperties": false,
+        "description": "Service-issued lease handle; clients must not derive or interpret it.",
+        "properties": {
+          "action": {
+            "enum": [
+              "self_read",
+              "preflight",
+              "guarded_merge"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "expires_at": {
+            "maximum": 9.223372036854776e+18,
+            "minimum": 1.0,
+            "title": "Expires At",
+            "type": "integer"
+          },
+          "lease_id": {
+            "pattern": "^[a-z][a-z0-9_-]{2,127}$",
+            "title": "Lease Id",
+            "type": "string"
+          },
+          "revoked_at": {
+            "anyOf": [
+              {
+                "maximum": 9.223372036854776e+18,
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revoked At"
+          }
+        },
+        "required": [
+          "lease_id",
+          "action",
+          "expires_at"
+        ],
+        "title": "OrdinaryAgentSessionLeaseSelector",
+        "type": "object"
+      },
       "OrdinaryAgentSessionOperationView": {
         "additionalProperties": false,
         "description": "Public diagnostic projection, never an admission or execution capability.",
@@ -20661,6 +20707,14 @@
             ],
             "title": "Kind",
             "type": "string"
+          },
+          "lease_selectors": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/OrdinaryAgentSessionLeaseSelector"
+            },
+            "title": "Lease Selectors",
+            "type": "array"
           },
           "operation_id": {
             "title": "Operation Id",

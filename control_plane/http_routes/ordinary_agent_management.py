@@ -310,13 +310,15 @@ def register_ordinary_agent_management_routes(
     ) -> OrdinaryAgentOperationClientResponse:
         with _operation_errors():
             view = store.read_ordinary_agent_session_operation(
-                proof=proof, operation_id=operation_id
+                proof=proof, operation_id=operation_id, lease_read=False
             )
             if view.session_id is None:
                 raise HTTPException(409, "This request has no issued session to cancel.")
             store.cancel_ordinary_agent_session(proof=proof, session_id=view.session_id)
             return _client_response(
-                store.read_ordinary_agent_session_operation(proof=proof, operation_id=operation_id)
+                store.read_ordinary_agent_session_operation(
+                    proof=proof, operation_id=operation_id, lease_read=False
+                )
             )
 
     def read_job(

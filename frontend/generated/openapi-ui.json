@@ -15752,6 +15752,53 @@
         "title": "OrdinaryAgentSessionAttenuation",
         "type": "object"
       },
+      "OrdinaryAgentSessionLeaseSelector": {
+        "additionalProperties": false,
+        "description": "Service-issued lease handle; clients must not derive or interpret it.",
+        "properties": {
+          "action": {
+            "enum": [
+              "self_read",
+              "preflight",
+              "guarded_merge"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "expires_at": {
+            "maximum": 9223372036854776000,
+            "minimum": 1,
+            "title": "Expires At",
+            "type": "integer"
+          },
+          "lease_id": {
+            "pattern": "^[a-z][a-z0-9_-]{2,127}$",
+            "title": "Lease Id",
+            "type": "string"
+          },
+          "revoked_at": {
+            "anyOf": [
+              {
+                "maximum": 9223372036854776000,
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revoked At"
+          }
+        },
+        "required": [
+          "action",
+          "expires_at",
+          "lease_id",
+          "revoked_at"
+        ],
+        "title": "OrdinaryAgentSessionLeaseSelector",
+        "type": "object"
+      },
       "OrdinaryAgentSessionOperationView": {
         "additionalProperties": false,
         "description": "Public diagnostic projection, never an admission or execution capability.",
@@ -15834,6 +15881,14 @@
             ],
             "title": "Kind",
             "type": "string"
+          },
+          "lease_selectors": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/OrdinaryAgentSessionLeaseSelector"
+            },
+            "title": "Lease Selectors",
+            "type": "array"
           },
           "operation_id": {
             "title": "Operation Id",
@@ -15932,6 +15987,7 @@
           "current_policy_execution_profile",
           "delivery_expires_at",
           "kind",
+          "lease_selectors",
           "operation_id",
           "principal_id",
           "reason_code",

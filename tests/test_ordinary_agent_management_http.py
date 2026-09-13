@@ -29,16 +29,21 @@ from control_plane.ordinary_agent_enrollment_worker import (
 )
 from control_plane.ordinary_agent_session_approval import (
     approve_ordinary_agent_enrollment,
+    approve_existing_ordinary_agent_session,
     disconnect_ordinary_agent_principal,
 )
 from control_plane.ordinary_agent_session_lifecycle import OrdinaryAgentSessionAdmissionDenied
+from control_plane.contracts.ordinary_agent_session_lifecycle import OrdinaryAgentLeaseRecord
 from control_plane.provider_delivery_inspection_profile import (
     ResolvedProviderDeliveryInspectionProfile,
 )
 from control_plane.provider_delivery_readiness import (
     ensure_provider_delivery_readiness_for_client,
 )
-from control_plane.storage.postgres import _OrdinaryAgentRuntimePrerequisites
+from control_plane.storage.postgres import (
+    LaunchplaneOrdinaryAgentLeaseRow,
+    _OrdinaryAgentRuntimePrerequisites,
+)
 from control_plane.service_auth import (
     BearerIdentityConfig,
     GitHubHumanIdentity,
@@ -59,6 +64,190 @@ from tests.support.ordinary_agent_lifecycle import (
 
 
 class OrdinaryAgentManagementHTTPTests(unittest.IsolatedAsyncioTestCase):
+    async def test_ordinary_session_projection_supplies_preflight_lease_for_qualification(
+        self,
+    ) -> None:
+        fixture = effect_support.OrdinaryAgentEffectStorageTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        session = fixture.fixture
+        preflight = session.attenuation.model_copy(update={"actions": ("preflight",)})
+        session.store.propose_ordinary_agent_session(
+            proof=session.proof,
+            operation_id="http-qualification-session",
+            attenuation=preflight,
+        )
+        approved = approve_existing_ordinary_agent_session(
+            store=session.store,
+            manager=session.manager,
+            cookie_header=session.manager.session_cookie_header(session.human),
+            csrf_token=session.manager.csrf_token(session.human),
+            principal_id=session.envelope.principal_id,
+            operation_id="http-qualification-session",
+        )
+        app = create_launchplane_fastapi_app(
+            verifier=Mock(),
+            authz_policy=session.policy.policy,
+            record_store_factory=lambda: session.store,
+        )
+        headers = {"Authorization": f"Bearer {session.bundle.token.value}"}
+        with patch.object(
+            session.store,
+            "_require_ordinary_agent_runtime_readiness",
+            return_value=(Mock(), (), session.now),
+        ):
+            async with lifespan_client(app) as client:
+                operation_response = await client.get(
+                    "/v1/agent/ordinary-agent-session-proposals/http-qualification-session",
+                    headers=headers,
+                )
+                self.assertEqual(operation_response.status_code, 200, operation_response.text)
+                operation = operation_response.json()["operation"]
+                self.assertEqual(operation["session_id"], approved.session.session_id)
+                selectors = operation["lease_selectors"]
+                self.assertEqual(len(selectors), 1)
+                self.assertEqual(selectors[0]["action"], "preflight")
+                for private_field in (
+                    "approval_sha256",
+                    "credential_digest",
+                    "receiver_sha256",
+                ):
+                    self.assertNotIn(private_field, operation_response.text)
+                qualification = await client.post(
+                    "/v1/agent/ordinary-agent-jobs",
+                    headers=headers,
+                    json={
+                        "schema_version": 2,
+                        "purpose": "qualification",
+                        "idempotency_key": "http-projection-qualification",
+                        "session_id": operation["session_id"],
+                        "lease_id": selectors[0]["lease_id"],
+                    },
+                )
+                self.assertEqual(qualification.status_code, 200, qualification.text)
+                request_id = qualification.json()["request_id"]
+                status = await client.get(
+                    f"/v1/agent/ordinary-agent-jobs/{request_id}",
+                    headers=headers,
+                )
+                self.assertEqual(status.status_code, 200, status.text)
+                self.assertEqual(status.json(), qualification.json())
+                cancelled = await client.post(
+                    "/v1/agent/ordinary-agent-session-proposals/http-qualification-session/cancel",
+                    headers=headers,
+                )
+                self.assertEqual(cancelled.status_code, 200, cancelled.text)
+                cancelled_operation = cancelled.json()["operation"]
+                self.assertEqual(cancelled_operation["status"], "revoked")
+                self.assertEqual(cancelled_operation["lease_selectors"], [])
+                status_after_cancel = await client.get(
+                    "/v1/agent/ordinary-agent-session-proposals/http-qualification-session",
+                    headers=headers,
+                )
+                self.assertEqual(status_after_cancel.status_code, 200, status_after_cancel.text)
+                status_operation = status_after_cancel.json()["operation"]
+                self.assertEqual(status_operation["status"], "revoked")
+                self.assertEqual(
+                    status_operation["lease_selectors"][0]["lease_id"],
+                    selectors[0]["lease_id"],
+                )
+                self.assertIsNotNone(status_operation["lease_selectors"][0]["revoked_at"])
+                for private_field in (
+                    "approval_sha256",
+                    "credential_digest",
+                    "receiver_sha256",
+                ):
+                    self.assertNotIn(private_field, status_after_cancel.text)
+                for private_field in (
+                    "approval_sha256",
+                    "credential_digest",
+                    "receiver_sha256",
+                ):
+                    self.assertNotIn(private_field, cancelled.text)
+                stale = await client.post(
+                    "/v1/agent/ordinary-agent-jobs",
+                    headers=headers,
+                    json={
+                        "schema_version": 2,
+                        "purpose": "qualification",
+                        "idempotency_key": "http-projection-qualification-stale",
+                        "session_id": operation["session_id"],
+                        "lease_id": selectors[0]["lease_id"],
+                    },
+                )
+                self.assertEqual(stale.status_code, 403, stale.text)
+
+    async def test_ordinary_cancel_omits_selector_diagnostics_for_corrupt_sibling(self) -> None:
+        fixture = effect_support.OrdinaryAgentEffectStorageTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        session = fixture.fixture
+        preflight = session.attenuation.model_copy(update={"actions": ("preflight",)})
+        session.store.propose_ordinary_agent_session(
+            proof=session.proof,
+            operation_id="http-corrupt-cancel-session",
+            attenuation=preflight,
+        )
+        approved = approve_existing_ordinary_agent_session(
+            store=session.store,
+            manager=session.manager,
+            cookie_header=session.manager.session_cookie_header(session.human),
+            csrf_token=session.manager.csrf_token(session.human),
+            principal_id=session.envelope.principal_id,
+            operation_id="http-corrupt-cancel-session",
+        )
+        with session.store._session_factory() as db_session:
+            row = db_session.get(LaunchplaneOrdinaryAgentLeaseRow, approved.leases[0].lease_id)
+            assert row is not None
+            lease = OrdinaryAgentLeaseRecord.model_validate(row.payload)
+            sibling = lease.model_copy(
+                update={"lease_id": "ordinary-lease-corrupt-cancel", "principal_id": "agent_two"}
+            )
+            db_session.add(
+                LaunchplaneOrdinaryAgentLeaseRow(
+                    lease_id=sibling.lease_id,
+                    session_id=sibling.session_id,
+                    revision=sibling.revision,
+                    payload=session.store._payload_dict(sibling),
+                )
+            )
+            db_session.commit()
+        app = create_launchplane_fastapi_app(
+            verifier=Mock(),
+            authz_policy=session.policy.policy,
+            record_store_factory=lambda: session.store,
+        )
+        with patch.object(
+            session.store,
+            "_require_ordinary_agent_runtime_readiness",
+            return_value=(Mock(), (), session.now),
+        ):
+            async with lifespan_client(app) as client:
+                diagnostic = await client.get(
+                    "/v1/agent/ordinary-agent-session-proposals/http-corrupt-cancel-session",
+                    headers={"Authorization": f"Bearer {session.bundle.token.value}"},
+                )
+                self.assertEqual(diagnostic.status_code, 403, diagnostic.text)
+                response = await client.post(
+                    "/v1/agent/ordinary-agent-session-proposals/http-corrupt-cancel-session/cancel",
+                    headers={"Authorization": f"Bearer {session.bundle.token.value}"},
+                )
+                stale = await client.post(
+                    "/v1/agent/ordinary-agent-jobs",
+                    headers={"Authorization": f"Bearer {session.bundle.token.value}"},
+                    json={
+                        "schema_version": 2,
+                        "purpose": "qualification",
+                        "idempotency_key": "http-corrupt-cancel-stale",
+                        "session_id": approved.session.session_id,
+                        "lease_id": approved.leases[0].lease_id,
+                    },
+                )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["operation"]["status"], "revoked")
+        self.assertEqual(response.json()["operation"]["lease_selectors"], [])
+        self.assertEqual(stale.status_code, 403, stale.text)
+
     async def test_finite_job_post_accepts_strict_client_intent_only(self) -> None:
         fixture = effect_support.OrdinaryAgentEffectStorageTests()
         fixture.setUp()
@@ -942,6 +1131,7 @@ class OrdinaryAgentManagementHTTPTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(
                         after_apply.json()["operation"]["operation_id"], first_operation
                     )
+                    self.assertEqual(after_apply.json()["operation"]["lease_selectors"], [])
                     prepare.assert_not_called()
                     # A concurrent winner can commit after the early read;
                     # newly inspected evidence must not replace its intent.

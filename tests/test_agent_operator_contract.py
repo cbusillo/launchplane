@@ -33,6 +33,7 @@ class AgentOperatorContractTests(unittest.TestCase):
         )
         expected_operation_ids = {
             ("POST", "/v1/agent/ordinary-agent-jobs"): "admit_ordinary_agent_job",
+            ("GET", "/v1/agent/ordinary-agent-jobs/{request_id}"): "read_ordinary_agent_job",
             ("POST", "/v1/agent/ordinary-agent-enrollments"): "propose_ordinary_agent_enrollment",
             (
                 "GET",
@@ -78,6 +79,7 @@ class AgentOperatorContractTests(unittest.TestCase):
         }
         expected_dependencies = {
             "admit_ordinary_agent_job": ["read_ordinary_agent_proof"],
+            "read_ordinary_agent_job": ["read_ordinary_agent_proof"],
             "propose_ordinary_agent_enrollment": ["read_terminal_enrollment_requester"],
             "read_proposed_ordinary_agent_enrollment": ["read_terminal_enrollment_requester"],
             "propose_ordinary_agent_session": ["read_ordinary_agent_proof"],

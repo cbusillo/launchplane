@@ -335,6 +335,15 @@ def is_guarded_ordinary_agent_finite_request(
     )
 
 
+class OrdinaryAgentSessionLeaseSelector(StrictFrozenModel):
+    """Service-issued lease handle; clients must not derive or interpret it."""
+
+    lease_id: str = Field(pattern=r"^[a-z][a-z0-9_-]{2,127}$")
+    action: OrdinaryAgentAction
+    expires_at: int = Field(ge=1, le=2**63 - 1)
+    revoked_at: int | None = Field(default=None, ge=0, le=2**63 - 1)
+
+
 class OrdinaryAgentSessionOperationView(StrictFrozenModel):
     """Public diagnostic projection, never an admission or execution capability."""
 
@@ -357,6 +366,7 @@ class OrdinaryAgentSessionOperationView(StrictFrozenModel):
     target: OrdinaryAgentTarget
     session_id: str | None = None
     session_expires_at: int | None = None
+    lease_selectors: tuple[OrdinaryAgentSessionLeaseSelector, ...] = ()
     applied: bool = False
     can_approve: bool = False
 

@@ -628,6 +628,15 @@ unavailable delivery uses a generic denial; errors never echo the submitted
 capability or a keyring/persistence exception. A successful response contains
 one private `credential` value and uses `Cache-Control: no-store`.
 
+The receiver proof is 32 cryptographically random bytes encoded as canonical
+unpadded base64url: exactly 43 ASCII characters from `A-Z`, `a-z`, `0-9`, `_`
+and `-`. Its enrollment `receiver_claim_sha256` is the lowercase SHA-256 digest
+of the byte prefix `launchplane:ordinary-agent-claim:v1` followed by one NUL
+byte and the encoded proof's ASCII bytes. Persist the proof and the original
+proposal, including its client retry key, together atomically and durably before
+sending the first proposal. Losing that private proof cannot be repaired by
+recomputing the canonical operation ID or replaying a proposal with a new proof.
+
 Only a private client adapter may consume that response. The exported agent
 contract marks its sole supported surface as `private_agent_client` and requires
 private response custody evidence. It is not an LLM-visible generic tool result,
@@ -697,6 +706,42 @@ and retain receiver proof privately, save the claimed credential atomically
 before reporting readiness, reuse finite approved sessions, and handle bounded
 status retries without GitHub polling. No installed-consumer or live usability
 claim follows from these source and controlled browser/HTTP checks alone.
+
+### Issued session lease selectors
+
+The ordinary session-operation response includes `lease_selectors` for the
+issued session: each selector contains the persisted `lease_id`, its `action`,
+`expires_at`, and optional `revoked_at`. An operation without an issued session
+returns an empty collection. The authenticated ordinary principal and signed
+administrator may read these selectors. The terminal client that proposed an
+enrollment receives no selectors, even after the initial operation issues a
+session. After claiming its credential privately, the ordinary client can read
+that initial operation through
+`GET /v1/agent/ordinary-agent-session-proposals/{operation_id}`, using the
+canonical operation ID returned by the service.
+
+Cancellation and revocation acknowledgements omit lease selectors. Withdrawing
+authority must not depend on optional lease-detail validation. Normal status
+reads still validate the bindings before returning selectors, including
+revocation metadata for correctly bound historical leases.
+
+Treat the returned session and lease IDs as service-issued handles; do not
+calculate or parse their current representation. The service validates the
+persisted operation/session/lease bindings before projecting them. Invalid,
+missing or ambiguous bindings produce the existing bounded denial, without
+inventing replacement handles or exposing private record details. Correctly
+bound expired or revoked leases retain their expiry/revocation metadata so the
+caller can understand a stale session. Their presence is not current authority;
+operation status and every finite admission check remain independent.
+
+To qualify, use the returned `session_id` and the `preflight` action's `lease_id`
+in the existing finite-v2 qualification request, with one stable idempotency
+key. Guarded delivery selects its corresponding action lease and retains the
+existing finite request's bounded PR inputs. Submission returns a service-issued
+`request_id`; use `GET /v1/agent/ordinary-agent-jobs/{request_id}` to read that
+job's current state. The public agent contract includes this existing ordinary
+status route. Neither status read needs a provider or GitHub poll, and neither
+grants admission, refreshes a session or activates a worker.
 
 ## Durable ordinary execution records
 

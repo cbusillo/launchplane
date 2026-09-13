@@ -1737,6 +1737,13 @@ export type OrdinaryAgentSessionAttenuation = {
     session_expires_at: number;
 };
 
+export type OrdinaryAgentSessionLeaseSelector = {
+    action: 'self_read' | 'preflight' | 'guarded_merge';
+    expires_at: number;
+    lease_id: string;
+    revoked_at: number | null;
+};
+
 export type OrdinaryAgentSessionOperationView = {
     applied: boolean;
     attenuation: OrdinaryAgentSessionAttenuation | null;
@@ -1748,6 +1755,7 @@ export type OrdinaryAgentSessionOperationView = {
     current_policy_execution_profile: 'read_only' | 'guarded_executor' | null;
     delivery_expires_at: number | null;
     kind: 'initial' | 'existing';
+    lease_selectors: Array<OrdinaryAgentSessionLeaseSelector>;
     operation_id: string;
     principal_id: string;
     reason_code: string | null;
