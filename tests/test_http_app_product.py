@@ -2,12 +2,16 @@ import asyncio
 import json
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, cast
 from unittest.mock import patch
 
 from control_plane import secrets as control_plane_secrets
+from control_plane.authz_candidate_preparation import (
+    compile_administrator_product_evidence_read_candidate,
+)
 from control_plane.contracts.outbox_delivery import OutboxDeliveryRecord
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
@@ -953,6 +957,87 @@ class FastApiProductEnvironmentConfigStatusTests(unittest.IsolatedAsyncioTestCas
 
 
 class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_administrator_evidence_candidate_reads_product_resource_context(self) -> None:
+        human = _github_human_identity()
+        _, request = compile_administrator_product_evidence_read_candidate(
+            current_policy=LaunchplaneAuthzPolicy(schema_version=2),
+            github_id=human.github_id,
+            intent="add",
+        )
+        assert request is not None
+        current_policy = request.desired_policy
+        legacy_policy = current_policy.model_copy(
+            update={
+                "github_humans": tuple(
+                    rule.model_copy(update={"contexts": ("launchplane",)})
+                    for rule in current_policy.github_humans
+                )
+            }
+        )
+        cases = (
+            ("legacy context restriction", legacy_policy, human, 200, 403),
+            ("current candidate", current_policy, human, 200, 200),
+            (
+                "different administrator with the same login",
+                current_policy,
+                replace(human, github_id=456),
+                403,
+                403,
+            ),
+            (
+                "same human without administrator role",
+                current_policy,
+                _github_human_identity(role="read_only"),
+                403,
+                403,
+            ),
+        )
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            _seed_product_environment_read_records(database_url)
+            app_store = PostgresRecordStore(database_url=database_url)
+            try:
+                for label, policy, identity, overview_status, environment_status in cases:
+                    with self.subTest(case=label):
+                        session_manager = HumanSessionManager(
+                            config=_github_oauth_config(),
+                            session_store=InMemoryHumanSessionStore(),
+                        )
+                        human_session = session_manager.issue(identity)
+                        app = create_launchplane_fastapi_app(
+                            verifier=_RejectingVerifier(),
+                            authz_policy=policy,
+                            record_store_factory=lambda: app_store,
+                            human_session_manager=session_manager,
+                        )
+                        headers = {"Cookie": session_manager.session_cookie_header(human_session)}
+                        overview = await _asgi_get(
+                            app, "/v1/products/example-site", headers=headers
+                        )
+                        environment = await _asgi_get(
+                            app, "/v1/products/example-site/environments/prod", headers=headers
+                        )
+                        self.assertEqual(overview.status_code, overview_status, overview.text)
+                        self.assertEqual(
+                            environment.status_code, environment_status, environment.text
+                        )
+                        if environment_status == 200:
+                            self.assertEqual(
+                                environment.json()["environment"]["context"], "example-site"
+                            )
+                            self.assertNotIn("super-secret-password", environment.text)
+                            self.assertNotIn(
+                                "https://internal.example-site.invalid", environment.text
+                            )
+                        else:
+                            self.assertEqual(
+                                environment.json()["error"]["code"], "authorization_denied"
+                            )
+            finally:
+                app_store.close()
+
     async def test_repo_product_mapping_returns_managed_and_awareness_repos(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)

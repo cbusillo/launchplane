@@ -18,8 +18,10 @@ not approve or apply it. See
 and [Preparing Administrator Product Evidence Access](authorization-authority.md#preparing-administrator-product-evidence-access)
 for eligibility, collision, removal, and production-activation boundaries.
 The product-evidence candidate proposes one read capability across all current
-and future projects for the requesting administrator. Its two rules cover
-project-level and environment-level reads. That standing access still requires
+and future projects for the requesting administrator. Its project-level rule
+uses the Launchplane context. Its environment-level all-instances rule has an
+empty context selector so it can read the stored context of each environment.
+That standing access still requires
 separate concrete administrator confirmation and governed installation.
 
 The Agent delivery workbench also offers a read-only preparation-input check at
