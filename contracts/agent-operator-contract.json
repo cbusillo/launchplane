@@ -75,6 +75,29 @@
         "identity_dependencies": [
           "read_ordinary_agent_proof"
         ],
+        "method": "GET",
+        "modes": [
+          "read"
+        ],
+        "operation_id": "read_ordinary_agent_job",
+        "path": "/v1/agent/ordinary-agent-jobs/{request_id}",
+        "purpose": "Read this ordinary principal's finite job state.",
+        "response_statuses": [
+          "200",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [],
+        "schema_fingerprint_sha256": "75eafec75f46cb1517923d1765f49e98f4fa88e5643e5cbf9ecc7cb309fdad03",
+        "supported_surfaces": [
+          "ordinary_agent_client"
+        ]
+      },
+      {
+        "idempotency": "none",
+        "identity_dependencies": [
+          "read_ordinary_agent_proof"
+        ],
         "method": "POST",
         "modes": [
           "cancel"
@@ -88,7 +111,7 @@
           "503"
         ],
         "reviewed_evidence": [],
-        "schema_fingerprint_sha256": "78cedd83759106da022303015945dd94ae9837fae8d9475eddf8f612af743932",
+        "schema_fingerprint_sha256": "ba26a97805990fd1b143b022a57b0b600b3da091387e3fc889d4d47e371672ee",
         "supported_surfaces": [
           "ordinary_agent_client"
         ]
@@ -111,7 +134,7 @@
           "503"
         ],
         "reviewed_evidence": [],
-        "schema_fingerprint_sha256": "fe82433782b5f7045000d8767938f74beeb0bb2955b7198851af79de14fcf00f",
+        "schema_fingerprint_sha256": "7979ba91b02ba78216fb44d07ad8acc1573325e38ee248bf340a21ffe8ca4161",
         "supported_surfaces": [
           "terminal_agent_client"
         ]
@@ -134,7 +157,7 @@
           "503"
         ],
         "reviewed_evidence": [],
-        "schema_fingerprint_sha256": "084a8fe8a6fd13ca87813b87ae541f89b0c1b459d1b7d351721fe175281684a7",
+        "schema_fingerprint_sha256": "8502e37a221d8c3de47b2f8611fa15052d108faa107784df28d94633159a5588",
         "supported_surfaces": [
           "terminal_agent_client"
         ]
@@ -157,7 +180,7 @@
           "503"
         ],
         "reviewed_evidence": [],
-        "schema_fingerprint_sha256": "451e4c75c9c246717f003f5c621df767bbc42c01767c70ef2b6614793dd3c5f3",
+        "schema_fingerprint_sha256": "a13842726146311c5872eba494714e3ded3c6b1b105a0445198801977a1113ce",
         "supported_surfaces": [
           "ordinary_agent_client"
         ]
@@ -180,7 +203,7 @@
           "503"
         ],
         "reviewed_evidence": [],
-        "schema_fingerprint_sha256": "78cedd83759106da022303015945dd94ae9837fae8d9475eddf8f612af743932",
+        "schema_fingerprint_sha256": "ba26a97805990fd1b143b022a57b0b600b3da091387e3fc889d4d47e371672ee",
         "supported_surfaces": [
           "ordinary_agent_client"
         ]
@@ -591,8 +614,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "6ee2f992af5d43553050ecb145cd4be34f6ddb44"
+    "source_commit_sha": "88a912940df197fc839180681c5970aba206592e"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "f4fa8fcec07ad2b6d11f641a0d0207a80a3d787b424025bf238f2c145535b6e2"
+  "semantic_digest_sha256": "a6dad1fcf4fe6ee709f6c3fb0c6b9d40688f3b7eed443add30cbd65ce745bf8d"
 }

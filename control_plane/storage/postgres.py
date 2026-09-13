@@ -540,6 +540,7 @@ from control_plane.contracts.ordinary_agent_session_lifecycle import (
     OrdinaryAgentJobBinding,
     OrdinaryAgentSessionAttenuation,
     OrdinaryAgentSessionOperationView,
+    OrdinaryAgentSessionLeaseSelector,
     OrdinaryAgentConnectionView,
     OrdinaryAgentSessionDelegation,
     OrdinaryAgentSessionRecord,
@@ -21268,7 +21269,7 @@ class PostgresRecordStore(HumanSessionStore):
                 if row.kind != "existing" or row.intent_sha256 != intent:
                     raise OrdinaryAgentSessionAdmissionDenied("idempotency_conflict")
                 return self._ordinary_agent_operation_view(
-                    session, row=row, policy=policy, now=now, human_read=False
+                    session, row=row, policy=policy, now=now, human_read=False, lease_read=True
                 )
             row = LaunchplaneOrdinaryAgentSessionOperationRow(
                 principal_id=principal.principal_id,
@@ -21283,7 +21284,7 @@ class PostgresRecordStore(HumanSessionStore):
             session.add(row)
             session.flush()
             view = self._ordinary_agent_operation_view(
-                session, row=row, policy=policy, now=now, human_read=False
+                session, row=row, policy=policy, now=now, human_read=False, lease_read=True
             )
             session.commit()
             return view
@@ -21376,6 +21377,72 @@ class PostgresRecordStore(HumanSessionStore):
             session.commit()
             return issued
 
+    def _ordinary_agent_lease_selectors(
+        self,
+        session: Any,
+        *,
+        session_record: OrdinaryAgentSessionRecord | None,
+        attenuation: OrdinaryAgentSessionAttenuation | None,
+        target: OrdinaryAgentTarget,
+        lease_read: bool,
+    ) -> tuple[OrdinaryAgentSessionLeaseSelector, ...]:
+        if not lease_read or session_record is None:
+            return ()
+        if attenuation is None:
+            raise OrdinaryAgentSessionAdmissionDenied("session_proposal_drift")
+        if (
+            session_record.delegation.model_dump(
+                exclude={"operation_id", "approval_sha256", "receiver_sha256"}
+            )
+            != attenuation.model_dump()
+        ):
+            raise OrdinaryAgentSessionAdmissionDenied("session_proposal_drift")
+
+        expected_actions = tuple(session_record.delegation.actions)
+        if not expected_actions:
+            raise OrdinaryAgentSessionAdmissionDenied("session_proposal_drift")
+        lease_rows = tuple(
+            session.scalars(
+                select(LaunchplaneOrdinaryAgentLeaseRow)
+                .where(LaunchplaneOrdinaryAgentLeaseRow.session_id == session_record.session_id)
+                .order_by(LaunchplaneOrdinaryAgentLeaseRow.lease_id)
+                .limit(len(expected_actions) + 1)
+            )
+        )
+        if len(lease_rows) != len(expected_actions):
+            raise OrdinaryAgentSessionAdmissionDenied("session_proposal_drift")
+        by_action: dict[str, OrdinaryAgentLeaseRecord] = {}
+        # Lease writers keep row/payload revision and original session/delegation lifetimes aligned.
+        for lease_row in lease_rows:
+            try:
+                lease = OrdinaryAgentLeaseRecord.model_validate(lease_row.payload)
+            except (TypeError, ValueError):
+                raise OrdinaryAgentSessionAdmissionDenied("session_proposal_drift") from None
+            if (
+                lease_row.lease_id != lease.lease_id
+                or lease_row.session_id != session_record.session_id
+                or lease_row.revision != lease.revision
+                or lease.session_id != session_record.session_id
+                or lease.principal_id != session_record.principal_id
+                or lease.target != target
+                or lease.action not in expected_actions
+                or lease.valid_from != session_record.valid_from
+                or lease.expires_at != session_record.delegation.lease_expires_at
+            ):
+                raise OrdinaryAgentSessionAdmissionDenied("session_proposal_drift")
+            if lease.action in by_action:
+                raise OrdinaryAgentSessionAdmissionDenied("session_proposal_drift")
+            by_action[lease.action] = lease
+        return tuple(
+            OrdinaryAgentSessionLeaseSelector(
+                lease_id=by_action[action].lease_id,
+                action=action,
+                expires_at=by_action[action].expires_at,
+                revoked_at=by_action[action].revoked_at,
+            )
+            for action in expected_actions
+        )
+
     def _ordinary_agent_operation_view(
         self,
         session: Any,
@@ -21384,6 +21451,7 @@ class PostgresRecordStore(HumanSessionStore):
         policy: LaunchplaneAuthzPolicyRecord,
         now: int,
         human_read: bool,
+        lease_read: bool,
     ) -> OrdinaryAgentSessionOperationView:
         if row.kind == "initial":
             envelope = self._ordinary_agent_initial_intent(row)
@@ -21425,6 +21493,23 @@ class PostgresRecordStore(HumanSessionStore):
             if session_row is None:
                 raise OrdinaryAgentSessionAdmissionDenied("session_unavailable")
             session_record = OrdinaryAgentSessionRecord.model_validate(session_row.payload)
+            # Optional selector integrity must not gate cancellation acknowledgements.
+            if lease_read and (
+                session_row.session_id != row.terminal_session_id
+                or session_row.operation_id != row.operation_id
+                or session_row.principal_id != row.principal_id
+                or session_row.credential_id != credential_id
+                or session_row.credential_version != credential_version
+                or session_record.session_id != session_row.session_id
+                or session_record.principal_id != session_row.principal_id
+                or session_record.credential_id != session_row.credential_id
+                or session_record.credential_version != session_row.credential_version
+                or session_record.delegation.operation_id != row.operation_id
+                or session_record.principal_id != row.principal_id
+                or session_record.credential_id != credential_id
+                or session_record.credential_version != credential_version
+            ):
+                raise OrdinaryAgentSessionAdmissionDenied("session_proposal_drift")
         applied = session_record is not None or (
             row.kind == "initial"
             and session.scalar(
@@ -21508,6 +21593,13 @@ class PostgresRecordStore(HumanSessionStore):
             and rules[0].target == target
             else ()
         )
+        lease_selectors = self._ordinary_agent_lease_selectors(
+            session,
+            session_record=session_record,
+            attenuation=attenuation,
+            target=target,
+            lease_read=lease_read,
+        )
         return OrdinaryAgentSessionOperationView(
             current_policy_actions=current_policy_actions,
             current_policy_execution_profile=(
@@ -21539,13 +21631,18 @@ class PostgresRecordStore(HumanSessionStore):
             target=target,
             session_id=None if session_record is None else session_record.session_id,
             session_expires_at=None if session_record is None else session_record.expires_at,
+            lease_selectors=lease_selectors,
             applied=applied,
             can_approve=human_read and status == "pending",
         )
 
     @_private_ordinary_agent_operation
     def read_ordinary_agent_session_operation(
-        self, *, proof: OrdinaryAgentTokenProof, operation_id: str
+        self,
+        *,
+        proof: OrdinaryAgentTokenProof,
+        operation_id: str,
+        lease_read: bool = True,
     ) -> OrdinaryAgentSessionOperationView:
         with self._session_factory() as session:
             self._begin_serialized_write(session)
@@ -21556,7 +21653,7 @@ class PostgresRecordStore(HumanSessionStore):
             if row is None:
                 raise OrdinaryAgentSessionAdmissionDenied("session_proposal_unavailable")
             return self._ordinary_agent_operation_view(
-                session, row=row, policy=policy, now=now, human_read=False
+                session, row=row, policy=policy, now=now, human_read=False, lease_read=lease_read
             )
 
     @_private_ordinary_agent_operation
@@ -21620,6 +21717,7 @@ class PostgresRecordStore(HumanSessionStore):
                 policy=self._read_authz_policy_row(policies[0]),
                 now=self._ordinary_agent_database_epoch(session),
                 human_read=False,
+                lease_read=False,
             )
 
     @_private_ordinary_agent_operation
@@ -21638,7 +21736,7 @@ class PostgresRecordStore(HumanSessionStore):
             if row is None:
                 raise OrdinaryAgentSessionAdmissionDenied("session_proposal_unavailable")
             return self._ordinary_agent_operation_view(
-                session, row=row, policy=policy, now=now, human_read=True
+                session, row=row, policy=policy, now=now, human_read=True, lease_read=True
             )
 
     def _persist_ordinary_agent_session(
@@ -32242,7 +32340,7 @@ class PostgresRecordStore(HumanSessionStore):
                 raise OrdinaryAgentSessionAdmissionDenied("session_proposal_unavailable")
             session.flush()
             view = self._ordinary_agent_operation_view(
-                session, row=row, policy=policy, now=now, human_read=True
+                session, row=row, policy=policy, now=now, human_read=True, lease_read=False
             )
             session.commit()
             return view
@@ -32269,14 +32367,14 @@ class PostgresRecordStore(HumanSessionStore):
             now = self._ordinary_agent_database_epoch(session)
             self._require_ordinary_agent_human_current(human, now)
             view = self._ordinary_agent_operation_view(
-                session, row=row, policy=policy, now=now, human_read=True
+                session, row=row, policy=policy, now=now, human_read=True, lease_read=False
             )
             if view.applied:
                 raise OrdinaryAgentSessionAdmissionDenied("operation_already_applied")
             if row.cancelled_at is None:
                 row.cancelled_at = now
             view = self._ordinary_agent_operation_view(
-                session, row=row, policy=policy, now=now, human_read=True
+                session, row=row, policy=policy, now=now, human_read=True, lease_read=False
             )
             session.commit()
             return view

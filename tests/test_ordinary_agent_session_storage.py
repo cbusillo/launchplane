@@ -849,6 +849,174 @@ class OrdinaryAgentSessionStorageTests(unittest.TestCase):
         self.assertFalse(historical.can_approve)
         self.assertEqual(historical.session_id, fresh.session.session_id)
 
+    def test_lease_projection_is_audience_scoped_and_preserves_stale_metadata(self) -> None:
+        pending = read_human_ordinary_agent_session_operation(
+            store=self.store,
+            manager=self.manager,
+            cookie_header=self.manager.session_cookie_header(self.human),
+            principal_id=self.envelope.principal_id,
+            operation_id=self.envelope.operation_id,
+        )
+        self.assertEqual(pending.lease_selectors, ())
+
+        self.enroll()
+        ordinary = self.store.read_ordinary_agent_session_operation(
+            proof=self.proof, operation_id=self.envelope.operation_id
+        )
+        human = read_human_ordinary_agent_session_operation(
+            store=self.store,
+            manager=self.manager,
+            cookie_header=self.manager.session_cookie_header(self.human),
+            principal_id=self.envelope.principal_id,
+            operation_id=self.envelope.operation_id,
+        )
+        terminal = self.store.read_proposed_ordinary_agent_enrollment(
+            requester=TerminalAgentIdentity(subject="test-cli", token_label="test"),
+            principal_id=self.envelope.principal_id,
+            operation_id=self.envelope.operation_id,
+        )
+        self.assertEqual(len(ordinary.lease_selectors), 1)
+        self.assertEqual(human.lease_selectors, ordinary.lease_selectors)
+        self.assertEqual(terminal.lease_selectors, ())
+
+        self.clock.return_value = datetime.fromtimestamp(self.now + 101, timezone.utc).isoformat()
+        expired = self.store.read_ordinary_agent_session_operation(
+            proof=self.proof, operation_id=self.envelope.operation_id
+        )
+        self.assertEqual(expired.status, "expired")
+        self.assertEqual(expired.lease_selectors, ordinary.lease_selectors)
+        self.assertIsNone(expired.lease_selectors[0].revoked_at)
+
+        self.clock.return_value = datetime.fromtimestamp(self.now, timezone.utc).isoformat()
+        self.store.cancel_ordinary_agent_session(
+            proof=self.proof, session_id=self.issued.session.session_id
+        )
+        revoked = self.store.read_ordinary_agent_session_operation(
+            proof=self.proof, operation_id=self.envelope.operation_id
+        )
+        self.assertEqual(revoked.status, "revoked")
+        self.assertEqual(revoked.lease_selectors[0].lease_id, ordinary.lease_selectors[0].lease_id)
+        self.assertEqual(revoked.lease_selectors[0].revoked_at, self.now)
+
+    def test_lease_projection_rejects_session_column_drift(self) -> None:
+        self.enroll()
+        with self.store._session_factory() as session:
+            row = session.get(LaunchplaneOrdinaryAgentSessionRow, self.issued.session.session_id)
+            assert row is not None
+            row.credential_version += 1
+            session.commit()
+        with self.assertRaisesRegex(OrdinaryAgentSessionAdmissionDenied, "session_proposal_drift"):
+            self.store.read_ordinary_agent_session_operation(
+                proof=self.proof, operation_id=self.envelope.operation_id
+            )
+
+    def test_lease_projection_rejects_unexpected_lease_row_count(self) -> None:
+        self.enroll()
+        with self.store._session_factory() as session:
+            row = session.get(LaunchplaneOrdinaryAgentLeaseRow, self.issued.leases[0].lease_id)
+            assert row is not None
+            lease = OrdinaryAgentLeaseRecord.model_validate(row.payload)
+            duplicate = lease.model_copy(update={"lease_id": "ordinary-lease-duplicate"})
+            session.add(
+                LaunchplaneOrdinaryAgentLeaseRow(
+                    lease_id=duplicate.lease_id,
+                    session_id=duplicate.session_id,
+                    revision=duplicate.revision,
+                    payload=self.store._payload_dict(duplicate),
+                )
+            )
+            session.commit()
+        with self.assertRaisesRegex(OrdinaryAgentSessionAdmissionDenied, "session_proposal_drift"):
+            self.store.read_ordinary_agent_session_operation(
+                proof=self.proof, operation_id=self.envelope.operation_id
+            )
+
+    def test_lease_projection_rejects_duplicate_action_with_same_row_count(self) -> None:
+        self.enroll()
+        operation_id = "fresh-two-action-session"
+        attenuation = self.attenuation.model_copy(
+            update={"actions": ("guarded_merge", "preflight")}
+        )
+        self.store.propose_ordinary_agent_session(
+            proof=self.proof, operation_id=operation_id, attenuation=attenuation
+        )
+        approved = approve_existing_ordinary_agent_session(
+            store=self.store,
+            manager=self.manager,
+            cookie_header=self.manager.session_cookie_header(self.human),
+            csrf_token=self.manager.csrf_token(self.human),
+            principal_id=self.envelope.principal_id,
+            operation_id=operation_id,
+        )
+        with self.store._session_factory() as session:
+            rows = tuple(
+                session.scalars(
+                    select(LaunchplaneOrdinaryAgentLeaseRow)
+                    .where(
+                        LaunchplaneOrdinaryAgentLeaseRow.session_id == approved.session.session_id
+                    )
+                    .order_by(LaunchplaneOrdinaryAgentLeaseRow.lease_id)
+                )
+            )
+            self.assertEqual(len(rows), 2)
+            first = OrdinaryAgentLeaseRecord.model_validate(rows[0].payload)
+            second = OrdinaryAgentLeaseRecord.model_validate(rows[1].payload)
+            rows[1].payload = self.store._payload_dict(
+                second.model_copy(update={"action": first.action})
+            )
+            session.commit()
+        with self.assertRaisesRegex(OrdinaryAgentSessionAdmissionDenied, "session_proposal_drift"):
+            self.store.read_ordinary_agent_session_operation(
+                proof=self.proof, operation_id=operation_id
+            )
+
+    def test_lease_projection_rejects_per_lease_binding_mismatch(self) -> None:
+        self.enroll()
+        with self.store._session_factory() as session:
+            row = session.get(LaunchplaneOrdinaryAgentLeaseRow, self.issued.leases[0].lease_id)
+            assert row is not None
+            lease = OrdinaryAgentLeaseRecord.model_validate(row.payload)
+            mismatched = lease.model_copy(update={"principal_id": "agent_two"})
+            row.payload = self.store._payload_dict(mismatched)
+            session.commit()
+        with self.assertRaisesRegex(OrdinaryAgentSessionAdmissionDenied, "session_proposal_drift"):
+            self.store.read_ordinary_agent_session_operation(
+                proof=self.proof, operation_id=self.envelope.operation_id
+            )
+
+    def test_human_revoke_omits_selector_diagnostics_for_corrupt_sibling(self) -> None:
+        self.enroll()
+        with self.store._session_factory() as session:
+            row = session.get(LaunchplaneOrdinaryAgentLeaseRow, self.issued.leases[0].lease_id)
+            assert row is not None
+            lease = OrdinaryAgentLeaseRecord.model_validate(row.payload)
+            sibling = lease.model_copy(
+                update={"lease_id": "ordinary-lease-corrupt-sibling", "principal_id": "agent_two"}
+            )
+            session.add(
+                LaunchplaneOrdinaryAgentLeaseRow(
+                    lease_id=sibling.lease_id,
+                    session_id=sibling.session_id,
+                    revision=sibling.revision,
+                    payload=self.store._payload_dict(sibling),
+                )
+            )
+            session.commit()
+        revoked = revoke_ordinary_agent_session(
+            store=self.store,
+            manager=self.manager,
+            cookie_header=self.manager.session_cookie_header(self.human),
+            csrf_token=self.manager.csrf_token(self.human),
+            principal_id=self.envelope.principal_id,
+            session_id=self.issued.session.session_id,
+        )
+        self.assertEqual(revoked.status, "revoked")
+        self.assertEqual(revoked.lease_selectors, ())
+        committed = self.store.read_ordinary_agent_session_operation(
+            proof=self.proof, operation_id=self.envelope.operation_id, lease_read=False
+        )
+        self.assertEqual(committed.status, "revoked")
+
     def test_cancel_approved_unapplied_intent_fences_worker_and_apply(self) -> None:
         view = cancel_pending_ordinary_agent_operation(
             store=self.store,

@@ -90,6 +90,15 @@ OPERATION_SPECS = (
         ("purpose_specific_readiness", "idempotent_replay"),
     ),
     OperationSpec(
+        "GET",
+        "/v1/agent/ordinary-agent-jobs/{request_id}",
+        "Read this ordinary principal's finite job state.",
+        ("ordinary_agent_client",),
+        ("read",),
+        "none",
+        (),
+    ),
+    OperationSpec(
         "POST",
         "/v1/agent/ordinary-agent-session-proposals/{operation_id}/cancel",
         "Cancel this ordinary principal's issued session.",
