@@ -12,6 +12,9 @@ import { Fragment, useEffect, useRef, useState } from "react";
 import {
   LaunchplaneApiError,
   readOrdinaryAgentDeliveryAuthorizationCandidateInputs,
+  type OrdinaryAgentDeliveryInspectionRuntimeState,
+  type OrdinaryAgentDeliveryInspectionSecretState,
+  type OrdinaryAgentDeliveryInspectionSetup,
   type OrdinaryAgentDeliveryAuthorizationCandidateInputsResponse,
 } from "./api";
 import type { DevFixtureMode } from "./dev-fixture-loader";
@@ -188,6 +191,7 @@ function PreparationInputsResult({
 }: {
   data: OrdinaryAgentDeliveryAuthorizationCandidateInputsResponse;
 }) {
+  const inspectionSetup = data.inspection_setup;
   const incompleteInventory = data.inventory_state !== "complete";
   const mergePolicyAvailable = data.merge_policy_state === "available";
 
@@ -207,6 +211,8 @@ function PreparationInputsResult({
           </dd>
         </div>
       </dl>
+
+      <InspectionSetupResult inspectionSetup={inspectionSetup} />
 
       {incompleteInventory ? (
         <div className="ordinary-agent-preparation-state" role="status">
@@ -360,6 +366,222 @@ function PreparationInputsResult({
   );
 }
 
+function InspectionSetupResult({
+  inspectionSetup,
+}: {
+  inspectionSetup: OrdinaryAgentDeliveryInspectionSetup | undefined;
+}) {
+  if (!inspectionSetup) {
+    return (
+      <section
+        className="ordinary-agent-inspection-setup"
+        aria-label="Inspection setup metadata"
+      >
+        <header>
+          <div>
+            <span className="engineering-kicker">Inspection setup</span>
+            <strong>Inspection metadata not reported</strong>
+          </div>
+        </header>
+        <p>
+          Inspection metadata was not included in this response. App identity
+          and installation are not verified by this read. Existing setup
+          prerequisites remain the available evidence.
+        </p>
+      </section>
+    );
+  }
+  return (
+    <section
+      className="ordinary-agent-inspection-setup"
+      aria-label="Inspection setup metadata"
+    >
+      <header>
+        <div>
+          <span className="engineering-kicker">Inspection setup</span>
+          <strong>{inspectionSetupStateLabel(inspectionSetup.state)}</strong>
+        </div>
+        <span
+          className="ordinary-agent-inspection-setup-state"
+          data-state={inspectionSetup.state}
+        >
+          {inspectionSetup.state === "metadata_recorded"
+            ? "Metadata recorded"
+            : inspectionSetup.state === "not_evaluated"
+              ? "Not evaluated"
+              : inspectionSetup.state === "unavailable"
+                ? "Unavailable"
+                : "Incomplete"}
+        </span>
+      </header>
+      <div className="ordinary-agent-inspection-setup-components">
+        <InspectionSetupComponent
+          detail={inspectionRuntimeDetail(inspectionSetup.runtime)}
+          label="Inspection App metadata"
+          state={inspectionSetup.runtime.state}
+        />
+        <InspectionSetupComponent
+          detail={inspectionSecretDetail(inspectionSetup.managed_secret)}
+          label="Managed-secret binding metadata"
+          state={inspectionSetup.managed_secret.state}
+        />
+      </div>
+      <p className="ordinary-agent-inspection-setup-caveat">
+        App identity and installation are not verified by this read. Recorded
+        metadata is not provider permission, protection, custody, or readiness
+        evidence.
+      </p>
+      <details className="privileged-operation-policy-review">
+        <summary>Inspection metadata details</summary>
+        <dl className="privileged-operation-details ordinary-agent-inspection-provenance">
+          {inspectionSetup.runtime.state === "metadata_recorded" &&
+          inspectionSetup.runtime.app_id ? (
+            <ProvenanceValue
+              label="Recorded App ID"
+              value={inspectionSetup.runtime.app_id}
+            />
+          ) : null}
+          {inspectionSetup.runtime.state === "metadata_recorded" &&
+          inspectionSetup.runtime.recorded_at ? (
+            <ProvenanceValue
+              label="App metadata recorded at"
+              value={formatTime(inspectionSetup.runtime.recorded_at)}
+            />
+          ) : null}
+          {inspectionSetup.managed_secret.state === "metadata_recorded" &&
+          inspectionSetup.managed_secret.secret_id ? (
+            <ProvenanceValue
+              label="Managed-secret record ID"
+              value={inspectionSetup.managed_secret.secret_id}
+            />
+          ) : null}
+          {inspectionSetup.managed_secret.state === "metadata_recorded" &&
+          inspectionSetup.managed_secret.binding_id ? (
+            <ProvenanceValue
+              label="Managed-secret binding ID"
+              value={inspectionSetup.managed_secret.binding_id}
+            />
+          ) : null}
+          {inspectionSetup.managed_secret.state === "metadata_recorded" &&
+          inspectionSetup.managed_secret.current_version_id ? (
+            <ProvenanceValue
+              label="Current version pointer (unverified)"
+              value={inspectionSetup.managed_secret.current_version_id}
+            />
+          ) : null}
+        </dl>
+      </details>
+    </section>
+  );
+}
+
+function InspectionSetupComponent({
+  detail,
+  label,
+  state,
+}: {
+  detail: string;
+  label: string;
+  state: string;
+}) {
+  return (
+    <div className="ordinary-agent-inspection-setup-component">
+      <div>
+        <span>{label}</span>
+        <strong data-state={state}>{inspectionComponentStateLabel(state)}</strong>
+      </div>
+      <p>{detail}</p>
+    </div>
+  );
+}
+
+function inspectionSetupStateLabel(
+  state: OrdinaryAgentDeliveryInspectionSetup["state"],
+): string {
+  if (state === "metadata_recorded") return "Inspection metadata recorded";
+  if (state === "not_evaluated") return "Inspection not evaluated";
+  if (state === "unavailable") return "Inspection metadata unavailable";
+  return "Inspection setup incomplete";
+}
+
+function inspectionComponentStateLabel(state: string): string {
+  const labels: Record<string, string> = {
+    not_evaluated: "Not evaluated",
+    metadata_recorded: "Recorded",
+    unavailable: "Unavailable",
+    record_missing: "Missing record",
+    record_unreadable: "Unable to read",
+    record_ambiguous: "Multiple records",
+    app_id_missing: "Missing App ID",
+    app_id_invalid: "Invalid App ID",
+    secret_missing: "Missing secret",
+    secret_unreadable: "Unable to read",
+    secret_ambiguous: "Multiple secrets",
+    binding_missing: "Missing binding",
+    binding_unreadable: "Unable to read",
+    binding_ambiguous: "Multiple bindings",
+    binding_mismatch: "Binding mismatch",
+    version_pointer_missing: "Missing current version",
+  };
+  return labels[state] ?? "Not evaluated";
+}
+
+function inspectionRuntimeDetail({
+  state,
+}: {
+  state: OrdinaryAgentDeliveryInspectionRuntimeState;
+}): string {
+  switch (state) {
+    case "metadata_recorded":
+      return "The configured App ID is recorded for the inspection scope.";
+    case "app_id_missing":
+      return "The inspection App ID key is missing from the recorded runtime map.";
+    case "app_id_invalid":
+      return "The inspection App ID has an invalid recorded shape.";
+    case "record_missing":
+      return "No matching Launchplane service-context runtime record was found.";
+    case "record_unreadable":
+      return "The matching runtime record could not be read.";
+    case "record_ambiguous":
+      return "Multiple matching runtime records prevent selecting one exact runtime record.";
+    case "unavailable":
+      return "Runtime metadata could not be read.";
+    default:
+      return "Inspection runtime metadata was not evaluated.";
+  }
+}
+
+function inspectionSecretDetail({
+  state,
+}: {
+  state: OrdinaryAgentDeliveryInspectionSecretState;
+}): string {
+  switch (state) {
+    case "metadata_recorded":
+      return "The exact inspection binding and current-version pointer are recorded.";
+    case "secret_missing":
+      return "The bounded inspection managed-secret record is missing.";
+    case "secret_unreadable":
+      return "The inspection managed-secret record could not be read.";
+    case "secret_ambiguous":
+      return "Multiple matching managed-secret records prevent selecting one exact managed-secret record.";
+    case "binding_missing":
+      return "The exact inspection binding is missing.";
+    case "binding_unreadable":
+      return "The exact inspection binding could not be read.";
+    case "binding_ambiguous":
+      return "Multiple matching inspection bindings prevent selecting one exact binding.";
+    case "binding_mismatch":
+      return "The binding points to a different managed-secret record.";
+    case "version_pointer_missing":
+      return "The managed-secret record has no current-version pointer.";
+    case "unavailable":
+      return "Managed-secret metadata could not be read.";
+    default:
+      return "Managed-secret inspection metadata was not evaluated.";
+  }
+}
+
 function ProvenanceValue({
   label,
   value,
@@ -508,11 +730,67 @@ async function preparationInputsFixture(
         }
       : null,
     repositories,
+    inspection_setup: inspectionSetupFixture(mode),
     diagnostics: mode === "truncated" || mode === "ambiguous" || mode === "missing"
       ? [{
           code: `${mode}_setup_input`,
           message: `The ${mode} setup input must be resolved before setup planning can use it.`,
         }]
       : [],
+  };
+}
+
+function inspectionSetupFixture(
+  mode: string,
+): OrdinaryAgentDeliveryInspectionSetup {
+  if (mode === "products") {
+    return {
+      state: "metadata_recorded",
+      runtime: {
+        state: "metadata_recorded",
+        app_id: "987654321012345",
+        recorded_at: "2026-09-12T14:31:00Z",
+      },
+      managed_secret: {
+        state: "metadata_recorded",
+        secret_id: "fixture-inspection-secret",
+        binding_id: "fixture-inspection-binding",
+        current_version_id: "fixture-secret-version-7",
+      },
+    };
+  }
+  if (mode === "missing") {
+    return {
+      state: "incomplete",
+      runtime: { state: "app_id_missing", app_id: null, recorded_at: null },
+      managed_secret: {
+        state: "binding_missing",
+        secret_id: null,
+        binding_id: null,
+        current_version_id: null,
+      },
+    };
+  }
+  if (mode === "truncated" || mode === "ambiguous") {
+    return {
+      state: "incomplete",
+      runtime: { state: "record_ambiguous", app_id: null, recorded_at: null },
+      managed_secret: {
+        state: "binding_ambiguous",
+        secret_id: null,
+        binding_id: null,
+        current_version_id: null,
+      },
+    };
+  }
+  return {
+    state: "not_evaluated",
+    runtime: { state: "not_evaluated", app_id: null, recorded_at: null },
+    managed_secret: {
+      state: "not_evaluated",
+      secret_id: null,
+      binding_id: null,
+      current_version_id: null,
+    },
   };
 }

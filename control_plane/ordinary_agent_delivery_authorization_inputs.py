@@ -12,6 +12,10 @@ from control_plane.contracts.ordinary_agent_delivery_authorization_inputs import
     AuthorizationCandidateInputDiagnostic,
     AuthorizationCandidateMergePolicyProvenance,
     AuthorizationCandidatePolicyProvenance,
+    InspectionSetupManagedSecretMetadata,
+    InspectionSetupMetadata,
+    InspectionSetupRuntimeMetadata,
+    InspectionSetupState,
     MergePolicyProjectionState,
     OrdinaryAgentDeliveryAuthorizationCandidateInputsResponse,
     OrdinaryAgentDeliveryAuthorizationCandidateRepository,
@@ -20,6 +24,16 @@ from control_plane.contracts.ordinary_agent_delivery_authorization_inputs import
 from control_plane.contracts.repository_inventory import (
     RepositoryInventoryRecord,
     normalize_repository,
+    normalize_utc_timestamp,
+)
+from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+from control_plane.contracts.secret_record import SecretBinding, SecretRecord
+from control_plane.provider_delivery_inspection_profile import (
+    PROVIDER_DELIVERY_INSPECTION_APP_ID_ENV_KEY,
+    PROVIDER_DELIVERY_INSPECTION_CONTEXT,
+    is_exact_provider_delivery_inspection_secret_binding,
+    is_exact_provider_delivery_inspection_secret_record,
+    provider_delivery_inspection_positive_app_id,
 )
 
 
@@ -38,6 +52,18 @@ class OrdinaryAgentDeliveryAuthorizationInputStore(Protocol):
         self, *, status: str = "", limit: int | None = None
     ) -> tuple[MergeTrainPolicyRecord, ...]: ...
 
+    def list_provider_delivery_inspection_setup_runtime_records(
+        self,
+    ) -> tuple[RuntimeEnvironmentRecord, ...]: ...
+
+    def list_provider_delivery_inspection_setup_secret_records(
+        self,
+    ) -> tuple[SecretRecord, ...]: ...
+
+    def list_provider_delivery_inspection_setup_secret_bindings(
+        self,
+    ) -> tuple[SecretBinding, ...]: ...
+
 
 def read_ordinary_agent_delivery_authorization_candidate_inputs(
     *,
@@ -55,6 +81,7 @@ def read_ordinary_agent_delivery_authorization_candidate_inputs(
         branches_by_repository,
         merge_diagnostics,
     ) = _read_merge_policy(record_store)
+    inspection_setup = _read_inspection_setup(record_store)
     repositories = tuple(
         OrdinaryAgentDeliveryAuthorizationCandidateRepository(
             record_id=record.record_id,
@@ -101,6 +128,135 @@ def read_ordinary_agent_delivery_authorization_candidate_inputs(
                 ),
             )
         ),
+        inspection_setup=inspection_setup,
+    )
+
+
+def _read_inspection_setup(record_store: object) -> InspectionSetupMetadata:
+    runtime_reader = getattr(
+        record_store, "list_provider_delivery_inspection_setup_runtime_records", None
+    )
+    secret_reader = getattr(
+        record_store, "list_provider_delivery_inspection_setup_secret_records", None
+    )
+    binding_reader = getattr(
+        record_store, "list_provider_delivery_inspection_setup_secret_bindings", None
+    )
+    if not all(callable(reader) for reader in (runtime_reader, secret_reader, binding_reader)):
+        return InspectionSetupMetadata()
+    runtime = _read_inspection_runtime(cast(Callable[[], tuple[object, ...]], runtime_reader))
+    managed_secret = _read_inspection_managed_secret(
+        secret_reader=cast(Callable[[], tuple[object, ...]], secret_reader),
+        binding_reader=cast(Callable[[], tuple[object, ...]], binding_reader),
+    )
+    unavailable_states = {
+        "unavailable",
+        "record_unreadable",
+        "secret_unreadable",
+        "binding_unreadable",
+    }
+    if runtime.state in unavailable_states or managed_secret.state in unavailable_states:
+        state: InspectionSetupState = "unavailable"
+    elif runtime.state == "metadata_recorded" and managed_secret.state == "metadata_recorded":
+        state = "metadata_recorded"
+    else:
+        state = "incomplete"
+    return InspectionSetupMetadata(
+        state=state,
+        runtime=runtime,
+        managed_secret=managed_secret,
+    )
+
+
+def _read_inspection_runtime(
+    reader: Callable[[], tuple[object, ...]],
+) -> InspectionSetupRuntimeMetadata:
+    try:
+        raw_records = tuple(reader())
+    except ValueError:
+        return InspectionSetupRuntimeMetadata(state="record_unreadable")
+    except Exception:
+        return InspectionSetupRuntimeMetadata(state="unavailable")
+    if not raw_records:
+        return InspectionSetupRuntimeMetadata(state="record_missing")
+    if len(raw_records) != 1:
+        return InspectionSetupRuntimeMetadata(state="record_ambiguous")
+    try:
+        record = RuntimeEnvironmentRecord.model_validate(raw_records[0])
+    except (TypeError, ValueError):
+        return InspectionSetupRuntimeMetadata(state="record_unreadable")
+    if (
+        record.scope != "context"
+        or record.context != PROVIDER_DELIVERY_INSPECTION_CONTEXT
+        or record.instance
+    ):
+        return InspectionSetupRuntimeMetadata(state="record_unreadable")
+    if PROVIDER_DELIVERY_INSPECTION_APP_ID_ENV_KEY not in record.env:
+        return InspectionSetupRuntimeMetadata(state="app_id_missing")
+    try:
+        app_id = provider_delivery_inspection_positive_app_id(
+            record.env[PROVIDER_DELIVERY_INSPECTION_APP_ID_ENV_KEY]
+        )
+    except ValueError:
+        return InspectionSetupRuntimeMetadata(state="app_id_invalid")
+    try:
+        recorded_at = normalize_utc_timestamp(record.updated_at, "inspection runtime recorded_at")
+    except ValueError:
+        return InspectionSetupRuntimeMetadata(state="record_unreadable")
+    return InspectionSetupRuntimeMetadata(
+        state="metadata_recorded",
+        app_id=str(app_id),
+        recorded_at=recorded_at,
+    )
+
+
+def _read_inspection_managed_secret(
+    *,
+    secret_reader: Callable[[], tuple[object, ...]],
+    binding_reader: Callable[[], tuple[object, ...]],
+) -> InspectionSetupManagedSecretMetadata:
+    try:
+        raw_secrets = tuple(secret_reader())
+    except ValueError:
+        return InspectionSetupManagedSecretMetadata(state="secret_unreadable")
+    except Exception:
+        return InspectionSetupManagedSecretMetadata(state="unavailable")
+    try:
+        raw_bindings = tuple(binding_reader())
+    except ValueError:
+        return InspectionSetupManagedSecretMetadata(state="binding_unreadable")
+    except Exception:
+        return InspectionSetupManagedSecretMetadata(state="unavailable")
+    if not raw_secrets:
+        return InspectionSetupManagedSecretMetadata(state="secret_missing")
+    if len(raw_secrets) != 1:
+        return InspectionSetupManagedSecretMetadata(state="secret_ambiguous")
+    if not raw_bindings:
+        return InspectionSetupManagedSecretMetadata(state="binding_missing")
+    if len(raw_bindings) != 1:
+        return InspectionSetupManagedSecretMetadata(state="binding_ambiguous")
+    raw_current_version_id = getattr(raw_secrets[0], "current_version_id", None)
+    if isinstance(raw_current_version_id, str) and not raw_current_version_id.strip():
+        return InspectionSetupManagedSecretMetadata(state="version_pointer_missing")
+    try:
+        secret = SecretRecord.model_validate(raw_secrets[0])
+    except (TypeError, ValueError):
+        return InspectionSetupManagedSecretMetadata(state="secret_unreadable")
+    try:
+        binding = SecretBinding.model_validate(raw_bindings[0])
+    except (TypeError, ValueError):
+        return InspectionSetupManagedSecretMetadata(state="binding_unreadable")
+    if not is_exact_provider_delivery_inspection_secret_record(secret):
+        return InspectionSetupManagedSecretMetadata(state="secret_unreadable")
+    if not is_exact_provider_delivery_inspection_secret_binding(binding):
+        return InspectionSetupManagedSecretMetadata(state="binding_unreadable")
+    if binding.secret_id != secret.secret_id:
+        return InspectionSetupManagedSecretMetadata(state="binding_mismatch")
+    return InspectionSetupManagedSecretMetadata(
+        state="metadata_recorded",
+        secret_id=secret.secret_id,
+        binding_id=binding.binding_id,
+        current_version_id=secret.current_version_id,
     )
 
 

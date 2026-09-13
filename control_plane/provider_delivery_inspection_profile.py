@@ -18,12 +18,12 @@ PROVIDER_DELIVERY_INSPECTION_APP_ID_ENV_KEY = (
 PROVIDER_DELIVERY_INSPECTION_INTEGRATION = "provider_delivery_inspection_github_app"
 PROVIDER_DELIVERY_INSPECTION_PRIVATE_KEY_BINDING = "private_key"
 PROVIDER_DELIVERY_INSPECTION_PROFILE_ID = "provider-delivery-inspection-v1"
+PROVIDER_DELIVERY_INSPECTION_CONTEXT = "launchplane"
 PROVIDER_DELIVERY_INSPECTION_PERMISSIONS = (
     "administration:write",
     "contents:read",
     "metadata:read",
 )
-_LAUNCHPLANE_SERVICE_CONTEXT = "launchplane"
 
 
 class ProviderDeliveryInspectionProfileError(ValueError):
@@ -80,7 +80,7 @@ def resolve_provider_delivery_inspection_profile(
 
     runtime_records = record_store.list_runtime_environment_records(
         scope="context",
-        context_name=_LAUNCHPLANE_SERVICE_CONTEXT,
+        context_name=PROVIDER_DELIVERY_INSPECTION_CONTEXT,
         instance_name="",
     )
     if len(runtime_records) != 1:
@@ -90,34 +90,34 @@ def resolve_provider_delivery_inspection_profile(
     runtime_record = runtime_records[0]
     if (
         runtime_record.scope != "context"
-        or runtime_record.context != _LAUNCHPLANE_SERVICE_CONTEXT
+        or runtime_record.context != PROVIDER_DELIVERY_INSPECTION_CONTEXT
         or runtime_record.instance
     ):
         raise ProviderDeliveryInspectionProfileError(
             "Provider-delivery inspection service runtime record is not exact."
         )
     raw_app_id = runtime_record.env.get(PROVIDER_DELIVERY_INSPECTION_APP_ID_ENV_KEY)
-    app_id = _positive_app_id(raw_app_id)
+    app_id = provider_delivery_inspection_positive_app_id(raw_app_id)
 
     records = tuple(
         record
         for record in record_store.list_secret_records(
             integration=PROVIDER_DELIVERY_INSPECTION_INTEGRATION,
-            context_name=_LAUNCHPLANE_SERVICE_CONTEXT,
+            context_name=PROVIDER_DELIVERY_INSPECTION_CONTEXT,
             instance_name="",
             limit=None,
         )
-        if _is_exact_secret_record(record)
+        if is_exact_provider_delivery_inspection_secret_record(record)
     )
     bindings = tuple(
         binding
         for binding in record_store.list_secret_bindings(
             integration=PROVIDER_DELIVERY_INSPECTION_INTEGRATION,
-            context_name=_LAUNCHPLANE_SERVICE_CONTEXT,
+            context_name=PROVIDER_DELIVERY_INSPECTION_CONTEXT,
             instance_name="",
             limit=None,
         )
-        if _is_exact_secret_binding(binding)
+        if is_exact_provider_delivery_inspection_secret_binding(binding)
     )
     if len(records) != 1 or len(bindings) != 1:
         raise ProviderDeliveryInspectionProfileError(
@@ -169,7 +169,7 @@ def resolve_provider_delivery_inspection_profile(
     )
 
 
-def _positive_app_id(value: object) -> int:
+def provider_delivery_inspection_positive_app_id(value: object) -> int:
     if isinstance(value, bool):
         raise ProviderDeliveryInspectionProfileError(
             "Provider-delivery inspection GitHub App id is unavailable."
@@ -187,10 +187,10 @@ def _positive_app_id(value: object) -> int:
     return app_id
 
 
-def _is_exact_secret_record(record: SecretRecord) -> bool:
+def is_exact_provider_delivery_inspection_secret_record(record: SecretRecord) -> bool:
     return (
         record.scope == "context"
-        and record.context == _LAUNCHPLANE_SERVICE_CONTEXT
+        and record.context == PROVIDER_DELIVERY_INSPECTION_CONTEXT
         and not record.instance
         and record.integration == PROVIDER_DELIVERY_INSPECTION_INTEGRATION
         and record.policy == "write_only"
@@ -198,9 +198,9 @@ def _is_exact_secret_record(record: SecretRecord) -> bool:
     )
 
 
-def _is_exact_secret_binding(binding: SecretBinding) -> bool:
+def is_exact_provider_delivery_inspection_secret_binding(binding: SecretBinding) -> bool:
     return (
-        binding.context == _LAUNCHPLANE_SERVICE_CONTEXT
+        binding.context == PROVIDER_DELIVERY_INSPECTION_CONTEXT
         and not binding.instance
         and binding.integration == PROVIDER_DELIVERY_INSPECTION_INTEGRATION
         and binding.binding_key == PROVIDER_DELIVERY_INSPECTION_PRIVATE_KEY_BINDING

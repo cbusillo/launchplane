@@ -678,13 +678,33 @@ enrollment follows installation of its exact ordinary-agent policy rule and
 requires the principal to be absent; an existing enrolled principal is not a
 prerequisite for preparing the first policy package.
 
-This inspection returns only bounded record provenance and repository/branch
-metadata needed for policy preparation. It reads no product-environment details,
-provider state, App bindings, credentials, or secrets, and persists no proposal,
-grant, session, activation, or operation. It cannot repair missing administrator
-authority or replace the separately reviewed policy, activation, custody, and
-worker-start steps. Any later preparation action must resolve its inputs again
-from current records.
+The same parameterless inspection includes bounded metadata for the separate
+provider-inspection App needed by delivery setup. It reads only the code-defined
+App-ID key in Launchplane's DB-backed service-context runtime record and the
+exact inspection integration's configured managed-secret record and private-key
+binding metadata. It accepts no caller-selected context, key, integration, or
+secret. This is an input projection for the existing immutable administrator's
+proposal task; it adds no permission or descriptor and does not authorize
+generic `secret.list` access for operators or agents.
+
+The projection distinguishes a missing runtime record, an unreadable record,
+a missing or malformed App-ID value, missing binding metadata, and ambiguous
+records. Bounded exact storage reads cannot silently turn incomplete evidence
+into absence. A `metadata_recorded` result means only that the recorded selector
+and binding metadata agree. The current-version ID is an unverified pointer;
+the read does not establish version existence, key validity, App identity or
+installation, provider permissions, protection, custody, or delivery readiness.
+Technical identifiers remain collapsed in the workbench.
+
+This inspection reads no product-environment details, ordinary delivery-App
+bindings, principals, credentials, secret-version objects, ciphertext, audit or
+version history, or plaintext. It does not decrypt, construct an App identity,
+call a provider, or persist a proposal, grant, session, activation, or operation.
+Unavailable inspection metadata leaves the existing policy/inventory diagnostics
+usable. It cannot repair missing administrator authority or replace the
+separately reviewed policy, activation, custody, and worker-start steps. No
+later proposal consumes this display snapshot as authority; its own preparation
+and execution resolve current records independently.
 
 **Preserved history:** Phase 1 introduced planning-only actions without grants.
 That history does not describe the deployed Phase 2 worker flow.

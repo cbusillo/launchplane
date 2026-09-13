@@ -9569,6 +9569,148 @@
           "verified"
         ]
       },
+      "InspectionSetupManagedSecretMetadata": {
+        "additionalProperties": false,
+        "properties": {
+          "binding_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Binding Id"
+          },
+          "current_version_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Version Id"
+          },
+          "secret_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Secret Id"
+          },
+          "state": {
+            "default": "not_evaluated",
+            "enum": [
+              "not_evaluated",
+              "metadata_recorded",
+              "secret_missing",
+              "secret_unreadable",
+              "secret_ambiguous",
+              "binding_missing",
+              "binding_unreadable",
+              "binding_ambiguous",
+              "binding_mismatch",
+              "version_pointer_missing",
+              "unavailable"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "title": "InspectionSetupManagedSecretMetadata",
+        "type": "object",
+        "required": [
+          "binding_id",
+          "current_version_id",
+          "secret_id",
+          "state"
+        ]
+      },
+      "InspectionSetupMetadata": {
+        "additionalProperties": false,
+        "properties": {
+          "managed_secret": {
+            "$ref": "#/components/schemas/InspectionSetupManagedSecretMetadata"
+          },
+          "runtime": {
+            "$ref": "#/components/schemas/InspectionSetupRuntimeMetadata"
+          },
+          "state": {
+            "default": "not_evaluated",
+            "enum": [
+              "not_evaluated",
+              "metadata_recorded",
+              "incomplete",
+              "unavailable"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "title": "InspectionSetupMetadata",
+        "type": "object",
+        "required": [
+          "managed_secret",
+          "runtime",
+          "state"
+        ]
+      },
+      "InspectionSetupRuntimeMetadata": {
+        "additionalProperties": false,
+        "properties": {
+          "app_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "App Id"
+          },
+          "recorded_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recorded At"
+          },
+          "state": {
+            "default": "not_evaluated",
+            "enum": [
+              "not_evaluated",
+              "metadata_recorded",
+              "record_missing",
+              "record_unreadable",
+              "record_ambiguous",
+              "app_id_missing",
+              "app_id_invalid",
+              "unavailable"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "title": "InspectionSetupRuntimeMetadata",
+        "type": "object",
+        "required": [
+          "app_id",
+          "recorded_at",
+          "state"
+        ]
+      },
       "LaunchplaneAuthzPolicy-Output": {
         "additionalProperties": true,
         "type": "object"
@@ -14627,6 +14769,9 @@
             "title": "Diagnostics",
             "type": "array"
           },
+          "inspection_setup": {
+            "$ref": "#/components/schemas/InspectionSetupMetadata"
+          },
           "inventory_state": {
             "enum": [
               "complete",
@@ -14689,6 +14834,7 @@
         "required": [
           "authorization_policy",
           "diagnostics",
+          "inspection_setup",
           "inventory_state",
           "merge_policy",
           "merge_policy_state",

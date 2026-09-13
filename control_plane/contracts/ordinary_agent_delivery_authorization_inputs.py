@@ -17,6 +17,30 @@ RepositoryInventoryProjectionState = Literal["complete", "unavailable", "truncat
 MergePolicyProjectionState = Literal[
     "available", "missing", "ambiguous", "unavailable", "truncated"
 ]
+InspectionSetupState = Literal["not_evaluated", "metadata_recorded", "incomplete", "unavailable"]
+InspectionSetupRuntimeState = Literal[
+    "not_evaluated",
+    "metadata_recorded",
+    "record_missing",
+    "record_unreadable",
+    "record_ambiguous",
+    "app_id_missing",
+    "app_id_invalid",
+    "unavailable",
+]
+InspectionSetupManagedSecretState = Literal[
+    "not_evaluated",
+    "metadata_recorded",
+    "secret_missing",
+    "secret_unreadable",
+    "secret_ambiguous",
+    "binding_missing",
+    "binding_unreadable",
+    "binding_ambiguous",
+    "binding_mismatch",
+    "version_pointer_missing",
+    "unavailable",
+]
 
 
 class AuthorizationCandidatePolicyProvenance(BaseModel):
@@ -92,6 +116,97 @@ class AuthorizationCandidateInputDiagnostic(BaseModel):
         return self
 
 
+class InspectionSetupRuntimeMetadata(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    state: InspectionSetupRuntimeState = "not_evaluated"
+    app_id: str | None = None
+    recorded_at: str | None = None
+
+    @model_validator(mode="after")
+    def _validate(self) -> InspectionSetupRuntimeMetadata:
+        if self.state == "metadata_recorded":
+            if self.app_id is None or self.recorded_at is None:
+                raise ValueError(
+                    "Recorded inspection runtime metadata requires an ID and timestamp."
+                )
+            self.app_id = required_decimal_id(self.app_id, "inspection app_id")
+            if int(self.app_id) > 2**63 - 1:
+                raise ValueError("Inspection app_id exceeds the supported positive ID range.")
+            self.recorded_at = normalize_utc_timestamp(
+                self.recorded_at, "inspection runtime recorded_at"
+            )
+        elif self.app_id is not None or self.recorded_at is not None:
+            raise ValueError(
+                "Incomplete inspection runtime metadata cannot expose recorded values."
+            )
+        return self
+
+
+class InspectionSetupManagedSecretMetadata(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    state: InspectionSetupManagedSecretState = "not_evaluated"
+    secret_id: str | None = None
+    binding_id: str | None = None
+    current_version_id: str | None = None
+
+    @model_validator(mode="after")
+    def _validate(self) -> InspectionSetupManagedSecretMetadata:
+        identifiers = (self.secret_id, self.binding_id, self.current_version_id)
+        if self.state == "metadata_recorded":
+            if any(identifier is None for identifier in identifiers):
+                raise ValueError("Recorded inspection secret metadata requires all identifiers.")
+            self.secret_id = required_token(self.secret_id or "", "inspection secret_id")
+            self.binding_id = required_token(self.binding_id or "", "inspection binding_id")
+            self.current_version_id = required_token(
+                self.current_version_id or "", "inspection current_version_id"
+            )
+        elif any(identifier is not None for identifier in identifiers):
+            raise ValueError("Incomplete inspection secret metadata cannot expose identifiers.")
+        return self
+
+
+class InspectionSetupMetadata(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    state: InspectionSetupState = "not_evaluated"
+    runtime: InspectionSetupRuntimeMetadata = Field(default_factory=InspectionSetupRuntimeMetadata)
+    managed_secret: InspectionSetupManagedSecretMetadata = Field(
+        default_factory=InspectionSetupManagedSecretMetadata
+    )
+
+    @model_validator(mode="after")
+    def _validate(self) -> InspectionSetupMetadata:
+        component_states = (self.runtime.state, self.managed_secret.state)
+        if self.state == "not_evaluated" and component_states != (
+            "not_evaluated",
+            "not_evaluated",
+        ):
+            raise ValueError("Unevaluated inspection setup requires unevaluated components.")
+        if self.state == "metadata_recorded" and component_states != (
+            "metadata_recorded",
+            "metadata_recorded",
+        ):
+            raise ValueError("Recorded inspection setup requires recorded component metadata.")
+        if self.state == "incomplete" and (
+            "not_evaluated" in component_states
+            or "unavailable" in component_states
+            or "record_unreadable" in component_states
+            or "secret_unreadable" in component_states
+            or "binding_unreadable" in component_states
+            or component_states == ("metadata_recorded", "metadata_recorded")
+        ):
+            raise ValueError("Incomplete inspection setup requires readable incomplete metadata.")
+        if self.state == "unavailable" and not any(
+            component_state
+            in {"unavailable", "record_unreadable", "secret_unreadable", "binding_unreadable"}
+            for component_state in component_states
+        ):
+            raise ValueError("Unavailable inspection setup requires an unavailable component.")
+        return self
+
+
 class OrdinaryAgentDeliveryAuthorizationCandidateInputsResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -105,6 +220,7 @@ class OrdinaryAgentDeliveryAuthorizationCandidateInputsResponse(BaseModel):
     merge_policy: AuthorizationCandidateMergePolicyProvenance | None
     repositories: tuple[OrdinaryAgentDeliveryAuthorizationCandidateRepository, ...]
     diagnostics: tuple[AuthorizationCandidateInputDiagnostic, ...]
+    inspection_setup: InspectionSetupMetadata = Field(default_factory=InspectionSetupMetadata)
 
     @model_validator(mode="after")
     def _validate(self) -> OrdinaryAgentDeliveryAuthorizationCandidateInputsResponse:
