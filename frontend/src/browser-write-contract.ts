@@ -12,6 +12,7 @@ import type {
   PlanOrdinaryAgentDeliveryActivationData,
   PrepareAuthorizationCandidateData,
   PrepareOrdinaryAgentMergeTrainTargetData,
+  PrepareOrdinaryAgentDeliveryPolicyData,
   WriteOwnerAcceptanceEventData,
 } from "./generated/openapi.ts";
 
@@ -40,6 +41,8 @@ export const BROWSER_WRITE_ROUTES = {
     "/v1/privileged-operations/authorization-candidates/prepare" satisfies PrepareAuthorizationCandidateData["url"],
   ordinaryMergeTrainTargetPrepare:
     "/v1/privileged-operations/merge-train-targets/prepare" satisfies PrepareOrdinaryAgentMergeTrainTargetData["url"],
+  ordinaryAgentDeliveryPolicyPrepare:
+    "/v1/privileged-operations/authorization-candidates/ordinary-agent-delivery/prepare" satisfies PrepareOrdinaryAgentDeliveryPolicyData["url"],
 } as const;
 
 export type BrowserWriteRoute =

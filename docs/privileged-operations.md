@@ -35,6 +35,15 @@ access. It creates no plan or access and does not inspect agent registration or
 preview readiness. See [Inspecting Pilot Preparation Inputs](authorization-authority.md#inspecting-pilot-preparation-inputs)
 for current-record selection and incomplete-read behavior.
 
+After this read, the administrator can use **Prepare client access** to name a
+new client and choose a recorded project/branch. Its dedicated typed preparation
+route creates an ordinary-rule proposal for the existing managed authorization
+descriptor, then carries the saved reference into delivery setup. The client
+principal and request identities are independent; interrupted requests retain
+both for exact replay. No policy JSON, managed IDs, or routine reason is entered
+by the administrator. See [first-client policy preparation](authorization-authority.md#preparing-the-first-ordinary-client-policy)
+for the authority and compatibility boundaries.
+
 The Merge-train policy workbench separately supports
 [preparing one ordinary-agent target](merge-train-policy.md#preparing-an-ordinary-agent-target).
 Its typed inputs and prepare routes use the merge-policy descriptor's existing

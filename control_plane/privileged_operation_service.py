@@ -523,11 +523,37 @@ def _build_privileged_operation_semantic_review(
                 )
             )
         )
+        is_ordinary_agent_delivery_policy = (
+            record.request.ordinary_agent_preparation_context is not None
+        )
         adds_candidate_access = bool(record.request.desired_policy.github_humans)
-        if is_delivery_administration:
-            authz_review_title: PrivilegedOperationSemanticReviewTitle = (
-                "Review agent delivery administration"
+        authz_review_title: PrivilegedOperationSemanticReviewTitle
+        if is_ordinary_agent_delivery_policy:
+            context = record.request.ordinary_agent_preparation_context
+            assert context is not None
+            ordinary_rule = next(
+                (
+                    rule
+                    for rule in record.request.desired_policy.ordinary_agents
+                    if rule.managed_set_id == context.managed_set_id
+                    and rule.managed_rule_id == context.managed_rule_id
+                ),
+                None,
             )
+            repository = (
+                ordinary_rule.target.repository
+                if ordinary_rule is not None
+                else "the selected project"
+            )
+            authz_review_title = "Review client delivery access"
+            authz_change_summary = (
+                f"Allow {context.intent.client_label} to request merges into "
+                f"{repository} on {context.intent.base_branch} through Launchplane. "
+                "Delivery setup must still be separately approved and verified. "
+                "This client access remains until removed."
+            )
+        elif is_delivery_administration:
+            authz_review_title = "Review agent delivery administration"
             authz_change_summary = (
                 "Allow the requesting pilot administrator to set up, review, approve, "
                 "and stop agent delivery. This standing access remains until removed; "

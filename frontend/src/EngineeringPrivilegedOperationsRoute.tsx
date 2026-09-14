@@ -60,7 +60,11 @@ function DefaultPrivilegedOperationsRoute({
     ? "product-evidence"
     : "default";
   const [descriptorId, setDescriptorId] =
-    useState<PrivilegedOperationDescriptorId>("managed-secret-reencryption");
+    useState<PrivilegedOperationDescriptorId>(
+      query.get("descriptor_id") === "ordinary-agent-delivery-activation"
+        ? "ordinary-agent-delivery-activation"
+        : "managed-secret-reencryption",
+    );
   const loader = useCallback(
     async (
       signal: AbortSignal,
@@ -164,6 +168,7 @@ function DefaultPrivilegedOperationsRoute({
             {descriptorId === "ordinary-agent-delivery-activation" &&
             operationId === null ? (
               <OrdinaryAgentDeliveryActivationComposer
+                key={query.get("policy_operation_id") ?? "delivery-setup"}
                 fixtureMode={fixtureMode}
                 refresh={resource.refresh}
               />
@@ -384,7 +389,9 @@ function OrdinaryAgentDeliveryActivationComposer({
   const [intent, setIntent] = useState<"setup" | "revoke_activation">(
     "setup",
   );
-  const [selection, setSelection] = useState("");
+  const preparedPolicyOperationId =
+    new URLSearchParams(window.location.search).get("policy_operation_id") ?? "";
+  const [selection, setSelection] = useState(preparedPolicyOperationId);
   const [durationSeconds, setDurationSeconds] = useState(24 * 60 * 60);
   const [message, setMessage] = useState("");
   const loader = useCallback(
@@ -466,6 +473,18 @@ function OrdinaryAgentDeliveryActivationComposer({
           </p>
         </div>
       </header>
+      {preparedPolicyOperationId ? (
+        <p>
+          Continue with delivery setup. Launchplane checks the saved access plan
+          before offering it below.{" "}
+          <a
+            className="ordinary-agent-prepared-policy-link"
+            href={`/ui/engineering/privileged-operations?operation_id=${encodeURIComponent(preparedPolicyOperationId)}`}
+          >
+            Review client access plan
+          </a>
+        </p>
+      ) : null}
       <div
         className="privileged-operation-kind-switch"
         aria-label="Activation intent"
@@ -499,12 +518,29 @@ function OrdinaryAgentDeliveryActivationComposer({
         {(data) => {
           const choices =
             intent === "setup" ? data.setup_options : data.revoke_options;
-          return choices.length ? (
+          const selectionAvailable = choices.some((option) => (
+            "policy_operation_id" in option
+              ? option.policy_operation_id
+              : option.activation.activation_id
+          ) === selection);
+          const preparedPlanUnavailable =
+            intent === "setup" && preparedPolicyOperationId &&
+            !data.setup_options.some(
+              (option) => option.policy_operation_id === preparedPolicyOperationId,
+            );
+          return <>
+            {preparedPlanUnavailable ? (
+              <p role="status">
+                The saved access plan is not available for delivery setup.
+                Review its status above, or prepare a new client access plan.
+              </p>
+            ) : null}
+            {choices.length ? (
             <div className="privileged-operation-actions activation-plan-actions">
               <label>
                 Project and branch
                 <select
-                  value={selection}
+                  value={selectionAvailable ? selection : ""}
                   onChange={(event) => setSelection(event.target.value)}
                 >
                   <option value="">Choose a target</option>
@@ -543,7 +579,7 @@ function OrdinaryAgentDeliveryActivationComposer({
               ) : null}
               <button
                 type="button"
-                disabled={!selection}
+                disabled={!selectionAvailable}
                 onClick={() => void submit(data)}
               >
                 {intent === "setup" ? "Review setup" : "Review stop"}
@@ -559,7 +595,8 @@ function OrdinaryAgentDeliveryActivationComposer({
               icon={ShieldAlert}
               title="No eligible activation choice"
             />
-          );
+          )}
+          </>;
         }}
       </EngineeringResourceGate>
       {intent === "setup" ? (

@@ -258,6 +258,13 @@ class ManagedAuthzPolicySetProposalInput(BaseModel):
     administrator_quorum_change: int | None = Field(default=None, ge=1)
     reason: str = Field(min_length=1, max_length=240)
     related_issue: str = Field(default="", max_length=128)
+    ordinary_agent_preparation_context: "ManagedOrdinaryAgentPolicyPreparationContext | None" = (
+        Field(
+            default=None,
+            exclude_if=lambda value: value is None,
+            json_schema_extra={"x-launchplane-optional-response": True},
+        )
+    )
 
     @model_validator(mode="after")
     def _validate_input(self) -> "ManagedAuthzPolicySetProposalInput":
@@ -304,6 +311,84 @@ class ManagedAuthzPolicySetProposalInput(BaseModel):
             reviewed_plan_sha256=reviewed_plan_sha256,
             desired_policy=self.desired_policy,
         )
+
+
+class OrdinaryAgentDeliveryPolicyIntent(BaseModel):
+    """Typed, non-executable choices for one ordinary-agent policy rule."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    repository_id: str
+    base_branch: str = Field(min_length=1, max_length=255)
+    principal_id: str = Field(pattern=r"^[a-z][a-z0-9_-]{2,127}$")
+    client_label: str = Field(min_length=1, max_length=120)
+
+    @model_validator(mode="after")
+    def _validate_intent(self) -> "OrdinaryAgentDeliveryPolicyIntent":
+        object.__setattr__(
+            self, "repository_id", required_decimal_id(self.repository_id, "repository_id")
+        )
+        base_branch = self.base_branch.strip()
+        client_label = self.client_label.strip()
+        if not base_branch:
+            raise ValueError("base_branch must be non-empty")
+        if not client_label:
+            raise ValueError("client_label must be non-empty")
+        object.__setattr__(self, "base_branch", base_branch)
+        object.__setattr__(self, "client_label", client_label)
+        # Reuse the canonical Git ref validation without accepting a client-supplied
+        # repository name as authority.
+        from control_plane.contracts.ordinary_agent import OrdinaryAgentTarget
+
+        OrdinaryAgentTarget.validate_base_branch(self.base_branch)
+        return self
+
+
+class ManagedOrdinaryAgentPolicyPreparationContext(BaseModel):
+    """Server-bound baseline retained with a typed ordinary policy proposal."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: int = Field(default=1, ge=1)
+    intent: OrdinaryAgentDeliveryPolicyIntent
+    managed_set_id: str = Field(min_length=1, max_length=96)
+    managed_rule_id: str = Field(min_length=1, max_length=128)
+    expected_policy_record_id: str
+    expected_policy_revision: int = Field(ge=1)
+    expected_policy_sha256: str
+    expected_inventory_record_id: str
+    expected_inventory_revision: int = Field(ge=1)
+    expected_inventory_sha256: str
+    expected_merge_policy_record_id: str
+    expected_merge_policy_sha256: str
+
+    @model_validator(mode="after")
+    def _validate_context(self) -> "ManagedOrdinaryAgentPolicyPreparationContext":
+        if self.schema_version != 1:
+            raise ValueError(
+                "Unsupported ordinary-agent policy preparation context schema version."
+            )
+        for field_name in (
+            "expected_policy_record_id",
+            "expected_inventory_record_id",
+            "expected_merge_policy_record_id",
+        ):
+            object.__setattr__(
+                self, field_name, _required_token(getattr(self, field_name), field_name)
+            )
+        for field_name in (
+            "expected_policy_sha256",
+            "expected_inventory_sha256",
+            "expected_merge_policy_sha256",
+        ):
+            object.__setattr__(self, field_name, _sha256(getattr(self, field_name), field_name))
+        object.__setattr__(
+            self, "managed_set_id", _required_token(self.managed_set_id, "managed_set_id")
+        )
+        object.__setattr__(
+            self, "managed_rule_id", _required_token(self.managed_rule_id, "managed_rule_id")
+        )
+        return self
 
 
 class ManagedAuthzPolicySetHumanEvidence(BaseModel):
@@ -1150,6 +1235,7 @@ PrivilegedOperationSemanticReviewTitle = Literal[
     "Managed authorization policy review",
     "Review agent delivery administration",
     "Review administrator product evidence access",
+    "Review client delivery access",
     "Managed merge-train policy review",
     "Review agent delivery setup",
     "Review stopping agent delivery",
@@ -1442,6 +1528,7 @@ class PrivilegedOperationSemanticReview(BaseModel):
                     "Managed authorization policy review",
                     "Review agent delivery administration",
                     "Review administrator product evidence access",
+                    "Review client delivery access",
                 }
             ),
             "managed-merge-train-policy-import": frozenset({"Managed merge-train policy review"}),

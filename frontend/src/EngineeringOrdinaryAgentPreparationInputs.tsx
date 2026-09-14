@@ -19,6 +19,7 @@ import {
 } from "./api";
 import type { DevFixtureMode } from "./dev-fixture-loader";
 import { formatTime } from "./format";
+import { EngineeringOrdinaryAgentPolicyPreparation } from "./EngineeringOrdinaryAgentPolicyPreparation";
 
 type CheckPhase = "idle" | "loading" | "ready" | "denied" | "error" | "cancelled";
 
@@ -197,6 +198,7 @@ function PreparationInputsResult({
 
   return (
     <div className="ordinary-agent-preparation-result">
+      <EngineeringOrdinaryAgentPolicyPreparation data={data} />
       <dl className="ordinary-agent-preparation-summary">
         <div>
           <dt>Repository inventory</dt>

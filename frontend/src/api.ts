@@ -40,6 +40,8 @@ import type {
   PrepareAuthorizationCandidateData,
   PrepareAuthorizationCandidateResponse,
   PrepareOrdinaryAgentMergeTrainTargetData,
+  PrepareOrdinaryAgentDeliveryPolicyData,
+  PrepareOrdinaryAgentDeliveryPolicyResponse,
   ProductActivityResponse,
   ProductEnvironmentConfigStatusResponse,
   ProductEnvironmentIncidentResponse,
@@ -709,6 +711,26 @@ export type {
 
 export type OrdinaryAgentMergeTrainTargetIntent =
   OrdinaryAgentMergeTrainTargetIntentInput;
+
+export type OrdinaryAgentDeliveryPolicyIntent =
+  PrepareOrdinaryAgentDeliveryPolicyData["body"]["intent"];
+
+export function prepareOrdinaryAgentDeliveryPolicy(
+  intent: OrdinaryAgentDeliveryPolicyIntent,
+  sourceEventId: string,
+  signal?: AbortSignal,
+): Promise<PrepareOrdinaryAgentDeliveryPolicyResponse> {
+  const request: PrepareOrdinaryAgentDeliveryPolicyData = {
+    url: BROWSER_WRITE_ROUTES.ordinaryAgentDeliveryPolicyPrepare,
+    body: { schema_version: 1, source_event_id: sourceEventId, intent },
+  };
+  return requestJson<PrepareOrdinaryAgentDeliveryPolicyResponse>(
+    request.url,
+    "POST",
+    request.body,
+    signal,
+  );
+}
 
 export type PrivilegedOperationDescriptorId = NonNullable<
   ListHumanPrivilegedOperationsData["query"]
