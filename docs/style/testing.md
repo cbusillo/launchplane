@@ -115,7 +115,10 @@ already-built image.
 
 The CI container-scan jobs pin the setup action and request Docker Compose
 v5.3.1 before that qualification. Local reproduction requires a compatible
-`docker compose` command in addition to the Docker engine and built image.
+`docker compose` command, GNU `timeout`, the Docker engine, and built image.
+The fixture uses bounded detached `up` calls and explicit running, absence, and
+container-identity checks because Compose v5.3.1 `--wait` incorrectly requires
+zero-replica services.
 
 ## Browser smoke
 

@@ -95,7 +95,7 @@ other_containers() {
 }
 
 render_fixture absent
-"${compose[@]}" up --detach --no-build --pull never --wait --wait-timeout 30
+timeout --kill-after=5s 30s "${compose[@]}" up --detach --no-build --pull never
 default_worker_ids="$("${compose[@]}" ps --all --quiet "$worker")"
 test -z "$default_worker_ids"
 before="$(other_containers)"
@@ -104,7 +104,7 @@ test "$(jq length <<<"$before")" = "$expected_others"
 jq -e 'all(.[]; .state == "running")' <<<"$before" >/dev/null
 
 render_fixture 1
-"${compose[@]}" up --detach --no-build --pull never --wait --wait-timeout 30
+timeout --kill-after=5s 30s "${compose[@]}" up --detach --no-build --pull never
 worker_id="$("${compose[@]}" ps --all --quiet "$worker")"
 test -n "$worker_id"
 test "$(wc -l <<<"$worker_id" | tr -d ' ')" = 1
@@ -112,7 +112,7 @@ test "$(docker inspect --format '{{.State.Running}}' "$worker_id")" = true
 test "$(other_containers)" = "$before"
 
 render_fixture 0
-"${compose[@]}" up --detach --no-build --pull never --wait --wait-timeout 30
+timeout --kill-after=5s 30s "${compose[@]}" up --detach --no-build --pull never
 disabled_worker_ids="$("${compose[@]}" ps --all --quiet "$worker")"
 test -z "$disabled_worker_ids"
 retained_worker_ids="$(docker ps --all --quiet --filter "id=$worker_id")"
