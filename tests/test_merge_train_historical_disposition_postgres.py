@@ -26,6 +26,15 @@ from control_plane.contracts.merge_admission_record import (
 )
 from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
 from control_plane.contracts.merge_train_controller_state import MergeTrainControllerStateRecord
+from control_plane.contracts.merge_train_batch import (
+    MergeTrainBatchCandidate,
+    MergeTrainBatchCandidateRecord,
+    MergeTrainBatchLandingPlanRecord,
+    build_merge_train_batch_candidate_record,
+    build_merge_train_batch_candidate_ref,
+    build_merge_train_batch_landing_plan,
+    build_merge_train_batch_landing_plan_record,
+)
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.merge_train_effect import (
     MergeTrainEffectLineage,
@@ -49,6 +58,9 @@ from control_plane.merge_train_historical_completion import (
 from control_plane.merge_train_historical_disposition import (
     HistoricalDispositionError,
     HistoricalDispositionRequest,
+)
+from control_plane.workflows.merge_train_controller import (
+    decide_merge_train_controller_record_action,
 )
 from control_plane.storage.historical_completion import _all_target_admissions
 from control_plane.http_routes.mutation_support import idempotency_scope
@@ -315,6 +327,42 @@ def _changed_policy_record(fixture: _HistoricalCompletionFixture) -> MergeTrainP
     )
 
 
+def _fresh_candidate_and_landing(
+    fixture: _HistoricalCompletionFixture,
+) -> tuple[MergeTrainBatchCandidateRecord, MergeTrainBatchLandingPlanRecord]:
+    candidate_payload = fixture.candidate_record.candidate.model_dump(mode="python")
+    candidate_payload.update(
+        {
+            "batch_id": "historical-followup-batch",
+            "candidate_ref": build_merge_train_batch_candidate_ref(
+                repository=REPOSITORY,
+                base_branch=BASE_BRANCH,
+                batch_id="historical-followup-batch",
+            ),
+            "status": "passed",
+            "created_at": "2026-09-15T14:00:00Z",
+            "updated_at": "2026-09-15T14:00:00Z",
+        }
+    )
+    candidate = MergeTrainBatchCandidate.model_validate(candidate_payload)
+    candidate_record = build_merge_train_batch_candidate_record(
+        candidate=candidate,
+        source="test:historical-disposition-followup",
+        updated_at="2026-09-15T14:00:00Z",
+    )
+    landing_plan = build_merge_train_batch_landing_plan(
+        candidate=candidate,
+        merge_method="merge",
+        created_at="2026-09-15T14:01:00Z",
+    )
+    landing_record = build_merge_train_batch_landing_plan_record(
+        landing_plan=landing_plan,
+        source="test:historical-disposition-followup",
+        updated_at="2026-09-15T14:01:00Z",
+    )
+    return candidate_record, landing_record
+
+
 class NativeHistoricalDispositionPostgresTests(unittest.TestCase):
     def test_atomic_success_persists_successor_retires_source_releases_controller(self) -> None:
         with _prepared_store() as (store, fixture):
@@ -360,6 +408,154 @@ class NativeHistoricalDispositionPostgresTests(unittest.TestCase):
             self.assertEqual(result.state, "completed")
             self.assertTrue(provider_transport.requests)
             self.assertTrue(all(request.method == "GET" for request in provider_transport.requests))
+
+    def test_post_disposition_generic_writers_reselect_fresh_landing(self) -> None:
+        with _prepared_store() as (store, fixture):
+            request = _request(fixture)
+            authority = store.authorize_merge_train_historical_completion(request)
+            snapshot = store.read_merge_train_historical_completion_snapshot(request, authority)
+            store.finalize_merge_train_historical_completion(
+                request=request,
+                authority=authority,
+                snapshot=snapshot,
+                provider_evidence=_provider_evidence(store, fixture),
+                trace_id="trace-historical-followup",
+            )
+            historical_successor = next(
+                record
+                for record in store.list_merge_train_batch_landing_plan_records(
+                    repository=REPOSITORY, base_branch=BASE_BRANCH
+                )
+                if record.historical_completion is not None
+            )
+            fresh_candidate, fresh_landing = _fresh_candidate_and_landing(fixture)
+            store.write_merge_train_batch_candidate_record(fresh_candidate)
+            store.write_merge_train_batch_landing_plan_record(fresh_landing)
+
+            decision = decide_merge_train_controller_record_action(
+                candidate_records=store.list_merge_train_batch_candidate_records(
+                    repository=REPOSITORY, base_branch=BASE_BRANCH
+                ),
+                landing_plan_records=store.list_merge_train_batch_landing_plan_records(
+                    repository=REPOSITORY, base_branch=BASE_BRANCH
+                ),
+                stack_collapse_plan_records=store.list_merge_train_stack_collapse_plan_records(
+                    repository=REPOSITORY, base_branch=BASE_BRANCH
+                ),
+            )
+            self.assertEqual(decision.action, "land_batch")
+            self.assertEqual(decision.landing_plan_record_id, fresh_landing.record_id)
+            self.assertEqual(
+                next(
+                    record
+                    for record in store.list_merge_train_batch_landing_plan_records(
+                        repository=REPOSITORY, base_branch=BASE_BRANCH
+                    )
+                    if record.record_id == historical_successor.record_id
+                ),
+                historical_successor,
+            )
+            self.assertIsNone(fresh_landing.historical_completion)
+
+    def test_legacy_defaulted_source_payload_is_read_and_finalized(self) -> None:
+        with _prepared_store() as (store, fixture):
+            with store._session_factory() as session:
+                row = session.get(
+                    LaunchplaneMergeTrainBatchLandingPlanRow,
+                    fixture.landing_record.record_id,
+                )
+                assert row is not None
+                row.payload = {
+                    key: value for key, value in row.payload.items() if key != "schema_version"
+                }
+                legacy_payload = dict(row.payload)
+                session.commit()
+
+            request = _request(fixture)
+            authority = store.authorize_merge_train_historical_completion(request)
+            snapshot = store.read_merge_train_historical_completion_snapshot(request, authority)
+            self.assertEqual(snapshot.source_payload_sha256, canonical_json_sha256(legacy_payload))
+            with store._session_factory() as session:
+                row = session.get(
+                    LaunchplaneMergeTrainBatchLandingPlanRow,
+                    fixture.landing_record.record_id,
+                )
+                assert row is not None
+                self.assertEqual(row.payload, legacy_payload)
+
+            store.finalize_merge_train_historical_completion(
+                request=request,
+                authority=authority,
+                snapshot=snapshot,
+                provider_evidence=_provider_evidence(store, fixture),
+                trace_id="trace-historical-legacy-default",
+            )
+            with store._session_factory() as session:
+                row = session.get(
+                    LaunchplaneMergeTrainBatchLandingPlanRow,
+                    fixture.landing_record.record_id,
+                )
+                assert row is not None
+                self.assertNotIn("schema_version", row.payload)
+
+    def test_raw_source_rewrite_after_snapshot_fails_without_history_write(self) -> None:
+        with _prepared_store() as (store, fixture):
+            request = _request(fixture)
+            authority = store.authorize_merge_train_historical_completion(request)
+            snapshot = store.read_merge_train_historical_completion_snapshot(request, authority)
+            with store._session_factory() as session:
+                row = session.get(
+                    LaunchplaneMergeTrainBatchLandingPlanRow,
+                    fixture.landing_record.record_id,
+                )
+                assert row is not None
+                row.payload = {**row.payload, "ordinary_job_binding": None}
+                session.commit()
+
+            with self.assertRaisesRegex(HistoricalDispositionError, "store_state_changed"):
+                store.finalize_merge_train_historical_completion(
+                    request=request,
+                    authority=authority,
+                    snapshot=snapshot,
+                    provider_evidence=_provider_evidence(store, fixture),
+                    trace_id="trace-historical-raw-rewrite",
+                )
+            self.assertEqual(
+                store.read_merge_train_controller_state_record(fixture.controller.controller_key),
+                fixture.controller,
+            )
+            self.assertIsNone(
+                store.read_idempotency_record(
+                    scope=request.scope,
+                    route_path=ROUTE,
+                    idempotency_key=request.idempotency_key,
+                )
+            )
+
+    def test_controller_projection_mismatch_refuses_read_snapshot(self) -> None:
+        with _prepared_store() as (store, fixture):
+            with store._session_factory() as session:
+                row = session.get(
+                    LaunchplaneMergeTrainBatchLandingPlanRow,
+                    fixture.landing_record.record_id,
+                )
+                assert row is not None
+                row.source = "tampered-source-projection"
+                session.commit()
+
+            request = _request(fixture)
+            authority = store.authorize_merge_train_historical_completion(request)
+            with self.assertRaisesRegex(HistoricalDispositionError, "landing_plan_binding_changed"):
+                store.read_merge_train_historical_completion_snapshot(request, authority)
+            with store._session_factory() as session:
+                row = session.get(
+                    LaunchplaneMergeTrainBatchLandingPlanRow,
+                    fixture.landing_record.record_id,
+                )
+                assert row is not None
+                self.assertEqual(
+                    row.payload, fixture.landing_record.model_dump(mode="json", exclude_none=True)
+                )
 
     def test_same_key_replay_is_currently_authorized_after_controller_work(self) -> None:
         with _prepared_store() as (store, fixture):

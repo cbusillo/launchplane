@@ -135,6 +135,8 @@ def build_historical_disposition(
                 {
                     **entry.model_dump(mode="json"),
                     "status": "stale",
+                    "recorded_rolling_base_sha": "",
+                    "recorded_rolling_base_tree_sha": "",
                     "landed_head_sha": "",
                     "landed_head_tree_sha": "",
                     "merge_commit_sha": "",
@@ -190,6 +192,10 @@ def build_historical_disposition(
             "historical_completion_disposition": {
                 "record_id": successor.record_id,
                 "source_landing_plan_record_id": source.record_id,
+                "landing_plan_sha256": plan.landing_plan_sha256,
+                "provider_evidence_sha256": canonical_json_sha256(
+                    provider_evidence.model_dump(mode="json")
+                ),
                 "selector": request.selector.model_dump(mode="json"),
                 "classification": historical.classification,
                 "authority_state": historical.authority_state,

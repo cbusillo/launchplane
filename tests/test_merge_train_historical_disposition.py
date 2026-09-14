@@ -51,6 +51,9 @@ class HistoricalDispositionRecordTests(unittest.TestCase):
                 base_branch=BASE_BRANCH,
                 selector=fixture.selector,
             )
+            for entry in snapshot.landing.landing_plan.entries:
+                entry.recorded_rolling_base_sha = entry.expected_base_sha
+                entry.recorded_rolling_base_tree_sha = entry.recorded_candidate_parent_tree_sha
             authority = HistoricalDispositionAuthority(
                 policy=fixture.policy_record,
                 authz=LaunchplaneAuthzPolicyRecord(
@@ -78,7 +81,19 @@ class HistoricalDispositionRecordTests(unittest.TestCase):
                 all(entry.status == "stale" for entry in bundle.successor.landing_plan.entries)
             )
             self.assertTrue(
-                all(not entry.merge_commit_sha for entry in bundle.successor.landing_plan.entries)
+                all(
+                    not any(
+                        (
+                            entry.recorded_rolling_base_sha,
+                            entry.recorded_rolling_base_tree_sha,
+                            entry.landed_head_sha,
+                            entry.landed_head_tree_sha,
+                            entry.merge_commit_sha,
+                            entry.merge_commit_tree_sha,
+                        )
+                    )
+                    for entry in bundle.successor.landing_plan.entries
+                )
             )
             self.assertEqual(bundle.controller.status, "idle")
             self.assertEqual(bundle.controller.last_record_id, bundle.successor.record_id)

@@ -200,7 +200,7 @@ class MergeTrainHistoricalCompletionEvidence(BaseModel):
             self.disposition_authorization is not None
             and self.disposition_authorization.merge_policy_sha256 != self.policy_sha256
         ):
-            raise ValueError("disposition authority must match the historical merge policy")
+            raise ValueError("disposition authorization must match the selected plan policy")
         return self
 
     @field_validator(

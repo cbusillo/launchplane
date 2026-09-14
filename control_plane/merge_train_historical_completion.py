@@ -186,6 +186,7 @@ class HistoricalCompletionSnapshot:
     policy: MergeTrainPolicyRecord
     landing: MergeTrainBatchLandingPlanRecord
     candidate: MergeTrainBatchCandidateRecord
+    source_payload_sha256: str = ""
 
 
 class HistoricalCompletionAssessmentFailure(Exception):
@@ -209,6 +210,7 @@ def assess_merge_train_historical_completion(
     selector: MergeTrainHistoricalCompletionSelector,
     generated_at: str,
     github_client: GitHubMergeTrainClient,
+    validated_snapshot: HistoricalCompletionSnapshot | None = None,
 ) -> MergeTrainHistoricalCompletionPreflight:
     """Observe an exact legacy plan without acquiring a lease or invoking admission."""
     normalized_repository = repository.strip().lower()
@@ -223,18 +225,19 @@ def assess_merge_train_historical_completion(
         "has_ordinary_merge_train_target_fence",
     )
     evidence: MergeTrainHistoricalCompletionProviderEvidence | None = None
-    snapshot: HistoricalCompletionSnapshot | None = None
+    snapshot: HistoricalCompletionSnapshot | None = validated_snapshot
     failure: HistoricalCompletionAssessmentFailure | None = None
     try:
-        if not all(callable(getattr(store, name, None)) for name in required):
-            raise HistoricalCompletionAssessmentFailure("indeterminate", "store_unavailable")
         reader = cast(HistoricalCompletionSnapshotStore, store)
-        snapshot = read_historical_completion_snapshot(
-            store=reader,
-            repository=normalized_repository,
-            base_branch=normalized_base_branch,
-            selector=selector,
-        )
+        if snapshot is None:
+            if not all(callable(getattr(store, name, None)) for name in required):
+                raise HistoricalCompletionAssessmentFailure("indeterminate", "store_unavailable")
+            snapshot = read_historical_completion_snapshot(
+                store=reader,
+                repository=normalized_repository,
+                base_branch=normalized_base_branch,
+                selector=selector,
+            )
         evidence = github_client.observe_historical_batch_completion(
             landing_plan=snapshot.landing.landing_plan,
             observed_at=generated_at,
@@ -243,14 +246,15 @@ def assess_merge_train_historical_completion(
             raise HistoricalCompletionAssessmentFailure(
                 "indeterminate", "provider_invalid_response"
             )
-        refreshed = read_historical_completion_snapshot(
-            store=reader,
-            repository=normalized_repository,
-            base_branch=normalized_base_branch,
-            selector=selector,
-        )
-        if refreshed != snapshot:
-            raise HistoricalCompletionAssessmentFailure("indeterminate", "store_state_changed")
+        if validated_snapshot is None:
+            refreshed = read_historical_completion_snapshot(
+                store=reader,
+                repository=normalized_repository,
+                base_branch=normalized_base_branch,
+                selector=selector,
+            )
+            if refreshed != snapshot:
+                raise HistoricalCompletionAssessmentFailure("indeterminate", "store_state_changed")
     except HistoricalCompletionAssessmentFailure as error:
         failure = error
     except MergeTrainHistoricalCompletionProofError as error:

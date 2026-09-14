@@ -5943,8 +5943,10 @@ def create_launchplane_fastapi_app(
                 message=message,
             ) from error
 
-        if controller_request.historical_completion is not None and isinstance(
-            record_store, PostgresRecordStore
+        if (
+            controller_request.historical_completion is not None
+            and isinstance(record_store, PostgresRecordStore)
+            and record_store.database_dialect_name == "postgresql"
         ):
             return run_merge_train_historical_disposition(
                 envelope=controller_request,

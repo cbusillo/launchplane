@@ -73,6 +73,7 @@ def run_merge_train_historical_disposition(
             base_branch=recovery.base_branch,
             selector=recovery.selector,
             generated_at=generated_at,
+            validated_snapshot=snapshot,
             github_client=GitHubMergeTrainClient(
                 transport=UrllibMergeTrainGitHubTransport(token=token),
             ),
@@ -123,7 +124,8 @@ def run_merge_train_historical_disposition(
                 "details": {
                     "reason_code": error.reason,
                     "record_id": record_id,
-                    "retryable": False,
+                    "retryable": error.reason == "recovery_busy",
+                    "automatic_retry_allowed": False,
                     "provider_effect_attempted": False,
                     "admission_created": False,
                     "fence_released": False,

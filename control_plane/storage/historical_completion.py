@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, cast
 
 from sqlalchemy import desc, func, or_, select, text
 
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
+from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.merge_train_batch import (
     MergeTrainBatchCandidateRecord,
@@ -44,23 +46,6 @@ class _SessionSnapshotStore(HistoricalCompletionSnapshotStore):
         self._store = store
         self._session = session
 
-    def _models(self) -> Any:
-        from control_plane.storage.postgres import (
-            LaunchplaneMergeAdmissionRow,
-            LaunchplaneMergeTrainBatchCandidateRow,
-            LaunchplaneMergeTrainBatchLandingPlanRow,
-            LaunchplaneMergeTrainControllerStateRow,
-            LaunchplaneMergeTrainStackCollapsePlanRow,
-        )
-
-        return (
-            LaunchplaneMergeAdmissionRow,
-            LaunchplaneMergeTrainBatchCandidateRow,
-            LaunchplaneMergeTrainBatchLandingPlanRow,
-            LaunchplaneMergeTrainControllerStateRow,
-            LaunchplaneMergeTrainStackCollapsePlanRow,
-        )
-
     def list_merge_train_controller_state_records(
         self,
         *,
@@ -69,7 +54,9 @@ class _SessionSnapshotStore(HistoricalCompletionSnapshotStore):
         status: str = "",
         limit: int | None = None,
     ) -> tuple[MergeTrainControllerStateRecord, ...]:
-        _, _, _, row_type, _ = self._models()
+        from control_plane.storage.postgres import LaunchplaneMergeTrainControllerStateRow
+
+        row_type = LaunchplaneMergeTrainControllerStateRow
         filters: list[object] = []
         if repository:
             filters.append(row_type.repository == repository)
@@ -119,7 +106,9 @@ class _SessionSnapshotStore(HistoricalCompletionSnapshotStore):
         record_id: str = "",
         limit: int | None = None,
     ) -> tuple[MergeTrainBatchLandingPlanRecord, ...]:
-        _, _, row_type, _, _ = self._models()
+        from control_plane.storage.postgres import LaunchplaneMergeTrainBatchLandingPlanRow
+
+        row_type = LaunchplaneMergeTrainBatchLandingPlanRow
         filters: list[object] = []
         if repository:
             filters.append(row_type.repository == repository)
@@ -152,7 +141,9 @@ class _SessionSnapshotStore(HistoricalCompletionSnapshotStore):
         batch_id: str = "",
         limit: int | None = None,
     ) -> tuple[MergeTrainBatchCandidateRecord, ...]:
-        _, row_type, _, _, _ = self._models()
+        from control_plane.storage.postgres import LaunchplaneMergeTrainBatchCandidateRow
+
+        row_type = LaunchplaneMergeTrainBatchCandidateRow
         filters: list[object] = []
         if repository:
             filters.append(row_type.repository == repository)
@@ -185,7 +176,9 @@ class _SessionSnapshotStore(HistoricalCompletionSnapshotStore):
         root_pull_request_number: int | None = None,
         limit: int | None = None,
     ) -> tuple[MergeTrainStackCollapsePlanRecord, ...]:
-        _, _, _, _, row_type = self._models()
+        from control_plane.storage.postgres import LaunchplaneMergeTrainStackCollapsePlanRow
+
+        row_type = LaunchplaneMergeTrainStackCollapsePlanRow
         filters: list[object] = []
         if repository:
             filters.append(row_type.repository == repository)
@@ -218,8 +211,10 @@ class _SessionSnapshotStore(HistoricalCompletionSnapshotStore):
         landing_plan_id: str = "",
         limit: int | None = None,
     ) -> tuple[Any, ...]:
-        row_type, _, _, _, _ = self._models()
         from control_plane.contracts.merge_admission_record import MergeAdmissionRecord
+        from control_plane.storage.postgres import LaunchplaneMergeAdmissionRow
+
+        row_type = LaunchplaneMergeAdmissionRow
 
         filters: list[object] = []
         if repository:
@@ -499,11 +494,44 @@ def _strict_stack_overlap(
         raise HistoricalDispositionError("stack_batch_unsupported")
 
 
+def _validate_source_landing_row(
+    store: PostgresRecordStore,
+    row: Any,
+    *,
+    expected_record_id: str,
+) -> tuple[MergeTrainBatchLandingPlanRecord, str]:
+    """Validate a landing row's projection and retain its exact payload digest."""
+    try:
+        landing = store._read_payload(
+            model_type=MergeTrainBatchLandingPlanRecord,
+            payload=row.payload,
+        )
+        payload_sha256 = canonical_json_sha256(row.payload)
+    except (TypeError, ValueError) as error:
+        raise HistoricalDispositionError("landing_plan_binding_changed") from error
+    if (
+        row.record_id != landing.record_id
+        or row.status != landing.status
+        or row.source != landing.source
+        or row.updated_at != landing.updated_at
+        or row.repository != landing.landing_plan.repository
+        or row.base_branch != landing.landing_plan.base_branch
+        or row.batch_id != landing.landing_plan.batch_id
+        or row.plan_id != landing.landing_plan.plan_id
+        or landing.record_id != expected_record_id
+        or landing.status != "active"
+    ):
+        raise HistoricalDispositionError("landing_plan_binding_changed")
+    return landing, payload_sha256
+
+
 def _read_snapshot_locked(
     store: Any,
     session: Any,
     request: HistoricalDispositionRequest,
 ) -> HistoricalCompletionSnapshot:
+    from control_plane.storage.postgres import LaunchplaneMergeTrainBatchLandingPlanRow
+
     reader = _SessionSnapshotStore(store, session)
     try:
         snapshot = read_historical_completion_snapshot(
@@ -521,6 +549,20 @@ def _read_snapshot_locked(
             else "snapshot_unavailable"
         )
         raise HistoricalDispositionError(reason) from error
+    source_row = session.get(
+        LaunchplaneMergeTrainBatchLandingPlanRow,
+        request.selector.expected_active_record_id,
+    )
+    if source_row is None:
+        raise HistoricalDispositionError("landing_plan_unavailable")
+    source_landing, source_payload_sha256 = _validate_source_landing_row(
+        store,
+        source_row,
+        expected_record_id=request.selector.expected_active_record_id,
+    )
+    if source_landing != snapshot.landing:
+        raise HistoricalDispositionError("store_state_changed")
+    snapshot = replace(snapshot, source_payload_sha256=source_payload_sha256)
     try:
         _strict_stack_overlap(reader, request, snapshot)
         _all_target_admissions(
@@ -755,58 +797,58 @@ def finalize_merge_train_historical_completion(
             expected_policy=authority.policy,
             expected_authz=authority.authz,
         )
-        if request.idempotency_key:
-            idem_row = session.scalar(
-                store._idempotency_statement(
-                    scope=request.scope,
-                    route_path=request.route_path,
-                    idempotency_key=request.idempotency_key,
-                    for_update=True,
-                )
+        idem_row = session.scalar(
+            store._idempotency_statement(
+                scope=request.scope,
+                route_path=request.route_path,
+                idempotency_key=request.idempotency_key,
+                for_update=True,
             )
-            if idem_row is not None:
-                replay = store._read_payload(
-                    model_type=LaunchplaneIdempotencyRecord, payload=idem_row.payload
-                )
-                _validate_replay(
-                    request,
-                    replay,
-                    _service_authz(request, policy),
-                )
-                if replay.state == "completed":
-                    session.rollback()
-                    return replay
+        )
+        if idem_row is not None:
+            replay = store._read_payload(
+                model_type=LaunchplaneIdempotencyRecord, payload=idem_row.payload
+            )
+            _validate_replay(
+                request,
+                replay,
+                _service_authz(request, policy),
+            )
+            if replay.state == "completed":
+                session.rollback()
+                return replay
         _ensure_no_successor(store, session, request)
         current = _read_snapshot_locked(store, session, request)
         if current != snapshot:
             raise HistoricalDispositionError("store_state_changed")
-        bundle = build_historical_disposition(
-            request=request,
-            authority=HistoricalDispositionAuthority(policy=policy, authz=authz),
-            snapshot=snapshot,
-            provider_evidence=provider_evidence,
-            recorded_at=store._database_mutation_timestamp(session),
-            trace_id=trace_id,
-        )
+        try:
+            bundle = build_historical_disposition(
+                request=request,
+                authority=HistoricalDispositionAuthority(policy=policy, authz=authz),
+                snapshot=snapshot,
+                provider_evidence=provider_evidence,
+                recorded_at=store._database_mutation_timestamp(session),
+                trace_id=trace_id,
+            )
+        except (TypeError, ValueError) as error:
+            raise HistoricalDispositionError("provider_binding_mismatch") from error
         predecessor_row = session.get(
             LaunchplaneMergeTrainBatchLandingPlanRow,
             snapshot.landing.record_id,
             with_for_update=True,
         )
-        if predecessor_row is None or predecessor_row.payload != store._payload_dict(
-            snapshot.landing
+        if predecessor_row is None:
+            raise HistoricalDispositionError("store_state_changed")
+        predecessor, predecessor_payload_sha256 = _validate_source_landing_row(
+            store,
+            predecessor_row,
+            expected_record_id=snapshot.landing.record_id,
+        )
+        if (
+            predecessor != snapshot.landing
+            or predecessor_payload_sha256 != snapshot.source_payload_sha256
         ):
             raise HistoricalDispositionError("store_state_changed")
-        if (
-            predecessor_row.status != "active"
-            or predecessor_row.source != snapshot.landing.source
-            or predecessor_row.updated_at != snapshot.landing.updated_at
-            or predecessor_row.repository != snapshot.landing.landing_plan.repository
-            or predecessor_row.base_branch != snapshot.landing.landing_plan.base_branch
-            or predecessor_row.batch_id != snapshot.landing.landing_plan.batch_id
-            or predecessor_row.plan_id != snapshot.landing.landing_plan.plan_id
-        ):
-            raise HistoricalDispositionError("landing_plan_binding_changed")
         session.add(
             LaunchplaneMergeTrainBatchLandingPlanRow(
                 record_id=bundle.successor.record_id,

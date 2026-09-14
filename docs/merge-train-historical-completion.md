@@ -86,6 +86,16 @@ multiple repository policies; it remains one active record. Native recovery
 uses the public GitHub API adapter endpoint; a caller-selected endpoint cannot
 provide historical truth or receive the service credential.
 
+Native provider proof uses the plan captured by that locked snapshot. Its
+source payload digest pins the stored legacy JSON without requiring older rows
+to re-serialize identically under newer model defaults. Physical projection
+checks run in both dry-run and apply. Any raw source rewrite after capture
+conflicts at commit; recovery never backfills defaults into the predecessor.
+The legacy plan also pins the entire merge-policy catalog digest. A catalog
+change, even for an unrelated repository, makes this narrow recovery
+inapplicable and requires separately reviewed reconciliation. Complete this
+recovery before changing the catalog.
+
 Normal requests without the selector retain their existing behavior and incur
 no new reads. Ordinary-agent controller execution rejects the selector.
 
@@ -97,6 +107,9 @@ is no local-write fallback. A positive native dry-run reports
 `disposition_supported=true` and `mutation_enabled=true`, while
 `fence_released=false` and `admission_created=false`. These capability flags do
 not replace current authorization, positive evidence or operator intent.
+Authorized native responses advertise capability even when provider evidence is
+ineligible. The public adapter endpoint value, when supplied, must be exactly
+`https://api.github.com`; omitting it uses that default.
 
 Apply repeats fresh GET-only proof, then performs one transaction:
 
@@ -127,6 +140,10 @@ key: current authz and merge-policy locks protect that lookup, without requiring
 the original controller state. Revoked callers receive no cached evidence. A
 different key for an exact completed disposition reports `already_recorded`
 with its record ID and creates no additional record.
+Transient database contention reports `retryable=true` while
+`automatic_retry_allowed=false`: an intentional same-key retry is supported,
+and the caller must inspect the result instead of blindly replaying a merge.
+The terminal receipt includes the source plan and provider-evidence digests.
 
 Generic writers continue rejecting creation or overwrite of historical
 records. The record-level landing schema remains version 2. Its inner evidence

@@ -691,7 +691,7 @@ def _historical_disposition_storage_error(error: Exception) -> HistoricalDisposi
         return HistoricalDispositionError("store_conflict")
     if isinstance(error, DBAPIError):
         sqlstate = getattr(error.orig, "pgcode", None) or getattr(error.orig, "sqlstate", None)
-        if sqlstate in {"55P03", "57014"}:
+        if sqlstate in {"55P03", "57014", "40001", "40P01"}:
             return HistoricalDispositionError("recovery_busy")
     return HistoricalDispositionError("store_unavailable", status_code=503)
 
