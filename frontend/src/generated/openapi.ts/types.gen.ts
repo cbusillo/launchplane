@@ -1225,6 +1225,7 @@ export type MergeTrainControllerStatusReadModel = {
     generated_at: string;
     latest_dry_run: MergeTrainLatestDryRunSummary | null;
     latest_run: MergeTrainRunRecord | null;
+    reconciliation_diagnostics: Array<MergeTrainReconciliationDiagnostic>;
     repository: string;
     schema_version: number;
 };
@@ -1307,6 +1308,18 @@ export type MergeTrainPolicyTargetsResponse = {
     status: 'ok';
     targets: Array<MergeTrainPolicyTarget>;
     trace_id: string;
+};
+
+export type MergeTrainReconciliationDiagnostic = {
+    base_branch: string;
+    classification: 'missing_preceding_admission' | 'admission_without_outcome' | 'outcome_reconcile_required' | 'outcome_rejected' | 'outcome_landed' | 'binding_unavailable' | 'binding_stale';
+    expected_head_sha: string;
+    expected_head_tree_sha: string;
+    landing_plan_id: string;
+    landing_plan_record_id: string;
+    pull_request_number: number | null;
+    repository: string;
+    schema_version: number;
 };
 
 export type MergeTrainRepositoryPolicyOutput = {

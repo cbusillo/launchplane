@@ -12978,6 +12978,14 @@
               }
             ]
           },
+          "reconciliation_diagnostics": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/MergeTrainReconciliationDiagnostic"
+            },
+            "title": "Reconciliation Diagnostics",
+            "type": "array"
+          },
           "repository": {
             "title": "Repository",
             "type": "string"
@@ -12999,6 +13007,7 @@
           "generated_at",
           "latest_dry_run",
           "latest_run",
+          "reconciliation_diagnostics",
           "repository",
           "schema_version"
         ],
@@ -13374,6 +13383,81 @@
           "trace_id"
         ],
         "title": "MergeTrainPolicyTargetsResponse",
+        "type": "object"
+      },
+      "MergeTrainReconciliationDiagnostic": {
+        "additionalProperties": false,
+        "properties": {
+          "base_branch": {
+            "title": "Base Branch",
+            "type": "string"
+          },
+          "classification": {
+            "enum": [
+              "missing_preceding_admission",
+              "admission_without_outcome",
+              "outcome_reconcile_required",
+              "outcome_rejected",
+              "outcome_landed",
+              "binding_unavailable",
+              "binding_stale"
+            ],
+            "title": "Classification",
+            "type": "string"
+          },
+          "expected_head_sha": {
+            "default": "",
+            "title": "Expected Head Sha",
+            "type": "string"
+          },
+          "expected_head_tree_sha": {
+            "default": "",
+            "title": "Expected Head Tree Sha",
+            "type": "string"
+          },
+          "landing_plan_id": {
+            "default": "",
+            "title": "Landing Plan Id",
+            "type": "string"
+          },
+          "landing_plan_record_id": {
+            "default": "",
+            "title": "Landing Plan Record Id",
+            "type": "string"
+          },
+          "pull_request_number": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pull Request Number"
+          },
+          "repository": {
+            "title": "Repository",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "base_branch",
+          "classification",
+          "expected_head_sha",
+          "expected_head_tree_sha",
+          "landing_plan_id",
+          "landing_plan_record_id",
+          "pull_request_number",
+          "repository",
+          "schema_version"
+        ],
+        "title": "MergeTrainReconciliationDiagnostic",
         "type": "object"
       },
       "MergeTrainRepositoryPolicy-Output": {

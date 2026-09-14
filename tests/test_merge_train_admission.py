@@ -1,4 +1,5 @@
 import unittest
+from types import SimpleNamespace
 
 from control_plane.contracts.merge_train_admission import (
     build_merge_train_controller_admission_decision,
@@ -69,12 +70,17 @@ class _RunHistoryStore:
         landing_plan_records: tuple[MergeTrainBatchLandingPlanRecord, ...] = (),
         stack_collapse_plan_records: tuple[MergeTrainStackCollapsePlanRecord, ...] = (),
         controller_state_records: tuple[MergeTrainControllerStateRecord, ...] = (),
+        admission_records: tuple[object, ...] = (),
+        outcome_records: tuple[object, ...] = (),
     ) -> None:
         self.latest_run = latest_run
         self.candidate_records = candidate_records
         self.landing_plan_records = landing_plan_records
         self.stack_collapse_plan_records = stack_collapse_plan_records
         self.controller_state_records = controller_state_records
+        self.admission_records = admission_records
+        self.admission_requests: list[dict[str, object]] = []
+        self.outcome_records = outcome_records
         self.requests: list[tuple[str, str]] = []
 
     def latest_merge_train_run_record(
@@ -122,6 +128,13 @@ class _RunHistoryStore:
         limit: int | None = None,
     ) -> tuple[MergeTrainControllerStateRecord, ...]:
         return self.controller_state_records
+
+    def list_merge_admission_records(self, **kwargs: object) -> tuple[object, ...]:
+        self.admission_requests.append(kwargs)
+        return self.admission_records
+
+    def list_merge_landing_outcome_records(self, **_kwargs: object) -> tuple[object, ...]:
+        return self.outcome_records
 
 
 class MergeTrainAdmissionTests(unittest.TestCase):
@@ -700,6 +713,231 @@ class MergeTrainAdmissionTests(unittest.TestCase):
         self.assertEqual(read_model.controller_diagnostics.lease_age_seconds, 120)
         self.assertEqual(read_model.controller_diagnostics.heartbeat_age_seconds, 60)
 
+    def test_controller_status_diagnoses_single_unresolved_landing_entry(self) -> None:
+        landing_record, controller_state = _fenced_landing_record()
+        plan = landing_record.landing_plan
+        admission = _diagnostic_admission(plan)
+        cases = (
+            ((), (), "missing_preceding_admission"),
+            ((admission,), (), "admission_without_outcome"),
+            (
+                (admission,),
+                (
+                    SimpleNamespace(
+                        admission_id="admission-42",
+                        admission_binding_sha256="binding-42",
+                        attempt_id="attempt-42",
+                        repository=plan.repository,
+                        base_branch=plan.base_branch,
+                        pull_request_number=42,
+                        status="reconcile_required",
+                        reason="provider_transport_ambiguous",
+                        observation_sequence=1,
+                        observed_at="2026-05-09T02:07:00Z",
+                    ),
+                ),
+                "outcome_reconcile_required",
+            ),
+            (
+                (admission,),
+                (
+                    SimpleNamespace(
+                        admission_id="admission-42",
+                        admission_binding_sha256="binding-42",
+                        attempt_id="attempt-42",
+                        repository=plan.repository,
+                        base_branch=plan.base_branch,
+                        pull_request_number=42,
+                        status="rejected",
+                        reason="provider_rejected",
+                        observation_sequence=1,
+                        observed_at="2026-05-09T02:07:00Z",
+                    ),
+                ),
+                "outcome_rejected",
+            ),
+            (
+                (admission,),
+                (
+                    SimpleNamespace(
+                        admission_id="admission-42",
+                        admission_binding_sha256="binding-42",
+                        attempt_id="attempt-42",
+                        repository=plan.repository,
+                        base_branch=plan.base_branch,
+                        pull_request_number=42,
+                        status="landed",
+                        reason="provider_and_git_confirmed",
+                        observed_pull_request_head_sha=plan.entries[0].expected_head_sha,
+                        observed_pull_request_head_tree_sha=plan.entries[0].expected_head_tree_sha,
+                        observation_sequence=1,
+                        observed_at="2026-05-09T02:07:00Z",
+                    ),
+                ),
+                "outcome_landed",
+            ),
+        )
+        for admissions, outcomes, expected in cases:
+            with self.subTest(expected=expected):
+                store = _RunHistoryStore(
+                    None,
+                    landing_plan_records=(landing_record,),
+                    controller_state_records=(controller_state,),
+                    admission_records=admissions,
+                    outcome_records=outcomes,
+                )
+                read_model = build_merge_train_controller_status_read_model(
+                    store=store,
+                    repository=plan.repository,
+                    base_branch=plan.base_branch,
+                    generated_at="2026-05-09T02:12:00Z",
+                    current_policy_key=plan.policy_key,
+                    current_policy_sha256=plan.policy_sha256,
+                )
+                self.assertEqual(len(read_model.reconciliation_diagnostics), 1)
+                diagnostic = read_model.reconciliation_diagnostics[0]
+                self.assertEqual(diagnostic.classification, expected)
+                self.assertEqual(diagnostic.pull_request_number, 42)
+                self.assertEqual(diagnostic.landing_plan_id, plan.plan_id)
+                self.assertEqual(diagnostic.landing_plan_record_id, landing_record.record_id)
+                self.assertEqual(diagnostic.expected_head_sha, "head-42")
+                self.assertEqual(store.admission_requests[0]["landing_plan_id"], plan.plan_id)
+                self.assertNotIn("landing_plan_record_id", store.admission_requests[0])
+
+    def test_controller_status_diagnostic_rejects_stale_admission_binding(self) -> None:
+        landing_record, controller_state = _fenced_landing_record()
+        plan = landing_record.landing_plan
+        stale = _diagnostic_admission(plan, landing_plan_id="different-plan")
+        read_model = build_merge_train_controller_status_read_model(
+            store=_RunHistoryStore(
+                None,
+                landing_plan_records=(landing_record,),
+                controller_state_records=(controller_state,),
+                admission_records=(stale,),
+            ),
+            repository=plan.repository,
+            base_branch=plan.base_branch,
+            generated_at="2026-05-09T02:12:00Z",
+            current_policy_key=plan.policy_key,
+            current_policy_sha256=plan.policy_sha256,
+        )
+        self.assertEqual(
+            read_model.reconciliation_diagnostics[0].classification,
+            "binding_stale",
+        )
+
+    def test_controller_status_diagnostic_does_not_classify_invalid_or_oversized_bindings(
+        self,
+    ) -> None:
+        record, state = _fenced_landing_record()
+        plan = record.landing_plan
+        too_many = tuple(
+            plan.entries[0].model_copy(update={"pull_request_number": number, "position": number})
+            for number in range(1, 27)
+        )
+        cases = (
+            (state.model_copy(update={"policy_sha256": "old-policy"}), record, "binding_stale"),
+            (state.model_copy(update={"step_payload": {}}), record, "binding_unavailable"),
+            (
+                state.model_copy(
+                    update={
+                        "step_payload": state.step_payload
+                        | {"landing_plan_record_id": "other-record"}
+                    }
+                ),
+                record,
+                "binding_stale",
+            ),
+            (
+                state.model_copy(update={"active_pull_request_number": 999}),
+                record,
+                "binding_unavailable",
+            ),
+            (
+                state,
+                record.model_copy(
+                    update={"landing_plan": plan.model_copy(update={"repository": "other/private"})}
+                ),
+                "binding_stale",
+            ),
+            (
+                state,
+                record.model_copy(
+                    update={"landing_plan": plan.model_copy(update={"policy_sha256": "old-policy"})}
+                ),
+                "binding_stale",
+            ),
+            (
+                state,
+                record.model_copy(
+                    update={"landing_plan": plan.model_copy(update={"entries": too_many})}
+                ),
+                "binding_unavailable",
+            ),
+        )
+        for controller_state, landing_record, expected in cases:
+            with self.subTest(state=controller_state, expected=expected):
+                store = _RunHistoryStore(
+                    None,
+                    landing_plan_records=(landing_record,),
+                    controller_state_records=(controller_state,),
+                )
+                result = build_merge_train_controller_status_read_model(
+                    store=store,
+                    repository=plan.repository,
+                    base_branch=plan.base_branch,
+                    generated_at="2026-05-09T02:12:00Z",
+                    current_policy_key=plan.policy_key,
+                    current_policy_sha256=plan.policy_sha256,
+                )
+                (diagnostic,) = result.reconciliation_diagnostics
+                self.assertEqual(diagnostic.classification, expected)
+                self.assertIsNone(diagnostic.pull_request_number)
+                self.assertEqual(diagnostic.expected_head_sha, "")
+                self.assertEqual(store.admission_requests, [])
+
+    def test_controller_status_diagnostic_preserves_latest_admission_and_outcome_association(
+        self,
+    ) -> None:
+        record, state = _fenced_landing_record()
+        plan = record.landing_plan
+        admission = _diagnostic_admission(plan)
+        wrong_head = _diagnostic_admission(
+            plan, pull_request_head_sha="different-head", attempt_sequence=2
+        )
+        foreign_outcome = SimpleNamespace(
+            admission_id=admission.admission_id,
+            admission_binding_sha256="other-binding",
+            attempt_id=admission.attempt_id,
+            repository=plan.repository,
+            base_branch=plan.base_branch,
+            pull_request_number=42,
+            status="landed",
+        )
+        cases = (
+            ((wrong_head, admission), (), "binding_stale"),
+            ((admission,), (foreign_outcome,), "binding_stale"),
+            ((admission,) * 26, (), "binding_unavailable"),
+            ((object(),), (), "binding_unavailable"),
+        )
+        for admissions, outcomes, expected in cases:
+            with self.subTest(expected=expected, admissions=admissions):
+                result = build_merge_train_controller_status_read_model(
+                    store=_RunHistoryStore(
+                        None,
+                        landing_plan_records=(record,),
+                        controller_state_records=(state,),
+                        admission_records=admissions,
+                        outcome_records=outcomes,
+                    ),
+                    repository=plan.repository,
+                    base_branch=plan.base_branch,
+                    generated_at="2026-05-09T02:12:00Z",
+                    current_policy_key=plan.policy_key,
+                    current_policy_sha256=plan.policy_sha256,
+                )
+                self.assertEqual(result.reconciliation_diagnostics[0].classification, expected)
+
     def test_controller_status_omits_latest_dry_run_summary_for_mutations(self) -> None:
         store = _RunHistoryStore(_run_record(recorded_at="2026-05-09T02:10:00Z", mutation="wait"))
 
@@ -711,6 +949,77 @@ class MergeTrainAdmissionTests(unittest.TestCase):
         )
 
         self.assertIsNone(read_model.latest_dry_run)
+
+
+def _diagnostic_admission(plan: MergeTrainBatchLandingPlan, **updates: object) -> SimpleNamespace:
+    admission = SimpleNamespace(
+        admission_id="admission-42",
+        admission_binding_sha256="binding-42",
+        attempt_id="attempt-42",
+        attempt_sequence=1,
+        created_at="2026-05-09T02:06:00Z",
+        repository=plan.repository,
+        base_branch=plan.base_branch,
+        pull_request_number=42,
+        landing_plan_record_id="previous-progress-record",
+        landing_plan_id=plan.plan_id,
+        batch_id=plan.batch_id,
+        candidate_sha=plan.candidate_sha,
+        expected_effect_sha=plan.candidate_sha,
+        pull_request_head_sha=plan.entries[0].expected_head_sha,
+        pull_request_head_tree_sha=plan.entries[0].expected_head_tree_sha,
+    )
+    return SimpleNamespace(**(vars(admission) | updates))
+
+
+def _fenced_landing_record() -> tuple[
+    MergeTrainBatchLandingPlanRecord, MergeTrainControllerStateRecord
+]:
+    candidate_record = _candidate_record(status="passed")
+    base_record = _landing_plan_record(candidate_record)
+    base_plan = base_record.landing_plan
+    plan = MergeTrainBatchLandingPlan(
+        plan_id=base_plan.plan_id,
+        batch_id=base_plan.batch_id,
+        repository=base_plan.repository,
+        base_branch=base_plan.base_branch,
+        candidate_ref=base_plan.candidate_ref,
+        candidate_sha=base_plan.candidate_sha,
+        candidate_tree_sha=base_plan.candidate_tree_sha,
+        candidate_sha256=base_plan.candidate_sha256,
+        structural_provenance_sha256=base_plan.structural_provenance_sha256,
+        policy_key=base_plan.policy_key,
+        policy_sha256=base_plan.policy_sha256,
+        entries=(base_plan.entries[0],),
+        created_at=base_plan.created_at,
+    )
+    landing_record = build_merge_train_batch_landing_plan_record(
+        landing_plan=plan,
+        source="test:reconciliation-diagnostic",
+        updated_at="2026-05-09T02:05:00Z",
+    )
+    controller_state = MergeTrainControllerStateRecord(
+        controller_key=build_merge_train_controller_key(
+            repository=plan.repository, base_branch=plan.base_branch
+        ),
+        repository=plan.repository,
+        base_branch=plan.base_branch,
+        policy_key=plan.policy_key,
+        policy_sha256=plan.policy_sha256,
+        status="reconcile_required",
+        updated_at="2026-05-09T02:11:00Z",
+        active_action="land_batch",
+        active_phase="merge_batch_entries",
+        active_record_id=landing_record.record_id,
+        step_payload={
+            "landing_plan_record_id": landing_record.record_id,
+            "landing_plan_id": plan.plan_id,
+            "expected_effect_sha": plan.candidate_sha,
+        },
+        reconciliation_status="required",
+        reconciliation_detail="merge_train_landing_reconcile_required",
+    )
+    return landing_record, controller_state
 
 
 def _run_record(

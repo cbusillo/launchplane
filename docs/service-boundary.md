@@ -1157,6 +1157,22 @@ see the current controller action, durable record ids, PR numbers, candidate
 SHA/check state, compact entry counts, lease owner, active phase, lease and
 heartbeat age, and reconciliation state without invoking a worker mutation.
 
+Its default-empty `reconciliation_diagnostics` list explains stored evidence
+for an unresolved batch-landing fence. Entries are selected only from the active
+persisted landing plan after current policy, repository/base, plan and candidate
+binding checks; the request adds no PR selector. Each result contains a stored
+classification and the associated plan/entry identifiers and expected head/tree.
+Stable plan lineage preserves admission lookup across progress records. Stale,
+unavailable or ambiguous evidence is reported as such, without treating it as
+missing authorization or as proof of provider history. The classification
+contract is described in [merge-train-policy.md](merge-train-policy.md).
+
+This diagnostic stays within the existing repository `service_authz` boundary
+for controller execution and reconciliation errors. It does not grant access
+to the broader Owner or engineering governance facets. It reads persisted
+records only, with no provider requests, record mutation, fence release or
+change in authority.
+
 `POST /v1/work-graph/merge-train/controller/run-once` is the operator-facing
 one-action controller for the full batch train. Request payloads name
 `repository`, `base_branch`, and optional `mutate`; the route uses the same
