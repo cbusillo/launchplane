@@ -86,6 +86,7 @@ from tests.support.merge_train import (
     _StaleLandingMergeTrainGitHubClient,
 )
 from tests.test_merge_readiness import _candidate, _evaluate
+from tests.test_merge_train_admission import _fenced_landing_record
 
 
 class _FenceCapturingAdmissionEvaluator:
@@ -183,6 +184,79 @@ class FastApiMergeTrainReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(controller_status["latest_run"]["run_id"], run_record.run_id)
         self.assertEqual(controller_status["latest_dry_run"]["queue_count"], 1)
         self.assertEqual(controller_status["latest_dry_run"]["selected_pr_number"], 1)
+        self.assertEqual(controller_status["reconciliation_diagnostics"], [])
+
+    async def test_controller_status_reads_scoped_diagnostic_without_broader_governance(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            _seed_merge_train_policy(state_dir)
+            landing_record, controller_state = _fenced_landing_record()
+            store.write_merge_train_batch_landing_plan_record(landing_record)
+            store.write_merge_train_controller_state_record(controller_state)
+            before = {
+                path.relative_to(state_dir): path.read_bytes()
+                for path in state_dir.rglob("*")
+                if path.is_file()
+            }
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            with patch(
+                "control_plane.merge_train_github.UrllibMergeTrainGitHubTransport.request",
+                side_effect=AssertionError("Diagnostic reads must not contact GitHub"),
+            ):
+                response = await _asgi_get(
+                    app,
+                    "/v1/work-graph/merge-train/controller/status?repository=cbusillo/sellyouroutboard&base_branch=main",
+                    headers={"Authorization": "Bearer valid-token"},
+                )
+                governance = await _asgi_get(
+                    app,
+                    "/v1/governance/projection?repository=cbusillo/sellyouroutboard&base_branch=main&pull_request_number=42",
+                    headers={"Authorization": "Bearer valid-token"},
+                )
+            after = {
+                path.relative_to(state_dir): path.read_bytes()
+                for path in state_dir.rglob("*")
+                if path.is_file()
+            }
+
+        self.assertEqual(response.status_code, 200, response.text)
+        diagnostics = response.json()["controller_status"]["reconciliation_diagnostics"]
+        self.assertEqual(diagnostics[0]["classification"], "missing_preceding_admission")
+        self.assertEqual(diagnostics[0]["pull_request_number"], 42)
+        self.assertEqual(governance.status_code, 403, governance.text)
+        self.assertEqual(governance.json()["error"]["code"], "authorization_denied")
+        self.assertEqual(
+            governance.json()["error"]["message"],
+            "Caller cannot read every governance evidence facet.",
+        )
+        self.assertEqual(after, before, "Diagnostic reads must leave persisted evidence unchanged")
+
+    async def test_controller_status_denies_unauthorized_repo(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            _seed_merge_train_policy(state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _asgi_get(
+                app,
+                "/v1/work-graph/merge-train/controller/status?repository=cbusillo/sellyouroutboard&base_branch=main",
+                headers={"Authorization": "Bearer valid-token"},
+            )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
 
     async def test_policy_targets_lists_authorized_policy_targets(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

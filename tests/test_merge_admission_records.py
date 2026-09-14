@@ -40,6 +40,7 @@ from control_plane.merge_admission import (
     MergeAdmissionEvaluator,
     MergeAdmissionReconciliationRequiredError,
 )
+from control_plane.merge_train_admission import build_merge_train_controller_status_read_model
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.test_merge_readiness import (
@@ -632,6 +633,76 @@ class GuardedMergeAdmissionScenarioTests(unittest.TestCase):
             admission,
         )
         self.assertEqual(admission.readiness.state, "ready")
+
+    def test_controller_diagnostic_reads_real_admissions_and_latest_outcome_in_both_stores(
+        self,
+    ) -> None:
+        database_path = Path(self.temporary_directory.name) / "diagnostic.sqlite3"
+        database_store = PostgresRecordStore(database_url=f"sqlite+pysqlite:///{database_path}")
+        database_store.ensure_schema()
+        self.addCleanup(database_store.close)
+        for store in (self.store, database_store):
+            with self.subTest(store=type(store).__name__):
+                store.write_merge_train_controller_state_record(self.controller_state)
+                guard = self._guard()
+                guard.record_store = store
+                guard.controller_state_provider = lambda: (
+                    store.read_merge_train_controller_state_record(
+                        self.controller_state.controller_key
+                    )
+                )
+                first = self._admit(guard)
+                guard.record_provider_failure(
+                    admission=first, error=_ProviderError(405), observed_at="2026-08-11T03:01:30Z"
+                )
+                guard.admission_time_provider = lambda: "2026-08-11T03:02:00Z"
+                second = self._admit(guard)
+                progress = self.landing_record.model_copy(
+                    update={"record_id": "landing-diagnostic-progress"}
+                )
+                store.write_merge_train_batch_landing_plan_record(progress)
+                fenced = self.controller_state.model_copy(
+                    update={
+                        "status": "reconcile_required",
+                        "lease_owner": "",
+                        "lease_acquired_at": "",
+                        "lease_expires_at": "",
+                        "heartbeat_at": "",
+                        "active_record_id": progress.record_id,
+                        "active_pull_request_number": None,
+                        "reconciliation_status": "required",
+                        "reconciliation_detail": "test:interrupted",
+                        "step_payload": {
+                            "landing_plan_record_id": progress.record_id,
+                            "landing_plan_id": progress.landing_plan.plan_id,
+                            "expected_effect_sha": progress.landing_plan.candidate_sha,
+                        },
+                    }
+                )
+                store.write_merge_train_controller_state_record(fenced)
+
+                def read_diagnostic() -> str:
+                    result = build_merge_train_controller_status_read_model(
+                        store=store,
+                        repository=REPOSITORY,
+                        base_branch="main",
+                        generated_at="2026-08-11T03:05:00Z",
+                        current_policy_key=fenced.policy_key,
+                        current_policy_sha256=fenced.policy_sha256,
+                    )
+                    (diagnostic,) = result.reconciliation_diagnostics
+                    return diagnostic.classification
+
+                # The newer production-built admission has no outcome; the older is rejected.
+                # Selecting the wrong persisted order or the progress record ID changes this answer.
+                self.assertEqual(read_diagnostic(), "admission_without_outcome")
+                guard.record_reconcile_required(
+                    admission=second,
+                    reason="process_interrupted",
+                    message="simulated interruption",
+                    observed_at="2026-08-11T03:04:00Z",
+                )
+                self.assertEqual(read_diagnostic(), "outcome_reconcile_required")
 
     def test_proposal_does_not_write_and_intervening_fence_change_denies_persistence(self) -> None:
         guard = self._guard()

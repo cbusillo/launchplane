@@ -1,14 +1,21 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Literal, Protocol
+from typing import Callable, Literal, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict
 
 from control_plane.contracts.merge_train_batch import MergeTrainBatchCandidateRecord
+from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingEntry
+from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingPlan
 from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingPlanRecord
 from control_plane.contracts.merge_train_controller_state import MergeTrainControllerStateRecord
 from control_plane.contracts.merge_train_admission import MergeTrainAdmissionDecision
+from control_plane.contracts.merge_admission_record import MergeAdmissionRecord
+from control_plane.contracts.merge_admission_record import MergeLandingOutcomeRecord
+from control_plane.contracts.merge_admission_record import (
+    validate_merge_landing_outcome_for_admission,
+)
 from control_plane.contracts.merge_train_admission import (
     build_merge_train_controller_admission_decision,
 )
@@ -19,6 +26,37 @@ from control_plane.contracts.merge_train_stack_collapse import (
 )
 
 MergeTrainControllerPolicyStatus = Literal["current", "stale", "unchecked"]
+MergeTrainReconciliationClassification = Literal[
+    "missing_preceding_admission",
+    "admission_without_outcome",
+    "outcome_reconcile_required",
+    "outcome_rejected",
+    "outcome_landed",
+    "binding_unavailable",
+    "binding_stale",
+]
+MergeTrainReconciliationBindingDetail = Literal[
+    "",
+    "current_policy_unavailable",
+    "controller_policy_changed",
+    "plan_reference_conflict",
+    "plan_reference_incomplete",
+    "plan_record_unavailable",
+    "plan_binding_changed",
+    "plan_entry_limit_exceeded",
+    "selected_entry_unavailable",
+    "history_reader_unavailable",
+    "admission_limit_exceeded",
+    "admission_binding_changed",
+    "admission_identity_missing",
+    "outcome_binding_changed",
+    "history_unavailable",
+    "outcome_status_unknown",
+]
+_LANDING_RECONCILIATION_PHASES = frozenset(
+    {"merge_batch_entries", "admit_pull_request", "merge_pull_request", "landing_entry_merged"}
+)
+_MAX_RECONCILIATION_DIAGNOSTICS = 25
 
 
 class MergeTrainControllerRecords(BaseModel):
@@ -90,6 +128,21 @@ class MergeTrainControllerLeaseDiagnostics(BaseModel):
     reconciliation_detail: str = ""
 
 
+class MergeTrainReconciliationDiagnostic(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = 1
+    classification: MergeTrainReconciliationClassification
+    binding_detail: MergeTrainReconciliationBindingDetail = ""
+    repository: str
+    base_branch: str
+    landing_plan_record_id: str = ""
+    landing_plan_id: str = ""
+    pull_request_number: int | None = None
+    expected_head_sha: str = ""
+    expected_head_tree_sha: str = ""
+
+
 class MergeTrainControllerStatusReadModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -105,6 +158,7 @@ class MergeTrainControllerStatusReadModel(BaseModel):
     controller_state: MergeTrainControllerStateRecord | None = None
     controller_diagnostics: MergeTrainControllerLeaseDiagnostics | None = None
     controller_records: tuple[MergeTrainControllerRecordSummary, ...]
+    reconciliation_diagnostics: tuple[MergeTrainReconciliationDiagnostic, ...] = ()
 
 
 class MergeTrainRunHistoryStore(Protocol):
@@ -147,6 +201,32 @@ class MergeTrainRunHistoryStore(Protocol):
         status: str = "",
         limit: int | None = None,
     ) -> tuple[MergeTrainControllerStateRecord, ...]: ...
+
+
+class MergeTrainReconciliationReadStore(Protocol):
+    def list_merge_admission_records(
+        self,
+        *,
+        repository: str = "",
+        base_branch: str = "",
+        pull_request_number: int | None = None,
+        landing_plan_record_id: str = "",
+        landing_plan_id: str = "",
+        attempt_id: str = "",
+        limit: int | None = None,
+    ) -> tuple[MergeAdmissionRecord, ...]: ...
+
+    def list_merge_landing_outcome_records(
+        self,
+        *,
+        repository: str = "",
+        base_branch: str = "",
+        pull_request_number: int | None = None,
+        admission_id: str = "",
+        status: str = "",
+        observation_sequence: int | None = None,
+        limit: int | None = None,
+    ) -> tuple[MergeLandingOutcomeRecord, ...]: ...
 
 
 def evaluate_merge_train_admission_from_store(
@@ -258,6 +338,13 @@ def build_merge_train_controller_status_read_model(
             current_policy_key=current_policy_key,
             current_policy_sha256=current_policy_sha256,
         ),
+        reconciliation_diagnostics=_reconciliation_diagnostics(
+            store=store,
+            controller_state=controller_state,
+            controller_records=controller_records,
+            current_policy_key=current_policy_key,
+            current_policy_sha256=current_policy_sha256,
+        ),
     )
 
 
@@ -284,6 +371,298 @@ def _list_active_controller_records(
             limit=25,
         ),
     )
+
+
+def _reconciliation_diagnostics(
+    *,
+    store: object,
+    controller_state: MergeTrainControllerStateRecord | None,
+    controller_records: MergeTrainControllerRecords,
+    current_policy_key: str,
+    current_policy_sha256: str,
+) -> tuple[MergeTrainReconciliationDiagnostic, ...]:
+    if (
+        controller_state is None
+        or controller_state.status != "reconcile_required"
+        or controller_state.active_action != "land_batch"
+        or controller_state.active_phase not in _LANDING_RECONCILIATION_PHASES
+    ):
+        return ()
+    if not current_policy_key or not current_policy_sha256:
+        return (
+            _diagnostic(
+                controller_state=controller_state,
+                classification="binding_unavailable",
+                binding_detail="current_policy_unavailable",
+            ),
+        )
+    if (
+        controller_state.policy_key != current_policy_key
+        or controller_state.policy_sha256 != current_policy_sha256
+    ):
+        return (
+            _diagnostic(
+                controller_state=controller_state,
+                classification="binding_stale",
+                binding_detail="controller_policy_changed",
+            ),
+        )
+
+    payload = controller_state.step_payload
+    payload_record_id = _string_value(payload, "landing_plan_record_id")
+    if (
+        controller_state.active_record_id
+        and payload_record_id
+        and controller_state.active_record_id != payload_record_id
+    ):
+        return (
+            _diagnostic(
+                controller_state=controller_state,
+                classification="binding_stale",
+                binding_detail="plan_reference_conflict",
+            ),
+        )
+    record_id = controller_state.active_record_id or payload_record_id
+    plan_id = _string_value(payload, "landing_plan_id")
+    expected_effect = _string_value(payload, "expected_effect_sha")
+    if not record_id or not plan_id or not expected_effect:
+        return (
+            _diagnostic(
+                controller_state=controller_state,
+                classification="binding_unavailable",
+                binding_detail="plan_reference_incomplete",
+            ),
+        )
+    landing_record = next(
+        (
+            record
+            for record in controller_records.landing_plan_records
+            if record.record_id == record_id
+        ),
+        None,
+    )
+    if landing_record is None:
+        return (
+            _diagnostic(
+                controller_state=controller_state,
+                classification="binding_unavailable",
+                binding_detail="plan_record_unavailable",
+            ),
+        )
+    plan = landing_record.landing_plan
+    if (
+        plan.plan_id != plan_id
+        or plan.candidate_sha != expected_effect
+        or plan.repository != controller_state.repository.strip().lower()
+        or plan.base_branch != controller_state.base_branch
+        or plan.policy_key != current_policy_key
+        or plan.policy_sha256 != current_policy_sha256
+    ):
+        return (
+            _diagnostic(
+                controller_state=controller_state,
+                classification="binding_stale",
+                binding_detail="plan_binding_changed",
+            ),
+        )
+
+    if len(plan.entries) > _MAX_RECONCILIATION_DIAGNOSTICS:
+        return (
+            _diagnostic(
+                controller_state=controller_state,
+                classification="binding_unavailable",
+                binding_detail="plan_entry_limit_exceeded",
+            ),
+        )
+    entries = _diagnostic_entries(plan=plan, controller_state=controller_state)
+    if not entries:
+        if controller_state.active_pull_request_number is None:
+            return ()
+        return (
+            _diagnostic(
+                controller_state=controller_state,
+                classification="binding_unavailable",
+                binding_detail="selected_entry_unavailable",
+            ),
+        )
+    readers = _reconciliation_readers(store)
+    if readers is None:
+        return (
+            _diagnostic(
+                controller_state=controller_state,
+                classification="binding_unavailable",
+                binding_detail="history_reader_unavailable",
+            ),
+        )
+    admission_reader, outcome_reader = readers
+    return tuple(
+        _entry_reconciliation_diagnostic(
+            admission_reader=admission_reader,
+            outcome_reader=outcome_reader,
+            landing_plan_record_id=record_id,
+            plan=plan,
+            entry=entry,
+        )
+        for entry in entries
+    )
+
+
+def _reconciliation_readers(
+    store: object,
+) -> (
+    tuple[
+        Callable[..., tuple[MergeAdmissionRecord, ...]],
+        Callable[..., tuple[MergeLandingOutcomeRecord, ...]],
+    ]
+    | None
+):
+    try:
+        reconciliation_store = cast(MergeTrainReconciliationReadStore, store)
+        return (
+            reconciliation_store.list_merge_admission_records,
+            reconciliation_store.list_merge_landing_outcome_records,
+        )
+    except AttributeError:
+        return None
+
+
+def _diagnostic_entries(
+    *, plan: MergeTrainBatchLandingPlan, controller_state: MergeTrainControllerStateRecord
+) -> tuple[MergeTrainBatchLandingEntry, ...]:
+    if controller_state.active_pull_request_number is None:
+        return tuple(entry for entry in plan.entries if entry.status in {"planned", "merging"})
+    return tuple(
+        entry
+        for entry in plan.entries
+        if entry.pull_request_number == controller_state.active_pull_request_number
+    )
+
+
+def _entry_reconciliation_diagnostic(
+    *,
+    admission_reader: Callable[..., tuple[MergeAdmissionRecord, ...]],
+    outcome_reader: Callable[..., tuple[MergeLandingOutcomeRecord, ...]],
+    landing_plan_record_id: str,
+    plan: MergeTrainBatchLandingPlan,
+    entry: MergeTrainBatchLandingEntry,
+) -> MergeTrainReconciliationDiagnostic:
+    def diagnostic(
+        classification: MergeTrainReconciliationClassification,
+        binding_detail: MergeTrainReconciliationBindingDetail = "",
+    ) -> MergeTrainReconciliationDiagnostic:
+        return _diagnostic(
+            repository=plan.repository,
+            base_branch=plan.base_branch,
+            landing_plan_record_id=landing_plan_record_id,
+            landing_plan_id=plan.plan_id,
+            entry=entry,
+            classification=classification,
+            binding_detail=binding_detail,
+        )
+
+    try:
+        admissions = tuple(
+            admission_reader(
+                repository=plan.repository,
+                base_branch=plan.base_branch,
+                pull_request_number=entry.pull_request_number,
+                landing_plan_id=plan.plan_id,
+                limit=_MAX_RECONCILIATION_DIAGNOSTICS + 1,
+            )
+        )
+        if not admissions:
+            return diagnostic("missing_preceding_admission")
+        if len(admissions) > _MAX_RECONCILIATION_DIAGNOSTICS:
+            return diagnostic("binding_unavailable", "admission_limit_exceeded")
+        admission = admissions[0]
+        if not _admission_matches_entry(admission=admission, plan=plan, entry=entry):
+            return diagnostic("binding_stale", "admission_binding_changed")
+        if not admission.admission_id:
+            return diagnostic("binding_unavailable", "admission_identity_missing")
+        outcomes = tuple(outcome_reader(admission_id=admission.admission_id, limit=1))
+        if not outcomes:
+            return diagnostic("admission_without_outcome")
+        outcome = outcomes[0]
+        try:
+            validate_merge_landing_outcome_for_admission(
+                admission=admission,
+                outcome=outcome,
+            )
+        except ValueError:
+            return diagnostic("binding_stale", "outcome_binding_changed")
+    except (AttributeError, LookupError, TypeError, ValueError):
+        return diagnostic("binding_unavailable", "history_unavailable")
+    classification = {
+        "reconcile_required": "outcome_reconcile_required",
+        "rejected": "outcome_rejected",
+        "landed": "outcome_landed",
+    }.get(outcome.status)
+    if classification is None:
+        return diagnostic("binding_unavailable", "outcome_status_unknown")
+    return diagnostic(cast(MergeTrainReconciliationClassification, classification))
+
+
+def _admission_matches_entry(
+    *,
+    admission: MergeAdmissionRecord,
+    plan: MergeTrainBatchLandingPlan,
+    entry: MergeTrainBatchLandingEntry,
+) -> bool:
+    return (
+        admission.repository == plan.repository
+        and admission.base_branch == plan.base_branch
+        and admission.pull_request_number == entry.pull_request_number
+        and admission.landing_plan_id == plan.plan_id
+        and admission.batch_id == plan.batch_id
+        and admission.candidate_sha == plan.candidate_sha
+        and admission.expected_effect_sha == plan.candidate_sha
+        and admission.pull_request_head_sha == entry.expected_head_sha
+        and (
+            not entry.expected_head_tree_sha
+            or admission.pull_request_head_tree_sha == entry.expected_head_tree_sha
+        )
+    )
+
+
+def _diagnostic(
+    *,
+    classification: MergeTrainReconciliationClassification,
+    binding_detail: MergeTrainReconciliationBindingDetail = "",
+    repository: str = "",
+    base_branch: str = "",
+    landing_plan_record_id: str = "",
+    landing_plan_id: str = "",
+    entry: MergeTrainBatchLandingEntry | None = None,
+    controller_state: MergeTrainControllerStateRecord | None = None,
+) -> MergeTrainReconciliationDiagnostic:
+    if controller_state is not None:
+        repository = controller_state.repository
+        base_branch = controller_state.base_branch
+        payload = controller_state.step_payload
+        landing_plan_record_id = controller_state.active_record_id or _string_value(
+            payload, "landing_plan_record_id"
+        )
+        landing_plan_id = _string_value(payload, "landing_plan_id")
+    values: dict[str, object] = {
+        "classification": classification,
+        "binding_detail": binding_detail,
+        "repository": repository,
+        "base_branch": base_branch,
+        "landing_plan_record_id": landing_plan_record_id,
+        "landing_plan_id": landing_plan_id,
+    }
+    if entry is not None:
+        values.update(
+            pull_request_number=entry.pull_request_number,
+            expected_head_sha=entry.expected_head_sha,
+            expected_head_tree_sha=entry.expected_head_tree_sha,
+        )
+    return MergeTrainReconciliationDiagnostic.model_validate(values)
+
+
+def _string_value(payload: dict[str, object], key: str) -> str:
+    value = payload.get(key)
+    return value.strip() if isinstance(value, str) else ""
 
 
 def _latest_controller_state(

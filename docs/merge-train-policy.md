@@ -814,6 +814,39 @@ policy; stale records remain visible in the summaries with a stale reason. It is
 also store-only, so it can power dashboards and status summaries without
 consuming GitHub API capacity or advancing the train.
 
+For an unresolved `land_batch` controller fence, `reconciliation_diagnostics`
+adds bounded stored admission/outcome classifications for entries in the active
+landing plan. The controller and plan must match the current repository/base
+policy and the recorded candidate effect. The read uses the stable landing-plan
+lineage, so a progress record does not hide a preceding immutable admission.
+An unset active PR is supported by reading unresolved entries in that plan;
+callers cannot select arbitrary PRs through this route.
+Plans with more than 25 entries, or an entry with more than 25 stored admission
+attempts, return `binding_unavailable` instead of a silently truncated diagnosis.
+
+Each diagnostic contains the repository/base, active plan record and stable
+plan identifiers, entry PR and expected head/tree, and one classification:
+`missing_preceding_admission`, `admission_without_outcome`,
+`outcome_reconcile_required`, `outcome_rejected`, `outcome_landed`,
+`binding_unavailable`, or `binding_stale`. Missing or conflicting bindings do
+not prove an absent admission. A closed-enum `binding_detail` distinguishes
+policy drift, incomplete or changed plan references, entry/history limits,
+missing readers, invalid history, and admission/outcome binding failures without
+returning exception text. It is empty for a classified admission/outcome. If the
+bound plan has no unresolved entry and no active PR, the diagnostic list is empty.
+These are stored states, not fresh provider
+observations or authority to release the fence. A missing admission does not
+establish who performed a merge; a stored terminal outcome does not establish
+that the provider still agrees.
+
+The existing repository policy's `service_authz` authorizes this bounded
+controller diagnostic, as it does the controller's reconciliation errors. It
+does not expose Owner decisions, engineering review/readiness payloads, or the
+full governance projection. Reading it performs no provider calls or writes and
+cannot reconcile a landing, create an admission, change policy, or release the
+controller fence. Recovery requires its own supported action and current
+evidence.
+
 The GitHub Actions scheduler in `.github/workflows/merge-train-runner.yml` reads
 authorized policy targets from the native FastAPI
 `GET /v1/work-graph/merge-train/policy-targets` route on every scheduled run.
