@@ -12,13 +12,21 @@ from control_plane.authz_candidate_preparation import (
     ORDINARY_AGENT_DELIVERY_ADMINISTRATION_ACTIONS,
     ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_RULE_ID,
     ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_SET_ID,
+    TERMINAL_ENROLLMENT_POLICY_MANAGED_SET_ID,
     administrator_product_evidence_read_state,
     compile_administrator_product_evidence_read_candidate,
+    compile_terminal_enrollment_policy_candidate,
+    is_terminal_enrollment_requester_request,
     compile_ordinary_agent_delivery_administration_candidate,
     is_administrator_product_evidence_read_request,
     is_legacy_administrator_product_evidence_read_request,
     is_ordinary_agent_delivery_administration_request,
     ordinary_agent_delivery_administration_state,
+    terminal_enrollment_capability_state,
+)
+from control_plane.contracts.ordinary_agent import (
+    OrdinaryAgentPolicyRule,
+    OrdinaryAgentTarget,
 )
 from control_plane.service_auth import (
     AuthorizationTarget,
@@ -105,6 +113,191 @@ def _legacy_policy_with_product_evidence(*, github_id: int = 123) -> Launchplane
 
 
 class AuthorizationCandidateCompilerTests(unittest.TestCase):
+    def test_terminal_enrollment_candidate_is_narrow_and_preserves_schema(self) -> None:
+        identity = TerminalAgentIdentity(subject="trusted-terminal", token_label="owner-terminal")
+        state, request = compile_terminal_enrollment_policy_candidate(
+            current_policy=_policy(), identity=identity
+        )
+
+        self.assertEqual(state, "planned")
+        assert request is not None
+        self.assertTrue(is_terminal_enrollment_requester_request(request, intent="add"))
+        self.assertEqual(request.desired_policy.schema_version, 2)
+        self.assertEqual(len(request.desired_policy.terminal_agents), 1)
+        rule = request.desired_policy.terminal_agents[0]
+        self.assertEqual(rule.subjects, (identity.subject,))
+        self.assertEqual(rule.token_labels, (identity.token_label,))
+        self.assertEqual(rule.products, ("launchplane",))
+        self.assertEqual(rule.contexts, ("launchplane",))
+        self.assertEqual(rule.actions, ("ordinary_agent_enrollment.propose",))
+        self.assertFalse(request.desired_policy.ordinary_agents)
+
+    def test_terminal_enrollment_readiness_matches_ingress_predicate(self) -> None:
+        identity = TerminalAgentIdentity(subject="trusted-terminal", token_label="owner-terminal")
+        payload = _policy().model_dump(mode="json")
+        payload["terminal_agents"] = [
+            {
+                "managed_set_id": "existing.terminal",
+                "managed_rule_id": "broader-rule",
+                "subjects": [identity.subject],
+                "token_labels": [identity.token_label],
+                "actions": ["ordinary_agent_enrollment.propose", "product_environment.read"],
+            }
+        ]
+        current = LaunchplaneAuthzPolicy.model_validate(payload)
+
+        self.assertEqual(
+            terminal_enrollment_capability_state(policy=current, identity=identity), "ready"
+        )
+        self.assertEqual(
+            compile_terminal_enrollment_policy_candidate(current_policy=current, identity=identity),
+            ("already_satisfied", None),
+        )
+
+    def test_terminal_enrollment_conflicts_are_classified_without_adoption(self) -> None:
+        identity = TerminalAgentIdentity(subject="trusted-terminal", token_label="owner-terminal")
+        cases = {
+            "unmanaged": [{"subjects": [identity.subject], "token_labels": [identity.token_label]}],
+            "mismatched": [
+                {
+                    "managed_set_id": TERMINAL_ENROLLMENT_POLICY_MANAGED_SET_ID,
+                    "managed_rule_id": "different-action",
+                    "subjects": [identity.subject],
+                    "token_labels": [identity.token_label],
+                    "actions": ["product_environment.read"],
+                }
+            ],
+            "ambiguous": [
+                {
+                    "managed_set_id": "terminal.one",
+                    "managed_rule_id": "one",
+                    "subjects": [identity.subject],
+                    "token_labels": [identity.token_label],
+                    "actions": ["ordinary_agent_enrollment.propose"],
+                },
+                {
+                    "managed_set_id": "terminal.two",
+                    "managed_rule_id": "two",
+                    "subjects": [identity.subject],
+                    "token_labels": [identity.token_label],
+                    "actions": ["ordinary_agent_enrollment.propose"],
+                },
+            ],
+        }
+        for expected, terminal_agents in cases.items():
+            with self.subTest(expected=expected):
+                payload = _policy().model_dump(mode="json")
+                payload["terminal_agents"] = terminal_agents
+                current = LaunchplaneAuthzPolicy.model_validate(payload)
+                self.assertEqual(
+                    terminal_enrollment_capability_state(policy=current, identity=identity),
+                    expected,
+                )
+                with self.assertRaises(ValueError):
+                    compile_terminal_enrollment_policy_candidate(
+                        current_policy=current, identity=identity
+                    )
+
+    def test_terminal_context_read_rule_does_not_block_enrollment_preparation(self) -> None:
+        identity = TerminalAgentIdentity(subject="trusted-terminal", token_label="owner-terminal")
+        payload = _policy().model_dump(mode="json")
+        payload["terminal_agents"] = [
+            {
+                "managed_set_id": "terminal.context-read",
+                "managed_rule_id": "redacted-context",
+                "subjects": [identity.subject],
+                "token_labels": [identity.token_label],
+                "products": ["launchplane"],
+                "contexts": ["launchplane"],
+                "actions": ["product_environment.read"],
+            }
+        ]
+        current = LaunchplaneAuthzPolicy.model_validate(payload)
+        state, request = compile_terminal_enrollment_policy_candidate(
+            current_policy=current, identity=identity
+        )
+
+        self.assertEqual(state, "planned")
+        assert request is not None
+        self.assertEqual(len(request.desired_policy.terminal_agents), 1)
+        self.assertNotEqual(
+            request.desired_policy.terminal_agents[0].managed_set_id,
+            "terminal.context-read",
+        )
+
+    def test_terminal_enrollment_rejects_wildcard_identity_metadata(self) -> None:
+        identity = TerminalAgentIdentity(subject="trusted-*", token_label="owner-terminal")
+
+        self.assertEqual(
+            terminal_enrollment_capability_state(policy=_policy(), identity=identity),
+            "unavailable",
+        )
+        with self.assertRaises(ValueError):
+            compile_terminal_enrollment_policy_candidate(
+                current_policy=_policy(), identity=identity
+            )
+
+    def test_terminal_enrollment_removal_survives_config_change_and_preserves_client_access(
+        self,
+    ) -> None:
+        identity = TerminalAgentIdentity(subject="trusted-terminal", token_label="owner-terminal")
+        _, addition = compile_terminal_enrollment_policy_candidate(
+            current_policy=_policy(), identity=identity
+        )
+        assert addition is not None
+        payload = _policy().model_dump(mode="json")
+        payload["schema_version"] = 3
+        payload["terminal_agents"] = [
+            rule.model_dump(mode="json") for rule in addition.desired_policy.terminal_agents
+        ]
+        payload["ordinary_agents"] = [
+            OrdinaryAgentPolicyRule(
+                managed_set_id="ordinary-client.existing",
+                managed_rule_id="delivery",
+                principal_id="agent_existing",
+                target=OrdinaryAgentTarget(
+                    repository_id=9001,
+                    repository="example/project",
+                    base_branch="main",
+                ),
+                actions=("self_read",),
+            ).model_dump(mode="json")
+        ]
+        current = LaunchplaneAuthzPolicy.model_validate(payload)
+        state, removal = compile_terminal_enrollment_policy_candidate(
+            current_policy=current, identity=None, intent="remove"
+        )
+
+        self.assertEqual(state, "planned")
+        assert removal is not None
+        self.assertTrue(is_terminal_enrollment_requester_request(removal, intent="remove"))
+        self.assertFalse(removal.desired_policy.terminal_agents)
+        self.assertFalse(removal.desired_policy.ordinary_agents)
+        self.assertEqual(len(current.ordinary_agents), 1)
+
+    def test_terminal_enrollment_removal_rejects_foreign_broad_or_ambiguous_sets(self) -> None:
+        identity = TerminalAgentIdentity(subject="trusted-terminal", token_label="owner-terminal")
+        _, addition = compile_terminal_enrollment_policy_candidate(
+            current_policy=_policy(), identity=identity
+        )
+        assert addition is not None
+        exact = addition.desired_policy.terminal_agents[0].model_dump(mode="json")
+        cases = {
+            "foreign": [{**exact, "managed_rule_id": "foreign"}],
+            "broad": [{**exact, "subjects": ["*"]}],
+            "ambiguous": [exact, {**exact, "managed_rule_id": "another"}],
+        }
+        for name, terminal_agents in cases.items():
+            with self.subTest(name=name):
+                payload = _policy().model_dump(mode="json")
+                payload["terminal_agents"] = terminal_agents
+                with self.assertRaises(ValueError):
+                    compile_terminal_enrollment_policy_candidate(
+                        current_policy=LaunchplaneAuthzPolicy.model_validate(payload),
+                        identity=None,
+                        intent="remove",
+                    )
+
     def test_add_compiles_only_exact_closed_rule_and_preserves_schema(self) -> None:
         state, request = compile_ordinary_agent_delivery_administration_candidate(
             current_policy=_policy(),

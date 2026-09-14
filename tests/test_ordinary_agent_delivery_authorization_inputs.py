@@ -288,6 +288,24 @@ def _app(
 
 
 class OrdinaryAgentDeliveryAuthorizationInputServiceTests(unittest.TestCase):
+    def test_terminal_enrollment_readiness_is_redacted_and_nonmutating(self) -> None:
+        store = _ReadStore()
+        identity = TerminalAgentIdentity(subject="trusted-terminal", token_label="owner-terminal")
+        response = read_ordinary_agent_delivery_authorization_candidate_inputs(
+            record_store=store,
+            policy_record=_policy_record(_policy()),
+            trace_id="terminal-readiness",
+            observed_at="2026-09-14T15:00:00Z",
+            configured_terminal_identity=identity,
+        )
+
+        self.assertEqual(response.terminal_enrollment.state, "missing")
+        serialized = response.model_dump_json()
+        self.assertNotIn(identity.subject, serialized)
+        self.assertNotIn(identity.token_label, serialized)
+        self.assertEqual(store.inventory_reads, 1)
+        self.assertEqual(store.merge_policy_reads, 1)
+
     def _read(self, store: object):  # type: ignore[no-untyped-def]
         return read_ordinary_agent_delivery_authorization_candidate_inputs(
             record_store=store,

@@ -2015,6 +2015,7 @@ test.describe("operator journeys", () => {
             schema_version: 2,
             policy_sha256: "1".repeat(64),
           },
+          terminal_enrollment: { state: "ready" },
           inventory_state: "complete",
           merge_policy_state: "available",
           merge_policy: {

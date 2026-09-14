@@ -146,6 +146,7 @@ class PrivilegedOperationRouteDependencies:
     read_github_human_mutation_identity: Callable[..., GitHubHumanIdentity]
     policy_reader: Callable[[], LaunchplaneAuthzPolicy]
     policy_record_reader: Callable[[], object] | None = None
+    read_configured_terminal_identity: Callable[[], TerminalAgentIdentity | None] = lambda: None
 
 
 class PrivilegedOperationPlanEnvelope(BaseModel):
@@ -1551,6 +1552,7 @@ def register_privileged_operation_routes(
                 github_id=identity.github_id,
                 intent=envelope.intent,
                 record_store=record_store,
+                configured_terminal_identity=dependencies.read_configured_terminal_identity(),
             )
             if state == "already_satisfied":
                 return AuthorizationCandidatePrepareResponse(
@@ -1917,6 +1919,7 @@ def register_privileged_operation_routes(
             policy_record=policy_record,
             trace_id=trace_id,
             observed_at=observed_at,
+            configured_terminal_identity=dependencies.read_configured_terminal_identity(),
         )
 
     app.add_api_route(

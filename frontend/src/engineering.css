@@ -1683,6 +1683,29 @@
   color: var(--muted);
 }
 
+.ordinary-target-preparation-terminal {
+  display: grid;
+  gap: 0.65rem;
+  padding: 0.9rem;
+  border: 1px solid rgb(103 191 255 / 18%);
+  border-radius: 0.75rem;
+  background: rgb(255 255 255 / 2%);
+}
+
+.ordinary-target-preparation-terminal h4,
+.ordinary-target-preparation-terminal p {
+  margin: 0;
+}
+
+.ordinary-target-preparation-terminal h4 {
+  color: var(--text-strong);
+  font-size: 0.9rem;
+}
+
+.ordinary-target-preparation-terminal p {
+  color: var(--muted);
+}
+
 .ordinary-target-preparation-boundary {
   display: flex;
   align-items: flex-start;

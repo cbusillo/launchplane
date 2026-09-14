@@ -3,6 +3,7 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 
 import {
   LaunchplaneApiError,
+  prepareAuthorizationCandidate,
   prepareOrdinaryAgentDeliveryPolicy,
   type OrdinaryAgentDeliveryAuthorizationCandidateInputsResponse,
   type OrdinaryAgentDeliveryPolicyIntent,
@@ -10,6 +11,7 @@ import {
 import { navigateTo } from "./router";
 
 const DRAFT_KEY = "launchplane:ordinary-agent-policy-preparation:v1";
+const TERMINAL_DRAFT_KEY = "launchplane:terminal-enrollment-preparation:v1";
 
 type PolicyDraft = {
   intent: OrdinaryAgentDeliveryPolicyIntent;
@@ -40,6 +42,25 @@ function readDraft(): PolicyDraft | null {
   }
 }
 
+function readTerminalDraft(): string | null {
+  try {
+    const value = window.sessionStorage.getItem(TERMINAL_DRAFT_KEY);
+    return value?.startsWith("ui:terminal-enrollment:") ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+const terminalReadinessMessage = {
+  ready: "",
+  configured_identity_absent: "Launchplane has no configured trusted terminal connection.",
+  missing: "The configured trusted terminal cannot yet request a client connection.",
+  unmanaged: "Existing terminal access needs repair before connection requests can be enabled.",
+  mismatched: "Existing terminal access needs repair before connection requests can be enabled.",
+  ambiguous: "Existing terminal access needs administrator review before connection requests can be enabled.",
+  unavailable: "Launchplane could not check terminal access before connection requests can be enabled.",
+} as const;
+
 export function EngineeringOrdinaryAgentPolicyPreparation({
   data,
 }: {
@@ -55,6 +76,9 @@ export function EngineeringOrdinaryAgentPolicyPreparation({
   const [finished, setFinished] = useState(false);
   const [message, setMessage] = useState("");
   const [traceId, setTraceId] = useState("");
+  const [terminalDraft, setTerminalDraft] = useState<string | null>(readTerminalDraft);
+  const [terminalPending, setTerminalPending] = useState(false);
+  const [terminalMessage, setTerminalMessage] = useState("");
   const controllerRef = useRef<AbortController | null>(null);
   const repositories = data.repositories.filter(
     (item) => item.configured_branches.length,
@@ -65,6 +89,8 @@ export function EngineeringOrdinaryAgentPolicyPreparation({
   const currentInputsAvailable =
     data.inventory_state === "complete" &&
     data.merge_policy_state === "available";
+  const terminalState = data.terminal_enrollment?.state ?? "unavailable";
+  const terminalReady = terminalState === "ready";
 
   useEffect(() => () => controllerRef.current?.abort(), []);
 
@@ -153,6 +179,39 @@ export function EngineeringOrdinaryAgentPolicyPreparation({
     }
   }
 
+  async function prepareTerminalEnrollment() {
+    if (terminalPending || terminalState !== "missing") return;
+    const sourceEventId = terminalDraft ?? `ui:terminal-enrollment:${crypto.randomUUID()}`;
+    setTerminalPending(true);
+    setTerminalMessage("");
+    try {
+      window.sessionStorage.setItem(TERMINAL_DRAFT_KEY, sourceEventId);
+      setTerminalDraft(sourceEventId);
+      const response = await prepareAuthorizationCandidate(
+        "ordinary-agent-enrollment-requester",
+        "add",
+        sourceEventId,
+      );
+      window.sessionStorage.removeItem(TERMINAL_DRAFT_KEY);
+      setTerminalDraft(null);
+      if (response.operation_id) {
+        navigateTo(
+          `/ui/engineering/privileged-operations?operation_id=${encodeURIComponent(response.operation_id)}`,
+        );
+        return;
+      }
+      setTerminalMessage("This terminal can already request a client connection. Check prerequisites again.");
+    } catch (error) {
+      if (error instanceof LaunchplaneApiError) {
+        setTerminalMessage(error.message);
+      } else {
+        setTerminalMessage("Launchplane could not confirm the terminal request. Retry to recover the same plan.");
+      }
+    } finally {
+      setTerminalPending(false);
+    }
+  }
+
   return (
     <section
       className="ordinary-target-preparation-card"
@@ -172,6 +231,36 @@ export function EngineeringOrdinaryAgentPolicyPreparation({
         This prepares access only. Delivery starts after the separate setup and
         verification steps.
       </p>
+      <section className="ordinary-target-preparation-terminal" aria-label="Terminal connection requests">
+        <h4>Trusted terminal connection requests</h4>
+        {terminalReady ? (
+          <p role="status">The configured trusted terminal can request a client connection.</p>
+        ) : (
+          <>
+            <p role="status">
+              {terminalReadinessMessage[terminalState] ?? terminalReadinessMessage.unavailable}
+            </p>
+            {terminalState === "missing" ? (
+              <button
+                className="button secondary"
+                disabled={terminalPending}
+                onClick={() => void prepareTerminalEnrollment()}
+                type="button"
+              >
+                {terminalPending ? <LoaderCircle className="spin" size={16} aria-hidden="true" /> : null}
+                {terminalPending
+                  ? "Preparing terminal access…"
+                  : terminalDraft
+                    ? "Retry terminal access preparation"
+                    : "Allow the trusted terminal to request a client connection"}
+              </button>
+            ) : null}
+            {terminalMessage ? <p role="status">{terminalMessage}</p> : null}
+          </>
+        )}
+        <p>Every client connection still needs separate administrator approval.</p>
+      </section>
+      {!terminalReady && !draft ? null : <>
       {draft && !finished ? (
         <p role="status">
           Retry the saved request for {draft.intent.client_label} on{" "}
@@ -283,6 +372,7 @@ export function EngineeringOrdinaryAgentPolicyPreparation({
           ) : null}
         </form>
       )}
+      </>}
     </section>
   );
 }

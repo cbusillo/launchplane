@@ -5,9 +5,15 @@ const preparationPath = "/v1/privileged-operations/authorization-candidates/ordi
 const operationId = "privileged-operation-client-policy";
 const entry = "/ui/engineering/privileged-operations?descriptor_id=ordinary-agent-delivery-activation";
 
-async function setup(page: Page, loseFirstResponse: boolean, rejectFirst = false) {
+async function setup(
+  page: Page,
+  loseFirstResponse: boolean,
+  rejectFirst = false,
+  terminalState: string | string[] = "ready",
+) {
   const proposals: Array<PrepareOrdinaryAgentDeliveryPolicyData["body"]> = [];
   const unexpected: string[] = [];
+  let inputReads = 0;
   await page.route("**/v1/**", async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
@@ -24,10 +30,15 @@ async function setup(page: Page, loseFirstResponse: boolean, rejectFirst = false
     } else if (path === "/v1/privileged-operations/plans") {
       await route.fulfill({ json: { status: "ok", trace_id: "plans", total: 0, reviews: [] } });
     } else if (path.endsWith("/ordinary-agent-delivery/inputs")) {
+      const state = Array.isArray(terminalState)
+        ? terminalState[Math.min(inputReads, terminalState.length - 1)]
+        : terminalState;
+      inputReads += 1;
       await route.fulfill({ json: {
         status: "ok", schema_version: 1, trace_id: "inputs",
         observed_at: "2026-09-14T15:00:00Z",
         authorization_policy: { record_id: "authz-r4", revision: 4, schema_version: 2, policy_sha256: "1".repeat(64) },
+        terminal_enrollment: { state },
         inventory_state: "complete", merge_policy_state: "available",
         merge_policy: { record_id: "merge-r2", policy_sha256: "2".repeat(64), updated_at: "2026-09-14T14:00:00Z" },
         repositories: [{
@@ -60,6 +71,54 @@ async function setup(page: Page, loseFirstResponse: boolean, rejectFirst = false
           principal_id: proposals[0].intent.principal_id,
         } });
       }
+    } else if (
+      path === "/v1/privileged-operations/authorization-candidates/prepare" &&
+      request.method() === "POST"
+    ) {
+      const body = request.postDataJSON();
+      expect(body).toMatchObject({
+        candidate_id: "ordinary-agent-enrollment-requester",
+        intent: "add",
+      });
+      expect(Object.keys(body).sort()).toEqual(["candidate_id", "intent", "source_event_id"]);
+      await route.fulfill({ json: {
+        trace_id: "terminal-prepared", state: "planned", operation_id: "privileged-operation-terminal-policy",
+      } });
+    } else if (
+      path === "/v1/privileged-operations/plans/privileged-operation-terminal-policy/review" &&
+      request.method() === "GET"
+    ) {
+      await route.fulfill({ json: {
+        status: "ok",
+        trace_id: "terminal-review",
+        review: {
+          schema_version: 1,
+          operation_id: "privileged-operation-terminal-policy",
+          descriptor_id: "managed-authz-policy-set",
+          descriptor_version: 1,
+          operation_class: "managed_authz_policy_set",
+          safety_class: "policy_admin",
+          title: "Review terminal client connection requests",
+          requested_by_kind: "github_human",
+          lifecycle: {
+            status: "planned", generated_at: "2026-09-14T15:00:00Z", expiry_state: "active",
+            created_at: "2026-09-14T15:00:00Z", updated_at: "2026-09-14T15:00:00Z",
+            expires_at: "2026-09-15T15:00:00Z", terminal_at: "", terminal_reason_available: false,
+            approval_recorded: false, execution_recorded: false,
+          },
+          blockers: { state: "clear", policy_safety_blocker_count: 0, operational_readiness_blocker_count: 0, unreadable_secret_count: 0, codes: [] },
+          change: {
+            changed: true,
+            summary: "Allow the configured terminal to submit client connection requests through Launchplane until this access is removed. Every client connection still needs separate administrator approval.",
+            metrics: [],
+          },
+          blast_radius: { scope: "authorization_policy", summary: "One trusted terminal; client connection requests only.", affected_count: 1 },
+          rollback: { rollback_class: "policy_cas", summary: "A reviewed removal can withdraw this connection-request permission." },
+          evidence: { result_status: "ok", digests: [], raw_detail_available: true, redaction: "semantic_only" },
+          activity: [], can_approve: false, can_revoke: false,
+          authorizes_approval: false, authorizes_execution: false, persists_state: false,
+        },
+      } });
     } else {
       unexpected.push(`${request.method()} ${path}`);
       await route.fulfill({ status: 404, json: { error: { message: "Unexpected test request" } } });
@@ -135,5 +194,42 @@ test("a saved plan that is not eligible explains how to recover", async ({ page 
   await expect(page.getByText(/The saved access plan is not available for delivery setup/)).toBeVisible();
   await expect(page.getByRole("link", { name: "Review client access plan" })).toHaveAttribute("href", /operation_id=unavailable-plan$/);
   await expect(page.getByRole("button", { name: "Review setup", exact: true })).toHaveCount(0);
+  expect(unexpected).toEqual([]);
+});
+
+test("a missing terminal capability is prepared before client access", async ({ page }) => {
+  const { proposals, unexpected } = await setup(page, false, false, "missing");
+  await page.goto(entry);
+  await page.getByRole("button", { name: "Check setup prerequisites", exact: true }).click();
+  const form = page.getByRole("region", { name: "Prepare client access", exact: true });
+  await expect(form.getByText("The configured trusted terminal cannot yet request a client connection.")).toBeVisible();
+  await expect(form.getByLabel("Client name", { exact: true })).toHaveCount(0);
+  await form.getByRole("button", { name: "Allow the trusted terminal to request a client connection" }).click();
+  await expect(page).toHaveURL(/operation_id=privileged-operation-terminal-policy$/);
+  await expect(page.getByRole("heading", { name: "Review terminal client connection requests" })).toBeVisible();
+  await expect(page.getByText(/until this access is removed/)).toBeVisible();
+  await expect(page.getByText(/separate administrator approval/)).toBeVisible();
+  await expect(page.getByText("One trusted terminal; client connection requests only.")).toBeVisible();
+  expect(proposals).toEqual([]);
+  expect(unexpected).toEqual([]);
+});
+
+test("a saved client request remains recoverable when terminal readiness becomes unavailable", async ({ page }) => {
+  const { proposals, unexpected } = await setup(page, true, false, ["ready", "unavailable"]);
+  await page.goto(entry);
+  await page.getByRole("button", { name: "Check setup prerequisites", exact: true }).click();
+  const form = page.getByRole("region", { name: "Prepare client access", exact: true });
+  await form.getByLabel("Client name", { exact: true }).fill("Interrupted client");
+  await form.getByRole("combobox", { name: "Project", exact: true }).selectOption({ label: "example/project" });
+  await form.getByRole("button", { name: "Prepare client access for review" }).click();
+  await expect(form.getByText(/could not confirm the setup request/)).toBeVisible();
+  await page.reload();
+  await page.getByRole("button", { name: "Check setup prerequisites", exact: true }).click();
+  await expect(form.getByText(/could not check terminal access/)).toBeVisible();
+  await expect(form.getByLabel("Client name", { exact: true })).toHaveValue("Interrupted client");
+  await expect(form.getByRole("button", { name: "Discard saved setup", exact: true })).toBeVisible();
+  await form.getByRole("button", { name: "Retry saved setup" }).click();
+  await expect.poll(() => proposals.length).toBe(2);
+  expect(proposals[1]).toEqual(proposals[0]);
   expect(unexpected).toEqual([]);
 });

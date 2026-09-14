@@ -24,7 +24,15 @@ from control_plane.contracts.ordinary_agent import (
     OrdinaryAgentPolicyRule,
     OrdinaryAgentTarget,
 )
-from control_plane.service_auth import GitHubHumanPolicyRule, LaunchplaneAuthzPolicy
+from control_plane.service_auth import (
+    AuthorizationTarget,
+    GitHubHumanPolicyRule,
+    LaunchplaneAuthzPolicy,
+    TerminalAgentIdentity,
+    TerminalAgentPolicyRule,
+    authz_selector_matches,
+)
+from control_plane.contracts.ordinary_agent_client import ORDINARY_AGENT_ENROLLMENT_PROPOSE_ACTION
 
 
 ORDINARY_AGENT_DELIVERY_ADMINISTRATION_CANDIDATE_ID: Final = (
@@ -59,6 +67,7 @@ ADMINISTRATOR_PRODUCT_EVIDENCE_READ_RELATED_ISSUE = "#2058"
 AuthorizationCandidateId = Literal[
     "ordinary-agent-delivery-administration",
     "administrator-product-evidence-read",
+    "ordinary-agent-enrollment-requester",
 ]
 AuthorizationCandidateIntent = Literal["add", "remove"]
 AuthorizationCandidateState = Literal["available", "active", "conflict"]
@@ -108,6 +117,186 @@ ORDINARY_AGENT_DELIVERY_POLICY_ACTIONS: tuple[OrdinaryAgentAction, ...] = (
     "preflight",
     "guarded_merge",
 )
+
+TERMINAL_ENROLLMENT_POLICY_MANAGED_SET_ID = "terminal-agent.ordinary-agent-enrollment"
+TERMINAL_ENROLLMENT_POLICY_MANAGED_RULE_ID = "requester"
+TERMINAL_ENROLLMENT_POLICY_ACTIONS = (ORDINARY_AGENT_ENROLLMENT_PROPOSE_ACTION,)
+TERMINAL_ENROLLMENT_POLICY_REASON = "Prepare terminal client connection requests."
+TERMINAL_ENROLLMENT_POLICY_RELATED_ISSUE = "#2369"
+TerminalEnrollmentCapabilityState = Literal[
+    "configured_identity_absent",
+    "ready",
+    "missing",
+    "unmanaged",
+    "mismatched",
+    "ambiguous",
+    "unavailable",
+]
+
+
+def terminal_enrollment_capability_state(
+    *,
+    policy: LaunchplaneAuthzPolicy,
+    identity: TerminalAgentIdentity | None,
+) -> TerminalEnrollmentCapabilityState:
+    """Classify the exact managed capability enforced by enrollment ingress."""
+    if identity is None:
+        return "configured_identity_absent"
+    if not _is_exact_terminal_selector(identity.subject) or not _is_exact_terminal_selector(
+        identity.token_label
+    ):
+        return "unavailable"
+    if policy.schema_version not in (2, 3):
+        return "unavailable"
+    matching = tuple(
+        rule
+        for rule in policy.terminal_agents
+        if rule.managed_set_id
+        and rule.managed_rule_id
+        and rule.allows(
+            identity=identity,
+            action=ORDINARY_AGENT_ENROLLMENT_PROPOSE_ACTION,
+            product="launchplane",
+            context="launchplane",
+            target=AuthorizationTarget(scope="global"),
+            schema_version=policy.schema_version,
+        )
+    )
+    if len(matching) == 1:
+        return "ready"
+    if len(matching) > 1:
+        return "ambiguous"
+    occupied = tuple(
+        rule
+        for _principal_type, rule in _rules(policy)
+        if getattr(rule, "managed_set_id", None) == TERMINAL_ENROLLMENT_POLICY_MANAGED_SET_ID
+    )
+    if occupied:
+        return "mismatched" if len(occupied) == 1 else "ambiguous"
+    overlapping_rules = tuple(
+        rule
+        for rule in policy.terminal_agents
+        if _terminal_identity_matches(rule, identity)
+        and rule.allows_scope(
+            action=ORDINARY_AGENT_ENROLLMENT_PROPOSE_ACTION,
+            product="launchplane",
+            context="launchplane",
+            target=AuthorizationTarget(scope="global"),
+            schema_version=policy.schema_version,
+        )
+    )
+    if not overlapping_rules:
+        return "missing"
+    if len(overlapping_rules) > 1:
+        return "ambiguous"
+    if not overlapping_rules[0].managed_set_id or not overlapping_rules[0].managed_rule_id:
+        return "unmanaged"
+    return "mismatched"
+
+
+def compile_terminal_enrollment_policy_candidate(
+    *,
+    current_policy: LaunchplaneAuthzPolicy,
+    identity: TerminalAgentIdentity | None,
+    intent: AuthorizationCandidateIntent = "add",
+) -> tuple[Literal["planned", "already_satisfied"], ManagedAuthzPolicySetProposalInput | None]:
+    """Compile the one narrow terminal enrollment rule when it is unambiguous."""
+    owned_rules = tuple(
+        (principal_type, rule)
+        for principal_type, rule in _rules(current_policy)
+        if getattr(rule, "managed_set_id", None) == TERMINAL_ENROLLMENT_POLICY_MANAGED_SET_ID
+    )
+    if intent == "remove":
+        if not owned_rules:
+            return "already_satisfied", None
+        if (
+            len(owned_rules) != 1
+            or owned_rules[0][0] != "terminal_agents"
+            or not isinstance(owned_rules[0][1], TerminalAgentPolicyRule)
+            or not _is_exact_terminal_enrollment_rule(owned_rules[0][1])
+        ):
+            raise OrdinaryAgentPolicyPreparationError(
+                "ordinary_agent_rule_conflict",
+                "The terminal enrollment capability is not the exact managed rule Launchplane prepared.",
+            )
+        return (
+            "planned",
+            ManagedAuthzPolicySetProposalInput(
+                managed_set_id=TERMINAL_ENROLLMENT_POLICY_MANAGED_SET_ID,
+                desired_policy=LaunchplaneAuthzPolicy(schema_version=current_policy.schema_version),
+                reason=TERMINAL_ENROLLMENT_POLICY_REASON,
+                related_issue=TERMINAL_ENROLLMENT_POLICY_RELATED_ISSUE,
+            ),
+        )
+    desired_rule = (
+        TerminalAgentPolicyRule(
+            managed_set_id=TERMINAL_ENROLLMENT_POLICY_MANAGED_SET_ID,
+            managed_rule_id=TERMINAL_ENROLLMENT_POLICY_MANAGED_RULE_ID,
+            subjects=(identity.subject,),
+            token_labels=(identity.token_label,),
+            products=("launchplane",),
+            contexts=("launchplane",),
+            actions=TERMINAL_ENROLLMENT_POLICY_ACTIONS,
+        )
+        if identity is not None
+        else None
+    )
+    state = terminal_enrollment_capability_state(policy=current_policy, identity=identity)
+    if state == "ready":
+        return "already_satisfied", None
+    errors: dict[TerminalEnrollmentCapabilityState, str] = {
+        "configured_identity_absent": "No configured terminal client identity is available.",
+        "unavailable": "Terminal enrollment requires authorization policy version 2 or 3.",
+        "unmanaged": "The configured terminal client has an unmanaged enrollment rule.",
+        "mismatched": "The configured terminal client has a different managed enrollment rule.",
+        "ambiguous": "The configured terminal client has ambiguous enrollment rules.",
+        "missing": "",
+        "ready": "",
+    }
+    if state != "missing":
+        raise OrdinaryAgentPolicyPreparationError("ordinary_agent_rule_conflict", errors[state])
+    if identity is None:
+        raise AssertionError("missing terminal identity was classified as missing")
+    assert desired_rule is not None
+    return (
+        "planned",
+        ManagedAuthzPolicySetProposalInput(
+            managed_set_id=TERMINAL_ENROLLMENT_POLICY_MANAGED_SET_ID,
+            desired_policy=LaunchplaneAuthzPolicy(
+                schema_version=current_policy.schema_version,
+                terminal_agents=(desired_rule,),
+            ),
+            reason=TERMINAL_ENROLLMENT_POLICY_REASON,
+            related_issue=TERMINAL_ENROLLMENT_POLICY_RELATED_ISSUE,
+        ),
+    )
+
+
+def _terminal_identity_matches(
+    rule: TerminalAgentPolicyRule, identity: TerminalAgentIdentity
+) -> bool:
+    return (not rule.subjects or authz_selector_matches(identity.subject, rule.subjects)) and (
+        not rule.token_labels or authz_selector_matches(identity.token_label, rule.token_labels)
+    )
+
+
+def _is_exact_terminal_selector(value: str) -> bool:
+    return bool(value.strip()) and not any(character in value for character in "*?[")
+
+
+def _is_exact_terminal_enrollment_rule(rule: TerminalAgentPolicyRule) -> bool:
+    return (
+        rule.managed_set_id == TERMINAL_ENROLLMENT_POLICY_MANAGED_SET_ID
+        and rule.managed_rule_id == TERMINAL_ENROLLMENT_POLICY_MANAGED_RULE_ID
+        and len(rule.subjects) == 1
+        and len(rule.token_labels) == 1
+        and _is_exact_terminal_selector(rule.subjects[0])
+        and _is_exact_terminal_selector(rule.token_labels[0])
+        and rule.products == ("launchplane",)
+        and rule.contexts == ("launchplane",)
+        and rule.actions == TERMINAL_ENROLLMENT_POLICY_ACTIONS
+        and not rule.instances
+    )
 
 
 def ordinary_agent_delivery_policy_managed_set_id(principal_id: str) -> str:
@@ -622,6 +811,7 @@ def compile_authorization_candidate(
     github_id: int,
     intent: AuthorizationCandidateIntent,
     record_store: object,
+    configured_terminal_identity: TerminalAgentIdentity | None = None,
 ) -> tuple[Literal["planned", "already_satisfied"], ManagedAuthzPolicySetProposalInput | None]:
     if candidate_id == ORDINARY_AGENT_DELIVERY_ADMINISTRATION_CANDIDATE_ID:
         return compile_ordinary_agent_delivery_administration_candidate(
@@ -636,7 +826,40 @@ def compile_authorization_candidate(
             github_id=github_id,
             intent=intent,
         )
+    if candidate_id == "ordinary-agent-enrollment-requester":
+        try:
+            return compile_terminal_enrollment_policy_candidate(
+                current_policy=current_policy,
+                identity=configured_terminal_identity,
+                intent=intent,
+            )
+        except OrdinaryAgentPolicyPreparationError as error:
+            raise AuthorizationCandidatePreparationError(
+                "candidate_set_conflict", str(error)
+            ) from error
     assert_never(candidate_id)
+
+
+def is_terminal_enrollment_requester_request(
+    request: ManagedAuthzPolicySetProposalInput, *, intent: AuthorizationCandidateIntent
+) -> bool:
+    """Recognize the narrow server-derived terminal enrollment candidate."""
+    rules = request.desired_policy.terminal_agents
+    common = (
+        request.managed_set_id == TERMINAL_ENROLLMENT_POLICY_MANAGED_SET_ID
+        and request.schema_migration == "reject"
+        and request.administrator_quorum_change is None
+        and request.reason == TERMINAL_ENROLLMENT_POLICY_REASON
+        and request.related_issue == TERMINAL_ENROLLMENT_POLICY_RELATED_ISSUE
+        and not request.desired_policy.github_actions
+        and not request.desired_policy.github_humans
+        and not request.desired_policy.local_operators
+        and not request.desired_policy.local_admins
+        and not request.desired_policy.ordinary_agents
+    )
+    if intent == "remove":
+        return common and not rules
+    return common and len(rules) == 1 and _is_exact_terminal_enrollment_rule(rules[0])
 
 
 def authorization_candidate_request_matches(
@@ -650,6 +873,8 @@ def authorization_candidate_request_matches(
         recognized = is_ordinary_agent_delivery_administration_request(request)
     elif candidate_id == ADMINISTRATOR_PRODUCT_EVIDENCE_READ_CANDIDATE_ID:
         recognized = is_administrator_product_evidence_read_request(request)
+    elif candidate_id == "ordinary-agent-enrollment-requester":
+        return is_terminal_enrollment_requester_request(request, intent=intent)
     else:
         assert_never(candidate_id)
     rules = request.desired_policy.github_humans

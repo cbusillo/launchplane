@@ -378,6 +378,27 @@ class BearerIdentityConfig(BaseModel):
     terminal_agent_token_label: str = ""
 
 
+def configured_terminal_agent_identity(
+    config: BearerIdentityConfig,
+) -> TerminalAgentIdentity | None:
+    """Return the configured terminal identity without exposing its bearer secret."""
+    if not config.terminal_agent_token.strip():
+        return None
+    try:
+        return TerminalAgentIdentity(
+            subject=_required_bearer_identity_config_value(
+                config.terminal_agent_subject,
+                "LAUNCHPLANE_TERMINAL_AGENT_SUBJECT",
+            ),
+            token_label=_required_bearer_identity_config_value(
+                config.terminal_agent_token_label,
+                "LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL",
+            ),
+        )
+    except PermissionError:
+        return None
+
+
 def read_bearer_token(authorization_header: str) -> str:
     header = authorization_header.strip()
     if not header:
