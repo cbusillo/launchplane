@@ -847,6 +847,12 @@ cannot reconcile a landing, create an admission, change policy, or release the
 controller fence. Recovery requires its own supported action and current
 evidence.
 
+An explicitly selected [historical-completion preflight](merge-train-historical-completion.md)
+on the existing controller route can verify the provider's exact merge evidence
+without advancing the controller. Its read-only result distinguishes positive
+proof from unsupported or indeterminate evidence. Historical retirement remains
+disabled; this preflight neither creates an admission nor releases a fence.
+
 The GitHub Actions scheduler in `.github/workflows/merge-train-runner.yml` reads
 authorized policy targets from the native FastAPI
 `GET /v1/work-graph/merge-train/policy-targets` route on every scheduled run.

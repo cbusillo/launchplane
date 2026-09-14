@@ -8,6 +8,11 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.ordinary_agent_session_lifecycle import OrdinaryAgentJobBinding
 
+from control_plane.contracts.merge_train_controller_state import build_merge_train_controller_key
+from control_plane.contracts.merge_train_historical_completion import (
+    MergeTrainHistoricalCompletionEvidence,
+)
+
 from control_plane.contracts.merge_train_policy import MergeTrainMergeMethod
 from control_plane.contracts.merge_train_structural_provenance import (
     MergeTrainStackCollapseRootProof,
@@ -330,6 +335,9 @@ class MergeTrainBatchLandingPlanRecord(BaseModel):
     source: str
     updated_at: str
     landing_plan: MergeTrainBatchLandingPlan
+    historical_completion: MergeTrainHistoricalCompletionEvidence | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
     @model_validator(mode="after")
     def _validate_record(self) -> "MergeTrainBatchLandingPlanRecord":
@@ -343,6 +351,81 @@ class MergeTrainBatchLandingPlanRecord(BaseModel):
             self.updated_at,
             "merge train batch landing plan record requires updated_at",
         )
+        historical_completion = self.historical_completion
+        if historical_completion is None:
+            return self
+        if self.schema_version != 2:
+            raise ValueError(
+                "historical completion requires merge train landing plan record schema_version 2"
+            )
+        if self.ordinary_job_binding is not None:
+            raise ValueError("historical completion cannot be attached to an ordinary record")
+        if historical_completion.source_landing_plan_record_id == self.record_id:
+            raise ValueError("historical completion source record must differ from new record")
+        if (
+            historical_completion.source_landing_plan_sha256
+            != self.landing_plan.landing_plan_sha256
+            or historical_completion.controller_key
+            != build_merge_train_controller_key(
+                repository=self.landing_plan.repository,
+                base_branch=self.landing_plan.base_branch,
+            )
+            or historical_completion.repository != self.landing_plan.repository
+            or historical_completion.base_branch != self.landing_plan.base_branch
+            or historical_completion.landing_plan_id != self.landing_plan.plan_id
+            or historical_completion.batch_id != self.landing_plan.batch_id
+            or historical_completion.candidate_sha != self.landing_plan.candidate_sha
+            or historical_completion.candidate_sha256 != self.landing_plan.candidate_sha256
+            or historical_completion.policy_key != self.landing_plan.policy_key
+            or historical_completion.policy_sha256 != self.landing_plan.policy_sha256
+        ):
+            raise ValueError("historical completion identity does not match landing plan")
+        if any(
+            entry.status != "stale"
+            or entry.landed_head_sha
+            or entry.landed_head_tree_sha
+            or entry.merge_commit_sha
+            or entry.merge_commit_tree_sha
+            for entry in self.landing_plan.entries
+        ):
+            raise ValueError(
+                "historical completion requires stale entries without landed merge evidence"
+            )
+        observed_entries = historical_completion.provider_evidence.entries
+        if len(observed_entries) != len(self.landing_plan.entries):
+            raise ValueError("historical completion entry count does not match landing plan")
+        for landing_entry, observed_entry in zip(self.landing_plan.entries, observed_entries):
+            if (
+                landing_entry.pull_request_number,
+                landing_entry.position,
+                landing_entry.expected_head_sha,
+                landing_entry.expected_head_tree_sha,
+                landing_entry.expected_base_sha,
+            ) != (
+                observed_entry.pull_request_number,
+                observed_entry.position,
+                observed_entry.expected_head_sha,
+                observed_entry.expected_head_tree_sha,
+                observed_entry.expected_base_sha,
+            ):
+                raise ValueError("historical completion entry identity does not match landing plan")
+            if (
+                observed_entry.observed_head_sha != observed_entry.expected_head_sha
+                or observed_entry.observed_head_tree_sha != observed_entry.expected_head_tree_sha
+            ):
+                raise ValueError("historical completion observed head does not match landing plan")
+            if not observed_entry.base_contains_merge_commit:
+                raise ValueError("historical completion requires observed merged base evidence")
+            if landing_entry.recorded_candidate_parent_tree_sha and (
+                landing_entry.recorded_candidate_parent_tree_sha
+                != observed_entry.expected_parent_tree_sha
+            ):
+                raise ValueError("historical completion parent tree does not match landing plan")
+            if landing_entry.recorded_candidate_result_tree_sha and (
+                landing_entry.recorded_candidate_result_tree_sha
+                != observed_entry.expected_result_tree_sha
+            ):
+                raise ValueError("historical completion result tree does not match landing plan")
         return self
 
 
@@ -470,6 +553,8 @@ def build_merge_train_batch_landing_plan_record_id(
     record: MergeTrainBatchLandingPlanRecord,
 ) -> str:
     digest_payload = record.model_dump(mode="json", exclude={"record_id"})
+    if record.historical_completion is None:
+        digest_payload.pop("historical_completion", None)
     if record.ordinary_job_binding is None:
         digest_payload.pop("ordinary_job_binding")
     digest = hashlib.sha256(

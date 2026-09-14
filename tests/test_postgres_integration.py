@@ -210,6 +210,7 @@ from control_plane.service_auth import (
     LocalAdminPolicyRule,
 )
 from control_plane.storage.postgres import (
+    LaunchplaneMergeTrainBatchLandingPlanRow,
     LaunchplanePrivilegedOperationRow,
     DbOnlyMutationRequest,
     LaunchplaneEveryCodeWorkRequestRow,
@@ -1150,6 +1151,41 @@ def _owner_acceptance_system_event(
 
 
 class RealPostgresSchemaIntegrationTests(unittest.TestCase):
+    def test_native_postgres_jsonb_ordinary_merge_train_fence_reader(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            with store._session_factory() as session:
+                session.add(
+                    LaunchplaneMergeTrainBatchLandingPlanRow(
+                        record_id="native-fence-landing-record",
+                        status="active",
+                        source="native-fence-test",
+                        updated_at="2026-09-14T02:00:00Z",
+                        repository="example/native-fence",
+                        base_branch="main",
+                        batch_id="native-fence-batch",
+                        plan_id="native-fence-plan",
+                        payload={
+                            "ordinary_job_binding": {
+                                "request_id": "native-fence-request",
+                                "scope_sha256": "a" * 64,
+                                "binding_revision": 1,
+                            }
+                        },
+                    )
+                )
+                session.commit()
+
+            self.assertTrue(
+                store.has_ordinary_merge_train_target_fence(
+                    repository="example/native-fence", base_branch="main"
+                )
+            )
+            self.assertFalse(
+                store.has_ordinary_merge_train_target_fence(
+                    repository="example/other-target", base_branch="main"
+                )
+            )
+
     def test_delivery_cleanup_database_failure_does_not_poison_privileged_store(self) -> None:
         with _store_for_fresh_head_database() as store:
             with store._engine.begin() as connection:

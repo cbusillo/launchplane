@@ -11973,6 +11973,136 @@
         "title": "HealthcheckEvidence",
         "type": "object"
       },
+      "HistoricalCompletionEntryAssessment": {
+        "additionalProperties": false,
+        "properties": {
+          "position": {
+            "title": "Position",
+            "type": "integer"
+          },
+          "pull_request_number": {
+            "title": "Pull Request Number",
+            "type": "integer"
+          },
+          "reason_code": {
+            "enum": [
+              "exact_historical_completion",
+              "not_assessed",
+              "controller_unavailable",
+              "controller_busy",
+              "controller_not_reconciling",
+              "selector_mismatch",
+              "policy_unavailable",
+              "policy_changed",
+              "landing_plan_unavailable",
+              "landing_plan_ambiguous",
+              "landing_plan_binding_changed",
+              "stored_evidence_incomplete",
+              "entry_limit_exceeded",
+              "candidate_unavailable",
+              "candidate_ambiguous",
+              "candidate_binding_changed",
+              "stack_batch_unsupported",
+              "ordinary_target_unsupported",
+              "admission_present",
+              "store_unavailable",
+              "store_state_changed",
+              "provider_unavailable",
+              "provider_invalid_response",
+              "provider_binding_mismatch",
+              "pull_request_not_merged",
+              "no_op_unsupported",
+              "base_not_contains_merge",
+              "base_changed"
+            ],
+            "title": "Reason Code",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "eligible",
+              "unsupported",
+              "indeterminate"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "position",
+          "pull_request_number",
+          "status",
+          "reason_code"
+        ],
+        "title": "HistoricalCompletionEntryAssessment",
+        "type": "object"
+      },
+      "HistoricalCompletionPreflightResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "records": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Records",
+            "type": "object"
+          },
+          "result": {
+            "$ref": "#/components/schemas/HistoricalCompletionPreflightResult"
+          },
+          "status": {
+            "const": "accepted",
+            "default": "accepted",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "result"
+        ],
+        "title": "HistoricalCompletionPreflightResponse",
+        "type": "object"
+      },
+      "HistoricalCompletionPreflightResult": {
+        "additionalProperties": false,
+        "properties": {
+          "base_branch": {
+            "title": "Base Branch",
+            "type": "string"
+          },
+          "controller_action": {
+            "const": "historical_completion_preflight",
+            "default": "historical_completion_preflight",
+            "title": "Controller Action",
+            "type": "string"
+          },
+          "historical_completion_preflight": {
+            "$ref": "#/components/schemas/MergeTrainHistoricalCompletionPreflight"
+          },
+          "mode": {
+            "const": "dry-run",
+            "default": "dry-run",
+            "title": "Mode",
+            "type": "string"
+          },
+          "repository": {
+            "title": "Repository",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repository",
+          "base_branch",
+          "historical_completion_preflight"
+        ],
+        "title": "HistoricalCompletionPreflightResult",
+        "type": "object"
+      },
       "IngressCanaryRouteApplyEnvelope": {
         "additionalProperties": false,
         "properties": {
@@ -16769,6 +16899,346 @@
           }
         },
         "title": "MergeTrainGitHubTokenSource",
+        "type": "object"
+      },
+      "MergeTrainHistoricalCompletionEntryEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "base_contains_merge_commit": {
+            "title": "Base Contains Merge Commit",
+            "type": "boolean"
+          },
+          "expected_base_sha": {
+            "title": "Expected Base Sha",
+            "type": "string"
+          },
+          "expected_head_sha": {
+            "title": "Expected Head Sha",
+            "type": "string"
+          },
+          "expected_head_tree_sha": {
+            "title": "Expected Head Tree Sha",
+            "type": "string"
+          },
+          "expected_parent_tree_sha": {
+            "title": "Expected Parent Tree Sha",
+            "type": "string"
+          },
+          "expected_result_tree_sha": {
+            "title": "Expected Result Tree Sha",
+            "type": "string"
+          },
+          "observed_head_sha": {
+            "title": "Observed Head Sha",
+            "type": "string"
+          },
+          "observed_head_tree_sha": {
+            "title": "Observed Head Tree Sha",
+            "type": "string"
+          },
+          "observed_merge_commit_sha": {
+            "title": "Observed Merge Commit Sha",
+            "type": "string"
+          },
+          "observed_merge_commit_tree_sha": {
+            "title": "Observed Merge Commit Tree Sha",
+            "type": "string"
+          },
+          "observed_parent_sha": {
+            "title": "Observed Parent Sha",
+            "type": "string"
+          },
+          "observed_parent_tree_sha": {
+            "title": "Observed Parent Tree Sha",
+            "type": "string"
+          },
+          "position": {
+            "exclusiveMinimum": 0.0,
+            "title": "Position",
+            "type": "integer"
+          },
+          "pull_request_number": {
+            "exclusiveMinimum": 0.0,
+            "title": "Pull Request Number",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "pull_request_number",
+          "position",
+          "expected_head_sha",
+          "expected_head_tree_sha",
+          "expected_base_sha",
+          "expected_parent_tree_sha",
+          "expected_result_tree_sha",
+          "observed_head_sha",
+          "observed_head_tree_sha",
+          "observed_merge_commit_sha",
+          "observed_merge_commit_tree_sha",
+          "observed_parent_sha",
+          "observed_parent_tree_sha",
+          "base_contains_merge_commit"
+        ],
+        "title": "MergeTrainHistoricalCompletionEntryEvidence",
+        "type": "object"
+      },
+      "MergeTrainHistoricalCompletionEntrySelector": {
+        "additionalProperties": false,
+        "properties": {
+          "expected_head_sha": {
+            "title": "Expected Head Sha",
+            "type": "string"
+          },
+          "expected_head_tree_sha": {
+            "title": "Expected Head Tree Sha",
+            "type": "string"
+          },
+          "position": {
+            "exclusiveMinimum": 0.0,
+            "title": "Position",
+            "type": "integer"
+          },
+          "pull_request_number": {
+            "exclusiveMinimum": 0.0,
+            "title": "Pull Request Number",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "position",
+          "pull_request_number",
+          "expected_head_sha",
+          "expected_head_tree_sha"
+        ],
+        "title": "MergeTrainHistoricalCompletionEntrySelector",
+        "type": "object"
+      },
+      "MergeTrainHistoricalCompletionPreflight": {
+        "additionalProperties": false,
+        "properties": {
+          "admission_created": {
+            "const": false,
+            "default": false,
+            "title": "Admission Created",
+            "type": "boolean"
+          },
+          "automatic_retry_allowed": {
+            "const": false,
+            "default": false,
+            "title": "Automatic Retry Allowed",
+            "type": "boolean"
+          },
+          "base_branch": {
+            "title": "Base Branch",
+            "type": "string"
+          },
+          "disposition_supported": {
+            "const": false,
+            "default": false,
+            "title": "Disposition Supported",
+            "type": "boolean"
+          },
+          "entries": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/HistoricalCompletionEntryAssessment"
+            },
+            "title": "Entries",
+            "type": "array"
+          },
+          "evidence_eligible": {
+            "default": false,
+            "title": "Evidence Eligible",
+            "type": "boolean"
+          },
+          "fence_released": {
+            "const": false,
+            "default": false,
+            "title": "Fence Released",
+            "type": "boolean"
+          },
+          "generated_at": {
+            "title": "Generated At",
+            "type": "string"
+          },
+          "landing_plan_sha256": {
+            "default": "",
+            "title": "Landing Plan Sha256",
+            "type": "string"
+          },
+          "mutation_enabled": {
+            "const": false,
+            "default": false,
+            "title": "Mutation Enabled",
+            "type": "boolean"
+          },
+          "provider_effect_attempted": {
+            "const": false,
+            "default": false,
+            "title": "Provider Effect Attempted",
+            "type": "boolean"
+          },
+          "provider_evidence": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MergeTrainHistoricalCompletionProviderEvidence"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reason_code": {
+            "enum": [
+              "exact_historical_completion",
+              "not_assessed",
+              "controller_unavailable",
+              "controller_busy",
+              "controller_not_reconciling",
+              "selector_mismatch",
+              "policy_unavailable",
+              "policy_changed",
+              "landing_plan_unavailable",
+              "landing_plan_ambiguous",
+              "landing_plan_binding_changed",
+              "stored_evidence_incomplete",
+              "entry_limit_exceeded",
+              "candidate_unavailable",
+              "candidate_ambiguous",
+              "candidate_binding_changed",
+              "stack_batch_unsupported",
+              "ordinary_target_unsupported",
+              "admission_present",
+              "store_unavailable",
+              "store_state_changed",
+              "provider_unavailable",
+              "provider_invalid_response",
+              "provider_binding_mismatch",
+              "pull_request_not_merged",
+              "no_op_unsupported",
+              "base_not_contains_merge",
+              "base_changed"
+            ],
+            "title": "Reason Code",
+            "type": "string"
+          },
+          "repository": {
+            "title": "Repository",
+            "type": "string"
+          },
+          "schema_version": {
+            "const": 1,
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "selector": {
+            "$ref": "#/components/schemas/MergeTrainHistoricalCompletionSelector"
+          },
+          "status": {
+            "enum": [
+              "eligible",
+              "unsupported",
+              "indeterminate"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repository",
+          "base_branch",
+          "generated_at",
+          "selector",
+          "status",
+          "reason_code"
+        ],
+        "title": "MergeTrainHistoricalCompletionPreflight",
+        "type": "object"
+      },
+      "MergeTrainHistoricalCompletionProviderEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/MergeTrainHistoricalCompletionEntryEvidence"
+            },
+            "maxItems": 25,
+            "minItems": 1,
+            "title": "Entries",
+            "type": "array"
+          },
+          "final_observed_base_sha": {
+            "title": "Final Observed Base Sha",
+            "type": "string"
+          },
+          "observed_at": {
+            "title": "Observed At",
+            "type": "string"
+          },
+          "observed_base_sha": {
+            "title": "Observed Base Sha",
+            "type": "string"
+          },
+          "observed_base_tree_sha": {
+            "title": "Observed Base Tree Sha",
+            "type": "string"
+          },
+          "provider_effect_attempted": {
+            "const": false,
+            "default": false,
+            "title": "Provider Effect Attempted",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "observed_at",
+          "observed_base_sha",
+          "observed_base_tree_sha",
+          "final_observed_base_sha",
+          "entries"
+        ],
+        "title": "MergeTrainHistoricalCompletionProviderEvidence",
+        "type": "object"
+      },
+      "MergeTrainHistoricalCompletionSelector": {
+        "additionalProperties": false,
+        "description": "The controller binding a future completion disposition would validate.",
+        "properties": {
+          "expected_active_record_id": {
+            "title": "Expected Active Record Id",
+            "type": "string"
+          },
+          "expected_effect_sha": {
+            "title": "Expected Effect Sha",
+            "type": "string"
+          },
+          "expected_entries": {
+            "items": {
+              "$ref": "#/components/schemas/MergeTrainHistoricalCompletionEntrySelector"
+            },
+            "maxItems": 25,
+            "minItems": 1,
+            "title": "Expected Entries",
+            "type": "array"
+          },
+          "expected_landing_plan_id": {
+            "title": "Expected Landing Plan Id",
+            "type": "string"
+          },
+          "expected_policy_sha256": {
+            "title": "Expected Policy Sha256",
+            "type": "string"
+          }
+        },
+        "required": [
+          "expected_active_record_id",
+          "expected_effect_sha",
+          "expected_policy_sha256",
+          "expected_landing_plan_id",
+          "expected_entries"
+        ],
+        "title": "MergeTrainHistoricalCompletionSelector",
         "type": "object"
       },
       "MergeTrainIdentity": {
@@ -82129,6 +82599,79 @@
           "content": {
             "application/json": {
               "schema": {
+                "$defs": {
+                  "MergeTrainHistoricalCompletionEntrySelector": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "expected_head_sha": {
+                        "title": "Expected Head Sha",
+                        "type": "string"
+                      },
+                      "expected_head_tree_sha": {
+                        "title": "Expected Head Tree Sha",
+                        "type": "string"
+                      },
+                      "position": {
+                        "exclusiveMinimum": 0,
+                        "title": "Position",
+                        "type": "integer"
+                      },
+                      "pull_request_number": {
+                        "exclusiveMinimum": 0,
+                        "title": "Pull Request Number",
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "position",
+                      "pull_request_number",
+                      "expected_head_sha",
+                      "expected_head_tree_sha"
+                    ],
+                    "title": "MergeTrainHistoricalCompletionEntrySelector",
+                    "type": "object"
+                  },
+                  "MergeTrainHistoricalCompletionSelector": {
+                    "additionalProperties": false,
+                    "description": "The controller binding a future completion disposition would validate.",
+                    "properties": {
+                      "expected_active_record_id": {
+                        "title": "Expected Active Record Id",
+                        "type": "string"
+                      },
+                      "expected_effect_sha": {
+                        "title": "Expected Effect Sha",
+                        "type": "string"
+                      },
+                      "expected_entries": {
+                        "items": {
+                          "$ref": "#/$defs/MergeTrainHistoricalCompletionEntrySelector"
+                        },
+                        "maxItems": 25,
+                        "minItems": 1,
+                        "title": "Expected Entries",
+                        "type": "array"
+                      },
+                      "expected_landing_plan_id": {
+                        "title": "Expected Landing Plan Id",
+                        "type": "string"
+                      },
+                      "expected_policy_sha256": {
+                        "title": "Expected Policy Sha256",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "expected_active_record_id",
+                      "expected_effect_sha",
+                      "expected_policy_sha256",
+                      "expected_landing_plan_id",
+                      "expected_entries"
+                    ],
+                    "title": "MergeTrainHistoricalCompletionSelector",
+                    "type": "object"
+                  }
+                },
                 "additionalProperties": false,
                 "properties": {
                   "base_branch": {
@@ -82140,6 +82683,16 @@
                     "default": "https://api.github.com",
                     "title": "Github Api Base Url",
                     "type": "string"
+                  },
+                  "historical_completion": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/MergeTrainHistoricalCompletionSelector"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "mutate": {
                     "default": false,
@@ -82172,7 +82725,15 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/AcceptedEvidenceResponse"
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/HistoricalCompletionPreflightResponse"
+                    },
+                    {
+                      "$ref": "#/components/schemas/AcceptedEvidenceResponse"
+                    }
+                  ],
+                  "title": "Response Write Merge Train Controller Run Once"
                 }
               }
             },

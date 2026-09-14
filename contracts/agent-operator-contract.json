@@ -397,7 +397,7 @@
           "503"
         ],
         "reviewed_evidence": [],
-        "schema_fingerprint_sha256": "c7351558badf1ffc4c955a82c5152bb878a2c0b652f9d8df6f2ee748e640ae83",
+        "schema_fingerprint_sha256": "a6a1d844314fa173380b6c555206f1a577d4c0c2f5ac9be6860ca2f55bb973dc",
         "supported_surfaces": [
           "agent_helper",
           "operator_ui",
@@ -614,8 +614,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "88a912940df197fc839180681c5970aba206592e"
+    "source_commit_sha": "3b5f7b977fdc8d9b8151d7969e4bb0acc2db5562"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "a6dad1fcf4fe6ee709f6c3fb0c6b9d40688f3b7eed443add30cbd65ce745bf8d"
+  "semantic_digest_sha256": "2e00e3e71aedbcc8c81bed79c890b02962999207d9b39ce67de2cdc65e2e34ac"
 }

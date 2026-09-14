@@ -52,6 +52,8 @@ delivery pilot and its DB-native activation/rollback amendment are prepared.
   provenance consumed by merge readiness.
 - [merge-admission.md](merge-admission.md) — immutable per-attempt Level 3
   admission, truthful landing outcomes, and append-only reconciliation.
+- [merge-train-historical-completion.md](merge-train-historical-completion.md) —
+  read-only applicability proof for historical merges without an admission.
 - [runner-lane-baseline.md](runner-lane-baseline.md) — self-hosted runner lane
   baseline, Docker credential isolation, and readiness contract.
 - [runner-host-hygiene.md](runner-host-hygiene.md) — report-only shared runner

@@ -1180,6 +1180,14 @@ one-action controller for the full batch train. Request payloads name
 policy, authorization, and GitHub token boundary as the lower-level merge-train
 routes. The native FastAPI route supports optional `Idempotency-Key`
 replay/conflict handling.
+The optional `historical_completion` selector selects a dedicated
+[read-only historical-completion preflight](merge-train-historical-completion.md)
+when `mutate=false`. It bypasses idempotency replay/storage and controller
+execution, returns typed applicability evidence, and uses the existing repository
+authorization. It cannot acquire or release a lease, create an admission, or
+perform a provider mutation. `mutate=true` with this selector returns
+non-retryable `historical_completion_recovery_not_enabled`; ordinary controller
+execution cannot invoke this legacy-only preflight.
 Each call advances at most one safe phase from DB-backed records and
 fresh GitHub evidence: plan stack collapse, execute stack collapse, admit the
 collapsed root PR, plan/build/observe a batch candidate, plan landing, or land
