@@ -18882,6 +18882,7 @@ class PostgresRecordStore(HumanSessionStore):
         repository: str = "",
         base_branch: str = "",
         status: str = "",
+        batch_id: str = "",
         limit: int | None = None,
     ) -> tuple[MergeTrainBatchCandidateRecord, ...]:
         filters: list[object] = []
@@ -18891,6 +18892,8 @@ class PostgresRecordStore(HumanSessionStore):
             filters.append(LaunchplaneMergeTrainBatchCandidateRow.base_branch == base_branch)
         if status:
             filters.append(LaunchplaneMergeTrainBatchCandidateRow.status == status)
+        if batch_id:
+            filters.append(LaunchplaneMergeTrainBatchCandidateRow.batch_id == batch_id)
         return self._list_models(
             model_type=MergeTrainBatchCandidateRecord,
             orm_model=LaunchplaneMergeTrainBatchCandidateRow,
@@ -19056,6 +19059,7 @@ class PostgresRecordStore(HumanSessionStore):
         repository: str = "",
         base_branch: str = "",
         status: str = "",
+        record_id: str = "",
         limit: int | None = None,
     ) -> tuple[MergeTrainBatchLandingPlanRecord, ...]:
         filters: list[object] = []
@@ -19065,6 +19069,8 @@ class PostgresRecordStore(HumanSessionStore):
             filters.append(LaunchplaneMergeTrainBatchLandingPlanRow.base_branch == base_branch)
         if status:
             filters.append(LaunchplaneMergeTrainBatchLandingPlanRow.status == status)
+        if record_id:
+            filters.append(LaunchplaneMergeTrainBatchLandingPlanRow.record_id == record_id)
         return self._list_models(
             model_type=MergeTrainBatchLandingPlanRecord,
             orm_model=LaunchplaneMergeTrainBatchLandingPlanRow,
@@ -19427,6 +19433,7 @@ class PostgresRecordStore(HumanSessionStore):
         repository: str = "",
         base_branch: str = "",
         status: str = "",
+        root_pull_request_number: int | None = None,
         limit: int | None = None,
     ) -> tuple[MergeTrainStackCollapsePlanRecord, ...]:
         filters: list[object] = []
@@ -19436,6 +19443,11 @@ class PostgresRecordStore(HumanSessionStore):
             filters.append(LaunchplaneMergeTrainStackCollapsePlanRow.base_branch == base_branch)
         if status:
             filters.append(LaunchplaneMergeTrainStackCollapsePlanRow.status == status)
+        if root_pull_request_number is not None:
+            filters.append(
+                LaunchplaneMergeTrainStackCollapsePlanRow.root_pull_request_number
+                == root_pull_request_number
+            )
         return self._list_models(
             model_type=MergeTrainStackCollapsePlanRecord,
             orm_model=LaunchplaneMergeTrainStackCollapsePlanRow,

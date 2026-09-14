@@ -2518,6 +2518,7 @@ class FilesystemRecordStore:
         repository: str = "",
         base_branch: str = "",
         status: str = "",
+        batch_id: str = "",
         limit: int | None = None,
     ) -> tuple[MergeTrainBatchCandidateRecord, ...]:
         records = [
@@ -2529,6 +2530,7 @@ class FilesystemRecordStore:
             if (not repository or record.candidate.repository == repository)
             and (not base_branch or record.candidate.base_branch == base_branch)
             and (not status or record.status == status)
+            and (not batch_id or record.candidate.batch_id == batch_id)
         ]
         records.sort(key=lambda record: (record.updated_at, record.record_id), reverse=True)
         if limit is not None:
@@ -2597,6 +2599,7 @@ class FilesystemRecordStore:
         repository: str = "",
         base_branch: str = "",
         status: str = "",
+        record_id: str = "",
         limit: int | None = None,
     ) -> tuple[MergeTrainBatchLandingPlanRecord, ...]:
         records = [
@@ -2608,6 +2611,7 @@ class FilesystemRecordStore:
             if (not repository or record.landing_plan.repository == repository)
             and (not base_branch or record.landing_plan.base_branch == base_branch)
             and (not status or record.status == status)
+            and (not record_id or record.record_id == record_id)
         ]
         records.sort(key=lambda record: (record.updated_at, record.record_id), reverse=True)
         if limit is not None:
@@ -2830,6 +2834,7 @@ class FilesystemRecordStore:
         repository: str = "",
         base_branch: str = "",
         status: str = "",
+        root_pull_request_number: int | None = None,
         limit: int | None = None,
     ) -> tuple[MergeTrainStackCollapsePlanRecord, ...]:
         records = [
@@ -2841,6 +2846,10 @@ class FilesystemRecordStore:
             if (not repository or record.plan.repository == repository)
             and (not base_branch or record.plan.base_branch == base_branch)
             and (not status or record.status == status)
+            and (
+                root_pull_request_number is None
+                or record.plan.root_pull_request_number == root_pull_request_number
+            )
         ]
         records.sort(key=lambda record: (record.updated_at, record.record_id), reverse=True)
         if limit is not None:
