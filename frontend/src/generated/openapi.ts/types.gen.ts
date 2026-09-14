@@ -1312,6 +1312,7 @@ export type MergeTrainPolicyTargetsResponse = {
 
 export type MergeTrainReconciliationDiagnostic = {
     base_branch: string;
+    binding_detail: '' | 'current_policy_unavailable' | 'controller_policy_changed' | 'plan_reference_conflict' | 'plan_reference_incomplete' | 'plan_record_unavailable' | 'plan_binding_changed' | 'plan_entry_limit_exceeded' | 'selected_entry_unavailable' | 'history_reader_unavailable' | 'admission_limit_exceeded' | 'admission_binding_changed' | 'admission_identity_missing' | 'outcome_binding_changed' | 'history_unavailable' | 'outcome_status_unknown';
     classification: 'missing_preceding_admission' | 'admission_without_outcome' | 'outcome_reconcile_required' | 'outcome_rejected' | 'outcome_landed' | 'binding_unavailable' | 'binding_stale';
     expected_head_sha: string;
     expected_head_tree_sha: string;

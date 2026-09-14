@@ -197,7 +197,9 @@ class FastApiMergeTrainReadTests(unittest.IsolatedAsyncioTestCase):
             store.write_merge_train_batch_landing_plan_record(landing_record)
             store.write_merge_train_controller_state_record(controller_state)
             before = {
-                path.relative_to(state_dir): path.read_bytes() for path in state_dir.rglob("*.json")
+                path.relative_to(state_dir): path.read_bytes()
+                for path in state_dir.rglob("*")
+                if path.is_file()
             }
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(_merge_train_service_identity()),
@@ -219,7 +221,9 @@ class FastApiMergeTrainReadTests(unittest.IsolatedAsyncioTestCase):
                     headers={"Authorization": "Bearer valid-token"},
                 )
             after = {
-                path.relative_to(state_dir): path.read_bytes() for path in state_dir.rglob("*.json")
+                path.relative_to(state_dir): path.read_bytes()
+                for path in state_dir.rglob("*")
+                if path.is_file()
             }
 
         self.assertEqual(response.status_code, 200, response.text)

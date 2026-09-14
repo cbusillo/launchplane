@@ -35,6 +35,24 @@ MergeTrainReconciliationClassification = Literal[
     "binding_unavailable",
     "binding_stale",
 ]
+MergeTrainReconciliationBindingDetail = Literal[
+    "",
+    "current_policy_unavailable",
+    "controller_policy_changed",
+    "plan_reference_conflict",
+    "plan_reference_incomplete",
+    "plan_record_unavailable",
+    "plan_binding_changed",
+    "plan_entry_limit_exceeded",
+    "selected_entry_unavailable",
+    "history_reader_unavailable",
+    "admission_limit_exceeded",
+    "admission_binding_changed",
+    "admission_identity_missing",
+    "outcome_binding_changed",
+    "history_unavailable",
+    "outcome_status_unknown",
+]
 _LANDING_RECONCILIATION_PHASES = frozenset(
     {"merge_batch_entries", "admit_pull_request", "merge_pull_request", "landing_entry_merged"}
 )
@@ -115,6 +133,7 @@ class MergeTrainReconciliationDiagnostic(BaseModel):
 
     schema_version: int = 1
     classification: MergeTrainReconciliationClassification
+    binding_detail: MergeTrainReconciliationBindingDetail = ""
     repository: str
     base_branch: str
     landing_plan_record_id: str = ""
@@ -371,13 +390,23 @@ def _reconciliation_diagnostics(
         return ()
     if not current_policy_key or not current_policy_sha256:
         return (
-            _diagnostic(controller_state=controller_state, classification="binding_unavailable"),
+            _diagnostic(
+                controller_state=controller_state,
+                classification="binding_unavailable",
+                binding_detail="current_policy_unavailable",
+            ),
         )
     if (
         controller_state.policy_key != current_policy_key
         or controller_state.policy_sha256 != current_policy_sha256
     ):
-        return (_diagnostic(controller_state=controller_state, classification="binding_stale"),)
+        return (
+            _diagnostic(
+                controller_state=controller_state,
+                classification="binding_stale",
+                binding_detail="controller_policy_changed",
+            ),
+        )
 
     payload = controller_state.step_payload
     payload_record_id = _string_value(payload, "landing_plan_record_id")
@@ -386,13 +415,23 @@ def _reconciliation_diagnostics(
         and payload_record_id
         and controller_state.active_record_id != payload_record_id
     ):
-        return (_diagnostic(controller_state=controller_state, classification="binding_stale"),)
+        return (
+            _diagnostic(
+                controller_state=controller_state,
+                classification="binding_stale",
+                binding_detail="plan_reference_conflict",
+            ),
+        )
     record_id = controller_state.active_record_id or payload_record_id
     plan_id = _string_value(payload, "landing_plan_id")
     expected_effect = _string_value(payload, "expected_effect_sha")
     if not record_id or not plan_id or not expected_effect:
         return (
-            _diagnostic(controller_state=controller_state, classification="binding_unavailable"),
+            _diagnostic(
+                controller_state=controller_state,
+                classification="binding_unavailable",
+                binding_detail="plan_reference_incomplete",
+            ),
         )
     landing_record = next(
         (
@@ -404,28 +443,56 @@ def _reconciliation_diagnostics(
     )
     if landing_record is None:
         return (
-            _diagnostic(controller_state=controller_state, classification="binding_unavailable"),
+            _diagnostic(
+                controller_state=controller_state,
+                classification="binding_unavailable",
+                binding_detail="plan_record_unavailable",
+            ),
         )
     plan = landing_record.landing_plan
     if (
         plan.plan_id != plan_id
         or plan.candidate_sha != expected_effect
-        or plan.repository != controller_state.repository
+        or plan.repository != controller_state.repository.strip().lower()
         or plan.base_branch != controller_state.base_branch
         or plan.policy_key != current_policy_key
         or plan.policy_sha256 != current_policy_sha256
     ):
-        return (_diagnostic(controller_state=controller_state, classification="binding_stale"),)
-
-    entries = _diagnostic_entries(plan=plan, controller_state=controller_state)
-    if not entries or len(entries) > _MAX_RECONCILIATION_DIAGNOSTICS:
         return (
-            _diagnostic(controller_state=controller_state, classification="binding_unavailable"),
+            _diagnostic(
+                controller_state=controller_state,
+                classification="binding_stale",
+                binding_detail="plan_binding_changed",
+            ),
+        )
+
+    if len(plan.entries) > _MAX_RECONCILIATION_DIAGNOSTICS:
+        return (
+            _diagnostic(
+                controller_state=controller_state,
+                classification="binding_unavailable",
+                binding_detail="plan_entry_limit_exceeded",
+            ),
+        )
+    entries = _diagnostic_entries(plan=plan, controller_state=controller_state)
+    if not entries:
+        if controller_state.active_pull_request_number is None:
+            return ()
+        return (
+            _diagnostic(
+                controller_state=controller_state,
+                classification="binding_unavailable",
+                binding_detail="selected_entry_unavailable",
+            ),
         )
     readers = _reconciliation_readers(store)
     if readers is None:
         return (
-            _diagnostic(controller_state=controller_state, classification="binding_unavailable"),
+            _diagnostic(
+                controller_state=controller_state,
+                classification="binding_unavailable",
+                binding_detail="history_reader_unavailable",
+            ),
         )
     admission_reader, outcome_reader = readers
     return tuple(
@@ -462,8 +529,6 @@ def _reconciliation_readers(
 def _diagnostic_entries(
     *, plan: MergeTrainBatchLandingPlan, controller_state: MergeTrainControllerStateRecord
 ) -> tuple[MergeTrainBatchLandingEntry, ...]:
-    if len(plan.entries) > _MAX_RECONCILIATION_DIAGNOSTICS:
-        return tuple(plan.entries[: _MAX_RECONCILIATION_DIAGNOSTICS + 1])
     if controller_state.active_pull_request_number is None:
         return tuple(entry for entry in plan.entries if entry.status in {"planned", "merging"})
     return tuple(
@@ -483,6 +548,7 @@ def _entry_reconciliation_diagnostic(
 ) -> MergeTrainReconciliationDiagnostic:
     def diagnostic(
         classification: MergeTrainReconciliationClassification,
+        binding_detail: MergeTrainReconciliationBindingDetail = "",
     ) -> MergeTrainReconciliationDiagnostic:
         return _diagnostic(
             repository=plan.repository,
@@ -491,6 +557,7 @@ def _entry_reconciliation_diagnostic(
             landing_plan_id=plan.plan_id,
             entry=entry,
             classification=classification,
+            binding_detail=binding_detail,
         )
 
     try:
@@ -506,12 +573,12 @@ def _entry_reconciliation_diagnostic(
         if not admissions:
             return diagnostic("missing_preceding_admission")
         if len(admissions) > _MAX_RECONCILIATION_DIAGNOSTICS:
-            return diagnostic("binding_unavailable")
+            return diagnostic("binding_unavailable", "admission_limit_exceeded")
         admission = admissions[0]
         if not _admission_matches_entry(admission=admission, plan=plan, entry=entry):
-            return diagnostic("binding_stale")
+            return diagnostic("binding_stale", "admission_binding_changed")
         if not admission.admission_id:
-            return diagnostic("binding_unavailable")
+            return diagnostic("binding_unavailable", "admission_identity_missing")
         outcomes = tuple(outcome_reader(admission_id=admission.admission_id, limit=1))
         if not outcomes:
             return diagnostic("admission_without_outcome")
@@ -522,17 +589,17 @@ def _entry_reconciliation_diagnostic(
                 outcome=outcome,
             )
         except ValueError:
-            return diagnostic("binding_stale")
+            return diagnostic("binding_stale", "outcome_binding_changed")
     except (AttributeError, LookupError, TypeError, ValueError):
-        return diagnostic("binding_unavailable")
+        return diagnostic("binding_unavailable", "history_unavailable")
     classification = {
         "reconcile_required": "outcome_reconcile_required",
         "rejected": "outcome_rejected",
         "landed": "outcome_landed",
     }.get(outcome.status)
-    return diagnostic(
-        cast(MergeTrainReconciliationClassification, classification or "binding_unavailable")
-    )
+    if classification is None:
+        return diagnostic("binding_unavailable", "outcome_status_unknown")
+    return diagnostic(cast(MergeTrainReconciliationClassification, classification))
 
 
 def _admission_matches_entry(
@@ -560,6 +627,7 @@ def _admission_matches_entry(
 def _diagnostic(
     *,
     classification: MergeTrainReconciliationClassification,
+    binding_detail: MergeTrainReconciliationBindingDetail = "",
     repository: str = "",
     base_branch: str = "",
     landing_plan_record_id: str = "",
@@ -577,6 +645,7 @@ def _diagnostic(
         landing_plan_id = _string_value(payload, "landing_plan_id")
     values: dict[str, object] = {
         "classification": classification,
+        "binding_detail": binding_detail,
         "repository": repository,
         "base_branch": base_branch,
         "landing_plan_record_id": landing_plan_record_id,

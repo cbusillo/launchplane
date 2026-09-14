@@ -27,6 +27,7 @@ from control_plane.contracts.merge_train_stack_collapse import (
     build_merge_train_stack_collapse_id,
 )
 from control_plane.merge_train_admission import build_merge_train_controller_status_read_model
+from control_plane.merge_train_admission import MergeTrainReconciliationDiagnostic
 from control_plane.merge_train import MergeTrainDryRunSnapshot
 from control_plane.merge_train import MergeTrainPullRequestSnapshot
 from control_plane.merge_train import MergeTrainCheckStatus
@@ -937,6 +938,58 @@ class MergeTrainAdmissionTests(unittest.TestCase):
                     current_policy_sha256=plan.policy_sha256,
                 )
                 self.assertEqual(result.reconciliation_diagnostics[0].classification, expected)
+
+    def test_controller_status_diagnostic_reports_binding_details_and_no_unresolved_entries(
+        self,
+    ) -> None:
+        record, state = _fenced_landing_record()
+        plan = record.landing_plan
+
+        def read(
+            landing_record: MergeTrainBatchLandingPlanRecord,
+            controller_state: MergeTrainControllerStateRecord,
+        ) -> tuple[MergeTrainReconciliationDiagnostic, ...]:
+            return build_merge_train_controller_status_read_model(
+                store=_RunHistoryStore(
+                    None,
+                    landing_plan_records=(landing_record,),
+                    controller_state_records=(controller_state,),
+                ),
+                repository=plan.repository,
+                base_branch=plan.base_branch,
+                generated_at="2026-05-09T02:12:00Z",
+                current_policy_key=plan.policy_key,
+                current_policy_sha256=plan.policy_sha256,
+            ).reconciliation_diagnostics
+
+        absent = read(record, state.model_copy(update={"step_payload": {}}))
+        changed = read(record, state.model_copy(update={"policy_sha256": "old"}))
+        self.assertEqual(absent[0].binding_detail, "plan_reference_incomplete")
+        self.assertEqual(changed[0].binding_detail, "controller_policy_changed")
+        completed = plan.entries[0].model_copy(
+            update={"status": "merged", "merge_commit_sha": "merged"}
+        )
+        self.assertEqual(
+            read(
+                record.model_copy(
+                    update={"landing_plan": plan.model_copy(update={"entries": (completed,)})}
+                ),
+                state,
+            ),
+            (),
+        )
+        normalized = read(
+            record,
+            state.model_copy(
+                update={
+                    "repository": state.repository.upper(),
+                    "controller_key": build_merge_train_controller_key(
+                        repository=state.repository.upper(), base_branch=state.base_branch
+                    ),
+                }
+            ),
+        )
+        self.assertEqual(normalized[0].classification, "missing_preceding_admission")
 
     def test_controller_status_omits_latest_dry_run_summary_for_mutations(self) -> None:
         store = _RunHistoryStore(_run_record(recorded_at="2026-05-09T02:10:00Z", mutation="wait"))

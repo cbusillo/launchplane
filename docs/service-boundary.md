@@ -1161,7 +1161,8 @@ Its default-empty `reconciliation_diagnostics` list explains stored evidence
 for an unresolved batch-landing fence. Entries are selected only from the active
 persisted landing plan after current policy, repository/base, plan and candidate
 binding checks; the request adds no PR selector. Each result contains a stored
-classification and the associated plan/entry identifiers and expected head/tree.
+classification, a closed-enum binding detail when needed, and the associated
+plan/entry identifiers and expected head/tree.
 Stable plan lineage preserves admission lookup across progress records. Stale,
 unavailable or ambiguous evidence is reported as such, without treating it as
 missing authorization or as proof of provider history. The classification

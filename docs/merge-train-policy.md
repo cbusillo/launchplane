@@ -829,7 +829,12 @@ plan identifiers, entry PR and expected head/tree, and one classification:
 `missing_preceding_admission`, `admission_without_outcome`,
 `outcome_reconcile_required`, `outcome_rejected`, `outcome_landed`,
 `binding_unavailable`, or `binding_stale`. Missing or conflicting bindings do
-not prove an absent admission. These are stored states, not fresh provider
+not prove an absent admission. A closed-enum `binding_detail` distinguishes
+policy drift, incomplete or changed plan references, entry/history limits,
+missing readers, invalid history, and admission/outcome binding failures without
+returning exception text. It is empty for a classified admission/outcome. If the
+bound plan has no unresolved entry and no active PR, the diagnostic list is empty.
+These are stored states, not fresh provider
 observations or authority to release the fence. A missing admission does not
 establish who performed a merge; a stored terminal outcome does not establish
 that the provider still agrees.
