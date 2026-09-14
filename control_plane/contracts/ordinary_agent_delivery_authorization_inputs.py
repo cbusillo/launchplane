@@ -41,6 +41,15 @@ InspectionSetupManagedSecretState = Literal[
     "version_pointer_missing",
     "unavailable",
 ]
+TerminalEnrollmentCapabilityState = Literal[
+    "configured_identity_absent",
+    "ready",
+    "missing",
+    "unmanaged",
+    "mismatched",
+    "ambiguous",
+    "unavailable",
+]
 
 
 class AuthorizationCandidatePolicyProvenance(BaseModel):
@@ -207,6 +216,12 @@ class InspectionSetupMetadata(BaseModel):
         return self
 
 
+class TerminalEnrollmentCapabilityReadiness(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    state: TerminalEnrollmentCapabilityState = "configured_identity_absent"
+
+
 class OrdinaryAgentDeliveryAuthorizationCandidateInputsResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -221,6 +236,9 @@ class OrdinaryAgentDeliveryAuthorizationCandidateInputsResponse(BaseModel):
     repositories: tuple[OrdinaryAgentDeliveryAuthorizationCandidateRepository, ...]
     diagnostics: tuple[AuthorizationCandidateInputDiagnostic, ...]
     inspection_setup: InspectionSetupMetadata = Field(default_factory=InspectionSetupMetadata)
+    terminal_enrollment: TerminalEnrollmentCapabilityReadiness = Field(
+        default_factory=TerminalEnrollmentCapabilityReadiness
+    )
 
     @model_validator(mode="after")
     def _validate(self) -> OrdinaryAgentDeliveryAuthorizationCandidateInputsResponse:

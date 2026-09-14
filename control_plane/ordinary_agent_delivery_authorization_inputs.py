@@ -20,6 +20,7 @@ from control_plane.contracts.ordinary_agent_delivery_authorization_inputs import
     OrdinaryAgentDeliveryAuthorizationCandidateInputsResponse,
     OrdinaryAgentDeliveryAuthorizationCandidateRepository,
     RepositoryInventoryProjectionState,
+    TerminalEnrollmentCapabilityReadiness,
 )
 from control_plane.contracts.repository_inventory import (
     RepositoryInventoryRecord,
@@ -35,6 +36,8 @@ from control_plane.provider_delivery_inspection_profile import (
     is_exact_provider_delivery_inspection_secret_record,
     provider_delivery_inspection_positive_app_id,
 )
+from control_plane.authz_candidate_preparation import terminal_enrollment_capability_state
+from control_plane.service_auth import TerminalAgentIdentity
 
 
 # This bounds historical rows, not repository count. Reaching it must report
@@ -71,6 +74,7 @@ def read_ordinary_agent_delivery_authorization_candidate_inputs(
     policy_record: LaunchplaneAuthzPolicyRecord,
     trace_id: str,
     observed_at: str,
+    configured_terminal_identity: TerminalAgentIdentity | None = None,
 ) -> OrdinaryAgentDeliveryAuthorizationCandidateInputsResponse:
     inventory_state, current_inventory, inventory_diagnostics = _read_current_inventory(
         record_store
@@ -129,6 +133,12 @@ def read_ordinary_agent_delivery_authorization_candidate_inputs(
             )
         ),
         inspection_setup=inspection_setup,
+        terminal_enrollment=TerminalEnrollmentCapabilityReadiness(
+            state=terminal_enrollment_capability_state(
+                policy=policy_record.policy,
+                identity=configured_terminal_identity,
+            )
+        ),
     )
 
 

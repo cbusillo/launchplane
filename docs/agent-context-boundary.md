@@ -45,7 +45,10 @@ Agent context callers are identified as compact agent consumers:
   rules.
 - `owner_local_agent`: trusted local terminal agent using
   `LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN`. The service admits this identity only
-  on `GET` routes; policy still scopes products, contexts, and read actions.
+  on redacted `GET` routes, plus the inert ordinary-agent enrollment proposal
+  route after an exact managed policy installation. Policy still scopes products,
+  contexts, and read actions; enrollment authority creates no credential,
+  session, activation, or worker start.
 - `owner_local_agent`: trusted local operator using
   `LAUNCHPLANE_LOCAL_OPERATOR_TOKEN` from
   `~/.config/launchplane/local-operator.env`. This identity is limited by exact

@@ -49,6 +49,7 @@ from control_plane.authz_candidate_preparation import (
     is_administrator_product_evidence_read_request,
     is_legacy_administrator_product_evidence_read_request,
     is_ordinary_agent_delivery_administration_request,
+    is_terminal_enrollment_requester_request,
 )
 from control_plane.contracts.ordinary_agent_activation import (
     OrdinaryAgentDeliveryActivationRevokeHumanEvidence,
@@ -526,6 +527,12 @@ def _build_privileged_operation_semantic_review(
         is_ordinary_agent_delivery_policy = (
             record.request.ordinary_agent_preparation_context is not None
         )
+        is_terminal_enrollment_requester = is_terminal_enrollment_requester_request(
+            record.request, intent="add"
+        )
+        is_terminal_enrollment_requester_removal = is_terminal_enrollment_requester_request(
+            record.request, intent="remove"
+        )
         adds_candidate_access = bool(record.request.desired_policy.github_humans)
         authz_review_title: PrivilegedOperationSemanticReviewTitle
         if is_ordinary_agent_delivery_policy:
@@ -551,6 +558,22 @@ def _build_privileged_operation_semantic_review(
                 f"{repository} on {context.intent.base_branch} through Launchplane. "
                 "Delivery setup must still be separately approved and verified. "
                 "This client access remains until removed."
+            )
+        elif is_terminal_enrollment_requester or is_terminal_enrollment_requester_removal:
+            authz_review_title = (
+                "Review terminal client connection requests"
+                if is_terminal_enrollment_requester
+                else "Review removing terminal client connection requests"
+            )
+            authz_change_summary = (
+                "Allow the configured terminal to submit client connection requests through "
+                "Launchplane until this access is removed. Every client connection still "
+                "needs separate administrator approval. This does not issue credentials, "
+                "activate delivery, start a worker, or change existing client access."
+                if is_terminal_enrollment_requester
+                else "Remove the permission this setup added for terminal client "
+                "connection requests. Existing ordinary credentials, sessions, ordinary rules, "
+                "and delivery activation are not revoked."
             )
         elif is_delivery_administration:
             authz_review_title = "Review agent delivery administration"
@@ -615,7 +638,13 @@ def _build_privileged_operation_semantic_review(
             ),
             blast_radius=PrivilegedOperationSemanticReviewBlastRadius(
                 scope="authorization_policy",
-                summary="Bounded to one managed authorization rule set.",
+                summary=(
+                    "One trusted terminal; client connection requests only."
+                    if is_terminal_enrollment_requester
+                    else "The terminal connection-request access added by this setup."
+                    if is_terminal_enrollment_requester_removal
+                    else "Bounded to one managed authorization rule set."
+                ),
                 affected_count=(
                     diff.added_rule_count
                     + diff.adopted_rule_count
@@ -626,7 +655,13 @@ def _build_privileged_operation_semantic_review(
             ),
             rollback=PrivilegedOperationSemanticReviewRollback(
                 rollback_class="policy_cas",
-                summary="Rollback is bounded by authorization policy CAS and record digest evidence.",
+                summary=(
+                    "A reviewed removal can withdraw this connection-request permission."
+                    if is_terminal_enrollment_requester
+                    else "Restoring connection-request access requires a new reviewed change."
+                    if is_terminal_enrollment_requester_removal
+                    else "Rollback is bounded by authorization policy CAS and record digest evidence."
+                ),
             ),
             evidence=PrivilegedOperationSemanticReviewEvidence(
                 result_status=_semantic_review_result_status(record),

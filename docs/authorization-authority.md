@@ -678,6 +678,20 @@ enrollment follows installation of its exact ordinary-agent policy rule and
 requires the principal to be absent; an existing enrolled principal is not a
 prerequisite for preparing the first policy package.
 
+The same read reports whether the service's configured trusted terminal identity
+has exactly one managed `ordinary_agent_enrollment.propose` rule for the
+Launchplane global target. It reports configured identity absence, missing,
+unmanaged, mismatched, or ambiguous capability without returning the identity,
+token, managed IDs, or policy selectors. When the capability is missing and the
+managed set is unoccupied, **Allow the trusted terminal to request a client
+connection** creates the existing closed managed-policy candidate for separate
+review. The server derives the identity and narrow rule. Existing unmanaged,
+mismatched, or duplicate rules remain conflicts; preparation does not adopt or
+delete them. The stored plan binds those reviewed selectors; a later bootstrap
+identity change does not rebind it. Removing this managed set blocks future terminal enrollment
+propose/status access under that rule only; it does not revoke ordinary
+credentials, sessions, ordinary rules, or an existing delivery activation.
+
 The same parameterless inspection includes bounded metadata for the separate
 provider-inspection App needed by delivery setup. It reads only the code-defined
 App-ID key in Launchplane's DB-backed service-context runtime record and the
@@ -713,6 +727,9 @@ client label and a recorded project/branch. The browser generates an independent
 random client principal and a separate request identity; neither comes from the
 repository name or branch. It retains the submitted metadata for an exact retry
 after interruption. No credential or private key is stored in this form.
+The terminal enrollment capability must be ready first, so the first client can
+request its connection after separately governed setup. Every connection still
+requires its own administrator approval.
 **Discard saved setup** allows revised choices after a rejected or abandoned
 request. It removes only the browser's saved request; a proposal already recorded
 in Launchplane remains available for review and is not cancelled by that action.

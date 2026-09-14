@@ -1026,13 +1026,15 @@ secret to the trusted local terminal agent out of band. Configure
 `LAUNCHPLANE_TERMINAL_AGENT_SUBJECT` and
 `LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL` to identify the local owner subject and
 token label used by `terminal_agents` authz policy rules; both identity values
-are required whenever the bearer token is configured. The service only accepts
-this identity on `GET` routes, so even an overly broad terminal-agent policy
-rule cannot dispatch product config writes, prod promotion, destructive cleanup,
+are required whenever the bearer token is configured. The service accepts this
+identity on redacted `GET` routes and the inert ordinary-agent enrollment
+proposal route only when exactly one managed rule authorizes that request. It
+cannot dispatch product config writes, prod promotion, destructive cleanup,
 authz policy mutation, read-model POSTs, or plaintext secret reveal routes.
 Policy still scopes which redacted read actions and product/context pairs the
 agent can access, such as `product_environment.read` for product environment and
-config-status diagnostics.
+config-status diagnostics. Enrollment proposal authority creates no principal,
+credential, session, grant, activation, or worker start on its own.
 
 Trusted owner terminals that need to make Launchplane-owned operator mutations
 without a browser session can use separate owner-agent bearer credentials.

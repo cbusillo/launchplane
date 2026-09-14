@@ -402,6 +402,7 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
         human_reader: Mock | None = None,
         mutation_human_reader: Mock | None = None,
         agent_identity: TerminalAgentIdentity | None = None,
+        configured_terminal_identity: TerminalAgentIdentity | None = None,
         policy_record_reader: Callable[[], object] | None = None,
     ) -> FastAPI:
         app = FastAPI()
@@ -443,6 +444,7 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
                 read_github_human_mutation_identity=read_mutation_human,
                 policy_reader=lambda: policy,
                 policy_record_reader=policy_record_reader or (lambda: _policy_record(policy)),
+                read_configured_terminal_identity=lambda: configured_terminal_identity,
             ),
         )
         return app
@@ -513,6 +515,114 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(review.json()["review"]["title"], "Review agent delivery administration")
         self.assertIn("does not enroll", review.json()["review"]["change"]["summary"])
         self.assertEqual(policy_record, active_policy_record)
+
+    async def test_terminal_enrollment_candidate_plans_without_active_policy_or_principal_write(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as directory:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(directory) / "launchplane.sqlite3")
+            )
+            store.ensure_schema()
+            policy = _policy()
+            policy_record = store.seed_authz_policy_if_absent(_policy_record(policy))
+            terminal = TerminalAgentIdentity(
+                subject="trusted-terminal", token_label="owner-terminal"
+            )
+            app = self._app(
+                store=store,
+                policy=policy,
+                policy_record_reader=lambda: policy_record,
+                configured_terminal_identity=terminal,
+            )
+            payload = {
+                "candidate_id": "ordinary-agent-enrollment-requester",
+                "intent": "add",
+                "source_event_id": "ui:terminal-enrollment:stable-retry",
+            }
+            async with lifespan_client(app) as client:
+                first = await client.post(
+                    "/v1/privileged-operations/authorization-candidates/prepare", json=payload
+                )
+                replay = await client.post(
+                    "/v1/privileged-operations/authorization-candidates/prepare", json=payload
+                )
+                conflict = await client.post(
+                    "/v1/privileged-operations/authorization-candidates/prepare",
+                    json={**payload, "intent": "remove"},
+                )
+                review = await client.get(
+                    f"/v1/privileged-operations/plans/{first.json()['operation_id']}/review"
+                )
+            records = store.list_privileged_operation_records(limit=None)
+            active_policy_record = store.list_authz_policy_records(status="active", limit=2)[0]
+            principal = store.read_current_ordinary_agent_principal(principal_id="agent_terminal")
+            store.close()
+
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(replay.json()["operation_id"], first.json()["operation_id"])
+        self.assertEqual(conflict.status_code, 409, conflict.text)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(policy_record, active_policy_record)
+        self.assertIsNone(principal)
+        self.assertEqual(
+            review.json()["review"]["title"], "Review terminal client connection requests"
+        )
+        self.assertIn(
+            "separate administrator approval", review.json()["review"]["change"]["summary"]
+        )
+        self.assertNotIn("owner-terminal", review.text)
+
+    async def test_terminal_enrollment_removal_review_keeps_existing_client_state(self) -> None:
+        terminal = TerminalAgentIdentity(subject="trusted-terminal", token_label="owner-terminal")
+        from control_plane.authz_candidate_preparation import (
+            compile_terminal_enrollment_policy_candidate,
+        )
+
+        _, addition = compile_terminal_enrollment_policy_candidate(
+            current_policy=_policy(), identity=terminal
+        )
+        assert addition is not None
+        policy_payload = _policy().model_dump(mode="json")
+        policy_payload["terminal_agents"] = [
+            rule.model_dump(mode="json") for rule in addition.desired_policy.terminal_agents
+        ]
+        policy = LaunchplaneAuthzPolicy.model_validate(policy_payload)
+        with TemporaryDirectory() as directory:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(directory) / "launchplane.sqlite3")
+            )
+            store.ensure_schema()
+            policy_record = store.seed_authz_policy_if_absent(_policy_record(policy))
+            app = self._app(
+                store=store,
+                policy=policy,
+                policy_record_reader=lambda: policy_record,
+                configured_terminal_identity=None,
+            )
+            async with lifespan_client(app) as client:
+                prepared = await client.post(
+                    "/v1/privileged-operations/authorization-candidates/prepare",
+                    json={
+                        "candidate_id": "ordinary-agent-enrollment-requester",
+                        "intent": "remove",
+                        "source_event_id": "ui:terminal-enrollment:remove",
+                    },
+                )
+                review = await client.get(
+                    f"/v1/privileged-operations/plans/{prepared.json()['operation_id']}/review"
+                )
+            store.close()
+
+        self.assertEqual(prepared.status_code, 200, prepared.text)
+        self.assertEqual(
+            review.json()["review"]["title"],
+            "Review removing terminal client connection requests",
+        )
+        self.assertIn(
+            "Existing ordinary credentials, sessions, ordinary rules, and delivery activation are not revoked.",
+            review.json()["review"]["change"]["summary"],
+        )
 
     async def test_closed_authorization_candidate_active_is_noop(self) -> None:
         policy_payload = _policy().model_dump(mode="json")

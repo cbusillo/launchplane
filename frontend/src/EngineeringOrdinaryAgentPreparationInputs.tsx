@@ -733,6 +733,7 @@ async function preparationInputsFixture(
       : null,
     repositories,
     inspection_setup: inspectionSetupFixture(mode),
+    terminal_enrollment: { state: "ready" },
     diagnostics: mode === "truncated" || mode === "ambiguous" || mode === "missing"
       ? [{
           code: `${mode}_setup_input`,

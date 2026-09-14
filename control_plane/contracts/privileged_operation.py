@@ -1236,6 +1236,8 @@ PrivilegedOperationSemanticReviewTitle = Literal[
     "Review agent delivery administration",
     "Review administrator product evidence access",
     "Review client delivery access",
+    "Review terminal client connection requests",
+    "Review removing terminal client connection requests",
     "Managed merge-train policy review",
     "Review agent delivery setup",
     "Review stopping agent delivery",
@@ -1529,6 +1531,8 @@ class PrivilegedOperationSemanticReview(BaseModel):
                     "Review agent delivery administration",
                     "Review administrator product evidence access",
                     "Review client delivery access",
+                    "Review terminal client connection requests",
+                    "Review removing terminal client connection requests",
                 }
             ),
             "managed-merge-train-policy-import": frozenset({"Managed merge-train policy review"}),

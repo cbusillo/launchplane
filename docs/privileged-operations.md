@@ -44,6 +44,13 @@ both for exact replay. No policy JSON, managed IDs, or routine reason is entered
 by the administrator. See [first-client policy preparation](authorization-authority.md#preparing-the-first-ordinary-client-policy)
 for the authority and compatibility boundaries.
 
+The same workbench first reports the configured terminal enrollment capability
+without exposing terminal identity values or bearer material. If the narrow
+capability is missing and unambiguous, **Allow the trusted terminal to request a client
+connection** uses the existing closed authorization-candidate route and standard
+managed-policy plan. It does not approve or apply the policy, issue a client
+credential, or activate delivery; every connection remains separately approved.
+
 The Merge-train policy workbench separately supports
 [preparing one ordinary-agent target](merge-train-policy.md#preparing-an-ordinary-agent-target).
 Its typed inputs and prepare routes use the merge-policy descriptor's existing

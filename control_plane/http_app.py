@@ -758,6 +758,7 @@ from control_plane.service_auth import (
     LocalAdminIdentity,
     LocalOperatorIdentity,
     TerminalAgentIdentity,
+    configured_terminal_agent_identity,
     TokenVerifier,
     agent_authz_audit,
     authz_policy_allows_immutable_github_id_administration,
@@ -4932,6 +4933,9 @@ def create_launchplane_fastapi_app(
         read_github_human_mutation_identity=read_github_human_browser_mutation_identity,
         policy_reader=lambda: resolved_authz_policy_runtime.policy,
         policy_record_reader=lambda: read_active_authz_policy_record(get_record_store()),
+        read_configured_terminal_identity=lambda: configured_terminal_agent_identity(
+            bearer_identity_config or BearerIdentityConfig()
+        ),
     )
     product_owner_write_route_dependencies = ProductOwnerWriteRouteDependencies(
         read_write_identity=read_write_identity,

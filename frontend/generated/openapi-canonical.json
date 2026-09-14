@@ -1156,7 +1156,8 @@
           "candidate_id": {
             "enum": [
               "ordinary-agent-delivery-administration",
-              "administrator-product-evidence-read"
+              "administrator-product-evidence-read",
+              "ordinary-agent-enrollment-requester"
             ],
             "title": "Candidate Id",
             "type": "string"
@@ -20031,6 +20032,9 @@
             "title": "Status",
             "type": "string"
           },
+          "terminal_enrollment": {
+            "$ref": "#/components/schemas/TerminalEnrollmentCapabilityReadiness"
+          },
           "trace_id": {
             "title": "Trace Id",
             "type": "string"
@@ -26261,6 +26265,8 @@
               "Review agent delivery administration",
               "Review administrator product evidence access",
               "Review client delivery access",
+              "Review terminal client connection requests",
+              "Review removing terminal client connection requests",
               "Managed merge-train policy review",
               "Review agent delivery setup",
               "Review stopping agent delivery"
@@ -42221,6 +42227,27 @@
           }
         },
         "title": "TerminalAgentPolicyRule",
+        "type": "object"
+      },
+      "TerminalEnrollmentCapabilityReadiness": {
+        "additionalProperties": false,
+        "properties": {
+          "state": {
+            "default": "configured_identity_absent",
+            "enum": [
+              "configured_identity_absent",
+              "ready",
+              "missing",
+              "unmanaged",
+              "mismatched",
+              "ambiguous",
+              "unavailable"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "title": "TerminalEnrollmentCapabilityReadiness",
         "type": "object"
       },
       "TrackedTargetLogDeploymentResponse": {
