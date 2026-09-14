@@ -17034,7 +17034,6 @@
             "type": "string"
           },
           "disposition_supported": {
-            "const": false,
             "default": false,
             "title": "Disposition Supported",
             "type": "boolean"
@@ -17068,7 +17067,6 @@
             "type": "string"
           },
           "mutation_enabled": {
-            "const": false,
             "default": false,
             "title": "Mutation Enabled",
             "type": "boolean"

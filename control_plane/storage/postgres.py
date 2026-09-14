@@ -51,7 +51,7 @@ from sqlalchemy import cast as sql_cast
 from sqlalchemy.dialects.postgresql import JSONB, insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Engine, make_url
-from sqlalchemy.exc import DBAPIError, IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 from sqlalchemy.pool import NullPool
 
@@ -135,6 +135,15 @@ from control_plane.contracts.provider_delivery_readiness import (
 )
 
 if TYPE_CHECKING:
+    from control_plane.contracts.merge_train_historical_completion import (
+        MergeTrainHistoricalCompletionProviderEvidence,
+    )
+    from control_plane.merge_train_historical_completion import HistoricalCompletionSnapshot
+    from control_plane.merge_train_historical_disposition import (
+        HistoricalDispositionAuthority,
+        HistoricalDispositionError,
+        HistoricalDispositionRequest,
+    )
     from control_plane.provider_delivery_inspection_profile import (
         ResolvedProviderDeliveryInspectionProfile,
     )
@@ -673,6 +682,19 @@ from control_plane.storage.schema_invariants import (
 from control_plane.ordinary_agent_worker_runtime import (
     DEFAULT_ORDINARY_AGENT_WORKER_SUPPORT,
 )
+
+
+def _historical_disposition_storage_error(error: Exception) -> HistoricalDispositionError:
+    from control_plane.merge_train_historical_disposition import HistoricalDispositionError
+
+    if isinstance(error, IntegrityError):
+        return HistoricalDispositionError("store_conflict")
+    if isinstance(error, DBAPIError):
+        sqlstate = getattr(error.orig, "pgcode", None) or getattr(error.orig, "sqlstate", None)
+        if sqlstate in {"55P03", "57014", "40001", "40P01"}:
+            return HistoricalDispositionError("recovery_busy")
+    return HistoricalDispositionError("store_unavailable", status_code=503)
+
 
 RecordModel = TypeVar("RecordModel", bound=BaseModel)
 
@@ -19081,6 +19103,60 @@ class PostgresRecordStore(HumanSessionStore):
             ),
             limit=limit,
         )
+
+    def authorize_merge_train_historical_completion(
+        self, request: HistoricalDispositionRequest
+    ) -> HistoricalDispositionAuthority:
+        """Authorize a historical disposition from current native-DB authority."""
+        from control_plane.storage.historical_completion import (
+            authorize_merge_train_historical_completion,
+        )
+
+        try:
+            return authorize_merge_train_historical_completion(self, request)
+        except (SQLAlchemyError, TypeError, ValueError) as error:
+            raise _historical_disposition_storage_error(error) from error
+
+    def read_merge_train_historical_completion_snapshot(
+        self,
+        request: HistoricalDispositionRequest,
+        authority: HistoricalDispositionAuthority,
+    ) -> HistoricalCompletionSnapshot:
+        """Read and validate one historical disposition snapshot in one DB session."""
+        from control_plane.storage.historical_completion import (
+            read_merge_train_historical_completion_snapshot,
+        )
+
+        try:
+            return read_merge_train_historical_completion_snapshot(self, request, authority)
+        except (SQLAlchemyError, TypeError, ValueError) as error:
+            raise _historical_disposition_storage_error(error) from error
+
+    def finalize_merge_train_historical_completion(
+        self,
+        *,
+        request: HistoricalDispositionRequest,
+        authority: HistoricalDispositionAuthority,
+        snapshot: HistoricalCompletionSnapshot,
+        provider_evidence: MergeTrainHistoricalCompletionProviderEvidence,
+        trace_id: str,
+    ) -> LaunchplaneIdempotencyRecord:
+        """Persist a historical successor and controller release atomically."""
+        from control_plane.storage.historical_completion import (
+            finalize_merge_train_historical_completion,
+        )
+
+        try:
+            return finalize_merge_train_historical_completion(
+                self,
+                request=request,
+                authority=authority,
+                snapshot=snapshot,
+                provider_evidence=provider_evidence,
+                trace_id=trace_id,
+            )
+        except (SQLAlchemyError, TypeError, ValueError) as error:
+            raise _historical_disposition_storage_error(error) from error
 
     def create_merge_admission_record_if_absent(
         self, record: MergeAdmissionRecord
