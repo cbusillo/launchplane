@@ -27,6 +27,7 @@
     "governanceEvidence": "docs/governance-evidence.md",
     "mergeTrainStructuralProvenance": "docs/merge-train-structural-provenance.md",
     "mergeAdmission": "docs/merge-admission.md",
+    "historicalMergeCompletion": "docs/merge-train-historical-completion.md",
     "runnerLaneBaseline": "docs/runner-lane-baseline.md",
     "runnerHostHygiene": "docs/runner-host-hygiene.md",
     "productOwnerPolicy": "docs/product-owner-policy.md",

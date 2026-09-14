@@ -26,6 +26,9 @@ from control_plane.contracts.merge_train_controller_state import (
 )
 from control_plane.contracts.merge_train_effect import MergeTrainSemanticEffectExecutor
 from control_plane.contracts.merge_train_policy import MergeTrainPolicy, MergeTrainRepositoryPolicy
+from control_plane.contracts.merge_train_historical_completion import (
+    MergeTrainHistoricalCompletionSelector,
+)
 from control_plane.contracts.merge_train_stack_collapse import (
     MergeTrainStackCollapsePlan,
     MergeTrainStackCollapsePlanRecord,
@@ -103,6 +106,9 @@ class MergeTrainControllerRunOnceEnvelope(BaseModel):
     base_branch: str = "main"
     mutate: bool = False
     github_api_base_url: str = "https://api.github.com"
+    historical_completion: MergeTrainHistoricalCompletionSelector | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
     @model_validator(mode="after")
     def _validate_envelope(self) -> "MergeTrainControllerRunOnceEnvelope":
@@ -371,6 +377,10 @@ def execute_merge_train_controller_with_client(
     joined bound-record adapters and their scoped semantic executor; the legacy
     entry point above retains its established token and transport behavior.
     """
+    if request.historical_completion is not None:
+        raise MergeTrainControllerRequestError(
+            "historical_completion_requires_legacy_service_preflight"
+        )
     transport = github_client.transport
     lease_owner = merge_train_controller_lease_owner(trace_id=trace_id)
     if request.mutate:

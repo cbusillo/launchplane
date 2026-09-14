@@ -18547,6 +18547,13 @@ class PostgresRecordStore(HumanSessionStore):
     ) -> None:
         if row.payload.get("ordinary_job_binding") is not None:
             raise OrdinaryAgentSessionAdmissionDenied("ordinary_record_requires_joined_write")
+        if (
+            isinstance(row, LaunchplaneMergeTrainBatchLandingPlanRow)
+            and row.payload.get("historical_completion") is not None
+        ):
+            raise ValueError(
+                "historical completion records are observation-only and cannot be written"
+            )
         key = build_merge_train_controller_key(
             repository=row.repository, base_branch=row.base_branch
         )
@@ -18585,6 +18592,14 @@ class PostgresRecordStore(HumanSessionStore):
                 and prior.payload.get("ordinary_job_binding") is not None
             ):
                 raise OrdinaryAgentSessionAdmissionDenied("ordinary_record_requires_joined_write")
+            prior_payload = getattr(prior, "payload", {})
+            if (
+                isinstance(prior, LaunchplaneMergeTrainBatchLandingPlanRow)
+                and prior_payload.get("historical_completion") is not None
+            ):
+                raise ValueError(
+                    "historical completion records are observation-only and cannot be overwritten"
+                )
             session.merge(row)
             session.commit()
 
@@ -18989,6 +19004,51 @@ class PostgresRecordStore(HumanSessionStore):
                 payload=self._payload_dict(record),
             )
         )
+
+    def has_ordinary_merge_train_target_fence(self, *, repository: str, base_branch: str) -> bool:
+        normalized_repository = repository.strip().lower()
+        normalized_base_branch = base_branch.strip()
+        active_rows = (
+            LaunchplaneMergeTrainBatchCandidateRow,
+            LaunchplaneMergeTrainBatchLandingPlanRow,
+            LaunchplaneMergeTrainStackCollapsePlanRow,
+        )
+        with self._session_factory() as session:
+            for row_type in active_rows:
+                row = session.scalar(
+                    select(row_type.record_id)
+                    .where(
+                        row_type.status == "active",
+                        row_type.repository == normalized_repository,
+                        row_type.base_branch == normalized_base_branch,
+                        row_type.payload["ordinary_job_binding"].as_string().is_not(None),
+                    )
+                    .limit(1)
+                )
+                if row is not None:
+                    return True
+            effect = session.scalar(
+                select(LaunchplaneOrdinaryAgentEffectRow.effect_id)
+                .where(
+                    LaunchplaneOrdinaryAgentEffectRow.payload["target"]["repository"].as_string()
+                    == normalized_repository,
+                    LaunchplaneOrdinaryAgentEffectRow.payload["target"]["base_branch"].as_string()
+                    == normalized_base_branch,
+                    LaunchplaneOrdinaryAgentEffectRow.payload["state"]
+                    .as_string()
+                    .in_(
+                        (
+                            "reserved",
+                            "dispatching",
+                            "waiting_provider",
+                            "reconciliation_required",
+                            "rebind_pending",
+                        )
+                    ),
+                )
+                .limit(1)
+            )
+            return effect is not None
 
     def list_merge_train_batch_landing_plan_records(
         self,

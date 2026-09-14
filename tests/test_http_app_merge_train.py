@@ -3175,7 +3175,13 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
         request_schema = route["requestBody"]["content"]["application/json"]["schema"]
 
         self.assertEqual(route["operationId"], "write_merge_train_controller_run_once")
-        self.assertEqual(success_schema["$ref"], "#/components/schemas/AcceptedEvidenceResponse")
+        self.assertEqual(
+            {schema["$ref"] for schema in success_schema["anyOf"]},
+            {
+                "#/components/schemas/AcceptedEvidenceResponse",
+                "#/components/schemas/HistoricalCompletionPreflightResponse",
+            },
+        )
         self.assertEqual(request_schema["title"], "MergeTrainControllerRunOnceEnvelope")
         self.assertTrue(set(route["responses"]) >= {"400", "401", "403", "409", "502", "503"})
 

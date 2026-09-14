@@ -2538,9 +2538,58 @@ class FilesystemRecordStore:
     def write_merge_train_batch_landing_plan_record(
         self, record: MergeTrainBatchLandingPlanRecord
     ) -> Path:
-        return self._write_model(
-            "launchplane_merge_train_batch_landing_plans", record.record_id, record
-        )
+        record_type = "launchplane_merge_train_batch_landing_plans"
+        with self._product_authority_bundle_lock():
+            try:
+                existing = self._read_model_locked(
+                    MergeTrainBatchLandingPlanRecord,
+                    record_type,
+                    record.record_id,
+                )
+            except FileNotFoundError:
+                existing = None
+            if record.historical_completion is not None or (
+                existing is not None and existing.historical_completion is not None
+            ):
+                raise ValueError(
+                    "historical completion records are observation-only and cannot be written"
+                )
+            return self._write_model_locked(record_type, record.record_id, record)
+
+    def has_ordinary_merge_train_target_fence(self, *, repository: str, base_branch: str) -> bool:
+        normalized_repository = repository.strip().lower()
+        normalized_base_branch = base_branch.strip()
+        with self._product_authority_bundle_lock():
+            for model_type, record_type in (
+                (MergeTrainBatchCandidateRecord, "launchplane_merge_train_batch_candidates"),
+                (
+                    MergeTrainBatchLandingPlanRecord,
+                    "launchplane_merge_train_batch_landing_plans",
+                ),
+                (
+                    MergeTrainStackCollapsePlanRecord,
+                    "launchplane_merge_train_stack_collapse_plans",
+                ),
+            ):
+                for record in self._list_models_locked(model_type, record_type):
+                    if isinstance(record, MergeTrainBatchCandidateRecord):
+                        scope_repository = record.candidate.repository
+                        scope_base_branch = record.candidate.base_branch
+                    elif isinstance(record, MergeTrainBatchLandingPlanRecord):
+                        scope_repository = record.landing_plan.repository
+                        scope_base_branch = record.landing_plan.base_branch
+                    else:
+                        stack_record = cast(MergeTrainStackCollapsePlanRecord, record)
+                        scope_repository = stack_record.plan.repository
+                        scope_base_branch = stack_record.plan.base_branch
+                    if (
+                        getattr(record, "status", "") == "active"
+                        and getattr(record, "ordinary_job_binding", None) is not None
+                        and scope_repository.lower() == normalized_repository
+                        and scope_base_branch == normalized_base_branch
+                    ):
+                        return True
+            return False
 
     def list_merge_train_batch_landing_plan_records(
         self,

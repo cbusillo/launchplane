@@ -1,6 +1,6 @@
 import json
 from time import sleep
-from typing import Callable, Protocol, TypeVar
+from typing import Callable, Literal, Protocol, TypeVar
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
@@ -13,6 +13,10 @@ from control_plane.contracts.merge_train_batch import MergeTrainBatchEntry
 from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingEntry
 from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingPlan
 from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingPlanRecord
+from control_plane.contracts.merge_train_historical_completion import (
+    MergeTrainHistoricalCompletionEntryEvidence,
+    MergeTrainHistoricalCompletionProviderEvidence,
+)
 from control_plane.contracts.merge_train_effect import (
     CandidateHeadMergeEffect,
     CandidateHeadMergeOutcome,
@@ -55,6 +59,39 @@ class MergeTrainGitHubError(RuntimeError):
 
 class MergeTrainGitHubStaleHeadError(MergeTrainGitHubError):
     """Raised when GitHub state no longer matches guarded merge evidence."""
+
+
+HistoricalCompletionProofStatus = Literal["unsupported", "indeterminate"]
+HistoricalCompletionProofReason = Literal[
+    "plan_invalid",
+    "plan_noop",
+    "plan_unmerged",
+    "plan_bound",
+    "provider_binding_mismatch",
+    "provider_unavailable",
+    "provider_response_malformed",
+    "base_not_contains_merge",
+    "target_moved",
+]
+
+
+class MergeTrainHistoricalCompletionProofError(MergeTrainGitHubError):
+    """Closed, public-safe disposition for a read-only historical proof attempt."""
+
+    def __init__(
+        self,
+        *,
+        status: HistoricalCompletionProofStatus,
+        reason_code: HistoricalCompletionProofReason,
+        pull_request_number: int | None = None,
+    ) -> None:
+        self.proof_status = status
+        self.reason_code = reason_code
+        self.pull_request_number = pull_request_number
+        super().__init__(
+            f"Historical completion proof {reason_code}.",
+            status_code=409 if status == "unsupported" else 503,
+        )
 
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
@@ -131,6 +168,177 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         """Read planning evidence through the client-owned provider boundary."""
         return GitHubMergeTrainSnapshotReader(transport=self.transport).read_merge_train_snapshot(
             repository=repository, base_branch=base_branch
+        )
+
+    def observe_historical_batch_completion(
+        self,
+        *,
+        landing_plan: MergeTrainBatchLandingPlan,
+        observed_at: str,
+    ) -> MergeTrainHistoricalCompletionProviderEvidence:
+        """Read exact merged evidence without admitting or dispatching an effect."""
+        entries = landing_plan.entries
+        try:
+            _required_value(observed_at, "Historical completion observation time is required.")
+            repository_path = _repository_path(landing_plan.repository)
+            if not 1 <= len(entries) <= 25:
+                reason_code: HistoricalCompletionProofReason = "plan_bound"
+                raise MergeTrainHistoricalCompletionProofError(
+                    status="unsupported", reason_code=reason_code
+                )
+            if tuple(entry.position for entry in entries) != tuple(
+                range(1, len(entries) + 1)
+            ) or len({entry.pull_request_number for entry in entries}) != len(entries):
+                raise MergeTrainHistoricalCompletionProofError(
+                    status="unsupported", reason_code="plan_invalid"
+                )
+            for entry in entries:
+                if entry.status not in {"planned", "merging"}:
+                    raise MergeTrainHistoricalCompletionProofError(
+                        status="unsupported",
+                        reason_code="plan_invalid",
+                        pull_request_number=entry.pull_request_number,
+                    )
+                if _recorded_candidate_step_is_no_op(entry):
+                    raise MergeTrainHistoricalCompletionProofError(
+                        status="unsupported",
+                        reason_code="plan_noop",
+                        pull_request_number=entry.pull_request_number,
+                    )
+                if not all(
+                    (
+                        entry.expected_head_sha,
+                        entry.expected_head_tree_sha,
+                        entry.expected_base_sha,
+                        entry.recorded_candidate_parent_sha,
+                        entry.recorded_candidate_parent_tree_sha,
+                        entry.recorded_candidate_result_sha,
+                        entry.recorded_candidate_result_tree_sha,
+                    )
+                ):
+                    raise MergeTrainHistoricalCompletionProofError(
+                        status="unsupported",
+                        reason_code="plan_invalid",
+                        pull_request_number=entry.pull_request_number,
+                    )
+            first_entry = entries[0]
+            if first_entry.recorded_candidate_parent_sha != first_entry.expected_base_sha:
+                raise MergeTrainHistoricalCompletionProofError(
+                    status="unsupported",
+                    reason_code="plan_invalid",
+                    pull_request_number=first_entry.pull_request_number,
+                )
+            expected_base_sha = first_entry.expected_base_sha
+            for entry in entries:
+                if entry.expected_base_sha != expected_base_sha:
+                    raise MergeTrainHistoricalCompletionProofError(
+                        status="unsupported",
+                        reason_code="plan_invalid",
+                        pull_request_number=entry.pull_request_number,
+                    )
+        except MergeTrainHistoricalCompletionProofError:
+            raise
+        except (MergeTrainGitHubError, TypeError, ValueError) as error:
+            raise MergeTrainHistoricalCompletionProofError(
+                status="unsupported", reason_code="plan_invalid"
+            ) from error
+
+        try:
+            observed_base_sha, observed_base_tree_sha = _base_branch_identity(
+                transport=self.transport,
+                repository_path=repository_path,
+                base_branch=landing_plan.base_branch,
+            )
+        except MergeTrainGitHubError as error:
+            raise _historical_provider_error(error) from error
+
+        rolling_parent_sha = first_entry.expected_base_sha
+        rolling_parent_tree_sha = first_entry.recorded_candidate_parent_tree_sha
+        evidence: list[MergeTrainHistoricalCompletionEntryEvidence] = []
+        for entry in entries:
+            try:
+                recovered = self._already_merged_landing_entry(
+                    repository_path=repository_path,
+                    entry=entry,
+                    expected_base_ref=landing_plan.base_branch,
+                    expected_rolling_base_sha=rolling_parent_sha,
+                    expected_rolling_base_tree_sha=rolling_parent_tree_sha,
+                )
+            except MergeTrainGitHubError as error:
+                raise _historical_provider_error(
+                    error, pull_request_number=entry.pull_request_number
+                ) from error
+            if recovered is None:
+                raise MergeTrainHistoricalCompletionProofError(
+                    status="unsupported",
+                    reason_code="plan_unmerged",
+                    pull_request_number=entry.pull_request_number,
+                )
+            if recovered.merge_commit_tree_sha != entry.recorded_candidate_result_tree_sha:
+                raise MergeTrainHistoricalCompletionProofError(
+                    status="unsupported",
+                    reason_code="provider_binding_mismatch",
+                    pull_request_number=entry.pull_request_number,
+                )
+            try:
+                contained = _branch_contains_commit_at_pinned_base(
+                    transport=self.transport,
+                    repository_path=repository_path,
+                    merge_commit_sha=recovered.merge_commit_sha,
+                    pinned_base_sha=observed_base_sha,
+                )
+            except MergeTrainGitHubError as error:
+                raise _historical_provider_error(
+                    error, pull_request_number=entry.pull_request_number
+                ) from error
+            if not contained:
+                raise MergeTrainHistoricalCompletionProofError(
+                    status="unsupported",
+                    reason_code="base_not_contains_merge",
+                    pull_request_number=entry.pull_request_number,
+                )
+            evidence.append(
+                MergeTrainHistoricalCompletionEntryEvidence(
+                    pull_request_number=entry.pull_request_number,
+                    position=entry.position,
+                    expected_head_sha=entry.expected_head_sha,
+                    expected_head_tree_sha=entry.expected_head_tree_sha,
+                    expected_base_sha=entry.expected_base_sha,
+                    expected_parent_tree_sha=entry.recorded_candidate_parent_tree_sha,
+                    expected_result_tree_sha=entry.recorded_candidate_result_tree_sha,
+                    observed_head_sha=recovered.landed_head_sha,
+                    observed_head_tree_sha=recovered.landed_head_tree_sha,
+                    observed_merge_commit_sha=recovered.merge_commit_sha,
+                    observed_merge_commit_tree_sha=recovered.merge_commit_tree_sha,
+                    observed_parent_sha=rolling_parent_sha,
+                    observed_parent_tree_sha=rolling_parent_tree_sha,
+                    base_contains_merge_commit=True,
+                )
+            )
+            rolling_parent_sha = recovered.merge_commit_sha
+            rolling_parent_tree_sha = recovered.merge_commit_tree_sha
+
+        try:
+            final_observed_base_sha, final_observed_base_tree_sha = _base_branch_identity(
+                transport=self.transport,
+                repository_path=repository_path,
+                base_branch=landing_plan.base_branch,
+            )
+        except MergeTrainGitHubError as error:
+            raise _historical_provider_error(error) from error
+        if (
+            final_observed_base_sha != observed_base_sha
+            or final_observed_base_tree_sha != observed_base_tree_sha
+        ):
+            raise MergeTrainHistoricalCompletionProofError(
+                status="indeterminate", reason_code="target_moved"
+            )
+        return MergeTrainHistoricalCompletionProviderEvidence(
+            observed_at=observed_at,
+            observed_base_sha=observed_base_sha,
+            observed_base_tree_sha=observed_base_tree_sha,
+            final_observed_base_sha=final_observed_base_sha,
+            entries=tuple(evidence),
         )
 
     @property
@@ -1748,6 +1956,71 @@ def _recorded_candidate_step_is_no_op(entry: MergeTrainBatchLandingEntry) -> boo
         entry.recorded_candidate_parent_sha == entry.recorded_candidate_result_sha
         and entry.recorded_candidate_parent_tree_sha == entry.recorded_candidate_result_tree_sha
     )
+
+
+def _historical_provider_error(
+    error: MergeTrainGitHubError, *, pull_request_number: int | None = None
+) -> MergeTrainHistoricalCompletionProofError:
+    if isinstance(error, MergeTrainGitHubStaleHeadError):
+        reason_code: HistoricalCompletionProofReason = "provider_binding_mismatch"
+        status: HistoricalCompletionProofStatus = "unsupported"
+    elif error.status_code is not None or isinstance(
+        error.__cause__, (OSError, TimeoutError, URLError)
+    ):
+        reason_code = "provider_unavailable"
+        status = "indeterminate"
+    else:
+        reason_code = "provider_response_malformed"
+        status = "indeterminate"
+    return MergeTrainHistoricalCompletionProofError(
+        status=status,
+        reason_code=reason_code,
+        pull_request_number=pull_request_number,
+    )
+
+
+def _branch_contains_commit_at_pinned_base(
+    *,
+    transport: MergeTrainGitHubTransport,
+    repository_path: str,
+    merge_commit_sha: str,
+    pinned_base_sha: str,
+) -> bool:
+    normalized_merge_sha = quote(
+        _required_value(merge_commit_sha, "Historical completion merge SHA is required."),
+        safe="",
+    )
+    normalized_base_sha = quote(
+        _required_value(pinned_base_sha, "Historical completion pinned base SHA is required."),
+        safe="",
+    )
+    payload = _json_object(
+        transport.request(
+            method="GET",
+            path=f"/repos/{repository_path}/compare/{normalized_merge_sha}...{normalized_base_sha}",
+        ),
+        "GitHub historical completion compare response",
+    )
+    status = _required_text(
+        payload.get("status"), "GitHub historical completion compare status is required."
+    )
+    if status not in {"ahead", "identical", "behind", "diverged"}:
+        raise MergeTrainGitHubError("GitHub historical completion compare status is unsupported.")
+    merge_base = _json_object(
+        payload.get("merge_base_commit"),
+        "GitHub historical completion merge base response",
+    )
+    merge_base_sha = _required_text(
+        merge_base.get("sha"),
+        "GitHub historical completion merge base SHA is required.",
+    )
+    if status in {"ahead", "identical"}:
+        if merge_base_sha != merge_commit_sha:
+            raise MergeTrainGitHubError(
+                "GitHub historical completion compare merge base was inconsistent."
+            )
+        return True
+    return False
 
 
 def _validated_model_update(model: ModelT, **updates: object) -> ModelT:

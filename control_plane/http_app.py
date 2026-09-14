@@ -358,9 +358,15 @@ from control_plane.merge_train_controller_run_once import (
     require_merge_train_controller_state_record_store,
 )
 from control_plane.merge_train_github import (
+    GitHubMergeTrainClient,
     MergeTrainGitHubError,
     MergeTrainGitHubStaleHeadError,
     UrllibMergeTrainGitHubTransport,
+)
+from control_plane.merge_train_historical_completion import (
+    HistoricalCompletionPreflightResponse,
+    HistoricalCompletionPreflightResult,
+    assess_merge_train_historical_completion,
 )
 from control_plane.merge_train_pr_feedback import (
     MergeTrainPrFeedbackEnvelope,
@@ -5905,7 +5911,7 @@ def create_launchplane_fastapi_app(
         identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
-    ) -> AcceptedEvidenceResponse | JSONResponse:
+    ) -> AcceptedEvidenceResponse | HistoricalCompletionPreflightResponse | JSONResponse:
         trace_id = next_trace_id()
         try:
             raw_payload = await request.json()
@@ -5934,9 +5940,23 @@ def create_launchplane_fastapi_app(
                 message=message,
             ) from error
 
+        if controller_request.historical_completion is not None and controller_request.mutate:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "status": "rejected",
+                    "trace_id": trace_id,
+                    "error": {
+                        "code": "historical_completion_recovery_not_enabled",
+                        "message": "Historical completion currently supports read-only preflight only.",
+                    },
+                    "details": {"retryable": False, "mutation_enabled": False},
+                },
+            )
+
         normalized_idempotency_key = idempotency_key.strip()
         payload_fingerprint = build_request_fingerprint(raw_payload)
-        if normalized_idempotency_key:
+        if normalized_idempotency_key and controller_request.historical_completion is None:
             (
                 normalized_idempotency_key,
                 payload_fingerprint,
@@ -5997,6 +6017,28 @@ def create_launchplane_fastapi_app(
                 trace_id=trace_id,
                 code="github_token_not_configured",
                 message="Configured merge train GitHub token is not available.",
+            )
+        if controller_request.historical_completion is not None:
+            preflight = assess_merge_train_historical_completion(
+                store=record_store,
+                repository=controller_request.repository,
+                base_branch=controller_request.base_branch,
+                selector=controller_request.historical_completion,
+                generated_at=utc_now_timestamp(),
+                github_client=GitHubMergeTrainClient(
+                    transport=UrllibMergeTrainGitHubTransport(
+                        token=token,
+                        api_base_url=controller_request.github_api_base_url,
+                    ),
+                ),
+            )
+            return HistoricalCompletionPreflightResponse(
+                trace_id=trace_id,
+                result=HistoricalCompletionPreflightResult(
+                    repository=controller_request.repository,
+                    base_branch=controller_request.base_branch,
+                    historical_completion_preflight=preflight,
+                ),
             )
         try:
             candidate_store = require_merge_train_batch_candidate_record_store(record_store)
@@ -23852,7 +23894,7 @@ def create_launchplane_fastapi_app(
         write_merge_train_controller_run_once,
         methods=["POST"],
         status_code=202,
-        response_model=AcceptedEvidenceResponse,
+        response_model=HistoricalCompletionPreflightResponse | AcceptedEvidenceResponse,
         response_model_exclude_none=True,
         openapi_extra={
             "requestBody": {
