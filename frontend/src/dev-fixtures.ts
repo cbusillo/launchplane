@@ -1627,6 +1627,7 @@ export function mergeTrainStatusForFixture(
   const reconciliationRequired = fixture === "missing";
   return {
     controller_status: {
+      reconciliation_diagnostics: [],
       admission: {
         base_branch: baseBranch,
         controller_action: reconciliationRequired
