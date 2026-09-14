@@ -21,6 +21,7 @@ class LaunchplaneSelfDeployWorkflowTests(unittest.TestCase):
     )
     _ORDINARY_WORKER_COMPOSE_TARGET = {
         "sourceType": "git",
+        "composeType": "docker-compose",
         "composePath": "./docker-compose.yml",
         "command": "",
     }
@@ -191,6 +192,43 @@ class LaunchplaneSelfDeployWorkflowTests(unittest.TestCase):
             update_env_mock.call_args.kwargs["env_text"],
         )
 
+    def test_execute_preserves_existing_one_replica_without_updating_target_env(self) -> None:
+        request = LaunchplaneSelfDeployRequest.model_validate(
+            {
+                "target_type": "compose",
+                "target_id": "compose-123",
+                "image_reference": "old",
+            }
+        )
+        target_env = self._BOOTSTRAP_ENV.replace(
+            "DOCKER_IMAGE_REFERENCE=old\n",
+            "DOCKER_IMAGE_REFERENCE=old\nLAUNCHPLANE_ORDINARY_AGENT_WORKER_REPLICAS=1\n",
+        )
+        with (
+            patch(
+                "control_plane.workflows.launchplane_self_deploy.dokploy_source.read_dokploy_config",
+                return_value=("https://dokploy.example.com", "token-123"),
+            ),
+            patch(
+                "control_plane.workflows.launchplane_self_deploy.dokploy_api.fetch_dokploy_target_payload",
+                return_value=self._compose_target(target_env),
+            ),
+            patch(
+                "control_plane.workflows.launchplane_self_deploy.dokploy_api.update_dokploy_target_env"
+            ) as update_env_mock,
+            patch(
+                "control_plane.workflows.launchplane_self_deploy.dokploy_api.trigger_deployment"
+            ) as trigger_mock,
+        ):
+            result = execute_launchplane_self_deploy(
+                control_plane_root_path=Path("."), request=request
+            )
+
+        self.assertEqual(result.ordinary_agent_worker_replicas_previous, "1")
+        self.assertEqual(result.ordinary_agent_worker_replicas_desired, "1")
+        update_env_mock.assert_not_called()
+        trigger_mock.assert_called_once()
+
     def test_execute_rejects_incompatible_worker_compose_target_before_mutation(self) -> None:
         request = LaunchplaneSelfDeployRequest.model_validate(
             {
@@ -207,8 +245,7 @@ class LaunchplaneSelfDeployWorkflowTests(unittest.TestCase):
             ),
             patch(
                 "control_plane.workflows.launchplane_self_deploy.dokploy_api.fetch_dokploy_target_payload",
-                return_value={"env": self._BOOTSTRAP_ENV, "sourceType": "raw"},
-            ),
+            ) as fetch_target_mock,
             patch(
                 "control_plane.workflows.launchplane_self_deploy.dokploy_api.update_dokploy_target_env"
             ) as update_env_mock,
@@ -216,10 +253,25 @@ class LaunchplaneSelfDeployWorkflowTests(unittest.TestCase):
                 "control_plane.workflows.launchplane_self_deploy.dokploy_api.trigger_deployment"
             ) as trigger_mock,
         ):
-            with self.assertRaisesRegex(ValueError, "compose target is incompatible"):
-                execute_launchplane_self_deploy(control_plane_root_path=Path("."), request=request)
-        update_env_mock.assert_not_called()
-        trigger_mock.assert_not_called()
+            for override in (
+                {"sourceType": "raw"},
+                {"composeType": "stack"},
+                {"composeType": ""},
+                {"composePath": "./other-compose.yml"},
+                {"command": "docker compose up --scale launchplane-ordinary-agent-workers=2"},
+                {"env": self._BOOTSTRAP_ENV + "COMPOSE_FILE=other-compose.yml\n"},
+            ):
+                with self.subTest(override=override):
+                    fetch_target_mock.return_value = {
+                        **self._compose_target(self._BOOTSTRAP_ENV),
+                        **override,
+                    }
+                    with self.assertRaisesRegex(ValueError, "compose target is incompatible"):
+                        execute_launchplane_self_deploy(
+                            control_plane_root_path=Path("."), request=request
+                        )
+                    update_env_mock.assert_not_called()
+                    trigger_mock.assert_not_called()
 
     def test_execute_updates_target_env_and_triggers_deployment(self) -> None:
         request = LaunchplaneSelfDeployRequest.model_validate(

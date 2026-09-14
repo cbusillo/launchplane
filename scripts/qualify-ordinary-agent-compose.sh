@@ -93,7 +93,8 @@ other_containers() {
 
 render_fixture absent
 "${compose[@]}" up --detach --no-build --pull never --wait --wait-timeout 30
-test -z "$("${compose[@]}" ps --all --quiet "$worker")"
+default_worker_ids="$("${compose[@]}" ps --all --quiet "$worker")"
+test -z "$default_worker_ids"
 before="$(other_containers)"
 expected_others="$(jq --arg worker "$worker" '[.services | keys[] | select(. != $worker)] | length' "$fixture_dir/compose.json")"
 test "$(jq length <<<"$before")" = "$expected_others"
@@ -109,7 +110,9 @@ test "$(other_containers)" = "$before"
 
 render_fixture 0
 "${compose[@]}" up --detach --no-build --pull never --wait --wait-timeout 30
-test -z "$("${compose[@]}" ps --all --quiet "$worker")"
-test -z "$(docker ps --all --quiet --filter "id=$worker_id")"
+disabled_worker_ids="$("${compose[@]}" ps --all --quiet "$worker")"
+test -z "$disabled_worker_ids"
+retained_worker_ids="$(docker ps --all --quiet --filter "id=$worker_id")"
+test -z "$retained_worker_ids"
 test "$(other_containers)" = "$before"
 printf '%s\n' '{"ordinary_worker_compose":"passed","default_absent":true,"enabled_running":true,"disabled_container_removed":true,"unrelated_fixture_containers_preserved":true}'

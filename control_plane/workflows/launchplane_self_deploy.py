@@ -289,7 +289,7 @@ def execute_launchplane_self_deploy(
     )
     updated_env_map = dokploy_api.parse_dokploy_env_text(updated_env_text)
     _validate_bootstrap_target_env(updated_env_map)
-    if updated_env_text != raw_env_text:
+    if updated_env_map != previous_env_map:
         dokploy_api.update_dokploy_target_env(
             host=host,
             token=token,
@@ -356,9 +356,15 @@ def _validate_ordinary_agent_worker_compose_target(
     *, target_payload: dokploy_api.JsonObject, env_map: dict[str, str]
 ) -> None:
     source_type = str(target_payload.get("sourceType") or "").strip()
+    compose_type = str(target_payload.get("composeType") or "").strip()
     compose_path = str(target_payload.get("composePath") or "").strip()
     command = str(target_payload.get("command") or "").strip()
-    if source_type != "git" or compose_path != "./docker-compose.yml" or command:
+    if (
+        source_type != "git"
+        or compose_type != "docker-compose"
+        or compose_path != "./docker-compose.yml"
+        or command
+    ):
         raise ValueError(
             "Launchplane self deploy ordinary-agent worker compose target is incompatible."
         )

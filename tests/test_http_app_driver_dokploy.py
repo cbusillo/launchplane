@@ -746,6 +746,7 @@ class FastApiLaunchplaneSelfDeployTests(unittest.IsolatedAsyncioTestCase):
     def _compose_target(env: str) -> dict[str, str]:
         return {
             "sourceType": "git",
+            "composeType": "docker-compose",
             "composePath": "./docker-compose.yml",
             "command": "",
             "env": env,

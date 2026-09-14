@@ -31,8 +31,9 @@ expected-state change among absent, zero, and one replicas; ordinary OAuth
 environment updates cannot control it. Normal deployments preserve that value.
 A separately reviewed enablement must establish the required readiness evidence
 first; source presence and a zero replica deployment do not start a process.
-The topology control accepts only the reviewed standard Git Compose path with
-no provider custom command or Compose-file/profile/project overrides. A normal
+The topology control accepts only the reviewed standard Git Compose path and
+Docker Compose engine, with no provider custom command or Compose-file/profile/
+project overrides. Swarm stack mode is not supported by this control. A normal
 full-stack deploy may still recreate other Launchplane services that share the
 target environment; it does not claim their container identities remain fixed.
 
