@@ -132,12 +132,47 @@ class MergeTrainHistoricalCompletionProviderEvidence(BaseModel):
         return self
 
 
-class MergeTrainHistoricalCompletionEvidence(BaseModel):
-    """Inert reader shape for a future typed historical disposition."""
+class MergeTrainHistoricalDispositionAuthorization(BaseModel):
+    """Authority used to record the observation, not to perform the historical merge."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal[1] = 1
+    actor_scope: str
+    idempotency_key: str
+    recorded_at: str
+    action: str
+    product: str
+    context: str
+    authz_policy_record_id: str
+    authz_policy_revision: StrictInt = Field(ge=1)
+    authz_policy_sha256: str
+    merge_policy_record_id: str
+    merge_policy_sha256: str
+
+    @field_validator(
+        "actor_scope",
+        "idempotency_key",
+        "recorded_at",
+        "action",
+        "product",
+        "context",
+        "authz_policy_record_id",
+        "authz_policy_sha256",
+        "merge_policy_record_id",
+        "merge_policy_sha256",
+        mode="before",
+    )
+    @classmethod
+    def _validate_text(cls, value: object, info: ValidationInfo) -> str:
+        return _required_text(value, info.field_name)
+
+
+class MergeTrainHistoricalCompletionEvidence(BaseModel):
+    """Historical observation, with versioned attribution for a service disposition."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal[1, 2] = 1
     classification: Literal["observed_merged_without_admission"]
     authority_state: Literal["observation_only"]
     source_landing_plan_record_id: str
@@ -153,6 +188,20 @@ class MergeTrainHistoricalCompletionEvidence(BaseModel):
     policy_sha256: str
     trace_id: str
     provider_evidence: MergeTrainHistoricalCompletionProviderEvidence
+    disposition_authorization: MergeTrainHistoricalDispositionAuthorization | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+
+    @model_validator(mode="after")
+    def _validate_disposition_authorization(self) -> "MergeTrainHistoricalCompletionEvidence":
+        if (self.schema_version == 2) != (self.disposition_authorization is not None):
+            raise ValueError("historical evidence schema2 requires disposition authorization")
+        if (
+            self.disposition_authorization is not None
+            and self.disposition_authorization.merge_policy_sha256 != self.policy_sha256
+        ):
+            raise ValueError("disposition authority must match the historical merge policy")
+        return self
 
     @field_validator(
         "source_landing_plan_record_id",

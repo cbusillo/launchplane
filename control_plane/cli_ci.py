@@ -40,6 +40,8 @@ LOCAL_PROCESS_TERMINATE_SECONDS = 5.0
 POSTGRES_INTEGRATION_MODULES = (
     "tests.test_postgres_integration",
     "tests.test_solo_administration_confirmation_postgres",
+    "tests.test_merge_train_historical_disposition_postgres",
+    "tests.test_merge_train_historical_disposition_http",
 )
 
 

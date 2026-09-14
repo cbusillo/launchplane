@@ -850,8 +850,12 @@ evidence.
 An explicitly selected [historical-completion preflight](merge-train-historical-completion.md)
 on the existing controller route can verify the provider's exact merge evidence
 without advancing the controller. Its read-only result distinguishes positive
-proof from unsupported or indeterminate evidence. Historical retirement remains
-disabled; this preflight neither creates an admission nor releases a fence.
+proof from unsupported or indeterminate evidence; it neither creates an
+admission nor releases a fence. The native PostgreSQL path additionally supports
+an explicit atomic historical disposition under current repository service
+authority. It records the observation without inventing admission history and
+releases only the exact legacy fence. It does not enable ordinary-agent
+execution or alter the scheduler policy.
 
 The GitHub Actions scheduler in `.github/workflows/merge-train-runner.yml` reads
 authorized policy targets from the native FastAPI

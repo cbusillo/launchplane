@@ -53,12 +53,15 @@ record's batch before applying the 100-record limit. An oversized batch reports
 its evidence window. An initial candidate without a commit SHA may precede the
 materialized candidate, but conflicting materialized candidates are ambiguous.
 
-For each of at most 25 selected PRs, the preflight checks for an active stack
-whose root is that PR. This preserves the existing root-level check; it does not
-prove absence of overlap as a non-root stack member. A future disposition must
-address that boundary before claiming complete stack exclusion. The separate
-ordinary-target fence remains repository/base-wide. Repository names are
-normalized before every scoped read; branch case is preserved.
+For each of at most 25 selected PRs, the portable observational reader checks
+for an active stack whose root is that PR. The native PostgreSQL service path
+also validates every active stack in the target and excludes overlap as either
+a root or a member. Its queries have no capped history post-filter. It refuses
+any admission for a selected repository/base/PR, across all heads and lineages,
+and any ordinary effect for the target, including terminal effects. An ordinary
+controller or active progress binding also prevents recovery. Malformed or
+ambiguous target evidence fails closed. Repository names are normalized before
+every scoped read; branch case is preserved.
 
 Provider verification uses only GETs. It checks each PR's actual merged state,
 exact head and tree, merge parents, recorded candidate result tree, and
@@ -76,26 +79,64 @@ bounded evidence rather than provider exception text or Owner/review payloads.
 
 The preflight creates no controller lease, admission, outcome, run, disposition,
 or idempotency record; an `Idempotency-Key` header does not cache or replay it.
+The native path checks exactly one current DB merge-policy catalog and authz
+policy under their existing locks, before provider access, and rechecks the
+selected snapshot and exclusions after the provider proof. The catalog contains
+multiple repository policies; it remains one active record. Native recovery
+uses the public GitHub API adapter endpoint; a caller-selected endpoint cannot
+provide historical truth or receive the service credential.
+
 Normal requests without the selector retain their existing behavior and incur
-no new reads. Ordinary controller execution rejects the selector.
+no new reads. Ordinary-agent controller execution rejects the selector.
 
-## Mutation remains unavailable
+## Atomic historical disposition
 
-`historical_completion` with `mutate=true` returns non-retryable HTTP 409 with
-`historical_completion_recovery_not_enabled` before controller execution.
-Every preflight reports `mutation_enabled=false`, `disposition_supported=false`,
-and no admission, provider effect, or fence release. Eligibility is observational
-preparation, not approval of a write. Do not loop against the disabled capability.
+Native PostgreSQL supports the same explicit selector with `mutate=true` and a
+new `Idempotency-Key`. Filesystem and SQLite cannot apply this operation; there
+is no local-write fallback. A positive native dry-run reports
+`disposition_supported=true` and `mutation_enabled=true`, while
+`fence_released=false` and `admission_created=false`. These capability flags do
+not replace current authorization, positive evidence or operator intent.
 
-A future recovery must re-run the proof, record a truthful append-only
-observation, and release only the bound fence. Its reader must be deployed before
-the first new record is written. The optional record-level schema-v2
-`historical_completion` field provides that reader compatibility; existing
-generic writers reject creating or overwriting such records. No supported
-retirement writer is provided by this preflight slice. Pre-reader source is not
-a valid rollback target after a future schema-v2 historical record is written.
+Apply repeats fresh GET-only proof, then performs one transaction:
 
-The failed historical request must not be blindly replayed. Once a supported
-recovery records a disposition and fresh status proves fence release, later PRs
-still require fresh selection, checks, readiness, and admission. Candidate-ref
-cleanup, new merges, policy changes, and runtime activation are separate actions.
+1. Acquire the target controller advisory lock and row, then the authz
+   and merge-policy locks. Every supported admission, controller, progress,
+   stack and ordinary-effect writer takes the same controller lock, so their
+   writes cannot appear between the absence checks and commit.
+2. Revalidate the exact inactive reconcile-required controller, source landing
+   and candidate, current authority identities, and all absence conditions.
+3. Insert one deterministic historical successor, supersede only its exact
+   predecessor, release only that controller fence, and persist the completed
+   idempotency response in the same commit.
+
+The successor classifies the observation as `observed_merged_without_admission`
+with `authority_state=observation_only`. Its landing entries are `stale` and have
+no successful landing fields. Its typed evidence records the actual observed
+provider merge. Its disposition authorization identifies the caller who
+recorded the recovery, the key, DB recording time, and the exact authz and merge
+policy identities checked at commit. It makes no claim about who performed the
+historical merge or whether Launchplane authorized that merge.
+
+The transaction contains no provider I/O and uses short lock and statement
+timeouts. Contention or changed state returns a bounded conflict and leaves the
+fence intact. A failure before commit rolls back history, retirement, controller
+release and idempotency together. There is no separate pending reservation or
+lease to recover. A lost response after commit can be replayed with the same
+key: current authz and merge-policy locks protect that lookup, without requiring
+the original controller state. Revoked callers receive no cached evidence. A
+different key for an exact completed disposition reports `already_recorded`
+with its record ID and creates no additional record.
+
+Generic writers continue rejecting creation or overwrite of historical
+records. The record-level landing schema remains version 2. Its inner evidence
+version 2 requires disposition authorization; the reader still accepts older
+inner version 1 observations. **After the first version 2 evidence is written,
+the release containing this atomic disposition reader is the minimum compatible
+rollback release.** Deploy that reader before the first live apply.
+
+The failed historical merge request must not be blindly replayed. After fresh
+status proves the exact fence release, the controller treats this stale legacy
+landing as completed for its candidate and performs fresh selection. Later PRs
+still require current checks, readiness and admission. Candidate-ref cleanup,
+new merges, policy changes and runtime activation are separate actions.

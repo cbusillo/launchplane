@@ -368,6 +368,9 @@ from control_plane.merge_train_historical_completion import (
     HistoricalCompletionPreflightResult,
     assess_merge_train_historical_completion,
 )
+from control_plane.merge_train_historical_disposition_http import (
+    run_merge_train_historical_disposition,
+)
 from control_plane.merge_train_pr_feedback import (
     MergeTrainPrFeedbackEnvelope,
     build_merge_train_pr_feedback_record,
@@ -5940,6 +5943,20 @@ def create_launchplane_fastapi_app(
                 message=message,
             ) from error
 
+        if controller_request.historical_completion is not None and isinstance(
+            record_store, PostgresRecordStore
+        ):
+            return run_merge_train_historical_disposition(
+                envelope=controller_request,
+                identity=identity,
+                store=record_store,
+                idempotency_key=idempotency_key,
+                request_fingerprint=idempotency_request_fingerprint(
+                    route_path=_MERGE_TRAIN_CONTROLLER_RUN_ONCE_ROUTE, payload=raw_payload
+                ),
+                trace_id=trace_id,
+                generated_at=utc_now_timestamp(),
+            )
         if controller_request.historical_completion is not None and controller_request.mutate:
             return JSONResponse(
                 status_code=409,
