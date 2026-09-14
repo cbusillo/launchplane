@@ -2068,7 +2068,10 @@ test.describe("operator journeys", () => {
     await preparation
       .getByRole("button", { name: "Check setup prerequisites" })
       .click();
-    await expect(page.getByText("example/launchplane", { exact: true })).toBeVisible();
+    await expect(
+      preparation.getByRole("list", { name: "Configured repositories" })
+        .getByText("example/launchplane", { exact: true }),
+    ).toBeVisible();
     await expect(page.getByText("main", { exact: true })).toBeVisible();
     await expect(page.getByText("release", { exact: true })).toBeVisible();
     await expect(page.getByText("Missing branch configuration")).toBeVisible();

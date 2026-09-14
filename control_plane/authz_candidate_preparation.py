@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
 from typing import Final, Literal, assert_never
 
 from control_plane.contracts.ordinary_agent_activation import (
     OrdinaryAgentDeliveryActivationRecord,
 )
+from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
+from control_plane.contracts.repository_inventory import RepositoryInventoryRecord
 from control_plane.contracts.privileged_operation import (
     ORDINARY_AGENT_DELIVERY_ACTIVATION_APPROVE_ACTION,
     ORDINARY_AGENT_DELIVERY_ACTIVATION_CANCEL_ACTION,
@@ -14,6 +17,12 @@ from control_plane.contracts.privileged_operation import (
     ORDINARY_AGENT_DELIVERY_ACTIVATION_READ_ACTION,
     ORDINARY_AGENT_DELIVERY_ACTIVATION_REVOKE_ACTION,
     ManagedAuthzPolicySetProposalInput,
+    OrdinaryAgentDeliveryPolicyIntent,
+)
+from control_plane.contracts.ordinary_agent import (
+    OrdinaryAgentAction,
+    OrdinaryAgentPolicyRule,
+    OrdinaryAgentTarget,
 )
 from control_plane.service_auth import GitHubHumanPolicyRule, LaunchplaneAuthzPolicy
 
@@ -75,6 +84,119 @@ class AuthorizationCandidatePreparationError(ValueError):
     ) -> None:
         super().__init__(message)
         self.reason_code = reason_code
+
+
+OrdinaryAgentPolicyPreparationReason = Literal[
+    "ordinary_agent_policy_schema_unavailable",
+    "ordinary_agent_target_unavailable",
+    "ordinary_agent_rule_conflict",
+]
+
+
+class OrdinaryAgentPolicyPreparationError(ValueError):
+    """A safe, authored diagnostic for first-client policy preparation."""
+
+    def __init__(self, reason_code: OrdinaryAgentPolicyPreparationReason, message: str) -> None:
+        super().__init__(message)
+        self.reason_code = reason_code
+
+
+ORDINARY_AGENT_DELIVERY_POLICY_MANAGED_SET_PREFIX = "ordinary-agent.delivery."
+ORDINARY_AGENT_DELIVERY_POLICY_MANAGED_RULE_ID = "delivery"
+ORDINARY_AGENT_DELIVERY_POLICY_ACTIONS: tuple[OrdinaryAgentAction, ...] = (
+    "self_read",
+    "preflight",
+    "guarded_merge",
+)
+
+
+def ordinary_agent_delivery_policy_managed_set_id(principal_id: str) -> str:
+    digest = hashlib.sha256(f"ordinary-agent-policy:{principal_id}".encode()).hexdigest()[:48]
+    return f"{ORDINARY_AGENT_DELIVERY_POLICY_MANAGED_SET_PREFIX}{digest}"
+
+
+def compile_ordinary_agent_delivery_policy_candidate(
+    *,
+    current_policy: LaunchplaneAuthzPolicy,
+    intent: OrdinaryAgentDeliveryPolicyIntent,
+    inventory: RepositoryInventoryRecord,
+    merge_policy: MergeTrainPolicyRecord,
+) -> tuple[Literal["planned", "already_satisfied"], ManagedAuthzPolicySetProposalInput | None]:
+    """Compile one server-resolved ordinary rule into the existing policy plan."""
+    if current_policy.schema_version not in (2, 3):
+        raise OrdinaryAgentPolicyPreparationError(
+            "ordinary_agent_policy_schema_unavailable",
+            "Client access requires authorization policy version 2 or 3.",
+        )
+    repository_id = int(intent.repository_id)
+    if inventory.inventory_state != "tracked" or int(inventory.repository_id) != repository_id:
+        raise OrdinaryAgentPolicyPreparationError(
+            "ordinary_agent_target_unavailable",
+            "The selected project is no longer tracked. Check setup prerequisites again.",
+        )
+    repository = inventory.repository
+    configured = tuple(
+        target
+        for target in merge_policy.policy.policies
+        if target.repository.casefold() == repository.casefold()
+        and target.base_branch == intent.base_branch
+    )
+    if len(configured) != 1:
+        raise OrdinaryAgentPolicyPreparationError(
+            "ordinary_agent_target_unavailable",
+            "The selected delivery branch is not configured. Check setup prerequisites and choose a recorded branch.",
+        )
+    managed_set_id = ordinary_agent_delivery_policy_managed_set_id(intent.principal_id)
+    managed_rule_id = ORDINARY_AGENT_DELIVERY_POLICY_MANAGED_RULE_ID
+    target = OrdinaryAgentTarget(
+        repository_id=repository_id,
+        repository=repository,
+        base_branch=intent.base_branch,
+    )
+    desired_rule = OrdinaryAgentPolicyRule(
+        managed_set_id=managed_set_id,
+        managed_rule_id=managed_rule_id,
+        principal_id=intent.principal_id,
+        target=target,
+        actions=ORDINARY_AGENT_DELIVERY_POLICY_ACTIONS,
+    )
+    occupied_set = tuple(
+        rule
+        for _principal_type, rule in _rules(current_policy)
+        if getattr(rule, "managed_set_id", None) == managed_set_id
+    )
+    if occupied_set and occupied_set != (desired_rule,):
+        raise OrdinaryAgentPolicyPreparationError(
+            "ordinary_agent_rule_conflict",
+            "This client identity already has conflicting access. Prepare a new client setup.",
+        )
+    existing = tuple(
+        rule for rule in current_policy.ordinary_agents if rule.principal_id == intent.principal_id
+    )
+    if existing:
+        if len(existing) == 1 and existing[0] == desired_rule:
+            return "already_satisfied", None
+        raise OrdinaryAgentPolicyPreparationError(
+            "ordinary_agent_rule_conflict",
+            "This client identity already has different access. Prepare a new client setup.",
+        )
+    desired_policy = LaunchplaneAuthzPolicy(
+        schema_version=3,
+        ordinary_agents=(desired_rule,),
+    )
+    migration: Literal["reject", "migrate_v2_to_v3"] = (
+        "migrate_v2_to_v3" if current_policy.schema_version == 2 else "reject"
+    )
+    return (
+        "planned",
+        ManagedAuthzPolicySetProposalInput(
+            managed_set_id=managed_set_id,
+            desired_policy=desired_policy,
+            schema_migration=migration,
+            reason=f"Prepare ordinary-agent delivery for {intent.client_label}.",
+            related_issue="#2423",
+        ),
+    )
 
 
 def _rules(policy: LaunchplaneAuthzPolicy) -> tuple[tuple[str, object], ...]:

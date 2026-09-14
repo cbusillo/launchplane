@@ -213,6 +213,9 @@ UI_OPENAPI_READ_OPERATIONS: dict[str, str] = {
 
 
 UI_OPENAPI_WRITE_OPERATIONS: dict[str, str] = {
+    "/v1/privileged-operations/authorization-candidates/ordinary-agent-delivery/prepare": (
+        "prepare_ordinary_agent_delivery_policy"
+    ),
     "/v1/privileged-operations/merge-train-targets/prepare": (
         "prepare_ordinary_agent_merge_train_target"
     ),

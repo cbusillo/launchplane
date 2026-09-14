@@ -838,6 +838,7 @@ export type ManagedAuthzPolicySetProposalInputOutput = {
     administrator_quorum_change: number | null;
     desired_policy: LaunchplaneAuthzPolicyOutput;
     managed_set_id: string;
+    ordinary_agent_preparation_context?: ManagedOrdinaryAgentPolicyPreparationContext | null;
     reason: string;
     related_issue: string;
     schema_migration?: 'reject' | 'migrate_v2_to_v3';
@@ -893,6 +894,21 @@ export type ManagedMergeTrainPolicyPreparationContextOutput = {
     intent: OrdinaryAgentMergeTrainTargetIntentOutput;
     schema_version: number;
     target_policy_key: string;
+};
+
+export type ManagedOrdinaryAgentPolicyPreparationContext = {
+    expected_inventory_record_id: string;
+    expected_inventory_revision: number;
+    expected_inventory_sha256: string;
+    expected_merge_policy_record_id: string;
+    expected_merge_policy_sha256: string;
+    expected_policy_record_id: string;
+    expected_policy_revision: number;
+    expected_policy_sha256: string;
+    intent: OrdinaryAgentDeliveryPolicyIntent;
+    managed_rule_id: string;
+    managed_set_id: string;
+    schema_version: number;
 };
 
 export type ManagedSecretReencryptionHumanEvidence = {
@@ -1608,6 +1624,13 @@ export type OrdinaryAgentDeliveryInventoryReference = {
     state: 'tracked';
 };
 
+export type OrdinaryAgentDeliveryPolicyIntent = {
+    base_branch: string;
+    client_label: string;
+    principal_id: string;
+    repository_id: string;
+};
+
 export type OrdinaryAgentDeliveryPolicyPackageReference = {
     candidate_policy_sha256: string;
     desired_set_sha256: string;
@@ -1615,6 +1638,19 @@ export type OrdinaryAgentDeliveryPolicyPackageReference = {
     plan_sha256: string;
     policy_operation_id: string;
     request_sha256: string;
+};
+
+export type OrdinaryAgentDeliveryPolicyPrepareEnvelope = {
+    intent: OrdinaryAgentDeliveryPolicyIntent;
+    schema_version?: 1;
+    source_event_id: string;
+};
+
+export type OrdinaryAgentDeliveryPolicyPrepareResponse = {
+    operation_id?: string | null;
+    principal_id: string;
+    state: 'planned' | 'already_satisfied';
+    trace_id: string;
 };
 
 export type OrdinaryAgentDeliveryRuntimeCapabilityEvidence = {
@@ -2332,7 +2368,7 @@ export type PrivilegedOperationSemanticReview = {
     rollback: PrivilegedOperationSemanticReviewRollback;
     safety_class: 'secret_backed' | 'policy_admin';
     schema_version: number;
-    title: 'Managed-secret re-encryption review' | 'Managed authorization policy review' | 'Review agent delivery administration' | 'Review administrator product evidence access' | 'Managed merge-train policy review' | 'Review agent delivery setup' | 'Review stopping agent delivery';
+    title: 'Managed-secret re-encryption review' | 'Managed authorization policy review' | 'Review agent delivery administration' | 'Review administrator product evidence access' | 'Review client delivery access' | 'Managed merge-train policy review' | 'Review agent delivery setup' | 'Review stopping agent delivery';
 };
 
 export type PrivilegedOperationSemanticReviewActivityEntry = {
@@ -5183,6 +5219,31 @@ export type WriteOwnerAcceptanceEventResponses = {
 };
 
 export type WriteOwnerAcceptanceEventResponse = WriteOwnerAcceptanceEventResponses[keyof WriteOwnerAcceptanceEventResponses];
+
+export type PrepareOrdinaryAgentDeliveryPolicyData = {
+    body: OrdinaryAgentDeliveryPolicyPrepareEnvelope;
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/privileged-operations/authorization-candidates/ordinary-agent-delivery/prepare';
+};
+
+export type PrepareOrdinaryAgentDeliveryPolicyErrors = {
+    403: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type PrepareOrdinaryAgentDeliveryPolicyError = PrepareOrdinaryAgentDeliveryPolicyErrors[keyof PrepareOrdinaryAgentDeliveryPolicyErrors];
+
+export type PrepareOrdinaryAgentDeliveryPolicyResponses = {
+    200: OrdinaryAgentDeliveryPolicyPrepareResponse;
+};
+
+export type PrepareOrdinaryAgentDeliveryPolicyResponse = PrepareOrdinaryAgentDeliveryPolicyResponses[keyof PrepareOrdinaryAgentDeliveryPolicyResponses];
 
 export type PrepareAuthorizationCandidateData = {
     body: AuthorizationCandidatePrepareEnvelope;

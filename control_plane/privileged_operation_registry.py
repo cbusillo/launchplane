@@ -12,11 +12,19 @@ from control_plane.authz_grant_service import (
     AuthzPolicyConflictError,
     plan_managed_authz_policy_reconcile,
 )
+from control_plane.authz_candidate_preparation import (
+    OrdinaryAgentPolicyPreparationError,
+    compile_ordinary_agent_delivery_policy_candidate,
+    ORDINARY_AGENT_DELIVERY_POLICY_MANAGED_RULE_ID,
+    ordinary_agent_delivery_policy_managed_set_id,
+)
+from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.merge_train_policy import (
     MergeTrainPolicyRecord,
     normalize_merge_train_policy_timestamp,
 )
+from control_plane.ordinary_agent_delivery_authorization_inputs import _read_current_inventory
 from control_plane.contracts.privileged_operation import (
     AUTHZ_POLICY_OPERATION_APPROVE_ACTION,
     AUTHZ_POLICY_OPERATION_CANCEL_ACTION,
@@ -30,6 +38,7 @@ from control_plane.contracts.privileged_operation import (
     MERGE_TRAIN_POLICY_OPERATION_REVOKE_ACTION,
     MERGE_TRAIN_POLICY_OPERATION_SUMMARY_READ_ACTION,
     ManagedAuthzPolicySetHumanEvidence,
+    ManagedOrdinaryAgentPolicyPreparationContext,
     ManagedAuthzPolicySetProposalInput,
     ManagedMergeTrainPolicyImportHumanEvidence,
     ManagedMergeTrainPolicyImportProposalInput,
@@ -120,6 +129,10 @@ class PrivilegedOperationPlannerError(RuntimeError):
 
 class PrivilegedOperationPlanningStoreError(TypeError):
     pass
+
+
+class PrivilegedOperationPlanningConflictError(PrivilegedOperationPlannerError):
+    """The prepared request no longer matches fresh server-owned state."""
 
 
 PrivilegedOperationPlanner = Callable[
@@ -294,6 +307,9 @@ def plan_managed_authz_policy_set(
         raise PrivilegedOperationPlanningStoreError(
             "Managed authz policy planning requires authorization policy storage."
         )
+    preparation = request.ordinary_agent_preparation_context
+    if preparation is not None:
+        _validate_ordinary_agent_policy_preparation(record_store, request, preparation)
     try:
         _, _, _, diff = plan_managed_authz_policy_reconcile(
             record_store=cast(Any, record_store),
@@ -311,6 +327,97 @@ def plan_managed_authz_policy_set(
         plan_digest=diff.plan_sha256,
         diff=diff,
     )
+
+
+def _validate_ordinary_agent_policy_preparation(
+    record_store: object,
+    request: ManagedAuthzPolicySetProposalInput,
+    preparation: ManagedOrdinaryAgentPolicyPreparationContext,
+) -> None:
+    """Fence the dedicated preparation against fresh policy and setup inputs."""
+    active_records = tuple(
+        getattr(record_store, "list_authz_policy_records")(status="active", limit=2)
+    )
+    if len(active_records) != 1:
+        raise PrivilegedOperationPlanningConflictError("Ordinary-agent policy baseline drifted.")
+    active = LaunchplaneAuthzPolicyRecord.model_validate(active_records[0])
+    if (
+        active.record_id != preparation.expected_policy_record_id
+        or active.revision != preparation.expected_policy_revision
+        or active.policy_sha256 != preparation.expected_policy_sha256
+    ):
+        raise PrivilegedOperationPlanningConflictError("Ordinary-agent policy baseline drifted.")
+    if request.schema_migration != (
+        "migrate_v2_to_v3" if active.policy.schema_version == 2 else "reject"
+    ):
+        raise PrivilegedOperationPlanningConflictError(
+            "Ordinary-agent policy migration mode drifted."
+        )
+    inventory_state, inventory, _diagnostics = _read_current_inventory(record_store)
+    if inventory_state == "unavailable":
+        raise PrivilegedOperationPlanningStoreError("Repository inventory is unavailable.")
+    if inventory_state != "complete":
+        raise PrivilegedOperationPlanningConflictError(
+            "Repository inventory is incomplete or conflicting. Check setup prerequisites again."
+        )
+    current = tuple(
+        item for item in inventory if item.repository_id == preparation.intent.repository_id
+    )
+    if (
+        len(current) != 1
+        or current[0].record_id != preparation.expected_inventory_record_id
+        or current[0].inventory_revision != preparation.expected_inventory_revision
+        or current[0].inventory_digest != preparation.expected_inventory_sha256
+        or current[0].inventory_state != "tracked"
+    ):
+        raise PrivilegedOperationPlanningConflictError("Ordinary-agent inventory baseline drifted.")
+    merge_reader = getattr(record_store, "list_merge_train_policy_records", None)
+    if not callable(merge_reader):
+        raise PrivilegedOperationPlanningStoreError("Ordinary-agent merge policy is unavailable.")
+    merge_records = tuple(merge_reader(status="active", limit=2))
+    if len(merge_records) != 1:
+        raise PrivilegedOperationPlanningConflictError(
+            "Ordinary-agent merge policy baseline is unavailable."
+        )
+    merge = MergeTrainPolicyRecord.model_validate(merge_records[0])
+    if (
+        merge.record_id != preparation.expected_merge_policy_record_id
+        or merge.policy_sha256 != preparation.expected_merge_policy_sha256
+    ):
+        raise PrivilegedOperationPlanningConflictError(
+            "Ordinary-agent merge policy baseline drifted."
+        )
+    if preparation.managed_set_id != ordinary_agent_delivery_policy_managed_set_id(
+        preparation.intent.principal_id
+    ):
+        raise PrivilegedOperationPlanningConflictError(
+            "Ordinary-agent managed set identity is invalid."
+        )
+    if preparation.managed_rule_id != ORDINARY_AGENT_DELIVERY_POLICY_MANAGED_RULE_ID:
+        raise PrivilegedOperationPlanningConflictError(
+            "Ordinary-agent managed rule identity is invalid."
+        )
+    try:
+        state, expected = compile_ordinary_agent_delivery_policy_candidate(
+            current_policy=active.policy,
+            intent=preparation.intent,
+            inventory=current[0],
+            merge_policy=merge,
+        )
+    except OrdinaryAgentPolicyPreparationError as error:
+        raise PrivilegedOperationPlanningConflictError(
+            "Ordinary-agent prepared target conflicts with fresh state."
+        ) from error
+    if state != "planned" or expected is None:
+        raise PrivilegedOperationPlanningConflictError(
+            "Ordinary-agent prepared rule is no longer available."
+        )
+    expected = expected.model_copy(update={"ordinary_agent_preparation_context": None})
+    actual = request.model_copy(update={"ordinary_agent_preparation_context": None})
+    if actual != expected:
+        raise PrivilegedOperationPlanningConflictError(
+            "Ordinary-agent prepared request shape drifted."
+        )
 
 
 def _policy_key_payloads(record: MergeTrainPolicyRecord) -> dict[str, dict[str, object]]:

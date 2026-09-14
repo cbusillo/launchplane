@@ -50,6 +50,14 @@ removal and unrelated schema-v3 maintenance remain possible after stop or expiry
 Recovery and generated planners retain the active schema. Compiled handler
 support is not runtime activation or authority for an arbitrary policy write.
 
+The first client policy can be prepared from **Agent delivery → Check setup
+prerequisites → Prepare client access**. The administrator names the client and
+selects a recorded project and branch; the browser creates an independent random
+principal and retains the exact setup request for retry. The service prepares
+one managed rule under the existing administration boundary. This creates only
+an inert policy proposal and carries it into the existing activation choices.
+See [first-client policy preparation](authorization-authority.md#preparing-the-first-ordinary-client-policy).
+
 The typed activation source slice persists a separate long-lived administration
 record without enabling delivery. A human selects a server-resolved reviewed
 policy package and current repository inventory through Engineering Ops. Setup
