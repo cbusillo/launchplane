@@ -8,6 +8,9 @@ if [ "$#" -ne 1 ] || [ -z "$1" ]; then
   echo "Usage: $0 EXISTING_TEST_IMAGE" >&2
   exit 2
 fi
+
+docker compose version
+
 image="$1"
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 worker="launchplane-ordinary-agent-workers"

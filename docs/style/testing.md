@@ -113,6 +113,10 @@ It proves Compose convergence, not the deployed provider invocation or worker
 authorization. Run it locally only with an available test Docker engine and an
 already-built image.
 
+The CI container-scan jobs pin the setup action and request Docker Compose
+v5.3.1 before that qualification. Local reproduction requires a compatible
+`docker compose` command in addition to the Docker engine and built image.
+
 ## Browser smoke
 
 Run the deterministic operator-journey smoke separately from the frontend unit,
