@@ -134,6 +134,9 @@ jobs:
           cache-to: >-
             type=gha,scope=launchplane-ci,mode=max
 
+      - name: Qualify ordinary worker Compose lifecycle
+        run: bash scripts/qualify-ordinary-agent-compose.sh "$LAUNCHPLANE_CI_IMAGE_TAG"
+
       - name: Restore Trivy cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -193,6 +196,9 @@ jobs:
           no-cache-filters: runtime
           cache-from: >-
             type=gha,scope=launchplane-ci
+
+      - name: Qualify ordinary worker Compose lifecycle
+        run: bash scripts/qualify-ordinary-agent-compose.sh "$LAUNCHPLANE_CI_IMAGE_TAG"
 
       - name: Restore Trivy cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0

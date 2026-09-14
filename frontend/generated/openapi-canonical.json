@@ -53054,6 +53054,16 @@
                         "title": "Oauth Env Removals",
                         "type": "array"
                       },
+                      "ordinary_agent_worker_replicas": {
+                        "anyOf": [
+                          {
+                            "$ref": "#/$defs/OrdinaryAgentWorkerReplicasChange"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
                       "policy_b64": {
                         "default": "",
                         "title": "Policy B64",
@@ -53078,6 +53088,36 @@
                       "image_reference"
                     ],
                     "title": "LaunchplaneSelfDeployRequest",
+                    "type": "object"
+                  },
+                  "OrdinaryAgentWorkerReplicasChange": {
+                    "additionalProperties": false,
+                    "description": "Reviewed expected-state change for the Launchplane ordinary-worker replica count.",
+                    "properties": {
+                      "desired": {
+                        "enum": [
+                          "absent",
+                          "0",
+                          "1"
+                        ],
+                        "title": "Desired",
+                        "type": "string"
+                      },
+                      "expected": {
+                        "enum": [
+                          "absent",
+                          "0",
+                          "1"
+                        ],
+                        "title": "Expected",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "expected",
+                      "desired"
+                    ],
+                    "title": "OrdinaryAgentWorkerReplicasChange",
                     "type": "object"
                   }
                 },

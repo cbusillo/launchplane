@@ -742,6 +742,15 @@ class FastApiLaunchplaneSelfDeployTests(unittest.IsolatedAsyncioTestCase):
         "LAUNCHPLANE_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET=manager-secret\n"
     )
 
+    @staticmethod
+    def _compose_target(env: str) -> dict[str, str]:
+        return {
+            "sourceType": "git",
+            "composePath": "./docker-compose.yml",
+            "command": "",
+            "env": env,
+        }
+
     def _policy(self) -> LaunchplaneAuthzPolicy:
         return LaunchplaneAuthzPolicy.model_validate(
             {
@@ -801,7 +810,7 @@ class FastApiLaunchplaneSelfDeployTests(unittest.IsolatedAsyncioTestCase):
                 ),
                 patch(
                     "control_plane.workflows.launchplane_self_deploy.dokploy_api.fetch_dokploy_target_payload",
-                    return_value={"env": self._BOOTSTRAP_ENV},
+                    return_value=self._compose_target(self._BOOTSTRAP_ENV),
                 ),
                 patch(
                     "control_plane.workflows.launchplane_self_deploy.dokploy_api.update_dokploy_target_env"
@@ -861,7 +870,7 @@ class FastApiLaunchplaneSelfDeployTests(unittest.IsolatedAsyncioTestCase):
                 ),
                 patch(
                     "control_plane.workflows.launchplane_self_deploy.dokploy_api.fetch_dokploy_target_payload",
-                    return_value={"env": self._BOOTSTRAP_ENV},
+                    return_value=self._compose_target(self._BOOTSTRAP_ENV),
                 ),
                 patch(
                     "control_plane.workflows.launchplane_self_deploy.dokploy_api.update_dokploy_target_env"
@@ -903,7 +912,7 @@ class FastApiLaunchplaneSelfDeployTests(unittest.IsolatedAsyncioTestCase):
                 ),
                 patch(
                     "control_plane.workflows.launchplane_self_deploy.dokploy_api.fetch_dokploy_target_payload",
-                    return_value={"env": self._BOOTSTRAP_ENV},
+                    return_value=self._compose_target(self._BOOTSTRAP_ENV),
                 ),
                 patch(
                     "control_plane.workflows.launchplane_self_deploy.dokploy_api.update_dokploy_target_env"
@@ -961,7 +970,7 @@ class FastApiLaunchplaneSelfDeployTests(unittest.IsolatedAsyncioTestCase):
                 ),
                 patch(
                     "control_plane.workflows.launchplane_self_deploy.dokploy_api.fetch_dokploy_target_payload",
-                    return_value={"env": "DOCKER_IMAGE_REFERENCE=old\n"},
+                    return_value=self._compose_target("DOCKER_IMAGE_REFERENCE=old\n"),
                 ),
                 patch(
                     "control_plane.workflows.launchplane_self_deploy.dokploy_api.update_dokploy_target_env"
@@ -1001,7 +1010,7 @@ class FastApiLaunchplaneSelfDeployTests(unittest.IsolatedAsyncioTestCase):
                 ),
                 patch(
                     "control_plane.workflows.launchplane_self_deploy.dokploy_api.fetch_dokploy_target_payload",
-                    return_value={"env": bootstrap_env},
+                    return_value=self._compose_target(bootstrap_env),
                 ),
                 patch(
                     "control_plane.workflows.launchplane_self_deploy.dokploy_api.update_dokploy_target_env"
@@ -1056,14 +1065,14 @@ class FastApiLaunchplaneSelfDeployTests(unittest.IsolatedAsyncioTestCase):
                 ),
                 patch(
                     "control_plane.workflows.launchplane_self_deploy.dokploy_api.fetch_dokploy_target_payload",
-                    return_value={
-                        "env": (
+                    return_value=self._compose_target(
+                        (
                             self._BOOTSTRAP_ENV
                             + "LAUNCHPLANE_NPMPLUS_BASE_URL=https://npmplus.example\n"
                             + "LAUNCHPLANE_NPMPLUS_IDENTITY=automation@example.com\n"
                             + "LAUNCHPLANE_NPMPLUS_SECRET=npmplus-secret\n"
                         )
-                    },
+                    ),
                 ),
                 patch(
                     "control_plane.workflows.launchplane_self_deploy.dokploy_api.update_dokploy_target_env"

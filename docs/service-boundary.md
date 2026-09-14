@@ -94,9 +94,11 @@ dispatcher, and independent process-local scan/error telemetry. Startup probes
 the exact compatible Alembic revision and ordinary-job relations before the
 loop. It has no HTTP route, does not share privileged-operation worker error
 accounting, and does not create policy, grant, activation, or provider state.
-The compose definition lives in the uninvoked
-`docker-compose.ordinary-agent-workers.yml` profile; adding that file/profile
-to a deployment remains a separately reviewed activation step.
+The compose definition is deployed with a code-owned zero replica default. A
+reviewed self-deploy topology change checks the reviewed ordinary-worker replica
+state before updating it; the provider does not offer an atomic compare-and-swap.
+Enabling the process remains a separately reviewed worker-start step and does
+not change the independent activation record.
 
 Ordinary guarded admission and finite continuation refresh independent provider
 protection evidence on demand within the existing delegation. This introduces

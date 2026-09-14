@@ -102,6 +102,17 @@ Do not add tests that merely restate a copied value or mirror the implementation
 No local command replaces CI's runner isolation, artifact retention, or required
 status checks.
 
+The container-build CI jobs also run
+`bash scripts/qualify-ordinary-agent-compose.sh <built-test-image>`. This
+exercises the checked-in ordinary-worker replica expression with an isolated
+Compose project: default zero, one running container, then removal of that
+container at zero. All service commands become harmless bounded sleeps, with
+no runtime environment, mounts, network access or provider credentials. The
+check preserves unrelated fixture containers and removes only its own project.
+It proves Compose convergence, not the deployed provider invocation or worker
+authorization. Run it locally only with an available test Docker engine and an
+already-built image.
+
 ## Browser smoke
 
 Run the deterministic operator-journey smoke separately from the frontend unit,
