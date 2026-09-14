@@ -45,6 +45,7 @@ HistoricalCompletionReason = Literal[
     "stored_evidence_incomplete",
     "entry_limit_exceeded",
     "candidate_unavailable",
+    "candidate_history_limit_exceeded",
     "candidate_ambiguous",
     "candidate_binding_changed",
     "stack_batch_unsupported",
@@ -137,6 +138,7 @@ class _PreflightStore(Protocol):
         repository: str = "",
         base_branch: str = "",
         status: str = "",
+        record_id: str = "",
         limit: int | None = None,
     ) -> tuple[MergeTrainBatchLandingPlanRecord, ...]: ...
 
@@ -146,6 +148,7 @@ class _PreflightStore(Protocol):
         repository: str = "",
         base_branch: str = "",
         status: str = "",
+        batch_id: str = "",
         limit: int | None = None,
     ) -> tuple[MergeTrainBatchCandidateRecord, ...]: ...
 
@@ -155,6 +158,7 @@ class _PreflightStore(Protocol):
         repository: str = "",
         base_branch: str = "",
         status: str = "",
+        root_pull_request_number: int | None = None,
         limit: int | None = None,
     ) -> tuple[MergeTrainStackCollapsePlanRecord, ...]: ...
 
@@ -207,6 +211,8 @@ def assess_merge_train_historical_completion(
     github_client: GitHubMergeTrainClient,
 ) -> MergeTrainHistoricalCompletionPreflight:
     """Observe an exact legacy plan without acquiring a lease or invoking admission."""
+    normalized_repository = repository.strip().lower()
+    normalized_base_branch = base_branch.strip()
     required = (
         "list_merge_train_controller_state_records",
         "list_merge_train_policy_records",
@@ -225,8 +231,8 @@ def assess_merge_train_historical_completion(
         reader = cast(_PreflightStore, store)
         snapshot = _read_snapshot(
             store=reader,
-            repository=repository,
-            base_branch=base_branch,
+            repository=normalized_repository,
+            base_branch=normalized_base_branch,
             selector=selector,
         )
         evidence = github_client.observe_historical_batch_completion(
@@ -237,8 +243,8 @@ def assess_merge_train_historical_completion(
             raise _AssessmentFailure("indeterminate", "provider_invalid_response")
         refreshed = _read_snapshot(
             store=reader,
-            repository=repository,
-            base_branch=base_branch,
+            repository=normalized_repository,
+            base_branch=normalized_base_branch,
             selector=selector,
         )
         if refreshed != snapshot:
@@ -288,8 +294,8 @@ def assess_merge_train_historical_completion(
         for entry in selector.expected_entries
     )
     return MergeTrainHistoricalCompletionPreflight(
-        repository=repository,
-        base_branch=base_branch,
+        repository=normalized_repository,
+        base_branch=normalized_base_branch,
         generated_at=generated_at,
         selector=selector,
         status=status,
@@ -358,19 +364,16 @@ def _read_snapshot(
     landings = store.list_merge_train_batch_landing_plan_records(
         repository=repository,
         base_branch=base_branch,
-        status="active",
-        limit=101,
+        record_id=selector.expected_active_record_id,
+        limit=2,
     )
-    if len(landings) > 100:
+    if not landings:
         raise _AssessmentFailure("indeterminate", "landing_plan_unavailable")
-    matching = [
-        record for record in landings if record.record_id == selector.expected_active_record_id
-    ]
-    if not matching:
-        raise _AssessmentFailure("indeterminate", "landing_plan_unavailable")
-    if len(matching) != 1:
+    if len(landings) > 1:
         raise _AssessmentFailure("indeterminate", "landing_plan_ambiguous")
-    landing = matching[0]
+    landing = landings[0]
+    if landing.record_id != selector.expected_active_record_id or landing.status != "active":
+        raise _AssessmentFailure("unsupported", "landing_plan_binding_changed")
     plan = landing.landing_plan
     if landing.ordinary_job_binding is not None or store.has_ordinary_merge_train_target_fence(
         repository=repository,
@@ -437,10 +440,20 @@ def _read_snapshot(
         repository=repository,
         base_branch=base_branch,
         status="active",
+        batch_id=plan.batch_id,
         limit=101,
     )
     if len(candidates) > 100:
-        raise _AssessmentFailure("indeterminate", "candidate_unavailable")
+        raise _AssessmentFailure("indeterminate", "candidate_history_limit_exceeded")
+    if any(
+        record.candidate.candidate_sha
+        and (
+            record.candidate.candidate_sha != plan.candidate_sha
+            or record.candidate.candidate_sha256 != plan.candidate_sha256
+        )
+        for record in candidates
+    ):
+        raise _AssessmentFailure("indeterminate", "candidate_ambiguous")
     compatible = tuple(
         record
         for record in candidates
@@ -494,20 +507,16 @@ def _read_snapshot(
         )
     ):
         raise _AssessmentFailure("unsupported", "candidate_binding_changed")
-    stacks = store.list_merge_train_stack_collapse_plan_records(
-        repository=repository,
-        base_branch=base_branch,
-        status="active",
-        limit=101,
-    )
-    if len(stacks) > 100:
-        raise _AssessmentFailure("indeterminate", "store_unavailable")
-    if any(
-        record.plan.root_pull_request_number
-        in {entry.pull_request_number for entry in plan.entries}
-        for record in stacks
-    ):
-        raise _AssessmentFailure("unsupported", "stack_batch_unsupported")
+    for entry in plan.entries:
+        stacks = store.list_merge_train_stack_collapse_plan_records(
+            repository=repository,
+            base_branch=base_branch,
+            status="active",
+            root_pull_request_number=entry.pull_request_number,
+            limit=1,
+        )
+        if stacks:
+            raise _AssessmentFailure("unsupported", "stack_batch_unsupported")
     return _Snapshot(controller=controller, policy=policy, landing=landing, candidate=candidate)
 
 

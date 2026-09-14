@@ -8,6 +8,8 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import json
 import os
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import threading
 import time
 from typing import Any
@@ -60,6 +62,13 @@ from tests.test_every_code_feedback_resume_storage import (
     T1 as FEEDBACK_T1,
 )
 from tests.test_ordinary_agent_qualification_storage import QualificationStorageScenario
+from tests.test_merge_train_historical_completion import (
+    _HistoricalCompletionFixture,
+    _ReadOnlyTransport,
+    _assess as _assess_historical_completion,
+    _provider_responses as _historical_provider_responses,
+    seed_crowded_scoped_history,
+)
 from control_plane.contracts.manager_preview_approval import (
     ManagerPreviewApprovalAuthorization,
     ManagerPreviewApprovalBinding,
@@ -1151,6 +1160,45 @@ def _owner_acceptance_system_event(
 
 
 class RealPostgresSchemaIntegrationTests(unittest.TestCase):
+    def test_historical_preflight_scopes_database_history_before_limits(self) -> None:
+        with TemporaryDirectory() as directory, _store_for_fresh_head_database() as store:
+            fixture = _HistoricalCompletionFixture(Path(directory))
+            store.write_merge_train_policy_record(fixture.policy_record)
+            store.write_merge_train_batch_candidate_record(fixture.candidate_record)
+            store.write_merge_train_batch_landing_plan_record(fixture.landing_record)
+            store.write_merge_train_controller_state_record(fixture.controller)
+            seed_crowded_scoped_history(
+                store, fixture, landing_count=101, candidate_count=101, stack_count=101
+            )
+            controller_before = store.list_merge_train_controller_state_records(
+                repository=fixture.controller.repository,
+                base_branch=fixture.controller.base_branch,
+            )
+            transport = _ReadOnlyTransport(responses=_historical_provider_responses())
+
+            result = _assess_historical_completion(fixture, store=store, transport=transport)
+
+            self.assertTrue(result.evidence_eligible, result.model_dump_json())
+            self.assertTrue(transport.requests)
+            self.assertEqual(
+                store.list_merge_train_controller_state_records(
+                    repository=fixture.controller.repository,
+                    base_branch=fixture.controller.base_branch,
+                ),
+                controller_before,
+            )
+
+            seed_crowded_scoped_history(
+                store, fixture, stack_count=1, stack_root_pull_request_number=1
+            )
+            blocked_transport = _ReadOnlyTransport(responses=_historical_provider_responses())
+            blocked = _assess_historical_completion(
+                fixture, store=store, transport=blocked_transport
+            )
+            self.assertEqual(blocked.reason_code, "stack_batch_unsupported")
+            self.assertFalse(blocked.evidence_eligible)
+            self.assertEqual(blocked_transport.requests, [])
+
     def test_native_postgres_jsonb_ordinary_merge_train_fence_reader(self) -> None:
         with _store_for_fresh_head_database() as store:
             with store._session_factory() as session:

@@ -46,15 +46,27 @@ read. They are comparisons against persisted state, never caller-supplied proof.
 The preflight requires an inactive legacy `reconcile_required` landing fence and
 complete, unchanged plan/candidate/policy evidence. It refuses ordinary-bound
 work, stack batches, no-op entries, existing admissions, and incomplete batches.
-It bounds entry reads to 25 and record windows to 100, reporting unavailable
-rather than silently overlooking evidence beyond those windows.
+It reads the exact landing record within the authorized repository and base,
+then checks that the record is active. Candidate history is scoped to that
+record's batch before applying the 100-record limit. An oversized batch reports
+`candidate_history_limit_exceeded`; unrelated historical batches do not consume
+its evidence window. An initial candidate without a commit SHA may precede the
+materialized candidate, but conflicting materialized candidates are ambiguous.
+
+For each of at most 25 selected PRs, the preflight checks for an active stack
+whose root is that PR. This preserves the existing root-level check; it does not
+prove absence of overlap as a non-root stack member. A future disposition must
+address that boundary before claiming complete stack exclusion. The separate
+ordinary-target fence remains repository/base-wide. Repository names are
+normalized before every scoped read; branch case is preserved.
 
 Provider verification uses only GETs. It checks each PR's actual merged state,
 exact head and tree, merge parents, recorded candidate result tree, and
 containment in a pinned current base commit. Later batch entries use the previous
 actual merge commit as their rolling parent. The candidate commit and provider
 merge commit may differ while their expected trees agree. A changed target tip
-or changed stored snapshot makes the preflight indeterminate.
+or changed stored snapshot makes the preflight indeterminate. Unrelated history
+changes do not invalidate the selected snapshot.
 
 The typed `result.historical_completion_preflight` distinguishes `eligible`,
 `unsupported`, and `indeterminate`, with closed overall and per-entry reason

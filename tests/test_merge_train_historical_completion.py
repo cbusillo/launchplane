@@ -12,6 +12,7 @@ from control_plane.contracts.merge_train_batch import (
     MergeTrainBatchCandidate,
     MergeTrainBatchCandidateRecord,
     MergeTrainBatchEntry,
+    MergeTrainBatchLandingPlan,
     MergeTrainBatchLandingPlanRecord,
     build_merge_train_batch_landing_plan,
 )
@@ -29,6 +30,12 @@ from control_plane.contracts.merge_train_structural_provenance import (
     MergeTrainStructuralProvenance,
     MergeTrainStructuralSubject,
 )
+from control_plane.contracts.merge_train_stack_collapse import (
+    MergeTrainStackCollapseEntry,
+    MergeTrainStackCollapseMutation,
+    MergeTrainStackCollapsePlan,
+    MergeTrainStackCollapsePlanRecord,
+)
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.merge_train_historical_completion import (
     MergeTrainHistoricalCompletionPreflight,
@@ -45,6 +52,7 @@ from control_plane.merge_train_github import (
     RecordingMergeTrainGitHubTransport,
 )
 from control_plane.storage.filesystem import FilesystemRecordStore
+from control_plane.storage.postgres import PostgresRecordStore
 from tests.http_app_test_support import _post_merge_train_controller_run_once
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_record
 from tests.support.auth import _StubVerifier, _identity
@@ -359,6 +367,98 @@ def _assess(
     )
 
 
+def seed_crowded_scoped_history(
+    store: FilesystemRecordStore | PostgresRecordStore,
+    fixture: _HistoricalCompletionFixture,
+    *,
+    landing_count: int = 0,
+    candidate_count: int = 0,
+    stack_count: int = 0,
+    candidate_batch_id: str = "",
+    stack_root_pull_request_number: int | None = None,
+) -> None:
+    """Seed newer same-target records that exact scoped reads must ignore."""
+    for index in range(landing_count):
+        store.write_merge_train_batch_landing_plan_record(
+            fixture.landing_record.model_copy(
+                update={
+                    "record_id": f"zz-crowded-landing-{index:03d}",
+                    "updated_at": f"2026-09-13T13:{index // 60:02d}:{index % 60:02d}Z",
+                }
+            )
+        )
+    for index in range(candidate_count):
+        batch_id = candidate_batch_id or f"zz-crowded-batch-{index:03d}"
+        candidate_updates: dict[str, object] = {"batch_id": batch_id}
+        if not candidate_batch_id:
+            candidate_updates.update(
+                {
+                    "candidate_sha256": "",
+                    "structural_provenance": None,
+                    "status": "planned",
+                    "required_checks_status": "unknown",
+                }
+            )
+        candidate = fixture.candidate_record.candidate.model_copy(update=candidate_updates)
+        candidate = MergeTrainBatchCandidate.model_validate(candidate.model_dump(mode="python"))
+        store.write_merge_train_batch_candidate_record(
+            fixture.candidate_record.model_copy(
+                update={
+                    "record_id": f"zz-crowded-candidate-{index:03d}",
+                    "updated_at": f"2026-09-13T13:{index // 60:02d}:{index % 60:02d}Z",
+                    "candidate": candidate,
+                }
+            )
+        )
+    for index in range(stack_count):
+        root_number = stack_root_pull_request_number or 900 + index
+        stack_plan = MergeTrainStackCollapsePlan(
+            collapse_id=f"zz-crowded-collapse-{index:03d}",
+            repository=fixture.landing_plan.repository,
+            base_branch=fixture.landing_plan.base_branch,
+            root_pull_request_number=root_number,
+            root_initial_head_sha="zz-root-head",
+            root_head_ref="refs/heads/zz-root",
+            policy_key=fixture.landing_plan.policy_key,
+            policy_sha256=fixture.landing_plan.policy_sha256,
+            entries=(
+                MergeTrainStackCollapseEntry(
+                    pull_request_number=root_number,
+                    position=1,
+                    head_sha="zz-root-head",
+                    head_ref="refs/heads/zz-root",
+                    base_ref=fixture.landing_plan.base_branch,
+                ),
+                MergeTrainStackCollapseEntry(
+                    pull_request_number=root_number + 1,
+                    position=2,
+                    head_sha="zz-child-head",
+                    head_ref="refs/heads/zz-child",
+                    base_ref=fixture.landing_plan.base_branch,
+                ),
+            ),
+            mutations=(
+                MergeTrainStackCollapseMutation(
+                    child_pull_request_number=root_number + 1,
+                    parent_pull_request_number=root_number,
+                    child_head_sha="zz-child-head",
+                    expected_parent_head_sha="zz-root-head",
+                    parent_head_ref="refs/heads/zz-root",
+                ),
+            ),
+            created_at=f"2026-09-13T13:{index // 60:02d}:{index % 60:02d}Z",
+            updated_at=f"2026-09-13T13:{index // 60:02d}:{index % 60:02d}Z",
+        )
+        store.write_merge_train_stack_collapse_plan_record(
+            MergeTrainStackCollapsePlanRecord(
+                record_id=f"zz-crowded-stack-{index:03d}",
+                source="test:scoped-history",
+                updated_at=stack_plan.updated_at,
+                plan=stack_plan,
+            )
+        )
+
+
 class HistoricalCompletionCoreTests(unittest.TestCase):
     def test_eligible_preflight_is_read_only_and_contains_bound_provider_evidence(self) -> None:
         with TemporaryDirectory() as directory:
@@ -383,6 +483,193 @@ class HistoricalCompletionCoreTests(unittest.TestCase):
         self.assertEqual(provider_evidence.entries[1].observed_merge_commit_sha, "merge-2")
         self.assertEqual(before, after)
         self.assertEqual(tuple(request.method for request in transport.requests), ("GET",) * 12)
+
+    def test_crowded_unrelated_history_cannot_hide_selected_records(self) -> None:
+        with TemporaryDirectory() as directory:
+            fixture = _HistoricalCompletionFixture(Path(directory))
+            seed_crowded_scoped_history(
+                fixture.store,
+                fixture,
+                landing_count=101,
+                candidate_count=101,
+                stack_count=101,
+            )
+            transport = _ReadOnlyTransport(responses=_provider_responses())
+            result = _assess(fixture, transport=transport)
+
+        self.assertEqual(result.status, "eligible")
+
+    def test_same_batch_candidate_history_overflow_fails_closed_before_provider(self) -> None:
+        with TemporaryDirectory() as directory:
+            fixture = _HistoricalCompletionFixture(Path(directory))
+            seed_crowded_scoped_history(
+                fixture.store,
+                fixture,
+                candidate_count=101,
+                candidate_batch_id=fixture.candidate_record.candidate.batch_id,
+            )
+            transport = _ReadOnlyTransport(responses=_provider_responses())
+            result = _assess(fixture, transport=transport)
+
+        self.assertEqual(
+            (result.status, result.reason_code),
+            ("indeterminate", "candidate_history_limit_exceeded"),
+        )
+        self.assertEqual(transport.requests, [])
+
+    def test_relevant_stack_root_blocks_before_provider(self) -> None:
+        with TemporaryDirectory() as directory:
+            fixture = _HistoricalCompletionFixture(Path(directory))
+            seed_crowded_scoped_history(
+                fixture.store,
+                fixture,
+                stack_count=1,
+                stack_root_pull_request_number=1,
+            )
+            transport = _ReadOnlyTransport(responses=_provider_responses())
+            result = _assess(fixture, transport=transport)
+
+        self.assertEqual(
+            (result.status, result.reason_code), ("unsupported", "stack_batch_unsupported")
+        )
+        self.assertEqual(transport.requests, [])
+
+    def test_exact_landing_record_status_scope_and_identity_fail_before_provider(self) -> None:
+        cases = ("inactive", "missing", "foreign")
+        for case in cases:
+            with self.subTest(case=case), TemporaryDirectory() as directory:
+                fixture = _HistoricalCompletionFixture(Path(directory))
+                if case == "inactive":
+                    fixture.store.write_merge_train_batch_landing_plan_record(
+                        fixture.landing_record.model_copy(update={"status": "superseded"})
+                    )
+                elif case == "missing":
+                    next(
+                        (Path(directory) / "launchplane_merge_train_batch_landing_plans").glob(
+                            "*.json"
+                        )
+                    ).unlink()
+                else:
+                    foreign_payload = fixture.landing_plan.model_dump(mode="python")
+                    foreign_payload["repository"] = "other/repository"
+                    foreign_payload["landing_plan_sha256"] = ""
+                    foreign_plan = MergeTrainBatchLandingPlan.model_validate(foreign_payload)
+                    fixture.store.write_merge_train_batch_landing_plan_record(
+                        fixture.landing_record.model_copy(update={"landing_plan": foreign_plan})
+                    )
+                transport = _ReadOnlyTransport(responses=_provider_responses())
+                result = _assess(fixture, transport=transport)
+
+            expected = (
+                "landing_plan_binding_changed" if case == "inactive" else "landing_plan_unavailable"
+            )
+            self.assertEqual(
+                (result.status, result.reason_code),
+                ("unsupported" if case == "inactive" else "indeterminate", expected),
+            )
+            self.assertEqual(transport.requests, [])
+
+    def test_assessment_normalizes_repository_and_base_branch(self) -> None:
+        with TemporaryDirectory() as directory:
+            fixture = _HistoricalCompletionFixture(Path(directory))
+            transport = _ReadOnlyTransport(responses=_provider_responses())
+            result = assess_merge_train_historical_completion(
+                store=fixture.store,
+                repository="  ACME/WIDGET  ",
+                base_branch="  main  ",
+                selector=fixture.selector,
+                generated_at=OBSERVED_AT,
+                github_client=GitHubMergeTrainClient(transport=transport),
+            )
+
+        self.assertEqual(result.status, "eligible")
+        self.assertEqual((result.repository, result.base_branch), (REPOSITORY, BASE_BRANCH))
+
+    def test_normalization_preserves_scoped_negative_reads(self) -> None:
+        with TemporaryDirectory() as directory:
+            admission_fixture = _HistoricalCompletionFixture(Path(directory) / "admission")
+            admission_transport = _ReadOnlyTransport(responses=_provider_responses())
+            admission = assess_merge_train_historical_completion(
+                store=_AdmissionPresentStore(admission_fixture.store),
+                repository="  ACME/WIDGET  ",
+                base_branch="  main  ",
+                selector=admission_fixture.selector,
+                generated_at=OBSERVED_AT,
+                github_client=GitHubMergeTrainClient(transport=admission_transport),
+            )
+            stack_fixture = _HistoricalCompletionFixture(Path(directory) / "stack")
+            seed_crowded_scoped_history(
+                stack_fixture.store,
+                stack_fixture,
+                stack_count=1,
+                stack_root_pull_request_number=1,
+            )
+            stack_transport = _ReadOnlyTransport(responses=_provider_responses())
+            stack = assess_merge_train_historical_completion(
+                store=stack_fixture.store,
+                repository="  ACME/WIDGET  ",
+                base_branch="  main  ",
+                selector=stack_fixture.selector,
+                generated_at=OBSERVED_AT,
+                github_client=GitHubMergeTrainClient(transport=stack_transport),
+            )
+
+        self.assertEqual(
+            (admission.status, admission.reason_code), ("unsupported", "admission_present")
+        )
+        self.assertEqual(admission_transport.requests, [])
+        self.assertEqual(
+            (stack.status, stack.reason_code), ("unsupported", "stack_batch_unsupported")
+        )
+        self.assertEqual(stack_transport.requests, [])
+
+    def test_empty_sha_prebuild_candidate_is_allowed_but_materialized_conflict_is_not(self) -> None:
+        with TemporaryDirectory() as directory:
+            fixture = _HistoricalCompletionFixture(Path(directory) / "prebuild")
+            prebuild = fixture.candidate_record.candidate.model_copy(
+                update={
+                    "candidate_sha": "",
+                    "candidate_tree_sha": "",
+                    "candidate_sha256": "",
+                    "status": "planned",
+                    "required_checks_status": "unknown",
+                    "structural_provenance": None,
+                    "updated_at": "2026-09-13T11:59:00Z",
+                }
+            )
+            fixture.store.write_merge_train_batch_candidate_record(
+                fixture.candidate_record.model_copy(
+                    update={"record_id": "prebuild-candidate", "candidate": prebuild}
+                )
+            )
+            transport = _ReadOnlyTransport(responses=_provider_responses())
+            result = _assess(fixture, transport=transport)
+            self.assertEqual(result.status, "eligible")
+
+            fixture = _HistoricalCompletionFixture(Path(directory) / "conflict")
+            conflict = fixture.candidate_record.candidate.model_copy(
+                update={
+                    "candidate_sha": "conflicting-candidate-sha",
+                    "candidate_tree_sha": "conflicting-candidate-tree",
+                    "candidate_sha256": "conflicting-candidate-digest",
+                    "structural_provenance": None,
+                    "status": "planned",
+                    "required_checks_status": "unknown",
+                    "updated_at": "2026-09-13T13:00:00Z",
+                }
+            )
+            fixture.store.write_merge_train_batch_candidate_record(
+                fixture.candidate_record.model_copy(
+                    update={"record_id": "conflicting-candidate", "candidate": conflict}
+                )
+            )
+            transport = _ReadOnlyTransport(responses=_provider_responses())
+            result = _assess(fixture, transport=transport)
+
+        self.assertEqual(
+            (result.status, result.reason_code), ("indeterminate", "candidate_ambiguous")
+        )
+        self.assertEqual(transport.requests, [])
 
     def test_selector_policy_and_ordinary_fence_refuse_before_provider(self) -> None:
         with TemporaryDirectory() as directory:
