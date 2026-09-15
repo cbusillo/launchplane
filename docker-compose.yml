@@ -97,6 +97,29 @@ services:
       - default
       - launchplane-external-network
 
+  launchplane-ordinary-agent-workers:
+    image: ${DOCKER_IMAGE_REFERENCE:-launchplane:local}
+    pull_policy: always
+    restart: unless-stopped
+    stop_grace_period: 5m
+    deploy:
+      replicas: ${LAUNCHPLANE_ORDINARY_AGENT_WORKER_REPLICAS:-0}
+    depends_on:
+      launchplane:
+        condition: service_healthy
+    env_file:
+      - .env
+    command:
+      - /app/scripts/start-launchplane-ordinary-agent-workers.sh
+    environment:
+      DOCKER_IMAGE_REFERENCE: ${DOCKER_IMAGE_REFERENCE:-launchplane:local}
+      LAUNCHPLANE_STATE_DIR: /app/runtime
+    volumes:
+      - launchplane-runtime:/app/runtime
+    networks:
+      - default
+      - launchplane-external-network
+
 networks:
   launchplane-external-network:
     name: ${LAUNCHPLANE_COMPOSE_EXTERNAL_NETWORK:?Missing LAUNCHPLANE_COMPOSE_EXTERNAL_NETWORK}

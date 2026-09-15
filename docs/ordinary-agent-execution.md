@@ -25,12 +25,17 @@ not use privileged-operation worker accounting. Startup performs an exact
 Alembic/relation probe and creates no policy, grant, activation, credential,
 session, lease, or provider record.
 
-The matching definition is kept in
-`docker-compose.ordinary-agent-workers.yml` and is intentionally outside the
-deployed `docker-compose.yml` invocation. Its profile and startup script are
-structural source wiring only. A separately reviewed enablement must add the
-compose file/profile to an explicit deployment invocation and establish the
-required readiness evidence first; source presence does not start a process.
+The matching definition is part of `docker-compose.yml`, with a code-owned
+default of zero replicas. The self-deploy request may make one reviewed
+expected-state change among absent, zero, and one replicas; ordinary OAuth
+environment updates cannot control it. Normal deployments preserve that value.
+A separately reviewed enablement must establish the required readiness evidence
+first; source presence and a zero replica deployment do not start a process.
+The topology control accepts only the reviewed standard Git Compose path and
+Docker Compose engine, with no provider custom command or Compose-file/profile/
+project overrides. Swarm stack mode is not supported by this control. A normal
+full-stack deploy may still recreate other Launchplane services that share the
+target environment; it does not claim their container identities remain fixed.
 
 The older `proposed_ordinary_agent_v1` evidence models and their pure eligibility
 result remain inert fixture contracts. They do not authenticate a caller or
@@ -435,7 +440,9 @@ zero PRs against that lease, and guarded delivery requires `guarded_merge`.
 Existing merge, snapshot, landing and effect paths refuse qualification. The
 separate qualification advancer is selected by the exhaustive dormant ordinary
 worker dispatcher. Its setup and readiness come from current activation records;
-the checked compose profile remains disabled until a later activation change.
+the checked compose definition remains at zero replicas until a separately
+reviewed worker-start action. That process control is independent from the
+current activation record and does not change its desired or effective state.
 
 The dormant advancer reserves a schema-v2 controller-free read attempt and one
 read-only `merge_train_snapshot` custody lease. Its only provider observation is

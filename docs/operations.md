@@ -152,8 +152,8 @@ checkout.
   `service ordinary-agent-workers run-once` and `run` are a dormant,
   PostgreSQL-only finite-job worker definition. They use an independent scan
   cursor and telemetry surface, perform an exact startup schema/relation probe,
-  and remain outside the deployed compose invocation until a separately
-  reviewed readiness and enablement step.
+  and deploy at zero replicas until a separately reviewed readiness and
+  enablement step.
   Guarded ingress and continuation perform automatic
   [provider delivery inspection](provider-delivery-inspection.md) under the
   same finite delegation. They require a separate DB-backed inspection App and

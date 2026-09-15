@@ -29,14 +29,13 @@ class OrdinaryAgentWorkerStartupTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("refuse startup without LAUNCHPLANE_DATABASE_URL", result.stderr)
 
-    def test_compose_definition_is_separate_from_deployed_default(self) -> None:
+    def test_compose_definition_defaults_to_zero_replicas(self) -> None:
         default_compose = (self.root / "docker-compose.yml").read_text(encoding="utf-8")
         dormant_compose_path = self.root / "docker-compose.ordinary-agent-workers.yml"
-        dormant_compose = dormant_compose_path.read_text(encoding="utf-8")
 
-        self.assertNotIn("launchplane-ordinary-agent-workers", default_compose)
-        self.assertIn("launchplane-ordinary-agent-workers", dormant_compose)
-        self.assertIn("ordinary-agent-workers", dormant_compose)
+        self.assertIn("launchplane-ordinary-agent-workers", default_compose)
+        self.assertIn("LAUNCHPLANE_ORDINARY_AGENT_WORKER_REPLICAS:-0", default_compose)
+        self.assertFalse(dormant_compose_path.exists())
         self.assertTrue(self.script.stat().st_mode & stat.S_IXUSR)
 
 

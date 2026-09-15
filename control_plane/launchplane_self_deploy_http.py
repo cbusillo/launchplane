@@ -33,4 +33,13 @@ def launchplane_self_deploy_records(
         "target_id": str(result_payload["target_id"]),
         "image_reference": str(result_payload["image_reference"]),
         "oauth_env_keys_removed": str(result_payload["oauth_env_keys_removed"]),
+        "ordinary_agent_worker_replicas_changed": str(
+            result_payload["ordinary_agent_worker_replicas_changed"]
+        ),
+        "ordinary_agent_worker_replicas_previous": str(
+            result_payload["ordinary_agent_worker_replicas_previous"]
+        ),
+        "ordinary_agent_worker_replicas_desired": str(
+            result_payload["ordinary_agent_worker_replicas_desired"]
+        ),
     }
