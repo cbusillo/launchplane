@@ -330,6 +330,7 @@ def _changed_policy_record(fixture: _HistoricalCompletionFixture) -> MergeTrainP
 def _fresh_candidate_and_landing(
     fixture: _HistoricalCompletionFixture,
 ) -> tuple[MergeTrainBatchCandidateRecord, MergeTrainBatchLandingPlanRecord]:
+    # Dated after the wall-clock successor that finalize writes, so these stay the latest records.
     candidate_payload = fixture.candidate_record.candidate.model_dump(mode="python")
     candidate_payload.update(
         {
@@ -340,25 +341,25 @@ def _fresh_candidate_and_landing(
                 batch_id="historical-followup-batch",
             ),
             "status": "passed",
-            "created_at": "2026-09-15T14:00:00Z",
-            "updated_at": "2026-09-15T14:00:00Z",
+            "created_at": "2099-01-01T14:00:00Z",
+            "updated_at": "2099-01-01T14:00:00Z",
         }
     )
     candidate = MergeTrainBatchCandidate.model_validate(candidate_payload)
     candidate_record = build_merge_train_batch_candidate_record(
         candidate=candidate,
         source="test:historical-disposition-followup",
-        updated_at="2026-09-15T14:00:00Z",
+        updated_at="2099-01-01T14:00:00Z",
     )
     landing_plan = build_merge_train_batch_landing_plan(
         candidate=candidate,
         merge_method="merge",
-        created_at="2026-09-15T14:01:00Z",
+        created_at="2099-01-01T14:01:00Z",
     )
     landing_record = build_merge_train_batch_landing_plan_record(
         landing_plan=landing_plan,
         source="test:historical-disposition-followup",
-        updated_at="2026-09-15T14:01:00Z",
+        updated_at="2099-01-01T14:01:00Z",
     )
     return candidate_record, landing_record
 
