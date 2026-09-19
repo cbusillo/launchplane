@@ -19060,6 +19060,8 @@ def create_launchplane_fastapi_app(
                     " requested product."
                 ),
             )
+        # One unauthorized product must not stop cleanup for the rest of the portfolio.
+        denied_actions_by_product: dict[str, str] = {}
         denied_profile: LaunchplaneProductProfileRecord | None = None
         denied_action = ""
         for profile in requested_sweep_profiles:
@@ -19070,11 +19072,13 @@ def create_launchplane_fastapi_app(
                     product=profile.product,
                     context=profile.preview.context,
                 ):
-                    denied_profile = profile
-                    denied_action = action
+                    denied_actions_by_product[profile.product] = action
+                    if denied_profile is None:
+                        denied_profile = profile
+                        denied_action = action
                     break
-            if denied_profile is not None:
-                break
+        if len(denied_actions_by_product) < len(requested_sweep_profiles):
+            denied_profile = None
         if denied_profile is not None:
             raise _launchplane_http_error(
                 status_code=403,
@@ -19112,6 +19116,7 @@ def create_launchplane_fastapi_app(
             control_plane_root=resolved_control_plane_root,
             record_store=sweep_store,
             request=sweep_request,
+            denied_actions_by_product=denied_actions_by_product,
         )
         response = accepted_evidence_response(
             trace_id=trace_id,
