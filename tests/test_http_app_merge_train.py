@@ -34,6 +34,7 @@ from control_plane.service_auth import (
 from control_plane.storage.filesystem import FilesystemRecordStore
 from tests.http_app_test_support import (
     _asgi_get,
+    _asgi_request,
     _BatchLandingWithoutLandingPlanStore,
     _CountingBatchCandidateMergeTrainSnapshotReader,
     _CountingMergeTrainSnapshotReader,
@@ -237,6 +238,46 @@ class FastApiMergeTrainReadTests(unittest.IsolatedAsyncioTestCase):
             "Caller cannot read every governance evidence facet.",
         )
         self.assertEqual(after, before, "Diagnostic reads must leave persisted evidence unchanged")
+
+    async def test_diagnostic_reads_allow_read_only_operator_who_cannot_run_train(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            _seed_merge_train_policy(state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=_local_operator_policy(
+                    actions=("merge_train.policy_targets",),
+                    products=("launchplane",),
+                    contexts=("launchplane",),
+                ),
+                record_store_factory=lambda: store,
+                bearer_identity_config=BearerIdentityConfig(
+                    local_operator_token="local-operator-token",
+                    local_operator_subject="local-owner-agent",
+                    local_operator_token_label="local-owner-write",
+                ),
+            )
+            headers = {"Authorization": "Bearer local-operator-token"}
+            query = "repository=cbusillo/sellyouroutboard&base_branch=main"
+
+            status = await _asgi_get(
+                app, f"/v1/work-graph/merge-train/controller/status?{query}", headers=headers
+            )
+            admission = await _asgi_get(
+                app, f"/v1/work-graph/merge-train/admission?{query}", headers=headers
+            )
+            run_once = await _asgi_request(
+                app,
+                "POST",
+                "/v1/work-graph/merge-train/run-once",
+                headers=headers,
+                payload={"repository": "cbusillo/sellyouroutboard", "base_branch": "main"},
+            )
+
+        self.assertEqual(status.status_code, 200, status.text)
+        self.assertEqual(admission.status_code, 200, admission.text)
+        self.assertEqual(run_once.status_code, 403, run_once.text)
 
     async def test_controller_status_denies_unauthorized_repo(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
