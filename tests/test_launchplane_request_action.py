@@ -60,6 +60,16 @@ global.fetch = async (url, init) => {{
   if (failureAttempts.includes(launchplaneRequestCount)) {{
     throw new TypeError('simulated Launchplane network failure');
   }}
+  const ingressAttempts = String(process.env.TEST_INGRESS_404_ATTEMPTS || '')
+    .split(',')
+    .filter(Boolean)
+    .map((value) => Number(value));
+  if (ingressAttempts.includes(launchplaneRequestCount)) {{
+    return new Response('404 page not found', {{
+      status: 404,
+      headers: {{'content-type': 'text/plain; charset=utf-8'}}
+    }});
+  }}
   const configuredStatusCodes = String(process.env.TEST_STATUS_SEQUENCE || '').split(',').filter(Boolean);
   const statusCode = Number(configuredStatusCodes[launchplaneRequestCount - 1] || process.env.TEST_STATUS || '200');
   const configuredRuntimeImages = String(process.env.TEST_RUNTIME_IMAGES || '').split(',').filter(Boolean);
@@ -643,6 +653,46 @@ process.on('beforeExit', () => {{
             [call["headers"]["Authorization"] for call in launchplane_calls],
             ["Bearer oidc-token-1", "Bearer oidc-token-2"],
         )
+
+    def test_resends_request_answered_by_ingress_instead_of_launchplane(self) -> None:
+        result = self.run_action(
+            inputs={
+                "launchplane-url": "https://launchplane.example",
+                "route-path": "/v1/drivers/odoo/prod-promotion-run",
+                "payload": '{"schema_version":1}',
+                "idempotency-key": "promotion-1",
+                "ingress-retry-delay-ms": "1",
+            },
+            environment={"TEST_INGRESS_404_ATTEMPTS": "1,2"},
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = json.loads(result.stderr.strip().splitlines()[-1])
+        launchplane_calls = [
+            call for call in calls if call["url"].startswith("https://launchplane.example/")
+        ]
+        self.assertEqual(len(launchplane_calls), 3)
+        self.assertEqual(
+            {call["headers"]["Idempotency-Key"] for call in launchplane_calls}, {"promotion-1"}
+        )
+
+    def test_launchplane_json_404_is_not_retried(self) -> None:
+        result = self.run_action(
+            inputs={
+                "launchplane-url": "https://launchplane.example",
+                "route-path": "/v1/missing",
+                "payload": '{"schema_version":1}',
+                "ingress-retry-delay-ms": "1",
+            },
+            environment={"TEST_STATUS": "404", "TEST_ERROR_CODE": "not_found"},
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        calls = json.loads(result.stderr.strip().splitlines()[-1])
+        launchplane_calls = [
+            call for call in calls if call["url"].startswith("https://launchplane.example/")
+        ]
+        self.assertEqual(len(launchplane_calls), 1)
 
     def test_writes_mapped_response_value_to_file(self) -> None:
         with TemporaryDirectory() as temporary_directory:
