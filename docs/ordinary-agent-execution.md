@@ -2,6 +2,9 @@
 title: Ordinary Agent Execution Contracts
 ---
 
+> **Retired.** This design is no longer the direction and is scheduled for
+> deletion with its code. Do not build on it. See [direction.md](direction.md).
+
 # Ordinary Agent Execution Contracts
 
 Launchplane has a separate ordinary-agent credential, enrollment and session
