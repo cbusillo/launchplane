@@ -795,9 +795,12 @@ worker pass still reads a fresh GitHub snapshot before choosing an action.
 
 External schedulers can read the same decision from the native FastAPI route
 `GET /v1/work-graph/merge-train/admission?repository=owner/name&base_branch=main`.
-The route is policy-backed and authorized through the repository policy's
-`service_authz`, but it is store-only: it does not require a GitHub token, does
-not read GitHub, and does not write run records.
+The route is policy-backed and store-only: it does not require a GitHub token,
+does not read GitHub, and does not write run records. This read and the
+controller status read below accept either the repository policy's
+`service_authz` or the read-only `merge_train.policy_targets` action, so an
+identity that may not run the train can still explain why it refused a pull
+request.
 
 Operator views can read the broader stored controller state from the native
 FastAPI route
