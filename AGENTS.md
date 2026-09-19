@@ -6,10 +6,9 @@ Treat this file as the launch checklist for each engineering session in
 ## Start Here
 
 - Use the documentation index in `docs/README.md` before reading deeper files.
-- Use [plan issue #2240](https://github.com/cbusillo/launchplane/issues/2240) as
-  the durable source for the active reconciliation direction. Keep current
-  runtime facts separate from proposed behavior until the proposal is
-  implemented, reviewed, deployed, and explicitly activated.
+- Read `docs/direction.md` first. It is the current direction, roles, and stop
+  boundaries, and it wins over any issue, milestone, or older doc. Issues are a
+  work list, not instructions.
 - Before changing code, open the matching style page in `docs/style/`.
 - Keep prompts lean and prefer linking repo docs over pasting large excerpts.
 
@@ -36,12 +35,10 @@ Treat this file as the launch checklist for each engineering session in
   config is Launchplane's own minimal bootstrap/root-of-trust wiring required
   for the service to start and reach DB-backed records and managed secrets.
 
-## Reconciled Target Boundary
+## Delivery Boundary
 
-- Read `docs/authorization-authority.md` as the target direction for one scoped
-  engineering delegation, included diagnostic reads, client parity, and a
-  separately reviewed bounded-pilot activation; it is not current runtime
-  authority. A pilot amendment does not lift the broader issue `#2058` freeze.
+- The merge train is the delivery path. The ordinary-agent delegated-delivery
+  design is retired; do not extend `ordinary_agent_*` code or its docs.
 - Read `docs/owner-acceptance.md` as the target direction for narrow site Owner
   visibility, acceptance, and feedback; it is not current runtime authority and
   Owner decisions grant no operational power.
@@ -74,10 +71,11 @@ Treat this file as the launch checklist for each engineering session in
 - Update docs in the same change when behavior or ownership changes.
 - Fix root causes, not symptoms; avoid workaround-only flows unless the
   operator explicitly asks for a time-boxed mitigation.
-- Follow `docs/authorization-authority.md`. While issue `#2058` is unresolved,
-  do not propose, add, or apply new routine GitHub-secret/workflow-managed
-  authorization grants. Treat `authorization_denied` as an authority or
-  capability gap and block the affected work on the DB-native redesign.
+- Do not propose, add, or apply new GitHub-secret/workflow-managed
+  authorization grants; that mechanism stays frozen under issue `#2058`. On
+  `authorization_denied`, name the exact denied action. If the denial blocks a
+  read that explains a refusal, fix it as a bug. Otherwise ask the operator once
+  for that specific grant and continue with work that does not depend on it.
 - Dispatch and watch protected GitHub operator workflows only through the
   installed `github_workflow_babysit.py` helper. Do not use raw
   `gh workflow run`, `gh run watch`, or a generic run waiter for those jobs;

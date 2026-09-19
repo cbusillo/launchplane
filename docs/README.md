@@ -4,14 +4,13 @@ title: Launchplane Docs
 
 Use these docs as the source of truth for `launchplane`.
 
-The durable reconciliation direction is tracked in
-[issue #2240](https://github.com/cbusillo/launchplane/issues/2240). These pages
-contain both current implementation contracts and future targets. A target does
-not describe live authority or runtime behavior until its implementation,
-review, deployment, and explicit activation are recorded. In particular, the
-issue `#2058` authorization freeze remains active while the bounded delegated-
-delivery pilot and its DB-native activation/rollback amendment are prepared.
+Start with [direction.md](direction.md): the current direction, roles, stop
+boundaries, and delivery path. It wins over any issue, milestone, or older page.
+Some pages below still describe targets rather than live behavior; a target does
+not describe runtime authority until it is implemented, deployed, and activated.
 
+- [direction.md](direction.md) — what Launchplane is for, who may do what, and
+  where agents stop.
 - [architecture.md](architecture.md) — ownership boundaries and system shape.
 - [config-boundary.md](config-boundary.md) — bootstrap-vs-DB config authority
   and checked-in config authority limits.
@@ -58,11 +57,8 @@ delivery pilot and its DB-native activation/rollback amendment are prepared.
   baseline, Docker credential isolation, and readiness contract.
 - [runner-host-hygiene.md](runner-host-hygiene.md) — report-only shared runner
   host hygiene evidence, budgets, and future apply boundary.
-- [ordinary-agent-execution.md](ordinary-agent-execution.md) — ordinary-agent
-  identity, private delivery, scope, eligibility and administration boundaries.
-- [provider-delivery-inspection.md](provider-delivery-inspection.md) — automatic
-  provider-protection inspection, governed expectations, custody and guarded
-  readiness evidence.
+- [ordinary-agent-execution.md](ordinary-agent-execution.md) — RETIRED, scheduled for deletion; see direction.md.
+- [provider-delivery-inspection.md](provider-delivery-inspection.md) — RETIRED, scheduled for deletion; see direction.md.
 - [agent-context-boundary.md](agent-context-boundary.md) — public-safe agent
   context, caller profiles, scoped intent, redaction, and provenance boundary.
 - [agent-operator-contract.md](agent-operator-contract.md) — generated,
