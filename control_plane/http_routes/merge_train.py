@@ -130,6 +130,26 @@ def merge_train_admission_query(
         ) from error
 
 
+def merge_train_diagnostic_read_allowed(
+    *,
+    dependencies: ReadRouteDependencies,
+    identity: LaunchplaneIdentity,
+    service_authz: MergeTrainServiceAuthz,
+) -> bool:
+    # Explaining a refusal must not require authority to run the train.
+    return dependencies.authorization_allows(
+        identity=identity,
+        action=service_authz.action,
+        product=service_authz.product,
+        context=service_authz.context,
+    ) or dependencies.authorization_allows(
+        identity=identity,
+        action=MERGE_TRAIN_POLICY_TARGETS_READ_ACTION,
+        product="launchplane",
+        context=LAUNCHPLANE_SERVICE_CONTEXT,
+    )
+
+
 def register_merge_train_read_routes(
     app: ApiRouteRegistrar,
     *,
@@ -167,11 +187,10 @@ def register_merge_train_read_routes(
                 trace_id=trace_id,
                 error=error,
             ) from error
-        if not dependencies.authorization_allows(
+        if not merge_train_diagnostic_read_allowed(
+            dependencies=dependencies,
             identity=identity,
-            action=repository_policy.service_authz.action,
-            product=repository_policy.service_authz.product,
-            context=repository_policy.service_authz.context,
+            service_authz=repository_policy.service_authz,
         ):
             raise dependencies.http_error(
                 status_code=403,
@@ -225,11 +244,10 @@ def register_merge_train_read_routes(
                 trace_id=trace_id,
                 error=error,
             ) from error
-        if not dependencies.authorization_allows(
+        if not merge_train_diagnostic_read_allowed(
+            dependencies=dependencies,
             identity=identity,
-            action=repository_policy.service_authz.action,
-            product=repository_policy.service_authz.product,
-            context=repository_policy.service_authz.context,
+            service_authz=repository_policy.service_authz,
         ):
             raise dependencies.http_error(
                 status_code=403,
