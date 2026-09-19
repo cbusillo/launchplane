@@ -1862,9 +1862,12 @@ mutation starts. It rejects missing or product-mismatched `plan_id` values befor
 writing cleanup state and returns the stored cleanup record as accepted evidence.
 
 `POST /v1/previews/lifecycle-sweep` derives enabled preview profiles from
-Launchplane product-profile records, requires both `preview_lifecycle.plan` and
-`preview_lifecycle.cleanup` authorization for every selected profile before any
-inventory, desired-state, plan, or cleanup mutation starts, requires storage
+Launchplane product-profile records, checks both `preview_lifecycle.plan` and
+`preview_lifecycle.cleanup` authorization for each selected profile before any
+inventory, desired-state, plan, or cleanup mutation starts, sweeps the authorized
+profiles and reports each unauthorized profile as `skipped` with the denied
+action (making the sweep `partial`), rejects the request only when no selected
+profile is authorized, requires storage
 that can read product profiles and preview/inventory history and write preview,
 inventory, desired-state, lifecycle plan, and cleanup records, preserves optional
 `Idempotency-Key` replay/conflict behavior, and returns the sweep summary as

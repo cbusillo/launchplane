@@ -29,6 +29,7 @@ from control_plane.workflows.generic_web_preview import (
 )
 from tests.http_app_test_support import (
     _asgi_get,
+    _AsgiResponse,
     _asgi_request,
     _generic_web_preview_desired_state_identity,
     _generic_web_preview_desired_state_payload,
@@ -419,32 +420,29 @@ class FastApiPreviewLifecycleCleanupTests(unittest.IsolatedAsyncioTestCase):
         inventory_mock.assert_called_once()
         desired_mock.assert_called_once()
 
-    async def test_preview_lifecycle_sweep_rejects_missing_product_authorization(self) -> None:
+    async def _sweep_syo_and_verireel(self, *, authorized_product: str) -> _AsgiResponse:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
             state_dir = root / "state"
             store = FilesystemRecordStore(state_dir=state_dir)
-            store.write_product_profile_record(
-                LaunchplaneProductProfileRecord.model_validate(
-                    _generic_site_profile_payload(product="syo")
+            for product in ("syo", "verireel"):
+                store.write_product_profile_record(
+                    LaunchplaneProductProfileRecord.model_validate(
+                        _generic_site_profile_payload(product=product)
+                    )
                 )
-            )
-            store.write_product_profile_record(
-                LaunchplaneProductProfileRecord.model_validate(
-                    _generic_site_profile_payload(product="verireel")
-                )
+            workflow_ref = (
+                "every/launchplane/.github/workflows/preview-lifecycle.yml@refs/heads/main"
             )
             policy = LaunchplaneAuthzPolicy.model_validate(
                 {
                     "github_actions": [
                         {
                             "repository": "every/launchplane",
-                            "workflow_refs": [
-                                "every/launchplane/.github/workflows/preview-lifecycle.yml@refs/heads/main"
-                            ],
+                            "workflow_refs": [workflow_ref],
                             "event_names": ["workflow_dispatch"],
-                            "products": ["syo"],
-                            "contexts": ["syo"],
+                            "products": [authorized_product],
+                            "contexts": [authorized_product],
                             "actions": ["preview_lifecycle.plan", "preview_lifecycle.cleanup"],
                         }
                     ]
@@ -454,9 +452,7 @@ class FastApiPreviewLifecycleCleanupTests(unittest.IsolatedAsyncioTestCase):
                 verifier=_StubVerifier(
                     _identity(
                         repository="every/launchplane",
-                        workflow_ref=(
-                            "every/launchplane/.github/workflows/preview-lifecycle.yml@refs/heads/main"
-                        ),
+                        workflow_ref=workflow_ref,
                         event_name="workflow_dispatch",
                     )
                 ),
@@ -464,20 +460,64 @@ class FastApiPreviewLifecycleCleanupTests(unittest.IsolatedAsyncioTestCase):
                 control_plane_root_path=root,
                 record_store_factory=lambda: FilesystemRecordStore(state_dir=state_dir),
             )
+            with (
+                patch(
+                    "control_plane.preview_lifecycle_cleanup_routes.execute_generic_web_preview_inventory",
+                    return_value=GenericWebPreviewInventoryResult(
+                        product="syo",
+                        context="syo",
+                        source="launchplane-preview-lifecycle",
+                        app_name_prefix="syo-preview",
+                        previews=(),
+                    ),
+                ),
+                patch(
+                    "control_plane.preview_lifecycle_cleanup_routes.discover_generic_web_preview_desired_state",
+                    return_value=PreviewDesiredStateRecord(
+                        desired_state_id="preview-desired-state-syo-20260510T120000Z",
+                        product="syo",
+                        context="syo",
+                        source="launchplane-preview-lifecycle",
+                        discovered_at="2026-05-10T12:00:00Z",
+                        repository="every/syo",
+                        label="preview",
+                        anchor_repo="syo",
+                        preview_slug_prefix="pr-",
+                        status="pass",
+                        desired_count=0,
+                        desired_previews=(),
+                    ),
+                ),
+            ):
+                return await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/previews/lifecycle-sweep",
+                    headers={"Authorization": "Bearer valid-token"},
+                    payload={"source": "launchplane-preview-lifecycle"},
+                )
 
-            response = await _asgi_request(
-                app,
-                "POST",
-                "/v1/previews/lifecycle-sweep",
-                headers={"Authorization": "Bearer valid-token"},
-                payload={"source": "launchplane-preview-lifecycle"},
-            )
+    async def test_preview_lifecycle_sweep_skips_unauthorized_product_and_sweeps_the_rest(
+        self,
+    ) -> None:
+        response = await self._sweep_syo_and_verireel(authorized_product="syo")
+
+        self.assertEqual(response.status_code, 202, response.text)
+        result = response.json()["result"]
+        self.assertEqual(result["status"], "partial")
+        statuses = {entry["product"]: entry["status"] for entry in result["profiles"]}
+        self.assertEqual(statuses["verireel"], "skipped")
+        self.assertNotEqual(statuses["syo"], "skipped")
+        skipped = next(entry for entry in result["profiles"] if entry["product"] == "verireel")
+        self.assertIn("preview_lifecycle.plan", skipped["error_message"])
+
+    async def test_preview_lifecycle_sweep_rejects_when_no_product_is_authorized(self) -> None:
+        response = await self._sweep_syo_and_verireel(authorized_product="other")
 
         self.assertEqual(response.status_code, 403)
         payload = response.json()
         self.assertEqual(payload["error"]["code"], "authorization_denied")
-        self.assertEqual(payload["authz"]["request"]["product"], "verireel")
-        self.assertEqual(payload["authz"]["request"]["context"], "verireel")
+        self.assertEqual(payload["authz"]["request"]["product"], "syo")
         self.assertEqual(payload["authz"]["request"]["action"], "preview_lifecycle.plan")
 
     async def test_preview_lifecycle_sweep_requires_write_capable_store_before_drivers(
