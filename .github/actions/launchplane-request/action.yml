@@ -78,6 +78,12 @@ inputs:
     description: Base retry delay in milliseconds.
     required: false
     default: "250"
+  ingress-retry-delay-ms:
+    description: >-
+      Base delay before resending a request that was answered by the ingress
+      proxy (404/502/503/504 without a JSON body) instead of Launchplane.
+    required: false
+    default: "5000"
   expected-status:
     description: >-
       Comma-separated HTTP status codes that should be accepted for the
