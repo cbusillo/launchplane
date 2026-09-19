@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from collections.abc import Mapping
 from typing import Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -275,11 +276,13 @@ def build_preview_lifecycle_sweep(
     control_plane_root: Path,
     record_store: PreviewLifecycleSweepStore,
     request: PreviewLifecycleSweepEnvelope,
+    denied_actions_by_product: Mapping[str, str] | None = None,
 ) -> dict[str, object]:
     profiles = preview_lifecycle_sweep_profiles(
         record_store=record_store,
         product=request.product,
     )
+    denied_actions = denied_actions_by_product or {}
     entries: list[dict[str, object]] = []
     for profile in profiles:
         cleanup_driver_id = preview_lifecycle_cleanup_driver_id(profile)
@@ -289,6 +292,18 @@ def build_preview_lifecycle_sweep(
             "driver_id": profile.driver_id,
             "cleanup_driver_id": cleanup_driver_id,
         }
+        if profile.product in denied_actions:
+            entry.update(
+                {
+                    "status": "skipped",
+                    "error_message": (
+                        "Caller is not authorized for "
+                        f"{denied_actions[profile.product]} on this product."
+                    ),
+                }
+            )
+            entries.append(entry)
+            continue
         if not cleanup_driver_id:
             entry.update(
                 {
