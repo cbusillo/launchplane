@@ -73,7 +73,7 @@ jobs:
             > odoo-testing-route-binding-refresh-request.json
 
       - name: Run Odoo testing route-binding refresh
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@dcfe6fb13cdd5f7c66428ce9ef108ebbe215fff5 # launchplane-request
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@052db9d452f05381a3b43a82dfddfeefb34a8b72 # launchplane-request
         with:
           launchplane-url: ${{ env.LAUNCHPLANE_URL }}
           audience: ${{ env.LAUNCHPLANE_AUDIENCE }}
