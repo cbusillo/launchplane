@@ -60,16 +60,51 @@ function describeError(error) {
   return String(error);
 }
 
+const INGRESS_RETRY_ATTEMPTS = 6;
+
+// Launchplane always answers with a JSON object. A 404/502/503/504 with any
+// other body comes from the proxy in front of it while a container is being
+// replaced, so the request never reached Launchplane and is safe to send again.
+async function isIngressResponse(response) {
+  if (![404, 502, 503, 504].includes(response.status)) {
+    return false;
+  }
+  try {
+    const body = JSON.parse(await response.clone().text());
+    return body === null || typeof body !== "object";
+  } catch {
+    return true;
+  }
+}
+
 async function fetchWithRetry(url, initOrFactory, options) {
   const attempts = parsePositiveInteger(options.retryAttempts, "retry-attempts");
   const delayMs = parseNonNegativeInteger(options.retryDelayMs, "retry-delay-ms");
+  const ingressDelayMs = parseNonNegativeInteger(
+    options.ingressRetryDelayMs ?? "5000",
+    "ingress-retry-delay-ms",
+  );
+  let ingressAttempt = 0;
   let lastError = null;
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
       const init = typeof initOrFactory === "function"
         ? await initOrFactory()
         : initOrFactory;
-      return await fetch(url, init);
+      const response = await fetch(url, init);
+      if (!(await isIngressResponse(response))) {
+        return response;
+      }
+      ingressAttempt += 1;
+      if (ingressAttempt >= INGRESS_RETRY_ATTEMPTS) {
+        return response;
+      }
+      process.stderr.write(
+        `${options.label} got HTTP ${response.status} from the ingress, not Launchplane; ` +
+          `retrying in ${ingressDelayMs * ingressAttempt}ms.\n`,
+      );
+      await sleep(ingressDelayMs * ingressAttempt);
+      attempt -= 1;
     } catch (error) {
       lastError = error;
       if (isAbortError(error) || attempt >= attempts) {
@@ -415,6 +450,7 @@ function getActionOptions() {
     pollUntilPath: getInput("poll-until-path"),
     pollUntilValue: getInput("poll-until-value"),
     retryAttempts: getInput("retry-attempts", { defaultValue: "3" }),
+    ingressRetryDelayMs: getInput("ingress-retry-delay-ms", { defaultValue: "5000" }),
     retryDelayMs: getInput("retry-delay-ms", { defaultValue: "250" }),
   };
 }
