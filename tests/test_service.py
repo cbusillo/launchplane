@@ -2510,9 +2510,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
             create_comment.call_args.kwargs["body"],
         )
         self.assertIn(
-            "repository=cbusillo%2Fsellyouroutboard&pull_request=42",
+            "/ui/owner-review?repository=cbusillo%2Fsellyouroutboard&pull_request=42",
             payload["result"]["comment_markdown"],
         )
+        self.assertNotIn("/pull/42/files", payload["result"]["comment_markdown"])
         self.assertEqual(failed_status_code, 202, failed_payload)
         self.assertEqual(failed_payload["result"]["delivery_status"], "delivered")
         self.assertIn("unavailable", failed_comment_body)
