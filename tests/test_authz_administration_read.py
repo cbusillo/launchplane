@@ -370,13 +370,13 @@ class AuthzAdministrationReadHttpTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         manager, session_store = _human_session_manager()
         identity = GitHubHumanIdentity(
-            login="browser-admin",
-            github_id=101,
-            name="Browser Admin",
-            email="browser-admin@example.test",
+            login="browser-viewer",
+            github_id=303,
+            name="Browser Viewer",
+            email="browser-viewer@example.test",
             organizations=frozenset(),
             teams=frozenset(),
-            role="admin",
+            role="read_only",
         )
         headers, session_id, csrf_token = _browser_headers(manager, identity)
         headers.pop("Origin")
