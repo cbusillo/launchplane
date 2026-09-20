@@ -3,7 +3,9 @@ import type {
   OwnerAcceptanceDecision,
 } from "./api";
 import type {
+  AcceptedEvidenceResponse,
   ApplyProductEnvironmentConfigData,
+  ApplyProductOwnerData,
   DataProvenance,
   DispatchProductPromotionWorkflowData,
   DryRunProductPromotionData,
@@ -29,6 +31,7 @@ import type {
   ProductIncidentSummary,
   ProductOperationalReadiness,
   ProductOperationalReadinessDimension,
+  ProductOwnerProfile,
   ProductPromotionDryRunResponse,
   ProductPromotionOperationAvailability,
   ProductPromotionStatus,
@@ -1255,6 +1258,71 @@ function productConfigWriteAvailabilityForFixture(
         "Managed-secret creation or rotation cannot restore prior plaintext.",
         "Live target synchronization remains a separate inspect-only step when advertised.",
       ],
+    },
+  };
+}
+
+const NO_FIXTURE_OWNER: ProductOwnerProfile = {
+  github_login: "",
+  github_id: "",
+  review_label: "owner-review",
+};
+const fixtureProductOwners = new Map<string, ProductOwnerProfile>([
+  [
+    "atlas-commerce",
+    { github_login: "example-owner", github_id: "9001", review_label: "owner-review" },
+  ],
+]);
+
+export function productOwnerForFixture(
+  fixture: DataFixtureMode,
+  product: string,
+): ProductOwnerProfile {
+  assertFixtureAvailable(fixture);
+  return fixtureProductOwners.get(product) ?? NO_FIXTURE_OWNER;
+}
+
+export async function applyProductOwnerForFixture(
+  fixture: DataFixtureMode,
+  product: string,
+  payload: ApplyProductOwnerData["body"],
+  signal?: AbortSignal,
+): Promise<AcceptedEvidenceResponse> {
+  assertFixtureAvailable(fixture);
+  if (signal?.aborted) {
+    throw new DOMException("Product owner fixture request cancelled.", "AbortError");
+  }
+  const before = productOwnerForFixture(fixture, product);
+  const login = (payload.github_login ?? "").trim();
+  const after: ProductOwnerProfile = payload.clear
+    ? NO_FIXTURE_OWNER
+    : {
+        github_login: login,
+        github_id: String(7000 + login.length),
+        review_label: before.review_label,
+      };
+  const applied = payload.mode === "apply";
+  if (applied) {
+    fixtureProductOwners.set(product, after);
+  }
+  const identity = (owner: ProductOwnerProfile) => ({
+    github_login: owner.github_login,
+    github_id: owner.github_id,
+  });
+  return {
+    status: "accepted",
+    trace_id: `fixture-product-owner-${applied ? "apply" : "dry-run"}`,
+    original_trace_id: null,
+    replayed: null,
+    records: { product_profile: product },
+    result: {
+      mode: payload.mode ?? "dry-run",
+      product,
+      owner_before: identity(before),
+      owner_after: identity(after),
+      changed: before.github_id !== after.github_id,
+      applied,
+      reason: payload.reason,
     },
   };
 }

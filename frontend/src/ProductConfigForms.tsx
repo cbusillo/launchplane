@@ -617,7 +617,7 @@ function ManagedSecretInput({
   );
 }
 
-function ReasonField({
+export function ReasonField({
   onChange,
   reason,
 }: {
@@ -807,7 +807,7 @@ function ProductConfigEvidence({
   );
 }
 
-function OperationNotice({
+export function OperationNotice({
   label,
   state,
 }: {
@@ -832,7 +832,7 @@ function OperationNotice({
   );
 }
 
-function InlineFormError({ message }: { message: string }) {
+export function InlineFormError({ message }: { message: string }) {
   return (
     <div className="product-config-inline-error" role="alert">
       <AlertTriangle aria-hidden="true" />
@@ -872,6 +872,6 @@ function useProductConfigOperation(
   });
 }
 
-function isOperationBusy(state: BrowserOperationState): boolean {
+export function isOperationBusy(state: BrowserOperationState): boolean {
   return state.phase === "queued" || state.phase === "submitting";
 }

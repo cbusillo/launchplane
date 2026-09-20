@@ -158,6 +158,7 @@ UI_OPENAPI_READ_OPERATIONS: dict[str, str] = {
     "/v1/contexts/{context}/driver-view": "read_driver_context_view",
     "/v1/contexts/{context}/instances/{instance}/driver-view": "read_driver_instance_view",
     "/v1/product-profiles": "list_product_profiles",
+    "/v1/product-profiles/{product}": "read_product_profile",
     "/v1/products": "list_products",
     "/v1/products/{product}": "read_product",
     "/v1/products/{product}/activity": "read_product_activity",
@@ -234,6 +235,7 @@ UI_OPENAPI_WRITE_OPERATIONS: dict[str, str] = {
     "/v1/products/{product}/environments/{environment}/config/apply": (
         "apply_product_environment_config"
     ),
+    "/v1/product-profiles/{product}/owner": "apply_product_owner",
     "/v1/products/{product}/environments/{environment}/promotion/dry-run": (
         "dry_run_product_promotion"
     ),

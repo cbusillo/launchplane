@@ -32,6 +32,7 @@ test("browser write routes are the generated UI write allowlist", () => {
     "/v1/ordinary-agent-sessions/{principal_id}/{session_id}/revoke",
     "/v1/ordinary-agent-connections/{principal_id}/disconnect",
     "/v1/products/{product}/environments/{environment}/config/apply",
+    "/v1/product-profiles/{product}/owner",
     "/v1/products/{product}/environments/{environment}/promotion/dry-run",
     "/v1/products/{product}/environments/{environment}/promotion/workflow-dispatch",
     "/v1/work-graph/rank",

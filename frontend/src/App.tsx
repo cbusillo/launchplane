@@ -306,6 +306,7 @@ export function App() {
       ) : null}
       {route.kind === "product-workspace" ? (
         <ProductWorkspaceRoute
+          fixtureMode={fixtureMode}
           fixtureResource={fixtureMode ? productsResource : null}
           key={`workspace:${route.product}:${fixtureMode}`}
           productKey={route.product}

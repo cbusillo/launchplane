@@ -994,6 +994,13 @@ The service exposes product profile records through `GET /v1/product-profiles`,
 require the `product_profile.write` action for the target product in the
 Launchplane service context; reads use `product_profile.read`.
 
+The profile `owner` names the site Owner who may accept or request changes on
+previews and can never merge or deploy. Set or clear it with
+`POST /v1/product-profiles/{product}/owner` or the Owner control on the operator
+product page rather than a whole-record write: the operator supplies a GitHub
+login, Launchplane resolves and stores the immutable numeric GitHub id, and no
+other profile field changes.
+
 Additive expected-config metadata changes use
 `POST /v1/product-profiles/expected-config/apply`. The request carries
 `mode: "dry-run"` or `mode: "apply"`, a product key, a reason, and runtime key

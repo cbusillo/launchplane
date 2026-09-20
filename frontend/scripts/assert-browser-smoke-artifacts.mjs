@@ -22,6 +22,7 @@ const journeys = [
   "action-readiness-empty",
   "action-readiness-loading-settled",
   "safe-change-confirmation",
+  "product-owner-preview",
 ];
 const missingArtifacts = [];
 
