@@ -95,6 +95,28 @@ part of the effective administration chain. Do not interpret the workflow's
 existence, its protected environment, or its listing in repository metadata as
 approval to use GitHub for routine permission administration.
 
+## The Policy Administrator
+
+One kind of rule already carries the power to change every grant: a
+`github_humans` rule named by immutable GitHub id with the `admin` role and
+`authz_policy_grant.write` on `launchplane`/`launchplane`, with no login,
+organization, team, or instance selector. A signed-in person matched by such a
+rule is the policy administrator, and the runtime allows them every action.
+Enumerating actions for that person added ceremony without adding protection,
+because they could already approve any change to their own grants.
+
+This is the same predicate that gates every policy write, so there is one
+definition of administrator. It does not widen anything else:
+
+- a rule that merely carries the `admin` role (for example the product-evidence
+  read set, which lists one read action) stays exactly as narrow as it is
+  written;
+- `read_only` people, site Owners, and every machine identity (workflows,
+  agents, tokens) are still limited to their enumerated grants;
+- the schema-version and instance-scope checks still apply to the administrator;
+- approval and worker reauthorization of privileged operations still require the
+  exact managed rule and never consult this shortcut.
+
 ## Denial Handling
 
 Treat `authorization_denied` as an authority result, not a credential-selection

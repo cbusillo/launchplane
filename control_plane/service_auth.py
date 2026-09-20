@@ -1093,7 +1093,9 @@ class LaunchplaneAuthzPolicy(BaseModel):
                     reason_code="principal_role_restricted",
                     record_context=record_context,
                 )
-            allowed = any(
+            # Policy decides who the administrator is; being the administrator means
+            # every action. Enumerated grants are for machine credentials.
+            allowed = self.names_administrator(identity) or any(
                 rule.allows(
                     identity=identity,
                     action=action,
@@ -1233,6 +1235,17 @@ class LaunchplaneAuthzPolicy(BaseModel):
             product=product,
             context="",
             target=AuthorizationTarget(scope="instance", instances=(instance,)),
+        )
+
+    def names_administrator(self, identity: GitHubHumanIdentity) -> bool:
+        """Whether this person is the policy administrator: the one kind of rule that
+        can already change any grant, named by immutable GitHub id.
+
+        A narrower rule that merely carries the admin role (one read action, one
+        product, a login or team selector) never confers unrestricted authority.
+        """
+        return identity.role == "admin" and authz_policy_allows_immutable_github_id_administration(
+            policy=self, github_id=identity.github_id
         )
 
     def human_role_for(
