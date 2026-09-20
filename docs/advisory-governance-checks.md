@@ -22,6 +22,18 @@ unavailable. Its summary routes the reviewer to Launchplane, the only Owner
 action surface. Owner projection uses one stable aggregate check and lists each
 affected product decision instead of product-derived check names.
 
+For product pull requests this check is a leftover of the change-impact model
+and is no longer the Owner's signal. Product Owner review is shown by the
+`launchplane/owner-review` commit status described in
+[preview-workflow-contract.md](preview-workflow-contract.md#owner-review-request).
+When Launchplane next writes a ready preview comment for a pull request, an
+existing `launchplane/owner-acceptance` check run on the current head that this
+App created and that is not already `neutral` is updated once to `neutral` with
+the title "Retired" and a summary pointing to `launchplane/owner-review`.
+Launchplane never creates the check for that purpose. Launchplane's own merge
+train still evaluates Owner acceptance; removing that is a later step of issue
+`#2446`.
+
 ## GitHub App Identity
 
 Projection uses a dedicated GitHub App installation identity. The App may have

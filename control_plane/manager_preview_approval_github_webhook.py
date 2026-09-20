@@ -363,17 +363,10 @@ def invalidate_manager_preview_approval_for_pr(
         occurred_at=resolved_occurred_at,
         binding=binding,
     )
-    if not event_result["required"]:
-        return event_result
-    projection = reconcile_manager_preview_approval_for_pr(
-        repository=repository,
-        pr_number=pr_number,
-        record_store=record_store,
-        control_plane_root=control_plane_root,
-        evaluated_at=resolved_occurred_at,
-        dependencies=resolved_dependencies,
-    )
-    return {**event_result, **projection}
+    # The invalidation stays a stored event for promotion; nothing is posted to the
+    # pull request any more.
+    del control_plane_root
+    return event_result
 
 
 def record_manager_preview_approval_invalidation_for_pr(
@@ -626,18 +619,8 @@ def _handle_issue_comment(
         not projection_before.binding_sha256
         or command.fingerprint != projection_before.binding_sha256
     ):
-        _write_projection_best_effort(
-            projection=projection_before,
-            token=token,
-            dependencies=dependencies,
-        )
         return 202, _accepted(trace_id, skipped=True, reason="stale_fingerprint")
     if projection_before.decision.status == "unavailable" or projection_before.pr_state != "open":
-        _write_projection_best_effort(
-            projection=projection_before,
-            token=token,
-            dependencies=dependencies,
-        )
         return 202, _accepted(trace_id, skipped=True, reason="preview_evidence_not_current")
     preview, generation = _preview_and_generation(
         record_store=record_store,
@@ -646,11 +629,6 @@ def _handle_issue_comment(
         pr_number=pr_number,
     )
     if generation.anchor_summary.head_sha != _nested_string(pull_request, "head", "sha"):
-        _write_projection_best_effort(
-            projection=projection_before,
-            token=token,
-            dependencies=dependencies,
-        )
         return 202, _accepted(trace_id, skipped=True, reason="stale_head")
     current_binding = build_current_manager_preview_approval_binding(
         product=profile.product,
@@ -658,20 +636,6 @@ def _handle_issue_comment(
         generation=generation,
     )
     if current_binding.binding_sha256 != command.fingerprint:
-        current_projection = build_manager_preview_approval_projection(
-            record_store=record_store,
-            repository=repository,
-            pr_number=pr_number,
-            pr_url=_string(pull_request, "html_url"),
-            pr_state=_string(pull_request, "state"),
-            current_head_sha=_nested_string(pull_request, "head", "sha"),
-            evaluated_at=evaluated_at,
-        )
-        _write_projection_best_effort(
-            projection=current_projection,
-            token=token,
-            dependencies=dependencies,
-        )
         return 202, _accepted(trace_id, skipped=True, reason="stale_fingerprint")
     current_events = record_store.list_manager_preview_approval_event_records(
         product=profile.product,
@@ -685,11 +649,6 @@ def _handle_issue_comment(
         and event.action in {"superseded", "invalidated"}
         for event in current_events
     ):
-        _write_projection_best_effort(
-            projection=projection_before,
-            token=token,
-            dependencies=dependencies,
-        )
         return 202, _accepted(trace_id, skipped=True, reason="preview_evidence_not_current")
     user = _mapping(comment, "user")
     login = _string(user, "login")
@@ -738,18 +697,12 @@ def _handle_issue_comment(
         current_head_sha=_nested_string(pull_request, "head", "sha"),
         evaluated_at=evaluated_at,
     )
-    projection_result = write_manager_preview_approval_projection(
-        projection=projection_after,
-        token=token,
-        api_request=dependencies.github_api,
-    )
     return 202, _accepted(
         trace_id,
         result={
             "event_id": result.record.event_id,
             "event_status": result.status,
             "approval_status": projection_after.decision.status,
-            **projection_result,
         },
         github_delivery_id=delivery_id,
     )
@@ -837,14 +790,9 @@ def _handle_pull_request(
     )
     if not projection.required:
         return 202, _accepted(trace_id, skipped=True, reason="approval_not_required")
-    result = write_manager_preview_approval_projection(
-        projection=projection,
-        token=token,
-        api_request=dependencies.github_api,
-    )
     return 202, _accepted(
         trace_id,
-        result={"approval_status": projection.decision.status, **result},
+        result={"approval_status": projection.decision.status},
         github_delivery_id=delivery_id,
     )
 

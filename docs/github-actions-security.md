@@ -41,10 +41,10 @@ remote code or move workflow data across trust boundaries.
 
 The current compatibility manager-preview approval is not emitted by pull-request
 Actions. Launchplane validates signed webhook input against its durable preview
-and policy records, then writes the `manager-preview-approval` status with a
-Launchplane-owned credential resolved outside PR code. Tenant workflows may
-request preview lifecycle operations, but they cannot mint a passing manager
-status or provide the status-writer token.
+and policy records and stores the decision; it no longer writes the
+`manager-preview-approval` status from the webhook. Tenant workflows may request
+preview lifecycle operations, but they cannot record a manager decision or
+provide a status-writer token.
 
 Issue `#2240` replaces this as the target admission path with trusted Launchplane
 Owner acceptance. The legacy credential boundary remains enforced until that

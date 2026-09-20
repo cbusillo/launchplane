@@ -2743,9 +2743,6 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
                     "control_plane.http_app.record_manager_preview_approval_invalidation_for_pr",
                     return_value={"required": True, "event_status": "written"},
                 ) as record_manager_invalidation,
-                patch(
-                    "control_plane.http_app.reconcile_manager_preview_approval_for_pr_best_effort"
-                ) as reconcile_manager_approval,
             ):
                 response = await _post_odoo_preview_apply(
                     app,
@@ -2785,7 +2782,6 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
         applied_request = apply_driver.call_args.kwargs["request"]
         self.assertEqual(applied_request.dry_run_plan.operation, "destroy")
         self.assertEqual(applied_request.image_reference, "")
-        self.assertEqual(reconcile_manager_approval.call_count, 2)
         record_manager_invalidation.assert_called_once()
         invalidation_call = record_manager_invalidation.call_args.kwargs
         self.assertEqual(invalidation_call["repository"], "cbusillo/odoo-tenant-cm")
@@ -2989,17 +2985,12 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
                         },
                     ),
                 ) as apply_driver,
-                patch(
-                    "control_plane.http_app.reconcile_manager_preview_approval_for_pr_best_effort",
-                    return_value=True,
-                ) as reconcile_manager_approval,
             ):
                 first_response = await _post_odoo_preview_apply(
                     app,
                     payload,
                     idempotency_key=plan_id,
                 )
-                reconcile_manager_approval.assert_not_called()
                 second_response = await _post_odoo_preview_apply(
                     app,
                     payload,
@@ -3011,7 +3002,6 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second_response.status_code, 202)
         self.assertEqual(second_response.json()["result"]["status"], "pass")
         self.assertEqual(apply_driver.call_count, 2)
-        reconcile_manager_approval.assert_called_once()
 
     async def test_odoo_preview_apply_replays_non_blocked_idempotency(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -3100,9 +3090,9 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
                     },
                 ) as apply_driver,
                 patch(
-                    "control_plane.http_app.reconcile_manager_preview_approval_for_pr_best_effort",
-                    side_effect=(False, True),
-                ) as reconcile_manager_approval,
+                    "control_plane.manager_preview_approval_github_webhook"
+                    ".write_manager_preview_approval_projection"
+                ) as write_manager_status,
             ):
                 first_response = await _post_odoo_preview_apply(
                     app,
@@ -3128,7 +3118,7 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(conflict_response.status_code, 409)
         self.assertEqual(conflict_response.json()["error"]["code"], "odoo_preview_plan_mismatch")
         apply_driver.assert_called_once()
-        self.assertEqual(reconcile_manager_approval.call_count, 2)
+        write_manager_status.assert_not_called()
         previews = store.list_preview_records(
             context_name="cm",
             anchor_repo="odoo-tenant-cm",

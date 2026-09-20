@@ -41,6 +41,10 @@ _NO_PREVIEW_REASON = "No preview is ready for this pull request yet."
 class ProductReviewRouteDependencies:
     common: ReadRouteDependencies
     read_github_human_browser_mutation_identity: Callable[..., GitHubHumanIdentity]
+    # Best-effort and non-raising: the recorded decision never depends on it.
+    publish_owner_review_status: Callable[
+        [ProductReviewStore, LaunchplaneProductProfileRecord, int], object
+    ]
 
 
 class ProductReviewDecisionEnvelope(BaseModel):
@@ -231,6 +235,7 @@ def register_product_review_routes(
             reason=envelope.reason,
             identity=human,
         )
+        dependencies.publish_owner_review_status(store, profile, envelope.pull_request)
         return build_response(
             store=store,
             profile=profile,

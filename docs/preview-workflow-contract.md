@@ -262,14 +262,46 @@ section. If the labels cannot be read, the comment is still delivered without an
 Owner section; release approval is the safety net (see
 [direction.md](direction.md)).
 
+The Owner's answer is shown on the pull request as one commit status,
+`launchplane/owner-review`, on the current head. Launchplane writes it with the
+same repository credential that writes the preview comment, when the ready
+preview comment is written and again as soon as the Owner records a decision:
+
+- marked, Owner set, no decision for the current head: `pending`, "Waiting for
+  @owner to review the preview", linking the focused `/ui/owner-review` page;
+- latest decision recorded for the current head: `success` ("Accepted by
+  @owner") or `failure` ("Changes requested by @owner");
+- a decision recorded for an older head does not count, because the Owner
+  reviews what is actually previewed, so the status returns to `pending`;
+- marked with no Owner: `pending`, "No Owner set for this product";
+- unmarked: no status is written.
+
+Status delivery is best-effort. A source-control failure is logged and never
+fails preview feedback or loses a recorded decision; the next ready preview
+comment or decision writes it again. The status is a signal for people. It is
+not a merge or promotion gate.
+
 ## Manager Preview Approval
 
-The mechanism below documents current compatibility behavior and retained
-history. It is not the target Owner model for issue `#2240`. Reconciliation must
-move current admission to authoritative Owner acceptance on the trusted
-Launchplane surface, preserve historical manager events for audit/rollback, and
-retire the manager command/status authority only after replacement coverage is
-proved. It must not treat manager approval as operational permission.
+Launchplane no longer posts the `manager-preview-approval` status or its managed
+`/preview` command comment on pull requests. Preview refresh, verification,
+destroy, Odoo preview apply, authorization-policy changes, and the signed GitHub
+webhook leave the pull request alone; Owner review is shown by
+`launchplane/owner-review` (see Owner Review Request). When Launchplane next
+writes a ready preview comment, a leftover `manager-preview-approval` status on
+the current head is closed once as `success` with "Retired. Owner review is
+recorded in Launchplane.", and a leftover `launchplane/owner-acceptance` check
+run created by Launchplane's advisory app is updated once to `neutral` with the
+title "Retired". Neither signal is created where it does not already exist.
+
+Manager decisions and invalidations remain stored events, and promotion still
+reads them, until the release-approval change from issue `#2446` replaces that
+gate. The signed webhook still records an exact `/preview` command from an
+authorized manager and still records invalidation on pull-request close or
+preview-label removal. The only remaining writer of the status and command
+comment is the explicit operator route
+`POST /v1/manager-preview-approval/reconcile`. The rest of this section
+describes that retained mechanism and its history; it is not the Owner model.
 
 Manager approval is a Launchplane-owned interaction layered on the serving
 preview evidence. Product workflows do not parse approval comments, resolve a
@@ -305,11 +337,8 @@ verified replacement generation starts pending for its own exact fingerprint.
 The terminal event remains append-only audit evidence, but it does not carry a
 stale decision forward onto the replacement generation.
 
-Preview refresh, destroy, and verification must never depend on manager
-approval. They persist their own lifecycle evidence first, then attempt status
-reconciliation. If GitHub is degraded, the lifecycle operation still completes
-and an authorized operator retries `POST /v1/manager-preview-approval/reconcile`
-with `repository` and `pr_number` after GitHub recovers.
+Preview refresh, destroy, and verification never depend on manager approval
+and no longer attempt status reconciliation.
 
 The broader `tenant-admission` status is a separate Launchplane projection. For
 a repository classified as `tenant_ui`, it recomputes the exact current
@@ -324,14 +353,11 @@ verification. Odoo preview apply finalizes the serving preview and generation
 evidence after the provider result is `pass` but before the durable provider
 reservation releases its target fence. The completed provider response stores
 those lifecycle record identities, so exact replay never synthesizes new
-evidence under changed profile authority. Successful completion, adoption, and
-current exact replay then retry manager projection without repeating the
-provider mutation. The service uses the issued plan as the stable generation
+evidence under changed profile authority. The service uses the issued plan as the stable generation
 identity and returns a non-passing conflict when a delayed refresh or destroy no
 longer owns the preview. Odoo destroy writes the approval invalidation event
 before its destroyed tombstone when a serving binding is available; this keeps
-the append-only event crash-durable while the GitHub call remains best-effort
-after the provider reservation completes.
+the append-only event crash-durable.
 
 Rollback removes the repository's required `manager-preview-approval` status
 and removes or narrows the managed approval rule. This disables merge/promotion
