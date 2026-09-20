@@ -111,6 +111,7 @@ test.describe("operator journeys", () => {
     expect(requestedPaths).not.toContain("/v1/owner-acceptance/queue");
     expect(requestedPaths).not.toContain("/v1/owner-acceptance/evaluation");
     expect(requestedPaths).not.toContain("/v1/owner-acceptance/owner-evaluation");
+    expect(requestedPaths).not.toContain("/v1/product-review");
     await expect(page.getByRole("link", { name: "Engineering Ops" })).toHaveCount(0);
     await expect(page.getByRole("link", { name: "Product Ops" })).toHaveCount(0);
     await assertDocumentBasics(page);
@@ -132,38 +133,9 @@ test.describe("operator journeys", () => {
     diagnostics.assertClean();
   });
 
-  test("Owner review keeps multiple product decisions and operations independent", async ({ page }) => {
+  test("Owner opens the preview and pull request, then accepts the change", async ({ page }) => {
     const requestedPaths: string[] = [];
     page.on("request", (request) => requestedPaths.push(new URL(request.url()).pathname));
-    const diagnostics = monitorBrowser(page);
-
-    await page.goto(
-      "/ui/owner-review?fixture=products&scenario=multi&viewer=mixed&repository=example%2Fcontrol-plane&pull_request=308",
-    );
-
-    const first = page.locator('[data-product="example-site"]');
-    const second = page.locator('[data-product="example-store"]');
-    await expect(first).toBeVisible();
-    await expect(second).toBeVisible();
-    await expect(first.getByRole("option")).toHaveCount(3);
-    await expect(second.getByRole("option")).toHaveCount(1);
-    await expect(second.getByRole("combobox")).toHaveValue("changes_requested");
-    const firstPreview = first.getByRole("link", { name: /Open preview/ });
-    await expect(firstPreview).toHaveAttribute("target", "_blank");
-    await expect(firstPreview).toHaveAttribute("rel", "noreferrer");
-    await expect(firstPreview).toHaveAttribute("href", "https://site.preview.example.invalid/");
-    await second.getByRole("textbox", { name: "Feedback" }).fill("Please adjust the checkout flow.");
-    await second.getByRole("button", { name: "Record decision" }).click();
-    await expect(second.getByRole("status")).toContainText("Decision recorded");
-    await expect(first.getByText("Decision recorded.")).toHaveCount(0);
-    expect(requestedPaths).not.toContain("/v1/products");
-    expect(requestedPaths).not.toContain("/v1/owner-acceptance/current-items");
-    expect(requestedPaths).not.toContain("/v1/owner-acceptance/queue");
-    await assertDocumentBasics(page);
-    diagnostics.assertClean();
-  });
-
-  test("Owner review clears feedback across decisions and blocks an unchanged duplicate", async ({ page }) => {
     const diagnostics = monitorBrowser(page);
 
     await page.goto(
@@ -171,57 +143,76 @@ test.describe("operator journeys", () => {
     );
 
     const card = page.locator('[data-product="example-site"]');
-    const decision = card.getByRole("combobox", { name: "Decision" });
-    const submit = card.getByRole("button", { name: "Record decision" });
-    await decision.selectOption("changes_requested");
-    await card.getByRole("textbox", { name: "Feedback" }).fill("Do not carry this feedback.");
-    await decision.selectOption("accepted");
-    await decision.selectOption("changes_requested");
-    await expect(card.getByRole("textbox", { name: "Feedback" })).toHaveValue("");
-    await decision.selectOption("accepted");
-    await submit.click();
+    const preview = card.getByRole("link", { name: /Open the preview/ });
+    await expect(preview).toHaveAttribute("target", "_blank");
+    await expect(preview).toHaveAttribute("rel", "noreferrer");
+    await expect(preview).toHaveAttribute("href", "https://site.preview.example.invalid/");
+    await expect(card.getByRole("link", { name: /Pull request #308/ })).toHaveAttribute(
+      "href",
+      "https://github.com/example/control-plane/pull/308",
+    );
+    await card.getByRole("button", { name: "Accept" }).click();
     await expect(card.getByText("Decision recorded.")).toBeVisible();
-    await expect(submit).toBeDisabled();
-    await decision.selectOption("changes_requested");
-    await expect(card.getByRole("textbox", { name: "Feedback" })).toHaveValue("");
-    await expect(submit).toBeDisabled();
-    await card.getByRole("textbox", { name: "Feedback" }).fill("Please revise this preview.");
-    await expect(submit).toBeEnabled();
+    await expect(card.getByLabel("Latest decision")).toContainText("Accepted by @example-owner");
+    expect(requestedPaths).not.toContain("/v1/products");
+    expect(requestedPaths).not.toContain("/v1/owner-acceptance/current-items");
+    expect(requestedPaths).not.toContain("/v1/owner-acceptance/queue");
+    await expect(page.getByRole("link", { name: "Engineering Ops" })).toHaveCount(0);
     await assertDocumentBasics(page);
     diagnostics.assertClean();
   });
 
-  test("Owner review exposes no write path when returned capabilities are ineligible", async ({ page }) => {
-    const requestedPaths: string[] = [];
-    page.on("request", (request) => requestedPaths.push(new URL(request.url()).pathname));
+  test("Owner must say what should change before requesting changes", async ({ page }) => {
     const diagnostics = monitorBrowser(page);
 
     await page.goto(
-      "/ui/owner-review?fixture=products&scenario=stale&viewer=non-owner&repository=example%2Fcontrol-plane&pull_request=308",
+      "/ui/owner-review?fixture=products&repository=example%2Fcontrol-plane&pull_request=308",
     );
 
-    await expect(page.locator(".owner-review-card")).toHaveCount(1);
-    await expect(page.getByRole("button", { name: "Record decision" })).toHaveCount(0);
-    expect(requestedPaths).not.toContain("/v1/owner-acceptance/events");
+    const card = page.locator('[data-product="example-site"]');
+    const requestChanges = card.getByRole("button", { name: "Request changes" });
+    await expect(requestChanges).toBeDisabled();
+    await card.getByRole("textbox").fill("Please adjust the checkout flow.");
+    await requestChanges.click();
+    await expect(card.getByLabel("Latest decision")).toContainText("Changes requested");
+    await expect(card.getByLabel("Latest decision")).toContainText(
+      "Please adjust the checkout flow.",
+    );
+    await expect(card.getByRole("textbox")).toHaveValue("");
     await assertDocumentBasics(page);
     diagnostics.assertClean();
   });
 
-  test("Owner review does not turn an empty unavailable decision into not required", async ({ page }) => {
+  test("Owner review shows the latest decision to a viewer who cannot decide", async ({ page }) => {
     const diagnostics = monitorBrowser(page);
 
     await page.goto(
-      "/ui/owner-review?fixture=products&scenario=empty-unavailable&repository=example%2Fcontrol-plane&pull_request=308",
+      "/ui/owner-review?fixture=products&scenario=decided&viewer=non-owner&repository=example%2Fcontrol-plane&pull_request=308",
     );
 
-    await expect(page.getByText("No decision can be recorded.", { exact: false })).toBeVisible();
-    await expect(page.getByText("No product review is required", { exact: false })).toHaveCount(0);
-    await expect(page.getByRole("button", { name: "Record decision" })).toHaveCount(0);
+    const card = page.locator('[data-product="example-site"]');
+    await expect(card.getByLabel("Latest decision")).toContainText("Changes requested");
+    await expect(card.getByText("You are not this product's Owner", { exact: false })).toBeVisible();
+    await expect(card.getByRole("button", { name: "Accept" })).toHaveCount(0);
+    await expect(card.getByRole("button", { name: "Request changes" })).toHaveCount(0);
     await assertDocumentBasics(page);
     diagnostics.assertClean();
   });
 
-  test("Owner review never offers acceptance without a safe bound preview", async ({ page }) => {
+  test("Owner review says when the product has no Owner", async ({ page }) => {
+    const diagnostics = monitorBrowser(page);
+
+    await page.goto(
+      "/ui/owner-review?fixture=products&scenario=no-owner&repository=example%2Fcontrol-plane&pull_request=308",
+    );
+
+    await expect(page.getByText("No Owner set for this product", { exact: false })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Accept" })).toHaveCount(0);
+    await assertDocumentBasics(page);
+    diagnostics.assertClean();
+  });
+
+  test("Owner review offers no decision before a preview exists", async ({ page }) => {
     const diagnostics = monitorBrowser(page);
 
     await page.goto(
@@ -229,125 +220,9 @@ test.describe("operator journeys", () => {
     );
 
     const card = page.locator('[data-product="example-site"]');
-    await expect(card.getByRole("link", { name: /Open preview/ })).toHaveCount(0);
-    await expect(card.getByRole("option", { name: "Accept product change" })).toHaveCount(0);
-    await expect(card.getByRole("option", { name: "Revoke prior acceptance" })).toHaveCount(1);
-    await assertDocumentBasics(page);
-    diagnostics.assertClean();
-  });
-
-  test("Owner review refreshes a changed preview without submitting again", async ({ page }) => {
-    const diagnostics = monitorBrowser(page);
-
-    await page.goto(
-      "/ui/owner-review?fixture=products&scenario=drift&repository=example%2Fcontrol-plane&pull_request=308",
-    );
-
-    const card = page.locator('[data-product="example-site"]');
-    await expect(card.getByRole("link", { name: /Open preview/ })).toHaveAttribute(
-      "href",
-      "https://site.preview.example.invalid/",
-    );
-    await card.getByRole("button", { name: "Record decision" }).click();
-    await expect(page.getByRole("alert")).toBeVisible();
-    await expect(card.getByRole("link", { name: /Open preview/ })).toHaveAttribute(
-      "href",
-      "https://site-updated.preview.example.invalid/",
-    );
-    await expect(card.getByText("Decision recorded.")).toHaveCount(0);
-    await assertDocumentBasics(page);
-    diagnostics.assertClean();
-  });
-
-  test("Owner review reconciles a same-version capability change before another write", async ({ page }) => {
-    const diagnostics = monitorBrowser(page);
-
-    await page.goto(
-      "/ui/owner-review?fixture=products&scenario=capability-transition&repository=example%2Fcontrol-plane&pull_request=308",
-    );
-
-    const card = page.locator('[data-product="example-site"]');
-    await expect(card.getByRole("combobox")).toHaveValue("accepted");
-    await card.getByRole("button", { name: "Record decision" }).click();
-    await expect(card.getByRole("option", { name: "Accept product change" })).toHaveCount(0);
-    await expect(card.getByRole("combobox")).toHaveValue("changes_requested");
-    await expect(card.getByRole("button", { name: "Record decision" })).toBeDisabled();
-    await card.getByRole("textbox", { name: "Feedback" }).fill("Please revise this preview.");
-    await expect(card.getByRole("button", { name: "Record decision" })).toBeEnabled();
-    await assertDocumentBasics(page);
-    diagnostics.assertClean();
-  });
-
-  test("Owner review blocks a restored uncertain identity when its draft is absent", async ({ page }) => {
-    const digest = "a".repeat(64);
-    const storageKey = `launchplane.browser-operation.owner-acceptance-example-control-plane-308-example-site-web-deploy-production-${digest}`;
-    const fallbackStorageKey = `launchplane.browser-operation.owner-acceptance-example-control-plane-308-example-site-owner-review-product-review-production-${digest}`;
-    const requestedPaths: string[] = [];
-    page.on("request", (request) => requestedPaths.push(new URL(request.url()).pathname));
-    await page.addInitScript(
-      ({ key }) => {
-        window.sessionStorage.setItem(
-          key,
-          JSON.stringify({
-            failure: null,
-            identity: {
-              idempotencyKey: "owner-review-recovered-key",
-              requestFingerprint: "recovered-request-fingerprint",
-            },
-            phase: "submitting",
-            receipt: null,
-            requiresIdempotencyContinuity: false,
-          }),
-        );
-      },
-      { key: storageKey },
-    );
-    const diagnostics = monitorBrowser(page);
-
-    await page.goto(
-      "/ui/owner-review?fixture=products&repository=example%2Fcontrol-plane&pull_request=308",
-    );
-
-    const card = page.locator('[data-product="example-site"]');
-    await expect(card.getByRole("button", { name: "Record decision" })).toBeDisabled();
-    await expect(card.getByRole("status")).toContainText("cannot restore its feedback");
-    const storage = await page.evaluate(
-      ({ currentKey, removedFallbackKey }) => ({
-        current: window.sessionStorage.getItem(currentKey),
-        fallback: window.sessionStorage.getItem(removedFallbackKey),
-      }),
-      { currentKey: storageKey, removedFallbackKey: fallbackStorageKey },
-    );
-    if (!storage.current) throw new Error("Expected the deployed unresolved operation key.");
-    const recovered = JSON.parse(storage.current);
-    expect(recovered.identity).toEqual({
-      idempotencyKey: "owner-review-recovered-key",
-      requestFingerprint: "recovered-request-fingerprint",
-    });
-    expect(recovered.phase).toBe("submitting");
-    expect(recovered.requiresIdempotencyContinuity).toBe(false);
-    expect(storage.fallback).toBeNull();
-    expect(requestedPaths).not.toContain("/v1/owner-acceptance/events");
-    await assertDocumentBasics(page);
-    diagnostics.assertClean();
-  });
-
-  test("Owner review accepts a resolution explanation without manual technical references", async ({ page }) => {
-    const diagnostics = monitorBrowser(page);
-
-    await page.goto(
-      "/ui/owner-review?fixture=products&scenario=resolution&repository=example%2Fcontrol-plane&pull_request=308",
-    );
-
-    const card = page.locator('[data-product="example-site"]');
-    const submit = card.getByRole("button", { name: "Record decision" });
-    await expect(submit).toBeDisabled();
-    await card.getByRole("textbox", { name: "Resolution explanation" }).fill(
-      "The revised preview now follows the requested checkout sequence.",
-    );
-    await expect(submit).toBeEnabled();
-    await submit.click();
-    await expect(card.getByRole("status")).toContainText("Decision recorded");
+    await expect(card.getByRole("link", { name: /Open the preview/ })).toHaveCount(0);
+    await expect(card.getByText("No preview yet", { exact: false })).toBeVisible();
+    await expect(card.getByRole("button", { name: "Accept" })).toHaveCount(0);
     await assertDocumentBasics(page);
     diagnostics.assertClean();
   });

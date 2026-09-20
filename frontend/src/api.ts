@@ -15,7 +15,6 @@ import type {
   DryRunProductPromotionResponse,
   EveryCodeSummaryResponse,
   EvaluateOwnerAcceptanceResponse,
-  EvaluateOwnerProductReviewResponse,
   GovernanceProjectionResponse,
   InspectionSetupMetadata,
   ListHumanPrivilegedOperationsData,
@@ -74,6 +73,8 @@ import type {
   WorkGraphSnapshotResponse,
   WriteOwnerAcceptanceEventData,
   WriteOwnerAcceptanceEventResponse,
+  ProductReviewResponse,
+  WriteProductReviewDecisionData,
 } from "./generated/openapi.ts";
 import type {
   OrdinaryAgentOperationClientResponse,
@@ -659,19 +660,35 @@ export function evaluateOwnerAcceptance(
   );
 }
 
-export function evaluateOwnerProductReview(
+export function readProductReview(
   repository: string,
-  pullRequestNumber: number,
+  pullRequest: number,
   signal?: AbortSignal,
-): Promise<EvaluateOwnerProductReviewResponse> {
+): Promise<ProductReviewResponse> {
   const params = new URLSearchParams({
     repository,
-    pull_request_number: String(pullRequestNumber),
+    pull_request: String(pullRequest),
   });
-  return requestJson<EvaluateOwnerProductReviewResponse>(
-    `/v1/owner-acceptance/owner-evaluation?${params.toString()}`,
+  return requestJson<ProductReviewResponse>(
+    `/v1/product-review?${params.toString()}`,
     "GET",
     undefined,
+    signal,
+  );
+}
+
+export function writeProductReviewDecision(
+  payload: WriteProductReviewDecisionData["body"],
+  signal?: AbortSignal,
+): Promise<ProductReviewResponse> {
+  const request: WriteProductReviewDecisionData = {
+    url: BROWSER_WRITE_ROUTES.productReviewDecision,
+    body: payload,
+  };
+  return requestJson<ProductReviewResponse>(
+    request.url,
+    "POST",
+    request.body,
     signal,
   );
 }

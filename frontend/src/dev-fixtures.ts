@@ -15,7 +15,6 @@ import type {
   MergeReadinessResult,
   MergeTrainControllerStatusResponse,
   MergeTrainPolicyTargetsResponse,
-  OwnerAcceptanceOwnerEvaluationResponse,
   OwnerAcceptanceProductDecision,
   OwnerAcceptanceQueueResponse,
   ProductActionAvailability,
@@ -36,6 +35,8 @@ import type {
   ProductPromotionWorkflowDeliveryStatusResponse,
   ProductPromotionWorkflowDispatchResponse,
   ProductSiteOverview,
+  ProductReviewDecisionRecord,
+  ProductReviewResponse,
   RuntimeIdentity,
   TenantAdmissionEvaluationReadResponse,
   TenantAdmissionPathResult,
@@ -3102,97 +3103,64 @@ export function ownerAcceptanceEvaluationForFixture(
   return decision;
 }
 
-export function ownerReviewEvaluationForFixture(
+export function productReviewForFixture(
   fixture: DataFixtureMode,
-  afterBindingChange = false,
-  afterWrite = false,
-): OwnerAcceptanceOwnerEvaluationResponse {
+  latestDecision: ProductReviewDecisionRecord | null = null,
+): ProductReviewResponse {
+  assertEngineeringFixtureAvailable(fixture);
   const params = new URLSearchParams(window.location.search);
-  const scenario = params.get("scenario") ?? "single";
-  const viewer = params.get("viewer") ?? "owner";
-  const baseDecision = ownerAcceptanceEvaluationForFixture(fixture);
-  const firstBinding = _ownerAcceptanceBinding({
-    pull_request_number: 308,
-    binding_sha256: (afterBindingChange ? "d" : "a").repeat(64),
-    head_sha: (afterBindingChange ? "d" : "a").repeat(40),
-  });
-  const secondBinding = _ownerAcceptanceBinding({
-    pull_request_number: 308,
-    binding_sha256: "e".repeat(64),
-    head_sha: "a".repeat(40),
-    product: "example-store",
-    system: "storefront",
-    environment: "preview",
-  });
-  const withPreview = (binding: typeof firstBinding, suffix: string) => ({
-    ...binding,
-    preview: {
-      schema_version: 1,
-      preview_id: `preview-${suffix}`,
-      serving_generation_id: `generation-${suffix}`,
-      artifact_id: `artifact-${suffix}`,
-      manifest_fingerprint: "f".repeat(64),
-      artifact_image_digest: `sha256:${"1".repeat(64)}`,
-      context: `preview-${suffix}`,
-      preview_url: `https://${suffix}.preview.example.invalid/`,
-      runtime_identity: {
-        schema_version: 1,
-        product: binding.product,
-        context: `preview-${suffix}`,
-        instance: `preview-${suffix}`,
-        environment_kind: "preview",
-        artifact_id: `artifact-${suffix}`,
-        image_reference: `registry.example.invalid/${suffix}@sha256:${"1".repeat(64)}`,
-        source_git_ref: `refs/pull/${binding.pull_request_number}/head`,
-        release_tuple_id: `release-${suffix}`,
-        deployment_record_id: `deployment-${suffix}`,
-        preview_id: `preview-${suffix}`,
-        preview_generation_id: `generation-${suffix}`,
-        runtime_identity_sha256: "2".repeat(64),
-      },
-    },
-  });
-  const bindings = scenario === "multi"
-    ? [withPreview(firstBinding, "site"), withPreview(secondBinding, "store")]
-    : scenario === "missing-preview"
-      ? [firstBinding]
-      : [withPreview(firstBinding, afterBindingChange ? "site-updated" : "site")];
-  const unavailable = scenario === "unavailable";
-  const reviewStatus = scenario === "empty-unavailable" || unavailable
-    ? "unavailable" as const
-    : scenario === "resolution"
-      ? "changes_requested" as const
-      : "review_required" as const;
+  const scenario = params.get("scenario") ?? "ready";
+  const ownerSet = scenario !== "no-owner";
+  const viewerIsOwner = ownerSet && params.get("viewer") !== "non-owner";
+  const previewUrl =
+    scenario === "missing-preview" ? "" : "https://site.preview.example.invalid/";
+  const cannotDecideReason = !ownerSet
+    ? "No Owner set for this product"
+    : !viewerIsOwner
+      ? "You are not this product's Owner."
+      : !previewUrl
+        ? "No preview is ready for this pull request yet."
+        : "";
   return {
     status: "ok",
-    trace_id: "fixture-owner-review",
-    evaluated_at: baseDecision.evaluated_at,
-    review_status: reviewStatus,
-    products: (scenario === "empty-unavailable" ? [] : bindings).map((binding, index) => {
-        const allowed = viewer !== "non-owner" && !unavailable;
-        const requestOnly = viewer === "mixed" && index === 1;
-        const acceptRemoved = scenario === "capability-transition" && afterWrite;
-        const resolutionRequired = scenario === "resolution" && index === 0;
-        return {
-          binding_sha256: binding.binding_sha256,
-          product: binding.product,
-          system: binding.system,
-          action: binding.action,
-          environment: binding.environment,
-          review_status: reviewStatus,
-          preview_url: binding.preview?.preview_url ?? null,
-          resolution_required: resolutionRequired,
-          resolution_evidence_references: resolutionRequired && binding.preview
-            ? [
-                `preview:${binding.preview.preview_id}`,
-                `preview-generation:${binding.preview.serving_generation_id}`,
-              ]
-            : [],
-          can_accept: allowed && !requestOnly && !acceptRemoved,
-          can_request_changes: allowed,
-          can_revoke: allowed && !requestOnly,
-        };
-      }),
+    trace_id: "fixture-product-review",
+    product: "example-site",
+    display_name: "Example Site",
+    repository: "example/control-plane",
+    pull_request_number: 308,
+    pull_request_url: "https://github.com/example/control-plane/pull/308",
+    preview_url: previewUrl,
+    head_sha: previewUrl ? "a".repeat(40) : "",
+    owner_set: ownerSet,
+    owner_github_login: ownerSet ? "example-owner" : "",
+    viewer_is_owner: viewerIsOwner,
+    can_decide: !cannotDecideReason,
+    cannot_decide_reason: cannotDecideReason,
+    latest_decision:
+      latestDecision ??
+      (scenario === "decided"
+        ? productReviewDecisionForFixture("changes_requested", "Please adjust the checkout flow.")
+        : null),
+  };
+}
+
+export function productReviewDecisionForFixture(
+  decision: ProductReviewDecisionRecord["decision"],
+  reason: string,
+): ProductReviewDecisionRecord {
+  return {
+    schema_version: 1,
+    record_id: `fixture-product-review-${decision}`,
+    product: "example-site",
+    repository: "example/control-plane",
+    pull_request_number: 308,
+    head_sha: "a".repeat(40),
+    preview_url: "https://site.preview.example.invalid/",
+    decision,
+    reason,
+    owner_github_id: "9001",
+    owner_github_login: "example-owner",
+    decided_at: OBSERVED_AT,
   };
 }
 

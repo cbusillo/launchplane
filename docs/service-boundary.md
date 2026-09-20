@@ -3833,6 +3833,33 @@ Launchplane merge readiness.
 
 See `docs/product-owner-policy.md` for routes and persisted record contracts.
 
+## Product Review API
+
+The small Owner review path from `docs/direction.md` and issue `#2446`. It is
+parallel to the Owner Acceptance API below and reads none of its records.
+
+`GET /v1/product-review?repository=<owner/repo>&pull_request=<n>` returns the
+product display name, the pull request URL, the preview URL of the one active
+preview serving a ready generation for that pull request (empty when there is
+none), the head revision that preview serves, the latest decision, and
+`owner_set`, `viewer_is_owner`, `can_decide`, and a plain `cannot_decide_reason`.
+The caller must be a browser-authenticated GitHub human who is either the
+product's Owner or allowed `product_profile.read` for that product.
+
+`POST /v1/product-review/decisions` takes `{repository, pull_request, decision,
+reason}` with `decision` of `accepted` or `changes_requested` (reason required)
+and appends one `launchplane_product_review_decisions` record bound to the served
+preview URL and head revision. It uses the GitHub-human browser mutation identity
+path (session cookie, same-origin fetch metadata, single-use CSRF token); bearer
+and agent identities are rejected. Authorization is one comparison: the
+session's immutable GitHub id equals `owner.github_id` on the product profile
+whose `repository` matches. No grant, policy record, or change-impact evaluation
+is involved. A product without an Owner returns `409 product_owner_not_set`
+("No Owner set for this product"); no serving preview returns
+`409 product_review_preview_unavailable`. Everyone else gets one closed
+`403 product_review_unavailable` that does not reveal whether the product or
+pull request exists. A decision merges and deploys nothing.
+
 ## Owner Acceptance API
 
 `GET /v1/owner-acceptance/evaluation` accepts only `repository` and

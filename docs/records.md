@@ -1374,6 +1374,15 @@ reports a request as `blocked`, Launchplane writes the terminal work request
 first and then records each notification attempt so bot-auth or Discord delivery
 failures remain inspectable even when no Every Code session starts.
 
+## Product Review Decision Records
+
+Owner product-review decisions are append-only records under
+`launchplane_product_review_decisions`. Each record names the product, repository,
+pull request number, the preview URL and head revision the Owner looked at, the
+decision (`accepted` or `changes_requested` with its reason), the Owner's GitHub
+id and login, and `decided_at`. The newest record for a repository and pull
+request is the current decision. The record authorizes nothing.
+
 ## Preview PR Feedback Notification Records
 
 Preview PR feedback remediation records are stored under
