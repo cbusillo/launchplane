@@ -10139,6 +10139,9 @@
             "title": "Lifecycle State",
             "type": "string"
           },
+          "owner": {
+            "$ref": "#/components/schemas/ProductOwnerProfile"
+          },
           "preview": {
             "$ref": "#/components/schemas/ProductPreviewProfile"
           },
@@ -10195,6 +10198,7 @@
           "image",
           "lanes",
           "lifecycle_state",
+          "owner",
           "preview",
           "product",
           "promotion_workflow",
@@ -24426,6 +24430,28 @@
         ],
         "title": "ProductOverviewResponse",
         "type": "object"
+      },
+      "ProductOwnerProfile": {
+        "additionalProperties": false,
+        "description": "The person who accepts or rejects what customers see for this product.\n\nAn Owner can veto a change but never merge or deploy one. The numeric GitHub id\nis the identity; the login is for mentions and display and may be renamed.",
+        "properties": {
+          "github_id": {
+            "default": "",
+            "title": "Github Id",
+            "type": "string"
+          },
+          "github_login": {
+            "default": "",
+            "title": "Github Login",
+            "type": "string"
+          }
+        },
+        "title": "ProductOwnerProfile",
+        "type": "object",
+        "required": [
+          "github_id",
+          "github_login"
+        ]
       },
       "ProductPreviewProfile": {
         "additionalProperties": false,

@@ -909,6 +909,12 @@ provider. `preview.domain_certificate_type` defaults to `none` for externally
 managed wildcard TLS; `letsencrypt` delegates per-host certificate provisioning
 to Dokploy.
 
+A product profile may name its `owner`: the person who accepts or rejects what
+customers see for that product, identified by immutable numeric GitHub id with
+the login kept for mentions and display. An Owner can veto a change but never
+merge or deploy one (see [direction.md](direction.md)). The field is optional;
+a product without one reports "No Owner set" instead of blocking.
+
 Product profiles may also declare expected config requirements for stable lanes:
 runtime-environment key names and managed secret binding keys by context and
 instance. These requirements are declarative intent for operator readiness

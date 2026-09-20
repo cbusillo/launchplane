@@ -800,6 +800,7 @@ export type LaunchplaneProductProfileRecord = {
     image: ProductImageProfile;
     lanes: Array<ProductLaneProfile>;
     lifecycle_state: 'active' | 'retiring' | 'retired';
+    owner: ProductOwnerProfile;
     preview: ProductPreviewProfile;
     product: string;
     promotion_workflow: ProductPromotionWorkflowProfile;
@@ -3153,6 +3154,11 @@ export type ProductOverviewResponse = {
     product: ProductSiteOverview;
     status: 'ok';
     trace_id: string;
+};
+
+export type ProductOwnerProfile = {
+    github_id: string;
+    github_login: string;
 };
 
 export type ProductPreviewProfile = {
