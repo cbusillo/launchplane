@@ -3416,6 +3416,46 @@ export type ProductPublicIngressSummary = {
     trust_state: 'verified' | 'recorded' | 'stale' | 'missing' | 'unsupported';
 };
 
+export type ProductReviewDecisionEnvelope = {
+    decision: 'accepted' | 'changes_requested';
+    pull_request: number;
+    reason?: string;
+    repository: string;
+};
+
+export type ProductReviewDecisionRecord = {
+    decided_at: string;
+    decision: 'accepted' | 'changes_requested';
+    head_sha: string;
+    owner_github_id: string;
+    owner_github_login: string;
+    preview_url: string;
+    product: string;
+    pull_request_number: number;
+    reason: string;
+    record_id: string;
+    repository: string;
+    schema_version: number;
+};
+
+export type ProductReviewResponse = {
+    can_decide: boolean;
+    cannot_decide_reason: string;
+    display_name: string;
+    head_sha: string;
+    latest_decision: ProductReviewDecisionRecord | null;
+    owner_github_login: string;
+    owner_set: boolean;
+    preview_url: string;
+    product: string;
+    pull_request_number: number;
+    pull_request_url: string;
+    repository: string;
+    status: string;
+    trace_id: string;
+    viewer_is_owner: boolean;
+};
+
 export type ProductRuntimeConfigRequirement = {
     context: string;
     instance: string;
@@ -4590,6 +4630,35 @@ export type ListProductProfilesResponses = {
 
 export type ListProductProfilesResponse = ListProductProfilesResponses[keyof ListProductProfilesResponses];
 
+export type ReadProductReviewData = {
+    body?: never;
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path?: never;
+    query: {
+        repository: string;
+        pull_request: number;
+    };
+    url: '/v1/product-review';
+};
+
+export type ReadProductReviewErrors = {
+    401: LaunchplaneErrorResponse;
+    403: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type ReadProductReviewError = ReadProductReviewErrors[keyof ReadProductReviewErrors];
+
+export type ReadProductReviewResponses = {
+    200: ProductReviewResponse;
+};
+
+export type ReadProductReviewResponse = ReadProductReviewResponses[keyof ReadProductReviewResponses];
+
 export type ListProductsData = {
     body?: never;
     headers?: {
@@ -5387,6 +5456,32 @@ export type RevokeHumanPrivilegedOperationResponses = {
 };
 
 export type RevokeHumanPrivilegedOperationResponse = RevokeHumanPrivilegedOperationResponses[keyof RevokeHumanPrivilegedOperationResponses];
+
+export type WriteProductReviewDecisionData = {
+    body: ProductReviewDecisionEnvelope;
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/product-review/decisions';
+};
+
+export type WriteProductReviewDecisionErrors = {
+    401: LaunchplaneErrorResponse;
+    403: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type WriteProductReviewDecisionError = WriteProductReviewDecisionErrors[keyof WriteProductReviewDecisionErrors];
+
+export type WriteProductReviewDecisionResponses = {
+    200: ProductReviewResponse;
+};
+
+export type WriteProductReviewDecisionResponse = WriteProductReviewDecisionResponses[keyof WriteProductReviewDecisionResponses];
 
 export type ApplyProductEnvironmentConfigData = {
     body: {

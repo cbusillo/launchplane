@@ -2,6 +2,17 @@
 title: Owner Acceptance
 ---
 
+## Owner Product Review Now Uses The Simple Path
+
+The Owner product-review route `/ui/owner-review` no longer uses the exact-binding
+machinery described below. It uses the small product-review path: the signed-in
+GitHub user may Accept or Request changes when their GitHub id equals the Owner
+named on the product profile, and the decision merges and deploys nothing. See
+[direction.md](direction.md), issue `#2446`, and the Product Review API section
+of [service-boundary.md](service-boundary.md). The rest of this page describes the
+older Owner-acceptance machinery that the merge train still reads until it is
+de-wired and deleted under `#2446`.
+
 ## Purpose
 
 Owner acceptance is Launchplane's authoritative exact-change product decision for
@@ -470,21 +481,16 @@ second semantic state.
 ## Owner Product Review Route
 
 `/ui/owner-review?repository=<owner/repo>&pull_request=<number>` is a focused
-browser view over the owner-safe exact evaluation and existing event routes. It has minimal
-product-review chrome and does not load the product catalog, Current-items list,
-recorded ledger, or Engineering Ops navigation. Every returned per-product
-binding is shown independently with its server-bound preview URL, exact
-viewer-capability controls, operation identity, and binding-drift refresh. A
-reviewer never selects the first binding implicitly. Missing or malformed query
-scope fails closed without an evaluation request.
+browser page over `GET /v1/product-review` and
+`POST /v1/product-review/decisions`. It has minimal product-review chrome and does
+not load the product catalog, Current-items list, recorded ledger, or Engineering
+Ops navigation. It shows the product name, the preview link, the pull request
+link, the latest decision, and Accept / Request changes (reason required) when the
+viewer is the product's Owner and a preview is serving. It says so plainly when
+the viewer is not signed in, is not the Owner, the product has no Owner, or no
+preview exists yet. Missing or malformed query scope fails closed without a
+request.
 
-The page uses neutral contract fields only; it does not require a PR narrative,
-test summary, or newly inferred readiness. Request-changes and revoke retain the
-existing reason and confirmation rules. When accepting an identical binding that
-previously requested changes, the reviewer supplies a plain resolution
-explanation and the browser attaches the current server-bound preview and serving
-generation identifiers as evidence references. The trusted Launchplane page
-keeps the decision controls while each preview opens as an external page.
 Advisory checks link directly to this focused route and retain an explicit
 Engineering details link in their summary for the compatibility workbench.
 

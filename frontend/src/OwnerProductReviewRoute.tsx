@@ -8,31 +8,21 @@ import {
 } from "react";
 
 import {
-  evaluateOwnerProductReview,
   LaunchplaneApiError,
-  writeOwnerAcceptanceEvent,
-  type OwnerAcceptanceEventMutationResponse,
+  readProductReview,
+  writeProductReviewDecision,
 } from "./api";
 import type { DevFixtureMode } from "./dev-fixture-loader";
 import { loadDevFixtures } from "./dev-fixture-loader";
 import { formatTime } from "./format";
-import {
-  ownerAcceptanceFailure,
-  ownerAcceptanceFailureCertainty,
-  ownerAcceptanceOperationScope,
-  ownerAcceptanceRequest,
-  type OwnerAcceptanceHumanAction,
-} from "./owner-acceptance-operation";
 import { ownerAcceptanceLookupFromSearch } from "./route-model";
 import { useAppSearchParams } from "./router";
 import { safeExternalUrl } from "./url";
-import { useBrowserOperationController } from "./use-browser-operation";
 
 import type {
   GitHubHumanIdentityResponse,
-  OwnerAcceptanceEventEnvelope,
-  OwnerAcceptanceOwnerEvaluationResponse,
-  OwnerAcceptanceOwnerProduct,
+  ProductReviewDecisionRecord,
+  ProductReviewResponse,
 } from "./generated/openapi.ts";
 
 type Theme = "dark" | "light";
@@ -125,19 +115,13 @@ export function OwnerProductReviewRoute({
 }) {
   const searchParams = useAppSearchParams();
   const lookup = ownerAcceptanceLookupFromSearch(searchParams.toString());
-  const [evaluation, setEvaluation] =
-    useState<OwnerAcceptanceOwnerEvaluationResponse | null>(null);
+  const [review, setReview] = useState<ProductReviewResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [driftMessage, setDriftMessage] = useState("");
   const requestRef = useRef(0);
 
-  const loadEvaluation = useCallback(
-    async (
-      afterBindingChange = false,
-      afterWrite = false,
-      signal?: AbortSignal,
-    ) => {
+  const loadReview = useCallback(
+    async (signal?: AbortSignal) => {
       if (!lookup.valid) return;
       const requestId = requestRef.current + 1;
       requestRef.current = requestId;
@@ -146,31 +130,24 @@ export function OwnerProductReviewRoute({
       try {
         const response = fixtureMode
           ? await loadDevFixtures().then((fixtures) =>
-              fixtures.ownerReviewEvaluationForFixture(
-                fixtureMode,
-                afterBindingChange,
-                afterWrite,
-              ),
+              fixtures.productReviewForFixture(fixtureMode),
             )
-          : await evaluateOwnerProductReview(
+          : await readProductReview(
               lookup.repository,
               Number(lookup.pullRequest),
               signal,
             );
         if (requestRef.current !== requestId || signal?.aborted) return;
-        setEvaluation(response);
-        setDriftMessage(
-          afterBindingChange
-            ? "The preview version changed. Review the updated preview before confirming your decision again."
-            : "",
-        );
+        setReview(response);
       } catch (loadError) {
         if (requestRef.current !== requestId || signal?.aborted) return;
         const apiError = loadError as LaunchplaneApiError;
         setError(
-          apiError.statusCode === 401 || apiError.statusCode === 403
-            ? "This product review is unavailable for this session."
-            : apiError.message || "The current product review is unavailable.",
+          apiError.statusCode === 403
+            ? "You are not this product's Owner, so this review is not available to you. If you expected to see it, ask the person who sent you the link."
+            : apiError.statusCode === 401
+              ? "You are not signed in. Sign in with GitHub to review this change."
+              : "The review could not be loaded. Try again in a moment.",
         );
       } finally {
         if (requestRef.current === requestId && !signal?.aborted) setLoading(false);
@@ -180,14 +157,13 @@ export function OwnerProductReviewRoute({
   );
 
   useEffect(() => {
-    setEvaluation(null);
-    setDriftMessage("");
+    setReview(null);
     setError("");
     if (!lookup.valid) return;
     const controller = new AbortController();
-    void loadEvaluation(false, false, controller.signal);
+    void loadReview(controller.signal);
     return () => controller.abort();
-  }, [loadEvaluation, lookup.valid]);
+  }, [loadReview, lookup.valid]);
 
   return (
     <section className="owner-review-page">
@@ -195,39 +171,25 @@ export function OwnerProductReviewRoute({
         <p className="eyebrow">Product decision</p>
         <h1 data-route-heading tabIndex={-1}>Review this change</h1>
         <p>
-          Open each preview, then record your decision for every product listed.
-          Delivery and operational actions remain separate.
+          Open the preview and look at the change. Then accept it, or say what
+          should change. Your decision does not publish anything.
         </p>
       </div>
       {!lookup.valid ? (
         <OwnerReviewState>
-          This review link is incomplete or invalid. Return to the pull request and
-          open its current Launchplane product-review link.
+          This review link is incomplete. Go back to the pull request and open
+          its Launchplane review link again.
         </OwnerReviewState>
-      ) : loading && !evaluation ? (
-        <OwnerReviewState>Loading the current product review…</OwnerReviewState>
+      ) : loading && !review ? (
+        <OwnerReviewState>Loading the review…</OwnerReviewState>
       ) : error ? (
         <OwnerReviewState tone="error">{error}</OwnerReviewState>
-      ) : evaluation ? (
-        <>
-          <div className="owner-review-context">
-            <span>{lookup.repository}</span>
-            <span>PR #{lookup.pullRequest}</span>
-            <span>Decision: {evaluation.review_status.replaceAll("_", " ")}</span>
-            <span>Evaluated {formatTime(evaluation.evaluated_at)}</span>
-          </div>
-          {driftMessage ? (
-            <p className="owner-review-alert" role="alert">{driftMessage}</p>
-          ) : null}
-          <OwnerBindingList
-            evaluation={evaluation}
-            fixtureMode={fixtureMode}
-            pullRequestNumber={Number(lookup.pullRequest)}
-            repository={lookup.repository}
-            onRefreshAfterChange={() => loadEvaluation(true, false)}
-            onRefreshAfterWrite={() => loadEvaluation(false, true)}
-          />
-        </>
+      ) : review ? (
+        <ProductReviewCard
+          fixtureMode={fixtureMode}
+          review={review}
+          onDecided={setReview}
+        />
       ) : null}
     </section>
   );
@@ -240,267 +202,190 @@ function OwnerReviewState({
   children: ReactNode;
   tone?: "neutral" | "error";
 }) {
-  return <p className="owner-review-state" data-tone={tone} role={tone === "error" ? "alert" : "status"}>{children}</p>;
-}
-
-function OwnerBindingList({
-  evaluation,
-  fixtureMode,
-  onRefreshAfterChange,
-  onRefreshAfterWrite,
-  pullRequestNumber,
-  repository,
-}: {
-  evaluation: OwnerAcceptanceOwnerEvaluationResponse;
-  fixtureMode: DevFixtureMode;
-  onRefreshAfterChange: () => Promise<void>;
-  onRefreshAfterWrite: () => Promise<void>;
-  pullRequestNumber: number;
-  repository: string;
-}) {
-  if (!evaluation.products.length) {
-    return evaluation.review_status === "not_required" ? (
-      <OwnerReviewState>No product review is required for this change.</OwnerReviewState>
-    ) : (
-      <OwnerReviewState tone="error">
-        The current product review is unavailable. No decision can be recorded.
-      </OwnerReviewState>
-    );
-  }
   return (
-    <div className="owner-review-bindings">
-      {evaluation.products.map((product) => {
-        const binding = {
-          ...product,
-          repository,
-          pull_request_number: pullRequestNumber,
-        };
-        return (
-          <OwnerBindingCard
-            binding={binding}
-            fixtureMode={fixtureMode}
-            key={product.binding_sha256}
-            onRefreshAfterChange={onRefreshAfterChange}
-            onRefreshAfterWrite={onRefreshAfterWrite}
-            product={product}
-          />
-        );
-      })}
-    </div>
+    <p
+      className="owner-review-state"
+      data-tone={tone}
+      role={tone === "error" ? "alert" : "status"}
+    >
+      {children}
+    </p>
   );
 }
 
-type OwnerReviewBinding = OwnerAcceptanceOwnerProduct & {
-  pull_request_number: number;
-  repository: string;
-};
-
-function OwnerBindingCard({
-  binding,
+function ProductReviewCard({
   fixtureMode,
-  onRefreshAfterChange,
-  onRefreshAfterWrite,
-  product,
+  onDecided,
+  review,
 }: {
-  binding: OwnerReviewBinding;
   fixtureMode: DevFixtureMode;
-  onRefreshAfterChange: () => Promise<void>;
-  onRefreshAfterWrite: () => Promise<void>;
-  product: OwnerAcceptanceOwnerProduct;
+  onDecided: (review: ProductReviewResponse) => void;
+  review: ProductReviewResponse;
 }) {
-  const previewUrl = safeExternalUrl(binding.preview_url ?? "");
-  const maySubmit = Boolean(
-    (binding.can_accept && previewUrl) ||
-      binding.can_request_changes ||
-      binding.can_revoke,
-  );
+  const previewUrl = safeExternalUrl(review.preview_url);
+  const pullRequestUrl = safeExternalUrl(review.pull_request_url);
   return (
-    <article className="owner-review-card" data-product={product.product}>
-      <OwnerBindingHeading product={product} />
-      <dl>
-        <div><dt>Environment</dt><dd>{binding.environment}</dd></div>
-        <div><dt>Current decision</dt><dd>{product.review_status.replaceAll("_", " ")}</dd></div>
-      </dl>
-      {previewUrl ? (
-        <a className="button button-primary owner-review-preview" href={previewUrl.toString()} target="_blank" rel="noreferrer">
-          Open preview <ExternalLink size={15} aria-hidden="true" />
-        </a>
-      ) : (
-        <OwnerReviewState tone="error">A verified preview link is unavailable for this product.</OwnerReviewState>
-      )}
-      {maySubmit ? (
-        <OwnerReviewAction
-          binding={binding}
+    <article className="owner-review-card" data-product={review.product}>
+      <header>
+        <p className="eyebrow">Product</p>
+        <h2>{review.display_name || review.product}</h2>
+      </header>
+      <div className="owner-review-links">
+        {previewUrl ? (
+          <a
+            className="button button-primary owner-review-preview"
+            href={previewUrl.toString()}
+            target="_blank"
+            rel="noreferrer"
+          >
+            Open the preview <ExternalLink size={15} aria-hidden="true" />
+          </a>
+        ) : null}
+        {pullRequestUrl ? (
+          <a
+            className="button"
+            href={pullRequestUrl.toString()}
+            target="_blank"
+            rel="noreferrer"
+          >
+            Pull request #{review.pull_request_number}{" "}
+            <ExternalLink size={15} aria-hidden="true" />
+          </a>
+        ) : null}
+      </div>
+      {previewUrl && review.head_sha ? (
+        <p className="owner-review-state">
+          Preview version {review.head_sha.slice(0, 7)}
+        </p>
+      ) : null}
+      {review.latest_decision ? (
+        <LatestDecision decision={review.latest_decision} />
+      ) : null}
+      {review.can_decide && previewUrl ? (
+        <ProductReviewDecisionForm
           fixtureMode={fixtureMode}
-          previewAvailable={Boolean(previewUrl)}
-          onRefreshAfterChange={onRefreshAfterChange}
-          onRefreshAfterWrite={onRefreshAfterWrite}
+          review={review}
+          onDecided={onDecided}
         />
       ) : (
-        <OwnerReviewState>This product is read-only for the current session and binding.</OwnerReviewState>
+        <OwnerReviewState>{cannotDecideMessage(review)}</OwnerReviewState>
       )}
     </article>
   );
 }
 
-function OwnerBindingHeading({ product }: { product: OwnerAcceptanceOwnerProduct }) {
-  return <header><p className="eyebrow">Product</p><h2>{product.product}</h2></header>;
+function cannotDecideMessage(review: ProductReviewResponse): string {
+  if (!review.owner_set) {
+    return "No Owner set for this product. Ask the operator to name one before this change can be reviewed.";
+  }
+  if (!review.viewer_is_owner) {
+    return "You are not this product's Owner. You can look, but only the Owner can record a decision.";
+  }
+  return "No preview yet. Come back when the pull request says the preview is ready.";
 }
 
-function OwnerReviewAction({
-  binding,
-  fixtureMode,
-  onRefreshAfterChange,
-  onRefreshAfterWrite,
-  previewAvailable,
-}: {
-  binding: OwnerReviewBinding;
-  fixtureMode: DevFixtureMode;
-  onRefreshAfterChange: () => Promise<void>;
-  onRefreshAfterWrite: () => Promise<void>;
-  previewAvailable: boolean;
-}) {
-  const allowedActions = ownerAllowedActions(binding, previewAvailable);
-  const [action, setAction] = useState<OwnerAcceptanceHumanAction>(allowedActions[0]);
-  const [reason, setReason] = useState("");
-  const [resolutionSummary, setResolutionSummary] = useState("");
-  const [confirmRevoke, setConfirmRevoke] = useState(false);
-  const handledDriftRef = useRef<object | null>(null);
-  const operation = useBrowserOperationController<
-    OwnerAcceptanceEventEnvelope,
-    OwnerAcceptanceEventMutationResponse
-  >({
-    scope: ownerAcceptanceOperationScope(binding),
-    execute: async (payload, options) => {
-      if (!fixtureMode) return writeOwnerAcceptanceEvent(payload, options);
-      options.onDispatch?.();
-      if (new URLSearchParams(window.location.search).get("scenario") === "drift") {
-        throw new LaunchplaneApiError("The reviewed binding changed.", 409, "fixture-owner-drift", "owner_acceptance_binding_changed");
-      }
-      return ownerFixtureMutationResponse();
-    },
-    failureFor: ownerAcceptanceFailure,
-    failureCertainty: ownerAcceptanceFailureCertainty,
-  });
-  const restoredWithoutDraft = useRef(
-    operation.state.requiresIdempotencyContinuity,
-  ).current;
-  const effectiveAction = (
-    operation.state.requiresIdempotencyContinuity || allowedActions.includes(action)
-      ? action
-      : allowedActions[0]
-  ) as OwnerAcceptanceHumanAction;
-  useEffect(() => {
-    if (operation.state.failure?.code === "owner_acceptance_binding_changed" && handledDriftRef.current !== operation.state.failure) {
-      handledDriftRef.current = operation.state.failure;
-      void onRefreshAfterChange();
-    }
-  }, [onRefreshAfterChange, operation.state.failure]);
-  useEffect(() => {
-    setAction(allowedActions[0]);
-    setReason("");
-    setResolutionSummary("");
-    setConfirmRevoke(false);
-  }, [binding.binding_sha256]);
-  const allowedActionKey = allowedActions.join(":");
-  useEffect(() => {
-    if (
-      operation.state.requiresIdempotencyContinuity ||
-      action === effectiveAction
-    ) {
-      return;
-    }
-    if (operation.state.phase === "succeeded") operation.reset();
-    setAction(effectiveAction);
-    setReason("");
-    setResolutionSummary("");
-    setConfirmRevoke(false);
-  }, [action, allowedActionKey, effectiveAction, operation.state.requiresIdempotencyContinuity]);
-  const busy = operation.state.phase === "queued" || operation.state.phase === "submitting";
-  const reasonRequired = effectiveAction !== "accepted";
-  const resolutionRequired = effectiveAction === "accepted" && binding.resolution_required;
-  const resolvedEvidenceReferences = binding.resolution_evidence_references;
-  const fieldsLocked = busy || operation.state.requiresIdempotencyContinuity;
-  const canSubmit =
-    Boolean(effectiveAction) &&
-    allowedActions.includes(effectiveAction) &&
-    !restoredWithoutDraft &&
-    (!reasonRequired || reason.trim()) &&
-    (!resolutionRequired ||
-      (resolutionSummary.trim() && resolvedEvidenceReferences.length > 0)) &&
-    (effectiveAction !== "revoked" || confirmRevoke) &&
-    operation.state.phase !== "succeeded" &&
-    !busy;
-  const disabledHint = restoredWithoutDraft
-    ? ""
-    : reasonRequired && !reason.trim()
-      ? "Feedback is required for this decision."
-      : resolutionRequired && !resolutionSummary.trim()
-        ? "A resolution explanation is required."
-        : effectiveAction === "revoked" && !confirmRevoke
-          ? "Confirm the revocation before recording it."
-          : "";
-  const clearCompletedReceipt = () => {
-    if (operation.state.phase === "succeeded") operation.reset();
-  };
+function LatestDecision({ decision }: { decision: ProductReviewDecisionRecord }) {
   return (
-    <section className="owner-review-action" aria-label={`Decision for ${binding.product}`}>
-      <label><span>Decision</span><select value={effectiveAction} disabled={fieldsLocked} onChange={(event) => { clearCompletedReceipt(); setAction(event.target.value as OwnerAcceptanceHumanAction); setReason(""); setResolutionSummary(""); setConfirmRevoke(false); }}>
-        {binding.can_accept && previewAvailable ? <option value="accepted">Accept product change</option> : null}
-        {binding.can_request_changes ? <option value="changes_requested">Request product changes</option> : null}
-        {binding.can_revoke ? <option value="revoked">Revoke prior acceptance</option> : null}
-      </select></label>
-      {reasonRequired ? <label><span>Feedback</span><textarea maxLength={4000} value={reason} disabled={fieldsLocked} onChange={(event) => { clearCompletedReceipt(); setReason(event.target.value); }} /></label> : null}
-      {resolutionRequired ? <div className="owner-review-resolution"><p>Explain how the requested changes were resolved. Launchplane will attach this preview and its current version to the decision.</p><label><span>Resolution explanation</span><textarea maxLength={4000} value={resolutionSummary} disabled={fieldsLocked} onChange={(event) => { clearCompletedReceipt(); setResolutionSummary(event.target.value); }} /></label></div> : null}
-      {effectiveAction === "revoked" ? <label className="owner-review-confirm"><input type="checkbox" checked={confirmRevoke} disabled={fieldsLocked} onChange={(event) => { clearCompletedReceipt(); setConfirmRevoke(event.target.checked); }} /><span>Confirm revocation for this product review.</span></label> : null}
-      <div className="owner-review-action-buttons">
-        <button className="button button-primary" type="button" disabled={!canSubmit} onClick={async () => {
-          if (restoredWithoutDraft || operation.state.phase === "succeeded" || !allowedActions.includes(effectiveAction)) return;
-          const response = await operation.run(
-            ownerAcceptanceRequest(
-              binding,
-              effectiveAction,
-              reason,
-              resolutionRequired
-                ? {
-                    schema_version: 1,
-                    summary: resolutionSummary.trim(),
-                    resolved_evidence_references: resolvedEvidenceReferences,
-                  }
-                : null,
-            ),
-          );
-          if (response) {
-            await onRefreshAfterWrite();
-          }
-        }}>{busy ? "Recording…" : "Record decision"}</button>
-        {busy ? <button className="button" type="button" onClick={operation.cancel}>Cancel wait</button> : null}
-      </div>
-      {disabledHint ? <p className="owner-review-state" role="status">{disabledHint}</p> : null}
-      {operation.state.failure && operation.state.failure.code !== "owner_acceptance_binding_changed" ? <p className="owner-review-alert" role="alert">{operation.state.failure.message}</p> : null}
-      {operation.state.receipt ? <p className="owner-review-success" role="status">Decision recorded.</p> : null}
-      {operation.state.requiresIdempotencyContinuity ? <p className="owner-review-alert" role="status">{restoredWithoutDraft ? "A prior decision outcome is unknown, and this page cannot restore its feedback. Reconcile that outcome before recording another decision." : "Outcome unknown. Retry only this unchanged decision; its fields and idempotency key are preserved."}</p> : null}
+    <section className="owner-review-latest" aria-label="Latest decision">
+      <p>
+        <strong>
+          {decision.decision === "accepted" ? "Accepted" : "Changes requested"}
+        </strong>{" "}
+        by @{decision.owner_github_login} · {formatTime(decision.decided_at)}
+      </p>
+      {decision.reason ? <blockquote>{decision.reason}</blockquote> : null}
     </section>
   );
 }
 
-function ownerAllowedActions(
-  product: OwnerAcceptanceOwnerProduct,
-  previewAvailable: boolean,
-): OwnerAcceptanceHumanAction[] {
-  const actions: OwnerAcceptanceHumanAction[] = [];
-  if (product.can_accept && previewAvailable) actions.push("accepted");
-  if (product.can_request_changes) actions.push("changes_requested");
-  if (product.can_revoke) actions.push("revoked");
-  return actions;
-}
+function ProductReviewDecisionForm({
+  fixtureMode,
+  onDecided,
+  review,
+}: {
+  fixtureMode: DevFixtureMode;
+  onDecided: (review: ProductReviewResponse) => void;
+  review: ProductReviewResponse;
+}) {
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [failure, setFailure] = useState("");
+  const [recorded, setRecorded] = useState(false);
 
-function ownerFixtureMutationResponse(): OwnerAcceptanceEventMutationResponse {
-  return {
-    response_kind: "receipt",
-    status: "ok",
-    trace_id: "fixture-owner-review-write",
-    write_status: "written",
-    replayed: false,
+  const record = async (decision: ProductReviewDecisionRecord["decision"]) => {
+    setBusy(true);
+    setFailure("");
+    setRecorded(false);
+    const decisionReason = decision === "changes_requested" ? reason.trim() : "";
+    try {
+      const response = fixtureMode
+        ? await loadDevFixtures().then((fixtures) =>
+            fixtures.productReviewForFixture(
+              fixtureMode,
+              fixtures.productReviewDecisionForFixture(decision, decisionReason),
+            ),
+          )
+        : await writeProductReviewDecision({
+            repository: review.repository,
+            pull_request: review.pull_request_number,
+            decision,
+            reason: decisionReason,
+          });
+      setReason("");
+      setRecorded(true);
+      onDecided(response);
+    } catch (writeError) {
+      const apiError = writeError as LaunchplaneApiError;
+      setFailure(
+        apiError.statusCode === 403
+          ? "Your decision was not recorded because you are not this product's Owner."
+          : apiError.statusCode === 409
+            ? apiError.message
+            : "Your decision was not recorded. Try again in a moment.",
+      );
+    } finally {
+      setBusy(false);
+    }
   };
+
+  return (
+    <section
+      className="owner-review-action"
+      aria-label={`Decision for ${review.display_name || review.product}`}
+    >
+      <label>
+        <span>What should change? (needed only when you request changes)</span>
+        <textarea
+          maxLength={4000}
+          value={reason}
+          disabled={busy}
+          onChange={(event) => {
+            setRecorded(false);
+            setReason(event.target.value);
+          }}
+        />
+      </label>
+      <div className="owner-review-action-buttons">
+        <button
+          className="button button-primary"
+          type="button"
+          disabled={busy}
+          onClick={() => void record("accepted")}
+        >
+          Accept
+        </button>
+        <button
+          className="button"
+          type="button"
+          disabled={busy || !reason.trim()}
+          onClick={() => void record("changes_requested")}
+        >
+          Request changes
+        </button>
+      </div>
+      {busy ? <p className="owner-review-state" role="status">Recording…</p> : null}
+      {failure ? <p className="owner-review-alert" role="alert">{failure}</p> : null}
+      {recorded ? <p className="owner-review-success" role="status">Decision recorded.</p> : null}
+    </section>
+  );
 }
