@@ -166,7 +166,7 @@ export function AppShell({
                         data-active={active}
                         to={productPath(product.product)}
                       >
-                        <span>{product.display_name}</span>
+                        <span title={product.display_name}>{product.display_name}</span>
                         <ProductTrustDots product={product} />
                       </AppLink>
                     </li>
