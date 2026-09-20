@@ -488,6 +488,35 @@ class ProductExpectedConfigProfile(BaseModel):
         return self
 
 
+class ProductOwnerProfile(BaseModel):
+    """The person who accepts or rejects what customers see for this product.
+
+    An Owner can veto a change but never merge or deploy one. The numeric GitHub id
+    is the identity; the login is for mentions and display and may be renamed.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    github_login: str = ""
+    github_id: str = ""
+
+    @model_validator(mode="after")
+    def _validate_owner(self) -> "ProductOwnerProfile":
+        self.github_login = self.github_login.strip().removeprefix("@")
+        self.github_id = self.github_id.strip()
+        if bool(self.github_login) != bool(self.github_id):
+            raise ValueError("product owner requires both github_login and github_id")
+        if self.github_id and not self.github_id.isdecimal():
+            raise ValueError("product owner github_id must be a numeric GitHub ID")
+        if any(character.isspace() for character in self.github_login):
+            raise ValueError("product owner github_login cannot contain whitespace")
+        return self
+
+    @property
+    def is_set(self) -> bool:
+        return bool(self.github_id)
+
+
 class LaunchplaneProductProfileRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -512,6 +541,7 @@ class LaunchplaneProductProfileRecord(BaseModel):
     expected_config: ProductExpectedConfigProfile = Field(
         default_factory=ProductExpectedConfigProfile
     )
+    owner: ProductOwnerProfile = Field(default_factory=ProductOwnerProfile)
     updated_at: str
     source: str
 
