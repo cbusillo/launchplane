@@ -33454,6 +33454,211 @@
         "title": "ProductRetirementRequest",
         "type": "object"
       },
+      "ProductReviewDecisionEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "decision": {
+            "enum": [
+              "accepted",
+              "changes_requested"
+            ],
+            "title": "Decision",
+            "type": "string"
+          },
+          "pull_request": {
+            "minimum": 1.0,
+            "title": "Pull Request",
+            "type": "integer"
+          },
+          "reason": {
+            "default": "",
+            "maxLength": 4000,
+            "title": "Reason",
+            "type": "string"
+          },
+          "repository": {
+            "maxLength": 256,
+            "minLength": 3,
+            "pattern": "^[^/\\s]+/[^/\\s]+$",
+            "title": "Repository",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repository",
+          "pull_request",
+          "decision"
+        ],
+        "title": "ProductReviewDecisionEnvelope",
+        "type": "object"
+      },
+      "ProductReviewDecisionRecord": {
+        "additionalProperties": false,
+        "description": "One Owner decision about one pull request preview.\n\nThe decision is a recorded opinion: it never merges or deploys anything.",
+        "properties": {
+          "decided_at": {
+            "title": "Decided At",
+            "type": "string"
+          },
+          "decision": {
+            "enum": [
+              "accepted",
+              "changes_requested"
+            ],
+            "title": "Decision",
+            "type": "string"
+          },
+          "head_sha": {
+            "default": "",
+            "title": "Head Sha",
+            "type": "string"
+          },
+          "owner_github_id": {
+            "title": "Owner Github Id",
+            "type": "string"
+          },
+          "owner_github_login": {
+            "title": "Owner Github Login",
+            "type": "string"
+          },
+          "preview_url": {
+            "default": "",
+            "title": "Preview Url",
+            "type": "string"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "pull_request_number": {
+            "minimum": 1.0,
+            "title": "Pull Request Number",
+            "type": "integer"
+          },
+          "reason": {
+            "default": "",
+            "maxLength": 4000,
+            "title": "Reason",
+            "type": "string"
+          },
+          "record_id": {
+            "title": "Record Id",
+            "type": "string"
+          },
+          "repository": {
+            "title": "Repository",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "record_id",
+          "product",
+          "repository",
+          "pull_request_number",
+          "decision",
+          "owner_github_id",
+          "owner_github_login",
+          "decided_at"
+        ],
+        "title": "ProductReviewDecisionRecord",
+        "type": "object"
+      },
+      "ProductReviewResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "can_decide": {
+            "title": "Can Decide",
+            "type": "boolean"
+          },
+          "cannot_decide_reason": {
+            "title": "Cannot Decide Reason",
+            "type": "string"
+          },
+          "display_name": {
+            "title": "Display Name",
+            "type": "string"
+          },
+          "head_sha": {
+            "title": "Head Sha",
+            "type": "string"
+          },
+          "latest_decision": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProductReviewDecisionRecord"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "owner_github_login": {
+            "title": "Owner Github Login",
+            "type": "string"
+          },
+          "owner_set": {
+            "title": "Owner Set",
+            "type": "boolean"
+          },
+          "preview_url": {
+            "title": "Preview Url",
+            "type": "string"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "pull_request_number": {
+            "title": "Pull Request Number",
+            "type": "integer"
+          },
+          "pull_request_url": {
+            "title": "Pull Request Url",
+            "type": "string"
+          },
+          "repository": {
+            "title": "Repository",
+            "type": "string"
+          },
+          "status": {
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          },
+          "viewer_is_owner": {
+            "title": "Viewer Is Owner",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "trace_id",
+          "product",
+          "display_name",
+          "repository",
+          "pull_request_number",
+          "pull_request_url",
+          "preview_url",
+          "head_sha",
+          "owner_set",
+          "owner_github_login",
+          "viewer_is_owner",
+          "can_decide",
+          "cannot_decide_reason",
+          "latest_decision"
+        ],
+        "title": "ProductReviewResponse",
+        "type": "object"
+      },
       "ProductRuntimeConfigRequirement": {
         "additionalProperties": false,
         "properties": {
@@ -77517,6 +77722,204 @@
         "summary": "Plan or apply audited generic-web product retirement"
       }
     },
+    "/v1/product-review": {
+      "get": {
+        "operationId": "read_product_review",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "repository",
+            "required": true,
+            "schema": {
+              "maxLength": 256,
+              "minLength": 3,
+              "pattern": "^[^/\\s]+/[^/\\s]+$",
+              "title": "Repository",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "pull_request",
+            "required": true,
+            "schema": {
+              "minimum": 1,
+              "title": "Pull Request",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductReviewResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read the Owner review page for one pull request",
+        "tags": [
+          "product-review"
+        ]
+      }
+    },
+    "/v1/product-review/decisions": {
+      "post": {
+        "operationId": "write_product_review_decision",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProductReviewDecisionEnvelope"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductReviewResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Record the product Owner's accept or request-changes decision",
+        "tags": [
+          "product-review"
+        ]
+      }
+    },
     "/v1/production-backup-authority": {
       "get": {
         "operationId": "read_production_backup_authority",
@@ -84796,6 +85199,7 @@
     "/v1/privileged-operations/plans/{operation_id}": "read_human_privileged_operation",
     "/v1/privileged-operations/plans/{operation_id}/review": "read_human_privileged_operation_review",
     "/v1/product-profiles": "list_product_profiles",
+    "/v1/product-review": "read_product_review",
     "/v1/products": "list_products",
     "/v1/products/{product}": "read_product",
     "/v1/products/{product}/activity": "read_product_activity",
@@ -84826,6 +85230,7 @@
     "/v1/privileged-operations/ordinary-agent-delivery-activation/plans": "plan_ordinary_agent_delivery_activation",
     "/v1/privileged-operations/plans/{operation_id}/approve": "approve_human_privileged_operation",
     "/v1/privileged-operations/plans/{operation_id}/revoke": "revoke_human_privileged_operation",
+    "/v1/product-review/decisions": "write_product_review_decision",
     "/v1/products/{product}/environments/{environment}/config/apply": "apply_product_environment_config",
     "/v1/products/{product}/environments/{environment}/promotion/dry-run": "dry_run_product_promotion",
     "/v1/products/{product}/environments/{environment}/promotion/workflow-dispatch": "dispatch_product_promotion_workflow",

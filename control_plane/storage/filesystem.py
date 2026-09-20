@@ -187,6 +187,7 @@ from control_plane.contracts.detached_application_retirement import (
     DetachedApplicationRetirementRecord,
 )
 from control_plane.contracts.product_retirement import ProductRetirementRecord
+from control_plane.contracts.product_review import ProductReviewDecisionRecord
 from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressIncidentEventRecord,
     PublicIngressIncidentReminderStateRecord,
@@ -7162,6 +7163,28 @@ class FilesystemRecordStore:
             if not context_name or record.context == context_name
         ]
         records.sort(key=lambda record: (record.requested_at, record.feedback_id), reverse=True)
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
+
+    def write_product_review_decision_record(self, record: ProductReviewDecisionRecord) -> Path:
+        return self._write_model("launchplane_product_review_decisions", record.record_id, record)
+
+    def list_product_review_decision_records(
+        self,
+        *,
+        repository: str,
+        pull_request_number: int,
+        limit: int | None = None,
+    ) -> tuple[ProductReviewDecisionRecord, ...]:
+        records = [
+            record
+            for record in self._list_models(
+                ProductReviewDecisionRecord, "launchplane_product_review_decisions"
+            )
+            if record.repository == repository and record.pull_request_number == pull_request_number
+        ]
+        records.sort(key=lambda record: (record.decided_at, record.record_id), reverse=True)
         if limit is not None:
             records = records[:limit]
         return tuple(records)

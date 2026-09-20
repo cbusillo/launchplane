@@ -437,6 +437,7 @@ from control_plane.contracts.production_backup_authority import (
     ProductionBackupTargetRecord,
 )
 from control_plane.contracts.product_retirement import ProductRetirementRecord
+from control_plane.contracts.product_review import ProductReviewDecisionRecord
 from control_plane.contracts.detached_application_retirement import (
     DetachedApplicationRetirementRecord,
 )
@@ -3678,6 +3679,25 @@ class LaunchplanePreviewPrFeedbackRow(Base):
     requested_at: Mapped[str] = mapped_column(String, nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False)
     delivery_status: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneProductReviewDecisionRow(Base):
+    __tablename__ = "launchplane_product_review_decisions"
+    __table_args__ = (
+        Index(
+            "launchplane_product_review_decisions_pull_request_idx",
+            "repository",
+            "pull_request_number",
+            desc("decided_at"),
+        ),
+    )
+
+    record_id: Mapped[str] = mapped_column(String, primary_key=True)
+    product: Mapped[str] = mapped_column(String, nullable=False)
+    repository: Mapped[str] = mapped_column(String, nullable=False)
+    pull_request_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    decided_at: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -19947,6 +19967,39 @@ class PostgresRecordStore(HumanSessionStore):
             order_by=(
                 LaunchplanePreviewPrFeedbackRow.requested_at.desc(),
                 LaunchplanePreviewPrFeedbackRow.feedback_id.desc(),
+            ),
+            limit=limit,
+        )
+
+    def write_product_review_decision_record(self, record: ProductReviewDecisionRecord) -> None:
+        self._write_row(
+            LaunchplaneProductReviewDecisionRow(
+                record_id=record.record_id,
+                product=record.product,
+                repository=record.repository,
+                pull_request_number=record.pull_request_number,
+                decided_at=record.decided_at,
+                payload=self._payload_dict(record),
+            )
+        )
+
+    def list_product_review_decision_records(
+        self,
+        *,
+        repository: str,
+        pull_request_number: int,
+        limit: int | None = None,
+    ) -> tuple[ProductReviewDecisionRecord, ...]:
+        return self._list_models(
+            model_type=ProductReviewDecisionRecord,
+            orm_model=LaunchplaneProductReviewDecisionRow,
+            filters=[
+                LaunchplaneProductReviewDecisionRow.repository == repository,
+                LaunchplaneProductReviewDecisionRow.pull_request_number == pull_request_number,
+            ],
+            order_by=(
+                LaunchplaneProductReviewDecisionRow.decided_at.desc(),
+                LaunchplaneProductReviewDecisionRow.record_id.desc(),
             ),
             limit=limit,
         )

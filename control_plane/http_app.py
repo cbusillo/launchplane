@@ -151,6 +151,7 @@ from control_plane.http_routes import (
     PRODUCT_OWNER_ROUTING_APPLY_ROUTE,
     ProductOwnerWriteRouteDependencies,
     OwnerAcceptanceRouteDependencies,
+    ProductReviewRouteDependencies,
     PrivilegedOperationRouteDependencies,
     GovernanceProjectionRouteDependencies,
     ProductReadRouteDependencies,
@@ -182,6 +183,7 @@ from control_plane.http_routes import (
     register_managed_secret_read_routes,
     register_merge_train_read_routes,
     register_owner_acceptance_routes,
+    register_product_review_routes,
     register_privileged_operation_routes,
     register_operation_status_read_routes,
     register_preview_notification_attempt_read_routes,
@@ -23760,6 +23762,15 @@ def create_launchplane_fastapi_app(
             github_api=github_api_request,
             public_origin=(human_session_manager.public_origin if human_session_manager else None),
             projection_service=owner_acceptance_projection_service,
+        ),
+    )
+    register_product_review_routes(
+        app,
+        dependencies=ProductReviewRouteDependencies(
+            common=read_route_dependencies,
+            read_github_human_browser_mutation_identity=(
+                read_github_human_browser_mutation_identity
+            ),
         ),
     )
     register_privileged_operation_routes(

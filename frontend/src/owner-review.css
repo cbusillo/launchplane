@@ -70,10 +70,8 @@
 }
 
 .owner-review-page,
-.owner-review-bindings,
 .owner-review-card,
 .owner-review-action,
-.owner-review-resolution,
 .owner-review-action label {
   display: grid;
   gap: 0.9rem;
@@ -85,24 +83,6 @@
   max-width: 700px;
 }
 
-.owner-review-context {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.5rem;
-  color: var(--muted);
-}
-
-.owner-review-context span {
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  background: var(--surface-muted);
-  padding: 0.28rem 0.65rem;
-}
-
-.owner-review-bindings {
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr));
-}
-
 .owner-review-card {
   align-content: start;
   border: 1px solid var(--border-strong);
@@ -111,15 +91,26 @@
   padding: clamp(18px, 3vw, 28px);
 }
 
-.owner-review-card dl {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+.owner-review-links {
+  display: flex;
+  flex-wrap: wrap;
   gap: 0.75rem;
 }
 
-.owner-review-card dl > div {
-  display: grid;
-  gap: 0.15rem;
+.owner-review-latest {
+  border-left: 3px solid var(--border-strong);
+  padding-left: 0.9rem;
+}
+
+.owner-review-latest p,
+.owner-review-latest blockquote {
+  margin: 0;
+}
+
+.owner-review-latest blockquote {
+  margin-top: 0.4rem;
+  color: var(--muted);
+  white-space: pre-wrap;
 }
 
 .owner-review-preview {
@@ -136,7 +127,6 @@
   font-weight: 650;
 }
 
-.owner-review-action select,
 .owner-review-action textarea {
   width: 100%;
   border: 1px solid var(--border);
@@ -149,11 +139,6 @@
 .owner-review-action textarea {
   min-height: 96px;
   resize: vertical;
-}
-
-.owner-review-confirm {
-  grid-template-columns: auto 1fr;
-  align-items: start;
 }
 
 .owner-review-state {
@@ -183,8 +168,9 @@
     margin-right: auto;
   }
 
-  .owner-review-card dl {
-    grid-template-columns: 1fr;
+  .owner-review-links,
+  .owner-review-links .button {
+    width: 100%;
   }
 
   .owner-review-action-buttons,
