@@ -845,8 +845,9 @@ def _render_preview_pr_feedback_markdown(
                     "route is available. Do not merge this change."
                 )
             if repository:
+                # The Owner reviews the preview, never the code.
                 lines.append(
-                    f"- PR changes: https://github.com/{repository}/pull/{anchor_pr_number}/files"
+                    f"- Pull request: https://github.com/{repository}/pull/{anchor_pr_number}"
                 )
             lines.extend(
                 [

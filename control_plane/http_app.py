@@ -127,7 +127,7 @@ from control_plane.github_app_identity import (
 )
 from control_plane.owner_acceptance_projection import (
     OwnerAcceptanceProjectionService,
-    owner_acceptance_workbench_reference_url,
+    owner_review_reference_url,
 )
 from control_plane.http_routes import (
     AcceptedEvidenceResponse as AcceptedEvidenceResponse,
@@ -19973,7 +19973,7 @@ def create_launchplane_fastapi_app(
                 )
                 owner_review_status = projection_outcome.decision.status
                 if projection_outcome.result is not None and human_session_manager is not None:
-                    owner_review_url = owner_acceptance_workbench_reference_url(
+                    owner_review_url = owner_review_reference_url(
                         public_origin=human_session_manager.public_origin,
                         repository=feedback_request.repository,
                         pull_request_number=feedback_request.anchor_pr_number,
