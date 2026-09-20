@@ -24642,13 +24642,19 @@
             "default": "",
             "title": "Github Login",
             "type": "string"
+          },
+          "review_label": {
+            "default": "owner-review",
+            "title": "Review Label",
+            "type": "string"
           }
         },
         "title": "ProductOwnerProfile",
         "type": "object",
         "required": [
           "github_id",
-          "github_login"
+          "github_login",
+          "review_label"
         ]
       },
       "ProductPreviewProfile": {

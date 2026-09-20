@@ -4,7 +4,6 @@ import hashlib
 import hmac
 import json
 import os
-import threading
 import unittest
 from collections.abc import Mapping
 from pathlib import Path
@@ -2316,15 +2315,31 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(request_schema["title"], "MergeTrainPolicyImportEnvelope")
         self.assertEqual(request_schema["additionalProperties"], False)
 
-    def test_preview_pr_feedback_hydrates_ready_url_from_preview_record(self) -> None:
-        request_thread_id = threading.get_ident()
-        projection_thread_ids: list[int] = []
+    def test_preview_pr_feedback_hydrates_ready_url_and_mentions_owner_when_marked(self) -> None:
+        pull_request_labels: list[dict[str, str]] = [{"name": "preview"}, {"name": "owner-review"}]
 
-        def reconcile_owner_acceptance_in_worker(**_kwargs: object) -> MagicMock:
-            projection_thread_ids.append(threading.get_ident())
-            return MagicMock(
-                decision=MagicMock(status="pending"),
-                result=MagicMock(),
+        def github_api(*, path: str, **_kwargs: object) -> object:
+            if path.endswith("/labels"):
+                return pull_request_labels
+            return {"user": {"login": "author"}, "head": {"ref": "pr-42"}}
+
+        def ready_feedback(app: object, idempotency_key: str) -> tuple[int, dict[str, Any]]:
+            return _invoke_app(
+                app,
+                method="POST",
+                path="/v1/previews/pr-feedback",
+                payload={
+                    "schema_version": 1,
+                    "product": "sellyouroutboard",
+                    "source": "workflow",
+                    "repository": "cbusillo/sellyouroutboard",
+                    "anchor_repo": "sellyouroutboard",
+                    "anchor_pr_number": 42,
+                    "anchor_pr_url": "https://github.com/cbusillo/sellyouroutboard/pull/42",
+                    "status": "ready",
+                    "run_url": "https://github.com/cbusillo/sellyouroutboard/actions/runs/42",
+                },
+                headers={"Idempotency-Key": idempotency_key},
             )
 
         with (
@@ -2339,22 +2354,20 @@ class LaunchplaneServiceTests(unittest.TestCase):
             ),
             patch(
                 "control_plane.workflows.preview_pr_feedback.github_api_request",
-                return_value={"user": {"login": "author"}, "head": {"ref": "pr-42"}},
+                side_effect=github_api,
             ),
             patch(
                 "control_plane.workflows.preview_pr_feedback.create_github_issue_comment",
                 return_value={"id": 987, "html_url": "https://github.example/comment"},
             ) as create_comment,
-            patch(
-                "control_plane.http_app.OwnerAcceptanceProjectionService.reconcile_if_required",
-                side_effect=reconcile_owner_acceptance_in_worker,
-            ) as reconcile_owner_acceptance,
         ):
             root = Path(temporary_directory_name)
             state_dir = root / "state"
             store = FilesystemRecordStore(state_dir=state_dir)
+            profile_payload = _product_profile_payload()
+            profile_payload["owner"] = {"github_login": "site-owner", "github_id": "7654321"}
             store.write_product_profile_record(
-                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+                LaunchplaneProductProfileRecord.model_validate(profile_payload)
             )
             store.write_preview_record(
                 PreviewRecord(
@@ -2374,157 +2387,54 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     latest_generation_id="generation-syo-pr-42",
                 )
             )
-            policy = LaunchplaneAuthzPolicy.model_validate(
-                {
-                    "github_actions": [
-                        {
-                            "repository": "cbusillo/sellyouroutboard",
-                            "workflow_refs": [
-                                "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml@refs/heads/main"
-                            ],
-                            "event_names": ["pull_request"],
-                            "products": ["sellyouroutboard"],
-                            "contexts": ["sellyouroutboard-testing"],
-                            "actions": ["preview_refresh.execute"],
-                        }
-                    ]
-                }
+            workflow_ref = (
+                "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml"
+                "@refs/heads/main"
             )
             app = create_launchplane_fastapi_test_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(
-                    _identity(
-                        repository="cbusillo/sellyouroutboard",
-                        workflow_ref=(
-                            "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml"
-                            "@refs/heads/main"
-                        ),
-                    )
+                    _identity(repository="cbusillo/sellyouroutboard", workflow_ref=workflow_ref)
                 ),
-                authz_policy=policy,
+                authz_policy=LaunchplaneAuthzPolicy.model_validate(
+                    {
+                        "github_actions": [
+                            {
+                                "repository": "cbusillo/sellyouroutboard",
+                                "workflow_refs": [workflow_ref],
+                                "event_names": ["pull_request"],
+                                "products": ["sellyouroutboard"],
+                                "contexts": ["sellyouroutboard-testing"],
+                                "actions": ["preview_refresh.execute"],
+                            }
+                        ]
+                    }
+                ),
                 control_plane_root_path=root,
                 human_session_manager=MagicMock(public_origin="https://launchplane.example.test"),
             )
-            status_code, payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/previews/pr-feedback",
-                payload={
-                    "schema_version": 1,
-                    "product": "sellyouroutboard",
-                    "source": "workflow",
-                    "repository": "cbusillo/sellyouroutboard",
-                    "anchor_repo": "sellyouroutboard",
-                    "anchor_pr_number": 42,
-                    "anchor_pr_url": "https://github.com/cbusillo/sellyouroutboard/pull/42",
-                    "status": "ready",
-                    "run_url": "https://github.com/cbusillo/sellyouroutboard/actions/runs/42",
-                },
-                headers={"Idempotency-Key": "preview-pr-feedback-ready-hydrate-url"},
-            )
-            reconcile_owner_acceptance.side_effect = RuntimeError("Owner projection is unavailable")
-            create_comment.reset_mock()
+            status_code, payload = ready_feedback(app, "preview-pr-feedback-ready-marked")
+            marked_comment = create_comment.call_args.kwargs["body"]
+            pull_request_labels[:] = [{"name": "preview"}]
             with patch(
-                "control_plane.http_app.utc_now_timestamp",
-                return_value="2026-08-16T23:59:59Z",
+                "control_plane.http_app.utc_now_timestamp", return_value="2026-08-16T23:59:59Z"
             ):
-                failed_status_code, failed_payload = _invoke_app(
-                    app,
-                    method="POST",
-                    path="/v1/previews/pr-feedback",
-                    payload={
-                        "schema_version": 1,
-                        "product": "sellyouroutboard",
-                        "source": "workflow",
-                        "repository": "cbusillo/sellyouroutboard",
-                        "anchor_repo": "sellyouroutboard",
-                        "anchor_pr_number": 42,
-                        "anchor_pr_url": ("https://github.com/cbusillo/sellyouroutboard/pull/42"),
-                        "status": "ready",
-                        "run_url": ("https://github.com/cbusillo/sellyouroutboard/actions/runs/43"),
-                    },
-                    headers={"Idempotency-Key": "preview-pr-feedback-ready-projection-failure"},
+                unmarked_status_code, unmarked_payload = ready_feedback(
+                    app, "preview-pr-feedback-ready-unmarked"
                 )
-            failed_comment_body = create_comment.call_args.kwargs["body"]
-            reconcile_owner_acceptance.side_effect = None
-            reconcile_owner_acceptance.return_value = MagicMock(
-                decision=MagicMock(status="pending"),
-                result=MagicMock(),
-            )
-            create_comment.reset_mock()
-            app_without_browser_sessions = create_launchplane_fastapi_test_app(
-                state_dir=state_dir,
-                verifier=_StubVerifier(
-                    _identity(
-                        repository="cbusillo/sellyouroutboard",
-                        workflow_ref=(
-                            "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml"
-                            "@refs/heads/main"
-                        ),
-                    )
-                ),
-                authz_policy=policy,
-                control_plane_root_path=root,
-            )
-            with patch(
-                "control_plane.http_app.utc_now_timestamp",
-                return_value="2026-08-16T23:59:58Z",
-            ):
-                no_browser_status_code, no_browser_payload = _invoke_app(
-                    app_without_browser_sessions,
-                    method="POST",
-                    path="/v1/previews/pr-feedback",
-                    payload={
-                        "schema_version": 1,
-                        "product": "sellyouroutboard",
-                        "source": "workflow",
-                        "repository": "cbusillo/sellyouroutboard",
-                        "anchor_repo": "sellyouroutboard",
-                        "anchor_pr_number": 42,
-                        "anchor_pr_url": ("https://github.com/cbusillo/sellyouroutboard/pull/42"),
-                        "status": "ready",
-                        "run_url": ("https://github.com/cbusillo/sellyouroutboard/actions/runs/44"),
-                    },
-                    headers={"Idempotency-Key": "preview-pr-feedback-ready-no-browser"},
-                )
-            no_browser_comment_body = create_comment.call_args.kwargs["body"]
 
         self.assertEqual(status_code, 202, payload)
-        self.assertEqual(
-            payload["result"]["preview_url"],
-            "https://pr-42.syo-preview.example.test",
-        )
+        self.assertEqual(payload["result"]["preview_url"], "https://pr-42.syo-preview.example.test")
         self.assertEqual(payload["result"]["delivery_status"], "delivered", payload)
-        self.assertNotEqual(projection_thread_ids[0], request_thread_id)
-        first_reconciliation_call = reconcile_owner_acceptance.call_args_list[0]
-        target = first_reconciliation_call.kwargs["target"]
-        self.assertEqual(target.repository, "cbusillo/sellyouroutboard")
-        self.assertEqual(target.pull_request_number, 42)
-        self.assertEqual(
-            first_reconciliation_call.kwargs["source_event_id"],
-            "preview-pr-feedback-ready-hydrate-url",
-        )
-        create_comment.assert_called_once()
-        self.assertIn(
-            "https://pr-42.syo-preview.example.test",
-            create_comment.call_args.kwargs["body"],
-        )
+        self.assertIn("https://pr-42.syo-preview.example.test", marked_comment)
+        self.assertIn("@site-owner", marked_comment)
         self.assertIn(
             "/ui/owner-review?repository=cbusillo%2Fsellyouroutboard&pull_request=42",
-            payload["result"]["comment_markdown"],
+            marked_comment,
         )
-        self.assertNotIn("/pull/42/files", payload["result"]["comment_markdown"])
-        self.assertEqual(failed_status_code, 202, failed_payload)
-        self.assertEqual(failed_payload["result"]["delivery_status"], "delivered")
-        self.assertIn("unavailable", failed_comment_body)
-        self.assertNotIn("/ui/engineering/owner-acceptance", failed_comment_body)
-        self.assertEqual(no_browser_status_code, 202, no_browser_payload)
-        self.assertEqual(no_browser_payload["result"]["delivery_status"], "delivered")
-        self.assertEqual(
-            reconcile_owner_acceptance.call_args.kwargs["source_event_id"],
-            "preview-pr-feedback-ready-no-browser",
-        )
-        self.assertNotIn("/ui/engineering/owner-acceptance", no_browser_comment_body)
+        self.assertEqual(unmarked_status_code, 202, unmarked_payload)
+        self.assertNotIn("@site-owner", unmarked_payload["result"]["comment_markdown"])
+        self.assertNotIn("Owner review", unmarked_payload["result"]["comment_markdown"])
 
     def test_preview_pr_feedback_ready_requires_active_preview_url(self) -> None:
         with (

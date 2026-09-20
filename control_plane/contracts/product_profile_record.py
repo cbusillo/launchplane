@@ -499,9 +499,11 @@ class ProductOwnerProfile(BaseModel):
 
     github_login: str = ""
     github_id: str = ""
+    review_label: str = "owner-review"
 
     @model_validator(mode="after")
     def _validate_owner(self) -> "ProductOwnerProfile":
+        self.review_label = self.review_label.strip() or "owner-review"
         self.github_login = self.github_login.strip().removeprefix("@")
         self.github_id = self.github_id.strip()
         if bool(self.github_login) != bool(self.github_id):

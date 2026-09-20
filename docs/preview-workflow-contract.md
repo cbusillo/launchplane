@@ -249,6 +249,19 @@ authorized Launchplane delivery job; it never authorizes merge, deploy, source,
 configuration, secrets, or access administration. Changed or incomplete binding
 evidence requires fresh review.
 
+## Owner Review Request
+
+Launchplane does not decide which pull requests a site Owner needs to see. The
+agent (or operator) that opens the pull request marks it with the product's
+Owner review label (`owner.review_label` on the product profile, default
+`owner-review`). When a ready preview comment is written for a marked pull
+request, Launchplane mentions the product's Owner with the preview URL and the
+focused `/ui/owner-review` page. A marked pull request on a product with no
+Owner says so instead of mentioning anyone. Unmarked pull requests get no Owner
+section. If the labels cannot be read, the comment is still delivered without an
+Owner section; release approval is the safety net (see
+[direction.md](direction.md)).
+
 ## Manager Preview Approval
 
 The mechanism below documents current compatibility behavior and retained
