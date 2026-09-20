@@ -187,13 +187,19 @@ class WorkflowInvariantCheckerTests(unittest.TestCase):
 
     def test_browser_smoke_must_run_for_fork_pull_requests(self) -> None:
         workflow_text = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
-        job_header = "  frontend_browser_smoke:\n    runs-on: ubuntu-latest\n"
+        job_header = (
+            "  frontend_browser_smoke:\n"
+            "    needs: verified_tree\n"
+            "    if: needs.verified_tree.outputs.verified != 'true'\n"
+        )
         self.assertIn(job_header, workflow_text)
         drifted_workflow = workflow_text.replace(
             job_header,
             "  frontend_browser_smoke:\n"
-            "    if: github.event_name != 'pull_request'\n"
-            "    runs-on: ubuntu-latest\n",
+            "    needs: verified_tree\n"
+            "    if: >-\n"
+            "      needs.verified_tree.outputs.verified != 'true' &&\n"
+            "      github.event_name != 'pull_request'\n",
             1,
         )
 
