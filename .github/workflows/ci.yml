@@ -20,10 +20,58 @@ concurrency:
   cancel-in-progress: ${{ github.event_name != 'push' || (startsWith(github.ref, 'refs/heads/launchplane/train/') && !github.event.created && !github.event.forced) }}
 
 jobs:
+  verified_tree:
+    # A merge of an up-to-date pull request has the same tree as the pull request
+    # head that already passed this workflow. Re-testing identical content only
+    # delays the deploy, so the heavy jobs are skipped when that can be proven.
+    name: verified-tree
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      checks: read
+      contents: read
+    outputs:
+      verified: ${{ steps.verify.outputs.verified }}
+    steps:
+      - name: Prove the pushed tree already passed CI
+        id: verify
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          REPOSITORY: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -uo pipefail
+          verified=false
+          if [ "${EVENT_NAME}" = "push" ] && [ "${REF}" = "refs/heads/main" ]; then
+            commit="$(gh api "repos/${REPOSITORY}/git/commits/${SHA}" 2>/dev/null || true)"
+            tree="$(jq -r '.tree.sha // empty' <<<"${commit}" 2>/dev/null || true)"
+            parent_count="$(jq -r '.parents | length' <<<"${commit}" 2>/dev/null || echo 0)"
+            if [ -n "${tree}" ] && [ "${parent_count}" = "2" ]; then
+              merged_head="$(jq -r '.parents[1].sha' <<<"${commit}")"
+              merged_tree="$(gh api "repos/${REPOSITORY}/git/commits/${merged_head}" \
+                --jq '.tree.sha' 2>/dev/null || true)"
+              if [ "${merged_tree}" = "${tree}" ]; then
+                passed="$(gh api \
+                  "repos/${REPOSITORY}/commits/${merged_head}/check-runs?check_name=ci-gate&per_page=100" \
+                  --jq '[.check_runs[] | select(.app.slug == "github-actions" and .status == "completed" and .conclusion == "success")] | length' \
+                  2>/dev/null || echo 0)"
+                if [ "${passed:-0}" -ge 1 ]; then
+                  verified=true
+                  echo "Tree ${tree} already passed ci-gate on ${merged_head}."
+                fi
+              fi
+            fi
+          fi
+          echo "verified=${verified}" >> "${GITHUB_OUTPUT}"
+
   static_checks:
+    needs: verified_tree
     if: >-
-      github.event_name != 'pull_request' ||
-      github.event.pull_request.head.repo.full_name == github.repository
+      needs.verified_tree.outputs.verified != 'true' &&
+      (github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository)
     runs-on:
       - self-hosted
       - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
@@ -91,9 +139,11 @@ jobs:
           uv run --with pip-audit pip-audit --ignore-vuln PYSEC-2025-183
 
   container_scan:
+    needs: verified_tree
     if: >-
-      github.event_name != 'pull_request' ||
-      github.event.pull_request.head.repo.full_name == github.repository
+      needs.verified_tree.outputs.verified != 'true' &&
+      (github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository)
     runs-on:
       - self-hosted
       - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
@@ -239,9 +289,11 @@ jobs:
         run: docker image rm "$LAUNCHPLANE_CI_IMAGE_TAG" || true
 
   frontend_validate:
+    needs: verified_tree
     if: >-
-      github.event_name != 'pull_request' ||
-      github.event.pull_request.head.repo.full_name == github.repository
+      needs.verified_tree.outputs.verified != 'true' &&
+      (github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository)
     runs-on:
       - self-hosted
       - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
@@ -335,6 +387,8 @@ jobs:
         run: pnpm --dir frontend validate
 
   frontend_browser_smoke:
+    needs: verified_tree
+    if: needs.verified_tree.outputs.verified != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -383,9 +437,11 @@ jobs:
           retention-days: 14
 
   test_timing_snapshot:
+    needs: verified_tree
     if: >-
-      github.event_name != 'pull_request' ||
-      github.event.pull_request.head.repo.full_name == github.repository
+      needs.verified_tree.outputs.verified != 'true' &&
+      (github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository)
     runs-on:
       - self-hosted
       - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
@@ -491,9 +547,10 @@ jobs:
           retention-days: 30
 
   test:
-    needs: [test_timing_snapshot, test_shards]
+    needs: [verified_tree, test_timing_snapshot, test_shards]
     if: >-
       always() &&
+      needs.verified_tree.outputs.verified != 'true' &&
       (github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository)
     runs-on:
@@ -583,9 +640,11 @@ jobs:
         run: uv run --extra dev python -m unittest
 
   postgres_integration:
+    needs: verified_tree
     if: >-
-      github.event_name != 'pull_request' ||
-      github.event.pull_request.head.repo.full_name == github.repository
+      needs.verified_tree.outputs.verified != 'true' &&
+      (github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository)
     runs-on:
       - self-hosted
       - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
@@ -628,6 +687,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     needs:
+      - verified_tree
       - static_checks
       - static_checks_fork
       - container_scan
@@ -659,8 +719,13 @@ jobs:
           TEST_RESULT: ${{ needs.test.result }}
           TEST_FORK_RESULT: ${{ needs.test_fork.result }}
           POSTGRES_INTEGRATION_RESULT: ${{ needs.postgres_integration.result }}
+          VERIFIED_TREE: ${{ needs.verified_tree.outputs.verified }}
         run: |
           set -euo pipefail
+          if [ "${VERIFIED_TREE}" = "true" ]; then
+            echo "This exact tree already passed ci-gate on the merged pull request head."
+            exit 0
+          fi
           require_success() {
             check_name="$1"
             check_result="$2"
