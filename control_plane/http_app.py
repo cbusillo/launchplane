@@ -296,9 +296,7 @@ from control_plane.manager_preview_approval_github_webhook import (
     MANAGER_PREVIEW_APPROVAL_RECONCILE_ROUTE,
     MANAGER_PREVIEW_APPROVAL_WEBHOOK_ROUTE,
     record_manager_preview_approval_invalidation_for_pr,
-    reconcile_all_manager_preview_approvals_best_effort,
     reconcile_manager_preview_approval_for_pr,
-    reconcile_manager_preview_approval_for_pr_best_effort,
 )
 from control_plane.provider_operations import (
     DurableProviderMutationAdapter,
@@ -399,6 +397,8 @@ from control_plane.generic_web_promotion_http import (
     dispatch_generic_web_promotion_workflow_result,
     execute_generic_web_prod_promotion_result,
 )
+from control_plane.product_review import require_product_review_store
+from control_plane.product_review_status import OwnerReviewStatusPublisher
 from control_plane.product_promotion_http import (
     PRODUCT_PROMOTION_DRY_RUN_MARKER_ROUTE as _PRODUCT_PROMOTION_DRY_RUN_MARKER_ROUTE,
     PRODUCT_PROMOTION_DRY_RUN_ROUTE as _PRODUCT_PROMOTION_DRY_RUN_ROUTE,
@@ -4010,6 +4010,7 @@ def create_launchplane_fastapi_app(
         ManagerPreviewApprovalGitHubWebhookHandler | None
     ) = None,
     engineering_review_target_resolver: EngineeringReviewTargetResolver | None = None,
+    owner_review_status_publisher: OwnerReviewStatusPublisher | None = None,
 ) -> FastAPI:
     resolved_control_plane_root = (
         control_plane_root_path or FilePath(__file__).resolve().parent.parent
@@ -4037,6 +4038,21 @@ def create_launchplane_fastapi_app(
         ),
         public_origin=(human_session_manager.public_origin if human_session_manager else None),
         api_request=injected_github_api_request,
+    )
+    resolved_owner_review_status_publisher = (
+        owner_review_status_publisher
+        or OwnerReviewStatusPublisher(
+            control_plane_root=resolved_control_plane_root,
+            public_origin=(human_session_manager.public_origin if human_session_manager else None),
+            github_app_token=lambda repository, repository_id: mint_repository_installation_token(
+                identity=resolve_advisory_github_app_identity(
+                    control_plane_root=resolved_control_plane_root
+                ),
+                repository=repository,
+                repository_id=repository_id,
+                api_request=injected_github_api_request,
+            ),
+        )
     )
     resolved_engineering_review_target_resolver = (
         engineering_review_target_resolver
@@ -6820,13 +6836,6 @@ def create_launchplane_fastapi_app(
                 profile=product_profile,
                 issued_plan=issued_plan,
                 records=response.records,
-            )
-            pr_number = issued_plan.plan_request.pr_number
-            reconcile_manager_preview_approval_for_pr_best_effort(
-                repository=product_profile.repository,
-                pr_number=pr_number,
-                record_store=record_store,
-                control_plane_root=resolved_control_plane_root,
             )
             return response
         except OdooPreviewPlanProvenanceError as error:
@@ -15222,10 +15231,6 @@ def create_launchplane_fastapi_app(
             record_id=route_result.authz_policy_record.record_id,
             revision=route_result.authz_policy_record.revision,
         )
-        reconcile_all_manager_preview_approvals_best_effort(
-            record_store=database_store,
-            control_plane_root=resolved_control_plane_root,
-        )
         return response
 
     def require_authz_policy_operation_activation_available(
@@ -15640,10 +15645,6 @@ def create_launchplane_fastapi_app(
             source="db",
             record_id=resulting_record.record_id,
             revision=resulting_record.revision,
-        )
-        reconcile_all_manager_preview_approvals_best_effort(
-            record_store=database_store,
-            control_plane_root=resolved_control_plane_root,
         )
         return accepted_response
 
@@ -16168,10 +16169,6 @@ def create_launchplane_fastapi_app(
             source="db",
             record_id=resulting_record.record_id,
             revision=resulting_record.revision,
-        )
-        reconcile_all_manager_preview_approvals_best_effort(
-            record_store=database_store,
-            control_plane_root=resolved_control_plane_root,
         )
         return accepted_response
 
@@ -20247,6 +20244,7 @@ def create_launchplane_fastapi_app(
         owner_review_requested = False
         owner_login = ""
         owner_review_url = ""
+        owner_profile: LaunchplaneProductProfileRecord | None = None
         if feedback_request.status == "ready":
             try:
                 owner_profile = cast(
@@ -20307,6 +20305,21 @@ def create_launchplane_fastapi_app(
                 message=str(error),
             ) from error
         feedback_store.write_preview_pr_feedback_record(feedback_record)
+        if feedback_request.status == "ready" and owner_profile is not None:
+            # Best-effort: the delivered comment never depends on the status.
+            try:
+                product_review_store = require_product_review_store(record_store)
+            except TypeError:
+                _LOGGER.exception("Owner review status needs product review storage.")
+            else:
+                await run_in_threadpool(
+                    resolved_owner_review_status_publisher.publish,
+                    store=product_review_store,
+                    profile=owner_profile,
+                    pull_request_number=feedback_request.anchor_pr_number,
+                    context=effective_context,
+                    retire_leftovers=True,
+                )
         notification_attempts = deliver_preview_pr_feedback_notifications(
             record_store=record_store,
             feedback=feedback_record,
@@ -24055,6 +24068,11 @@ def create_launchplane_fastapi_app(
             common=read_route_dependencies,
             read_github_human_browser_mutation_identity=(
                 read_github_human_browser_mutation_identity
+            ),
+            publish_owner_review_status=lambda store, profile, pull_request_number: (
+                resolved_owner_review_status_publisher.publish(
+                    store=store, profile=profile, pull_request_number=pull_request_number
+                )
             ),
         ),
     )

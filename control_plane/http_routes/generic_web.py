@@ -117,7 +117,6 @@ from control_plane.http_routes.support import (
 )
 from control_plane.manager_preview_approval_github_webhook import (
     invalidate_manager_preview_approval_for_pr_best_effort,
-    reconcile_manager_preview_approval_for_pr_best_effort,
 )
 from control_plane.product_promotion_http import (
     build_product_promotion_status,
@@ -1128,18 +1127,6 @@ def build_generic_web_write_route_handlers(
                     code="invalid_request",
                     message="Request could not be completed.",
                 ) from error
-            pr_number = manager_preview_pr_number(
-                profile=profile,
-                anchor_pr_number=refresh_request.refresh.anchor_pr_number,
-                preview_slug=refresh_request.refresh.preview_slug,
-            )
-            if pr_number is not None:
-                reconcile_manager_preview_approval_for_pr_best_effort(
-                    repository=profile.repository,
-                    pr_number=pr_number,
-                    record_store=record_store,
-                    control_plane_root=dependencies.control_plane_root,
-                )
             response = accepted_evidence_response(
                 trace_id=trace_id,
                 records=records,
@@ -1933,12 +1920,6 @@ def build_generic_web_write_route_handlers(
                 code="invalid_request",
                 message="Request could not be completed.",
             ) from error
-        reconcile_manager_preview_approval_for_pr_best_effort(
-            repository=profile.repository,
-            pr_number=verification_request.verification.anchor_pr_number,
-            record_store=record_store,
-            control_plane_root=dependencies.control_plane_root,
-        )
         response = accepted_evidence_response(
             trace_id=trace_id,
             records=generic_web_verification_response_records(result),

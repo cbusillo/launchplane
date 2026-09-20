@@ -2382,9 +2382,10 @@ the append-only ledger.
   command. Delivery replay returns the existing append-only event, while actor,
   head, fingerprint, serving-generation, and policy mismatches write nothing.
 - `manager-preview-approval` is a GitHub status projection of this record, not
-  authority. The service updates only a marker comment owned by the authenticated
-  Launchplane credential and projects `pending`, `success`, `failure`, or
-  `error` on the current head. GitHub write failure never rewrites or deletes
+  authority. Only the explicit operator reconcile route still writes it; preview
+  lifecycle routes and the webhook do not. That route updates only a marker
+  comment owned by the authenticated Launchplane credential and projects
+  `pending`, `success`, `failure`, or `error` on the current head. GitHub write failure never rewrites or deletes
   approval evidence.
 - Preview refresh and verification routes reconcile the projection after their
   durable record changes. Pull-request synchronize, reopen, close, preview-label

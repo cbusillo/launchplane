@@ -401,7 +401,8 @@ class ManagerPreviewApprovalGitHubWebhookTests(unittest.TestCase):
         self.assertEqual(replay_status, 202)
         self.assertEqual(replay_result["event_status"], "replayed")
         self.assertEqual(len(store.events), 1)
-        self.assertEqual(github.statuses[-1]["state"], "success")
+        self.assertEqual(github.statuses, [])
+        self.assertEqual(github.comments, [])
 
     def test_exact_current_command_replaces_stale_prior_binding(self) -> None:
         store = _Store()
@@ -454,7 +455,8 @@ class ManagerPreviewApprovalGitHubWebhookTests(unittest.TestCase):
         self.assertEqual(result["event_status"], "written")
         self.assertEqual(result["approval_status"], "approved")
         self.assertEqual(len(store.events), 2)
-        self.assertEqual(github.statuses[-1]["state"], "success")
+        self.assertEqual(github.statuses, [])
+        self.assertEqual(github.comments, [])
 
         replay_status, replay_response = handle_manager_preview_approval_github_webhook_request(
             current_payload,
@@ -518,7 +520,8 @@ class ManagerPreviewApprovalGitHubWebhookTests(unittest.TestCase):
         self.assertEqual(result["event_status"], "written")
         self.assertEqual(result["approval_status"], "approved")
         self.assertEqual(len(store.events), 2)
-        self.assertEqual(github.statuses[-1]["state"], "success")
+        self.assertEqual(github.statuses, [])
+        self.assertEqual(github.comments, [])
         latest_event = max(
             store.events.values(),
             key=lambda event: (event.occurred_at, event.event_id),
@@ -562,7 +565,8 @@ class ManagerPreviewApprovalGitHubWebhookTests(unittest.TestCase):
         self.assertEqual(status, 202)
         self.assertEqual(response["reason"], "stale_fingerprint")
         self.assertEqual(store.events, {})
-        self.assertEqual(github.statuses[-1]["state"], "pending")
+        self.assertEqual(github.statuses, [])
+        self.assertEqual(github.comments, [])
 
     def test_exact_terminal_binding_remains_stale(self) -> None:
         for action in ("invalidated", "superseded"):
@@ -600,7 +604,8 @@ class ManagerPreviewApprovalGitHubWebhookTests(unittest.TestCase):
                 self.assertEqual(status, 202)
                 self.assertEqual(response["reason"], "preview_evidence_not_current")
                 self.assertEqual(len(store.events), 1)
-                self.assertEqual(github.statuses[-1]["state"], "failure")
+                self.assertEqual(github.statuses, [])
+                self.assertEqual(github.comments, [])
 
     def test_closed_pr_and_mismatched_head_reject_exact_current_command(self) -> None:
         for stale_source in ("closed_pr", "mismatched_head"):
@@ -635,7 +640,8 @@ class ManagerPreviewApprovalGitHubWebhookTests(unittest.TestCase):
                     {"preview_evidence_not_current", "stale_head"},
                 )
                 self.assertEqual(store.events, {})
-                self.assertEqual(github.statuses[-1]["state"], "failure")
+                self.assertEqual(github.statuses, [])
+                self.assertEqual(github.comments, [])
 
     def test_stale_fingerprint_and_unauthorized_actor_do_not_write_evidence(self) -> None:
         store = _Store()
@@ -779,7 +785,8 @@ class ManagerPreviewApprovalGitHubWebhookTests(unittest.TestCase):
         assert isinstance(result, dict)
         self.assertEqual(result["approval_status"], "stale")
         self.assertEqual(len(store.events), 2)
-        self.assertEqual(github.statuses[-1]["state"], "failure")
+        self.assertEqual(github.statuses, [])
+        self.assertEqual(github.comments, [])
 
     def test_destroyed_preview_records_invalidation_from_captured_binding(self) -> None:
         store = _Store()
@@ -805,12 +812,11 @@ class ManagerPreviewApprovalGitHubWebhookTests(unittest.TestCase):
         )
 
         self.assertEqual(result["event_status"], "written")
-        self.assertEqual(result["status"], "unavailable")
         self.assertEqual(len(store.events), 1)
         event = next(iter(store.events.values()))
         self.assertEqual(event.action, "invalidated")
         self.assertEqual(event.binding.binding_sha256, binding.binding_sha256)
-        self.assertEqual(github.statuses[-1]["state"], "error")
+        self.assertEqual(github.statuses, [])
 
     def test_reconcile_recovers_pending_projection_after_destroy_and_replacement(self) -> None:
         store = _Store()

@@ -979,17 +979,18 @@ The manager-preview webhook uses
 `LAUNCHPLANE_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET`, accepts signed
 `issue_comment.created` and selected pull-request lifecycle deliveries, and
 re-fetches comments, actor numeric identity, current PR head, current serving
-preview, and active managed policy before writing evidence. Its GitHub comment
-and `manager-preview-approval` status writes use the Launchplane-managed token
-resolved for the product context; tenant workflow or PR code cannot supply that
-credential. GitHub projection failure is degraded output, not approval loss and
-not a reason to block destroy or cleanup.
+preview, and active managed policy before writing evidence. It reads GitHub with
+the Launchplane-managed token resolved for the product context; tenant workflow
+or PR code cannot supply that credential. The webhook no longer writes the
+`manager-preview-approval` status or its command comment; see
+[preview-workflow-contract.md](preview-workflow-contract.md#manager-preview-approval).
 
 `POST /v1/manager-preview-approval/reconcile` is the authenticated retry path.
 It requires `manager_preview_approval.read` authorization for the resolved
 product/context, re-fetches current GitHub and Launchplane evidence, and rewrites
-the credential-owned comment and current-head status. Managed authz policy apply
-also attempts reconciliation for existing previews. Removing the managed
+the credential-owned comment and current-head status. It is the only remaining
+writer of that status; managed authz policy apply and preview lifecycle routes
+no longer attempt reconciliation. Removing the managed
 approval rule is the rollback switch; records remain append-only.
 
 The Every Code worker read, native claim, and status routes also accept a
