@@ -925,6 +925,44 @@ test.describe("operator journeys", () => {
     diagnostics.assertClean();
   });
 
+  test("operator previews a new Owner without saving", async ({
+    page,
+  }, testInfo) => {
+    const diagnostics = monitorBrowser(page);
+
+    await page.goto("/ui/products/atlas-commerce?fixture=products");
+
+    const ownerPanel = page.getByRole("region", {
+      name: "example-owner (id 9001)",
+    });
+    await expect(ownerPanel).toBeVisible();
+    await expect(
+      ownerPanel.getByText(
+        "The Owner can accept or request changes on previews. They can never merge or deploy.",
+      ),
+    ).toBeVisible();
+    const saveButton = ownerPanel.getByRole("button", { name: "Save" });
+    await expect(saveButton).toBeDisabled();
+    await ownerPanel.getByLabel("GitHub login").fill("@new-owner");
+    await ownerPanel
+      .getByLabel("Change reason")
+      .fill("Verify the deterministic Owner preview.");
+    await ownerPanel.getByRole("button", { name: "Preview change" }).click();
+
+    await expect(ownerPanel.getByRole("status")).toHaveText(
+      "Set the Owner to new-owner (id 7009).",
+    );
+    await expect(saveButton).toBeEnabled();
+    await ownerPanel.getByLabel("GitHub login").fill("someone-else");
+    await expect(saveButton).toBeDisabled();
+    await expect(
+      ownerPanel.getByRole("button", { name: "Clear" }),
+    ).toBeVisible();
+    await assertDocumentBasics(page);
+    await captureScreenshot(page, testInfo, "product-owner-preview");
+    diagnostics.assertClean();
+  });
+
   test("operator can inspect exact tenant admission without a browser mutation", async ({
     page,
   }, testInfo) => {

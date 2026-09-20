@@ -4,6 +4,19 @@ export type ClientOptions = {
     baseUrl: `${string}://${string}` | (string & {});
 };
 
+export type AcceptedEvidenceResponse = {
+    original_trace_id: string | null;
+    records: {
+        [key: string]: unknown;
+    };
+    replayed: boolean | null;
+    result: {
+        [key: string]: unknown;
+    } | null;
+    status: 'accepted';
+    trace_id: string;
+};
+
 export type AgentContextEvidence = {
     code: string;
     detail: string;
@@ -3201,6 +3214,12 @@ export type ProductProfileListResponse = {
     trace_id: string;
 };
 
+export type ProductProfileResponse = {
+    profile: LaunchplaneProductProfileRecord;
+    status: 'ok';
+    trace_id: string;
+};
+
 export type ProductPromotionDryRunEnvelope = {
     bump?: 'patch' | 'minor' | 'major';
     evidence_fingerprint: string;
@@ -4630,6 +4649,35 @@ export type ListProductProfilesResponses = {
 
 export type ListProductProfilesResponse = ListProductProfilesResponses[keyof ListProductProfilesResponses];
 
+export type ReadProductProfileData = {
+    body?: never;
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path: {
+        product: string;
+    };
+    query?: never;
+    url: '/v1/product-profiles/{product}';
+};
+
+export type ReadProductProfileErrors = {
+    401: LaunchplaneErrorResponse;
+    403: LaunchplaneErrorResponse;
+    404: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type ReadProductProfileError = ReadProductProfileErrors[keyof ReadProductProfileErrors];
+
+export type ReadProductProfileResponses = {
+    200: ProductProfileResponse;
+};
+
+export type ReadProductProfileResponse = ReadProductProfileResponses[keyof ReadProductProfileResponses];
+
 export type ReadProductReviewData = {
     body?: never;
     headers?: {
@@ -5456,6 +5504,43 @@ export type RevokeHumanPrivilegedOperationResponses = {
 };
 
 export type RevokeHumanPrivilegedOperationResponse = RevokeHumanPrivilegedOperationResponses[keyof RevokeHumanPrivilegedOperationResponses];
+
+export type ApplyProductOwnerData = {
+    body: {
+        clear?: boolean;
+        github_login?: string;
+        mode?: 'dry-run' | 'apply';
+        reason: string;
+        schema_version?: 1;
+    };
+    headers?: {
+        'Idempotency-Key'?: string;
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path: {
+        product: string;
+    };
+    query?: never;
+    url: '/v1/product-profiles/{product}/owner';
+};
+
+export type ApplyProductOwnerErrors = {
+    400: LaunchplaneErrorResponse;
+    401: LaunchplaneErrorResponse;
+    403: LaunchplaneErrorResponse;
+    404: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type ApplyProductOwnerError = ApplyProductOwnerErrors[keyof ApplyProductOwnerErrors];
+
+export type ApplyProductOwnerResponses = {
+    202: AcceptedEvidenceResponse;
+};
+
+export type ApplyProductOwnerResponse = ApplyProductOwnerResponses[keyof ApplyProductOwnerResponses];
 
 export type WriteProductReviewDecisionData = {
     body: ProductReviewDecisionEnvelope;

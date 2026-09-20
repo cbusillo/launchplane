@@ -1,5 +1,6 @@
 import type {
   ApplyProductEnvironmentConfigData,
+  ApplyProductOwnerData,
   ApproveOrdinaryAgentOperationData,
   CancelOrdinaryAgentOperationData,
   RevokeOrdinaryAgentSessionData,
@@ -24,6 +25,8 @@ export const BROWSER_WRITE_ROUTES = {
   ordinaryAgentDisconnect: "/v1/ordinary-agent-connections/{principal_id}/disconnect" satisfies DisconnectOrdinaryAgentPrincipalData["url"],
   productEnvironmentConfigApply:
     "/v1/products/{product}/environments/{environment}/config/apply" satisfies ApplyProductEnvironmentConfigData["url"],
+  productOwnerApply:
+    "/v1/product-profiles/{product}/owner" satisfies ApplyProductOwnerData["url"],
   productPromotionDryRun:
     "/v1/products/{product}/environments/{environment}/promotion/dry-run" satisfies DryRunProductPromotionData["url"],
   productPromotionWorkflowDispatch:

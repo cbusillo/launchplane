@@ -315,6 +315,9 @@ governed expectation, custody and currentness contract.
   - `POST /v1/product-profiles/prelaunch-rebuild/apply` (native FastAPI for
     exact-lane reviewed Odoo prelaunch-rebuild policy planning, profile
     compare-and-write, and apply-only atomic idempotency enforcement)
+  - `POST /v1/product-profiles/{product}/owner` (native FastAPI for bearer-token
+    and signed-in operator callers, server-side GitHub login resolution, profile
+    compare-and-write, and apply-only atomic idempotency enforcement)
   - `POST /v1/product-profiles/preview-tls/apply` (native FastAPI for
     Launchplane-operator workflow callers, DB-backed dry-run/apply planning,
     reviewed-plan continuity, and apply-only idempotency enforcement)
@@ -1898,6 +1901,7 @@ refresh/destroy flow.
 - `POST /v1/product-profiles/health-monitoring/apply`
 - `POST /v1/product-profiles/prelaunch-rebuild/apply`
 - `POST /v1/product-profiles/preview-tls/apply`
+- `POST /v1/product-profiles/{product}/owner`
 
 Product profiles are Launchplane-owned product/driver bindings. They are written
 through native FastAPI authenticated service ingress and stored in Launchplane
@@ -1917,6 +1921,18 @@ writing. Apply updates only the profile `expected_config`, `updated_at`, and
 sync live provider environment. The route does not accept secret plaintext,
 runtime values, or checked-in product catalogs, and workflow authority for real
 products must be granted through operator-supplied authz input.
+
+Owner apply names or clears the product's site Owner and changes only the
+profile `owner`, `updated_at`, and `source` fields. It requires
+`product_profile.write` for the path product in the Launchplane service context
+and accepts operator bearer tokens, GitHub Actions OIDC, and signed-in operator
+sessions under the browser-mutation protections. The caller supplies a GitHub
+login (or `clear: true`) and a reason; Launchplane resolves the canonical login
+and immutable numeric id through `GET /users/{login}` with its managed GitHub
+read credential and rejects unknown logins and non-`User` accounts. Dry-run
+returns the resolved identity and the before/after Owner without writing; apply
+requires an `Idempotency-Key` and uses profile compare-and-write, so a profile
+that changed during the request is rejected as `stale` instead of overwritten.
 
 Health-monitoring apply is an exact-instance mutation for one stable-lane
 `public_http` or `private_http` check plus the lane's typed `public`, `private`,

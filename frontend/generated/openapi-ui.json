@@ -2145,6 +2145,107 @@
         "summary": "List Launchplane product profiles"
       }
     },
+    "/v1/product-profiles/{product}": {
+      "get": {
+        "operationId": "read_product_profile",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "pattern": "^\\S+$",
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductProfileResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read a Launchplane product profile"
+      }
+    },
     "/v1/product-review": {
       "get": {
         "operationId": "read_product_review",
@@ -5181,6 +5282,171 @@
         ]
       }
     },
+    "/v1/product-profiles/{product}/owner": {
+      "post": {
+        "operationId": "apply_product_owner",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "clear": {
+                    "default": false,
+                    "title": "Clear",
+                    "type": "boolean"
+                  },
+                  "github_login": {
+                    "default": "",
+                    "title": "Github Login",
+                    "type": "string"
+                  },
+                  "mode": {
+                    "default": "dry-run",
+                    "enum": [
+                      "dry-run",
+                      "apply"
+                    ],
+                    "title": "Mode",
+                    "type": "string"
+                  },
+                  "reason": {
+                    "title": "Reason",
+                    "type": "string"
+                  },
+                  "schema_version": {
+                    "const": 1,
+                    "default": 1,
+                    "title": "Schema Version",
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "reason"
+                ],
+                "title": "ProductOwnerApplyRequest",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedEvidenceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Preview or change the Owner of a product"
+      }
+    },
     "/v1/product-review/decisions": {
       "post": {
         "operationId": "write_product_review_decision",
@@ -5847,6 +6113,70 @@
   },
   "components": {
     "schemas": {
+      "AcceptedEvidenceResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "original_trace_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Original Trace Id"
+          },
+          "records": {
+            "additionalProperties": true,
+            "title": "Records",
+            "type": "object"
+          },
+          "replayed": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Replayed"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Result"
+          },
+          "status": {
+            "const": "accepted",
+            "default": "accepted",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "original_trace_id",
+          "records",
+          "replayed",
+          "result",
+          "status",
+          "trace_id"
+        ],
+        "title": "AcceptedEvidenceResponse",
+        "type": "object"
+      },
       "AgentContextEvidence": {
         "additionalProperties": false,
         "properties": {
@@ -24896,6 +25226,31 @@
           "trace_id"
         ],
         "title": "ProductProfileListResponse",
+        "type": "object"
+      },
+      "ProductProfileResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "profile": {
+            "$ref": "#/components/schemas/LaunchplaneProductProfileRecord"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "profile",
+          "status",
+          "trace_id"
+        ],
+        "title": "ProductProfileResponse",
         "type": "object"
       },
       "ProductPromotionDryRunEnvelope": {

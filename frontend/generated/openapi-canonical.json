@@ -77617,6 +77617,171 @@
         "summary": "Read a Launchplane product profile"
       }
     },
+    "/v1/product-profiles/{product}/owner": {
+      "post": {
+        "operationId": "apply_product_owner",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "clear": {
+                    "default": false,
+                    "title": "Clear",
+                    "type": "boolean"
+                  },
+                  "github_login": {
+                    "default": "",
+                    "title": "Github Login",
+                    "type": "string"
+                  },
+                  "mode": {
+                    "default": "dry-run",
+                    "enum": [
+                      "dry-run",
+                      "apply"
+                    ],
+                    "title": "Mode",
+                    "type": "string"
+                  },
+                  "reason": {
+                    "title": "Reason",
+                    "type": "string"
+                  },
+                  "schema_version": {
+                    "const": 1,
+                    "default": 1,
+                    "title": "Schema Version",
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "reason"
+                ],
+                "title": "ProductOwnerApplyRequest",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedEvidenceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Preview or change the Owner of a product"
+      }
+    },
     "/v1/product-retirement": {
       "post": {
         "operationId": "execute_product_retirement",
@@ -85204,6 +85369,7 @@
     "/v1/privileged-operations/plans/{operation_id}": "read_human_privileged_operation",
     "/v1/privileged-operations/plans/{operation_id}/review": "read_human_privileged_operation_review",
     "/v1/product-profiles": "list_product_profiles",
+    "/v1/product-profiles/{product}": "read_product_profile",
     "/v1/product-review": "read_product_review",
     "/v1/products": "list_products",
     "/v1/products/{product}": "read_product",
@@ -85235,6 +85401,7 @@
     "/v1/privileged-operations/ordinary-agent-delivery-activation/plans": "plan_ordinary_agent_delivery_activation",
     "/v1/privileged-operations/plans/{operation_id}/approve": "approve_human_privileged_operation",
     "/v1/privileged-operations/plans/{operation_id}/revoke": "revoke_human_privileged_operation",
+    "/v1/product-profiles/{product}/owner": "apply_product_owner",
     "/v1/product-review/decisions": "write_product_review_decision",
     "/v1/products/{product}/environments/{environment}/config/apply": "apply_product_environment_config",
     "/v1/products/{product}/environments/{environment}/promotion/dry-run": "dry_run_product_promotion",

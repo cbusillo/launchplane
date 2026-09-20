@@ -14,7 +14,9 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { LaunchplaneApiError, readProduct } from "./api";
+import type { DevFixtureMode } from "./dev-fixture-loader";
 import { formatTime } from "./format";
+import { ProductOwnerPanel } from "./ProductOwnerPanel";
 import { ProductWorkspaceNav } from "./ProductWorkspaceNav";
 import {
   emptyResource,
@@ -142,10 +144,12 @@ export function ProductIndexRoute({
 }
 
 export function ProductWorkspaceRoute({
+  fixtureMode,
   fixtureResource,
   productKey,
   refreshToken,
 }: {
+  fixtureMode: DevFixtureMode;
   fixtureResource: ResourceState<ProductSiteOverview[]> | null;
   productKey: string;
   refreshToken: number;
@@ -255,6 +259,7 @@ export function ProductWorkspaceRoute({
 
   return (
     <ProductWorkspace
+      fixtureMode={fixtureMode}
       product={resource.data}
       refreshError={resource.status === "error" ? resource.error : ""}
       route={{ kind: "product-workspace", product: productKey }}
@@ -336,12 +341,14 @@ function DirectoryLane({
 }
 
 function ProductWorkspace({
+  fixtureMode,
   product,
   refreshError,
   route,
   traceId,
   updating,
 }: {
+  fixtureMode: DevFixtureMode;
   product: ProductSiteOverview;
   refreshError: string;
   route: AppRoute;
@@ -515,6 +522,8 @@ function ProductWorkspace({
         <PreviewSummary product={product} />
         <WarningSummary product={product} warnings={warnings} />
       </div>
+
+      <ProductOwnerPanel fixtureMode={fixtureMode} product={product.product} />
 
       <ProductDiagnostics product={product} />
     </article>

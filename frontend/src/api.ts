@@ -7,6 +7,8 @@ import type {
 import type {
   ApplyProductEnvironmentConfigData,
   ApplyProductEnvironmentConfigResponse,
+  ApplyProductOwnerData,
+  ApplyProductOwnerResponse,
   ApproveHumanPrivilegedOperationData,
   ApproveHumanPrivilegedOperationResponse,
   DispatchProductPromotionWorkflowData,
@@ -64,6 +66,8 @@ import type {
   RankWorkGraphSnapshotData,
   RankWorkGraphSnapshotResponse,
   ReadProductOperationalReadinessData,
+  ReadProductProfileData,
+  ReadProductProfileResponse,
   ReadTenantAdmissionEvaluationData,
   RevokeHumanPrivilegedOperationData,
   RevokeHumanPrivilegedOperationResponse,
@@ -554,6 +558,43 @@ export function applyProductEnvironmentConfig(
   };
   return requestJson<ApplyProductEnvironmentConfigResponse>(
     `/v1/products/${encodeURIComponent(request.path.product)}/environments/${encodeURIComponent(request.path.environment)}/config/apply`,
+    "POST",
+    request.body,
+    options.signal,
+    generatedIdempotencyKey(request.headers),
+    options.onDispatch,
+  );
+}
+
+export function readProductProfile(
+  product: string,
+  signal?: AbortSignal,
+): Promise<ReadProductProfileResponse> {
+  const request: ReadProductProfileData = {
+    url: "/v1/product-profiles/{product}",
+    path: { product },
+  };
+  return requestJson<ReadProductProfileResponse>(
+    `/v1/product-profiles/${encodeURIComponent(request.path.product)}`,
+    "GET",
+    undefined,
+    signal,
+  );
+}
+
+export function applyProductOwner(
+  product: string,
+  payload: ApplyProductOwnerData["body"],
+  options: BrowserOperationOptions,
+): Promise<ApplyProductOwnerResponse> {
+  const request: ApplyProductOwnerData = {
+    url: BROWSER_WRITE_ROUTES.productOwnerApply,
+    path: { product },
+    body: payload,
+    headers: { "Idempotency-Key": options.idempotencyKey },
+  };
+  return requestJson<ApplyProductOwnerResponse>(
+    `/v1/product-profiles/${encodeURIComponent(request.path.product)}/owner`,
     "POST",
     request.body,
     options.signal,

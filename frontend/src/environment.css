@@ -3242,3 +3242,16 @@
     width: 100%;
   }
 }
+
+.product-owner-panel {
+  margin-top: 16px;
+}
+
+.product-owner-plan {
+  margin: 0;
+  border-left: 3px solid var(--accent);
+  padding: 4px 0 4px 10px;
+  color: var(--text-strong);
+  font-size: 13px;
+  font-weight: 600;
+}
