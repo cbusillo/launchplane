@@ -76,6 +76,11 @@ large. This lets hot modules distribute across shards without physical file
 moves. Timing files are balancing hints only; discovered tests remain the source
 of truth.
 
+A push to `main` that is a merge of an up-to-date pull request has the same tree
+as the pull request head that already passed CI. The `verified-tree` job proves
+that from commit trees and the head's `ci-gate` result, and the heavy jobs are
+skipped for that push. Any doubt falls through to the full run.
+
 Same-repo CI currently uses 12 unittest shards with a 20-test/30-second split
 threshold to keep large app and service targets under the tool wall-clock
 ceiling. CI restores timing history once per workflow run and distributes that

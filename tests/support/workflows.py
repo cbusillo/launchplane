@@ -450,9 +450,10 @@ def check_frontend_browser_smoke(
         f"{job_id} must run on ubuntu-latest",
     )
     checker.require(
-        not _string_value(job.get("if")),
+        _string_value(job.get("if")) == "needs.verified_tree.outputs.verified != 'true'",
         invariant,
-        f"{job_id} must run for same-repository and fork pull requests",
+        f"{job_id} must run for same-repository and fork pull requests, "
+        "skipping only an already verified tree",
     )
     install_step = workflow.step_named(job_id, "Install Chromium")
     checker.require(install_step is not None, invariant, "missing Install Chromium step")
@@ -500,6 +501,7 @@ def check_ci_aggregate_gate(workflow: Workflow) -> tuple[WorkflowInvariantViolat
     checker = WorkflowInvariantChecker(workflow)
     invariant = "aggregate-ci-gate"
     expected_needs = {
+        "verified_tree",
         "static_checks",
         "static_checks_fork",
         "container_scan",
@@ -524,6 +526,7 @@ def check_ci_aggregate_gate(workflow: Workflow) -> tuple[WorkflowInvariantViolat
         "TEST_RESULT",
         "TEST_FORK_RESULT",
         "POSTGRES_INTEGRATION_RESULT",
+        "VERIFIED_TREE",
     }
     gate = workflow.job("ci_gate")
     checker.require(bool(gate), invariant, "missing ci_gate job")
@@ -744,7 +747,8 @@ def check_unittest_timing_snapshot(workflow: Workflow) -> tuple[WorkflowInvarian
         )
     aggregate_job = workflow.job("test")
     checker.require(
-        _string_set(aggregate_job.get("needs")) == {"test_timing_snapshot", "test_shards"},
+        _string_set(aggregate_job.get("needs"))
+        == {"verified_tree", "test_timing_snapshot", "test_shards"},
         invariant,
         "test aggregate job must wait for snapshot and shards",
     )
