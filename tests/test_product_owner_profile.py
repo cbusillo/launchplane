@@ -3,7 +3,7 @@ import unittest
 from pydantic import ValidationError
 
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
-from tests.http_app_test_support import _generic_site_profile_payload
+from tests.support.profiles import _generic_site_profile_payload
 
 
 class ProductOwnerProfileTests(unittest.TestCase):
