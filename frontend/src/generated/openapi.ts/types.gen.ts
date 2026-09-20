@@ -3159,6 +3159,7 @@ export type ProductOverviewResponse = {
 export type ProductOwnerProfile = {
     github_id: string;
     github_login: string;
+    review_label: string;
 };
 
 export type ProductPreviewProfile = {

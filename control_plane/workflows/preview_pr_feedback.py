@@ -17,7 +17,6 @@ from control_plane.contracts.preview_pr_feedback_record import (
     build_preview_pr_feedback_id,
 )
 from control_plane.contracts.preview_record import PreviewRecord
-from control_plane.contracts.owner_acceptance import OwnerAcceptanceDecisionStatus
 from control_plane.every_code_worker import every_code_worktree_branch
 from control_plane.workflows.launchplane import (
     create_github_issue_comment,
@@ -313,6 +312,35 @@ def _github_repository_user_owner_login(*, owner: str, repo: str, token: str) ->
     if owner_type != "User" or not isinstance(login, str):
         return ""
     return login.strip()
+
+
+def pull_request_has_label(
+    *, control_plane_root: Path, context: str, anchor_pr_url: str, label: str
+) -> bool:
+    """Whether the pull request carries `label`. Unreadable labels count as absent."""
+
+    normalized_label = label.strip().casefold()
+    github_reference = github_pull_request_reference(pr_url=anchor_pr_url)
+    github_token = resolve_launchplane_github_token(
+        control_plane_root=control_plane_root, context_name=context
+    )
+    if not normalized_label or github_reference is None or not github_token:
+        return False
+    payload = github_api_request(
+        path=(
+            f"/repos/{github_reference['owner']}/{github_reference['repo']}"
+            f"/issues/{github_reference['pr_number']}/labels"
+        ),
+        token=github_token,
+    )
+    if not isinstance(payload, list):
+        return False
+    return any(
+        isinstance(item, dict)
+        and isinstance(item.get("name"), str)
+        and item["name"].strip().casefold() == normalized_label
+        for item in payload
+    )
 
 
 def _github_add_labels(
@@ -732,7 +760,8 @@ def _render_preview_pr_feedback_markdown(
     run_url: str,
     failure_summary: str,
     repository: str = "",
-    owner_review_status: OwnerAcceptanceDecisionStatus | None = None,
+    owner_review_requested: bool = False,
+    owner_login: str = "",
     owner_review_url: str = "",
 ) -> str:
     lines = [marker]
@@ -744,13 +773,12 @@ def _render_preview_pr_feedback_markdown(
             ]
         )
     elif status == "ready":
-        owner_review_required = owner_review_status not in {None, "not_required"}
         lines.extend(
             [
                 (
                     f"Launchplane preview is ready for PR #{anchor_pr_number} — "
-                    "Owner review required before merge."
-                    if owner_review_required
+                    "Owner review requested."
+                    if owner_review_requested
                     else f"Launchplane preview is ready for PR #{anchor_pr_number}."
                 ),
                 "",
@@ -819,67 +847,33 @@ def _render_preview_pr_feedback_markdown(
                 "The preview passed the remote creator/public verification gate.",
             ]
         )
-        if owner_review_status == "not_required":
-            lines.extend(
-                [
-                    "",
-                    "Launchplane classified this exact revision as not requiring Owner acceptance.",
-                ]
-            )
-        elif owner_review_status is not None:
+        owner_mention = owner_login.strip().removeprefix("@")
+        if owner_review_requested and owner_mention and owner_review_url:
             lines.extend(
                 [
                     "",
                     "## Owner review",
                     "",
-                    f"- Current state: **{owner_review_status.replace('_', ' ')}**",
+                    f"@{owner_mention} this change is ready for you to look at.",
+                    "",
+                    "1. Open the preview above and try the change. What to check is listed under "
+                    "**Owner test notes** in the pull request description.",
+                    f"2. Record **Accept** or **Request changes** in Launchplane: {owner_review_url}",
+                    "",
+                    "Your decision does not merge or deploy anything. A GitHub approval or comment "
+                    "does not record it.",
                 ]
             )
-            if owner_review_url:
-                lines.append(
-                    f"- Review and record the Owner decision in Launchplane: {owner_review_url}"
-                )
-            else:
-                lines.append(
-                    "- Launchplane cannot expose an Owner action until the authoritative review "
-                    "route is available. Do not merge this change."
-                )
-            if repository:
-                # The Owner reviews the preview, never the code.
-                lines.append(
-                    f"- Pull request: https://github.com/{repository}/pull/{anchor_pr_number}"
-                )
+        elif owner_review_requested:
             lines.extend(
                 [
                     "",
-                    "### What to test",
+                    "## Owner review",
                     "",
-                    "1. Open the preview and exercise the changed workflow, not only the page load.",
-                    "2. Compare the behavior with the pull request scope and acceptance criteria.",
-                    "3. Check the affected area for regressions at desktop and narrow/mobile widths.",
+                    "This pull request is marked for Owner review, but no Owner is set for this "
+                    "product in Launchplane. The operator needs to set one.",
                 ]
             )
-            if owner_review_url:
-                lines.extend(
-                    [
-                        "",
-                        "### Record the decision in Launchplane",
-                        "",
-                        "- Select **Accept** when the product change is correct.",
-                        "- Select **Request changes** and provide a specific reason when it is not.",
-                        "- A GitHub approval, review, or comment does not record Owner acceptance.",
-                        "- The decision is bound to this exact revision and serving preview. New commits, "
-                        "preview generations, artifacts, runtime identity, or policy changes require "
-                        "Launchplane to re-evaluate the decision.",
-                        "",
-                        "### What happens next",
-                        "",
-                        "Launchplane recomputes exact-head merge readiness after the Owner decision. "
-                        "Only a current accepted decision can satisfy the Owner facet; technical checks, "
-                        "engineering review, merge admission, landing, and production authorization "
-                        "remain separate gates.",
-                    ]
-                )
         lines.extend(
             [
                 "",
@@ -946,7 +940,8 @@ def render_preview_pr_feedback_markdown(
     run_url: str = "",
     failure_summary: str = "",
     repository: str = "",
-    owner_review_status: OwnerAcceptanceDecisionStatus | None = None,
+    owner_review_requested: bool = False,
+    owner_login: str = "",
     owner_review_url: str = "",
 ) -> str:
     return _render_preview_pr_feedback_markdown(
@@ -960,7 +955,8 @@ def render_preview_pr_feedback_markdown(
         run_url=run_url,
         failure_summary=failure_summary,
         repository=repository,
-        owner_review_status=owner_review_status,
+        owner_review_requested=owner_review_requested,
+        owner_login=owner_login,
         owner_review_url=owner_review_url,
     )
 
@@ -1020,7 +1016,8 @@ def build_preview_pr_feedback_record(
     failure_summary: str = "",
     every_code_record_store: EveryCodeWorkRequestReadStore | None = None,
     preview_record_store: PreviewPrFeedbackPreviewReadStore | None = None,
-    owner_review_status: OwnerAcceptanceDecisionStatus | None = None,
+    owner_review_requested: bool = False,
+    owner_login: str = "",
     owner_review_url: str = "",
 ) -> PreviewPrFeedbackRecord:
     resolved_preview_url = preview_url.strip()
@@ -1047,7 +1044,8 @@ def build_preview_pr_feedback_record(
         run_url=run_url.strip(),
         failure_summary=failure_summary.strip(),
         repository=repository.strip(),
-        owner_review_status=owner_review_status,
+        owner_review_requested=owner_review_requested,
+        owner_login=owner_login,
         owner_review_url=owner_review_url.strip(),
     )
     delivery_status: PreviewPrFeedbackDeliveryStatus = "skipped"

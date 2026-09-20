@@ -31374,6 +31374,11 @@
             "default": "",
             "title": "Github Login",
             "type": "string"
+          },
+          "review_label": {
+            "default": "owner-review",
+            "title": "Review Label",
+            "type": "string"
           }
         },
         "title": "ProductOwnerProfile",

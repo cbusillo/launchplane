@@ -74,7 +74,6 @@ from control_plane import service_status as control_plane_service_status
 from control_plane import live_target_runtime as control_plane_live_target_runtime
 from control_plane.change_impact_github import GitHubChangeImpactRepositoryEvidenceProvider
 from control_plane.change_impact_service import ChangeImpactRepositoryEvidenceProvider
-from control_plane.contracts.change_impact import ChangeImpactTargetReference
 from control_plane.contracts.generic_web_deploy_recovery import (
     GenericWebDeployRecoveryProviderEvidenceResponse,
 )
@@ -115,7 +114,6 @@ from control_plane.contracts.solo_administration_confirmation import (
     solo_administration_confirmation_secret_sha256,
 )
 from control_plane.contracts.authz_denial_record import build_authz_denial_record
-from control_plane.contracts.owner_acceptance import OwnerAcceptanceDecisionStatus
 from control_plane.engineering_review_service import (
     EngineeringReviewTargetResolver,
     resolve_engineering_review_pull_request_target,
@@ -827,6 +825,7 @@ from control_plane.workflows.preview_pr_feedback import (
     EveryCodeWorkRequestReadStore,
     PreviewPrFeedbackPreviewReadStore,
     build_preview_pr_feedback_record,
+    pull_request_has_label,
 )
 from control_plane.preview_pr_feedback_remediation import (
     PreviewPrFeedbackRemediationStore,
@@ -19957,33 +19956,34 @@ def create_launchplane_fastapi_app(
             if supports_every_code_work_requests(record_store)
             else None
         )
-        owner_review_status: OwnerAcceptanceDecisionStatus | None = None
+        # The agent that opened the pull request marks it for the Owner with a label;
+        # Launchplane does not try to detect Owner impact.
+        owner_review_requested = False
+        owner_login = ""
         owner_review_url = ""
         if feedback_request.status == "ready":
-            owner_target = ChangeImpactTargetReference(
-                repository=feedback_request.repository,
-                pull_request_number=feedback_request.anchor_pr_number,
-            )
             try:
-                projection_outcome = await run_in_threadpool(
-                    owner_acceptance_projection_service.reconcile_if_required,
-                    store=record_store,
-                    target=owner_target,
-                    source_event_id=normalized_key,
+                owner_profile = cast(
+                    ProductProfileWriteStore, record_store
+                ).read_product_profile_record(feedback_request.product)
+                owner_review_requested = await run_in_threadpool(
+                    pull_request_has_label,
+                    control_plane_root=resolved_control_plane_root,
+                    context=effective_context,
+                    anchor_pr_url=feedback_request.anchor_pr_url,
+                    label=owner_profile.owner.review_label,
                 )
-                owner_review_status = projection_outcome.decision.status
-                if projection_outcome.result is not None and human_session_manager is not None:
-                    owner_review_url = owner_review_reference_url(
-                        public_origin=human_session_manager.public_origin,
-                        repository=feedback_request.repository,
-                        pull_request_number=feedback_request.anchor_pr_number,
-                    )
-            except (OSError, RequestException, RuntimeError, ValueError):
-                owner_review_status = "unavailable"
-                owner_review_url = ""
-                _LOGGER.exception(
-                    "Owner acceptance GitHub projection refresh failed during preview feedback."
-                )
+                if owner_review_requested and owner_profile.owner.is_set:
+                    owner_login = owner_profile.owner.github_login
+                    if human_session_manager is not None:
+                        owner_review_url = owner_review_reference_url(
+                            public_origin=human_session_manager.public_origin,
+                            repository=feedback_request.repository,
+                            pull_request_number=feedback_request.anchor_pr_number,
+                        )
+            except (FileNotFoundError, OSError, RequestException, RuntimeError, ValueError):
+                _LOGGER.exception("Owner review mark could not be read during preview feedback.")
+                owner_review_requested = False
         try:
             feedback_record = build_preview_pr_feedback_record(
                 control_plane_root=resolved_control_plane_root,
@@ -20009,7 +20009,8 @@ def create_launchplane_fastapi_app(
                     if callable(getattr(record_store, "list_preview_records", None))
                     else None
                 ),
-                owner_review_status=owner_review_status,
+                owner_review_requested=owner_review_requested,
+                owner_login=owner_login,
                 owner_review_url=owner_review_url,
             )
         except click.ClickException as error:
