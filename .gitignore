@@ -34,8 +34,9 @@ dist/
 !.github/actions/*/dist/
 !.github/actions/*/dist/**
 *.egg-info/
-node_modules/
-frontend/node_modules/
+# No trailing slash: a trailing slash matches directories only, so a
+# node_modules symlink would show up as untracked.
+node_modules
 control_plane/ui_static/
 
 # Local env and secrets
