@@ -3852,7 +3852,7 @@ See `docs/product-owner-policy.md` for routes and persisted record contracts.
 
 ## Product Review API
 
-The small Owner review path from `docs/direction.md` and issue `#2446`. It is
+The small Owner review path from `DIRECTION.md` and issue `#2446`. It is
 parallel to the Owner Acceptance API below and reads none of its records.
 
 `GET /v1/product-review?repository=<owner/repo>&pull_request=<n>` returns the
@@ -3860,8 +3860,11 @@ product display name, the pull request URL, the preview URL of the one active
 preview serving a ready generation for that pull request (empty when there is
 none), the head revision that preview serves, the latest decision, and
 `owner_set`, `viewer_is_owner`, `can_decide`, and a plain `cannot_decide_reason`.
-The caller must be a browser-authenticated GitHub human who is either the
-product's Owner or allowed `product_profile.read` for that product.
+The caller must be the browser-authenticated GitHub Owner or an authenticated
+identity allowed `product_profile.read` for that product in the Launchplane
+context. A scoped operator or agent can inspect the preview and latest decision;
+it receives `viewer_is_owner=false` and `can_decide=false`. Reading never grants
+the ability to record an Owner decision.
 
 `POST /v1/product-review/decisions` takes `{repository, pull_request, decision,
 reason}` with `decision` of `accepted` or `changes_requested` (reason required)
