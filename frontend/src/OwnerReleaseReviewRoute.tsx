@@ -79,7 +79,7 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
           {response.can_override ? <button className="button" type="button" disabled={busy || !reason.trim()} onClick={() => void decide("overridden")}>Record operator override</button> : null}
         </div>
       </section> : null}
-      {recorded ? <p role="status" className="owner-review-success">Decision recorded. Nothing was published.</p> : null}
+      {recorded ? <p role="status" className="owner-review-success">Decision recorded. The site is unchanged.</p> : null}
     </article> : null}
   </section>;
 }

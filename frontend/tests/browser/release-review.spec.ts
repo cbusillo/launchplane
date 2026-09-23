@@ -18,7 +18,7 @@ test("Owner reviews the complete release and can request changes after accepting
   await expect(page.getByText("On a phone, confirm the booking button is visible.", { exact: false })).toBeVisible();
   await expect(page.getByRole("button", { name: "Request changes" })).toBeDisabled();
   await page.getByRole("button", { name: "Accept release" }).click();
-  await expect(page.getByRole("status")).toHaveText("Decision recorded. Nothing was published.");
+  await expect(page.getByRole("status")).toHaveText("Decision recorded. The site is unchanged.");
   await page.getByRole("textbox").fill("The booking button needs a clearer label.");
   await page.getByRole("button", { name: "Request changes" }).click();
   await expect(page.getByRole("listitem").filter({ hasText: "The booking button needs a clearer label." })).toBeVisible();

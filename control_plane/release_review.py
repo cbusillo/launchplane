@@ -49,6 +49,11 @@ class ReleaseReviewStore(Protocol):
     ) -> tuple[ReleaseReviewDecisionRecord, ...]: ...
 
 
+RELEASE_RECORD_PENDING = (
+    "The decision is saved, but the release record could not be published. Try recording it again."
+)
+
+
 def checklist_digest(checklist: ReleaseChecklist) -> str:
     payload = checklist.model_dump(mode="json")
     # Prior preview decisions are helpful annotations, never release approval.
@@ -173,9 +178,12 @@ def build_release_review(
         matching, key=lambda decision: (decision.decided_at, decision.record_id), default=None
     )
     blockers = checklist_blockers(checklist)
-    approved = bool(latest_decision and latest_decision.decision == "overridden") or bool(
-        not blockers and latest_decision and latest_decision.decision == "accepted"
+    approved = bool(latest_decision and latest_decision.release_issue_url) and (
+        bool(latest_decision and latest_decision.decision == "overridden")
+        or bool(not blockers and latest_decision and latest_decision.decision == "accepted")
     )
+    if latest_decision and not latest_decision.release_issue_url:
+        blockers += (RELEASE_RECORD_PENDING,)
     if not approved and not blockers:
         blockers = (
             "The Owner requested changes."

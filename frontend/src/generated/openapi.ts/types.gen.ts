@@ -3681,6 +3681,7 @@ export type ReleaseReviewDecisionRecord = {
     product: string;
     reason: string;
     record_id: string;
+    release_issue_url: string;
 };
 
 export type ReleaseReviewItem = {

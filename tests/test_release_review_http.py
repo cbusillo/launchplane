@@ -57,6 +57,12 @@ class ReleaseReviewHttpTests(unittest.IsolatedAsyncioTestCase):
         )
         replacement.start()
         self.addCleanup(replacement.stop)
+        publisher = patch(
+            "control_plane.http_app.publish_release_decision",
+            return_value="https://github.com/example/site/issues/99",
+        )
+        self.publisher = publisher.start()
+        self.addCleanup(publisher.stop)
 
     async def post(
         self,
@@ -151,6 +157,26 @@ class ReleaseReviewHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(
             build_release_review(store=self.store, profile=profile(), read=github_read).approved
         )
+
+    async def test_release_record_failure_preserves_decision_and_retry_reuses_it(self) -> None:
+        self.publisher.side_effect = ValueError("Source-control write unavailable")
+        pending = await self.post()
+        self.assertEqual(pending.status_code, 200, pending.text)
+        self.assertFalse(pending.json()["review"]["approved"])
+        record = self.store.list_release_review_decision_records(product="example-site")[0]
+        self.assertEqual(record.decision, "accepted")
+        self.assertFalse(record.release_issue_url)
+        self.assertFalse(
+            build_release_review(store=self.store, profile=profile(), read=github_read).approved
+        )
+        self.publisher.side_effect = None
+        retry = await self.post()
+        self.assertEqual(retry.status_code, 200, retry.text)
+        self.assertTrue(retry.json()["review"]["approved"])
+        saved = self.store.list_release_review_decision_records(product="example-site")
+        self.assertEqual(len(saved), 1)
+        self.assertEqual(saved[0].record_id, record.record_id)
+        self.assertEqual(saved[0].release_issue_url, "https://github.com/example/site/issues/99")
 
     async def test_shared_addon_changes_need_recorded_operator_review(self) -> None:
         artifact = self.store.read_artifact_manifest("artifact-testing")

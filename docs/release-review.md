@@ -36,6 +36,25 @@ release evidence requires a new decision. Decisions do not expire merely because
 time passes. A later request for changes replaces acceptance of the same
 checklist. Backup and deployment evidence remain independently required.
 
+Recording a decision also creates a release issue in the product repository,
+containing that complete checklist, the actor, decision, and reason. The Owner
+does not need to open GitHub. The existing managed source-control credential
+must be able to read and create issues in that repository; this feature creates
+no credentials or grants. Launchplane saves the decision before publishing its
+record. A failed publication leaves the decision visible but cannot approve a
+promotion. Recording the same pending decision retries its publication with the
+same decision ID, including recovery when GitHub accepted a write whose response
+was lost. GitHub issue contents and membership never decide release contents or
+approval; the saved Launchplane decision remains authoritative.
+
+Product CI must require a nonempty **Owner test notes** section on every pull
+request, including changes that need no manual test. The shared
+`.github/actions/owner-test-notes` action checks presence only, using the pull
+request event as data without checking out or running its code. Run it inside an
+existing required CI job and include `edited` among that workflow's pull request
+events so editing notes reruns the gate. Pin the action to a full Launchplane
+commit SHA. The product repo contract includes the integration pattern.
+
 An operator with the existing `product_profile.write` capability can record an
 `overridden` decision through their own human session, with a nonempty reason.
 This records the operator's identity and never impersonates the Owner. An

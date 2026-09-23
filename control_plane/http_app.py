@@ -291,6 +291,7 @@ from control_plane.http_routes.release_review import (
     register_release_review_routes,
 )
 from control_plane.release_review import current_release_review
+from control_plane.release_review_record import publish_release_decision
 from control_plane.contracts.manager_preview_approval import (
     MANAGER_PREVIEW_APPROVAL_READ_ACTION,
 )
@@ -24089,6 +24090,11 @@ def create_launchplane_fastapi_app(
                 record_store=store,
                 profile=profile,
                 include_prelaunch=True,
+            ),
+            publish_decision=lambda profile, decision: publish_release_decision(
+                control_plane_root=resolved_control_plane_root,
+                profile=profile,
+                decision=decision,
             ),
         ),
     )

@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from typing import Annotated, cast
 from uuid import uuid4
 
+import click
 from fastapi import Depends, Query
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -17,7 +18,11 @@ from control_plane.contracts.release_review import (
 )
 from control_plane.http_routes.support import ApiRouteRegistrar, ReadRouteDependencies
 from control_plane.product_review import viewer_is_product_owner
-from control_plane.release_review import ReleaseReviewStore, checklist_blockers
+from control_plane.release_review import (
+    RELEASE_RECORD_PENDING,
+    ReleaseReviewStore,
+    checklist_blockers,
+)
 from control_plane.service_auth import AuthorizationTarget, GitHubHumanIdentity, LaunchplaneIdentity
 
 
@@ -26,6 +31,7 @@ class ReleaseReviewRouteDependencies:
     common: ReadRouteDependencies
     read_github_human_browser_mutation_identity: Callable[..., GitHubHumanIdentity]
     current_review: Callable[[object, LaunchplaneProductProfileRecord], ReleaseReviewStatus]
+    publish_decision: Callable[[LaunchplaneProductProfileRecord, ReleaseReviewDecisionRecord], str]
 
 
 class ReleaseReviewResponse(BaseModel):
@@ -194,16 +200,36 @@ def register_release_review_routes(
             actor_github_login=identity.login,
             decided_at=datetime.now(UTC).isoformat(),
         )
-        cast(ReleaseReviewStore, record_store).write_release_review_decision_record(decision)
+        previous = review.latest_decision
+        if (
+            previous
+            and not previous.release_issue_url
+            and previous.actor_github_id == decision.actor_github_id
+            and previous.decision == decision.decision
+            and previous.reason == decision.reason
+        ):
+            decision = previous
+        store = cast(ReleaseReviewStore, record_store)
+        store.write_release_review_decision_record(decision)
+        try:
+            issue_url = dependencies.publish_decision(profile, decision)
+        except (AttributeError, FileNotFoundError, StopIteration, ValueError, click.ClickException):
+            issue_url = ""
+        if issue_url:
+            decision = decision.model_copy(update={"release_issue_url": issue_url})
+            store.write_release_review_decision_record(decision)
+        blockers: tuple[str, ...] = (
+            ("The Owner requested changes.",) if decision.decision == "changes_requested" else ()
+        )
+        if not issue_url:
+            blockers += (RELEASE_RECORD_PENDING,)
         return current.model_copy(
             update={
                 "review": review.model_copy(
                     update={
                         "latest_decision": decision,
-                        "approved": decision.decision != "changes_requested",
-                        "blockers": ("The Owner requested changes.",)
-                        if decision.decision == "changes_requested"
-                        else (),
+                        "approved": bool(issue_url) and decision.decision != "changes_requested",
+                        "blockers": blockers,
                     }
                 )
             }

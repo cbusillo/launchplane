@@ -28169,6 +28169,11 @@
             "minLength": 1,
             "title": "Record Id",
             "type": "string"
+          },
+          "release_issue_url": {
+            "default": "",
+            "title": "Release Issue Url",
+            "type": "string"
           }
         },
         "required": [
@@ -28180,7 +28185,8 @@
           "decision",
           "product",
           "reason",
-          "record_id"
+          "record_id",
+          "release_issue_url"
         ],
         "title": "ReleaseReviewDecisionRecord",
         "type": "object"

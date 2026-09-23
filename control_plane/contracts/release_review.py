@@ -54,6 +54,7 @@ class ReleaseReviewDecisionRecord(BaseModel):
     actor_github_id: str = Field(pattern=r"^[0-9]+$")
     actor_github_login: str = Field(min_length=1)
     decided_at: str = Field(min_length=1)
+    release_issue_url: str = ""
 
     @model_validator(mode="after")
     def validate_decision(self) -> "ReleaseReviewDecisionRecord":

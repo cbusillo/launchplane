@@ -115,6 +115,7 @@ def decision(
             "actor_github_id": "9001",
             "actor_github_login": "site-owner",
             "decided_at": date,
+            "release_issue_url": "https://github.com/example/site/issues/99",
         }
     )
 
@@ -138,6 +139,19 @@ class ReleaseReviewTests(unittest.TestCase):
         self.assertEqual(review.checklist.items[0].owner_test_notes, "Check the repair prices.")
         self.store.write_release_review_decision_record(decision(self.store))
         self.assertTrue(self.review().approved)
+
+    def test_pending_release_record_never_approves_promotion(self) -> None:
+        for outcome in ("accepted", "overridden"):
+            with self.subTest(outcome=outcome):
+                self.store.write_release_review_decision_record(
+                    decision(self.store, outcome=outcome).model_copy(
+                        update={"release_issue_url": ""}
+                    )
+                )
+                self.assertFalse(self.review().approved)
+                self.assertTrue(
+                    any("release record" in blocker for blocker in self.review().blockers)
+                )
 
     def test_shared_addon_only_change_is_visible_and_cannot_be_owner_accepted(self) -> None:
         artifact = self.store.read_artifact_manifest("artifact-testing")
@@ -313,6 +327,12 @@ class ReleaseReviewTests(unittest.TestCase):
         self.addCleanup(store.close)
         seed(store)
         record = decision(store)
+        store.write_release_review_decision_record(
+            record.model_copy(update={"release_issue_url": ""})
+        )
+        self.assertFalse(
+            build_release_review(store=store, profile=profile(), read=github_read).approved
+        )
         store.write_release_review_decision_record(record)
         self.assertEqual(
             store.list_release_review_decision_records(product="example-site"), (record,)
