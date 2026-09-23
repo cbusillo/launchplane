@@ -18,6 +18,7 @@ import { formatTime } from "./format";
 import { ownerAcceptanceLookupFromSearch } from "./route-model";
 import { useAppSearchParams } from "./router";
 import { safeExternalUrl } from "./url";
+import { OwnerReleaseReviewRoute } from "./OwnerReleaseReviewRoute";
 
 import type {
   GitHubHumanIdentityResponse,
@@ -109,6 +110,16 @@ export function OwnerReviewShell({
 }
 
 export function OwnerProductReviewRoute({
+  fixtureMode,
+}: {
+  fixtureMode: DevFixtureMode;
+}) {
+  const searchParams = useAppSearchParams();
+  const product = searchParams.get("product");
+  return product ? <OwnerReleaseReviewRoute key={product} product={product} fixtureMode={fixtureMode} /> : <OwnerPreviewReviewRoute fixtureMode={fixtureMode} />;
+}
+
+function OwnerPreviewReviewRoute({
   fixtureMode,
 }: {
   fixtureMode: DevFixtureMode;

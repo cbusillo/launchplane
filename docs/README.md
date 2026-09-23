@@ -71,6 +71,8 @@ not describe runtime authority until it is implemented, deployed, and activated.
   product/system Owner membership, requirement, routing, and evaluation contract.
 - [owner-acceptance.md](owner-acceptance.md) — authoritative exact-change Owner
   acceptance binding, event ledger, and human-only API boundary.
+- [release-review.md](release-review.md) — Owner checklist decisions for production
+  promotion, revision changes, and recorded operator overrides.
 - [owner-control-channel.md](owner-control-channel.md) — public canonical owner
   challenge payloads, cross-host conformance artifact, and deferred runtime boundary.
 - [privileged-operations.md](privileged-operations.md) — typed human-governed

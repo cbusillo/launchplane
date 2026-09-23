@@ -1,4 +1,6 @@
 import unittest
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from tests.support.profiles import product_profile_payload
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -156,7 +158,7 @@ class OdooProdPromotionWorkflowTests(unittest.TestCase):
                 )
 
     def test_promotion_delegates_deployment_to_target_replacement(self) -> None:
-        record_store = Mock()
+        record_store = _promotion_store()
         record_store.read_artifact_manifest.return_value = _artifact_manifest()
         record_store.read_release_tuple_record.return_value = _source_tuple()
         record_store.read_backup_gate_record.return_value = _backup_gate()
@@ -206,7 +208,7 @@ class OdooProdPromotionWorkflowTests(unittest.TestCase):
         self.assertTrue(replacement_request.verify_logo)
 
     def test_promotion_rejects_retained_volume_recovery_backup_source(self) -> None:
-        record_store = Mock()
+        record_store = _promotion_store()
         record_store.read_artifact_manifest.return_value = _artifact_manifest()
         record_store.read_release_tuple_record.return_value = _source_tuple()
         record_store.read_backup_gate_record.return_value = _backup_gate().model_copy(
@@ -234,7 +236,7 @@ class OdooProdPromotionWorkflowTests(unittest.TestCase):
         apply_mock.assert_not_called()
 
     def test_failed_target_replacement_records_failed_promotion_result(self) -> None:
-        record_store = Mock()
+        record_store = _promotion_store()
         record_store.read_artifact_manifest.return_value = _artifact_manifest()
         record_store.read_release_tuple_record.return_value = _source_tuple()
         record_store.read_backup_gate_record.return_value = _backup_gate()
@@ -270,3 +272,14 @@ class OdooProdPromotionWorkflowTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _promotion_store() -> Mock:
+    store = Mock()
+    store.read_product_profile_record.return_value = LaunchplaneProductProfileRecord.model_validate(
+        {
+            **product_profile_payload("example-site"),
+            "production_use": "prelaunch",
+        }
+    )
+    return store

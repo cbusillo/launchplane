@@ -1,5 +1,6 @@
 import asyncio
 import unittest
+from control_plane.contracts.release_review import ReleaseReviewStatus
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -145,6 +146,7 @@ class _AcceptingVerifier:
 
 def _profile() -> LaunchplaneProductProfileRecord:
     return LaunchplaneProductProfileRecord(
+        production_use="prelaunch",
         product="atlas-commerce",
         display_name="Atlas Commerce",
         repository="example/atlas-commerce",
@@ -948,94 +950,46 @@ class ProductPromotionRequestTests(unittest.TestCase):
         self.assertEqual(delivered.run_id, 123)
 
 
-class ProductPromotionManagerApprovalTests(unittest.TestCase):
-    def test_pending_manager_approval_blocks_only_live_workflow(self) -> None:
-        store = _ManagerPromotionStore()
-
-        _, _, status = _status(store)
-
-        decision = status.manager_preview_approval
-        self.assertIsNotNone(decision)
-        assert decision is not None
-        self.assertEqual(decision.status, "pending")
+class ProductPromotionReleaseApprovalTests(unittest.TestCase):
+    def test_pending_release_blocks_only_live_workflow(self) -> None:
+        review = ReleaseReviewStatus(blockers=("Owner approval is required.",))
+        with patch(
+            "control_plane.product_promotion_http.current_release_review", return_value=review
+        ):
+            _, _, status = _status(_store())
         self.assertTrue(status.direct_dry_run.enabled)
         self.assertTrue(status.workflow_dry_run.enabled)
         self.assertFalse(status.workflow_live.enabled)
-        self.assertIn(
-            "Manager preview approval is not valid for the exact testing artifact",
-            status.workflow_live.disabled_reasons[-1],
-        )
+        self.assertIn("Owner approval is required.", status.workflow_live.disabled_reasons)
 
-    def test_exact_approval_enables_live_and_policy_change_invalidates_it(self) -> None:
-        store = _ManagerPromotionStore()
-        _, _, pending = _status(store)
-        _approve_manager_preview(store)
-
-        _, _, approved = _status(store)
-        store.policy = _manager_policy_record(revision=2)
-        _, _, stale = _status(store)
-
-        approved_decision = approved.manager_preview_approval
-        stale_decision = stale.manager_preview_approval
-        self.assertIsNotNone(approved_decision)
-        self.assertIsNotNone(stale_decision)
-        assert approved_decision is not None
-        assert stale_decision is not None
-        self.assertEqual(approved_decision.status, "approved")
+    def test_release_approval_changes_live_gate_and_fingerprint(self) -> None:
+        with patch(
+            "control_plane.product_promotion_http.current_release_review",
+            return_value=ReleaseReviewStatus(blockers=("Pending",)),
+        ):
+            _, _, pending = _status(_store())
+        with patch(
+            "control_plane.product_promotion_http.current_release_review",
+            return_value=ReleaseReviewStatus(approved=True),
+        ):
+            _, _, approved = _status(_store())
         self.assertTrue(approved.workflow_live.enabled)
         self.assertNotEqual(pending.evidence_fingerprint, approved.evidence_fingerprint)
-        self.assertEqual(stale_decision.status, "stale")
-        self.assertFalse(stale.workflow_live.enabled)
-        self.assertNotEqual(approved.evidence_fingerprint, stale.evidence_fingerprint)
 
-    def test_policy_removal_disables_enforcement_without_deleting_evidence(self) -> None:
+    def test_old_manager_policy_does_not_control_release_gate(self) -> None:
         store = _ManagerPromotionStore()
         _approve_manager_preview(store)
-        event_ids = tuple(store.events)
-        store.policy = None
-
-        _, _, status = _status(store)
-
-        self.assertIsNone(status.manager_preview_approval)
-        self.assertTrue(status.workflow_live.enabled)
-        self.assertEqual(tuple(store.events), event_ids)
-
-    def test_evaluation_time_does_not_change_promotion_fingerprint(self) -> None:
-        store = _ManagerPromotionStore()
-        _approve_manager_preview(store)
-
-        _, _, first = build_product_promotion_status(
-            record_store=store,
-            product="atlas-commerce",
-            destination_environment="prod",
-            action_allowed=lambda _action, _product, _context, _instances: True,
-            workflow_credentials_ready=lambda _context: True,
-            now=NOW,
-        )
-        _, _, second = build_product_promotion_status(
-            record_store=store,
-            product="atlas-commerce",
-            destination_environment="prod",
-            action_allowed=lambda _action, _product, _context, _instances: True,
-            workflow_credentials_ready=lambda _context: True,
-            now=NOW + timedelta(seconds=1),
-        )
-
-        first_decision = first.manager_preview_approval
-        second_decision = second.manager_preview_approval
-        self.assertIsNotNone(first_decision)
-        self.assertIsNotNone(second_decision)
-        assert first_decision is not None
-        assert second_decision is not None
-        self.assertNotEqual(
-            first_decision.evaluated_at,
-            second_decision.evaluated_at,
-        )
-        self.assertEqual(first.evidence_fingerprint, second.evidence_fingerprint)
+        store.profile = store.profile.model_copy(update={"production_use": "live"})
+        with patch(
+            "control_plane.release_review.resolve_launchplane_github_token", return_value=""
+        ):
+            _, _, status = _status(store)
+        self.assertFalse(status.workflow_live.enabled)
+        self.assertFalse(status.release_review.approved)
 
 
 class FastApiProductPromotionTests(unittest.IsolatedAsyncioTestCase):
-    async def test_raw_live_execution_denies_pending_manager_approval_before_provider(self) -> None:
+    async def test_raw_live_execution_denies_missing_release_approval_before_provider(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
             store = PostgresRecordStore(
@@ -1047,11 +1001,12 @@ class FastApiProductPromotionTests(unittest.IsolatedAsyncioTestCase):
             store.write_product_profile_record(
                 profile.model_copy(
                     update={
+                        "production_use": "live",
                         "preview": ProductPreviewProfile(
                             enabled=True,
                             context="atlas-commerce",
                             enable_label="launchplane-preview",
-                        )
+                        ),
                     }
                 )
             )
@@ -1127,7 +1082,7 @@ class FastApiProductPromotionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 409, response.json())
         self.assertEqual(
             response.json()["error"]["code"],
-            "manager_preview_approval_required",
+            "release_review_required",
         )
         provider_factory.assert_not_called()
 

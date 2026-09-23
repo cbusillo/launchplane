@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from control_plane.release_review import require_release_approval
 from typing import Literal, Protocol
 
 import click
@@ -121,6 +122,13 @@ def execute_odoo_prod_promotion(
 ) -> OdooProdPromotionResult:
     del state_dir, database_url
     product = _resolve_product_profile_key(product=request.product, context=request.context)
+    require_release_approval(
+        control_plane_root=control_plane_root,
+        record_store=record_store,
+        product=product,
+        artifact_id=request.artifact_id,
+        source_commit=request.source_git_ref,
+    )
     promotion_record_id = _promotion_record_id(
         context=request.context,
         from_instance=request.from_instance,

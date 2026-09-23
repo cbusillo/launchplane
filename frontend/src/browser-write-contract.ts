@@ -16,9 +16,11 @@ import type {
   PrepareOrdinaryAgentDeliveryPolicyData,
   WriteOwnerAcceptanceEventData,
   WriteProductReviewDecisionData,
+  WriteReleaseReviewDecisionData,
 } from "./generated/openapi.ts";
 
 export const BROWSER_WRITE_ROUTES = {
+  releaseReviewDecision: "/v1/release-review/decisions" satisfies WriteReleaseReviewDecisionData["url"],
   ordinaryAgentApprove: "/v1/ordinary-agent-operations/{principal_id}/{operation_id}/approve" satisfies ApproveOrdinaryAgentOperationData["url"],
   ordinaryAgentCancel: "/v1/ordinary-agent-operations/{principal_id}/{operation_id}/cancel" satisfies CancelOrdinaryAgentOperationData["url"],
   ordinaryAgentRevokeSession: "/v1/ordinary-agent-sessions/{principal_id}/{session_id}/revoke" satisfies RevokeOrdinaryAgentSessionData["url"],

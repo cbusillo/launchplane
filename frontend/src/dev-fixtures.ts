@@ -849,6 +849,7 @@ export function promotionStatusForFixture(
     base_driver_id: detail.base_driver_id,
     repository: detail.repository,
     workflow_id: "promote-prod.yml",
+    release_review: { required: false, approved: true, checklist: null, checklist_digest: "", blockers: [], latest_decision: null },
     workflow_ref: "main",
     context: detail.context,
     source_environment: "testing",
@@ -3642,4 +3643,24 @@ function assertEngineeringFixtureAvailable(fixture: DataFixtureMode): void {
       },
     );
   }
+}
+export function releaseReviewForFixture(mode: string): import("./generated/openapi.ts").ReleaseReviewResponse {
+  const additionalChanges = mode === "missing" ? ["Shared website components changed outside this repository's checklist. Operator review is required."] : [];
+  return {
+    trace_id: "fixture-release-review", product: "example-site", display_name: "Example site",
+    owner_github_login: "site-owner", viewer_is_owner: true, can_override: false,
+    review: {
+      required: true, approved: false, checklist_digest: "a".repeat(64), latest_decision: null,
+      blockers: additionalChanges.length ? additionalChanges : ["Owner approval of this release is required."],
+      checklist: {
+        product: "example-site", repository: "example/site", owner_github_id: "9001",
+        testing_url: "https://testing.example.invalid",
+        production: { artifact_id: "production-image", source_commit: "a".repeat(40), shared_addons_digest: "" },
+        candidate: { artifact_id: "testing-image", source_commit: "b".repeat(40), shared_addons_digest: "" },
+        untracked_commits: [],
+        additional_changes: additionalChanges,
+        items: [{ pull_request_number: 42, title: "Make the repair options easier to find", url: "https://github.com/example/site/pull/42", head_sha: "c".repeat(40), merge_commit: "b".repeat(40), owner_test_notes: "Open Services and confirm each repair option has a clear price.\nOn a phone, confirm the booking button is visible.", already_reviewed: true }],
+      },
+    },
+  };
 }

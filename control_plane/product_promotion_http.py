@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 from collections.abc import Callable
+from pathlib import Path
 from datetime import UTC, datetime, timedelta
 from typing import Literal, Protocol, cast
 
@@ -12,12 +13,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from control_plane.contracts.data_provenance import FreshnessStatus
 from control_plane.contracts.environment_inventory import EnvironmentInventory
-from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
-from control_plane.contracts.manager_preview_approval import ManagerPreviewApprovalDecision
 from control_plane.contracts.outbox_delivery import OutboxDeliveryRecord
-from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
-from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneProfile,
@@ -35,11 +32,8 @@ from control_plane.generic_web_promotion_http import (
     GenericWebProdPromotionResponseResult,
     GenericWebPromotionWorkflowResponseResult,
 )
-from control_plane.manager_preview_approval import (
-    build_current_manager_preview_approval_binding,
-    evaluate_manager_preview_approval,
-    manager_preview_approval_required,
-)
+from control_plane.contracts.release_review import ReleaseReviewStatus
+from control_plane.release_review import current_release_review
 from control_plane.workflows.generic_web_deploy import (
     normalize_generic_web_artifact_id,
     product_profile_uses_generic_web_base,
@@ -141,10 +135,7 @@ class ProductPromotionStatus(BaseModel):
     destination_environment: str = "prod"
     source: ProductPromotionEvidence
     destination: ProductPromotionEvidence
-    manager_preview_approval: ManagerPreviewApprovalDecision | None = Field(
-        default=None,
-        json_schema_extra={"x-launchplane-optional-response": True},
-    )
+    release_review: ReleaseReviewStatus = Field(default_factory=ReleaseReviewStatus)
     evidence_fingerprint: str
     default_bump: BumpLevel
     bump_options: tuple[BumpLevel, ...] = ("patch", "minor", "major")
@@ -295,6 +286,7 @@ def build_product_promotion_status(
     action_allowed: Callable[[str, str, str, tuple[str, ...]], bool],
     workflow_credentials_ready: Callable[[str], bool],
     now: datetime | None = None,
+    control_plane_root: Path = Path("."),
 ) -> tuple[LaunchplaneProductProfileRecord, ProductLaneProfile, ProductPromotionStatus]:
     profile, destination_lane = resolve_product_promotion_target(
         record_store=record_store,
@@ -317,11 +309,10 @@ def build_product_promotion_status(
         summary=destination_summary,
         now=observed_at,
     )
-    manager_preview_approval = current_product_promotion_manager_preview_approval(
+    release_review = current_release_review(
+        control_plane_root=control_plane_root,
         record_store=record_store,
         profile=profile,
-        source=source_evidence,
-        evaluated_at=observed_at.isoformat().replace("+00:00", "Z"),
     )
     common_blockers = _common_promotion_blockers(
         record_store=record_store,
@@ -354,11 +345,8 @@ def build_product_promotion_status(
     ):
         workflow_blockers.append("Caller is not authorized to dispatch the promotion workflow.")
     workflow_live_blockers = list(workflow_blockers)
-    if manager_preview_approval is not None and manager_preview_approval.status != "approved":
-        workflow_live_blockers.append(
-            "Manager preview approval is not valid for the exact testing artifact: "
-            f"{manager_preview_approval.reason}"
-        )
+    if release_review.required and not release_review.approved:
+        workflow_live_blockers.extend(release_review.blockers)
     trust_state = _promotion_trust_state(
         source_evidence,
         destination_evidence,
@@ -369,7 +357,7 @@ def build_product_promotion_status(
         source=source_evidence,
         destination=destination_evidence,
         destination_summary=destination_summary,
-        manager_preview_approval=manager_preview_approval,
+        release_review=release_review,
     )
     return (
         profile,
@@ -387,7 +375,7 @@ def build_product_promotion_status(
             destination_environment=destination_lane.instance,
             source=source_evidence,
             destination=destination_evidence,
-            manager_preview_approval=manager_preview_approval,
+            release_review=release_review,
             evidence_fingerprint=evidence_fingerprint,
             default_bump=cast(BumpLevel, profile.promotion_workflow.default_bump.strip()),
             direct_dry_run=_operation_availability(
@@ -909,7 +897,7 @@ def _promotion_evidence_fingerprint(
     source: ProductPromotionEvidence,
     destination: ProductPromotionEvidence,
     destination_summary: LaunchplaneLaneSummary | None,
-    manager_preview_approval: ManagerPreviewApprovalDecision | None,
+    release_review: ReleaseReviewStatus,
 ) -> str:
     return _canonical_sha256(
         {
@@ -920,14 +908,14 @@ def _promotion_evidence_fingerprint(
             "workflow": profile.promotion_workflow.model_dump(mode="json"),
             "source": source.model_dump(mode="json"),
             "destination": destination.model_dump(mode="json"),
-            "manager_preview_approval": (
-                manager_preview_approval.model_dump(
-                    mode="json",
-                    exclude={"evaluated_at"},
-                )
-                if manager_preview_approval is not None
-                else None
-            ),
+            "release_review": {
+                "required": release_review.required,
+                "approved": release_review.approved,
+                "checklist_digest": release_review.checklist_digest,
+                "decision_id": release_review.latest_decision.record_id
+                if release_review.latest_decision
+                else "",
+            },
             "destination_provider_target": (
                 destination_summary.provider_target.model_dump(mode="json")
                 if destination_summary is not None
@@ -935,132 +923,6 @@ def _promotion_evidence_fingerprint(
                 else None
             ),
         }
-    )
-
-
-def current_product_promotion_manager_preview_approval(
-    *,
-    record_store: object,
-    profile: LaunchplaneProductProfileRecord,
-    source: ProductPromotionEvidence,
-    evaluated_at: str,
-) -> ManagerPreviewApprovalDecision | None:
-    list_policy_records = getattr(record_store, "list_authz_policy_records", None)
-    if not callable(list_policy_records):
-        return None
-    policy_records = tuple(list_policy_records(status="active", limit=2))
-    if not policy_records:
-        return None
-    if len(policy_records) != 1:
-        return _manager_preview_approval_unavailable(
-            evaluated_at=evaluated_at,
-            reason="Launchplane could not resolve exactly one active manager authorization policy.",
-        )
-    policy_record = policy_records[0]
-    if not isinstance(policy_record, LaunchplaneAuthzPolicyRecord):
-        policy_record = LaunchplaneAuthzPolicyRecord.model_validate(policy_record)
-    preview_context = profile.preview.context.strip()
-    if not manager_preview_approval_required(
-        policy_record=policy_record,
-        product=profile.product,
-        context=preview_context,
-    ):
-        return None
-    if not source.artifact_id or not source.source_git_ref:
-        return _manager_preview_approval_unavailable(
-            evaluated_at=evaluated_at,
-            reason="Testing artifact and source identity are unavailable for manager approval.",
-        )
-    list_previews = getattr(record_store, "list_preview_records", None)
-    read_generation = getattr(record_store, "read_preview_generation_record", None)
-    list_events = getattr(record_store, "list_manager_preview_approval_event_records", None)
-    if not callable(list_previews) or not callable(read_generation) or not callable(list_events):
-        return _manager_preview_approval_unavailable(
-            evaluated_at=evaluated_at,
-            reason="Manager preview approval evidence storage is unavailable.",
-        )
-    owner, separator, anchor_repo = profile.repository.strip().partition("/")
-    if not separator or not owner or not anchor_repo:
-        return _manager_preview_approval_unavailable(
-            evaluated_at=evaluated_at,
-            reason="The product repository is not configured as owner/repo.",
-        )
-    source_digest = _immutable_artifact_digest(source.artifact_id)
-    candidates: list[tuple[PreviewRecord, PreviewGenerationRecord]] = []
-    for raw_preview in list_previews(
-        context_name=preview_context,
-        anchor_repo=anchor_repo,
-        limit=200,
-    ):
-        preview = (
-            raw_preview
-            if isinstance(raw_preview, PreviewRecord)
-            else PreviewRecord.model_validate(raw_preview)
-        )
-        if preview.state != "active" or not preview.serving_generation_id.strip():
-            continue
-        try:
-            raw_generation = read_generation(preview.serving_generation_id)
-            generation = (
-                raw_generation
-                if isinstance(raw_generation, PreviewGenerationRecord)
-                else PreviewGenerationRecord.model_validate(raw_generation)
-            )
-            binding = build_current_manager_preview_approval_binding(
-                product=profile.product,
-                preview=preview,
-                generation=generation,
-            )
-        except (
-            FileNotFoundError,
-            LookupError,
-            ValueError,
-        ):
-            continue
-        if (
-            binding.head_sha == source.source_git_ref.strip().lower()
-            and source_digest
-            and binding.artifact_image_digest == source_digest
-        ):
-            candidates.append((preview, generation))
-    if len(candidates) != 1:
-        reason = (
-            "No active serving preview matches the exact testing artifact and source."
-            if not candidates
-            else "Multiple active serving previews match the exact testing artifact and source."
-        )
-        return _manager_preview_approval_unavailable(
-            evaluated_at=evaluated_at,
-            reason=reason,
-        )
-    preview, generation = candidates[0]
-    raw_events = list_events(
-        product=profile.product,
-        context=preview_context,
-        repository=preview.anchor_repo,
-        pr_number=preview.anchor_pr_number,
-        limit=200,
-    )
-    return evaluate_manager_preview_approval(
-        product=profile.product,
-        preview=preview,
-        generation=generation,
-        policy_record=policy_record,
-        events=tuple(raw_events),
-        evaluated_at=evaluated_at,
-    )
-
-
-def _manager_preview_approval_unavailable(
-    *,
-    evaluated_at: str,
-    reason: str,
-) -> ManagerPreviewApprovalDecision:
-    return ManagerPreviewApprovalDecision(
-        status="unavailable",
-        reason_code="preview_inactive",
-        reason=reason,
-        evaluated_at=evaluated_at,
     )
 
 

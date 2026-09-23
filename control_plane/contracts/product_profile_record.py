@@ -524,6 +524,8 @@ class LaunchplaneProductProfileRecord(BaseModel):
 
     schema_version: int = Field(default=1, ge=1)
     lifecycle_state: ProductLifecycleState = "active"
+    # Unknown existing records require review; only explicit prelaunch records are exempt.
+    production_use: Literal["unknown", "prelaunch", "live"] = "unknown"
     product: str
     display_name: str
     repository: str

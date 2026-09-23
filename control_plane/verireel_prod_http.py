@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from control_plane.release_review import require_release_approval
 from typing import cast
 
 from pydantic import Field, model_validator
@@ -183,6 +184,13 @@ def apply_verireel_prod_promotion_result(
     record_store: object,
     request: VeriReelProdPromotionEnvelope,
 ) -> tuple[dict[str, object], dict[str, object]]:
+    require_release_approval(
+        control_plane_root=control_plane_root,
+        record_store=record_store,
+        product=request.product,
+        artifact_id=request.promotion.artifact_id,
+        source_commit=request.promotion.source_git_ref,
+    )
     driver_result = execute_verireel_prod_promotion(
         control_plane_root=control_plane_root,
         record_store=cast(VeriReelProdPromotionStore, record_store),

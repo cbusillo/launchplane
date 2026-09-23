@@ -178,3 +178,15 @@
     width: 100%;
   }
 }
+.release-review-checklist {
+  padding-inline-start: 1.5rem;
+}
+
+.release-review-checklist li {
+  margin-block: 1.5rem;
+  overflow-wrap: anywhere;
+}
+
+.release-review-notes {
+  white-space: pre-wrap;
+}

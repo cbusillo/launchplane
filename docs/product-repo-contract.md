@@ -58,6 +58,34 @@ Moving lifecycle truth from code into repo metadata, workflow defaults, TOML,
 JSON, or YAML is still a boundary violation unless the file is docs, tests, or
 Launchplane self-bootstrap.
 
+## Owner test notes
+
+Every product pull request includes an **Owner test notes** heading with test
+instructions or `Nothing for the owner to test`. CI checks presence without
+deciding whether a change needs human review. Add the shared action as a step in
+an existing required CI job, before checking out product code:
+
+```yaml
+"on":
+  pull_request:
+    types: [opened, reopened, synchronize, edited]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Require Owner test notes
+        if: github.event_name == 'pull_request'
+        uses: cbusillo/launchplane/.github/actions/owner-test-notes@<launchplane-sha>
+```
+
+Keep the rest of that job's build and test steps. The immutable action reference
+must name a full commit SHA. No extra token or write permission is required.
+Launchplane compiles the release from actual commits and PR notes, independently
+of GitHub release-issue or milestone membership; see [Owner release review](release-review.md).
+
 ## Repo Metadata Boundary
 
 Product repos may keep `.github/github.json` as repo ergonomics metadata. It can

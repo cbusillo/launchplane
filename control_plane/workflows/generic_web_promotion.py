@@ -7,6 +7,7 @@ from typing import Literal, Protocol, cast
 from urllib.parse import quote
 
 import click
+from control_plane.release_review import require_release_approval
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.backup_gate_record import BackupGateRecord
@@ -240,6 +241,14 @@ def execute_generic_web_prod_promotion(
         request=request,
         source_lane=source_lane,
     )
+    if not request.dry_run:
+        require_release_approval(
+            control_plane_root=control_plane_root,
+            record_store=record_store,
+            product=profile.product,
+            artifact_id=request.artifact_id,
+            source_commit=request.source_git_ref,
+        )
     if request.release_tag:
         _preflight_github_release(
             control_plane_root=control_plane_root,

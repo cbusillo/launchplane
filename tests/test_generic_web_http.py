@@ -1695,7 +1695,9 @@ class GenericWebHttpTests(unittest.TestCase):
             state_dir = root / "state"
             store = FilesystemRecordStore(state_dir=state_dir)
             store.write_product_profile_record(
-                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload_with_prod())
+                LaunchplaneProductProfileRecord.model_validate(
+                    {**_product_profile_payload_with_prod(), "production_use": "prelaunch"}
+                )
             )
             identity = _identity(
                 repository="cbusillo/sellyouroutboard",

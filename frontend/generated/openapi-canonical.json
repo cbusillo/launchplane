@@ -13186,6 +13186,16 @@
             "title": "Product",
             "type": "string"
           },
+          "production_use": {
+            "default": "unknown",
+            "enum": [
+              "unknown",
+              "prelaunch",
+              "live"
+            ],
+            "title": "Production Use",
+            "type": "string"
+          },
           "promotion_workflow": {
             "$ref": "#/components/schemas/ProductPromotionWorkflowProfile"
           },
@@ -14637,92 +14647,6 @@
           "reason"
         ],
         "title": "ManagedSecretReencryptionPlanInput",
-        "type": "object"
-      },
-      "ManagerPreviewApprovalDecision": {
-        "additionalProperties": false,
-        "properties": {
-          "approval_id": {
-            "default": "",
-            "title": "Approval Id",
-            "type": "string"
-          },
-          "current_binding_sha256": {
-            "default": "",
-            "title": "Current Binding Sha256",
-            "type": "string"
-          },
-          "evaluated_at": {
-            "title": "Evaluated At",
-            "type": "string"
-          },
-          "event_id": {
-            "default": "",
-            "title": "Event Id",
-            "type": "string"
-          },
-          "manager_github_id": {
-            "default": 0,
-            "minimum": 0.0,
-            "title": "Manager Github Id",
-            "type": "integer"
-          },
-          "manager_login": {
-            "default": "",
-            "title": "Manager Login",
-            "type": "string"
-          },
-          "reason": {
-            "title": "Reason",
-            "type": "string"
-          },
-          "reason_code": {
-            "enum": [
-              "approval_missing",
-              "approval_valid",
-              "changes_requested",
-              "approval_revoked",
-              "approval_stale",
-              "preview_inactive",
-              "serving_generation_missing",
-              "serving_generation_mismatch",
-              "generation_not_ready",
-              "generation_verification_failed",
-              "preview_identity_mismatch",
-              "artifact_identity_missing",
-              "runtime_identity_missing",
-              "runtime_identity_mismatch",
-              "policy_unavailable"
-            ],
-            "title": "Reason Code",
-            "type": "string"
-          },
-          "schema_version": {
-            "default": 1,
-            "minimum": 1.0,
-            "title": "Schema Version",
-            "type": "integer"
-          },
-          "status": {
-            "enum": [
-              "pending",
-              "approved",
-              "changes_requested",
-              "revoked",
-              "stale",
-              "unavailable"
-            ],
-            "title": "Status",
-            "type": "string"
-          }
-        },
-        "required": [
-          "status",
-          "reason_code",
-          "reason",
-          "evaluated_at"
-        ],
-        "title": "ManagerPreviewApprovalDecision",
         "type": "object"
       },
       "ManagerPreviewApprovalReconcileEnvelope": {
@@ -32722,20 +32646,12 @@
           "live_confirmations": {
             "$ref": "#/components/schemas/ProductPromotionLiveConfirmations"
           },
-          "manager_preview_approval": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/ManagerPreviewApprovalDecision"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "x-launchplane-optional-response": true
-          },
           "product": {
             "title": "Product",
             "type": "string"
+          },
+          "release_review": {
+            "$ref": "#/components/schemas/ReleaseReviewStatus"
           },
           "repository": {
             "title": "Repository",
@@ -36079,6 +35995,315 @@
         "title": "RecentOperationsResponse",
         "type": "object"
       },
+      "ReleaseChecklist": {
+        "additionalProperties": false,
+        "properties": {
+          "additional_changes": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Additional Changes",
+            "type": "array"
+          },
+          "candidate": {
+            "$ref": "#/components/schemas/ReleaseVersion"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ReleaseReviewItem"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "owner_github_id": {
+            "title": "Owner Github Id",
+            "type": "string"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "production": {
+            "$ref": "#/components/schemas/ReleaseVersion"
+          },
+          "repository": {
+            "title": "Repository",
+            "type": "string"
+          },
+          "testing_url": {
+            "title": "Testing Url",
+            "type": "string"
+          },
+          "untracked_commits": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Untracked Commits",
+            "type": "array"
+          }
+        },
+        "required": [
+          "product",
+          "repository",
+          "owner_github_id",
+          "testing_url",
+          "production",
+          "candidate",
+          "items"
+        ],
+        "title": "ReleaseChecklist",
+        "type": "object"
+      },
+      "ReleaseReviewDecisionEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "checklist_digest": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Checklist Digest",
+            "type": "string"
+          },
+          "decision": {
+            "enum": [
+              "accepted",
+              "changes_requested",
+              "overridden"
+            ],
+            "title": "Decision",
+            "type": "string"
+          },
+          "product": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Product",
+            "type": "string"
+          },
+          "reason": {
+            "default": "",
+            "maxLength": 4000,
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "product",
+          "checklist_digest",
+          "decision"
+        ],
+        "title": "ReleaseReviewDecisionEnvelope",
+        "type": "object"
+      },
+      "ReleaseReviewDecisionRecord": {
+        "additionalProperties": false,
+        "properties": {
+          "actor_github_id": {
+            "pattern": "^[0-9]+$",
+            "title": "Actor Github Id",
+            "type": "string"
+          },
+          "actor_github_login": {
+            "minLength": 1,
+            "title": "Actor Github Login",
+            "type": "string"
+          },
+          "checklist": {
+            "$ref": "#/components/schemas/ReleaseChecklist"
+          },
+          "checklist_digest": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Checklist Digest",
+            "type": "string"
+          },
+          "decided_at": {
+            "minLength": 1,
+            "title": "Decided At",
+            "type": "string"
+          },
+          "decision": {
+            "enum": [
+              "accepted",
+              "changes_requested",
+              "overridden"
+            ],
+            "title": "Decision",
+            "type": "string"
+          },
+          "product": {
+            "minLength": 1,
+            "title": "Product",
+            "type": "string"
+          },
+          "reason": {
+            "default": "",
+            "maxLength": 4000,
+            "title": "Reason",
+            "type": "string"
+          },
+          "record_id": {
+            "minLength": 1,
+            "title": "Record Id",
+            "type": "string"
+          },
+          "release_issue_url": {
+            "default": "",
+            "title": "Release Issue Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "record_id",
+          "product",
+          "checklist_digest",
+          "checklist",
+          "decision",
+          "actor_github_id",
+          "actor_github_login",
+          "decided_at"
+        ],
+        "title": "ReleaseReviewDecisionRecord",
+        "type": "object"
+      },
+      "ReleaseReviewItem": {
+        "additionalProperties": false,
+        "properties": {
+          "already_reviewed": {
+            "default": false,
+            "title": "Already Reviewed",
+            "type": "boolean"
+          },
+          "head_sha": {
+            "pattern": "^[0-9a-f]{40}$",
+            "title": "Head Sha",
+            "type": "string"
+          },
+          "merge_commit": {
+            "pattern": "^[0-9a-f]{40}$",
+            "title": "Merge Commit",
+            "type": "string"
+          },
+          "owner_test_notes": {
+            "title": "Owner Test Notes",
+            "type": "string"
+          },
+          "pull_request_number": {
+            "minimum": 1.0,
+            "title": "Pull Request Number",
+            "type": "integer"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "pull_request_number",
+          "title",
+          "url",
+          "head_sha",
+          "merge_commit",
+          "owner_test_notes"
+        ],
+        "title": "ReleaseReviewItem",
+        "type": "object"
+      },
+      "ReleaseReviewResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "can_override": {
+            "title": "Can Override",
+            "type": "boolean"
+          },
+          "display_name": {
+            "title": "Display Name",
+            "type": "string"
+          },
+          "owner_github_login": {
+            "title": "Owner Github Login",
+            "type": "string"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "review": {
+            "$ref": "#/components/schemas/ReleaseReviewStatus"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          },
+          "viewer_is_owner": {
+            "title": "Viewer Is Owner",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "trace_id",
+          "product",
+          "display_name",
+          "owner_github_login",
+          "viewer_is_owner",
+          "can_override",
+          "review"
+        ],
+        "title": "ReleaseReviewResponse",
+        "type": "object"
+      },
+      "ReleaseReviewStatus": {
+        "additionalProperties": false,
+        "properties": {
+          "approved": {
+            "default": false,
+            "title": "Approved",
+            "type": "boolean"
+          },
+          "blockers": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Blockers",
+            "type": "array"
+          },
+          "checklist": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReleaseChecklist"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "checklist_digest": {
+            "default": "",
+            "title": "Checklist Digest",
+            "type": "string"
+          },
+          "latest_decision": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReleaseReviewDecisionRecord"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "required": {
+            "default": true,
+            "title": "Required",
+            "type": "boolean"
+          }
+        },
+        "title": "ReleaseReviewStatus",
+        "type": "object"
+      },
       "ReleaseTupleRecord": {
         "additionalProperties": false,
         "properties": {
@@ -36159,6 +36384,32 @@
           "minted_at"
         ],
         "title": "ReleaseTupleRecord",
+        "type": "object"
+      },
+      "ReleaseVersion": {
+        "additionalProperties": false,
+        "properties": {
+          "artifact_id": {
+            "minLength": 1,
+            "title": "Artifact Id",
+            "type": "string"
+          },
+          "shared_addons_digest": {
+            "default": "",
+            "title": "Shared Addons Digest",
+            "type": "string"
+          },
+          "source_commit": {
+            "pattern": "^[0-9a-f]{40}$",
+            "title": "Source Commit",
+            "type": "string"
+          }
+        },
+        "required": [
+          "artifact_id",
+          "source_commit"
+        ],
+        "title": "ReleaseVersion",
         "type": "object"
       },
       "RepoProductMapping": {
@@ -80740,6 +80991,193 @@
         "summary": "Apply public ingress notification policy"
       }
     },
+    "/v1/release-review": {
+      "get": {
+        "operationId": "read_release_review",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "maxLength": 256,
+              "minLength": 1,
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReleaseReviewResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read Release Review",
+        "tags": [
+          "release-review"
+        ]
+      }
+    },
+    "/v1/release-review/decisions": {
+      "post": {
+        "operationId": "write_release_review_decision",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReleaseReviewDecisionEnvelope"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReleaseReviewResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Write Release Review Decision",
+        "tags": [
+          "release-review"
+        ]
+      }
+    },
     "/v1/repo-product-mapping": {
       "get": {
         "operationId": "read_repo_product_mapping",
@@ -85382,6 +85820,7 @@
     "/v1/products/{product}/environments/{environment}/promotion/workflow-deliveries/{delivery_id}": "read_product_promotion_workflow_delivery",
     "/v1/products/{product}/environments/{environment}/public-ingress/incidents": "list_product_environment_public_ingress_incidents",
     "/v1/products/{product}/environments/{environment}/public-ingress/incidents/{incident_id}": "read_product_environment_public_ingress_incident",
+    "/v1/release-review": "read_release_review",
     "/v1/repo-product-mapping": "read_repo_product_mapping",
     "/v1/work-graph/github/issues": "read_work_graph_issue_inbox",
     "/v1/work-graph/merge-train/controller/status": "read_merge_train_controller_status",
@@ -85406,6 +85845,7 @@
     "/v1/products/{product}/environments/{environment}/config/apply": "apply_product_environment_config",
     "/v1/products/{product}/environments/{environment}/promotion/dry-run": "dry_run_product_promotion",
     "/v1/products/{product}/environments/{environment}/promotion/workflow-dispatch": "dispatch_product_promotion_workflow",
+    "/v1/release-review/decisions": "write_release_review_decision",
     "/v1/work-graph/rank": "rank_work_graph_snapshot"
   }
 }
