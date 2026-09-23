@@ -269,11 +269,13 @@ class GovernanceProjectionTests(unittest.TestCase):
             repository_evidence=evidence,
             base_branch="main",
             evaluated_at=NOW,
-            github_token_source=MergeTrainGitHubTokenSource(env_var="GH_TOKEN"),
+            github_token_source=MergeTrainGitHubTokenSource(runtime_context="example_context"),
         )
 
         self.assertEqual(result.availability, "available")
-        token.assert_called_once_with(MergeTrainGitHubTokenSource(env_var="GH_TOKEN"))
+        token.assert_called_once_with(
+            MergeTrainGitHubTokenSource(runtime_context="example_context")
+        )
         evaluator_factory.assert_called_once()
         evaluator.evaluate.assert_called_once()
 

@@ -102,7 +102,7 @@ through managed secret records scoped to Launchplane/Every Code. Do not add a
 service-host env var or checked-in file containing the webhook URL, channel, or
 real destination authority.
 
-| Work graph and merge-train GitHub token | `GH_TOKEN` from deploy secret `LAUNCHPLANE_WORK_GRAPH_GH_TOKEN` | Platform secret projected into service target env | Authenticates the service's non-interactive `gh` reads and merge-train GitHub API calls. The token must have enough GitHub access for the configured Project, issue/PR signal reads, and the configured merge-train repository. |
+| Work graph and legacy environment-bound train token | `GH_TOKEN` from deploy secret `LAUNCHPLANE_WORK_GRAPH_GH_TOKEN` | Platform secret projected into service target env | Authenticates the service's non-interactive `gh` reads and train policies explicitly bound to this variable. Other train policies can explicitly select the resolved `LAUNCHPLANE_GITHUB_TOKEN` from a DB-backed runtime context; see [merge-train credential sources](merge-train-policy.md#credential-source-and-policy-readback). The token must have enough GitHub access for the configured Project, issue/PR signal reads, and the configured merge-train repository. |
 
 ### DB Authoritative
 

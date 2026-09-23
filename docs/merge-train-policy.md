@@ -87,17 +87,23 @@ A repository policy names one GitHub credential source:
 - `github_token.env_var` reads the named Launchplane service bootstrap variable
   for existing policies.
 - `github_token.runtime_context` resolves `LAUNCHPLANE_GITHUB_TOKEN` through the
-  named DB-backed runtime context and its managed-secret binding. This is an
-  explicit selection of an existing source, not a new credential or grant.
+  named DB-backed runtime context, including global shared values and global
+  secret bindings that the runtime-context contract intentionally includes.
+  Selecting a context selects its resolved credential for GitHub operations;
+  this is a credential-authority decision for the policy reviewer. It does not
+  create a credential or expand its provider permissions.
 
 The two sources cannot be combined. If both are empty, the target remains
-unconfigured. A missing runtime-context credential fails closed; the service
-never falls back to a bootstrap token, another product's context, or an agent's
-local credential. Controller, phase-specific operations, historical proof and
+unconfigured. If the selected context cannot resolve a token, the service
+refuses the operation; it never tries a service-host bootstrap token, a different
+context, or an agent's local credential. Configured global runtime values are
+part of the selected context, not an alternate source. Controller, phase-specific operations, historical proof and
 current governance readiness use the same resolver. Adding this optional field
 does not change existing policy bytes or digests. Selecting a managed source
 changes the full policy digest and therefore requires a new reviewed policy
-revision; it does not change the repository's delivery-semantics digest.
+revision. Check every repository in that policy for active train work before
+applying the revision: in-flight candidates, landings and controller fences bind
+the full digest. It does not change the repository's delivery-semantics digest.
 
 `GET /v1/work-graph/merge-train/policy` returns the active persisted policy record
 for callers with the existing global `merge_train.policy_targets` read action.
@@ -196,7 +202,7 @@ Each repository policy contains:
   merge pull requests.
 - `service_authz`: Launchplane authz action/product/context required before the
   service endpoint may run the policy.
-- `github_token`: Launchplane service-host token source used for live GitHub
+- `github_token`: Launchplane explicit GitHub credential source used for live GitHub
   API calls.
 - `scheduler`: Optional DB-backed scheduler intent for the GitHub Actions
   scheduler. When enabled, the scheduler reads this target from the deployed
@@ -574,7 +580,7 @@ GH_TOKEN=... uv run launchplane work-graph merge-train-run-once \
 
 The deployed Launchplane service projects the work-graph GitHub credential into
 `GH_TOKEN` from the `LAUNCHPLANE_WORK_GRAPH_GH_TOKEN` deployment secret, so the
-imported policies normally reference that same service-host token source.
+imported policies normally reference that same explicit GitHub credential source.
 
 Passing `--mutate` applies exactly one ordered-queue worker transition from that
 fresh snapshot. Use it only from the intended operator environment for the smoke

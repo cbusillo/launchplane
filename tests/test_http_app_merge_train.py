@@ -5,6 +5,7 @@ from typing import Any, cast
 from unittest.mock import patch
 
 from click import ClickException
+from sqlalchemy.exc import SQLAlchemyError
 
 from control_plane.contracts.merge_train_controller_state import (
     build_merge_train_controller_state_record,
@@ -1917,14 +1918,19 @@ class FastApiMergeTrainRunOnceTests(unittest.IsolatedAsyncioTestCase):
 
 class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
     async def test_controller_uses_only_the_declared_managed_token_source(self) -> None:
-        for managed_token, expected_status in (("managed-test-token", 202), ("", 503)):
+        for managed_token, expected_status in (
+            ("managed-test-token", 202),
+            ("", 503),
+            (SQLAlchemyError("database temporarily unavailable"), 503),
+        ):
             with (
                 self.subTest(available=bool(managed_token)),
                 TemporaryDirectory() as temporary_directory_name,
                 patch.dict("os.environ", {"GH_TOKEN": "unrelated-bootstrap-token"}, clear=True),
                 patch(
                     "control_plane.merge_train_github_token.resolve_launchplane_github_token",
-                    return_value=managed_token,
+                    return_value=managed_token if isinstance(managed_token, str) else "",
+                    side_effect=managed_token if isinstance(managed_token, Exception) else None,
                 ) as resolve_token,
                 patch("control_plane.http_app.UrllibMergeTrainGitHubTransport") as transport,
                 patch(
@@ -1966,7 +1972,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertNotIn("managed-test-token", response.text)
                 self.assertNotIn("unrelated-bootstrap-token", response.text)
-                if managed_token:
+                if expected_status == 202:
                     self.assertEqual(transport.call_args.kwargs["token"], managed_token)
                 else:
                     transport.assert_not_called()

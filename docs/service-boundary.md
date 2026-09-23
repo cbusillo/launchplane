@@ -1122,7 +1122,7 @@ and trusted owner-agent write credentials, then returns reconcile evidence under
 ordered-queue pass for a requested repository/base branch. It requires the
 `service_authz` action/product/context declared by the matching merge-train
 repository policy, resolves its GitHub token from that policy's
-`github_token.env_var`, and fails closed before GitHub calls when no matching
+the policy's explicit `github_token` source (`env_var` or DB-backed `runtime_context`), and fails closed before GitHub calls when no matching
 policy or token is available. The route is dry-run by default; `mutate: true`
 applies at most one worker transition from one fresh snapshot. This route is the
 deployed sequential baseline, not the full batch train target. It is native
