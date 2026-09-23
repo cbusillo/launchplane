@@ -27,7 +27,7 @@ class _EvidenceProvider(ChangeImpactRepositoryEvidenceProvider):
     def __init__(self, evidence: ChangeImpactRepositoryEvidence) -> None:
         self.evidence = evidence
 
-    def resolve(self, _target: ChangeImpactTargetReference) -> ChangeImpactRepositoryEvidence:
+    def resolve(self, target: ChangeImpactTargetReference) -> ChangeImpactRepositoryEvidence:
         return self.evidence
 
 

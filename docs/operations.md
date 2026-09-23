@@ -933,20 +933,13 @@ policy-admin worker rules for the standalone authz wrapper and must declare the
 `LAUNCHPLANE_AUTHZ_MANAGER_PREVIEW_APPROVAL_MANAGED_SET_JSON` owns the generic
 GitHub-human manager preview approval writer set and must declare the exact
 `operator.manager-preview-approval` managed-set identity;
-`LAUNCHPLANE_AUTHZ_OWNER_ACCEPTANCE_MANAGED_SET_JSON` owns only the dedicated
-GitHub-human Owner Acceptance workbench grants and must declare the exact
-`operator.owner-acceptance` managed-set identity. Bind its rules to immutable
-numeric GitHub user IDs. Engineering viewer rules grant only
-`owner_acceptance.read` and match both resolved human roles, `admin` and
-`read_only`, so an existing global admin assignment cannot suppress the narrow
-viewer grant. Owner candidate rules use only `read_only` and may grant that read
-action plus `owner_acceptance_event.write`, or may grant only
-`owner_acceptance_event.write` for the owner-safe product-review route. All
-three shapes remain limited to product `launchplane` and context
-`owner-acceptance`. Product Owner membership remains a separate server-side
-requirement for the owner-safe read and event writes. Event-write-only source
-compatibility does not alter the current DB policy; use it only in a separately
-reviewed contraction after the supporting service SHA is deployed.
+`LAUNCHPLANE_AUTHZ_OWNER_ACCEPTANCE_MANAGED_SET_JSON` is a retired compatibility
+name. The `operator.owner-acceptance` managed set accepts only an empty desired
+policy so existing grants can be removed. It cannot create or update Owner
+review grants. The current `/ui/owner-review` path uses the product profile's
+Owner identity directly. Do not introduce new GitHub-secret/workflow grants;
+use the native reviewed policy path for any separately authorized contraction.
+See [owner-acceptance.md](owner-acceptance.md).
 
 The manager-preview set above is current compatibility authority, not the issue
 `#2240` target. Preserve it only until Owner-acceptance replacement coverage and
