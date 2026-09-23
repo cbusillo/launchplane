@@ -1,6 +1,6 @@
 """Explicit legacy-operator HTTP orchestration for historical disposition."""
 
-import os
+from pathlib import Path
 
 from starlette.responses import JSONResponse
 
@@ -10,6 +10,7 @@ from control_plane.http_routes.mutation_support import (
     replay_idempotent_response,
 )
 from control_plane.merge_train_controller_run_once import MergeTrainControllerRunOnceEnvelope
+from control_plane.merge_train_github_token import resolve_merge_train_github_token
 from control_plane.merge_train_github import GitHubMergeTrainClient, UrllibMergeTrainGitHubTransport
 from control_plane.merge_train_historical_completion import (
     HistoricalCompletionAssessmentFailure,
@@ -28,6 +29,7 @@ from control_plane.storage.postgres import PostgresRecordStore
 def run_merge_train_historical_disposition(
     *,
     envelope: MergeTrainControllerRunOnceEnvelope,
+    control_plane_root: Path,
     identity: LaunchplaneIdentity,
     store: PostgresRecordStore,
     idempotency_key: str,
@@ -64,7 +66,9 @@ def run_merge_train_historical_disposition(
         repository_policy = authority.policy.policy.find_repository_policy(
             repository=recovery.repository, base_branch=recovery.base_branch
         )
-        token = os.environ.get(repository_policy.github_token.env_var, "").strip()
+        token = resolve_merge_train_github_token(
+            source=repository_policy.github_token, control_plane_root=control_plane_root
+        )
         if not token:
             raise HistoricalDispositionError("github_token_not_configured", status_code=503)
         preflight = assess_merge_train_historical_completion(

@@ -5,6 +5,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import Mock
 
+from control_plane.contracts.merge_train_policy import MergeTrainGitHubTokenSource
 from control_plane.contracts.change_impact import ChangeImpactTargetReference
 from control_plane.contracts.governance_projection import GovernanceMergeReadinessFacet
 from control_plane.contracts.merge_train_structural_provenance import (
@@ -71,7 +72,7 @@ class GovernanceProjectionTests(unittest.TestCase):
                 }
             )
             provider = LiveGovernanceCurrentReadinessProvider(
-                github_token=lambda env_var: "test-token" if env_var == "GH_TOKEN" else "",
+                github_token=lambda source: "test-token" if source.env_var == "GH_TOKEN" else "",
                 evaluator_factory=lambda _store, _provider, _token: evaluator,
             )
 
@@ -80,7 +81,7 @@ class GovernanceProjectionTests(unittest.TestCase):
                 repository_evidence=evidence,
                 base_branch="main",
                 evaluated_at=NOW,
-                github_token_env_var="GH_TOKEN",
+                github_token_source=MergeTrainGitHubTokenSource(env_var="GH_TOKEN"),
             )
 
         self.assertEqual(result.availability, "available")
@@ -140,7 +141,7 @@ class GovernanceProjectionTests(unittest.TestCase):
                 repository_evidence=evidence,
                 base_branch="main",
                 evaluated_at=NOW,
-                github_token_env_var="GH_TOKEN",
+                github_token_source=MergeTrainGitHubTokenSource(env_var="GH_TOKEN"),
             )
 
         self.assertEqual(result.availability, "unavailable")
@@ -209,7 +210,7 @@ class GovernanceProjectionTests(unittest.TestCase):
                     repository_evidence=evidence,
                     base_branch="main",
                     evaluated_at=NOW,
-                    github_token_env_var="GH_TOKEN",
+                    github_token_source=MergeTrainGitHubTokenSource(env_var="GH_TOKEN"),
                 )
 
                 self.assertEqual(result.availability, "unavailable")
@@ -268,11 +269,13 @@ class GovernanceProjectionTests(unittest.TestCase):
             repository_evidence=evidence,
             base_branch="main",
             evaluated_at=NOW,
-            github_token_env_var="GH_TOKEN",
+            github_token_source=MergeTrainGitHubTokenSource(runtime_context="example_context"),
         )
 
         self.assertEqual(result.availability, "available")
-        token.assert_called_once_with("GH_TOKEN")
+        token.assert_called_once_with(
+            MergeTrainGitHubTokenSource(runtime_context="example_context")
+        )
         evaluator_factory.assert_called_once()
         evaluator.evaluate.assert_called_once()
 
@@ -350,7 +353,7 @@ class GovernanceProjectionTests(unittest.TestCase):
             repository_evidence=evidence,
             base_branch="main",
             evaluated_at=NOW,
-            github_token_env_var="GH_TOKEN",
+            github_token_source=MergeTrainGitHubTokenSource(env_var="GH_TOKEN"),
         )
 
         self.assertEqual(result.availability, "unavailable")
@@ -404,7 +407,7 @@ class GovernanceProjectionTests(unittest.TestCase):
                     repository_evidence=evidence,
                     base_branch="main",
                     evaluated_at=NOW,
-                    github_token_env_var="GH_TOKEN",
+                    github_token_source=MergeTrainGitHubTokenSource(env_var="GH_TOKEN"),
                 )
 
             self.assertEqual(result.availability, "not_active")
