@@ -317,6 +317,7 @@ from control_plane.contracts.ingress_route_audit_record import (
     build_ingress_route_audit_record_id,
 )
 from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
+from control_plane.merge_train_github_token import resolve_merge_train_github_token
 from control_plane.merge_train_policy_source import (
     MergeTrainPolicyStoreMissingError,
     resolve_merge_train_policy_record,
@@ -5816,15 +5817,10 @@ def create_launchplane_fastapi_app(
                 code="authorization_denied",
                 message="Workflow cannot run the requested merge train policy.",
             )
-        token_env = repository_policy.github_token.env_var
-        if not token_env:
-            raise _launchplane_http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="github_token_not_configured",
-                message="Merge train policy does not define a GitHub token environment variable.",
-            )
-        token = os.environ.get(token_env, "").strip()
+        token = resolve_merge_train_github_token(
+            source=repository_policy.github_token,
+            control_plane_root=resolved_control_plane_root,
+        )
         if not token:
             raise _launchplane_http_error(
                 status_code=503,
@@ -5955,6 +5951,7 @@ def create_launchplane_fastapi_app(
         ):
             return run_merge_train_historical_disposition(
                 envelope=controller_request,
+                control_plane_root=resolved_control_plane_root,
                 identity=identity,
                 store=record_store,
                 idempotency_key=idempotency_key,
@@ -6026,15 +6023,10 @@ def create_launchplane_fastapi_app(
                 code="authorization_denied",
                 message="Workflow cannot run the requested merge train policy.",
             )
-        token_env = repository_policy.github_token.env_var
-        if not token_env:
-            raise _launchplane_http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="github_token_not_configured",
-                message="Merge train policy does not define a GitHub token environment variable.",
-            )
-        token = os.environ.get(token_env, "").strip()
+        token = resolve_merge_train_github_token(
+            source=repository_policy.github_token,
+            control_plane_root=resolved_control_plane_root,
+        )
         if not token:
             raise _launchplane_http_error(
                 status_code=503,
@@ -9634,15 +9626,10 @@ def create_launchplane_fastapi_app(
                 code="authorization_denied",
                 message="Workflow cannot run the requested merge train policy.",
             )
-        token_env = repository_policy.github_token.env_var
-        if not token_env:
-            raise _launchplane_http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="github_token_not_configured",
-                message="Merge train policy does not define a GitHub token environment variable.",
-            )
-        token = os.environ.get(token_env, "").strip()
+        token = resolve_merge_train_github_token(
+            source=repository_policy.github_token,
+            control_plane_root=resolved_control_plane_root,
+        )
         if not token:
             raise _launchplane_http_error(
                 status_code=503,
@@ -9839,15 +9826,10 @@ def create_launchplane_fastapi_app(
                 code="authorization_denied",
                 message="Workflow cannot run the requested merge train policy.",
             )
-        token_env = repository_policy.github_token.env_var
-        if not token_env:
-            raise _launchplane_http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="github_token_not_configured",
-                message="Merge train policy does not define a GitHub token environment variable.",
-            )
-        token = os.environ.get(token_env, "").strip()
+        token = resolve_merge_train_github_token(
+            source=repository_policy.github_token,
+            control_plane_root=resolved_control_plane_root,
+        )
         if not token:
             raise _launchplane_http_error(
                 status_code=503,
@@ -10066,15 +10048,10 @@ def create_launchplane_fastapi_app(
                 code="authorization_denied",
                 message="Workflow cannot run the requested merge train policy.",
             )
-        token_env = repository_policy.github_token.env_var
-        if not token_env:
-            raise _launchplane_http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="github_token_not_configured",
-                message="Merge train policy does not define a GitHub token environment variable.",
-            )
-        token = os.environ.get(token_env, "").strip()
+        token = resolve_merge_train_github_token(
+            source=repository_policy.github_token,
+            control_plane_root=resolved_control_plane_root,
+        )
         if not token:
             raise _launchplane_http_error(
                 status_code=503,
@@ -10255,15 +10232,10 @@ def create_launchplane_fastapi_app(
                 code="authorization_denied",
                 message="Workflow cannot write merge train PR feedback.",
             )
-        token_env = repository_policy.github_token.env_var
-        if not token_env:
-            raise _launchplane_http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="github_token_not_configured",
-                message="Merge train policy does not define a GitHub token environment variable.",
-            )
-        token = os.environ.get(token_env, "").strip()
+        token = resolve_merge_train_github_token(
+            source=repository_policy.github_token,
+            control_plane_root=resolved_control_plane_root,
+        )
         if not token:
             raise _launchplane_http_error(
                 status_code=503,
@@ -24069,7 +24041,9 @@ def create_launchplane_fastapi_app(
             common=read_route_dependencies,
             repository_evidence_provider=resolved_change_impact_repository_evidence_provider,
             current_readiness_provider=LiveGovernanceCurrentReadinessProvider(
-                github_token=lambda env_var: os.environ.get(env_var, "").strip(),
+                github_token=lambda source: resolve_merge_train_github_token(
+                    source=source, control_plane_root=resolved_control_plane_root
+                ),
             ),
             now=utc_now_timestamp,
         ),

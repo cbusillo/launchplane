@@ -4,6 +4,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal, Protocol, cast
 
+from control_plane.contracts.merge_train_policy import MergeTrainGitHubTokenSource
 from control_plane.change_impact_service import ChangeImpactRepositoryEvidenceProvider
 from control_plane.contracts.change_impact import (
     ChangeImpactRepositoryEvidence,
@@ -56,7 +57,7 @@ class GovernanceCurrentReadinessProvider(Protocol):
         repository_evidence: ChangeImpactRepositoryEvidence,
         base_branch: str,
         evaluated_at: str,
-        github_token_env_var: str,
+        github_token_source: MergeTrainGitHubTokenSource,
     ) -> GovernanceMergeReadinessFacet: ...
 
 
@@ -73,7 +74,7 @@ class GovernanceMergeTrainReadStore(Protocol):
 
 @dataclass(frozen=True)
 class LiveGovernanceCurrentReadinessProvider:
-    github_token: Callable[[str], str]
+    github_token: Callable[[MergeTrainGitHubTokenSource], str]
     evaluator_factory: Callable[
         [object, ChangeImpactRepositoryEvidenceProvider, str],
         object,
@@ -92,7 +93,7 @@ class LiveGovernanceCurrentReadinessProvider:
         repository_evidence: ChangeImpactRepositoryEvidence,
         base_branch: str,
         evaluated_at: str,
-        github_token_env_var: str,
+        github_token_source: MergeTrainGitHubTokenSource,
     ) -> GovernanceMergeReadinessFacet:
         repository = repository_evidence.target.repository
         pull_request_number = repository_evidence.target.pull_request_number
@@ -172,7 +173,7 @@ class LiveGovernanceCurrentReadinessProvider:
                 )
             ):
                 return _unavailable_readiness()
-            token = self.github_token(github_token_env_var).strip()
+            token = self.github_token(github_token_source).strip()
             if not token:
                 return _unavailable_readiness()
             evaluator = cast(
@@ -228,7 +229,7 @@ def build_governance_projection(
     base_branch: str,
     generated_at: str,
     repository_evidence: ChangeImpactRepositoryEvidence | None = None,
-    github_token_env_var: str = "",
+    github_token_source: MergeTrainGitHubTokenSource | None = None,
 ) -> GovernanceProjection:
     resolved_repository_evidence = repository_evidence or repository_evidence_provider.resolve(
         target
@@ -238,7 +239,7 @@ def build_governance_projection(
         repository_evidence=resolved_repository_evidence,
         base_branch=base_branch,
         evaluated_at=generated_at,
-        github_token_env_var=github_token_env_var,
+        github_token_source=github_token_source or MergeTrainGitHubTokenSource(),
     )
     admission_store = require_merge_admission_record_store(store)
     admissions = admission_store.list_merge_admission_records(

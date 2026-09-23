@@ -5,6 +5,7 @@ from pydantic import BaseModel, ConfigDict, model_validator
 
 from control_plane.contracts.merge_train_policy import (
     MERGE_TRAIN_POLICY_TARGETS_READ_ACTION,
+    MergeTrainPolicyRecord,
     MergeTrainSchedulerPolicy,
     MergeTrainServiceAuthz,
 )
@@ -87,6 +88,14 @@ class MergeTrainPolicyTargetsResponse(BaseModel):
     trace_id: str
     policy: MergeTrainPolicySummary
     targets: tuple[MergeTrainPolicyTarget, ...]
+
+
+class MergeTrainPolicyReadResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    record: MergeTrainPolicyRecord
 
 
 def merge_train_policy_not_configured_error(
@@ -318,6 +327,33 @@ def register_merge_train_read_routes(
             targets=tuple(targets),
         )
 
+    def read_merge_train_policy(
+        identity: Annotated[LaunchplaneIdentity, Depends(dependencies.read_identity)],
+        record_store: Annotated[object, Depends(dependencies.get_record_store)],
+    ) -> MergeTrainPolicyReadResponse:
+        trace_id = dependencies.next_trace_id()
+        if not dependencies.authorization_allows(
+            identity=identity,
+            action=MERGE_TRAIN_POLICY_TARGETS_READ_ACTION,
+            product="launchplane",
+            context=LAUNCHPLANE_SERVICE_CONTEXT,
+        ):
+            raise dependencies.http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Caller cannot read the complete merge train policy record.",
+            )
+        try:
+            record = resolve_merge_train_policy_record(record_store)
+        except MergeTrainPolicyStoreMissingError as error:
+            raise merge_train_policy_not_configured_error(
+                dependencies=dependencies,
+                trace_id=trace_id,
+                error=error,
+            ) from error
+        return MergeTrainPolicyReadResponse(trace_id=trace_id, record=record)
+
     responses = {
         400: {"model": dependencies.error_response_model},
         401: {"model": dependencies.error_response_model},
@@ -349,5 +385,14 @@ def register_merge_train_read_routes(
         response_model=MergeTrainPolicyTargetsResponse,
         operation_id="read_merge_train_policy_targets",
         summary="Read merge train policy targets",
+        responses=responses,
+    )
+    app.add_api_route(
+        "/v1/work-graph/merge-train/policy",
+        read_merge_train_policy,
+        methods=["GET"],
+        response_model=MergeTrainPolicyReadResponse,
+        operation_id="read_merge_train_policy",
+        summary="Read the active merge train policy record without resolving credentials",
         responses=responses,
     )
