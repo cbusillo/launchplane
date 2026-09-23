@@ -10,6 +10,7 @@ from control_plane.contracts.merge_train_controller_state import (
     build_merge_train_controller_state_record,
 )
 from control_plane.contracts.merge_train_policy import (
+    MergeTrainPolicy,
     MergeTrainPolicyRecord,
     parse_merge_train_policy_toml,
 )
@@ -134,6 +135,55 @@ class _StructuralDiagnosticAdmissionEvaluator:
 
 
 class FastApiMergeTrainReadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_complete_policy_read_needs_read_authority_and_never_resolves_tokens(
+        self,
+    ) -> None:
+        for actions, expected_status in (
+            (("merge_train.policy_targets",), 200),
+            (("merge_train.run_once",), 403),
+        ):
+            with (
+                self.subTest(actions=actions),
+                TemporaryDirectory() as temporary_directory_name,
+                patch.dict("os.environ", {"GH_TOKEN": "secret-do-not-return"}),
+                patch("control_plane.http_app.resolve_merge_train_github_token") as resolve_token,
+            ):
+                state_dir = Path(temporary_directory_name) / "state"
+                original = _seed_merge_train_policy(state_dir)
+                store = FilesystemRecordStore(state_dir=state_dir)
+                app = create_launchplane_fastapi_app(
+                    verifier=_RejectingVerifier(),
+                    authz_policy=_local_operator_policy(
+                        actions=actions, products=("launchplane",), contexts=("launchplane",)
+                    ),
+                    record_store_factory=lambda: store,
+                    bearer_identity_config=BearerIdentityConfig(
+                        local_operator_token="local-operator-token",
+                        local_operator_subject="local-owner-agent",
+                        local_operator_token_label="local-owner-write",
+                    ),
+                )
+                response = await _asgi_get(
+                    app,
+                    "/v1/work-graph/merge-train/policy",
+                    headers={"Authorization": "Bearer local-operator-token"},
+                )
+                self.assertEqual(response.status_code, expected_status, response.text)
+                self.assertNotIn("secret-do-not-return", response.text)
+                resolve_token.assert_not_called()
+                if expected_status == 200:
+                    self.assertEqual(response.json()["record"], original.model_dump(mode="json"))
+                    denied = await _post_merge_train_controller_run_once(
+                        app,
+                        {
+                            "repository": "cbusillo/sellyouroutboard",
+                            "base_branch": "main",
+                            "mutate": False,
+                        },
+                        authorization="Bearer local-operator-token",
+                    )
+                    self.assertEqual(denied.status_code, 403, denied.text)
+
     async def test_admission_reads_store_decision(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"
@@ -1866,6 +1916,64 @@ class FastApiMergeTrainRunOnceTests(unittest.IsolatedAsyncioTestCase):
 
 
 class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_controller_uses_only_the_declared_managed_token_source(self) -> None:
+        for managed_token, expected_status in (("managed-test-token", 202), ("", 503)):
+            with (
+                self.subTest(available=bool(managed_token)),
+                TemporaryDirectory() as temporary_directory_name,
+                patch.dict("os.environ", {"GH_TOKEN": "unrelated-bootstrap-token"}, clear=True),
+                patch(
+                    "control_plane.merge_train_github_token.resolve_launchplane_github_token",
+                    return_value=managed_token,
+                ) as resolve_token,
+                patch("control_plane.http_app.UrllibMergeTrainGitHubTransport") as transport,
+                patch(
+                    "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
+                    _FakeMergeTrainSnapshotReader,
+                ),
+            ):
+                state_dir = Path(temporary_directory_name) / "state"
+                policy = build_test_merge_train_policy_with_codex_skills().model_dump(mode="json")
+                policy["policies"][0]["github_token"] = {"runtime_context": "example_context"}
+                _seed_merge_train_policy(
+                    state_dir,
+                    policy=MergeTrainPolicyRecord(
+                        record_id="managed-token-policy",
+                        source="test",
+                        updated_at="2026-09-23T12:00:00Z",
+                        policy=MergeTrainPolicy.model_validate(policy),
+                    ),
+                )
+                store = FilesystemRecordStore(state_dir=state_dir)
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(_merge_train_service_identity()),
+                    authz_policy=_merge_train_service_policy(),
+                    record_store_factory=lambda: store,
+                    control_plane_root_path=Path(temporary_directory_name),
+                )
+                response = await _post_merge_train_controller_run_once(
+                    app,
+                    {
+                        "repository": policy["policies"][0]["repository"],
+                        "base_branch": "main",
+                        "mutate": False,
+                    },
+                )
+                self.assertEqual(response.status_code, expected_status, response.text)
+                resolve_token.assert_called_once_with(
+                    control_plane_root=Path(temporary_directory_name),
+                    context_name="example_context",
+                )
+                self.assertNotIn("managed-test-token", response.text)
+                self.assertNotIn("unrelated-bootstrap-token", response.text)
+                if managed_token:
+                    self.assertEqual(transport.call_args.kwargs["token"], managed_token)
+                else:
+                    transport.assert_not_called()
+                    self.assertEqual(
+                        response.json()["error"]["code"], "github_token_not_configured"
+                    )
+
     async def test_blocked_admission_projects_structural_diagnostics_without_effect(
         self,
     ) -> None:

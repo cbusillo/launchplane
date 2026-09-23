@@ -125,10 +125,18 @@ class MergeTrainGitHubTokenSource(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     env_var: str = ""
+    runtime_context: str = Field(
+        default="",
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
 
     @model_validator(mode="after")
     def _validate_token_source(self) -> "MergeTrainGitHubTokenSource":
         self.env_var = self.env_var.strip()
+        self.runtime_context = self.runtime_context.strip()
+        if self.env_var and self.runtime_context:
+            raise ValueError("Merge train GitHub token cannot define both credential sources.")
         return self
 
 

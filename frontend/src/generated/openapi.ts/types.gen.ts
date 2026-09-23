@@ -1276,6 +1276,7 @@ export type MergeTrainEnqueuePolicyOutput = {
 
 export type MergeTrainGitHubTokenSource = {
     env_var: string;
+    runtime_context?: string;
 };
 
 export type MergeTrainIdentity = {

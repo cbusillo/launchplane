@@ -16935,6 +16935,12 @@
             "default": "",
             "title": "Env Var",
             "type": "string"
+          },
+          "runtime_context": {
+            "default": "",
+            "title": "Runtime Context",
+            "type": "string",
+            "x-launchplane-optional-response": true
           }
         },
         "title": "MergeTrainGitHubTokenSource",
@@ -17395,6 +17401,30 @@
           "policies"
         ],
         "title": "MergeTrainPolicy",
+        "type": "object"
+      },
+      "MergeTrainPolicyReadResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "record": {
+            "$ref": "#/components/schemas/MergeTrainPolicyRecord-Output"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "record"
+        ],
+        "title": "MergeTrainPolicyReadResponse",
         "type": "object"
       },
       "MergeTrainPolicyRecord-Input": {
@@ -69678,6 +69708,12 @@
                         "default": "",
                         "title": "Env Var",
                         "type": "string"
+                      },
+                      "runtime_context": {
+                        "default": "",
+                        "title": "Runtime Context",
+                        "type": "string",
+                        "x-launchplane-optional-response": true
                       }
                     },
                     "title": "MergeTrainGitHubTokenSource",
@@ -84239,6 +84275,96 @@
           }
         },
         "summary": "Read merge train controller status"
+      }
+    },
+    "/v1/work-graph/merge-train/policy": {
+      "get": {
+        "operationId": "read_merge_train_policy",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MergeTrainPolicyReadResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read the active merge train policy record without resolving credentials"
       }
     },
     "/v1/work-graph/merge-train/policy-targets": {

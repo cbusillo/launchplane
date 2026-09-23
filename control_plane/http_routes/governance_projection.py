@@ -154,7 +154,7 @@ def register_governance_projection_routes(
                 base_branch=normalized_base_branch,
                 generated_at=dependencies.now(),
                 repository_evidence=repository_evidence,
-                github_token_env_var=repository_policy.github_token.env_var,
+                github_token_source=repository_policy.github_token,
             )
         except (LookupError, TypeError, ValueError):
             raise common.http_error(

@@ -70,6 +70,28 @@ def _provider_delivery_expectation(
 
 
 class MergeTrainPolicyTests(unittest.TestCase):
+    def test_token_source_preserves_stored_policy_and_requires_explicit_selection(self) -> None:
+        legacy = build_test_merge_train_policy()
+        payload = legacy.model_dump(mode="json")
+        legacy_digest = legacy.policy_sha256
+        token_source = payload["policies"][0]["github_token"]
+        self.assertNotIn("runtime_context", token_source)
+        token_source["runtime_context"] = ""
+        restored = MergeTrainPolicy.model_validate(payload)
+        self.assertEqual(restored.policy_sha256, legacy_digest)
+        self.assertEqual(restored.model_dump(mode="json"), legacy.model_dump(mode="json"))
+
+        token_source["runtime_context"] = "example_context"
+        with self.assertRaises(ValidationError):
+            MergeTrainPolicy.model_validate(payload)
+        token_source["env_var"] = ""
+        managed = MergeTrainPolicy.model_validate(payload)
+        self.assertNotEqual(managed.policy_sha256, legacy_digest)
+        self.assertEqual(
+            merge_train_repository_policy_delivery_semantics_sha256(managed.policies[0]),
+            merge_train_repository_policy_delivery_semantics_sha256(legacy.policies[0]),
+        )
+
     def test_provider_delivery_expectation_normalizes_exact_provider_semantics(self) -> None:
         pull_request = ProviderPullRequestExpectationV1(
             dismiss_stale_reviews_on_push=False,

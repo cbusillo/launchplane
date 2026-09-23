@@ -13964,6 +13964,12 @@
             "default": "",
             "title": "Env Var",
             "type": "string"
+          },
+          "runtime_context": {
+            "default": "",
+            "title": "Runtime Context",
+            "type": "string",
+            "x-launchplane-optional-response": true
           }
         },
         "title": "MergeTrainGitHubTokenSource",
