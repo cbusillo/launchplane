@@ -369,18 +369,18 @@ function TenantAdmissionEvaluation({
         />
       </div>
 
-      {evaluation.outcome === "already_merged" ? (
+      {evaluation.outcome === "already_merged" ?
         <EngineeringBoundaryNote title="Pull request already merged">
           This exact pull request is already on the target branch, so Launchplane
           does not offer an admission action for it.
         </EngineeringBoundaryNote>
-      ) : (
+      : !admission?.classification_kind ?
         <EngineeringBoundaryNote title="Classification evidence unavailable">
           Launchplane cannot prove that this repository is engineering or tenant UI.
           The candidate remains blocked until the DB-backed repository classification
           and exact admission evidence are available.
         </EngineeringBoundaryNote>
-      )}
+      : null}
 
       <div className="tenant-admission-detail-grid">
         <section className="tenant-admission-evidence-card">
@@ -528,10 +528,6 @@ function evaluationTone(readModel: TenantAdmissionEvaluationReadModel): string {
   if (readModel.evaluation.outcome === "not_applicable") {
     return "neutral";
   }
-  const admission = readModel.evaluation.admission;
-  if (admission?.category === "pending" && readModel.evaluation.technical_checks?.status === "pass") {
-    return "pending";
-  }
   return "blocked";
 }
 
@@ -545,9 +541,6 @@ function evaluationTitle(readModel: TenantAdmissionEvaluationReadModel): string 
   }
   if (evaluation.outcome === "not_applicable") {
     return "Engineering normal flow";
-  }
-  if (evaluation.admission?.category === "pending") {
-    return "Waiting for one current admission path";
   }
   return "Merge remains blocked";
 }

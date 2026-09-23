@@ -979,6 +979,9 @@ test.describe("operator journeys", () => {
       }),
     ).toBeVisible();
     await expect(
+      page.getByText("Classification evidence unavailable", { exact: true }),
+    ).toHaveCount(0);
+    await expect(
       page.getByText("This page is read-only.", { exact: false }),
     ).toBeVisible();
     await expect(

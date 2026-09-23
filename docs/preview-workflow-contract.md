@@ -340,12 +340,11 @@ stale decision forward onto the replacement generation.
 Preview refresh, destroy, and verification never depend on manager approval
 and no longer attempt status reconciliation.
 
-The broader `tenant-admission` status is a separate Launchplane projection. For
-a repository classified as `tenant_ui`, it recomputes the exact current
-candidate and succeeds when manager preview approval, a technical human waiver,
-or trusted-maintenance evidence is satisfied. It does not replace or weaken the
-manager-preview binding rules. Preview refresh, verification, destroy, and
-cleanup do not wait for either status, and projection delivery failure never
+The `tenant-admission` status is a separate Launchplane projection of the current
+repository classification and candidate identity. It no longer evaluates manager,
+waiver, or maintenance admission records. The controller separately requires
+current technical checks before merging. Preview refresh, verification, destroy,
+and cleanup do not wait for this status, and projection delivery failure never
 rolls back a completed lifecycle mutation.
 
 Generic-web routes write lifecycle records as part of refresh, destroy, and
