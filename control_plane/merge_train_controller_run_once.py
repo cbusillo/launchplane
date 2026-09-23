@@ -1411,6 +1411,7 @@ def _advance_without_active_landing(
             trace_id=trace_id,
             recorded_at=recorded_at,
             candidate_store=candidate_store,
+            stack_collapse_store=stack_collapse_store,
             active_candidate_record=active_candidate_record,
             lease=lease,
         )
@@ -1456,6 +1457,7 @@ def _advance_active_candidate_record(
     trace_id: str,
     recorded_at: str,
     candidate_store: MergeTrainBatchCandidateRecordStore,
+    stack_collapse_store: MergeTrainStackCollapsePlanRecordStore,
     active_candidate_record: MergeTrainBatchCandidateRecord,
     lease: MergeTrainControllerLeaseContext,
 ) -> dict[str, object]:
@@ -1520,6 +1522,22 @@ def _advance_active_candidate_record(
 
     candidate_build_error: MergeTrainGitHubStaleHeadError | None = None
     if active_candidate_record.candidate.status in {"planned", "building"}:
+        reflow_result = _reflow_stale_candidate_record(
+            request=request,
+            policy=policy,
+            policy_sha256=policy_sha256,
+            repository_policy=repository_policy,
+            transport=transport,
+            github_client=github_client,
+            candidate_store=candidate_store,
+            stack_collapse_store=stack_collapse_store,
+            candidate_record=active_candidate_record,
+            trace_id=trace_id,
+            recorded_at=recorded_at,
+            lease=lease,
+        )
+        if reflow_result is not None:
+            return reflow_result
         controller_action = "build_candidate"
         if request.mutate:
             lease.checkpoint(
@@ -1634,6 +1652,84 @@ def _advance_active_candidate_record(
     return result
 
 
+def _reflow_stale_candidate_record(
+    *,
+    request: MergeTrainControllerRunOnceEnvelope,
+    policy: MergeTrainPolicy,
+    policy_sha256: str,
+    repository_policy: MergeTrainRepositoryPolicy,
+    transport: MergeTrainGitHubTransport,
+    github_client: GitHubMergeTrainClient,
+    candidate_store: MergeTrainBatchCandidateRecordStore,
+    stack_collapse_store: MergeTrainStackCollapsePlanRecordStore,
+    candidate_record: MergeTrainBatchCandidateRecord,
+    trace_id: str,
+    recorded_at: str,
+    lease: MergeTrainControllerLeaseContext,
+) -> dict[str, object] | None:
+    """Replan obsolete candidates before any build or landing-plan mutation."""
+    snapshot = github_client.read_merge_train_snapshot(
+        repository=request.repository,
+        base_branch=request.base_branch,
+    )
+    candidate_snapshot = snapshot
+    stack_collapse_root = candidate_record.candidate.stack_collapse_root
+    if stack_collapse_root is not None:
+        candidate_snapshot = snapshot.model_copy(
+            update={
+                "pull_requests": tuple(
+                    pull_request
+                    for pull_request in snapshot.pull_requests
+                    if pull_request.number == stack_collapse_root.root_pull_request_number
+                )
+            }
+        )
+    dry_run_result = build_merge_train_dry_run_result(
+        policy=policy,
+        snapshot=candidate_snapshot,
+    )
+    candidate_matches_queue = _merge_train_candidate_matches_dry_run_queue(
+        candidate=candidate_record.candidate,
+        dry_run_result=dry_run_result,
+        base_sha=snapshot.base_sha,
+    )
+    if not candidate_matches_queue:
+        if request.mutate:
+            lease.checkpoint(
+                active_action="reflow_candidate",
+                active_phase="supersede_stale_candidate",
+                active_record_id=candidate_record.record_id,
+                active_pull_request_number=None,
+                step_payload={
+                    "candidate_record_id": candidate_record.record_id,
+                    "batch_id": candidate_record.candidate.batch_id,
+                },
+            )
+            _supersede_active_merge_train_batch_candidate_records(
+                record_store=candidate_store,
+                repository=request.repository,
+                base_branch=request.base_branch,
+                batch_id=candidate_record.candidate.batch_id,
+                replacement_record_id=None,
+            )
+        result = _advance_without_candidate_record(
+            request=request,
+            policy=policy,
+            policy_sha256=policy_sha256,
+            repository_policy=repository_policy,
+            transport=transport,
+            github_client=github_client,
+            candidate_store=candidate_store,
+            stack_collapse_store=stack_collapse_store,
+            trace_id=trace_id,
+            recorded_at=recorded_at,
+            lease=lease,
+        )
+        result["superseded_merge_train_batch_candidate_record_id"] = candidate_record.record_id
+        return result
+    return None
+
+
 def _advance_passed_candidate_record(
     *,
     request: MergeTrainControllerRunOnceEnvelope,
@@ -1683,67 +1779,22 @@ def _advance_passed_candidate_record(
             "merge_train_batch_landing_plan_record_id": completed_landing_record.record_id,
             "landing_plan": completed_landing_record.landing_plan.model_dump(mode="json"),
         }
-    snapshot = github_client.read_merge_train_snapshot(
-        repository=request.repository,
-        base_branch=request.base_branch,
-    )
-    candidate_snapshot = snapshot
-    stack_collapse_root = passed_candidate_record.candidate.stack_collapse_root
-    if stack_collapse_root is not None:
-        candidate_snapshot = snapshot.model_copy(
-            update={
-                "pull_requests": tuple(
-                    pull_request
-                    for pull_request in snapshot.pull_requests
-                    if pull_request.number == stack_collapse_root.root_pull_request_number
-                )
-            }
-        )
-    dry_run_result = build_merge_train_dry_run_result(
+    reflow_result = _reflow_stale_candidate_record(
+        request=request,
         policy=policy,
-        snapshot=candidate_snapshot,
+        policy_sha256=policy_sha256,
+        repository_policy=repository_policy,
+        transport=transport,
+        github_client=github_client,
+        candidate_store=candidate_store,
+        stack_collapse_store=stack_collapse_store,
+        candidate_record=passed_candidate_record,
+        trace_id=trace_id,
+        recorded_at=recorded_at,
+        lease=lease,
     )
-    candidate_matches_queue = _merge_train_candidate_matches_dry_run_queue(
-        candidate=passed_candidate_record.candidate,
-        dry_run_result=dry_run_result,
-        base_sha=snapshot.base_sha,
-    )
-    if not candidate_matches_queue:
-        if request.mutate:
-            lease.checkpoint(
-                active_action="reflow_candidate",
-                active_phase="supersede_stale_passed_candidate",
-                active_record_id=passed_candidate_record.record_id,
-                active_pull_request_number=None,
-                step_payload={
-                    "candidate_record_id": passed_candidate_record.record_id,
-                    "batch_id": passed_candidate_record.candidate.batch_id,
-                },
-            )
-            _supersede_active_merge_train_batch_candidate_records(
-                record_store=candidate_store,
-                repository=request.repository,
-                base_branch=request.base_branch,
-                batch_id=passed_candidate_record.candidate.batch_id,
-                replacement_record_id=None,
-            )
-        result = _advance_without_candidate_record(
-            request=request,
-            policy=policy,
-            policy_sha256=policy_sha256,
-            repository_policy=repository_policy,
-            transport=transport,
-            github_client=github_client,
-            candidate_store=candidate_store,
-            stack_collapse_store=stack_collapse_store,
-            trace_id=trace_id,
-            recorded_at=recorded_at,
-            lease=lease,
-        )
-        result["superseded_merge_train_batch_candidate_record_id"] = (
-            passed_candidate_record.record_id
-        )
-        return result
+    if reflow_result is not None:
+        return reflow_result
     if not request.mutate:
         return {
             "repository": request.repository,

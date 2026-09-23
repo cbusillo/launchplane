@@ -2480,109 +2480,230 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
             [1, 2],
         )
 
-    async def test_reflows_passed_candidate_after_head_changes_before_landing(self) -> None:
-        class MovedHeadMergeTrainSnapshotReader(_FakeMergeTrainSnapshotReader):
-            def read_merge_train_snapshot(
-                self, *, repository: str, base_branch: str
-            ) -> MergeTrainDryRunSnapshot:
-                base_snapshot = super().read_merge_train_snapshot(
-                    repository=repository, base_branch=base_branch
-                )
-                moved_pull_request = base_snapshot.pull_requests[0].model_copy(
-                    update={"head_sha": "head-1-updated"}
-                )
-                return base_snapshot.model_copy(update={"pull_requests": (moved_pull_request,)})
-
+    async def test_candidate_build_stops_when_fresh_queue_cannot_be_read(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
             patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            patch(
+                "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
+                _UnavailableMergeTrainSnapshotReader,
+            ),
+            patch(
+                "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                _FakeMergeTrainGitHubClient,
+            ),
+            patch.object(_FakeMergeTrainGitHubClient, "build_batch_candidate") as build,
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)
+            original = _seed_merge_train_batch_candidate_record(state_dir)
             store = FilesystemRecordStore(state_dir=state_dir)
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(_merge_train_service_identity()),
                 authz_policy=_merge_train_service_policy(),
                 record_store_factory=lambda: store,
             )
-            request_payload = {
-                "schema_version": 1,
-                "repository": "cbusillo/sellyouroutboard",
-                "base_branch": "main",
-                "mutate": True,
-            }
-            with (
-                patch(
-                    "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
-                    _FakeMergeTrainSnapshotReader,
-                ),
-                patch(
-                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
-                    _FakeMergeTrainGitHubClient,
-                ),
-            ):
-                responses = [
-                    await _post_merge_train_controller_run_once(app, request_payload)
-                    for _ in range(3)
-                ]
-            passed_payload = responses[2].json()
-            passed_record_id = passed_payload["records"]["merge_train_batch_candidate_record_id"]
-            passed_batch_id = passed_payload["result"]["candidate"]["batch_id"]
-            with (
-                patch(
-                    "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
-                    MovedHeadMergeTrainSnapshotReader,
-                ),
-                patch(
-                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
-                    _FakeMergeTrainGitHubClient,
-                ),
-            ):
-                reflow_response = await _post_merge_train_controller_run_once(app, request_payload)
-                build_response = await _post_merge_train_controller_run_once(app, request_payload)
-            candidate_records = store.list_merge_train_batch_candidate_records(
-                repository="cbusillo/sellyouroutboard",
-                base_branch="main",
+            response = await _post_merge_train_controller_run_once(
+                app,
+                {
+                    "schema_version": 1,
+                    "repository": "cbusillo/sellyouroutboard",
+                    "base_branch": "main",
+                    "mutate": True,
+                },
             )
-            landing_records = store.list_merge_train_batch_landing_plan_records(
-                repository="cbusillo/sellyouroutboard",
-                base_branch="main",
-            )
+            self.assertEqual(response.status_code, 502, response.text)
+            self.assertEqual(store.list_merge_train_batch_candidate_records(), (original,))
+            build.assert_not_called()
 
-        reflow_payload = reflow_response.json()
-        build_payload = build_response.json()
-        self.assertTrue(all(response.status_code == 202 for response in responses))
-        self.assertEqual(reflow_response.status_code, 202)
-        self.assertEqual(reflow_payload["result"]["controller_action"], "plan_candidate")
-        self.assertEqual(
-            reflow_payload["result"]["superseded_merge_train_batch_candidate_record_id"],
-            passed_record_id,
-        )
-        self.assertEqual(
-            [entry["head_sha"] for entry in reflow_payload["result"]["candidate"]["entries"]],
-            ["head-1-updated"],
-        )
-        self.assertEqual(build_response.status_code, 202)
-        self.assertEqual(build_payload["result"]["controller_action"], "build_candidate")
-        self.assertEqual(landing_records, ())
-        superseded_record = next(
-            record for record in candidate_records if record.record_id == passed_record_id
-        )
-        self.assertEqual(superseded_record.status, "superseded")
-        active_records = [record for record in candidate_records if record.status == "active"]
-        self.assertTrue(active_records)
-        self.assertFalse(
-            any(record.candidate.batch_id == passed_batch_id for record in active_records)
-        )
-        self.assertTrue(
-            any(record.candidate.status == "ready_for_checks" for record in active_records)
-        )
-        self.assertTrue(
-            all(
-                record.candidate.entries[0].head_sha == "head-1-updated"
-                for record in active_records
-            )
-        )
+    async def test_discards_unbuilt_candidate_when_its_pull_request_leaves_the_queue(self) -> None:
+        class EmptyQueueSnapshotReader(_FakeMergeTrainSnapshotReader):
+            def read_merge_train_snapshot(
+                self, *, repository: str, base_branch: str
+            ) -> MergeTrainDryRunSnapshot:
+                snapshot = super().read_merge_train_snapshot(
+                    repository=repository, base_branch=base_branch
+                )
+                return snapshot.model_copy(
+                    update={"base_sha": "base-after-manual-merge", "pull_requests": ()}
+                )
+
+        for candidate_status in ("planned", "building"):
+            with (
+                self.subTest(candidate_status=candidate_status),
+                TemporaryDirectory() as temporary_directory_name,
+                patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+                patch(
+                    "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
+                    EmptyQueueSnapshotReader,
+                ),
+                patch(
+                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                    _FakeMergeTrainGitHubClient,
+                ),
+                patch.object(_FakeMergeTrainGitHubClient, "build_batch_candidate") as build,
+            ):
+                state_dir = Path(temporary_directory_name) / "state"
+                _seed_merge_train_policy(state_dir)
+                original = _seed_merge_train_batch_candidate_record(
+                    state_dir, status=candidate_status
+                )
+                store = FilesystemRecordStore(state_dir=state_dir)
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(_merge_train_service_identity()),
+                    authz_policy=_merge_train_service_policy(),
+                    record_store_factory=lambda: store,
+                )
+                request_payload = {
+                    "schema_version": 1,
+                    "repository": "cbusillo/sellyouroutboard",
+                    "base_branch": "main",
+                    "mutate": False,
+                }
+                dry_run = await _post_merge_train_controller_run_once(app, request_payload)
+                self.assertEqual(dry_run.status_code, 202, dry_run.text)
+                self.assertEqual(dry_run.json()["result"]["controller_action"], "idle")
+                self.assertEqual(store.list_merge_train_batch_candidate_records(), (original,))
+                request_payload["mutate"] = True
+                applied = await _post_merge_train_controller_run_once(app, request_payload)
+                self.assertEqual(applied.status_code, 202, applied.text)
+                self.assertEqual(applied.json()["result"]["controller_action"], "idle")
+                self.assertEqual(
+                    applied.json()["result"]["superseded_merge_train_batch_candidate_record_id"],
+                    original.record_id,
+                )
+                self.assertEqual(
+                    [record.status for record in store.list_merge_train_batch_candidate_records()],
+                    ["superseded"],
+                )
+                resumed = await _post_merge_train_controller_run_once(app, request_payload)
+                self.assertEqual(resumed.status_code, 202, resumed.text)
+                self.assertEqual(resumed.json()["result"]["controller_action"], "idle")
+                build.assert_not_called()
+
+    async def test_reflows_candidate_after_head_changes_before_build_or_landing(self) -> None:
+        for controller_steps in (1, 3):
+            with self.subTest(controller_steps=controller_steps):
+
+                class MovedHeadMergeTrainSnapshotReader(_FakeMergeTrainSnapshotReader):
+                    def read_merge_train_snapshot(
+                        self, *, repository: str, base_branch: str
+                    ) -> MergeTrainDryRunSnapshot:
+                        base_snapshot = super().read_merge_train_snapshot(
+                            repository=repository, base_branch=base_branch
+                        )
+                        moved_pull_request = base_snapshot.pull_requests[0].model_copy(
+                            update={"head_sha": "head-1-updated"}
+                        )
+                        return base_snapshot.model_copy(
+                            update={"pull_requests": (moved_pull_request,)}
+                        )
+
+                with (
+                    TemporaryDirectory() as temporary_directory_name,
+                    patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+                ):
+                    state_dir = Path(temporary_directory_name) / "state"
+                    _seed_merge_train_policy(state_dir)
+                    store = FilesystemRecordStore(state_dir=state_dir)
+                    app = create_launchplane_fastapi_app(
+                        verifier=_StubVerifier(_merge_train_service_identity()),
+                        authz_policy=_merge_train_service_policy(),
+                        record_store_factory=lambda: store,
+                    )
+                    request_payload = {
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mutate": True,
+                    }
+                    with (
+                        patch(
+                            "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
+                            _FakeMergeTrainSnapshotReader,
+                        ),
+                        patch(
+                            "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                            _FakeMergeTrainGitHubClient,
+                        ),
+                    ):
+                        responses = [
+                            await _post_merge_train_controller_run_once(app, request_payload)
+                            for _ in range(controller_steps)
+                        ]
+                    candidate_payload = responses[-1].json()
+                    candidate_record_id = candidate_payload["records"][
+                        "merge_train_batch_candidate_record_id"
+                    ]
+                    candidate_batch_id = candidate_payload["result"]["candidate"]["batch_id"]
+                    with (
+                        patch(
+                            "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
+                            MovedHeadMergeTrainSnapshotReader,
+                        ),
+                        patch(
+                            "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                            _FakeMergeTrainGitHubClient,
+                        ),
+                    ):
+                        reflow_response = await _post_merge_train_controller_run_once(
+                            app, request_payload
+                        )
+                        build_response = await _post_merge_train_controller_run_once(
+                            app, request_payload
+                        )
+                    candidate_records = store.list_merge_train_batch_candidate_records(
+                        repository="cbusillo/sellyouroutboard",
+                        base_branch="main",
+                    )
+                    landing_records = store.list_merge_train_batch_landing_plan_records(
+                        repository="cbusillo/sellyouroutboard",
+                        base_branch="main",
+                    )
+
+                reflow_payload = reflow_response.json()
+                build_payload = build_response.json()
+                self.assertTrue(all(response.status_code == 202 for response in responses))
+                self.assertEqual(reflow_response.status_code, 202)
+                self.assertEqual(reflow_payload["result"]["controller_action"], "plan_candidate")
+                self.assertEqual(
+                    reflow_payload["result"]["superseded_merge_train_batch_candidate_record_id"],
+                    candidate_record_id,
+                )
+                self.assertEqual(
+                    [
+                        entry["head_sha"]
+                        for entry in reflow_payload["result"]["candidate"]["entries"]
+                    ],
+                    ["head-1-updated"],
+                )
+                self.assertEqual(build_response.status_code, 202)
+                self.assertEqual(build_payload["result"]["controller_action"], "build_candidate")
+                self.assertEqual(landing_records, ())
+                superseded_record = next(
+                    record
+                    for record in candidate_records
+                    if record.record_id == candidate_record_id
+                )
+                self.assertEqual(superseded_record.status, "superseded")
+                active_records = [
+                    record for record in candidate_records if record.status == "active"
+                ]
+                self.assertTrue(active_records)
+                self.assertFalse(
+                    any(
+                        record.candidate.batch_id == candidate_batch_id for record in active_records
+                    )
+                )
+                self.assertTrue(
+                    any(record.candidate.status == "ready_for_checks" for record in active_records)
+                )
+                self.assertTrue(
+                    all(
+                        record.candidate.entries[0].head_sha == "head-1-updated"
+                        for record in active_records
+                    )
+                )
 
     async def test_keeps_passed_candidate_when_only_live_readiness_changes(self) -> None:
         class UnknownMergeabilitySnapshotReader(_FakeMergeTrainSnapshotReader):
@@ -2684,9 +2805,15 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
                 ),
             ):
                 await _post_merge_train_controller_run_once(app, request_payload)
-            with patch(
-                "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
-                _StaleCandidateMergeTrainGitHubClient,
+            with (
+                patch(
+                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                    _StaleCandidateMergeTrainGitHubClient,
+                ),
+                patch(
+                    "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
+                    _FakeMergeTrainSnapshotReader,
+                ),
             ):
                 failed_response = await _post_merge_train_controller_run_once(app, request_payload)
             with (
@@ -2754,9 +2881,15 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
                 ),
             ):
                 await _post_merge_train_controller_run_once(app, request_payload)
-            with patch(
-                "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
-                _StaleCandidateMergeTrainGitHubClient,
+            with (
+                patch(
+                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                    _StaleCandidateMergeTrainGitHubClient,
+                ),
+                patch(
+                    "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
+                    _FakeMergeTrainSnapshotReader,
+                ),
             ):
                 failed_response = await _post_merge_train_controller_run_once(app, request_payload)
             with patch(

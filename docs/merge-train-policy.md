@@ -708,7 +708,12 @@ Controller actions have these retry/stop semantics:
   stack. Stop and surface the redacted stack discovery details.
 - `plan_candidate`: The queue can produce the next batch candidate. Mutate once,
   then call again.
-- `build_candidate`: A stored candidate needs its train ref built or refreshed.
+- `build_candidate`: A stored candidate still matches the fresh queue and base
+  and needs its train ref built or refreshed. Planned or interrupted-building
+  candidates are rechecked before any candidate-ref write. If their head, queue,
+  or base has changed, dry-run reports the replacement action; mutate supersedes
+  the stale records under the controller lease and replans. An empty queue
+  returns `idle`, without building the obsolete ref.
   Mutate once, then call again.
 - `observe_candidate`: A built candidate needs check observation. Mutate or
   dry-run later until checks pass, fail, or remain pending.
