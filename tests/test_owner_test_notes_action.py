@@ -9,7 +9,7 @@ import unittest
 from control_plane.release_review_github import owner_test_notes
 
 
-ACTION = Path(".github/actions/owner-test-notes/index.cjs")
+ACTION = Path(".github/actions/owner-test-notes/index.mjs")
 
 
 class OwnerTestNotesActionTests(unittest.TestCase):
@@ -39,7 +39,6 @@ class OwnerTestNotesActionTests(unittest.TestCase):
                         cwd=directory,
                         capture_output=True,
                         text=True,
-                        check=False,
                     )
                     try:
                         expected = bool(owner_test_notes(body))

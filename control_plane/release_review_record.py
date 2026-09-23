@@ -68,7 +68,7 @@ def release_decision_issue_body(decision: ReleaseReviewDecisionRecord) -> str:
 
 def _record_parts(decision: ReleaseReviewDecisionRecord) -> tuple[str, tuple[str, ...]]:
     body = release_decision_issue_body(decision)
-    if len(body.encode("utf-8")) <= 60000:
+    if len(body.encode()) <= 60000:
         return body, ()
     # UTF-8 uses at most four bytes per character. Literal blocks keep each
     # piece below the provider limit even when notes contain Unicode or fences.
@@ -129,7 +129,7 @@ def publish_release_decision(
     )
     if not token:
         raise ValueError("Release record source-control access is unavailable.")
-    path = f"/repos/{quote(profile.repository, safe='/')}/issues"
+    path = f"/repos/{quote(profile.repository)}/issues"
     decision_time = (
         datetime.fromisoformat(decision.decided_at).astimezone(UTC).replace(microsecond=0)
     )

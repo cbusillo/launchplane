@@ -1,6 +1,5 @@
-"use strict";
-
-const fs = require("node:fs");
+import fs from "node:fs";
+import process from "node:process";
 
 function ownerTestNotes(body) {
   const notes = [];
@@ -40,14 +39,10 @@ function main() {
   console.log("Owner test notes are present. Their content is reviewed by the Owner at release.");
 }
 
-if (require.main === module) {
-  try {
-    main();
-  } catch (error) {
-    const message = String(error.message).replaceAll("%", "%25").replaceAll("\r", "%0D").replaceAll("\n", "%0A");
-    console.error(`::error::${message}`);
-    process.exitCode = 1;
-  }
+try {
+  main();
+} catch (error) {
+  const message = String(error.message).replaceAll("%", "%25").replaceAll("\r", "%0D").replaceAll("\n", "%0A");
+  console.error(`::error::${message}`);
+  process.exitCode = 1;
 }
-
-module.exports = { ownerTestNotes };

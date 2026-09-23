@@ -309,7 +309,7 @@ class ReleaseReviewTests(unittest.TestCase):
                 control_plane_root=Path(self.directory.name),
                 state_dir=Path(self.directory.name),
                 database_url=None,
-                record_store=cast(OdooProdPromotionRunStore, self.store),
+                record_store=cast(OdooProdPromotionRunStore, cast(object, self.store)),
                 request=OdooProdPromotionRunRequest(
                     product="example-site", context="example-site", request_id="release-test"
                 ),

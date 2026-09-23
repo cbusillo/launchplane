@@ -2,4 +2,4 @@ name: Owner test notes
 description: Require a nonempty Owner test notes section without judging its contents.
 runs:
   using: node24
-  main: index.cjs
+  main: index.mjs

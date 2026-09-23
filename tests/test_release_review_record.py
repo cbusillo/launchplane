@@ -126,9 +126,13 @@ class ReleaseReviewRecordTests(unittest.TestCase):
             )
         self.assertEqual(url, "https://github.com/example/site/issues/99")
         self.assertEqual(len(issues), 1)
-        comment_bodies = [str(comment["body"]) for comment in comments]
+        comment_bodies = []
+        for comment in comments:
+            body = comment["body"]
+            assert isinstance(body, str)
+            comment_bodies.append(body)
         self.assertEqual(len(comment_bodies), len(set(comment_bodies)))
-        self.assertTrue(all(len(body.encode("utf-8")) <= 60000 for body in comment_bodies))
+        self.assertTrue(all(len(body.encode()) <= 60000 for body in comment_bodies))
         recovered = "".join(
             "\n".join(body.split("\n\n", 2)[2].split("\n")[1:-1]) for body in comment_bodies
         )

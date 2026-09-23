@@ -40,7 +40,7 @@ def owner_test_notes(body: str) -> str:
 def read_release_changes(
     *, repository: str, production_commit: str, candidate_commit: str, read: GitHubRead
 ) -> tuple[tuple[ReleaseReviewItem, ...], tuple[str, ...]]:
-    repository_path = quote(repository, safe="/")
+    repository_path = quote(repository)
     commits: list[str] = []
     total = None
     for page in range(1, 51):
