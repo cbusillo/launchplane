@@ -127,7 +127,7 @@ def register_product_review_routes(
                 context=LAUNCHPLANE_SERVICE_CONTEXT,
             ):
                 return profile
-        unavailable(trace_id)
+        return unavailable(trace_id)
 
     def build_response(
         *,
