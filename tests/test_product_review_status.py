@@ -11,7 +11,10 @@ from control_plane.contracts.product_review import (
 )
 from control_plane.github_app_identity import GitHubAppInstallationToken
 from control_plane.http_app import create_launchplane_fastapi_app
-from control_plane.product_review_status import OwnerReviewStatusPublisher
+from control_plane.product_review_status import (
+    OwnerReviewStatusPublisher,
+    owner_review_reference_url,
+)
 from control_plane.service_auth import GitHubHumanIdentity, LaunchplaneAuthzPolicy
 from control_plane.service_human_auth import HumanSessionManager, InMemoryHumanSessionStore
 from control_plane.storage.filesystem import FilesystemRecordStore
@@ -164,6 +167,27 @@ class OwnerReviewStatusTests(unittest.TestCase):
             pull_request_number=_PULL_REQUEST,
             retire_leftovers=retire_leftovers,
         )
+
+    def test_review_link_encodes_target_and_rejects_non_origin_urls(self) -> None:
+        self.assertEqual(
+            owner_review_reference_url(
+                public_origin="https://ops.example.test/",
+                repository="example/repo",
+                pull_request_number=7,
+            ),
+            "https://ops.example.test/ui/owner-review?repository=example%2Frepo&pull_request=7",
+        )
+        for origin in (
+            "https://github.com/example/repo/pull/7",
+            "https://user:pass@ops.example.test",
+        ):
+            with (
+                self.subTest(origin=origin),
+                self.assertRaisesRegex(ValueError, "valid browser public origin"),
+            ):
+                owner_review_reference_url(
+                    public_origin=origin, repository="example/repo", pull_request_number=7
+                )
 
     def test_marked_pull_request_waits_for_the_owner_with_the_review_link(self) -> None:
         github = _GitHub()

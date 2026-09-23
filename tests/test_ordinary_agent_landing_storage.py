@@ -62,7 +62,6 @@ from control_plane.storage.postgres import (
 )
 from tests import test_ordinary_agent_effect_storage as effect_support
 from tests import test_ordinary_agent_session_storage as session_support
-from tests import test_postgres_integration as postgres_support
 from tests.test_merge_admission_records import _guard_records
 
 
@@ -531,31 +530,6 @@ class OrdinaryAgentLandingStorageTests(unittest.TestCase):
             self.assertIsNone(
                 session.get(LaunchplaneMergeAdmissionRow, proposal.record.admission_id)
             )
-
-    def test_new_owner_decision_invalidates_observed_authority(self) -> None:
-        preparation, proposal = self.observed_proposal()
-        original = postgres_support._owner_acceptance_event()
-        decision = original.model_copy(
-            update={
-                "binding": original.binding.model_copy(
-                    update={
-                        "repository_id": str(preparation.target.repository_id),
-                        "repository": preparation.target.repository,
-                        "pull_request_number": preparation.entry.pull_request_number,
-                    }
-                )
-            }
-        )
-        self.store.write_owner_acceptance_event_record(decision)
-        with self.assertRaisesRegex(
-            OrdinaryAgentSessionAdmissionDenied, "landing_authority_changed"
-        ):
-            self.finalize(preparation, proposal)
-        with self.store._session_factory() as session:
-            self.assertIsNone(
-                session.get(LaunchplaneMergeAdmissionRow, proposal.record.admission_id)
-            )
-            self.assertEqual(len(list(session.query(LaunchplaneOrdinaryAgentEffectRow))), 0)
 
     def test_fresh_envelope_cannot_reuse_checks_from_before_preparation(self) -> None:
         with self.assertRaisesRegex(

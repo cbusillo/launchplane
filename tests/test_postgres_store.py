@@ -14,7 +14,6 @@ from alembic.config import Config as AlembicConfig
 from click.testing import CliRunner
 from sqlalchemy import create_engine, inspect, insert, text, update
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
-from sqlalchemy.pool import NullPool
 from sqlalchemy.sql.schema import Index
 
 from control_plane.cli import main
@@ -1717,80 +1716,6 @@ def _merge_train_stack_collapse_plan_record(
 
 
 class PostgresRecordStoreTests(unittest.TestCase):
-    def test_owner_acceptance_projection_lock_does_not_consume_record_pool(self) -> None:
-        store = PostgresRecordStore(
-            database_url="postgresql+psycopg://test:test@127.0.0.1:1/launchplane"
-        )
-        try:
-            assert store._owner_acceptance_projection_lock_engine is not None
-            self.assertIsInstance(
-                store._owner_acceptance_projection_lock_engine.pool,
-                NullPool,
-            )
-        finally:
-            store.close()
-
-    def test_owner_acceptance_projection_lock_commits_and_verifies_unlock(self) -> None:
-        store = PostgresRecordStore(
-            database_url="postgresql+psycopg://test:test@127.0.0.1:1/launchplane"
-        )
-        original_lock_engine = store._owner_acceptance_projection_lock_engine
-        assert original_lock_engine is not None
-        original_lock_engine.dispose()
-        lock_engine = MagicMock()
-        connection = MagicMock()
-        connection.scalar.side_effect = (True, True)
-        connection_context = MagicMock()
-        connection_context.__enter__.return_value = connection
-        connection_context.__exit__.return_value = False
-        lock_engine.connect.return_value = connection_context
-        store._owner_acceptance_projection_lock_engine = lock_engine
-        try:
-            with store.owner_acceptance_projection_lock(
-                repository_id="101",
-                pull_request_number=42,
-            ):
-                connection.commit.assert_called_once_with()
-
-            self.assertEqual(connection.commit.call_count, 2)
-            self.assertEqual(connection.scalar.call_count, 2)
-            self.assertIn(
-                "pg_try_advisory_lock",
-                str(connection.scalar.call_args_list[0].args[0]),
-            )
-            self.assertIn(
-                "pg_advisory_unlock",
-                str(connection.scalar.call_args_list[1].args[0]),
-            )
-        finally:
-            store.close()
-
-    def test_owner_acceptance_projection_lock_rejects_failed_unlock(self) -> None:
-        store = PostgresRecordStore(
-            database_url="postgresql+psycopg://test:test@127.0.0.1:1/launchplane"
-        )
-        original_lock_engine = store._owner_acceptance_projection_lock_engine
-        assert original_lock_engine is not None
-        original_lock_engine.dispose()
-        lock_engine = MagicMock()
-        connection = MagicMock()
-        connection.scalar.side_effect = (True, False)
-        connection_context = MagicMock()
-        connection_context.__enter__.return_value = connection
-        connection_context.__exit__.return_value = False
-        lock_engine.connect.return_value = connection_context
-        store._owner_acceptance_projection_lock_engine = lock_engine
-        try:
-            with self.assertRaisesRegex(RuntimeError, "lock cleanup failed"):
-                with store.owner_acceptance_projection_lock(
-                    repository_id="101",
-                    pull_request_number=42,
-                ):
-                    pass
-            self.assertEqual(connection.commit.call_count, 2)
-        finally:
-            store.close()
-
     def test_postgres_metadata_index_names_fit_identifier_limit(self) -> None:
         index_names = tuple(
             index.name
@@ -3907,31 +3832,6 @@ class PostgresRecordStoreTests(unittest.TestCase):
                 "options": "-c search_path=launchplane -c statement_timeout=30000",
             },
         )
-
-    def test_postgres_store_applies_bounded_options_to_lock_engine(self) -> None:
-        database_url = "postgresql+psycopg://launchplane.invalid/launchplane"
-        primary_engine = Mock()
-        primary_engine.url.get_backend_name.return_value = "postgresql"
-
-        with (
-            patch("control_plane.storage.postgres._build_engine", return_value=primary_engine),
-            patch("control_plane.storage.postgres.create_engine") as create_engine_mock,
-        ):
-            store = PostgresRecordStore(
-                database_url=database_url,
-                postgres_connect_timeout_seconds=10,
-                postgres_statement_timeout_milliseconds=30_000,
-            )
-
-        create_engine_mock.assert_called_once_with(
-            database_url,
-            poolclass=NullPool,
-            connect_args={
-                "connect_timeout": 10,
-                "options": "-c statement_timeout=30000",
-            },
-        )
-        store.close()
 
     def test_runtime_schema_compatibility_requires_postgres(self) -> None:
         store = object.__new__(PostgresRecordStore)

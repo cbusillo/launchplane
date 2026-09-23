@@ -17,7 +17,7 @@ from control_plane.merge_admission import MergeAdmissionEvaluation
 from tests.test_merge_readiness import _evaluate as _merge_readiness
 from tests.test_merge_admission_records import _guard_records
 from tests.test_merge_train_admission import _stack_collapse_record
-from tests.test_owner_acceptance import (
+from tests.support.repository_evidence import (
     REPOSITORY,
     _repository_evidence,
     _store,

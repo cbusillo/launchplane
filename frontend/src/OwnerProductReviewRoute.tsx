@@ -15,7 +15,7 @@ import {
 import type { DevFixtureMode } from "./dev-fixture-loader";
 import { loadDevFixtures } from "./dev-fixture-loader";
 import { formatTime } from "./format";
-import { ownerAcceptanceLookupFromSearch } from "./route-model";
+import { productReviewLookupFromSearch } from "./route-model";
 import { useAppSearchParams } from "./router";
 import { safeExternalUrl } from "./url";
 import { OwnerReleaseReviewRoute } from "./OwnerReleaseReviewRoute";
@@ -125,7 +125,7 @@ function OwnerPreviewReviewRoute({
   fixtureMode: DevFixtureMode;
 }) {
   const searchParams = useAppSearchParams();
-  const lookup = ownerAcceptanceLookupFromSearch(searchParams.toString());
+  const lookup = productReviewLookupFromSearch(searchParams.toString());
   const [review, setReview] = useState<ProductReviewResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");

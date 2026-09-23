@@ -7,12 +7,8 @@ from contextlib import contextmanager, suppress
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from functools import wraps
-import fcntl
 import hashlib
-from pathlib import Path
 import secrets
-from threading import Lock
-import time
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -48,12 +44,10 @@ from sqlalchemy import (
     select,
 )
 from sqlalchemy import cast as sql_cast
-from sqlalchemy.dialects.postgresql import JSONB, insert as postgresql_insert
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.exc import DBAPIError, IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
-from sqlalchemy.pool import NullPool
 
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.agent_write_intent import AgentWriteIntentRecord
@@ -259,10 +253,6 @@ from control_plane.contracts.merge_train_effect import (
 )
 from control_plane.contracts.owner_acceptance import (
     OwnerAcceptanceEventRecord,
-    OwnerAcceptanceEventWriteStatus,
-    owner_acceptance_event_replay_matches,
-    owner_acceptance_subject_key,
-    validate_owner_acceptance_event_transition,
 )
 from control_plane.contracts.owner_control import (
     ChannelBindingRecord,
@@ -413,7 +403,6 @@ from control_plane.contracts.private_health_endpoint_record import (
     private_health_endpoint_record_sha256,
 )
 from control_plane.manager_preview_approval import ManagerPreviewApprovalEventConflictError
-from control_plane.owner_acceptance import OwnerAcceptanceEventConflictError
 from control_plane.contracts.route_binding_record import (
     EnvironmentRouteBindingRecord,
     route_binding_record_sha256,
@@ -709,8 +698,6 @@ class OrdinaryAgentDeliveryActivationConflictError(ValueError):
     """Raised when an activation mutation is not an exact replay or compare-and-swap."""
 
 
-_SQLITE_OWNER_ACCEPTANCE_PROJECTION_LOCKS_GUARD = Lock()
-_SQLITE_OWNER_ACCEPTANCE_PROJECTION_LOCKS: dict[str, Lock] = {}
 ConnectionFactory = Callable[[], Any]
 PayloadDict = dict[str, Any]
 PayloadJsonType = JSON().with_variant(JSONB(), "postgresql")
@@ -5899,22 +5886,6 @@ class PostgresRecordStore(HumanSessionStore):
             postgres_statement_timeout_milliseconds=postgres_statement_timeout_milliseconds,
         )
         self._session_factory = sessionmaker(self._engine, expire_on_commit=False)
-        lock_engine_kwargs: dict[str, Any] = {"poolclass": NullPool}
-        if connection_factory is not None:
-            lock_engine_kwargs["creator"] = connection_factory
-        elif self._engine.url.get_backend_name() == "postgresql":
-            connect_args = _engine_connect_args(
-                database_url,
-                postgres_connect_timeout_seconds=postgres_connect_timeout_seconds,
-                postgres_statement_timeout_milliseconds=(postgres_statement_timeout_milliseconds),
-            )
-            if connect_args:
-                lock_engine_kwargs["connect_args"] = connect_args
-        self._owner_acceptance_projection_lock_engine = (
-            create_engine(database_url, **lock_engine_kwargs)
-            if self._engine.url.get_backend_name() == "postgresql"
-            else None
-        )
 
     @property
     def backend_name(self) -> str:
@@ -6008,8 +5979,6 @@ class PostgresRecordStore(HumanSessionStore):
         return revisions[0]
 
     def close(self) -> None:
-        if self._owner_acceptance_projection_lock_engine is not None:
-            self._owner_acceptance_projection_lock_engine.dispose()
         self._engine.dispose()
 
     def __del__(self) -> None:
@@ -11589,77 +11558,6 @@ class PostgresRecordStore(HumanSessionStore):
                     )
                 return "replayed"
 
-    @contextmanager
-    def owner_acceptance_projection_lock(
-        self,
-        *,
-        repository_id: str,
-        pull_request_number: int,
-    ) -> Iterator[None]:
-        normalized_repository_id = repository_id.strip()
-        if not normalized_repository_id or pull_request_number < 1:
-            raise ValueError("Owner acceptance projection lock requires an exact pull request")
-        lock_subject = f"repository-id:{normalized_repository_id}:{pull_request_number}"
-        if self._engine.url.get_backend_name() == "sqlite":
-            database = self._engine.url.database
-            database_identity = (
-                str(Path(database).expanduser().resolve())
-                if database and database != ":memory:"
-                else f"memory:{id(self._engine)}"
-            )
-            lock_key = f"{database_identity}:{lock_subject}"
-            with _SQLITE_OWNER_ACCEPTANCE_PROJECTION_LOCKS_GUARD:
-                thread_lock = _SQLITE_OWNER_ACCEPTANCE_PROJECTION_LOCKS.setdefault(
-                    lock_key,
-                    Lock(),
-                )
-            with thread_lock:
-                if not database or database == ":memory:":
-                    yield
-                    return
-                lock_digest = hashlib.sha256(lock_key.encode()).hexdigest()
-                database_path = Path(database).expanduser().resolve()
-                lock_path = database_path.parent / (
-                    f".{database_path.name}.owner-acceptance-{lock_digest}.lock"
-                )
-                with lock_path.open("a+b") as lock_file:
-                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-                    try:
-                        yield
-                    finally:
-                        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-            return
-        lock_engine = self._owner_acceptance_projection_lock_engine
-        if lock_engine is None:
-            raise RuntimeError("PostgreSQL projection lock engine is unavailable")
-        lock_name = f"launchplane:owner-acceptance-projection:{lock_subject}"
-        while True:
-            with lock_engine.connect() as connection:
-                acquired = bool(
-                    connection.scalar(
-                        text("select pg_try_advisory_lock(hashtextextended(:lock_name, 0))"),
-                        {"lock_name": lock_name},
-                    )
-                )
-                if acquired:
-                    connection.commit()
-                    try:
-                        yield
-                    finally:
-                        unlocked = bool(
-                            connection.scalar(
-                                text("select pg_advisory_unlock(hashtextextended(:lock_name, 0))"),
-                                {"lock_name": lock_name},
-                            )
-                        )
-                        connection.commit()
-                        if not unlocked:
-                            raise RuntimeError(
-                                "PostgreSQL Owner acceptance projection lock cleanup failed"
-                            )
-                    return
-            time.sleep(0.05)
-
     def _owner_control_channel_session_row(
         self,
         session: Any,
@@ -13389,176 +13287,6 @@ class PostgresRecordStore(HumanSessionStore):
                 LaunchplanePrivilegedOperationWorkerHeartbeatRow.worker_identity_sha256.asc(),
             ),
             limit=limit,
-        )
-
-    def write_owner_acceptance_event_record(
-        self, record: OwnerAcceptanceEventRecord
-    ) -> OwnerAcceptanceEventWriteStatus:
-        with self._session_factory() as session:
-            self._begin_serialized_write(session)
-            self._lock_landing_authority(
-                session,
-                landing_authority.owner_acceptance(
-                    record.binding.repository_id, record.binding.pull_request_number
-                ),
-            )
-            existing_row = session.get(LaunchplaneOwnerAcceptanceEventRow, record.event_id)
-            if existing_row is not None:
-                existing = self._owner_acceptance_record_from_row(existing_row)
-                if not owner_acceptance_event_replay_matches(existing, record):
-                    raise OwnerAcceptanceEventConflictError(
-                        "Owner acceptance event replay changed the persisted payload."
-                    )
-                return "replayed"
-
-            subject_sequence = self._next_owner_acceptance_subject_sequence(
-                session=session,
-                record=record,
-            )
-            existing_row = session.get(LaunchplaneOwnerAcceptanceEventRow, record.event_id)
-            if existing_row is not None:
-                session.rollback()
-                existing = self._owner_acceptance_record_from_row(existing_row)
-                if not owner_acceptance_event_replay_matches(existing, record):
-                    raise OwnerAcceptanceEventConflictError(
-                        "Owner acceptance event replay changed the persisted payload."
-                    )
-                return "replayed"
-
-            previous_row = session.scalars(
-                select(LaunchplaneOwnerAcceptanceEventRow)
-                .where(
-                    LaunchplaneOwnerAcceptanceEventRow.repository_id
-                    == record.binding.repository_id,
-                    LaunchplaneOwnerAcceptanceEventRow.pr_number
-                    == record.binding.pull_request_number,
-                    LaunchplaneOwnerAcceptanceEventRow.product == record.binding.product,
-                    LaunchplaneOwnerAcceptanceEventRow.system == record.binding.system,
-                    LaunchplaneOwnerAcceptanceEventRow.owner_action == record.binding.action,
-                    LaunchplaneOwnerAcceptanceEventRow.environment == record.binding.environment,
-                )
-                .order_by(LaunchplaneOwnerAcceptanceEventRow.subject_sequence.desc())
-                .limit(1)
-            ).first()
-            persisted_record = record.model_copy(update={"subject_sequence": subject_sequence})
-            validate_owner_acceptance_event_transition(
-                previous=(
-                    self._owner_acceptance_record_from_row(previous_row)
-                    if previous_row is not None
-                    else None
-                ),
-                proposed=persisted_record,
-            )
-            session.add(self._owner_acceptance_row(persisted_record))
-            try:
-                session.commit()
-                return "written"
-            except IntegrityError:
-                session.rollback()
-                existing_row = session.get(LaunchplaneOwnerAcceptanceEventRow, record.event_id)
-                if existing_row is None:
-                    raise
-                existing = self._owner_acceptance_record_from_row(existing_row)
-                if not owner_acceptance_event_replay_matches(existing, record):
-                    raise OwnerAcceptanceEventConflictError(
-                        "Owner acceptance event replay changed the persisted payload."
-                    )
-                return "replayed"
-
-    @staticmethod
-    def _next_owner_acceptance_subject_sequence(
-        *,
-        session: Any,
-        record: OwnerAcceptanceEventRecord,
-    ) -> int:
-        values = {
-            "repository_id": record.binding.repository_id,
-            "pr_number": record.binding.pull_request_number,
-            "product": record.binding.product,
-            "system": record.binding.system,
-            "owner_action": record.binding.action,
-            "environment": record.binding.environment,
-            "last_sequence": 1,
-        }
-        index_elements = (
-            LaunchplaneOwnerAcceptanceSubjectSequenceRow.repository_id,
-            LaunchplaneOwnerAcceptanceSubjectSequenceRow.pr_number,
-            LaunchplaneOwnerAcceptanceSubjectSequenceRow.product,
-            LaunchplaneOwnerAcceptanceSubjectSequenceRow.system,
-            LaunchplaneOwnerAcceptanceSubjectSequenceRow.owner_action,
-            LaunchplaneOwnerAcceptanceSubjectSequenceRow.environment,
-        )
-        dialect_name = session.get_bind().dialect.name
-        if dialect_name == "postgresql":
-            statement = (
-                postgresql_insert(LaunchplaneOwnerAcceptanceSubjectSequenceRow)
-                .values(**values)
-                .on_conflict_do_update(
-                    index_elements=index_elements,
-                    set_={
-                        "last_sequence": (
-                            LaunchplaneOwnerAcceptanceSubjectSequenceRow.last_sequence + 1
-                        )
-                    },
-                )
-                .returning(LaunchplaneOwnerAcceptanceSubjectSequenceRow.last_sequence)
-            )
-            return int(session.execute(statement).scalar_one())
-        if dialect_name == "sqlite":
-            sqlite_statement = (
-                sqlite_insert(LaunchplaneOwnerAcceptanceSubjectSequenceRow)
-                .values(**values)
-                .on_conflict_do_update(
-                    index_elements=index_elements,
-                    set_={
-                        "last_sequence": (
-                            LaunchplaneOwnerAcceptanceSubjectSequenceRow.last_sequence + 1
-                        )
-                    },
-                )
-                .returning(LaunchplaneOwnerAcceptanceSubjectSequenceRow.last_sequence)
-            )
-            return int(session.execute(sqlite_statement).scalar_one())
-        raise RuntimeError(
-            "Owner acceptance subject sequencing requires PostgreSQL or SQLite storage."
-        )
-
-    def _owner_acceptance_row(
-        self,
-        record: OwnerAcceptanceEventRecord,
-    ) -> LaunchplaneOwnerAcceptanceEventRow:
-        review_context = record.binding.review_context
-        return LaunchplaneOwnerAcceptanceEventRow(
-            event_id=record.event_id,
-            acceptance_id=record.acceptance_id,
-            subject_sequence=record.subject_sequence,
-            binding_sha256=record.binding.binding_sha256,
-            repository_id=record.binding.repository_id,
-            repository_owner_id=record.binding.repository_owner_id,
-            repository=record.binding.repository,
-            pr_number=record.binding.pull_request_number,
-            head_sha=record.binding.head_sha,
-            tree_sha=record.binding.tree_sha,
-            product=record.binding.product,
-            system=record.binding.system,
-            owner_action=record.binding.action,
-            environment=record.binding.environment,
-            action=record.action,
-            owner_github_id=(record.authorization.owner_github_id if record.authorization else 0),
-            owner_login=(record.authorization.owner_login if record.authorization else ""),
-            base_ref=(review_context.base_ref if review_context else ""),
-            base_sha=(review_context.base_sha if review_context else ""),
-            change_class=(review_context.change_class if review_context else ""),
-            review_max_age_seconds=(review_context.review_max_age_seconds if review_context else 0),
-            contribution_resolution=(
-                review_context.contributions.resolution if review_context else ""
-            ),
-            preview_isolation_class=(
-                review_context.preview_isolation.isolation_class if review_context else ""
-            ),
-            self_review=bool(record.authorization and record.authorization.self_review),
-            occurred_at=record.occurred_at,
-            payload=self._payload_dict(record),
         )
 
     def _owner_acceptance_record_from_row(
@@ -37843,6 +37571,10 @@ class PostgresRecordStore(HumanSessionStore):
     def import_core_records_from_filesystem(
         self, filesystem_store: FilesystemRecordStore
     ) -> dict[str, int]:
+        if filesystem_store.list_owner_acceptance_event_records():
+            raise ValueError(
+                "Retired Owner acceptance history cannot be imported through record authoring."
+            )
         counts = {
             "artifacts": 0,
             "authz_policies": 0,
@@ -37991,14 +37723,6 @@ class PostgresRecordStore(HumanSessionStore):
             ) in filesystem_store.list_manager_preview_approval_event_records():
                 self.write_manager_preview_approval_event_record(manager_approval_event)
                 counts["manager_preview_approval_events"] += 1
-        if hasattr(filesystem_store, "list_owner_acceptance_event_records"):
-            owner_acceptance_events = sorted(
-                filesystem_store.list_owner_acceptance_event_records(),
-                key=lambda event: (*owner_acceptance_subject_key(event), event.subject_sequence),
-            )
-            for owner_acceptance_event in owner_acceptance_events:
-                self.write_owner_acceptance_event_record(owner_acceptance_event)
-                counts["owner_acceptance_events"] += 1
         if hasattr(filesystem_store, "list_privileged_operation_records"):
             for privileged_operation in filesystem_store.list_privileged_operation_records():
                 events = tuple(

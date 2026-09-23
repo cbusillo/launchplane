@@ -16,19 +16,12 @@ import type {
   DryRunProductPromotionData,
   DryRunProductPromotionResponse,
   EveryCodeSummaryResponse,
-  EvaluateOwnerAcceptanceResponse,
   GovernanceProjectionResponse,
   InspectionSetupMetadata,
   ListHumanPrivilegedOperationsData,
   ListHumanPrivilegedOperationsResponse,
-  ListOwnerAcceptanceCurrentItemsData,
-  ListOwnerAcceptanceQueueData,
   MergeTrainControllerStatusResponse,
   MergeTrainPolicyTargetsResponse,
-  OwnerAcceptanceQueueResponse,
-  OwnerAcceptanceCurrentItemsResponse,
-  OwnerAcceptanceDecision,
-  OwnerAcceptanceProductDecision,
   OrdinaryAgentDeliveryActivationOptionsResponse,
   OrdinaryAgentDeliveryAuthorizationCandidateInputsResponse,
   OrdinaryAgentMergeTrainTargetInputsResponse,
@@ -75,8 +68,6 @@ import type {
   WorkGraphIssueInboxResponse,
   WorkGraphSnapshot,
   WorkGraphSnapshotResponse,
-  WriteOwnerAcceptanceEventData,
-  WriteOwnerAcceptanceEventResponse,
   ProductReviewResponse,
   WriteProductReviewDecisionData,
   ReleaseReviewResponse,
@@ -649,60 +640,6 @@ export function dispatchProductPromotionWorkflow(
   );
 }
 
-export function readOwnerAcceptanceQueue(
-  query: ListOwnerAcceptanceQueueData["query"] = {},
-  signal?: AbortSignal,
-): Promise<OwnerAcceptanceQueueResponse> {
-  const params = new URLSearchParams();
-  if (query.repository) params.set("repository", query.repository);
-  if (query.status) params.set("status", query.status);
-  const qs = params.toString();
-  return requestJson<OwnerAcceptanceQueueResponse>(
-    `/v1/owner-acceptance/queue${qs ? `?${qs}` : ""}`,
-    "GET",
-    undefined,
-    signal,
-  );
-}
-
-export function readOwnerAcceptanceCurrentItems(
-  query: ListOwnerAcceptanceCurrentItemsData["query"] = {},
-  signal?: AbortSignal,
-): Promise<OwnerAcceptanceCurrentItemsResponse> {
-  const params = new URLSearchParams();
-  if (query.limit) params.set("limit", String(query.limit));
-  const qs = params.toString();
-  return requestJson<OwnerAcceptanceCurrentItemsResponse>(
-    `/v1/owner-acceptance/current-items${qs ? `?${qs}` : ""}`,
-    "GET",
-    undefined,
-    signal,
-  );
-}
-
-export type { OwnerAcceptanceDecision, OwnerAcceptanceProductDecision };
-export type OwnerAcceptanceEventMutationResponse =
-  WriteOwnerAcceptanceEventResponse & {
-    replayed: boolean;
-  };
-
-export function evaluateOwnerAcceptance(
-  repository: string,
-  pullRequestNumber: number,
-  signal?: AbortSignal,
-): Promise<EvaluateOwnerAcceptanceResponse> {
-  const params = new URLSearchParams({
-    repository,
-    pull_request_number: String(pullRequestNumber),
-  });
-  return requestJson<EvaluateOwnerAcceptanceResponse>(
-    `/v1/owner-acceptance/evaluation?${params.toString()}`,
-    "GET",
-    undefined,
-    signal,
-  );
-}
-
 export function readProductReview(
   repository: string,
   pullRequest: number,
@@ -744,24 +681,6 @@ export function writeProductReviewDecision(
   );
 }
 
-export function writeOwnerAcceptanceEvent(
-  payload: WriteOwnerAcceptanceEventData["body"],
-  options: BrowserOperationOptions,
-): Promise<OwnerAcceptanceEventMutationResponse> {
-  const request: WriteOwnerAcceptanceEventData = {
-    url: BROWSER_WRITE_ROUTES.ownerAcceptanceEvent,
-    body: payload,
-    headers: { "Idempotency-Key": options.idempotencyKey },
-  };
-  return requestGeneratedPost<WriteOwnerAcceptanceEventResponse>(
-    request,
-    options.signal,
-    options.onDispatch,
-  ).then((response) => ({
-    ...response,
-    replayed: response.write_status === "replayed",
-  }));
-}
 
 export type {
   OrdinaryAgentDeliveryActivationOptionsResponse,

@@ -54,10 +54,6 @@ from control_plane.contracts.authz_access_read import (
     EffectiveAccessDecision,
     EffectiveAccessRequestSummary,
 )
-from control_plane.contracts.owner_acceptance import (
-    OWNER_ACCEPTANCE_EVENT_WRITE_ACTION,
-    OWNER_ACCEPTANCE_READ_ACTION,
-)
 from control_plane.contracts.ordinary_agent import OrdinaryAgentPolicyRule
 from control_plane.contracts.product_owner import (
     PRODUCT_OWNER_POLICY_READ_ACTION,
@@ -272,17 +268,6 @@ _IMMUTABLE_GITHUB_HUMAN_ACTION_SAFETIES = frozenset(
 )
 _MANAGED_AUTHZ_RECONCILE_SOURCE = "service:authz-managed-rule-set-reconcile"
 _AUTHZ_POLICY_ADMIN_ACTION = "authz_policy_grant.write"
-_OWNER_ACCEPTANCE_MANAGED_SET_ID = "operator.owner-acceptance"
-_OWNER_ACCEPTANCE_ACTIONS = frozenset(
-    {OWNER_ACCEPTANCE_READ_ACTION, OWNER_ACCEPTANCE_EVENT_WRITE_ACTION}
-)
-_OWNER_ACCEPTANCE_READ_ONLY_ACTIONS = frozenset({OWNER_ACCEPTANCE_READ_ACTION})
-_OWNER_ACCEPTANCE_EVENT_WRITE_ONLY_ACTIONS = frozenset({OWNER_ACCEPTANCE_EVENT_WRITE_ACTION})
-_OWNER_ACCEPTANCE_PERMITTED_ACTION_SETS = (
-    _OWNER_ACCEPTANCE_READ_ONLY_ACTIONS,
-    _OWNER_ACCEPTANCE_ACTIONS,
-    _OWNER_ACCEPTANCE_EVENT_WRITE_ONLY_ACTIONS,
-)
 _PRODUCT_OWNER_POLICY_ADMIN_MANAGED_SET_ID = "operator.product-owner-policy-admin"
 _PRODUCT_OWNER_POLICY_ADMIN_ACTIONS = frozenset(
     {
@@ -294,44 +279,6 @@ _PRODUCT_OWNER_POLICY_ADMIN_ACTIONS = frozenset(
 )
 AuthzSchemaMigrationMode: TypeAlias = Literal["reject", "migrate_v1_to_v2", "migrate_v2_to_v3"]
 AuthzUnmanagedAdoptionMode: TypeAlias = Literal["reject", "adopt_matching"]
-
-
-def _validate_owner_acceptance_managed_set(policy: LaunchplaneAuthzPolicy) -> None:
-    if any(
-        rules
-        for principal_type, rules in _authz_policy_rule_collections(policy)
-        if principal_type != "github_humans"
-    ):
-        raise ValueError("Owner Acceptance managed authz may contain only GitHub human rules.")
-    for rule in policy.github_humans:
-        if not rule.github_ids or rule.logins or rule.organizations or rule.teams:
-            raise ValueError(
-                "Owner Acceptance managed authz rules require only immutable GitHub IDs."
-            )
-        actions = frozenset(rule.actions)
-        expected_roles = (
-            ("admin", "read_only")
-            if actions == _OWNER_ACCEPTANCE_READ_ONLY_ACTIONS
-            else ("read_only",)
-        )
-        if tuple(sorted(rule.roles)) != expected_roles:
-            raise ValueError(
-                "Owner Acceptance viewer rules require admin and read_only roles; "
-                "Owner candidate rules require only the read_only role."
-            )
-        if rule.products != ("launchplane",) or rule.contexts != ("owner-acceptance",):
-            raise ValueError(
-                "Owner Acceptance managed authz rules require the exact Launchplane workbench scope."
-            )
-        if rule.instances:
-            raise ValueError(
-                "Owner Acceptance managed authz rules cannot declare instance selectors."
-            )
-        if actions not in _OWNER_ACCEPTANCE_PERMITTED_ACTION_SETS:
-            raise ValueError(
-                "Owner Acceptance managed authz rules require the read action alone, the event-write "
-                "action alone, or both actions together."
-            )
 
 
 def _validate_product_owner_policy_admin_managed_set(policy: LaunchplaneAuthzPolicy) -> None:
@@ -431,8 +378,10 @@ class AuthzManagedPolicyReconcileEnvelope(BaseModel):
                 "use administrator_quorum_change."
             )
         self.desired_policy = _normalize_desired_authz_policy(self.desired_policy)
-        if self.managed_set_id == _OWNER_ACCEPTANCE_MANAGED_SET_ID:
-            _validate_owner_acceptance_managed_set(self.desired_policy)
+        if self.managed_set_id == "operator.owner-acceptance" and any(
+            rules for _, rules in _authz_policy_rule_collections(self.desired_policy)
+        ):
+            raise ValueError("Retired Owner-acceptance grants can only be removed.")
         if self.managed_set_id == _PRODUCT_OWNER_POLICY_ADMIN_MANAGED_SET_ID:
             _validate_product_owner_policy_admin_managed_set(self.desired_policy)
         for principal_type, rules in _authz_policy_rule_collections(self.desired_policy):

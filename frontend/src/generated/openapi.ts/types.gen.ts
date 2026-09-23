@@ -308,12 +308,6 @@ export type ChangeImpactTarget = {
     tree_sha: string;
 };
 
-export type ChangeImpactTargetReference = {
-    pull_request_number: number;
-    repository: string;
-    schema_version?: number;
-};
-
 export type DataProvenance = {
     detail: string;
     freshness_status: 'verified' | 'recorded' | 'stale' | 'missing' | 'unsupported';
@@ -1880,38 +1874,6 @@ export type OwnerAcceptanceContributionBinding = {
     schema_version: number;
 };
 
-export type OwnerAcceptanceCurrentItem = {
-    decision: OwnerAcceptanceDecision | null;
-    error_code: string;
-    evaluation_status: 'available' | 'unavailable';
-    pull_request_number: number;
-    repository: string;
-    title: string;
-    updated_at: string;
-    url: string;
-};
-
-export type OwnerAcceptanceCurrentItemsRepositoryFailure = {
-    error_code: 'open_pull_requests_unavailable';
-    repository: string;
-};
-
-export type OwnerAcceptanceCurrentItemsResponse = {
-    candidate_count: number;
-    derivation: 'active_change_impact_open_pull_requests';
-    evaluated_count: number;
-    generated_at: string;
-    items: Array<OwnerAcceptanceCurrentItem>;
-    repository_count: number;
-    repository_failure_count: number;
-    repository_failures: Array<OwnerAcceptanceCurrentItemsRepositoryFailure>;
-    status: 'ok';
-    trace_id: string;
-    truncated: boolean;
-    unavailable_count: number;
-    viewer_capabilities: OwnerAcceptanceViewerCapabilities;
-};
-
 export type OwnerAcceptanceDecision = {
     admissible: boolean;
     binding: OwnerAcceptanceBinding | null;
@@ -1923,29 +1885,6 @@ export type OwnerAcceptanceDecision = {
     reason_code: 'engineering_only' | 'acceptance_missing' | 'acceptance_valid' | 'changes_requested' | 'acceptance_revoked' | 'acceptance_stale' | 'change_impact_unavailable' | 'change_impact_stale' | 'multi_product_unsupported' | 'owner_authority_unavailable' | 'owner_authority_denied' | 'preview_evidence_unavailable' | 'preview_evidence_stale' | 'owner_review_expired' | 'preview_isolation_insufficient' | 'contributing_identity_unknown' | 'self_review_denied' | 'review_context_missing';
     schema_version: number;
     status: 'not_required' | 'pending' | 'accepted' | 'changes_requested' | 'revoked' | 'stale' | 'unavailable';
-};
-
-export type OwnerAcceptanceEvaluationResponse = {
-    decision: OwnerAcceptanceDecision;
-    status: 'ok';
-    trace_id: string;
-    viewer_capabilities: OwnerAcceptanceViewerCapabilities;
-};
-
-export type OwnerAcceptanceEventEnvelope = {
-    action: 'accepted' | 'changes_requested' | 'revoked';
-    expected_binding_sha256: string;
-    reason?: string;
-    resolution?: OwnerAcceptanceResolutionEvidence | null;
-    schema_version?: number;
-    target: ChangeImpactTargetReference;
-};
-
-export type OwnerAcceptanceEventReceipt = {
-    response_kind: 'receipt';
-    status: 'ok';
-    trace_id: string;
-    write_status: 'written' | 'replayed';
 };
 
 export type OwnerAcceptanceEventRecord = {
@@ -1961,43 +1900,6 @@ export type OwnerAcceptanceEventRecord = {
     source_event_id: string;
     source_event_kind: 'browser_api' | 'system';
     subject_sequence: number;
-};
-
-export type OwnerAcceptanceEventResponse = {
-    decision: OwnerAcceptanceDecision;
-    record: OwnerAcceptanceEventRecord;
-    response_kind: 'full';
-    semantics: OwnerAcceptanceEventSemantics;
-    status: 'ok';
-    trace_id: string;
-    write_status: 'written' | 'replayed';
-};
-
-export type OwnerAcceptanceEventSemantics = {
-    human_action_semantics: 'none' | 'product_review_accepted' | 'product_review_changes_requested' | 'product_review_revoked' | 'product_review_superseded' | 'product_review_invalidated';
-};
-
-export type OwnerAcceptanceOwnerEvaluationResponse = {
-    evaluated_at: string;
-    products: Array<OwnerAcceptanceOwnerProduct>;
-    review_status: 'not_required' | 'review_required' | 'accepted' | 'changes_requested' | 'unavailable';
-    status: 'ok';
-    trace_id: string;
-};
-
-export type OwnerAcceptanceOwnerProduct = {
-    action: string;
-    binding_sha256: string;
-    can_accept: boolean;
-    can_request_changes: boolean;
-    can_revoke: boolean;
-    environment: string;
-    preview_url: string | null;
-    product: string;
-    resolution_evidence_references: Array<string>;
-    resolution_required: boolean;
-    review_status: 'not_required' | 'review_required' | 'accepted' | 'changes_requested' | 'unavailable';
-    system: string;
 };
 
 export type OwnerAcceptancePolicyFingerprintBinding = {
@@ -2043,36 +1945,6 @@ export type OwnerAcceptanceProductDecision = {
     system: string;
 };
 
-export type OwnerAcceptanceQueueEntry = {
-    action: string;
-    environment: string;
-    latest_binding: OwnerAcceptanceBinding;
-    latest_event: OwnerAcceptanceEventRecord;
-    ledger_status: 'not_required' | 'pending' | 'accepted' | 'changes_requested' | 'revoked' | 'stale' | 'unavailable';
-    next_action: string;
-    occurred_at: string;
-    product: string;
-    pull_request_number: number;
-    repository: string;
-    repository_id: string;
-    schema_version: number;
-    system: string;
-    verification_required: boolean;
-};
-
-export type OwnerAcceptanceQueueResponse = {
-    candidate: number;
-    derivation: 'ledger_only';
-    entries: Array<OwnerAcceptanceQueueEntry>;
-    entry_count: number;
-    generated_at: string;
-    has_more: boolean;
-    status: 'ok';
-    total: number;
-    trace_id: string;
-    truncated: boolean;
-};
-
 export type OwnerAcceptanceResolutionEvidence = {
     resolved_evidence_references: Array<string>;
     schema_version: number;
@@ -2105,25 +1977,6 @@ export type OwnerAcceptanceRuntimeIdentityBinding = {
     runtime_identity_sha256: string;
     schema_version: number;
     source_git_ref: string;
-};
-
-export type OwnerAcceptanceViewerBindingEligibility = {
-    action: string;
-    binding_sha256: string;
-    can_accept: boolean;
-    can_request_changes: boolean;
-    can_revoke: boolean;
-    can_submit_event: boolean;
-    environment: string;
-    product: string;
-    reason_code: 'current_product_owner' | 'not_current_product_owner' | 'viewer_identity_unsupported' | 'owner_authority_unavailable' | 'self_review_denied';
-    schema_version: number;
-    system: string;
-};
-
-export type OwnerAcceptanceViewerCapabilities = {
-    bindings: Array<OwnerAcceptanceViewerBindingEligibility>;
-    event_write_authorized: boolean;
 };
 
 export type PostDeployUpdateEvidence = {
@@ -4348,129 +4201,6 @@ export type ReadHumanOrdinaryAgentOperationResponses = {
 
 export type ReadHumanOrdinaryAgentOperationResponse = ReadHumanOrdinaryAgentOperationResponses[keyof ReadHumanOrdinaryAgentOperationResponses];
 
-export type ListOwnerAcceptanceCurrentItemsData = {
-    body?: never;
-    headers?: {
-        Authorization?: string;
-        Cookie?: string;
-    };
-    path?: never;
-    query?: {
-        limit?: number;
-    };
-    url: '/v1/owner-acceptance/current-items';
-};
-
-export type ListOwnerAcceptanceCurrentItemsErrors = {
-    400: LaunchplaneErrorResponse;
-    401: LaunchplaneErrorResponse;
-    403: LaunchplaneErrorResponse;
-    404: LaunchplaneErrorResponse;
-    409: LaunchplaneErrorResponse;
-    503: LaunchplaneErrorResponse;
-};
-
-export type ListOwnerAcceptanceCurrentItemsError = ListOwnerAcceptanceCurrentItemsErrors[keyof ListOwnerAcceptanceCurrentItemsErrors];
-
-export type ListOwnerAcceptanceCurrentItemsResponses = {
-    200: OwnerAcceptanceCurrentItemsResponse;
-};
-
-export type ListOwnerAcceptanceCurrentItemsResponse = ListOwnerAcceptanceCurrentItemsResponses[keyof ListOwnerAcceptanceCurrentItemsResponses];
-
-export type EvaluateOwnerAcceptanceData = {
-    body?: never;
-    headers?: {
-        Authorization?: string;
-        Cookie?: string;
-    };
-    path?: never;
-    query: {
-        repository: string;
-        pull_request_number: number;
-    };
-    url: '/v1/owner-acceptance/evaluation';
-};
-
-export type EvaluateOwnerAcceptanceErrors = {
-    400: LaunchplaneErrorResponse;
-    401: LaunchplaneErrorResponse;
-    403: LaunchplaneErrorResponse;
-    404: LaunchplaneErrorResponse;
-    409: LaunchplaneErrorResponse;
-    503: LaunchplaneErrorResponse;
-};
-
-export type EvaluateOwnerAcceptanceError = EvaluateOwnerAcceptanceErrors[keyof EvaluateOwnerAcceptanceErrors];
-
-export type EvaluateOwnerAcceptanceResponses = {
-    200: OwnerAcceptanceEvaluationResponse;
-};
-
-export type EvaluateOwnerAcceptanceResponse = EvaluateOwnerAcceptanceResponses[keyof EvaluateOwnerAcceptanceResponses];
-
-export type EvaluateOwnerProductReviewData = {
-    body?: never;
-    headers?: {
-        Authorization?: string;
-        Cookie?: string;
-    };
-    path?: never;
-    query: {
-        repository: string;
-        pull_request_number: number;
-    };
-    url: '/v1/owner-acceptance/owner-evaluation';
-};
-
-export type EvaluateOwnerProductReviewErrors = {
-    400: LaunchplaneErrorResponse;
-    401: LaunchplaneErrorResponse;
-    403: LaunchplaneErrorResponse;
-    404: LaunchplaneErrorResponse;
-    409: LaunchplaneErrorResponse;
-    503: LaunchplaneErrorResponse;
-};
-
-export type EvaluateOwnerProductReviewError = EvaluateOwnerProductReviewErrors[keyof EvaluateOwnerProductReviewErrors];
-
-export type EvaluateOwnerProductReviewResponses = {
-    200: OwnerAcceptanceOwnerEvaluationResponse;
-};
-
-export type EvaluateOwnerProductReviewResponse = EvaluateOwnerProductReviewResponses[keyof EvaluateOwnerProductReviewResponses];
-
-export type ListOwnerAcceptanceQueueData = {
-    body?: never;
-    headers?: {
-        Authorization?: string;
-        Cookie?: string;
-    };
-    path?: never;
-    query?: {
-        repository?: string;
-        status?: string;
-    };
-    url: '/v1/owner-acceptance/queue';
-};
-
-export type ListOwnerAcceptanceQueueErrors = {
-    400: LaunchplaneErrorResponse;
-    401: LaunchplaneErrorResponse;
-    403: LaunchplaneErrorResponse;
-    404: LaunchplaneErrorResponse;
-    409: LaunchplaneErrorResponse;
-    503: LaunchplaneErrorResponse;
-};
-
-export type ListOwnerAcceptanceQueueError = ListOwnerAcceptanceQueueErrors[keyof ListOwnerAcceptanceQueueErrors];
-
-export type ListOwnerAcceptanceQueueResponses = {
-    200: OwnerAcceptanceQueueResponse;
-};
-
-export type ListOwnerAcceptanceQueueResponse = ListOwnerAcceptanceQueueResponses[keyof ListOwnerAcceptanceQueueResponses];
-
 export type ReadPreviewReadinessData = {
     body?: never;
     headers?: {
@@ -5387,39 +5117,6 @@ export type RevokeOrdinaryAgentSessionResponses = {
 };
 
 export type RevokeOrdinaryAgentSessionResponse = RevokeOrdinaryAgentSessionResponses[keyof RevokeOrdinaryAgentSessionResponses];
-
-export type WriteOwnerAcceptanceEventData = {
-    body: OwnerAcceptanceEventEnvelope;
-    headers: {
-        'Idempotency-Key': string;
-        Authorization?: string;
-        Cookie?: string;
-    };
-    path?: never;
-    query?: never;
-    url: '/v1/owner-acceptance/events';
-};
-
-export type WriteOwnerAcceptanceEventErrors = {
-    400: LaunchplaneErrorResponse;
-    401: LaunchplaneErrorResponse;
-    403: LaunchplaneErrorResponse;
-    404: LaunchplaneErrorResponse;
-    409: LaunchplaneErrorResponse;
-    503: LaunchplaneErrorResponse;
-};
-
-export type WriteOwnerAcceptanceEventError = WriteOwnerAcceptanceEventErrors[keyof WriteOwnerAcceptanceEventErrors];
-
-export type WriteOwnerAcceptanceEventResponses = {
-    202: ({
-        response_kind: 'full';
-    } & OwnerAcceptanceEventResponse) | ({
-        response_kind: 'receipt';
-    } & OwnerAcceptanceEventReceipt);
-};
-
-export type WriteOwnerAcceptanceEventResponse = WriteOwnerAcceptanceEventResponses[keyof WriteOwnerAcceptanceEventResponses];
 
 export type PrepareOrdinaryAgentDeliveryPolicyData = {
     body: OrdinaryAgentDeliveryPolicyPrepareEnvelope;

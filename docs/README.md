@@ -69,8 +69,8 @@ not describe runtime authority until it is implemented, deployed, and activated.
   classification plus independent-run evaluation and shadow GitHub projection.
 - [product-owner-policy.md](product-owner-policy.md) — authoritative
   product/system Owner membership, requirement, routing, and evaluation contract.
-- [owner-acceptance.md](owner-acceptance.md) — authoritative exact-change Owner
-  acceptance binding, event ledger, and human-only API boundary.
+- [owner-acceptance.md](owner-acceptance.md) — current Owner review and the
+  compatibility boundary for retired acceptance history.
 - [release-review.md](release-review.md) — Owner checklist decisions for production
   promotion, revision changes, and recorded operator overrides.
 - [owner-control-channel.md](owner-control-channel.md) — public canonical owner

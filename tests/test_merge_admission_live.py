@@ -36,7 +36,7 @@ from control_plane.tenant_admission_controller import (
 )
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_record
 from tests.test_merge_admission_records import _guard_records
-from tests.test_owner_acceptance import (
+from tests.support.repository_evidence import (
     BASE_SHA as OWNER_BASE_SHA,
     HEAD_SHA as OWNER_HEAD_SHA,
     REPOSITORY as OWNER_REPOSITORY,

@@ -27,7 +27,6 @@ export type EngineeringView =
   | "merge-train"
   | "tenant-admission"
   | "governance-projection"
-  | "owner-acceptance"
   | "privileged-operations";
 
 export function productIndexPath(): string {
@@ -79,9 +78,6 @@ export function engineeringViewLabel(view: EngineeringView): string {
   if (view === "governance-projection") {
     return "Governance evidence";
   }
-  if (view === "owner-acceptance") {
-    return "Owner product review";
-  }
   if (view === "privileged-operations") {
     return "Privileged operation plans";
   }
@@ -116,7 +112,6 @@ export function parseAppRoute(pathname: string): AppRoute {
         "merge-train",
         "tenant-admission",
         "governance-projection",
-        "owner-acceptance",
         "privileged-operations",
       ].includes(view)
     ) {
@@ -168,7 +163,7 @@ export function parseAppRoute(pathname: string): AppRoute {
   return { kind: "not-found", path: pathname };
 }
 
-export function ownerAcceptanceLookupFromSearch(search: string): {
+export function productReviewLookupFromSearch(search: string): {
   repository: string;
   pullRequest: string;
   requested: boolean;

@@ -5,7 +5,6 @@ import {
   KeyRound,
   Network,
   ShieldCheck,
-  UserCheck,
   Wrench,
 } from "lucide-react";
 
@@ -13,7 +12,6 @@ import { EngineeringEveryCodeRoute } from "./EngineeringEveryCodeRoute";
 import { EngineeringIssueInboxRoute } from "./EngineeringIssueInboxRoute";
 import { EngineeringMergeTrainRoute } from "./EngineeringMergeTrainRoute";
 import { EngineeringGovernanceProjectionRoute } from "./EngineeringGovernanceProjectionRoute";
-import { EngineeringOwnerAcceptanceRoute } from "./EngineeringOwnerAcceptanceRoute";
 import { EngineeringPrivilegedOperationsRoute } from "./EngineeringPrivilegedOperationsRoute";
 import { EngineeringTenantAdmissionRoute } from "./EngineeringTenantAdmissionRoute";
 import { EngineeringRouteFrame } from "./EngineeringRouteUi";
@@ -29,7 +27,7 @@ import type { DevFixtureMode } from "./dev-fixture-loader";
 const ENGINEERING_SURFACES = [
   {
     detail:
-      "Inspect authoritative Owner acceptance, current readiness, immutable admission, landing outcome, and GitHub observations without fusing the layers.",
+      "Inspect current readiness, immutable admission, landing outcome, and GitHub observations.",
     icon: ShieldCheck,
     label: "Read only",
     title: "Governance evidence",
@@ -69,19 +67,11 @@ const ENGINEERING_SURFACES = [
   },
   {
     detail:
-      "Inspect exact-head tenant classification, human admission paths, mergeability, and required technical checks.",
+      "Inspect tenant classification, mergeability, and required technical checks for the current revision.",
     icon: ShieldCheck,
     label: "Read only",
     title: "Tenant admission",
     view: "tenant-admission" as const,
-  },
-  {
-    detail:
-      "Review exact-change product judgments separately from technical, merge, and production readiness.",
-    icon: UserCheck,
-    label: "Read only",
-    title: "Owner product review",
-    view: "owner-acceptance" as const,
   },
   {
     detail:
@@ -117,9 +107,6 @@ export function EngineeringOpsRoute({
   }
   if (view === "governance-projection") {
     return <EngineeringGovernanceProjectionRoute fixtureMode={fixtureMode} />;
-  }
-  if (view === "owner-acceptance") {
-    return <EngineeringOwnerAcceptanceRoute fixtureMode={fixtureMode} />;
   }
   if (view === "privileged-operations") {
     return <EngineeringPrivilegedOperationsRoute fixtureMode={fixtureMode} />;
