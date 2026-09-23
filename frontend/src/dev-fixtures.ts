@@ -17,7 +17,6 @@ import type {
   MergeReadinessResult,
   MergeTrainControllerStatusResponse,
   MergeTrainPolicyTargetsResponse,
-  OwnerAcceptanceProductDecision,
   OwnerAcceptanceQueueResponse,
   ProductActionAvailability,
   ProductActivityReadModel,
@@ -3238,82 +3237,7 @@ export function governanceProjectionForFixture(
 ): GovernanceProjectionResponse {
   assertEngineeringFixtureAvailable(fixture);
   const scenario = new URLSearchParams(window.location.search).get("scenario") ?? "25";
-  const binding = _ownerAcceptanceBinding({
-    pull_request_number: 308,
-    binding_sha256: "a".repeat(64),
-    head_sha: "a".repeat(40),
-  });
-  const acceptedEvent = _ownerAcceptanceEvent("accepted", binding, {
-    occurred_at: "2026-08-12T04:00:00.000000Z",
-    event_id: "owner-acceptance-event-governance-accepted",
-    acceptance_id: "owner-acceptance-" + "a".repeat(32),
-  });
-  const revokedEvent = _ownerAcceptanceEvent("revoked", binding, {
-    occurred_at: "2026-08-12T04:40:00.000000Z",
-    event_id: "owner-acceptance-event-governance-revoked",
-    acceptance_id: "owner-acceptance-" + "a".repeat(32),
-  });
-  const currentStatus =
-    scenario === "15"
-      ? "revoked"
-      : scenario === "20"
-        ? "stale"
-        : scenario === "24"
-          ? "changes_requested"
-          : "accepted";
-  const currentReason =
-    scenario === "15"
-      ? "acceptance_revoked"
-      : scenario === "20"
-        ? "preview_isolation_insufficient"
-        : scenario === "24"
-          ? "changes_requested"
-          : "acceptance_valid";
-  const currentEvent = scenario === "15" ? revokedEvent : acceptedEvent;
-  const product: OwnerAcceptanceProductDecision = {
-    schema_version: 1,
-    product: binding.product,
-    system: binding.system,
-    action: binding.action,
-    environment: binding.environment,
-    status: currentStatus,
-    reason_code: currentReason,
-    binding,
-    current_event: currentEvent,
-    admissible: currentStatus === "accepted",
-    human_action_semantics:
-      scenario === "15" ? "product_review_revoked" : "product_review_accepted",
-  };
-  const products: OwnerAcceptanceProductDecision[] =
-    scenario === "24"
-      ? [
-          { ...product, status: "accepted", reason_code: "acceptance_valid", admissible: true },
-          {
-            ...product,
-            product: "example-secondary",
-            status: "changes_requested",
-            reason_code: "changes_requested",
-            admissible: false,
-          },
-        ]
-      : [product];
-  const decision: OwnerAcceptanceDecision = {
-    schema_version: 1,
-    change_impact_coverage: null,
-    status: currentStatus,
-    reason_code: currentReason,
-    binding,
-    current_event: currentEvent,
-    admissible: currentStatus === "accepted",
-    human_action_semantics:
-      scenario === "15" ? "product_review_revoked" : "product_review_accepted",
-    products,
-    evaluated_at: OBSERVED_AT,
-  };
-  const readiness = governanceReadinessFixture(
-    scenario === "3" ? "unknown" : scenario === "24" || scenario === "20" ? "blocked_owner_evidence" : "blocked_checks",
-    products,
-  );
+  const readiness = governanceReadinessFixture(scenario === "3" ? "unknown" : "blocked_checks");
   const admission = scenario === "15" ? governanceAdmissionFixture(readiness) : null;
   const outcome = scenario === "15" && admission ? governanceOutcomeFixture(admission) : null;
   return {
@@ -3326,37 +3250,14 @@ export function governanceProjectionForFixture(
       authorizes: [],
       target: {
         schema_version: 1,
-        repository_id: binding.repository_id,
-        repository_owner_id: binding.repository_owner_id,
-        repository: binding.repository,
-        pull_request_number: binding.pull_request_number,
-        head_sha: binding.head_sha,
-        tree_sha: binding.tree_sha,
+        repository_id: "101",
+        repository_owner_id: "202",
+        repository: "example/tenant-site",
+        pull_request_number: 308,
+        head_sha: "a".repeat(40),
+        tree_sha: "b".repeat(40),
       },
-      owner_judgment: {
-        level: 1,
-        mode: "owner_acceptance",
-        authoritative: true,
-        current: decision,
-        history: [
-          {
-            record: acceptedEvent,
-            human_action_semantics: "product_review_accepted",
-            target_status: "current",
-            decision_relationship: scenario === "15" ? "historical" : "current",
-          },
-          ...(scenario === "15"
-            ? [
-                {
-                  record: revokedEvent,
-                  human_action_semantics: "product_review_revoked" as const,
-                  target_status: "current" as const,
-                  decision_relationship: "current" as const,
-                },
-              ]
-            : []),
-        ],
-      },
+      owner_judgment: null,
       merge_readiness: {
         level: 2,
         mode: "ephemeral",
@@ -3413,9 +3314,7 @@ export function governanceProjectionForFixture(
 
 function governanceReadinessFixture(
   state: MergeReadinessResult["state"],
-  products: readonly unknown[],
 ): MergeReadinessResult {
-  const ownerState = state === "blocked_owner_evidence" ? "blocked_owner_evidence" : "ready";
   return {
     schema_version: 1,
     mode: "ephemeral" as const,
@@ -3434,26 +3333,8 @@ function governanceReadinessFixture(
       queue_position: 1,
     },
     state,
-    reason_codes:
-      state === "unknown"
-        ? ["checks_unknown"]
-        : state === "blocked_owner_evidence"
-          ? ["owner_changes_requested", "checks_passed"]
-          : ["owner_acceptance_valid", "checks_pending"],
-    owner_facets: products.map((_, index) => ({
-      product: index ? "example-secondary" : "example-site",
-      system: "web",
-      action: "change",
-      environment: "production",
-      owner_status: ownerState === "ready" ? "accepted" : "changes_requested",
-      owner_reason_code:
-        ownerState === "ready" ? "acceptance_valid" : "changes_requested",
-      binding_sha256: "a".repeat(64),
-      event_id: "owner-acceptance-event-governance-accepted",
-      state: ownerState,
-      reason_codes:
-        ownerState === "ready" ? ["owner_acceptance_valid"] : ["owner_changes_requested"],
-    })),
+    reason_codes: state === "unknown" ? ["checks_unknown"] : ["checks_pending"],
+    owner_facets: [],
     technical_checks: {
       head_sha: "4".repeat(40),
       status: state === "unknown" ? "unknown" : state === "blocked_checks" ? "pending" : "pass",
@@ -3514,7 +3395,6 @@ function governanceReadinessFixture(
 function governancePolicyFingerprintsFixture() {
   const fingerprint = (
     dimension:
-      | "impact"
       | "technical_checks"
       | "engineering_review"
       | "ruleset"
@@ -3527,7 +3407,7 @@ function governancePolicyFingerprintsFixture() {
     current_sha256: "e".repeat(64),
   });
   return {
-    impact: fingerprint("impact"),
+    impact: null,
     technical_checks: fingerprint("technical_checks"),
     engineering_review: fingerprint("engineering_review"),
     ruleset: fingerprint("ruleset"),

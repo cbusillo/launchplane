@@ -109,7 +109,6 @@ MERGE_READINESS_STATE_PRECEDENCE: tuple[MergeReadinessState, ...] = (
     "ready",
 )
 MERGE_READINESS_POLICY_DIMENSIONS: tuple[MergeReadinessPolicyDimension, ...] = (
-    "impact",
     "technical_checks",
     "engineering_review",
     "ruleset",
@@ -310,7 +309,7 @@ class MergeReadinessPolicyFingerprintEvidence(BaseModel):
 class MergeReadinessPolicyFingerprints(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    impact: MergeReadinessPolicyFingerprintEvidence
+    impact: MergeReadinessPolicyFingerprintEvidence | None = None
     technical_checks: MergeReadinessPolicyFingerprintEvidence
     engineering_review: MergeReadinessPolicyFingerprintEvidence
     ruleset: MergeReadinessPolicyFingerprintEvidence
@@ -320,6 +319,8 @@ class MergeReadinessPolicyFingerprints(BaseModel):
 
     @model_validator(mode="after")
     def _validate_dimensions(self) -> "MergeReadinessPolicyFingerprints":
+        if self.impact is not None and self.impact.dimension != "impact":
+            raise ValueError("impact policy fingerprint uses the wrong dimension")
         for dimension in MERGE_READINESS_POLICY_DIMENSIONS:
             if getattr(self, dimension).dimension != dimension:
                 raise ValueError(f"{dimension} policy fingerprint uses the wrong dimension")
@@ -578,7 +579,7 @@ class MergeReadinessResult(BaseModel):
     target: MergeReadinessTarget
     state: MergeReadinessState
     reason_codes: tuple[MergeReadinessReasonCode, ...]
-    owner_facets: tuple[MergeReadinessOwnerFacet, ...]
+    owner_facets: tuple[MergeReadinessOwnerFacet, ...] = ()
     technical_checks: MergeReadinessTechnicalChecksFacet
     engineering_review: MergeReadinessEngineeringReviewFacet
     policy: MergeReadinessPolicyFacet
@@ -593,8 +594,6 @@ class MergeReadinessResult(BaseModel):
             raise ValueError("Unsupported merge readiness result schema version.")
         if self.authorizes:
             raise ValueError("Ephemeral merge readiness never authorizes an effect")
-        if not self.owner_facets:
-            raise ValueError("Merge readiness requires at least one Owner product facet")
         sorted_owner_facets = tuple(
             sorted(
                 self.owner_facets,

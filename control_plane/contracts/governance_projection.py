@@ -178,7 +178,7 @@ class GovernanceProjection(BaseModel):
     authoritative: Literal[False] = False
     authorizes: tuple[str, ...] = ()
     target: ChangeImpactTarget
-    owner_judgment: GovernanceOwnerJudgmentFacet
+    owner_judgment: GovernanceOwnerJudgmentFacet | None = None
     merge_readiness: GovernanceMergeReadinessFacet
     merge_admission: GovernanceMergeAdmissionFacet
     landing_outcome: GovernanceLandingOutcomeFacet

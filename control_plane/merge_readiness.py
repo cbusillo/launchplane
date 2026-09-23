@@ -14,7 +14,6 @@ from control_plane.contracts.merge_readiness import (
     MergeReadinessEngineeringReviewFacet,
     MergeReadinessFenceEvidence,
     MergeReadinessFenceFacet,
-    MergeReadinessOwnerFacet,
     MergeReadinessPolicyDimension,
     MergeReadinessPolicyFacet,
     MergeReadinessPolicyFingerprints,
@@ -30,11 +29,6 @@ from control_plane.contracts.merge_readiness import (
 )
 from control_plane.contracts.merge_train_batch import MergeTrainBatchCandidateRecord
 from control_plane.contracts.merge_train_controller_state import MergeTrainControllerStateRecord
-from control_plane.contracts.owner_acceptance import (
-    OwnerAcceptanceDecision,
-    OwnerAcceptanceProductDecision,
-    OwnerAcceptanceReasonCode,
-)
 from control_plane.tenant_admission_controller import (
     TenantAdmissionRequiredTechnicalCheck,
     TenantAdmissionTechnicalCheckSignal,
@@ -42,31 +36,10 @@ from control_plane.tenant_admission_controller import (
 )
 
 
-_OWNER_REASON_CODES: dict[OwnerAcceptanceReasonCode, MergeReadinessReasonCode] = {
-    "engineering_only": "owner_not_required",
-    "acceptance_missing": "owner_acceptance_missing",
-    "acceptance_valid": "owner_acceptance_valid",
-    "changes_requested": "owner_changes_requested",
-    "acceptance_revoked": "owner_acceptance_revoked",
-    "acceptance_stale": "owner_acceptance_stale",
-    "change_impact_unavailable": "owner_evidence_unavailable",
-    "change_impact_stale": "owner_evidence_stale",
-    "multi_product_unsupported": "owner_evidence_unavailable",
-    "owner_authority_unavailable": "owner_authority_unavailable",
-    "owner_authority_denied": "owner_authority_denied",
-    "preview_evidence_unavailable": "owner_preview_evidence_unavailable",
-    "preview_evidence_stale": "owner_preview_evidence_stale",
-    "owner_review_expired": "owner_review_expired",
-    "preview_isolation_insufficient": "owner_preview_isolation_insufficient",
-    "contributing_identity_unknown": "owner_contributing_identity_unknown",
-    "self_review_denied": "owner_self_review_denied",
-    "review_context_missing": "owner_review_context_missing",
-}
 _POLICY_REASON_CODES: dict[
     MergeReadinessPolicyDimension,
     tuple[MergeReadinessReasonCode, MergeReadinessReasonCode],
 ] = {
-    "impact": ("policy_impact_missing", "policy_impact_drift"),
     "technical_checks": (
         "policy_technical_checks_missing",
         "policy_technical_checks_drift",
@@ -84,13 +57,10 @@ _POLICY_REASON_CODES: dict[
     ),
 }
 
-_NO_OWNER_PRODUCT_SUBJECT = "__not_applicable__"
-
 
 def evaluate_merge_readiness(
     *,
     target: MergeReadinessTarget,
-    owner_decision: OwnerAcceptanceDecision,
     technical_checks: MergeReadinessTechnicalCheckEvidence,
     engineering_decision: EngineeringReviewDecisionRecord | None,
     engineering_evidence: tuple[MergeReadinessEngineeringEvidenceReference, ...],
@@ -100,7 +70,6 @@ def evaluate_merge_readiness(
     fence_evidence: MergeReadinessFenceEvidence,
     evaluated_at: str,
 ) -> MergeReadinessResult:
-    owner_facets = _owner_facets(target=target, decision=owner_decision)
     technical_facet = _technical_checks_facet(target=target, evidence=technical_checks)
     engineering_facet = _engineering_review_facet(
         target=target,
@@ -120,7 +89,6 @@ def evaluate_merge_readiness(
         evaluated_at=evaluated_at,
     )
     facet_states = (
-        *(facet.state for facet in owner_facets),
         technical_facet.state,
         *(() if engineering_review_authority == "advisory" else (engineering_facet.state,)),
         policy_facet.state,
@@ -132,7 +100,6 @@ def evaluate_merge_readiness(
             {
                 reason
                 for reasons in (
-                    *(facet.reason_codes for facet in owner_facets),
                     technical_facet.reason_codes,
                     engineering_facet.reason_codes,
                     policy_facet.reason_codes,
@@ -148,7 +115,6 @@ def evaluate_merge_readiness(
         target=target,
         state=merge_readiness_worst_state(facet_states),
         reason_codes=reason_codes,
-        owner_facets=owner_facets,
         technical_checks=technical_facet,
         engineering_review=engineering_facet,
         policy=policy_facet,
@@ -161,7 +127,6 @@ def evaluate_merge_readiness(
 def evaluate_merge_readiness_from_live_evidence(
     *,
     target: MergeReadinessTarget,
-    owner_decision: OwnerAcceptanceDecision,
     engineering_decision: EngineeringReviewDecisionRecord | None,
     engineering_runs: tuple[EngineeringReviewRunRecord, ...],
     engineering_review_authority: MergeReadinessAuthorityMode = "required",
@@ -181,7 +146,6 @@ def evaluate_merge_readiness_from_live_evidence(
     """
     return evaluate_merge_readiness(
         target=target,
-        owner_decision=owner_decision,
         technical_checks=_technical_check_evidence(
             target=target,
             evidence=technical_checks,
@@ -204,96 +168,6 @@ def evaluate_merge_readiness_from_live_evidence(
             observed_effect_sha=observed_effect_sha,
         ),
         evaluated_at=evaluated_at,
-    )
-
-
-def _owner_facets(
-    *,
-    target: MergeReadinessTarget,
-    decision: OwnerAcceptanceDecision,
-) -> tuple[MergeReadinessOwnerFacet, ...]:
-    products = decision.products
-    if not products:
-        if decision.binding is not None:
-            products = (
-                OwnerAcceptanceProductDecision(
-                    product=decision.binding.product,
-                    system=decision.binding.system,
-                    action=decision.binding.action,
-                    environment=decision.binding.environment,
-                    status=decision.status,
-                    reason_code=decision.reason_code,
-                    binding=decision.binding,
-                    current_event=decision.current_event,
-                    admissible=decision.admissible,
-                    human_action_semantics=decision.human_action_semantics,
-                ),
-            )
-        else:
-            return (_owner_unscoped_facet(decision),)
-    return tuple(
-        sorted(
-            (_owner_facet(target=target, product=product) for product in products),
-            key=lambda item: (item.product, item.system, item.action, item.environment),
-        )
-    )
-
-
-def _owner_unscoped_facet(decision: OwnerAcceptanceDecision) -> MergeReadinessOwnerFacet:
-    reason = _OWNER_REASON_CODES[decision.reason_code]
-    reasons: tuple[MergeReadinessReasonCode, ...]
-    if decision.status == "not_required":
-        state: MergeReadinessState = "ready"
-        reasons = ("owner_not_required",)
-    elif decision.status == "unavailable":
-        state = "unknown"
-        reasons = tuple(sorted({reason, "owner_evidence_unavailable"}))
-    else:
-        state = "blocked_owner_evidence"
-        reasons = (reason,)
-    return MergeReadinessOwnerFacet(
-        product=_NO_OWNER_PRODUCT_SUBJECT,
-        system=_NO_OWNER_PRODUCT_SUBJECT,
-        action=_NO_OWNER_PRODUCT_SUBJECT,
-        environment=_NO_OWNER_PRODUCT_SUBJECT,
-        owner_status=decision.status,
-        owner_reason_code=decision.reason_code,
-        state=state,
-        reason_codes=reasons,
-    )
-
-
-def _owner_facet(
-    *,
-    target: MergeReadinessTarget,
-    product: OwnerAcceptanceProductDecision,
-) -> MergeReadinessOwnerFacet:
-    reasons: list[MergeReadinessReasonCode] = [_OWNER_REASON_CODES[product.reason_code]]
-    ready = product.status == "not_required" or (
-        product.status == "accepted" and product.admissible
-    )
-    binding = product.binding
-    if binding is None and product.status != "not_required":
-        reasons.append("owner_evidence_unavailable")
-        ready = False
-    elif binding is not None:
-        if binding.head_sha != target.pull_request_head_sha:
-            reasons.append("owner_evidence_head_mismatch")
-            ready = False
-        if binding.tree_sha != target.pull_request_tree_sha:
-            reasons.append("owner_evidence_tree_mismatch")
-            ready = False
-    return MergeReadinessOwnerFacet(
-        product=product.product,
-        system=product.system,
-        action=product.action,
-        environment=product.environment,
-        owner_status=product.status,
-        owner_reason_code=product.reason_code,
-        binding_sha256=binding.binding_sha256 if binding is not None else "",
-        event_id=product.current_event.event_id if product.current_event is not None else "",
-        state="ready" if ready else "blocked_owner_evidence",
-        reason_codes=tuple(reasons),
     )
 
 

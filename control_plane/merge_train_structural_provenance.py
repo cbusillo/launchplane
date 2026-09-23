@@ -9,12 +9,10 @@ from control_plane.contracts.merge_train_stack_collapse import (
     MergeTrainStackCollapsePlanRecord,
 )
 from control_plane.contracts.merge_train_structural_provenance import (
-    MergeTrainCombinedCandidateOwnerReview,
     MergeTrainStructuralCandidateResult,
     MergeTrainStructuralEntryObservation,
     MergeTrainStructuralEvaluationInput,
     MergeTrainStructuralReasonCode,
-    merge_train_structural_evaluation_entries_sha256,
 )
 from control_plane.merge_train_stack_collapse import stack_collapse_expected_root_head_sha
 
@@ -150,13 +148,6 @@ def evaluate_merge_train_structural_candidate(
             landing_plan_record,
             "structural_position_mismatch",
         )
-    impact_result, combined_review_used = _impact_composition_result(
-        evaluation=evaluation,
-        candidate_record=candidate_record,
-        landing_plan_record=landing_plan_record,
-    )
-    if impact_result is not None:
-        return impact_result
     stack_reason = _stack_root_reason(
         evaluation=evaluation,
         candidate_record=candidate_record,
@@ -187,23 +178,19 @@ def evaluate_merge_train_structural_candidate(
         if stack_reason == "structural_stack_root_recorded":
             return _success_result(
                 status="recorded_rolling",
-                reason_codes=_success_reasons(
-                    "structural_stack_root_recorded",
-                    combined_review_used=combined_review_used,
-                ),
+                reason_codes=("structural_stack_root_recorded",),
                 evaluation=evaluation,
                 candidate_record=candidate_record,
                 landing_plan_record=landing_plan_record,
             )
         return _success_result(
             status="exact",
-            reason_codes=_success_reasons(
+            reason_codes=(
                 (
                     "structural_single_entry_exact"
                     if len(candidate.entries) == 1
                     else "structural_batch_entry_exact"
                 ),
-                combined_review_used=combined_review_used,
             ),
             evaluation=evaluation,
             candidate_record=candidate_record,
@@ -218,10 +205,7 @@ def evaluate_merge_train_structural_candidate(
         return rolling_result
     return _success_result(
         status="recorded_rolling",
-        reason_codes=_success_reasons(
-            "structural_rolling_chain_recorded",
-            combined_review_used=combined_review_used,
-        ),
+        reason_codes=("structural_rolling_chain_recorded",),
         evaluation=evaluation,
         candidate_record=candidate_record,
         landing_plan_record=landing_plan_record,
@@ -387,143 +371,6 @@ def _landing_plan_shape_result(
                 "structural_rolling_chain_broken",
             )
     return None
-
-
-def _impact_composition_result(
-    *,
-    evaluation: MergeTrainStructuralEvaluationInput,
-    candidate_record: MergeTrainBatchCandidateRecord,
-    landing_plan_record: MergeTrainBatchLandingPlanRecord,
-) -> tuple[MergeTrainStructuralCandidateResult | None, bool]:
-    if any(
-        entry.reviewed_delta is None or entry.current_delta is None for entry in evaluation.entries
-    ):
-        return (
-            _bound_result(
-                evaluation,
-                candidate_record,
-                landing_plan_record,
-                "structural_impact_unknown",
-                status="unknown",
-            ),
-            False,
-        )
-    reasons: list[MergeTrainStructuralReasonCode] = []
-    if any(
-        entry.reviewed_delta.fingerprint_sha256 != entry.current_delta.fingerprint_sha256
-        for entry in evaluation.entries
-        if entry.reviewed_delta is not None and entry.current_delta is not None
-    ):
-        reasons.append("structural_delta_drift")
-    if any(
-        not set(entry.current_delta.affected_subjects).issubset(
-            entry.reviewed_delta.affected_subjects
-        )
-        for entry in evaluation.entries
-        if entry.reviewed_delta is not None and entry.current_delta is not None
-    ):
-        reasons.append("structural_impact_expanded")
-    path_positions: dict[str, set[int]] = {}
-    subject_positions: dict[tuple[str, str], set[int]] = {}
-    for entry in evaluation.entries:
-        current_delta = entry.current_delta
-        assert current_delta is not None
-        for path in current_delta.changed_paths:
-            path_positions.setdefault(path, set()).add(entry.position)
-        for subject in current_delta.affected_subjects:
-            subject_positions.setdefault((subject.product, subject.system), set()).add(
-                entry.position
-            )
-    if any(len(positions) > 1 for positions in path_positions.values()) and not (
-        _attested_engineering_only_composition(evaluation.entries)
-    ):
-        reasons.append("structural_changed_path_overlap")
-    if any(len(positions) > 1 for positions in subject_positions.values()):
-        reasons.append("structural_same_subject_combined_review_required")
-    review = evaluation.combined_owner_review
-    if not reasons:
-        if review is None:
-            return None, False
-        if not _combined_review_matches(review=review, evaluation=evaluation):
-            return (
-                _bound_result(
-                    evaluation,
-                    candidate_record,
-                    landing_plan_record,
-                    "structural_combined_owner_review_mismatch",
-                ),
-                False,
-            )
-        return None, True
-    if review is None:
-        return (
-            _bound_result_reasons(
-                evaluation,
-                candidate_record,
-                landing_plan_record,
-                tuple(reasons),
-            ),
-            False,
-        )
-    if not _combined_review_matches(review=review, evaluation=evaluation):
-        return (
-            _bound_result(
-                evaluation,
-                candidate_record,
-                landing_plan_record,
-                "structural_combined_owner_review_mismatch",
-            ),
-            False,
-        )
-    return None, True
-
-
-def _attested_engineering_only_composition(
-    entries: tuple[MergeTrainStructuralEntryObservation, ...],
-) -> bool:
-    supported_models = {"legacy_v1", "v2"}
-    models: set[str] = set()
-    policy_digests: set[str] = set()
-    for entry in entries:
-        reviewed = entry.reviewed_delta
-        current = entry.current_delta
-        if reviewed is None or current is None:
-            return False
-        if reviewed.fingerprint_sha256 != current.fingerprint_sha256:
-            return False
-        if (
-            reviewed.change_impact_model not in supported_models
-            or current.change_impact_model not in supported_models
-            or reviewed.change_impact_policy_digest is None
-            or current.change_impact_policy_digest is None
-            or reviewed.affected_subjects
-            or current.affected_subjects
-        ):
-            return False
-        models.update((reviewed.change_impact_model, current.change_impact_model))
-        policy_digests.update(
-            (reviewed.change_impact_policy_digest, current.change_impact_policy_digest)
-        )
-    return len(models) == 1 and len(policy_digests) == 1
-
-
-def _combined_review_matches(
-    *,
-    review: MergeTrainCombinedCandidateOwnerReview,
-    evaluation: MergeTrainStructuralEvaluationInput,
-) -> bool:
-    return (
-        review.candidate_sha256 == evaluation.active_candidate_sha256
-        and review.landing_plan_sha256 == evaluation.active_landing_plan_sha256
-        and review.policy_key == evaluation.policy_key
-        and review.policy_sha256 == evaluation.policy_sha256
-        and review.entries == evaluation.entries
-        and review.entries_sha256
-        == merge_train_structural_evaluation_entries_sha256(evaluation.entries)
-        and bool(review.evidence_bindings)
-        and review.authoritative is False
-        and review.authorizes_merge is False
-    )
 
 
 def _stack_root_reason(
@@ -695,17 +542,6 @@ def _rolling_base_result(
             "structural_base_tree_mismatch",
         )
     return None
-
-
-def _success_reasons(
-    primary_reason: MergeTrainStructuralReasonCode,
-    *,
-    combined_review_used: bool,
-) -> tuple[MergeTrainStructuralReasonCode, ...]:
-    reasons = [primary_reason]
-    if combined_review_used:
-        reasons.append("structural_combined_owner_review_recorded")
-    return tuple(reasons)
 
 
 def _success_result(

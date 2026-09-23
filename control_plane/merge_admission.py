@@ -31,7 +31,7 @@ from control_plane.contracts.merge_train_structural_provenance import (
 )
 
 
-MERGE_ADMISSION_ALGORITHM_VERSION = "merge-admission-v1"
+MERGE_ADMISSION_ALGORITHM_VERSION = "merge-admission-v2"
 
 
 def _utc_now_timestamp() -> str:

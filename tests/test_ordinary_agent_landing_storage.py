@@ -15,7 +15,6 @@ from control_plane.contracts.ordinary_agent_snapshot import (
     OrdinaryAgentProviderRequestCounts,
     OrdinaryAgentRequiredCheck,
 )
-from control_plane.contracts.owner_acceptance import OwnerAcceptanceDecision
 from control_plane.contracts.change_impact import (
     ChangeImpactRepositoryEvidence,
     ChangeImpactTarget,
@@ -359,9 +358,6 @@ class OrdinaryAgentLandingStorageTests(unittest.TestCase):
                         }
                     ),
                 }
-            ),
-            owner_decision=OwnerAcceptanceDecision(
-                status="not_required", reason_code="engineering_only", evaluated_at=timestamp
             ),
             engineering_decision=None,
             engineering_evidence=(),

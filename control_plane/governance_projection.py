@@ -14,8 +14,6 @@ from control_plane.contracts.governance_projection import (
     GovernanceLandingOutcomeFacet,
     GovernanceMergeAdmissionFacet,
     GovernanceMergeReadinessFacet,
-    GovernanceOwnerHistoryEntry,
-    GovernanceOwnerJudgmentFacet,
     GovernanceProjection,
 )
 from control_plane.contracts.merge_admission_record import (
@@ -24,10 +22,6 @@ from control_plane.contracts.merge_admission_record import (
 from control_plane.contracts.merge_readiness import MergeReadinessResult
 from control_plane.contracts.merge_train_stack_collapse import (
     MergeTrainStackCollapsePlanRecord,
-)
-from control_plane.contracts.owner_acceptance import (
-    OwnerAcceptanceEventRecord,
-    owner_acceptance_human_action_semantics,
 )
 from control_plane.merge_admission import (
     MergeAdmissionDeniedError,
@@ -46,10 +40,6 @@ from control_plane.merge_train_controller_run_once import (
 from control_plane.merge_train_github import (
     MergeTrainGitHubError,
     UrllibMergeTrainGitHubTransport,
-)
-from control_plane.owner_acceptance import (
-    evaluate_owner_acceptance,
-    require_owner_acceptance_event_store,
 )
 from control_plane.tenant_admission_controller import TenantAdmissionControllerGitHubClient
 from control_plane.workflows.merge_train_controller import (
@@ -243,17 +233,6 @@ def build_governance_projection(
     resolved_repository_evidence = repository_evidence or repository_evidence_provider.resolve(
         target
     )
-    snapshot_provider = _ResolvedRepositoryEvidenceProvider(resolved_repository_evidence)
-    decision = evaluate_owner_acceptance(
-        store=store,
-        repository_evidence_provider=snapshot_provider,
-        target=target,
-        evaluated_at=generated_at,
-    )
-    history = require_owner_acceptance_event_store(store).list_owner_acceptance_event_records(
-        repository_id=resolved_repository_evidence.target.repository_id,
-        pull_request_number=resolved_repository_evidence.target.pull_request_number,
-    )
     readiness = current_readiness_provider(
         store=store,
         repository_evidence=resolved_repository_evidence,
@@ -284,17 +263,6 @@ def build_governance_projection(
     outcome = outcomes[0] if outcomes else None
     return GovernanceProjection(
         target=resolved_repository_evidence.target,
-        owner_judgment=GovernanceOwnerJudgmentFacet(
-            current=decision,
-            history=tuple(
-                _owner_history_entry(
-                    event,
-                    repository_evidence=resolved_repository_evidence,
-                    current_event_ids=_current_owner_event_ids(decision),
-                )
-                for event in history
-            ),
-        ),
         merge_readiness=readiness,
         merge_admission=GovernanceMergeAdmissionFacet(
             status=(
@@ -334,36 +302,6 @@ class _ResolvedRepositoryEvidenceProvider:
         ):
             raise LookupError("Resolved repository evidence does not match the requested target.")
         return self.evidence
-
-
-def _owner_history_entry(
-    event: OwnerAcceptanceEventRecord,
-    *,
-    repository_evidence: ChangeImpactRepositoryEvidence,
-    current_event_ids: frozenset[str],
-) -> GovernanceOwnerHistoryEntry:
-    return GovernanceOwnerHistoryEntry(
-        record=event,
-        human_action_semantics=owner_acceptance_human_action_semantics(event.action),
-        target_status=(
-            "current"
-            if event.binding.head_sha == repository_evidence.target.head_sha
-            and event.binding.tree_sha == repository_evidence.target.tree_sha
-            else "historical"
-        ),
-        decision_relationship=("current" if event.event_id in current_event_ids else "historical"),
-    )
-
-
-def _current_owner_event_ids(decision: object) -> frozenset[str]:
-    event_ids: set[str] = set()
-    current_event = getattr(decision, "current_event", None)
-    if current_event is not None:
-        event_ids.add(current_event.event_id)
-    for product in getattr(decision, "products", ()):
-        if product.current_event is not None:
-            event_ids.add(product.current_event.event_id)
-    return frozenset(event_ids)
 
 
 def _admission_target_status(

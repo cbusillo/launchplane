@@ -715,7 +715,7 @@ export type GovernanceProjection = {
     merge_admission: GovernanceMergeAdmissionFacet;
     merge_readiness: GovernanceMergeReadinessFacet;
     mode: 'read_only_projection';
-    owner_judgment: GovernanceOwnerJudgmentFacet;
+    owner_judgment: GovernanceOwnerJudgmentFacet | null;
     schema_version: 1;
     target: ChangeImpactTarget;
 };
@@ -1102,7 +1102,7 @@ export type MergeReadinessPolicyFingerprints = {
     admission_algorithm: MergeReadinessPolicyFingerprintEvidence;
     authorization: MergeReadinessPolicyFingerprintEvidence;
     engineering_review: MergeReadinessPolicyFingerprintEvidence;
-    impact: MergeReadinessPolicyFingerprintEvidence;
+    impact: MergeReadinessPolicyFingerprintEvidence | null;
     merge_train: MergeReadinessPolicyFingerprintEvidence;
     ruleset: MergeReadinessPolicyFingerprintEvidence;
     technical_checks: MergeReadinessPolicyFingerprintEvidence;

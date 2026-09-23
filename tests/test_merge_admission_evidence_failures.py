@@ -12,7 +12,6 @@ from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.merge_admission import MergeAdmissionDeniedError
 from control_plane.merge_admission_live import LiveMergeAdmissionEvaluator
 from control_plane.merge_train import MergeTrainDryRunSnapshot
-from control_plane.owner_acceptance import OwnerAcceptanceEvaluationUnavailableError
 from control_plane.storage.filesystem import FilesystemRecordStore
 from tests.http_app_test_support import _post_merge_train_controller_run_once
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_record
@@ -35,12 +34,9 @@ from tests.test_merge_readiness import BASE_SHA, HEAD_SHA, REPOSITORY, TREE_SHA
 
 
 class _EvidenceApi:
-    def __init__(
-        self, files: list[dict[str, object]], *, stale: bool = False, failure_attempt: int = 1
-    ) -> None:
+    def __init__(self, files: list[dict[str, object]], *, stale: bool = False) -> None:
         self.files = files
         self.stale = stale
-        self.failure_attempt = failure_attempt
         self.pull_request_reads = 0
         self.file_reads = 0
 
@@ -48,8 +44,6 @@ class _EvidenceApi:
         repository = "/".join(path.split("/")[2:4])
         if "/files?" in path:
             self.file_reads += 1
-            if self.file_reads < self.failure_attempt:
-                return [{"filename": "private/path.py", "status": "modified"}]
             return self.files
         if "/commits?" in path:
             return [_commit_payload()]
@@ -58,9 +52,7 @@ class _EvidenceApi:
         if "/pulls/" in path:
             self.pull_request_reads += 1
             payload = _pull_request_payload(
-                head_sha="c" * 40
-                if self.stale and self.pull_request_reads >= 2 * self.failure_attempt
-                else "a" * 40
+                head_sha="c" * 40 if self.stale and self.pull_request_reads >= 2 else "a" * 40
             )
             payload["base"] = {
                 "sha": "d" * 40,
@@ -108,134 +100,127 @@ class MergeAdmissionEvidenceFailureTests(unittest.TestCase):
             ),
         )
         candidate, landing, controller, _ = _guard_records()
-        for failure_attempt in (1, 2):
-            for files, stale, reason, cause_type in cases:
-                with (
-                    self.subTest(reason=reason, stale=stale, files=files, attempt=failure_attempt),
-                    TemporaryDirectory() as state_dir,
-                ):
-                    api = _EvidenceApi(files, stale=stale, failure_attempt=failure_attempt)
-                    evaluator = LiveMergeAdmissionEvaluator(
-                        store=FilesystemRecordStore(state_dir=Path(state_dir)),
-                        repository_evidence_provider=api.provider(),
-                        technical_check_client=_TechnicalCheckClient(),
-                        policy_record_provider=lambda: build_test_merge_train_policy_record(
-                            repository=REPOSITORY
-                        ),
-                        snapshot_reader=_StaticSnapshotReader(
-                            MergeTrainDryRunSnapshot(
-                                repository=REPOSITORY,
-                                base_branch="main",
-                                base_sha=BASE_SHA,
-                                pull_requests=(
-                                    _queued_pull_request(
-                                        number=2083,
-                                        head_sha=HEAD_SHA,
-                                        created_at="2026-08-11T03:00:00Z",
-                                    ),
+        for files, stale, reason, cause_type in cases:
+            with (
+                self.subTest(reason=reason, stale=stale, files=files),
+                TemporaryDirectory() as state_dir,
+            ):
+                api = _EvidenceApi(files, stale=stale)
+                evaluator = LiveMergeAdmissionEvaluator(
+                    store=FilesystemRecordStore(state_dir=Path(state_dir)),
+                    repository_evidence_provider=api.provider(),
+                    technical_check_client=_TechnicalCheckClient(),
+                    policy_record_provider=lambda: build_test_merge_train_policy_record(
+                        repository=REPOSITORY
+                    ),
+                    snapshot_reader=_StaticSnapshotReader(
+                        MergeTrainDryRunSnapshot(
+                            repository=REPOSITORY,
+                            base_branch="main",
+                            base_sha=BASE_SHA,
+                            pull_requests=(
+                                _queued_pull_request(
+                                    number=2083,
+                                    head_sha=HEAD_SHA,
+                                    created_at="2026-08-11T03:00:00Z",
                                 ),
-                            )
-                        ),
-                    )
-                    with self.assertRaises(MergeAdmissionDeniedError) as raised:
-                        evaluator.evaluate(
-                            candidate_record=candidate,
-                            landing_plan_record=landing,
-                            entry=landing.landing_plan.entries[0],
-                            observed_base_sha=BASE_SHA,
-                            observed_base_tree_sha="5" * 40,
-                            observed_head_sha=HEAD_SHA,
-                            observed_head_tree_sha=TREE_SHA,
-                            controller_state=controller,
-                            expected_lease_owner=controller.lease_owner,
-                            stack_collapse_record=None,
-                            evaluated_at="2026-08-11T03:01:00Z",
+                            ),
                         )
-                    self.assertEqual(raised.exception.reason_code, reason)
-                    cause = raised.exception.__cause__
-                    if failure_attempt == 2:
-                        self.assertIsInstance(cause, OwnerAcceptanceEvaluationUnavailableError)
-                        assert cause is not None
-                        cause = cause.__cause__
-                    self.assertIsInstance(cause, cause_type)
-                    self.assertNotIn("private/path.py", str(raised.exception))
-                    self.assertEqual(api.file_reads, failure_attempt)
+                    ),
+                )
+                with self.assertRaises(MergeAdmissionDeniedError) as raised:
+                    evaluator.evaluate(
+                        candidate_record=candidate,
+                        landing_plan_record=landing,
+                        entry=landing.landing_plan.entries[0],
+                        observed_base_sha=BASE_SHA,
+                        observed_base_tree_sha="5" * 40,
+                        observed_head_sha=HEAD_SHA,
+                        observed_head_tree_sha=TREE_SHA,
+                        controller_state=controller,
+                        expected_lease_owner=controller.lease_owner,
+                        stack_collapse_record=None,
+                        evaluated_at="2026-08-11T03:01:00Z",
+                    )
+                self.assertEqual(raised.exception.reason_code, reason)
+                cause = raised.exception.__cause__
+                self.assertIsInstance(cause, cause_type)
+                self.assertNotIn("private/path.py", str(raised.exception))
+                self.assertEqual(api.file_reads, 1)
 
 
 class MergeAdmissionEvidenceFailureHttpTests(unittest.IsolatedAsyncioTestCase):
     async def test_duplicate_evidence_blocks_controller_without_effect_or_reconciliation(
         self,
     ) -> None:
-        for failure_attempt in (1, 2):
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "test-token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            api = _EvidenceApi(
+                [
+                    {"filename": "private/path.py", "status": "modified"},
+                    {"filename": "private/path.py", "status": "modified"},
+                ],
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+                change_impact_repository_evidence_provider=api.provider(),
+            )
             with (
-                TemporaryDirectory() as temporary_directory_name,
-                patch.dict("os.environ", {"GH_TOKEN": "test-token"}, clear=True),
-            ):
-                state_dir = Path(temporary_directory_name) / "state"
-                _seed_merge_train_policy(state_dir)
-                store = FilesystemRecordStore(state_dir=state_dir)
-                api = _EvidenceApi(
-                    [
-                        {"filename": "private/path.py", "status": "modified"},
-                        {"filename": "private/path.py", "status": "modified"},
-                    ],
-                    failure_attempt=failure_attempt,
-                )
-                app = create_launchplane_fastapi_app(
-                    verifier=_StubVerifier(_merge_train_service_identity()),
-                    authz_policy=_merge_train_service_policy(),
-                    record_store_factory=lambda: store,
-                    change_impact_repository_evidence_provider=api.provider(),
-                )
-                with (
-                    patch(
-                        "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
-                        _FakeMergeTrainSnapshotReader,
-                    ),
-                    patch(
-                        "control_plane.merge_admission_live.GitHubMergeTrainSnapshotReader",
-                        _FakeMergeTrainSnapshotReader,
-                    ),
-                    patch(
-                        "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
-                        _AdmissionInvokingMergeTrainGitHubClient,
-                    ),
-                ):
-                    responses = [
-                        await _post_merge_train_controller_run_once(
-                            app,
-                            {
-                                "schema_version": 1,
-                                "repository": "cbusillo/sellyouroutboard",
-                                "base_branch": "main",
-                                "mutate": True,
-                            },
-                        )
-                        for _ in range(5)
-                    ]
-                controller_state = store.list_merge_train_controller_state_records(
-                    repository="cbusillo/sellyouroutboard", base_branch="main", limit=1
-                )[0]
-                self.assertEqual(store.list_merge_admission_records(), ())
-                self.assertEqual(store.list_merge_landing_outcome_records(), ())
-            self.assertTrue(all(response.status_code == 202 for response in responses))
-            result = responses[-1].json()["result"]
-            self.assertEqual((result["mode"], result["controller_action"]), ("blocked", "block"))
-            self.assertEqual(
-                result["blocking_reason"],
-                {
-                    "code": "repository_evidence_unavailable",
-                    "message": "Authoritative repository evidence is unavailable for merge admission.",
-                },
-            )
-            self.assertNotIn("private/path.py", responses[-1].text)
-            self.assertEqual(api.file_reads, failure_attempt)
-            self.assertEqual(
-                (
-                    controller_state.status,
-                    controller_state.reconciliation_status,
-                    controller_state.lease_owner,
+                patch(
+                    "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
+                    _FakeMergeTrainSnapshotReader,
                 ),
-                ("idle", "clean", ""),
-            )
-            self.assertEqual(controller_state.last_phase, "admit_pull_request")
+                patch(
+                    "control_plane.merge_admission_live.GitHubMergeTrainSnapshotReader",
+                    _FakeMergeTrainSnapshotReader,
+                ),
+                patch(
+                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                    _AdmissionInvokingMergeTrainGitHubClient,
+                ),
+            ):
+                responses = [
+                    await _post_merge_train_controller_run_once(
+                        app,
+                        {
+                            "schema_version": 1,
+                            "repository": "cbusillo/sellyouroutboard",
+                            "base_branch": "main",
+                            "mutate": True,
+                        },
+                    )
+                    for _ in range(5)
+                ]
+            controller_state = store.list_merge_train_controller_state_records(
+                repository="cbusillo/sellyouroutboard", base_branch="main", limit=1
+            )[0]
+            self.assertEqual(store.list_merge_admission_records(), ())
+            self.assertEqual(store.list_merge_landing_outcome_records(), ())
+        self.assertTrue(all(response.status_code == 202 for response in responses))
+        result = responses[-1].json()["result"]
+        self.assertEqual((result["mode"], result["controller_action"]), ("blocked", "block"))
+        self.assertEqual(
+            result["blocking_reason"],
+            {
+                "code": "repository_evidence_unavailable",
+                "message": "Authoritative repository evidence is unavailable for merge admission.",
+            },
+        )
+        self.assertNotIn("private/path.py", responses[-1].text)
+        self.assertEqual(api.file_reads, 1)
+        self.assertEqual(
+            (
+                controller_state.status,
+                controller_state.reconciliation_status,
+                controller_state.lease_owner,
+            ),
+            ("idle", "clean", ""),
+        )
+        self.assertEqual(controller_state.last_phase, "admit_pull_request")
