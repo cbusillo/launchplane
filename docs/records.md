@@ -368,46 +368,19 @@ The PostgreSQL tables are `launchplane_product_owner_policies`,
 `launchplane_product_owner_routing`. Migration `c1d2e3f4a5b6` creates these
 tables without inserting or inferring any owner data.
 
-## Owner Acceptance Event Records
+## Retired Owner Acceptance Event Records
 
-`OwnerAcceptanceEventRecord` is the append-only authoritative ledger for exact-change
-Owner acceptance. Human-authored events are `accepted`, `changes_requested`, and
-`revoked`; `superseded` and `invalidated` are system-only. Human events require
-a browser-authenticated GitHub human who is a current Owner in the bound product
-Owner policy. Agents, workers, GitHub Actions, and local operator bearer
-identities cannot author or impersonate Owner events.
+`OwnerAcceptanceEventRecord` remains a historical, read-only compatibility
+contract. Its exact-binding evaluator and event writers have been removed; these
+records are never current Owner review or merge authority. Current decisions use
+product-review records and release-checklist records instead.
 
-Each event binding includes exact numeric GitHub repository identity, PR, head,
-tree, active change-impact policy provenance, product/system/action/environment,
-and active Owner policy plus requirement provenance. When an enabled product
-preview has one active serving record, the binding also embeds preview and
-generation IDs, immutable artifact image digest, manifest fingerprint,
-canonical URL, and an explicit verified-runtime identity projection. Changed
-head, tree, policy, requirement, membership, preview generation, artifact,
-manifest, URL, or runtime identity stales earlier acceptance for the new exact
-binding. Multi-product evaluation returns one independently authorized decision
-per affected product and accepts only when every current product decision is
-accepted. The top-level status and singular binding mirror the deterministic
-worst current product decision for compatibility. Event writes use the reviewed
-binding digest to select one server-derived product binding and never accept a
-caller-supplied product.
-
-Filesystem rehearsal records live under `launchplane_owner_acceptance_events/`.
-PostgreSQL stores the ledger in `launchplane_owner_acceptance_events` with an
-event-id primary key, database-assigned monotonic `subject_sequence`, and
-subject, binding, acceptance, and unique subject-sequence indexes. The companion
-`launchplane_owner_acceptance_subject_sequences` table serializes allocation for
-each full Owner-review subject in the append transaction. Filesystem rehearsal
-holds the equivalent cross-process lock while it checks replay, validates the
-transition, allocates sequence, and atomically replaces the new event file.
-
-Migration `f3a5c7e9b1d4` creates the empty event table. Migration
-`b5d7f9a1c3e6` backfills existing rows in their prior deterministic
-`(occurred_at, event_id)` order, creates the counter and uniqueness fence, and
-does not change semantic payload identity. Sequence metadata is excluded from
-event IDs, binding digests, and replay digests. Optional preview and structured
-resolution evidence live inside the JSON payload; omitted optional fields
-preserve the original #2022 binding, event, and replay digests byte-for-byte.
+Filesystem history remains under `launchplane_owner_acceptance_events/`.
+PostgreSQL retains `launchplane_owner_acceptance_events` and
+`launchplane_owner_acceptance_subject_sequences`, including their migrations and
+indexes. No row, event id, binding digest, replay digest, or sequence is rewritten
+or deleted. Filesystem-to-PostgreSQL import rejects archives containing retired
+Owner events before writing anything. See [owner-acceptance.md](owner-acceptance.md).
 
 ## Change Impact Policy Records
 

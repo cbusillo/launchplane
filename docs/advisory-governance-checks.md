@@ -4,35 +4,16 @@ title: Governance Check Projection
 
 ## Purpose
 
-Launchplane projects its server-owned engineering review and Owner acceptance
-decisions into GitHub as check runs. GitHub is a visibility and routing surface,
-not an authority source. The projection cannot authorize merge, tenant
-admission, promotion, or production deployment.
+Launchplane projects engineering review into the `launchplane/engineering-review`
+GitHub check as a neutral advisory observation. GitHub is a visibility and routing
+surface; this projection grants no merge, promotion, or deployment authority.
 
-The two stable check names are:
-
-- `launchplane/engineering-review`
-- `launchplane/owner-acceptance`
-
-Engineering review remains a neutral advisory observation. Owner acceptance uses
-an `in_progress` check while an ordinary Owner decision is pending, `success`
-after acceptance or when review is not required, `action_required` for stale or
-negative human decisions, and `failure` when authority or evidence is
-unavailable. Its summary routes the reviewer to Launchplane, the only Owner
-action surface. Owner projection uses one stable aggregate check and lists each
-affected product decision instead of product-derived check names.
-
-For product pull requests this check is a leftover of the change-impact model
-and is no longer the Owner's signal. Product Owner review is shown by the
-`launchplane/owner-review` commit status described in
-[preview-workflow-contract.md](preview-workflow-contract.md#owner-review-request).
-When Launchplane next writes a ready preview comment for a pull request, an
-existing `launchplane/owner-acceptance` check run on the current head that this
-App created and that is not already `neutral` is updated once to `neutral` with
-the title "Retired" and a summary pointing to `launchplane/owner-review`.
-Launchplane never creates the check for that purpose. Launchplane's own merge
-train still evaluates Owner acceptance; removing that is a later step of issue
-`#2446`.
+Owner preview review uses the `launchplane/owner-review` commit status described
+in [preview-workflow-contract.md](preview-workflow-contract.md#owner-review-request).
+The exact-binding `launchplane/owner-acceptance` check is retired. When Launchplane
+next publishes current review feedback, it neutralizes any old App-owned check
+on that head with the title "Retired" and a pointer to the current status. It
+never creates an old check for cleanup and never reads it as merge authority.
 
 ## GitHub App Identity
 
@@ -64,63 +45,12 @@ missing identity or installation state fails the projection route closed.
 engineering decision only after Launchplane re-resolves the exact repository,
 pull request, head, and tree evidence.
 
-`POST /v1/owner-acceptance/project` accepts only a repository and pull-request
-reference. Launchplane evaluates current Owner acceptance from server-owned
-evidence, re-resolves the exact target, and rejects any mid-flight head, tree,
-repository-id, or owner-id drift before writing GitHub.
-
-Owner acceptance `details_url` values point to the server-derived Launchplane
-Owner workbench, not directly to GitHub. Launchplane validates the configured
-browser public origin and URL-encodes the exact repository and pull-request
-query parameters before constructing `/ui/engineering/owner-acceptance`; an
-invalid origin or target fails the projection closed. Opening that link expands
-Exact lookup and automatically evaluates the same target in the browser.
-
-Each check run stores the Launchplane decision digest as `external_id`.
-Identical state replays without a write. Changed binding or decision state on
-the same head updates the App-owned check run. GitHub does not reliably reopen a
-completed check run, so a transition from a completed state to ordinary pending
-Owner review creates a fresh same-name, same-head `in_progress` run; GitHub's
-latest-run filter then makes that run canonical. This also recovers a pending
-projection after GitHub marks an incomplete check stale at fourteen days. A
-changed head receives its own new check run and cannot reuse evidence from the
-prior head.
-
-Browser Owner event writes first replace the exact-head check with an
-`in_progress` **updating decision** state. Failure to establish that non-green
-state blocks the immutable append. Launchplane then projects the stored event's
-final decision from a fresh current-ledger evaluation while holding a store-backed
-immutable-repository-id projection lock for the pull request. Repository-id
-changes are rejected and retried before the critical section, and the resolved
-event binding must still match the held lock before projection or append.
-Repository renames remain serialized by the stable id. Ready preview-feedback
-hydration and the explicit endpoint use this same locked current-ledger
-reconciliation service rather than projecting independently. Preview feedback
-runs the synchronous lock, storage, and GitHub work in a worker thread instead
-of blocking the ASGI event loop. Bindingless stale and unavailable decisions
-still project against the exact resolved target as `action_required` or
-`failure`; only `not_required` intentionally omits the Owner action. A second
-evaluation confirms that the projected state stayed current before the lock is
-released, and every minted installation token is revoked after its attempt.
-PostgreSQL waiters use dedicated unpooled advisory-lock connections rather than
-consuming the record-store pool. Successful acquisition is committed before
-provider work; cleanup explicitly unlocks, commits, and verifies the session
-lock. If the event is confirmed persisted but final delivery, token cleanup, or
-confirmation fails, Launchplane replaces the exact attempted target with a
-completed `action_required` **reconciliation required** check. A failed event
-write is read back by deterministic event id: confirmed absence projects a
-completed `failure` **update failed** check, while an unreadable or mismatched
-record projects a completed `failure` **write outcome unknown** check. The API
-reports these outcomes separately and never claims persistence without read-back
-evidence. If that recovery projection also fails, the API reports that the event
-was not persisted but the GitHub projection is unconfirmed rather than claiming
-that GitHub shows the failed update. Concurrent domain conflicts confirmed absent
-are reconciled to the current authoritative decision before their original 4xx
-response is returned. Idempotent replay uses stable GitHub user ID rather than
-mutable Owner login and can safely retry the final projection. Projection results
-use public schema version 2 because they include exact check-run status and
-nullable conclusion. This sequence remains non-authoritative for admission, and
-browser sessions do not gain projection authority.
+The retired `/v1/owner-acceptance/project` route and
+`/ui/engineering/owner-acceptance` workbench have been removed. Current preview
+review uses `/ui/owner-review` and the `launchplane/owner-review` commit status.
+`OwnerReviewStatusPublisher` can neutralize an old `launchplane/owner-acceptance`
+check on the same pull request; it does not evaluate or write old Owner events.
+See [owner-acceptance.md](owner-acceptance.md).
 
 ## No Feedback Loop
 
@@ -132,7 +62,6 @@ separate cutover. Tests prove that preview, merge, and admission results are
 unchanged when GitHub projections are present, `in_progress`, completed, or
 failed.
 
-Do not make the Owner projection a required GitHub status until the separate
-ruleset reconciliation work proves refresh behavior for every staleness source.
-Launchplane recomputes the authoritative Owner decision immediately before
-admission; the GitHub check remains a routing and visibility projection.
+The retired Owner projection is never a required check or merge authority.
+Current product review and release checklist decisions are separate Launchplane
+records, and the release checklist remains the production Owner gate.

@@ -80,18 +80,13 @@ title: Secrets
   generated preview caller rules in it. Product rules are planned from typed
   runtime input and persisted in the DB-backed `operator.generic-web-preview`
   managed set.
-- The protected `LAUNCHPLANE_AUTHZ_OWNER_ACCEPTANCE_MANAGED_SET_JSON` secret
-  contains the complete `operator.owner-acceptance` GitHub-human desired set.
-  Bind every rule to immutable numeric GitHub user IDs and grant only the
-  `read_only` role, `launchplane` product, and `owner-acceptance` context.
-  Engineering viewer rules may contain only `owner_acceptance.read`; Owner
-  candidate rules may contain the combined read and event-write actions or, once
-  the owner-safe service source is deployed, only
-  `owner_acceptance_event.write`. Keep product Owner membership in the
-  independently managed Owner policy; this secret cannot satisfy Owner
-  authority. Event-write-only source compatibility is not permission or evidence
-  to update the current secret. Contracting a live Owner-candidate rule requires
-  its own reviewed plan, apply, and exact DB readback.
+- `LAUNCHPLANE_AUTHZ_OWNER_ACCEPTANCE_MANAGED_SET_JSON` names a retired
+  compatibility set. `operator.owner-acceptance` accepts only an empty desired
+  policy for removal of existing grants. Current Owner review uses the Owner
+  on the product profile and has no Owner-grant secret prerequisite. This code
+  retirement does not change deployed secrets or authorization records. See
+  [owner-acceptance.md](owner-acceptance.md).
+
 - The protected
   `LAUNCHPLANE_AUTHZ_PRODUCT_OWNER_POLICY_ADMIN_MANAGED_SET_JSON` secret contains
   the complete `operator.product-owner-policy-admin` local-operator desired set.

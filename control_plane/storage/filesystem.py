@@ -65,10 +65,7 @@ from control_plane.contracts.merge_admission_record import (
 )
 from control_plane.contracts.owner_acceptance import (
     OwnerAcceptanceEventRecord,
-    OwnerAcceptanceEventWriteStatus,
-    owner_acceptance_event_replay_matches,
     owner_acceptance_subject_key,
-    validate_owner_acceptance_event_transition,
 )
 from control_plane.contracts.merge_train_batch import MergeTrainBatchCandidateRecord
 from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingPlanRecord
@@ -203,7 +200,6 @@ from control_plane.contracts.promotion_record import PromotionRecord
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.manager_preview_approval import ManagerPreviewApprovalEventConflictError
-from control_plane.owner_acceptance import OwnerAcceptanceEventConflictError
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.runtime_environment_record import (
@@ -3363,63 +3359,6 @@ class FilesystemRecordStore:
         if limit is not None:
             records = records[:limit]
         return tuple(records)
-
-    @contextmanager
-    def owner_acceptance_projection_lock(
-        self,
-        *,
-        repository_id: str,
-        pull_request_number: int,
-    ) -> Iterator[None]:
-        normalized_repository_id = repository_id.strip()
-        if not normalized_repository_id or pull_request_number < 1:
-            raise ValueError("Owner acceptance projection lock requires an exact pull request")
-        lock_id = f"{normalized_repository_id}-{pull_request_number}"
-        with self._exclusive_record_lock("owner_acceptance_projections", lock_id):
-            yield
-
-    def write_owner_acceptance_event_record(
-        self, record: OwnerAcceptanceEventRecord
-    ) -> OwnerAcceptanceEventWriteStatus:
-        record_type = "launchplane_owner_acceptance_events"
-        with self._product_authority_bundle_lock():
-            records = self._owner_acceptance_event_records_locked()
-            record_path = self._record_path(record_type, record.event_id)
-            if record_path.exists():
-                existing = next(
-                    existing_record
-                    for existing_record in records
-                    if existing_record.event_id == record.event_id
-                )
-                if not owner_acceptance_event_replay_matches(existing, record):
-                    raise OwnerAcceptanceEventConflictError(
-                        "Owner acceptance event replay changed the persisted payload."
-                    )
-                return "replayed"
-            subject_records = tuple(
-                existing_record
-                for existing_record in records
-                if owner_acceptance_subject_key(existing_record)
-                == owner_acceptance_subject_key(record)
-            )
-            previous = (
-                max(subject_records, key=lambda existing_record: existing_record.subject_sequence)
-                if subject_records
-                else None
-            )
-            persisted_record = record.model_copy(
-                update={
-                    "subject_sequence": (
-                        previous.subject_sequence + 1 if previous is not None else 1
-                    )
-                }
-            )
-            validate_owner_acceptance_event_transition(
-                previous=previous,
-                proposed=persisted_record,
-            )
-            self._write_model_locked(record_type, record.event_id, persisted_record)
-            return "written"
 
     def read_owner_acceptance_event_record(
         self,

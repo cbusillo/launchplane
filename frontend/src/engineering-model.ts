@@ -3,16 +3,9 @@ import type {
   GitHubIssueInboxReadModel,
   MergeTrainControllerStatusReadModel,
   MergeTrainPolicyTarget,
-  OwnerAcceptanceViewerBindingEligibility,
-  OwnerAcceptanceViewerCapabilities,
-  OwnerAcceptanceQueueEntry,
   WorkGraphQueueItem,
 } from "./generated/openapi.ts";
 import type { Status } from "./types";
-
-export type OwnerAcceptanceStatusFilter =
-  | "all"
-  | OwnerAcceptanceQueueEntry["ledger_status"];
 
 export type WorkGraphStateFilter =
   | "all"
@@ -217,42 +210,4 @@ export function scalarEvidence(
       return [];
     })
     .sort((left, right) => left.label.localeCompare(right.label));
-}
-
-export function ownerAcceptanceDecisionTone(
-  status: OwnerAcceptanceQueueEntry["ledger_status"],
-): Status {
-  if (status === "accepted") return "pass";
-  if (status === "not_required") return "pass";
-  if (status === "pending") return "pending";
-  if (status === "changes_requested") return "blocked";
-  if (status === "revoked") return "blocked";
-  if (status === "stale") return "unknown";
-  if (status === "unavailable") return "unknown";
-  return "unknown";
-}
-
-export function ownerAcceptanceBindingEligibility(
-  capabilities: OwnerAcceptanceViewerCapabilities,
-  bindingSha256: string,
-): OwnerAcceptanceViewerBindingEligibility | undefined {
-  if (!capabilities.event_write_authorized) {
-    return undefined;
-  }
-  return capabilities.bindings.find(
-    (eligibility) => eligibility.binding_sha256 === bindingSha256,
-  );
-}
-
-export function filterOwnerAcceptanceEntries(
-  entries: OwnerAcceptanceQueueEntry[],
-  status: OwnerAcceptanceStatusFilter,
-  repository: string,
-): OwnerAcceptanceQueueEntry[] {
-  const normalized = repository.trim().toLowerCase();
-  return entries.filter(
-    (entry) =>
-      (status === "all" || entry.ledger_status === status) &&
-      (!normalized || entry.repository.includes(normalized)),
-  );
 }

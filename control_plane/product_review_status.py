@@ -10,7 +10,7 @@ from dataclasses import dataclass
 import logging
 from pathlib import Path
 from typing import Final, Literal
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, urlencode, urlsplit
 
 from control_plane.contracts.advisory_check_projection import OWNER_ACCEPTANCE_CHECK_NAME
 from control_plane.contracts.manager_preview_approval_projection import (
@@ -25,7 +25,6 @@ from control_plane.github_app_identity import (
     GitHubAppInstallationToken,
     revoke_installation_token,
 )
-from control_plane.owner_acceptance_projection import owner_review_reference_url
 from control_plane.product_review import ProductReviewStore
 from control_plane.workflows.launchplane import (
     github_api_request,
@@ -337,3 +336,43 @@ class OwnerReviewStatusPublisher:
 def _repository_path(repository: str) -> str:
     owner, name = repository.strip().split("/", 1)
     return f"{quote(owner, safe='')}/{quote(name, safe='')}"
+
+
+def owner_review_reference_url(
+    *,
+    public_origin: str,
+    repository: str,
+    pull_request_number: int,
+) -> str:
+    origin = public_origin.strip()
+    try:
+        parsed_origin = urlsplit(origin)
+    except ValueError as error:
+        raise ValueError("Owner review requires a valid browser public origin.") from error
+    if (
+        parsed_origin.scheme not in {"http", "https"}
+        or not parsed_origin.netloc
+        or parsed_origin.path not in {"", "/"}
+        or parsed_origin.query
+        or parsed_origin.fragment
+        or parsed_origin.username is not None
+        or parsed_origin.password is not None
+    ):
+        raise ValueError("Owner review requires a valid browser public origin.")
+    try:
+        if parsed_origin.port is not None and not 1 <= parsed_origin.port <= 65535:
+            raise ValueError
+    except ValueError as error:
+        raise ValueError("Owner review requires a valid browser public origin.") from error
+    if any(character.isspace() or ord(character) < 32 for character in origin):
+        raise ValueError("Owner review requires a valid browser public origin.")
+    if repository.count("/") != 1 or any(
+        not part or part != part.strip() for part in repository.split("/", 1)
+    ):
+        raise ValueError("Owner review requires a valid repository target.")
+    if pull_request_number < 1:
+        raise ValueError("Owner review requires a positive pull request number.")
+    return (
+        f"{origin.rstrip('/')}/ui/owner-review"
+        f"?repository={quote(repository, safe='')}&pull_request={pull_request_number}"
+    )

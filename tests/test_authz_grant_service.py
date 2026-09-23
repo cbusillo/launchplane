@@ -186,6 +186,39 @@ def _workflow_admin_rule(
 
 
 class AuthzManagedPolicyServiceTests(unittest.TestCase):
+    def test_retired_owner_grants_can_be_removed_but_not_recreated(self) -> None:
+        rule = GitHubHumanPolicyRule(
+            github_ids=(101,),
+            roles=("read_only",),
+            products=("example-product",),
+            contexts=("launchplane",),
+            actions=("owner_acceptance.read",),
+            managed_set_id="operator.owner-acceptance",
+            managed_rule_id="example-owner",
+        )
+        with self.assertRaisesRegex(ValidationError, "can only be removed"):
+            AuthzManagedPolicyReconcileEnvelope(
+                product="launchplane",
+                managed_set_id="operator.owner-acceptance",
+                desired_policy=LaunchplaneAuthzPolicy(schema_version=2, github_humans=(rule,)),
+            )
+        removal = AuthzManagedPolicyReconcileEnvelope(
+            product="launchplane",
+            managed_set_id="operator.owner-acceptance",
+            desired_policy=LaunchplaneAuthzPolicy(schema_version=2),
+        )
+        active = _active_record()
+        policy = active.policy.model_copy(update={"schema_version": 2, "github_humans": (rule,)})
+        active = active.model_copy(
+            update={"policy": policy, "policy_sha256": authz_policy_sha256(policy)}
+        )
+        _, _, updated, diff = plan_managed_authz_policy_reconcile(
+            record_store=_AuthzPolicyStore((active,)), request=removal
+        )
+        self.assertEqual(diff.removed_rule_count, 1)
+        self.assertEqual(updated.github_humans, ())
+        self.assertEqual(updated.github_actions, policy.github_actions)
+
     def test_administrator_quorum_is_legacy_compatible_and_schema_v1_rejects_it(self) -> None:
         legacy_policy = LaunchplaneAuthzPolicy.model_validate(
             {
@@ -1093,135 +1126,6 @@ class AuthzManagedPolicyServiceTests(unittest.TestCase):
         )
 
         self.assertEqual(request.desired_policy.github_humans[0].github_ids, (1001,))
-
-    def test_owner_acceptance_managed_set_enforces_minimum_human_boundary(self) -> None:
-        valid_rule = {
-            "managed_set_id": "operator.owner-acceptance",
-            "managed_rule_id": "owner.current",
-            "github_ids": [1001],
-            "roles": ["read_only"],
-            "products": ["launchplane"],
-            "contexts": ["owner-acceptance"],
-            "actions": ["owner_acceptance.read", "owner_acceptance_event.write"],
-        }
-        request_payload = {
-            "schema_version": 2,
-            "product": "launchplane",
-            "mode": "dry_run",
-            "managed_set_id": "operator.owner-acceptance",
-            "desired_policy": {
-                "schema_version": 2,
-                "github_humans": [valid_rule],
-            },
-        }
-
-        AuthzManagedPolicyReconcileEnvelope.model_validate(request_payload)
-        AuthzManagedPolicyReconcileEnvelope.model_validate(
-            {
-                **request_payload,
-                "desired_policy": {
-                    "schema_version": 2,
-                    "github_humans": [
-                        {
-                            **valid_rule,
-                            "managed_rule_id": "viewer.current",
-                            "roles": ["read_only", "admin"],
-                            "actions": ["owner_acceptance.read"],
-                        }
-                    ],
-                },
-            }
-        )
-        AuthzManagedPolicyReconcileEnvelope.model_validate(
-            {
-                **request_payload,
-                "desired_policy": {
-                    "schema_version": 2,
-                    "github_humans": [
-                        {
-                            **valid_rule,
-                            "managed_rule_id": "owner.event-write-only",
-                            "actions": ["owner_acceptance_event.write"],
-                        }
-                    ],
-                },
-            }
-        )
-
-        invalid_rules = (
-            ({**valid_rule, "github_ids": [], "logins": ["owner"]}, "immutable GitHub IDs"),
-            (
-                {**valid_rule, "roles": ["admin"]},
-                "Owner candidate rules require only the read_only role",
-            ),
-            (
-                {
-                    **valid_rule,
-                    "managed_rule_id": "viewer.invalid",
-                    "roles": ["read_only"],
-                    "actions": ["owner_acceptance.read"],
-                },
-                "viewer rules require admin and read_only roles",
-            ),
-            ({**valid_rule, "products": ["other"]}, "exact Launchplane workbench scope"),
-            (
-                {**valid_rule, "actions": [*valid_rule["actions"], "product_config.apply"]},
-                "read action alone, the event-write action alone, or both actions together",
-            ),
-            (
-                {**valid_rule, "actions": []},
-                "actions",
-            ),
-            (
-                {
-                    **valid_rule,
-                    "managed_rule_id": "owner.write-only-admin.invalid",
-                    "roles": ["admin"],
-                    "actions": ["owner_acceptance_event.write"],
-                },
-                "Owner candidate rules require only the read_only role",
-            ),
-            (
-                {
-                    **valid_rule,
-                    "managed_rule_id": "owner.write-only-scope.invalid",
-                    "contexts": ["other"],
-                    "actions": ["owner_acceptance_event.write"],
-                },
-                "exact Launchplane workbench scope",
-            ),
-        )
-        for invalid_rule, message in invalid_rules:
-            with self.subTest(message=message), self.assertRaisesRegex(ValidationError, message):
-                AuthzManagedPolicyReconcileEnvelope.model_validate(
-                    {
-                        **request_payload,
-                        "desired_policy": {
-                            "schema_version": 2,
-                            "github_humans": [invalid_rule],
-                        },
-                    }
-                )
-
-        with self.assertRaisesRegex(ValidationError, "only GitHub human rules"):
-            AuthzManagedPolicyReconcileEnvelope.model_validate(
-                {
-                    **request_payload,
-                    "desired_policy": {
-                        "schema_version": 2,
-                        "github_actions": [
-                            {
-                                "managed_set_id": "operator.owner-acceptance",
-                                "managed_rule_id": "worker.invalid",
-                                "repository": "cbusillo/launchplane",
-                                "repository_id": "1001",
-                                "repository_owner_id": "2001",
-                                "actions": ["owner_acceptance.read"],
-                            }
-                        ],
-                    },
-                }
-            )
 
     def test_product_owner_policy_admin_managed_set_enforces_minimum_operator_boundary(
         self,

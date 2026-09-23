@@ -18,7 +18,7 @@ from control_plane.ordinary_agent_landing_evidence import (
 from control_plane.contracts.change_impact import ChangeImpactTargetReference
 from control_plane.tenant_admission_controller import TenantAdmissionTechnicalChecks
 from control_plane.merge_train import MergeTrainDryRunSnapshot, MergeTrainPullRequestSnapshot
-from tests.test_owner_acceptance import _repository_evidence
+from tests.support.repository_evidence import _repository_evidence
 
 
 class OrdinaryAgentLandingEvidenceTests(unittest.TestCase):

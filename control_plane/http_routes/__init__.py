@@ -86,14 +86,6 @@ from control_plane.http_routes.product_review import (
     ProductReviewRouteDependencies,
     register_product_review_routes,
 )
-from control_plane.http_routes.owner_acceptance import (
-    OWNER_ACCEPTANCE_EVALUATION_ROUTE,
-    OWNER_ACCEPTANCE_EVENT_ROUTE,
-    OWNER_ACCEPTANCE_EVENTS_ROUTE,
-    OWNER_ACCEPTANCE_PROJECT_ROUTE,
-    OwnerAcceptanceRouteDependencies,
-    register_owner_acceptance_routes,
-)
 from control_plane.http_routes.privileged_operations import (
     PRIVILEGED_OPERATION_AGENT_PLANS_ROUTE,
     PRIVILEGED_OPERATION_AGENT_SUMMARY_ROUTE,
@@ -167,11 +159,6 @@ __all__ = (
     "ProductReadRouteDependencies",
     "ChangeImpactWriteRouteDependencies",
     "ProductOwnerWriteRouteDependencies",
-    "OWNER_ACCEPTANCE_EVALUATION_ROUTE",
-    "OWNER_ACCEPTANCE_EVENT_ROUTE",
-    "OWNER_ACCEPTANCE_EVENTS_ROUTE",
-    "OWNER_ACCEPTANCE_PROJECT_ROUTE",
-    "OwnerAcceptanceRouteDependencies",
     "ProductReviewRouteDependencies",
     "PRIVILEGED_OPERATION_AGENT_PLANS_ROUTE",
     "PRIVILEGED_OPERATION_AGENT_SUMMARY_ROUTE",
@@ -234,7 +221,6 @@ __all__ = (
     "register_preview_readiness_read_routes",
     "register_product_owner_read_routes",
     "register_product_owner_write_routes",
-    "register_owner_acceptance_routes",
     "register_product_review_routes",
     "register_privileged_operation_routes",
     "register_preview_record_read_routes",

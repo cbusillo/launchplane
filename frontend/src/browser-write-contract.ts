@@ -14,7 +14,6 @@ import type {
   PrepareAuthorizationCandidateData,
   PrepareOrdinaryAgentMergeTrainTargetData,
   PrepareOrdinaryAgentDeliveryPolicyData,
-  WriteOwnerAcceptanceEventData,
   WriteProductReviewDecisionData,
   WriteReleaseReviewDecisionData,
 } from "./generated/openapi.ts";
@@ -35,8 +34,6 @@ export const BROWSER_WRITE_ROUTES = {
     "/v1/products/{product}/environments/{environment}/promotion/workflow-dispatch" satisfies DispatchProductPromotionWorkflowData["url"],
   workGraphRank:
     "/v1/work-graph/rank" satisfies RankWorkGraphSnapshotData["url"],
-  ownerAcceptanceEvent:
-    "/v1/owner-acceptance/events" satisfies WriteOwnerAcceptanceEventData["url"],
   productReviewDecision:
     "/v1/product-review/decisions" satisfies WriteProductReviewDecisionData["url"],
   privilegedOperationApprove:

@@ -18,7 +18,12 @@ from control_plane.http_routes.governance_projection import (
 from control_plane.http_routes.support import ApiRouteRegistrar, ReadRouteDependencies
 from tests.support.http import lifespan_client
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_record
-from tests.test_owner_acceptance import _EvidenceProvider, _human, _repository_evidence, _store
+from tests.support.repository_evidence import (
+    _EvidenceProvider,
+    _human,
+    _repository_evidence,
+    _store,
+)
 
 
 def _http_error(**kwargs: object) -> HTTPException:

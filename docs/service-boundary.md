@@ -3508,14 +3508,13 @@ files, repository names, branches, titles, labels, or commit text. Preview
 refresh, verification, destroy, and cleanup remain independent from admission,
 projection delivery, and merge-controller results.
 
-`POST /v1/engineering-review-decisions/project` and
-`POST /v1/owner-acceptance/project` write the stable
-`launchplane/engineering-review` and `launchplane/owner-acceptance` check runs
+`POST /v1/engineering-review-decisions/project` writes the stable
+`launchplane/engineering-review` check run
 through a dedicated least-privilege GitHub App. Launchplane verifies exact App,
 installation, repository, and permission identity, mints a one-repository
 Checks-write token, rechecks current server-owned evidence, and uses the exact
 decision digest as `external_id`. Replays avoid duplicate writes and same-head
-binding changes update only the App-owned run. Both checks complete `neutral`,
+binding changes update only the App-owned run. The check completes `neutral`,
 remain shadow/non-authoritative, and are excluded from merge-train and tenant-
 admission technical inputs.
 
@@ -3843,16 +3842,15 @@ never satisfies an Owner requirement.
 
 Authority evaluation derives human identity only from immutable provider subject
 identity. It does not consume global-admin, bootstrap-admin, manager,
-delegation, repository-permission, or routing state as Owner authority. Matching
-product Owner requirements feed the exact Owner acceptance decision consumed by
-Launchplane merge readiness.
+delegation, repository-permission, or routing state as Owner authority. This retired policy surface does not decide current Owner review or merge readiness;
+its separate deletion remains pending.
 
 See `docs/product-owner-policy.md` for routes and persisted record contracts.
 
 ## Product Review API
 
 The small Owner review path from `DIRECTION.md` and issue `#2446`. It is
-parallel to the Owner Acceptance API below and reads none of its records.
+independent of the retired exact-binding machinery and reads none of its records.
 
 `GET /v1/product-review?repository=<owner/repo>&pull_request=<n>` returns the
 product display name, the pull request URL, the preview URL of the one active
@@ -3879,70 +3877,19 @@ is involved. A product without an Owner returns `409 product_owner_not_set`
 `403 product_review_unavailable` that does not reveal whether the product or
 pull request exists. A decision merges and deploys nothing.
 
-## Owner Acceptance API
+## Retired Owner Acceptance API
 
-`GET /v1/owner-acceptance/evaluation` accepts only `repository` and
-`pull_request_number` query parameters. Launchplane derives repository
-identity, head, tree, change-impact policy provenance, affected
-product/system/action/environment, and current Owner policy plus requirement
-provenance from service-owned providers and records. The pure read cannot
-consume a request body and does not expand the cookie-capable mutation route
-inventory. Engineering-only changes return `not_required` and write no event.
-Incomplete change-impact or Owner authority evidence fails closed.
-Preferred Owner routing remains notification-only, does not participate in the
-authority decision, and is not part of the exact acceptance binding.
-When an enabled product preview has an active record for the exact repository
-and pull request, Launchplane requires one unambiguous ready serving generation
-whose deploy, verification, and health evidence passed. The binding then adds
-the preview/generation IDs, immutable artifact image digest, manifest
-fingerprint, canonical preview URL, and an explicit verified-runtime identity
-projection. Preview, artifact, manifest, and runtime evidence remains entirely
-server-derived. Ambiguous or incomplete evidence fails closed, and a prior
-preview-bound event prevents later downgrade to a non-preview binding after
-teardown.
-
-`POST /v1/owner-acceptance/events` uses the browser mutation identity path and
-requires a browser-authenticated GitHub human plus a bounded `Idempotency-Key`.
-It also requires the `expected_binding_sha256` returned by evaluation. The
-digest is a compare-only precondition: Launchplane re-resolves all evidence and
-returns a conflict without writing when the exact binding changed. For
-multi-product changes, that digest selects exactly one current server-derived
-product binding; callers cannot name or inject a product. The service then
-verifies that the immutable GitHub user ID is a current Owner for the affected exact scope
-before writing `accepted`, `changes_requested`, or `revoked`. Agents, workers,
-GitHub Actions, local operators, and other bearer identities cannot satisfy this
-route. Caller-owned head, tree, policy, Owner, or membership evidence is
-rejected by the bounded request contract. `GET
-/v1/owner-acceptance/events/{event_id}` reads the persisted append-only event
-through the same Owner-acceptance read authority.
-
-The request may include structured `resolution` evidence only for an
-`accepted` event that resolves the current `changes_requested` event on the
-identical binding. That object requires a non-empty summary and one or more
-unique resolved evidence references. The append transaction assigns the next
-per-subject `subject_sequence`, validates the complete human transition table,
-and inserts the event atomically. Exact replay receives no new sequence;
-invalid reaffirmations, unreasoned revocations, and unsupported transitions
-return a conflict. Current state folds by sequence only, while timestamps remain
-audit and display fields.
-
-The ledger is append-only and authoritative for the Owner merge-readiness facet.
-Changed bound evidence or changed
-Owner policy/requirement/membership makes prior acceptance stale for the new
-binding. Evaluation returns one decision per affected product and is accepted
-only when all are current; dropped products stop governing without a read-side
-write. The GitHub projection and frontend workbench route reviewers without
-becoming authority. Tenant-admission consumers, production authorization, and
-legacy manager cleanup remain out of scope. See `docs/owner-acceptance.md` for
-the full record and migration boundary.
+The `/v1/owner-acceptance/*` routes and old engineering workbench are removed.
+Historical stored events remain readable through the record stores and retain
+all original identities and digests. No event writer or old Owner evaluator
+participates in the current product-review or release-checklist flow. See
+[owner-acceptance.md](owner-acceptance.md) for the storage compatibility boundary.
 
 `GET /v1/governance/projection` accepts only repository, pull request number,
-and base branch scope. It requires Owner-acceptance, engineering-review
-decision/run/authority, and either the repository policy's service authorization
+and base branch scope. It requires the repository policy's service authorization
 or the Launchplane merge-train policy-target read permission;
 the route fails closed rather than returning a partially authorized projection.
-It returns one read-only model containing immutable Owner
-history, current Owner evaluation, current ephemeral merge readiness when an
+It returns one read-only model containing current ephemeral merge readiness when an
 active landing lineage exists, latest immutable merge admission, separate
 landing outcome, and non-authoritative GitHub status observations. It reuses the guarded
 landing readiness evaluator instead of duplicating readiness logic in the HTTP

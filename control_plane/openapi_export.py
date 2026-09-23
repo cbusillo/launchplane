@@ -192,12 +192,8 @@ UI_OPENAPI_READ_OPERATIONS: dict[str, str] = {
     "/v1/work-graph/merge-train/policy-targets": "read_merge_train_policy_targets",
     "/v1/work-graph/tenant-admission/evaluation": "read_tenant_admission_evaluation",
     "/v1/governance/projection": "read_governance_projection",
-    "/v1/owner-acceptance/evaluation": "evaluate_owner_acceptance",
-    "/v1/owner-acceptance/owner-evaluation": "evaluate_owner_product_review",
     "/v1/product-review": "read_product_review",
     "/v1/release-review": "read_release_review",
-    "/v1/owner-acceptance/current-items": "list_owner_acceptance_current_items",
-    "/v1/owner-acceptance/queue": "list_owner_acceptance_queue",
     "/v1/privileged-operations/plans": "list_human_privileged_operations",
     "/v1/privileged-operations/plans/{operation_id}": ("read_human_privileged_operation"),
     "/v1/privileged-operations/plans/{operation_id}/review": (
@@ -243,7 +239,6 @@ UI_OPENAPI_WRITE_OPERATIONS: dict[str, str] = {
     "/v1/products/{product}/environments/{environment}/promotion/workflow-dispatch": (
         "dispatch_product_promotion_workflow"
     ),
-    "/v1/owner-acceptance/events": "write_owner_acceptance_event",
     "/v1/product-review/decisions": "write_product_review_decision",
     "/v1/release-review/decisions": "write_release_review_decision",
     "/v1/privileged-operations/plans/{operation_id}/approve": (
