@@ -2801,110 +2801,111 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
             "written",
         )
 
-    async def test_odoo_preview_destroy_supersedes_expired_reconciled_refresh(
+    async def test_odoo_preview_recovers_abandoned_refresh_only_after_grace(
         self,
     ) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            store = self._reservation_store(root)
-            identity = self._identity(
-                repository="cbusillo/launchplane",
-                workflow_ref=(
-                    "cbusillo/launchplane/.github/workflows/odoo-preview-apply.yml@refs/heads/main"
-                ),
-            )
-            app = create_launchplane_fastapi_app(
-                verifier=_StubVerifier(identity),
-                authz_policy=self._policy(
-                    actions=("odoo_preview_apply.execute",),
-                    repository="cbusillo/launchplane",
-                    workflow_ref=(
-                        "cbusillo/launchplane/.github/workflows/odoo-preview-apply.yml"
-                        "@refs/heads/main"
-                    ),
-                ),
-                record_store_factory=lambda: store,
-                control_plane_root_path=root,
-            )
-            destroy_payload = _ready_odoo_preview_destroy_payload()
-            destroy_plan_id = self._store_issued_preview_plan(
-                store=store,
-                identity=identity,
-                payload=destroy_payload,
-                plan_id="odoo-preview-destroy-after-stale-refresh",
-            )
-            reconciliation_key = "dokploy:compose:cm:cm-odoo-preview-pr-42"
-            provider_target_key = (
-                "dokploy-provider-target:"
-                + hashlib.sha256(reconciliation_key.encode("utf-8")).hexdigest()
-            )
-            clock = {"now": "2026-07-30T15:00:00Z"}
-            with patch.object(
-                store,
-                "_database_mutation_timestamp",
-                side_effect=lambda _session: clock["now"],
-            ):
-                stale_refresh = store.reserve_mutation(
-                    scope=idempotency_scope(identity),
-                    route_path="/v1/drivers/odoo/preview-apply",
-                    idempotency_key="odoo-preview-stale-refresh",
-                    request_fingerprint="odoo-preview-stale-refresh-fingerprint",
-                    lease_owner="stale-refresh-trace",
-                    lease_seconds=60,
-                    reconciliation_key=reconciliation_key,
-                    provider_target_key=provider_target_key,
-                )
-                reconciled_refresh = store.mark_mutation_reconcile_required(
-                    reservation=stale_refresh.record,
-                    reconciliation_key=reconciliation_key,
-                )
-                clock["now"] = "2026-07-30T15:17:00Z"
-                with (
-                    patch(
-                        "control_plane.odoo_preview_apply_http.refresh_odoo_preview_issued_plan",
-                        side_effect=lambda **kwargs: kwargs["request"],
-                    ),
-                    patch(
-                        "control_plane.odoo_preview_apply_http.execute_odoo_preview_dokploy_apply",
-                        return_value=OdooPreviewDokployApplyResult(
-                            status="pass",
-                            operation="destroy",
-                            product="odoo-tenant-cm",
-                            repository="cbusillo/odoo-tenant-cm",
-                            preview_slug="pr-42",
-                            preview_url="https://pr-42.cm-preview.example.test",
-                            domain_host="pr-42.cm-preview.example.test",
-                            compose_id="compose-cm-pr-42",
-                            compose_name="cm-odoo-preview-pr-42",
+        operations: tuple[Literal["refresh", "destroy"], ...] = ("refresh", "destroy")
+        for operation in operations:
+            with self.subTest(operation=operation):
+                with TemporaryDirectory() as temporary_directory_name:
+                    root = Path(temporary_directory_name)
+                    store = self._reservation_store(root)
+                    identity = self._identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/odoo-preview-apply.yml@refs/heads/main"
                         ),
-                    ) as apply_driver,
-                    patch(
-                        "control_plane.http_app.odoo_preview_destroy_supersession_is_quiescent",
-                        return_value=True,
-                    ),
-                ):
-                    response = await _post_odoo_preview_apply(
-                        app,
-                        destroy_payload,
-                        idempotency_key=destroy_plan_id,
                     )
-            stored_refresh = store.read_idempotency_record(
-                scope=idempotency_scope(identity),
-                route_path="/v1/drivers/odoo/preview-apply",
-                idempotency_key="odoo-preview-stale-refresh",
-            )
+                    app = create_launchplane_fastapi_app(
+                        verifier=_StubVerifier(identity),
+                        authz_policy=self._policy(
+                            actions=("odoo_preview_apply.execute",),
+                            repository="cbusillo/launchplane",
+                            workflow_ref=(
+                                "cbusillo/launchplane/.github/workflows/odoo-preview-apply.yml"
+                                "@refs/heads/main"
+                            ),
+                        ),
+                        record_store_factory=lambda: store,
+                        control_plane_root_path=root,
+                    )
+                    payload = (
+                        _ready_odoo_preview_destroy_payload()
+                        if operation == "destroy"
+                        else _ready_odoo_preview_apply_payload(include_manifest=True)
+                    )
+                    plan_id = self._store_issued_preview_plan(
+                        store=store,
+                        identity=identity,
+                        payload=payload,
+                        plan_id="odoo-preview-after-stale-refresh",
+                    )
+                    reconciliation_key = "dokploy:compose:cm:cm-odoo-preview-pr-42"
+                    provider_target_key = (
+                        "dokploy-provider-target:"
+                        + hashlib.sha256(reconciliation_key.encode()).hexdigest()
+                    )
+                    clock = {"now": "2026-07-30T15:00:00Z"}
+                    with patch.object(
+                        store,
+                        "_database_mutation_timestamp",
+                        side_effect=lambda _session: clock["now"],
+                    ):
+                        store.reserve_mutation(
+                            scope=idempotency_scope(identity),
+                            route_path="/v1/drivers/odoo/preview-apply",
+                            idempotency_key="odoo-preview-stale-refresh",
+                            request_fingerprint="odoo-preview-stale-refresh-fingerprint",
+                            lease_owner="stale-refresh-trace",
+                            lease_seconds=60,
+                            reconciliation_key=reconciliation_key,
+                            provider_target_key=provider_target_key,
+                        )
+                        with (
+                            patch(
+                                "control_plane.http_app.execute_odoo_preview_apply_result",
+                                return_value=OdooPreviewDokployApplyResult(
+                                    status="pass",
+                                    operation=operation,
+                                    product="odoo-tenant-cm",
+                                    repository="cbusillo/odoo-tenant-cm",
+                                    preview_slug="pr-42",
+                                    preview_url="https://pr-42.cm-preview.example.test",
+                                    domain_host="pr-42.cm-preview.example.test",
+                                    compose_id="compose-cm-pr-42",
+                                    compose_name="cm-odoo-preview-pr-42",
+                                ).model_dump(mode="json"),
+                            ) as apply_driver,
+                            patch(
+                                "control_plane.http_app.odoo_preview_supersession_is_quiescent",
+                                return_value=True,
+                            ),
+                        ):
+                            for timestamp in ("2026-07-30T15:00:30Z", "2026-07-30T15:02:00Z"):
+                                clock["now"] = timestamp
+                                blocked = await _post_odoo_preview_apply(
+                                    app, payload, idempotency_key=plan_id
+                                )
+                                self.assertEqual(blocked.status_code, 409)
+                                apply_driver.assert_not_called()
+                            clock["now"] = "2026-07-30T15:17:00Z"
+                            response = await _post_odoo_preview_apply(
+                                app,
+                                payload,
+                                idempotency_key=plan_id,
+                            )
+                    stored_refresh = store.read_idempotency_record(
+                        scope=idempotency_scope(identity),
+                        route_path="/v1/drivers/odoo/preview-apply",
+                        idempotency_key="odoo-preview-stale-refresh",
+                    )
 
-        self.assertEqual(reconciled_refresh.status, "updated")
-        self.assertEqual(response.status_code, 202)
-        self.assertEqual(response.json()["result"]["status"], "pass")
-        apply_driver.assert_called_once()
-        assert stored_refresh is not None
-        self.assertEqual(stored_refresh.state, "completed")
-        self.assertEqual(stored_refresh.response_status_code, 409)
-        self.assertIn(
-            "superseded by an authoritative destroy",
-            str(stored_refresh.response_payload),
-        )
+                self.assertEqual(response.status_code, 202)
+                self.assertEqual(response.json()["result"]["status"], "pass")
+                apply_driver.assert_called_once()
+                assert stored_refresh is not None
+                self.assertEqual(stored_refresh.state, "completed")
+                self.assertEqual(stored_refresh.response_status_code, 409)
 
     async def test_odoo_preview_apply_does_not_replay_blocked_idempotency(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

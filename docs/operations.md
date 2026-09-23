@@ -496,18 +496,20 @@ mutation_in_progress`; a completed effect replays; a different request
   failure. Incomplete terminal observations remain unknown.
 - Blocked plans and other non-durable results release the reservation instead of
   storing replay evidence, so a corrected retry with the same key can proceed.
-- Odoo preview destroy is the only current lifecycle operation allowed to
-  supersede a different-key target fence. When the blocking preview apply is
-  already `reconcile_required`, Launchplane waits until its recovery lease has
+- Odoo preview refresh and destroy may supersede a different-key preview
+  target fence. When the blocking preview apply is already `reconcile_required`, Launchplane waits until its recovery lease has
   been expired for 15 minutes and verifies that Dokploy has no running compose
   deployment or Odoo data-workflow schedule. It then atomically records that
-  earlier apply as a terminal superseded failure while reserving the destroy.
+  earlier apply as a terminal superseded failure while reserving the new
+  operation. A refresh uses a fresh service-issued plan and verifies the
+  replacement runtime before publishing its serving generation.
   Odoo preview apply timeouts are capped at 10 minutes, so the additional grace
-  outlives a supported in-flight provider request before cleanup can take over.
+  outlives a supported in-flight provider request before another operation can
+  take over.
   Active leases remain fenced, stale reservation snapshots cannot supersede a
   newer attempt, and the original request keeps durable replay evidence
-  explaining that cleanup won. Provider read failures remain fail-closed. Do not
-  reproduce this transition with direct SQL or provider-side deletion.
+  explaining which operation superseded it. Provider read failures remain
+  fail-closed. Do not reproduce this transition with direct SQL or provider-side deletion.
 
 ### Generic-web deploy recovery dry-run/apply
 

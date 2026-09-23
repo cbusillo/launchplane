@@ -513,7 +513,7 @@ from control_plane.odoo_preview_apply_http import (
     execute_odoo_preview_apply_result,
     issue_odoo_preview_apply_plan,
     observe_odoo_preview_apply_result,
-    odoo_preview_destroy_supersession_is_quiescent,
+    odoo_preview_supersession_is_quiescent,
     resolve_odoo_preview_apply_profile,
     validate_odoo_preview_issued_plan,
     validate_odoo_preview_lifecycle_response_current,
@@ -653,7 +653,7 @@ from control_plane.workflows.odoo_prod_backup_restore import (
     build_odoo_prod_backup_restore_plan,
 )
 from control_plane.workflows.odoo_preview_runtime import (
-    ODOO_PREVIEW_DESTROY_SUPERSESSION_GRACE_SECONDS,
+    ODOO_PREVIEW_SUPERSESSION_GRACE_SECONDS,
     OdooPreviewApplyInputsResult,
     OdooPreviewDokployApplyResult,
 )
@@ -6794,30 +6794,26 @@ def create_launchplane_fastapi_app(
                 idempotency_key=normalized_idempotency_key,
             ),
         )
-        target_supersession = None
-        if service_apply_request.apply.dry_run_plan.operation == "destroy":
-            target_supersession = ProviderTargetSupersession(
-                response_status_code=409,
-                response_payload=_provider_operation_response_payload(
-                    trace_id=trace_id,
-                    records={},
-                    result={
-                        "status": "fail",
-                        "error_message": (
-                            "The earlier Odoo preview apply was superseded by an "
-                            "authoritative destroy after its recovery lease expired."
-                        ),
-                    },
-                ),
-                minimum_expired_seconds=ODOO_PREVIEW_DESTROY_SUPERSESSION_GRACE_SECONDS,
-                quiescence_check=lambda _reservation: (
-                    odoo_preview_destroy_supersession_is_quiescent(
-                        control_plane_root_path=resolved_control_plane_root,
-                        request=service_apply_request,
-                        database_url=getattr(record_store, "database_url", None),
-                    )
-                ),
-            )
+        target_supersession = ProviderTargetSupersession(
+            response_status_code=409,
+            response_payload=_provider_operation_response_payload(
+                trace_id=trace_id,
+                records={},
+                result={
+                    "status": "fail",
+                    "error_message": (
+                        "The earlier Odoo preview apply was superseded by an "
+                        f"authoritative {issued_plan.operation} after its recovery lease expired."
+                    ),
+                },
+            ),
+            minimum_expired_seconds=ODOO_PREVIEW_SUPERSESSION_GRACE_SECONDS,
+            quiescence_check=lambda _reservation: odoo_preview_supersession_is_quiescent(
+                control_plane_root_path=resolved_control_plane_root,
+                request=service_apply_request,
+                database_url=getattr(record_store, "database_url", None),
+            ),
+        )
         try:
             response = await run_provider_mutation(
                 record_store=record_store,
