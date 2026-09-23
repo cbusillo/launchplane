@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import unittest
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from tests.support.profiles import product_profile_payload
 from pathlib import Path
 from typing import cast
 from unittest.mock import Mock, patch
@@ -28,7 +30,7 @@ class OdooProdPromotionRunTests(unittest.TestCase):
             )
 
     def test_run_executes_inputs_backup_gate_and_promotion(self) -> None:
-        record_store = cast(OdooProdPromotionRunStore, cast(object, Mock()))
+        record_store = cast(OdooProdPromotionRunStore, cast(object, _promotion_store()))
         inputs_result = _inputs_result()
         backup_result = _backup_result()
         promotion_result = _promotion_result()
@@ -108,7 +110,7 @@ class OdooProdPromotionRunTests(unittest.TestCase):
                 control_plane_root=Path("/control-plane"),
                 state_dir=Path("/state"),
                 database_url=None,
-                record_store=cast(OdooProdPromotionRunStore, cast(object, Mock())),
+                record_store=cast(OdooProdPromotionRunStore, cast(object, _promotion_store())),
                 request=OdooProdPromotionRunRequest(
                     context="cm",
                     request_id="run-123",
@@ -142,7 +144,7 @@ class OdooProdPromotionRunTests(unittest.TestCase):
                     control_plane_root=Path("/control-plane"),
                     state_dir=Path("/state"),
                     database_url=None,
-                    record_store=cast(OdooProdPromotionRunStore, cast(object, Mock())),
+                    record_store=cast(OdooProdPromotionRunStore, cast(object, _promotion_store())),
                     request=OdooProdPromotionRunRequest(context="cm", request_id="run-123"),
                 )
 
@@ -177,7 +179,7 @@ class OdooProdPromotionRunTests(unittest.TestCase):
                 control_plane_root=Path("/control-plane"),
                 state_dir=Path("/state"),
                 database_url=None,
-                record_store=cast(OdooProdPromotionRunStore, cast(object, Mock())),
+                record_store=cast(OdooProdPromotionRunStore, cast(object, _promotion_store())),
                 request=OdooProdPromotionRunRequest(context="cm", request_id="run-123"),
             )
 
@@ -233,3 +235,14 @@ def _promotion_result() -> OdooProdPromotionResult:
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _promotion_store() -> Mock:
+    store = Mock()
+    store.read_product_profile_record.return_value = LaunchplaneProductProfileRecord.model_validate(
+        {
+            **product_profile_payload("example-site"),
+            "production_use": "prelaunch",
+        }
+    )
+    return store

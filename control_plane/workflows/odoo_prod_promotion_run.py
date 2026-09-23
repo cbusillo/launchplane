@@ -4,6 +4,9 @@ from pathlib import Path
 from typing import Literal, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+import click
+
+from control_plane.release_review import require_release_approval
 
 from control_plane.workflows.odoo_prod_backup_gate import (
     OdooProdBackupGateResult,
@@ -116,6 +119,22 @@ def execute_odoo_prod_promotion_run(
             inputs_result=inputs_result,
             run_status="blocked",
             error_message=inputs_result.error_message,
+        )
+
+    try:
+        require_release_approval(
+            control_plane_root=control_plane_root,
+            record_store=record_store,
+            product=request.product,
+            artifact_id=inputs_result.artifact_id,
+            source_commit=inputs_result.source_git_ref,
+        )
+    except (AttributeError, FileNotFoundError, ValueError, click.ClickException) as error:
+        return _result_from_inputs(
+            request=request,
+            inputs_result=inputs_result,
+            run_status="blocked",
+            error_message=str(error),
         )
 
     backup_result = execute_odoo_prod_backup_gate(

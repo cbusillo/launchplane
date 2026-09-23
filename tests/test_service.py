@@ -9396,6 +9396,11 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
+            profile_payload = _generic_site_profile_payload(product="verireel")
+            profile_payload.update(driver_id="verireel", production_use="prelaunch")
+            FilesystemRecordStore(state_dir=state_dir).write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(profile_payload)
+            )
             app = create_launchplane_fastapi_test_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(
@@ -9489,6 +9494,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             profile_payload = _generic_site_profile_payload(product="video-site")
             profile_payload["display_name"] = "Video Site"
             profile_payload["driver_id"] = "verireel"
+            profile_payload["production_use"] = "prelaunch"
             profile_payload["preview"] = {
                 "enabled": False,
                 "context": "",

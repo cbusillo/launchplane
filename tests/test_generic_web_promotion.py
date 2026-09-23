@@ -105,6 +105,7 @@ def _profile(
         testing_health_url = "https://testing.sellyouroutboard.com/api/health"
         prod_health_url = "https://www.sellyouroutboard.com/api/health"
     return LaunchplaneProductProfileRecord(
+        production_use="prelaunch",
         product="sellyouroutboard",
         display_name="SellYourOutboard.com",
         repository="cbusillo/sellyouroutboard",

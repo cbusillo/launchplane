@@ -816,6 +816,7 @@ export type LaunchplaneProductProfileRecord = {
     owner: ProductOwnerProfile;
     preview: ProductPreviewProfile;
     product: string;
+    production_use: 'unknown' | 'prelaunch' | 'live';
     promotion_workflow: ProductPromotionWorkflowProfile;
     repository: string;
     repository_id: string;
@@ -943,19 +944,6 @@ export type ManagedSecretReencryptionPlanInput = {
     reason: string;
     schema_version: number;
     source_label: string;
-};
-
-export type ManagerPreviewApprovalDecision = {
-    approval_id: string;
-    current_binding_sha256: string;
-    evaluated_at: string;
-    event_id: string;
-    manager_github_id: number;
-    manager_login: string;
-    reason: string;
-    reason_code: 'approval_missing' | 'approval_valid' | 'changes_requested' | 'approval_revoked' | 'approval_stale' | 'preview_inactive' | 'serving_generation_missing' | 'serving_generation_mismatch' | 'generation_not_ready' | 'generation_verification_failed' | 'preview_identity_mismatch' | 'artifact_identity_missing' | 'runtime_identity_missing' | 'runtime_identity_mismatch' | 'policy_unavailable';
-    schema_version: number;
-    status: 'pending' | 'approved' | 'changes_requested' | 'revoked' | 'stale' | 'unavailable';
 };
 
 export type MergeAdmissionRecord = {
@@ -3313,8 +3301,8 @@ export type ProductPromotionStatus = {
     driver_id: string;
     evidence_fingerprint: string;
     live_confirmations: ProductPromotionLiveConfirmations;
-    manager_preview_approval?: ManagerPreviewApprovalDecision | null;
     product: string;
+    release_review: ReleaseReviewStatus;
     repository: string;
     schema_version: number;
     source: ProductPromotionEvidence;
@@ -3663,6 +3651,65 @@ export type ProviderTargetRecord = {
     updated_at: string;
 };
 
+export type ReleaseChecklist = {
+    candidate: ReleaseVersion;
+    items: Array<ReleaseReviewItem>;
+    owner_github_id: string;
+    product: string;
+    production: ReleaseVersion;
+    repository: string;
+    testing_url: string;
+    untracked_commits: Array<string>;
+};
+
+export type ReleaseReviewDecisionEnvelope = {
+    checklist_digest: string;
+    decision: 'accepted' | 'changes_requested' | 'overridden';
+    product: string;
+    reason?: string;
+};
+
+export type ReleaseReviewDecisionRecord = {
+    actor_github_id: string;
+    actor_github_login: string;
+    checklist: ReleaseChecklist;
+    checklist_digest: string;
+    decided_at: string;
+    decision: 'accepted' | 'changes_requested' | 'overridden';
+    product: string;
+    reason: string;
+    record_id: string;
+};
+
+export type ReleaseReviewItem = {
+    already_reviewed: boolean;
+    head_sha: string;
+    merge_commit: string;
+    owner_test_notes: string;
+    pull_request_number: number;
+    title: string;
+    url: string;
+};
+
+export type ReleaseReviewResponse = {
+    can_override: boolean;
+    display_name: string;
+    owner_github_login: string;
+    product: string;
+    review: ReleaseReviewStatus;
+    trace_id: string;
+    viewer_is_owner: boolean;
+};
+
+export type ReleaseReviewStatus = {
+    approved: boolean;
+    blockers: Array<string>;
+    checklist: ReleaseChecklist | null;
+    checklist_digest: string;
+    latest_decision: ReleaseReviewDecisionRecord | null;
+    required: boolean;
+};
+
 export type ReleaseTupleRecord = {
     artifact_id: string;
     channel: string;
@@ -3679,6 +3726,11 @@ export type ReleaseTupleRecord = {
     };
     schema_version: number;
     tuple_id: string;
+};
+
+export type ReleaseVersion = {
+    artifact_id: string;
+    source_commit: string;
 };
 
 export type RepoProductMapping = {
@@ -5052,6 +5104,34 @@ export type ReadProductEnvironmentPublicIngressIncidentResponses = {
 
 export type ReadProductEnvironmentPublicIngressIncidentResponse = ReadProductEnvironmentPublicIngressIncidentResponses[keyof ReadProductEnvironmentPublicIngressIncidentResponses];
 
+export type ReadReleaseReviewData = {
+    body?: never;
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path?: never;
+    query: {
+        product: string;
+    };
+    url: '/v1/release-review';
+};
+
+export type ReadReleaseReviewErrors = {
+    401: LaunchplaneErrorResponse;
+    403: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type ReadReleaseReviewError = ReadReleaseReviewErrors[keyof ReadReleaseReviewErrors];
+
+export type ReadReleaseReviewResponses = {
+    200: ReleaseReviewResponse;
+};
+
+export type ReadReleaseReviewResponse = ReadReleaseReviewResponses[keyof ReadReleaseReviewResponses];
+
 export type ReadRepoProductMappingData = {
     body?: never;
     headers?: {
@@ -5672,6 +5752,32 @@ export type DispatchProductPromotionWorkflowResponses = {
 };
 
 export type DispatchProductPromotionWorkflowResponse = DispatchProductPromotionWorkflowResponses[keyof DispatchProductPromotionWorkflowResponses];
+
+export type WriteReleaseReviewDecisionData = {
+    body: ReleaseReviewDecisionEnvelope;
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/release-review/decisions';
+};
+
+export type WriteReleaseReviewDecisionErrors = {
+    401: LaunchplaneErrorResponse;
+    403: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type WriteReleaseReviewDecisionError = WriteReleaseReviewDecisionErrors[keyof WriteReleaseReviewDecisionErrors];
+
+export type WriteReleaseReviewDecisionResponses = {
+    200: ReleaseReviewResponse;
+};
+
+export type WriteReleaseReviewDecisionResponse = WriteReleaseReviewDecisionResponses[keyof WriteReleaseReviewDecisionResponses];
 
 export type RankWorkGraphSnapshotData = {
     body: WorkGraphRankEnvelope;

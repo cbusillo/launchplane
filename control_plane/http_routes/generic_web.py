@@ -408,6 +408,7 @@ def build_generic_web_write_route_handlers(
         try:
             intent_record = record_store.read_outbox_delivery_record(intent_id)
             current_profile, current_lane, status = build_product_promotion_status(
+                control_plane_root=dependencies.control_plane_root,
                 record_store=record_store,
                 product=profile.product,
                 destination_environment=lane.instance,
@@ -482,7 +483,7 @@ def build_generic_web_write_route_handlers(
                 message="The production provider target changed before promotion execution.",
             )
 
-    def require_current_manager_preview_approval(
+    def require_current_release_approval(
         *,
         record_store: object,
         profile: LaunchplaneProductProfileRecord,
@@ -491,6 +492,7 @@ def build_generic_web_write_route_handlers(
     ) -> None:
         try:
             current_profile, current_lane, status = build_product_promotion_status(
+                control_plane_root=dependencies.control_plane_root,
                 record_store=record_store,
                 product=profile.product,
                 destination_environment=lane.instance,
@@ -501,22 +503,21 @@ def build_generic_web_write_route_handlers(
             raise dependencies.http_error(
                 status_code=409,
                 trace_id=trace_id,
-                code="manager_preview_approval_unavailable",
-                message="Manager preview approval could not be evaluated for live promotion.",
+                code="release_review_unavailable",
+                message="Owner release approval could not be evaluated for live promotion.",
             ) from error
-        decision = status.manager_preview_approval
+        decision = status.release_review
         if (
             current_profile != profile
             or current_lane != lane
-            or (decision is not None and decision.status != "approved")
+            or (decision.required and not decision.approved)
         ):
             raise dependencies.http_error(
                 status_code=409,
                 trace_id=trace_id,
-                code="manager_preview_approval_required",
+                code="release_review_required",
                 message=(
-                    "Live promotion requires current manager approval for the exact testing "
-                    "artifact and serving preview."
+                    "Live promotion requires Owner approval of the current release checklist."
                 ),
             )
 
@@ -1491,7 +1492,7 @@ def build_generic_web_write_route_handlers(
                 replayed_response.model_dump(mode="json")
             )
         if live_promotion:
-            require_current_manager_preview_approval(
+            require_current_release_approval(
                 record_store=record_store,
                 profile=profile,
                 lane=lane,
@@ -1501,7 +1502,7 @@ def build_generic_web_write_route_handlers(
             def validate_live_promotion(
                 resolved_deploy_target: GenericWebResolvedDeployTarget,
             ) -> None:
-                require_current_manager_preview_approval(
+                require_current_release_approval(
                     record_store=record_store,
                     profile=profile,
                     lane=lane,

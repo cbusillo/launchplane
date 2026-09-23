@@ -1,0 +1,59 @@
+---
+title: Owner release review
+---
+
+Before a customer production promotion, Launchplane compiles the release from
+the current production and testing revisions. The product's Owner reviews the
+testing site and the **Owner test notes** from every merged pull request in that
+commit range at `/ui/owner-review?product=<product>`. No GitHub interaction is
+required to read the checklist, accept it, or request changes.
+
+`GET /v1/release-review?product=<product>` serves the same checklist to the Owner
+and to callers already permitted to read the product or promote it. Decisions
+use `POST /v1/release-review/decisions` and the existing GitHub human session and
+CSRF protection. An automation token cannot submit an Owner decision. Identity
+comes from the session, never from the request body. The product record's
+immutable Owner GitHub ID decides who can accept or request changes; separate
+Owner policies and grants are not used.
+
+The server resolves Odoo revisions from release tuples and artifact manifests;
+image-based products use deployed inventory runtime identities. GitHub compare
+and commit-associated pull-request reads are paginated. Divergent history,
+incomplete responses, unavailable source control, and missing lane evidence
+fail closed. Missing test notes and commits without a merged pull request are
+visible checklist blockers. `Nothing for the owner to test` is valid test notes.
+Previous preview acceptance is an annotation, never release approval.
+
+The decision stores the complete checklist and its digest. The digest includes
+the production and candidate artifact and commit, repository, Owner identity,
+testing URL, and checklist contents. Promotion recompiles the checklist; changed
+release evidence requires a new decision. Decisions do not expire merely because
+time passes. A later request for changes replaces acceptance of the same
+checklist. Backup and deployment evidence remain independently required.
+
+An operator with the existing `product_profile.write` capability can record an
+`overridden` decision through their own human session, with a nonempty reason.
+This records the operator's identity and never impersonates the Owner. An
+override can account for missing notes or missing Owner setup, but cannot approve
+an unavailable checklist or a different artifact. The override is scoped to the
+same release digest as an Owner decision and does not bypass backups.
+
+Product records declare `production_use` as `live`, `prelaunch`, or `unknown`.
+Only an explicitly recorded `prelaunch` product is exempt from the release gate.
+Existing records default to `unknown`, which requires review. No real product
+names or classifications are supplied by code or checked-in configuration.
+Operators must review this distinction before deploying the gate; deployment
+does not change product classifications, Owner identities, or existing grants.
+
+The gate replaces manager-preview approval in the product promotion read model
+and raw generic-web promotion routes. Odoo evaluates it before backup in the
+combined run and again before direct promotion. The existing VeriReel service
+promotion wrapper also checks it. Readiness and direct dry-runs remain available
+while an Owner decision is pending. Recording a decision never merges, backs up,
+dispatches a workflow, or deploys.
+
+Release decisions are persisted in `launchplane_release_review_decisions`, with
+file storage reserved for tests and rehearsal. Deployments must migrate the
+database before serving the new routes. This change does not retire the remaining
+merge-admission Owner/change-impact machinery; that is the following slice of
+the Owner-approval replacement.

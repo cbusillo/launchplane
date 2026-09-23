@@ -1558,6 +1558,7 @@ def register_product_promotion_status_read_routes(
 
         try:
             _, _, promotion_status = build_product_promotion_status(
+                control_plane_root=dependencies.control_plane_root,
                 record_store=record_store,
                 product=profile.product,
                 destination_environment=lane.instance,

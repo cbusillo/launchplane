@@ -188,6 +188,7 @@ from control_plane.contracts.detached_application_retirement import (
 )
 from control_plane.contracts.product_retirement import ProductRetirementRecord
 from control_plane.contracts.product_review import ProductReviewDecisionRecord
+from control_plane.contracts.release_review import ReleaseReviewDecisionRecord
 from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressIncidentEventRecord,
     PublicIngressIncidentReminderStateRecord,
@@ -7166,6 +7167,22 @@ class FilesystemRecordStore:
         if limit is not None:
             records = records[:limit]
         return tuple(records)
+
+    def write_release_review_decision_record(self, record: ReleaseReviewDecisionRecord) -> Path:
+        return self._write_model("launchplane_release_review_decisions", record.record_id, record)
+
+    def list_release_review_decision_records(
+        self, *, product: str, limit: int | None = None
+    ) -> tuple[ReleaseReviewDecisionRecord, ...]:
+        records = [
+            record
+            for record in self._list_models(
+                ReleaseReviewDecisionRecord, "launchplane_release_review_decisions"
+            )
+            if record.product == product
+        ]
+        records.sort(key=lambda record: (record.decided_at, record.record_id), reverse=True)
+        return tuple(records if limit is None else records[:limit])
 
     def write_product_review_decision_record(self, record: ProductReviewDecisionRecord) -> Path:
         return self._write_model("launchplane_product_review_decisions", record.record_id, record)

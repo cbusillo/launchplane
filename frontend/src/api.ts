@@ -79,6 +79,8 @@ import type {
   WriteOwnerAcceptanceEventResponse,
   ProductReviewResponse,
   WriteProductReviewDecisionData,
+  ReleaseReviewResponse,
+  ReleaseReviewDecisionEnvelope,
 } from "./generated/openapi.ts";
 import type {
   OrdinaryAgentOperationClientResponse,
@@ -716,6 +718,14 @@ export function readProductReview(
     undefined,
     signal,
   );
+}
+
+export function readReleaseReview(product: string, signal?: AbortSignal): Promise<ReleaseReviewResponse> {
+  return requestJson<ReleaseReviewResponse>(`/v1/release-review?${new URLSearchParams({ product })}`, "GET", undefined, signal);
+}
+
+export function writeReleaseReviewDecision(payload: ReleaseReviewDecisionEnvelope): Promise<ReleaseReviewResponse> {
+  return requestJson<ReleaseReviewResponse>(BROWSER_WRITE_ROUTES.releaseReviewDecision, "POST", payload);
 }
 
 export function writeProductReviewDecision(
