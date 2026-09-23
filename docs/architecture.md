@@ -33,7 +33,7 @@ drivers, provider calls, admission evidence, and operator read models.
 - Launchplane preview and generation records
 - product drivers for Odoo and VeriReel
 - provider integrations for Dokploy, GHCR, GitHub, health, and backups
-- authoritative Owner acceptance, engineering-review evidence, merge admission,
+- site Owner product and release decisions, engineering-review evidence, merge admission,
   dependency health, and the exact-change/dependency state needed to decide
   whether a change may enter a managed environment
 
@@ -53,12 +53,10 @@ current forge adapter, not Launchplane's permanent product boundary. Future
 adapters may target an open-source or hosted forge without moving Launchplane's
 delivery authority back into the forge.
 
-Product/system human ownership is represented by additive Launchplane records.
-Owner membership, Owner requirements, and preferred routing are separate
-revision streams. Owner requirements and exact-change acceptance are authoritative
-for Launchplane merge readiness; preferred routing cannot grant authority and
-production authorization remains separate. See
-`docs/product-owner-policy.md`.
+Each product profile names its site Owner. That person reviews product previews
+and the release checklist in Launchplane. These decisions grant no operational
+authority and do not enter machine merge readiness. Production promotion checks
+the separate release approval and backup evidence. See `docs/release-review.md`.
 
 Launchplane does not become a Git host, general issue or project-planning
 system, engineering work queue, CI runner, package registry, generic provider
