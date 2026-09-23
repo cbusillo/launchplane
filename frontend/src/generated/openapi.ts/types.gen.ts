@@ -817,7 +817,6 @@ export type LaunchplaneProductProfileRecord = {
     preview: ProductPreviewProfile;
     product: string;
     production_use: 'unknown' | 'prelaunch' | 'live';
-    production_use_reason: string;
     promotion_workflow: ProductPromotionWorkflowProfile;
     repository: string;
     repository_id: string;

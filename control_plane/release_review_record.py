@@ -66,53 +66,6 @@ def release_decision_issue_body(decision: ReleaseReviewDecisionRecord) -> str:
     return "\n\n".join(lines)
 
 
-def _record_parts(decision: ReleaseReviewDecisionRecord) -> tuple[str, tuple[str, ...]]:
-    body = release_decision_issue_body(decision)
-    if len(body.encode()) <= 60000:
-        return body, ()
-    # UTF-8 uses at most four bytes per character. Literal blocks keep each
-    # piece below the provider limit even when notes contain Unicode or fences.
-    chunks = tuple(body[offset : offset + 12000] for offset in range(0, len(body), 12000))
-    marker = body.splitlines()[0]
-    issue = (
-        f"{marker}\n\n# Release decision\n\n"
-        f"Decision: **{decision.decision.replace('_', ' ')}**\n\n"
-        f"Checklist digest: `{decision.checklist_digest}`\n\n"
-        f"The complete saved decision and checklist are recorded in {len(chunks)} numbered comments."
-    )
-    comments = tuple(
-        f"{marker}\n\n## Release record part {index + 1} of {len(chunks)}\n\n{_literal(chunk)}"
-        for index, chunk in enumerate(chunks)
-    )
-    return issue, comments
-
-
-def _publish_record_parts(*, path: str, token: str, parts: tuple[str, ...]) -> None:
-    if not parts:
-        return
-    existing: set[str] = set()
-    for page in range(1, 101):
-        comments = github_api_request(path=f"{path}/comments?per_page=100&page={page}", token=token)
-        if not isinstance(comments, list):
-            raise ValueError("Release record comments are unavailable.")
-        for comment in comments:
-            if not isinstance(comment, dict) or not isinstance(comment.get("body"), str):
-                raise ValueError("Release record comments are incomplete.")
-            existing.add(comment["body"])
-        if len(comments) < 100:
-            break
-    else:
-        raise ValueError("Release record comment lookup exceeds the supported size.")
-    for part in parts:
-        if part in existing:
-            continue
-        created = github_api_request(
-            path=f"{path}/comments", token=token, method="POST", body={"body": part}
-        )
-        if not isinstance(created, dict) or created.get("body") != part:
-            raise ValueError("Release record comment creation was not confirmed.")
-
-
 def publish_release_decision(
     *,
     control_plane_root: Path,
@@ -122,7 +75,7 @@ def publish_release_decision(
     """Return the issue URL; recover a successful but unacknowledged prior write."""
     if profile.product != decision.product or profile.repository != decision.checklist.repository:
         raise ValueError("The release record must belong to the product repository.")
-    body, parts = _record_parts(decision)
+    body = release_decision_issue_body(decision)
     lane = next(lane for lane in profile.lanes if lane.instance == "testing")
     token = resolve_launchplane_github_token(
         control_plane_root=control_plane_root, context_name=lane.context
@@ -176,5 +129,4 @@ def publish_release_decision(
         if not isinstance(number, int) or number < 1:
             raise ValueError("Release record creation was not confirmed.")
         issue_number = number
-    _publish_record_parts(path=f"{path}/{issue_number}", token=token, parts=parts)
     return f"https://github.com/{profile.repository}/issues/{issue_number}"

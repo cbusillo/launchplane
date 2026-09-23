@@ -13196,11 +13196,6 @@
             "title": "Production Use",
             "type": "string"
           },
-          "production_use_reason": {
-            "default": "",
-            "title": "Production Use Reason",
-            "type": "string"
-          },
           "promotion_workflow": {
             "$ref": "#/components/schemas/ProductPromotionWorkflowProfile"
           },

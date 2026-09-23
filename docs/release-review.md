@@ -46,12 +46,10 @@ promotion. Recording the same pending decision retries its publication with the
 same decision ID, including recovery when GitHub accepted a write whose response
 was lost. GitHub issue contents and membership never decide release contents or
 approval; the saved Launchplane decision remains authoritative.
-Large records continue in numbered comments without truncating the checklist;
-promotion stays blocked until every part is confirmed. Recovery compares the
-complete expected contents, not only a marker. Lookup stops once creation dates
-predate the saved decision, so unrelated old repository history does not prevent
-new releases. Ambiguous duplicate notes headings remain visible as missing
-coverage that requires correction or a reasoned operator override.
+The complete record uses one issue body. If GitHub rejects publication, the
+decision remains saved and promotion stays blocked; records are not split into
+comments. Retry recovery checks the complete issue body. Multiple Owner notes
+sections are collected together; CI checks presence, not their number or content.
 
 Product CI must require a nonempty **Owner test notes** section on every pull
 request, including changes that need no manual test. The shared
@@ -74,9 +72,7 @@ Existing records default to `unknown`, which requires review. No real product
 names or classifications are supplied by code or checked-in configuration.
 Operators must review this distinction before deploying the gate; deployment
 does not change product classifications, Owner identities, or existing grants.
-Writing `prelaunch` also requires `production_use_reason`, persisted on the
-profile. A transition back to prelaunch requires a new reason, rather than
-reusing a reason from an earlier classification.
+Classification changes use the existing authorized product-profile write path.
 
 The gate replaces manager-preview approval in the product promotion read model
 and raw generic-web promotion routes. Odoo evaluates it before backup in the

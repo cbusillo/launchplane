@@ -6,7 +6,6 @@ function ownerTestNotes(body) {
   let collecting = false;
   let level = 0;
   let fence = "";
-  let found = false;
   for (const line of body.split(/\r?\n/u)) {
     const marker = line.trimStart().slice(0, 3);
     if (marker === "```" || marker === "~~~") {
@@ -15,8 +14,7 @@ function ownerTestNotes(body) {
     const heading = fence ? null : /^(#{1,6})\s+(.+?)\s*#*\s*$/u.exec(line);
     if (heading) {
       if (heading[2].trim().toLowerCase() === "owner test notes") {
-        if (found) throw new Error("Use exactly one Owner test notes section.");
-        found = collecting = true;
+        collecting = true;
         level = heading[1].length;
         continue;
       }

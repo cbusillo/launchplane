@@ -10874,11 +10874,6 @@
             "title": "Production Use",
             "type": "string"
           },
-          "production_use_reason": {
-            "default": "",
-            "title": "Production Use Reason",
-            "type": "string"
-          },
           "promotion_workflow": {
             "$ref": "#/components/schemas/ProductPromotionWorkflowProfile"
           },
@@ -10932,7 +10927,6 @@
           "preview",
           "product",
           "production_use",
-          "production_use_reason",
           "promotion_workflow",
           "repository",
           "repository_id",

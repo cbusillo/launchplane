@@ -11375,17 +11375,6 @@ def create_launchplane_fastapi_app(
                 message=str(error),
             ) from error
         if existing_profile is not None:
-            if (
-                existing_profile.production_use != "prelaunch"
-                and profile.production_use == "prelaunch"
-                and existing_profile.production_use_reason == profile.production_use_reason
-            ):
-                raise _launchplane_http_error(
-                    status_code=409,
-                    trace_id=trace_id,
-                    code="production_use_reason_required",
-                    message="Classifying a product as prelaunch requires a new recorded reason.",
-                )
             if control_plane_product_health_monitoring.product_health_monitoring_authority(
                 existing_profile
             ) != control_plane_product_health_monitoring.product_health_monitoring_authority(

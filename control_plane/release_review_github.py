@@ -11,12 +11,11 @@ GitHubRead = Callable[[str], object]
 
 
 def owner_test_notes(body: str) -> str:
-    """Read one Markdown heading, ignoring headings inside fenced examples."""
+    """Collect Owner notes sections, ignoring headings inside fenced examples."""
     lines: list[str] = []
     collecting = False
     level = 0
     fence = ""
-    found = False
     for line in body.splitlines():
         stripped = line.lstrip()
         if stripped.startswith(("```", "~~~")):
@@ -25,9 +24,7 @@ def owner_test_notes(body: str) -> str:
         heading = re.match(r"^(#{1,6})\s+(.+?)\s*#*\s*$", line) if not fence else None
         if heading:
             if heading[2].strip().casefold() == "owner test notes":
-                if found:
-                    raise ValueError("Pull request has more than one Owner test notes section.")
-                found = collecting = True
+                collecting = True
                 level = len(heading[1])
                 continue
             if collecting and len(heading[1]) <= level:
@@ -102,19 +99,13 @@ def read_release_changes(
                     or not title
                 ):
                     raise ValueError("GitHub pull request number or title is unavailable.")
-                try:
-                    notes = owner_test_notes(pull.get("body") or "")
-                except ValueError:
-                    # Ambiguous notes are visible missing coverage, so an
-                    # operator can still inspect the PR and record an override.
-                    notes = ""
                 item = ReleaseReviewItem(
                     pull_request_number=number,
                     title=title,
                     url=f"https://github.com/{repository}/pull/{number}",
                     head_sha=head.get("sha", ""),
                     merge_commit=pull["merge_commit_sha"],
-                    owner_test_notes=notes,
+                    owner_test_notes=owner_test_notes(pull.get("body") or ""),
                 )
                 if item.pull_request_number in items and items[item.pull_request_number] != item:
                     raise ValueError("Owner test notes changed while compiling the release.")

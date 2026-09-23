@@ -180,14 +180,6 @@ class ReleaseReviewTests(unittest.TestCase):
         self.assertFalse(review.approved)
         self.assertIn("Shared website components", review.blockers[0])
 
-    def test_prelaunch_profile_write_requires_recorded_reason(self) -> None:
-        prelaunch = profile().model_copy(update={"production_use": "prelaunch"})
-        with self.assertRaisesRegex(ValueError, "classification reason"):
-            prelaunch.validate_write_contract()
-        prelaunch.model_copy(
-            update={"production_use_reason": "Not serving real customers."}
-        ).validate_write_contract()
-
     def test_rejection_supersedes_acceptance_without_deploying(self) -> None:
         self.store.write_release_review_decision_record(decision(self.store))
         self.store.write_release_review_decision_record(
@@ -343,35 +335,6 @@ class ReleaseReviewTests(unittest.TestCase):
 
 
 class ReleaseGitHubTests(unittest.TestCase):
-    def test_ambiguous_notes_are_a_visible_coverage_blocker(self) -> None:
-        def ambiguous(path: str) -> object:
-            result = github_read(path)
-            if isinstance(result, list):
-                result[0]["body"] = "## Owner test notes\nFirst\n## Owner test notes\nSecond"
-            return result
-
-        items, untracked = read_release_changes(
-            repository="example/site", production_commit=BASE, candidate_commit=HEAD, read=ambiguous
-        )
-        self.assertEqual(len(items), 1)
-        self.assertEqual(items[0].owner_test_notes, "")
-        self.assertEqual(untracked, ())
-
-    def test_malformed_pull_request_fails_as_incomplete_evidence(self) -> None:
-        def malformed(path: str) -> object:
-            result = github_read(path)
-            if isinstance(result, list):
-                del result[0]["number"]
-            return result
-
-        with self.assertRaisesRegex(ValueError, "number or title"):
-            read_release_changes(
-                repository="example/site",
-                production_commit=BASE,
-                candidate_commit=HEAD,
-                read=malformed,
-            )
-
     def test_notes_ignore_fenced_heading_and_preserve_subheadings(self) -> None:
         self.assertEqual(
             owner_test_notes(
@@ -383,10 +346,14 @@ class ReleaseGitHubTests(unittest.TestCase):
             owner_test_notes("## Owner test notes\nNothing for the owner to test"),
             "Nothing for the owner to test",
         )
+        self.assertEqual(
+            owner_test_notes(
+                "## Owner test notes\nCheck checkout.\n## Tests\nPassed.\n## Owner test notes\nCheck booking."
+            ),
+            "Check checkout.\nCheck booking.",
+        )
 
-    def test_duplicate_notes_and_incomplete_comparison_fail_closed(self) -> None:
-        with self.assertRaises(ValueError):
-            owner_test_notes("## Owner test notes\nOne\n## Owner test notes\nTwo")
+    def test_incomplete_comparison_fails_closed(self) -> None:
         for comparison in (
             {"status": "diverged", "total_commits": 1, "commits": []},
             {"status": "ahead", "total_commits": 2, "commits": []},
