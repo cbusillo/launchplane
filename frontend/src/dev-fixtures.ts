@@ -41,7 +41,6 @@ import type {
   ProductReviewResponse,
   RuntimeIdentity,
   TenantAdmissionEvaluationReadResponse,
-  TenantAdmissionPathResult,
   TenantAdmissionTechnicalChecks,
   WorkGraphIssueInboxResponse,
   WorkGraphQueue,
@@ -1861,12 +1860,11 @@ export function tenantAdmissionForFixture(
   const classificationMissing = fixture === "empty";
   const evidenceStale = fixture === "missing";
   const classificationDigest = classificationMissing ? "" : "c".repeat(64);
-  const pathState = evidenceStale ? "stale" : "pending";
   const admissionCategory = classificationMissing
     ? "unavailable"
     : evidenceStale
       ? "stale"
-      : "pending";
+      : "eligible";
   const technicalStatus: TenantAdmissionTechnicalChecks["status"] = evidenceStale
     ? "pending"
     : "pass";
@@ -1880,31 +1878,7 @@ export function tenantAdmissionForFixture(
     repository_owner_id: "2001",
     schema_version: 1,
   };
-  const paths = classificationMissing
-    ? {
-        manager_preview_approval: null,
-        schema_version: 1,
-        technical_human_waiver: null,
-        trusted_maintenance: null,
-      }
-    : {
-        manager_preview_approval: tenantAdmissionPath(
-          "manager_preview_approval",
-          pathState,
-          classificationDigest,
-        ),
-        schema_version: 1,
-        technical_human_waiver: tenantAdmissionPath(
-          "technical_human_waiver",
-          pathState,
-          classificationDigest,
-        ),
-        trusted_maintenance: tenantAdmissionPath(
-          "trusted_maintenance",
-          pathState,
-          classificationDigest,
-        ),
-      };
+  const paths = {schema_version: 1, manager_preview_approval: null, technical_human_waiver: null, trusted_maintenance: null};
   const technicalChecks = classificationMissing
     ? null
     : {
@@ -1956,24 +1930,24 @@ export function tenantAdmissionForFixture(
               ? "No repository classification record is available for this GitHub repository ID."
               : evidenceStale
                 ? "Tenant admission evidence is stale for this exact head."
-                : "Tenant UI repository requires one current admission path.",
+                : "Tenant repository is eligible for normal technical merge checks.",
             evaluated_at: OBSERVED_AT,
             evidence_digest: "",
             evidence_id: "",
-            evidence_kind: evidenceStale ? "manager_preview_approval" : "none",
+            evidence_kind: "none",
             head_sha: candidate.head_sha,
             product: candidate.product,
             pull_request_number: candidate.pull_request_number,
             reason_code: classificationMissing
               ? "classification_missing"
               : evidenceStale
-                ? "evidence_stale"
-                : "manager_preview_required",
+                ? "classification_identity_drift"
+                : "tenant_normal_flow",
             repository: candidate.repository,
             repository_id: candidate.repository_id,
             repository_owner_id: candidate.repository_owner_id,
             schema_version: 1,
-            status: "blocked",
+            status: classificationMissing || evidenceStale ? "blocked" : "admitted",
           },
           generated_at: OBSERVED_AT,
           paths,
@@ -1987,7 +1961,7 @@ export function tenantAdmissionForFixture(
         merge_commit_sha: "",
         merge_method: "merge",
         mutated: false,
-        outcome: "blocked",
+        outcome: classificationMissing || evidenceStale ? "blocked" : "ready",
         pull_request_facts: {
           base_branch: "main",
           base_sha: "b".repeat(40),
@@ -2005,58 +1979,11 @@ export function tenantAdmissionForFixture(
         technical_checks: technicalChecks,
       },
       generated_at: OBSERVED_AT,
-      human_actions: classificationMissing
-        ? []
-        : [
-            {
-              action_kind: "manager_preview_approval",
-              agent_authoring_allowed: false,
-              availability: "available",
-              detail: evidenceStale
-                ? "The prior manager approval is stale; review and approve the current preview fingerprint."
-                : "The manager can review the current preview and approve its exact fingerprint.",
-              path_state: pathState,
-              requires_human: true,
-              schema_version: 1,
-              title: "Manager preview approval",
-            },
-            {
-              action_kind: "technical_human_waiver",
-              agent_authoring_allowed: false,
-              availability: "available",
-              detail: evidenceStale
-                ? "The prior waiver is stale; an authorized repository owner can review the current head."
-                : "An authorized repository owner can issue a reasoned waiver for this exact head.",
-              path_state: pathState,
-              requires_human: true,
-              schema_version: 1,
-              title: "Repository-owner technical waiver",
-            },
-          ],
+      human_actions: [],
       schema_version: 1,
     },
     status: "ok",
     trace_id: "fixture-tenant-admission",
-  };
-}
-
-function tenantAdmissionPath(
-  pathKind: TenantAdmissionPathResult["path_kind"],
-  state: "pending" | "stale",
-  classificationDigest: string,
-): TenantAdmissionPathResult {
-  return {
-    classification_digest: classificationDigest,
-    evidence_digest: "",
-    evidence_id: "",
-    head_sha: "a".repeat(40),
-    path_kind: pathKind,
-    pull_request_number: 69,
-    repository: "example/tenant-site",
-    repository_id: "1001",
-    repository_owner_id: "2001",
-    schema_version: 1,
-    state,
   };
 }
 

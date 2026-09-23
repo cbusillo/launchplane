@@ -3265,7 +3265,7 @@ should prefer the thin `prod-promotion-run` path.
   Apply mode requires JSON with one exact bounded `Content-Length` (maximum 64 KiB), a non-empty `Idempotency-Key` header, and a `PostgresRecordStore` using the `postgresql` dialect (returns HTTP 503 `database_storage_required` for filesystem, SQLite-backed rehearsal stores, or unsupported stores). Launchplane reserves durable idempotency, locks the repository classification stream, validates CAS, appends the immutable revision, and completes the stored response in one PostgreSQL transaction. Exact same-key, same-payload retries replay the completed response; a different key revalidates current state and cannot replay an already-applied revision.
   Validation uses CAS (compare-and-swap): first revision must be revision 1 with no `supersedes_record_id` and empty `expected_current_record_id`. Subsequent revisions must increment revision by 1, set `supersedes_record_id` to the active current record ID, and match `expected_current_record_id`. Mismatches fail closed with HTTP 409 conflict, and sequence gaps fail closed with HTTP 400.
   Dry-run mode performs full CAS/sequence validation without persisting changes and reports `would_apply` or `would_replay`.
-  Pure tenant merge eligibility evaluation uses this DB authority without heuristics, PR label fallbacks, or wildcard matching. Repositories classified as `engineering` take the normal engineering fast path. Repositories classified as `tenant_ui` require one satisfied exact-head path from manager preview approval, technical human waiver, or trusted-maintenance evidence.
+  Pure tenant merge eligibility evaluation uses this DB authority without heuristics, PR label fallbacks, or wildcard matching. Both repository classifications use the normal technical merge flow. Retired manager, waiver, and maintenance admission paths no longer qualify a merge.
   This pure evaluator remains internal and separate from scheduler merge train admission (`merge_train_admission`).
 
 `GET /v1/work-graph/tenant-admission/repository-human-role-policy` and
@@ -3414,24 +3414,23 @@ controller's `mutate=false` path, so it verifies current numeric repository and
 owner identity, head, base, open/merged state, draft/mergeability, admission,
 and live required-check policy without acquiring a controller lease or writing
 GitHub/provider state. Mergeable tenant UI PRs report required technical-check
-readiness even while manager approval or owner waiver remains pending.
-Engineering returns `not_applicable` and no human actions. The response adds a
-public-safe guidance projection for manager preview approval and repository-
-owner technical waiver, with `agent_authoring_allowed=false`; trusted
-maintenance remains automatic evidence.
+readiness. Engineering returns `not_applicable`; current results for both kinds
+have no human actions. Owner decisions use product review and the release
+checklist, separately from these machine checks.
 
 `GET /v1/work-graph/tenant-admission/status` exposes the public-safe unified
 tenant-admission read model. The query supplies the complete candidate binding:
 product, context, numeric repository ID, numeric repository-owner ID,
 `OWNER/REPO`, pull-request number, and exact head SHA. The route requires
 `tenant_admission.read` authorization for the submitted product/context and a
-context-scoped authorization target. It recomputes from the current DB-backed
-classification, role policy, authorization policy, manager-preview lifecycle,
-waiver events, maintenance policy, and maintenance evidence; it does not trust
-GitHub commit status as decision authority. Engineering returns the normal-flow
-category. Tenant UI returns `pending`, `manager-approved`, `technical-waived`,
-`maintenance-admitted`, `stale`, `denied`, or `unavailable` and exposes no human
-membership, private policy, credential, or provider-topology detail.
+context-scoped authorization target. It reads the current DB-backed classification
+and matches repository, numeric owner, product, and context identity. Engineering
+returns its normal-flow category; a matching tenant UI classification returns
+`eligible`. Missing, ambiguous, or drifted classification remains unavailable or
+stale. The status alone grants no merge authority; the controller still reads
+required technical checks and current source-control facts. Optional legacy paths
+and categories remain readable in old stored results, but current reads do not
+consult the retired evidence stores.
 
 `GET /v1/agent/context` may include the same evaluation as a named
 `tenant_admission` section when the caller supplies every exact candidate field
@@ -3461,18 +3460,18 @@ tenant status and performs no status write.
 schema-v1 candidate plus exact base branch, merge method, and `mutate` intent.
 It is bearer-only, requires `tenant_admission.controller.run_once` authorization
 for the candidate product/context, and is covered by the exact-length JSON body
-guard at 64 KiB. An explicitly authorized terminal agent may invoke this route:
-the caller cannot create manager, waiver, or maintenance authority, and the
-controller independently recomputes those DB-backed records before every merge
-effect. This is a dedicated privileged controller action: its context-scoped
+guard at 64 KiB. An explicitly authorized terminal agent may invoke this route.
+The controller independently rechecks classification, exact source-control facts,
+and technical evidence before every merge effect. This is a dedicated privileged
+controller action: its context-scoped
 grant intentionally authorizes a central controller or operator whose source
 repository need not equal the target tenant repository. The submitted target
 still gains no authority from the caller and must independently satisfy exact
 GitHub identity, DB admission, mergeability, and required-check policy.
 
 The controller is tenant-only. An `engineering` classification returns
-`not_applicable` without a merge call. For `tenant_ui`, only
-`manager-approved`, `technical-waived`, or `maintenance-admitted` may proceed.
+`not_applicable` without a merge call. For `tenant_ui`, the current classification
+must be `eligible` before the technical gates may permit a merge.
 Launchplane re-fetches the open PR and requires exact numeric base repository
 ID, numeric owner ID, full repository name, same-repository head, requested base
 branch, and head SHA. It then evaluates technical commit statuses and check runs

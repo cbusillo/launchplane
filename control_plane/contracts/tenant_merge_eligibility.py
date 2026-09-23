@@ -21,6 +21,7 @@ TenantMergeEligibilityEvidenceKind = Literal[
 ]
 TenantMergeEligibilityReasonCode = Literal[
     "engineering_normal_flow",
+    "tenant_normal_flow",
     "trusted_maintenance_admitted",
     "technical_human_waiver_admitted",
     "manager_preview_approved",
@@ -268,12 +269,17 @@ class TenantMergeEligibilityDecision(BaseModel):
                 raise ValueError(
                     "admitted tenant merge eligibility decisions require classification"
                 )
-            if self.classification_kind == "tenant_ui" and (
-                self.evidence_kind == "none" or not self.evidence_id or not self.evidence_digest
+            if (
+                self.classification_kind == "tenant_ui"
+                and self.reason_code != "tenant_normal_flow"
+                and (
+                    self.evidence_kind == "none" or not self.evidence_id or not self.evidence_digest
+                )
             ):
                 raise ValueError("tenant UI admissions require binding evidence")
         elif self.reason_code in {
             "engineering_normal_flow",
+            "tenant_normal_flow",
             "trusted_maintenance_admitted",
             "technical_human_waiver_admitted",
             "manager_preview_approved",
@@ -318,7 +324,6 @@ def evaluate_tenant_merge_eligibility(
     candidate: TenantMergeCandidate,
     classification_lookup: TenantRepositoryClassificationLookup,
     evaluated_at: str,
-    evidence_inputs: TenantMergeEligibilityEvidenceInputs | None = None,
 ) -> TenantMergeEligibilityDecision:
     normalized_evaluated_at = _normalize_utc_timestamp(evaluated_at, "evaluated_at")
     selection = _select_current_classification(candidate=candidate, lookup=classification_lookup)
@@ -343,60 +348,13 @@ def evaluate_tenant_merge_eligibility(
             evaluated_at=normalized_evaluated_at,
         )
 
-    evidence = evidence_inputs or TenantMergeEligibilityEvidenceInputs()
-    paths = (
-        (
-            "trusted_maintenance",
-            evidence.trusted_maintenance,
-            "trusted_maintenance_admitted",
-            "Tenant UI merge is eligible through current trusted-maintenance evidence.",
-        ),
-        (
-            "technical_human_waiver",
-            evidence.technical_human_waiver,
-            "technical_human_waiver_admitted",
-            "Tenant UI merge is eligible through a current exact-head technical human waiver.",
-        ),
-        (
-            "manager_preview_approval",
-            evidence.manager_preview_approval,
-            "manager_preview_approved",
-            "Tenant UI merge is eligible through exact manager preview approval.",
-        ),
-    )
-
-    for path_kind, path_result, admitting_reason, detail in paths:
-        if path_result is None:
-            continue
-        eval_res = _evaluate_path_result(
-            candidate=candidate, classification=classification, path_result=path_result
-        )
-        if eval_res.admitted:
-            return _decision(
-                candidate=candidate,
-                classification=classification,
-                status="admitted",
-                reason_code=admitting_reason,  # type: ignore
-                detail=detail,
-                evaluated_at=normalized_evaluated_at,
-                evidence_kind=path_kind,  # type: ignore
-                evidence_id=path_result.evidence_id,
-                evidence_digest=path_result.evidence_digest,
-            )
-
-    blocked_code, blocked_detail, blocked_path = _determine_blocked_reason(
-        candidate=candidate, classification=classification, evidence=evidence
-    )
     return _decision(
         candidate=candidate,
         classification=classification,
-        status="blocked",
-        reason_code=blocked_code,
-        detail=blocked_detail,
+        status="admitted",
+        reason_code="tenant_normal_flow",
+        detail="Tenant repository is eligible for the normal technical merge checks.",
         evaluated_at=normalized_evaluated_at,
-        evidence_kind=blocked_path.path_kind if blocked_path is not None else "none",
-        evidence_id=blocked_path.evidence_id if blocked_path is not None else "",
-        evidence_digest=blocked_path.evidence_digest if blocked_path is not None else "",
     )
 
 
@@ -404,12 +362,6 @@ def evaluate_tenant_merge_eligibility(
 class _ClassificationSelection:
     classification: TenantRepositoryClassificationRecord | None
     blocked_reason: tuple[TenantMergeEligibilityReasonCode, str]
-
-
-@dataclass(frozen=True)
-class _PathEvaluation:
-    admitted: bool = False
-    blocked_reason: tuple[TenantMergeEligibilityReasonCode, str] | None = None
 
 
 def _select_current_classification(
@@ -489,93 +441,6 @@ def _select_current_classification(
         )
 
     return _ClassificationSelection(classification, ("classification_missing", ""))
-
-
-def _evaluate_path_result(
-    *,
-    candidate: TenantMergeCandidate,
-    classification: TenantRepositoryClassificationRecord,
-    path_result: TenantAdmissionPathResult,
-) -> _PathEvaluation:
-    if (
-        path_result.repository_id != candidate.repository_id
-        or path_result.repository_owner_id != candidate.repository_owner_id
-        or path_result.repository != candidate.repository
-        or path_result.pull_request_number != candidate.pull_request_number
-    ):
-        return _PathEvaluation(
-            blocked_reason=(
-                "evidence_identity_drift",
-                f"{path_result.path_kind} evidence does not match repository or PR identity.",
-            )
-        )
-
-    if path_result.head_sha != candidate.head_sha:
-        return _PathEvaluation(
-            blocked_reason=(
-                "evidence_head_mismatch",
-                f"{path_result.path_kind} evidence is bound to a different PR head SHA.",
-            )
-        )
-
-    if path_result.classification_digest != classification.classification_digest:
-        return _PathEvaluation(
-            blocked_reason=(
-                "evidence_policy_drift",
-                f"{path_result.path_kind} evidence classification digest does not match active classification digest.",
-            )
-        )
-
-    if path_result.state == "satisfied":
-        return _PathEvaluation(admitted=True)
-    if path_result.state == "stale":
-        return _PathEvaluation(
-            blocked_reason=("evidence_stale", f"{path_result.path_kind} evidence state is stale.")
-        )
-    if path_result.state == "denied":
-        return _PathEvaluation(
-            blocked_reason=("evidence_denied", f"{path_result.path_kind} evidence state is denied.")
-        )
-    if path_result.state == "unavailable":
-        return _PathEvaluation(
-            blocked_reason=(
-                "evidence_unavailable",
-                f"{path_result.path_kind} evidence state is unavailable.",
-            )
-        )
-    return _PathEvaluation(
-        blocked_reason=(
-            "manager_preview_required",
-            "Manager preview approval is required before merge eligibility.",
-        )
-    )
-
-
-def _determine_blocked_reason(
-    *,
-    candidate: TenantMergeCandidate,
-    classification: TenantRepositoryClassificationRecord,
-    evidence: TenantMergeEligibilityEvidenceInputs,
-) -> tuple[
-    TenantMergeEligibilityReasonCode,
-    str,
-    TenantAdmissionPathResult | None,
-]:
-    if evidence.manager_preview_approval is not None:
-        eval_res = _evaluate_path_result(
-            candidate=candidate,
-            classification=classification,
-            path_result=evidence.manager_preview_approval,
-        )
-        if eval_res.blocked_reason is not None:
-            reason_code, detail = eval_res.blocked_reason
-            return reason_code, detail, evidence.manager_preview_approval
-
-    return (
-        "manager_preview_required",
-        "Tenant UI repository requires manager preview approval before merge eligibility.",
-        None,
-    )
 
 
 def _decision(

@@ -90,20 +90,13 @@ writes no records, fetches no issue bodies, and should preserve the underlying
 read models' redaction, freshness, and provenance fields.
 
 The optional `tenant_admission` section reports exact pull-request facts,
-repository classification, all three admission paths, GitHub mergeability,
-required technical-check readiness, and the two possible human actions:
-manager preview approval or repository-owner technical waiver. Trusted
-maintenance remains automatic evidence rather than a human action. Every human
-action explicitly reports `agent_authoring_allowed=false`; agent context can
-explain or recommend a path but cannot create, revoke, delegate, approve, or
-waive anything. Incomplete candidate queries fail rather than falling back to
-repository-name or file heuristics. Section-level authorization or provider
-failure leaves the other context sections available.
-
-Those three tenant-admission paths describe current compatibility. The issue
-`#2240` target replaces manager-preview admission with authoritative Owner
-acceptance on the trusted Launchplane surface; agent context may report or
-diagnose that decision but may never author it.
+repository classification, GitHub mergeability, and required technical-check
+readiness. Retired manager, waiver, and maintenance admission paths no longer
+qualify a merge; current results have empty paths and human actions. Site Owner
+decisions use the separate product-review and release-checklist flows. Incomplete
+candidate queries fail rather than falling back to repository-name or file
+heuristics. Section-level authorization or provider failure leaves the other
+context sections available. The read grants no write authority.
 
 Agents may call lower-level read models directly when they need a narrower
 surface:

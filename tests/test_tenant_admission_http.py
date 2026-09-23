@@ -60,7 +60,6 @@ from tests.http_app_test_support import (
     _github_oauth_config,
 )
 from tests.support.auth import _StubVerifier, _identity
-from tests.test_tenant_admission_status import _path_result
 
 PRODUCT = "launchplane"
 CONTEXT = "production"
@@ -421,37 +420,17 @@ def _tenant_admission_evaluation_result() -> TenantAdmissionControllerRunOnceRes
         head_sha=HEAD_SHA,
     )
     classification = _waiver_classification_record()
-    paths = TenantMergeEligibilityEvidenceInputs(
-        trusted_maintenance=_path_result(
-            kind="trusted_maintenance",
-            state="pending",
-            candidate=candidate,
-            classification=classification,
-        ),
-        technical_human_waiver=_path_result(
-            kind="technical_human_waiver",
-            state="pending",
-            candidate=candidate,
-            classification=classification,
-        ),
-        manager_preview_approval=_path_result(
-            kind="manager_preview_approval",
-            state="pending",
-            candidate=candidate,
-            classification=classification,
-        ),
-    )
+    paths = TenantMergeEligibilityEvidenceInputs()
     decision = evaluate_tenant_merge_eligibility(
         candidate=candidate,
         classification_lookup=TenantRepositoryClassificationLookup(
             status="available",
             records=(classification,),
         ),
-        evidence_inputs=paths,
         evaluated_at=CLASSIFIED_AT,
     )
     admission = TenantAdmissionStatusReadModel(
-        category="pending",
+        category="eligible",
         classification_status="available",
         classification_kind="tenant_ui",
         classification_revision=classification.classification_revision,
@@ -477,7 +456,7 @@ def _tenant_admission_evaluation_result() -> TenantAdmissionControllerRunOnceRes
         evaluated_at=CLASSIFIED_AT,
     )
     return TenantAdmissionControllerRunOnceResult(
-        outcome="blocked",
+        outcome="ready",
         candidate=candidate,
         base_branch="main",
         merge_method="merge",
@@ -500,7 +479,7 @@ def _tenant_admission_evaluation_result() -> TenantAdmissionControllerRunOnceRes
 
 
 class TenantAdmissionHttpTests(unittest.IsolatedAsyncioTestCase):
-    async def test_read_only_evaluation_exposes_human_actions_and_technical_checks(
+    async def test_read_only_evaluation_exposes_checks_without_retired_human_actions(
         self,
     ) -> None:
         evaluation = _tenant_admission_evaluation_result()
@@ -542,15 +521,12 @@ class TenantAdmissionHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200)
         read_model = response.json()["read_model"]
         self.assertFalse(read_model["agent_authoring_allowed"])
-        self.assertEqual(read_model["evaluation"]["outcome"], "blocked")
+        self.assertEqual(read_model["evaluation"]["outcome"], "ready")
         self.assertEqual(
             read_model["evaluation"]["technical_checks"]["status"],
             "pass",
         )
-        actions = {action["action_kind"]: action for action in read_model["human_actions"]}
-        self.assertEqual(actions["manager_preview_approval"]["availability"], "available")
-        self.assertEqual(actions["technical_human_waiver"]["availability"], "available")
-        self.assertFalse(actions["technical_human_waiver"]["agent_authoring_allowed"])
+        self.assertEqual(read_model["human_actions"], [])
 
     async def test_agent_context_includes_exact_tenant_admission_without_dropping_sections(
         self,

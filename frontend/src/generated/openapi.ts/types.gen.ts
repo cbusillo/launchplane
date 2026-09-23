@@ -3864,7 +3864,7 @@ export type TenantAdmissionEvaluationReadModel = {
     agent_authoring_allowed: false;
     evaluation: TenantAdmissionControllerRunOnceResult;
     generated_at: string;
-    human_actions: Array<TenantAdmissionHumanActionReadModel>;
+    human_actions: Array<unknown>;
     schema_version: number;
 };
 
@@ -3872,17 +3872,6 @@ export type TenantAdmissionEvaluationReadResponse = {
     read_model: TenantAdmissionEvaluationReadModel;
     status: 'ok';
     trace_id: string;
-};
-
-export type TenantAdmissionHumanActionReadModel = {
-    action_kind: 'manager_preview_approval' | 'technical_human_waiver';
-    agent_authoring_allowed: false;
-    availability: 'available' | 'satisfied' | 'unavailable';
-    detail: string;
-    path_state: 'satisfied' | 'pending' | 'denied' | 'stale' | 'unavailable';
-    requires_human: true;
-    schema_version: number;
-    title: string;
 };
 
 export type TenantAdmissionPathResult = {
@@ -3919,7 +3908,7 @@ export type TenantAdmissionRequiredTechnicalCheck = {
 };
 
 export type TenantAdmissionStatusReadModel = {
-    category: 'engineering' | 'pending' | 'manager-approved' | 'technical-waived' | 'maintenance-admitted' | 'stale' | 'denied' | 'unavailable';
+    category: 'engineering' | 'eligible' | 'pending' | 'manager-approved' | 'technical-waived' | 'maintenance-admitted' | 'stale' | 'denied' | 'unavailable';
     classification_digest: string;
     classification_kind: 'engineering' | 'tenant_ui' | '';
     classification_revision: number;
@@ -3976,7 +3965,7 @@ export type TenantMergeEligibilityDecision = {
     head_sha: string;
     product: string;
     pull_request_number: number;
-    reason_code: 'engineering_normal_flow' | 'trusted_maintenance_admitted' | 'technical_human_waiver_admitted' | 'manager_preview_approved' | 'manager_preview_required' | 'evidence_denied' | 'evidence_stale' | 'evidence_unavailable' | 'evidence_identity_drift' | 'evidence_head_mismatch' | 'evidence_policy_drift' | 'classification_missing' | 'classification_unknown' | 'classification_ambiguous' | 'classification_identity_drift';
+    reason_code: 'engineering_normal_flow' | 'tenant_normal_flow' | 'trusted_maintenance_admitted' | 'technical_human_waiver_admitted' | 'manager_preview_approved' | 'manager_preview_required' | 'evidence_denied' | 'evidence_stale' | 'evidence_unavailable' | 'evidence_identity_drift' | 'evidence_head_mismatch' | 'evidence_policy_drift' | 'classification_missing' | 'classification_unknown' | 'classification_ambiguous' | 'classification_identity_drift';
     repository: string;
     repository_id: string;
     repository_owner_id: string;
