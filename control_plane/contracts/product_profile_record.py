@@ -526,6 +526,7 @@ class LaunchplaneProductProfileRecord(BaseModel):
     lifecycle_state: ProductLifecycleState = "active"
     # Unknown existing records require review; only explicit prelaunch records are exempt.
     production_use: Literal["unknown", "prelaunch", "live"] = "unknown"
+    production_use_reason: str = ""
     product: str
     display_name: str
     repository: str
@@ -613,6 +614,8 @@ class LaunchplaneProductProfileRecord(BaseModel):
         return self.lifecycle_state == "active"
 
     def validate_write_contract(self) -> "LaunchplaneProductProfileRecord":
+        if self.production_use == "prelaunch" and not self.production_use_reason.strip():
+            raise ValueError("Prelaunch production use requires a recorded classification reason.")
         for lane in self.lanes:
             for check in lane.health_monitoring.checks:
                 if not check.enabled:

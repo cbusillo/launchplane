@@ -4,6 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 from typing import Protocol, cast
+from urllib.parse import urlsplit
 
 import click
 
@@ -69,7 +70,32 @@ def release_version(
         if release.context != lane.context or release.channel != instance:
             raise ValueError("Release tuple does not belong to the requested lane.")
         artifact = store.read_artifact_manifest(release.artifact_id)
-        return ReleaseVersion(artifact_id=release.artifact_id, source_commit=artifact.source_commit)
+
+        def repository_key(value: str) -> str:
+            if value.startswith("git@github.com:"):
+                value = value.removeprefix("git@github.com:")
+            elif "://" in value:
+                parsed = urlsplit(value)
+                if parsed.hostname == "github.com":
+                    value = parsed.path.strip("/")
+            return value.removesuffix(".git").casefold()
+
+        sources = sorted(
+            (repository_key(source.repository), source.ref)
+            for source in artifact.addon_sources
+            if repository_key(source.repository) != repository_key(profile.repository)
+        )
+        selectors = sorted(
+            (repository_key(selector.repository), selector.selector, selector.resolved_ref)
+            for selector in artifact.addon_selectors
+            if repository_key(selector.repository) != repository_key(profile.repository)
+        )
+        shared_digest = hashlib.sha256(json.dumps([sources, selectors]).encode()).hexdigest()
+        return ReleaseVersion(
+            artifact_id=release.artifact_id,
+            source_commit=artifact.source_commit,
+            shared_addons_digest=shared_digest,
+        )
     inventory = store.read_environment_inventory(context_name=lane.context, instance_name=instance)
     if inventory.context != lane.context or inventory.instance != instance:
         raise ValueError("Environment inventory does not belong to the requested lane.")
@@ -129,6 +155,13 @@ def build_release_review(
         candidate=candidate,
         items=tuple(annotated),
         untracked_commits=untracked,
+        additional_changes=(
+            (
+                "Shared website components changed outside this repository's checklist. Operator review is required.",
+            )
+            if production.shared_addons_digest != candidate.shared_addons_digest
+            else ()
+        ),
     )
     digest = checklist_digest(checklist)
     matching = [
@@ -172,6 +205,7 @@ def checklist_blockers(checklist: ReleaseChecklist) -> tuple[str, ...]:
         blockers.append(
             "The release contains commits without a merged pull request and Owner test notes."
         )
+    blockers.extend(checklist.additional_changes)
     return tuple(blockers)
 
 

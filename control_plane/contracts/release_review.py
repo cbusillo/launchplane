@@ -10,6 +10,7 @@ class ReleaseVersion(BaseModel):
 
     artifact_id: str = Field(min_length=1)
     source_commit: str = Field(pattern=r"^[0-9a-f]{40}$")
+    shared_addons_digest: str = ""
 
 
 class ReleaseReviewItem(BaseModel):
@@ -35,6 +36,7 @@ class ReleaseChecklist(BaseModel):
     candidate: ReleaseVersion
     items: tuple[ReleaseReviewItem, ...]
     untracked_commits: tuple[str, ...] = ()
+    additional_changes: tuple[str, ...] = ()
 
 
 ReleaseDecision = Literal["accepted", "changes_requested", "overridden"]

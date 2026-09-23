@@ -13196,6 +13196,11 @@
             "title": "Production Use",
             "type": "string"
           },
+          "production_use_reason": {
+            "default": "",
+            "title": "Production Use Reason",
+            "type": "string"
+          },
           "promotion_workflow": {
             "$ref": "#/components/schemas/ProductPromotionWorkflowProfile"
           },
@@ -35998,6 +36003,14 @@
       "ReleaseChecklist": {
         "additionalProperties": false,
         "properties": {
+          "additional_changes": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Additional Changes",
+            "type": "array"
+          },
           "candidate": {
             "$ref": "#/components/schemas/ReleaseVersion"
           },
@@ -36379,6 +36392,11 @@
           "artifact_id": {
             "minLength": 1,
             "title": "Artifact Id",
+            "type": "string"
+          },
+          "shared_addons_digest": {
+            "default": "",
+            "title": "Shared Addons Digest",
             "type": "string"
           },
           "source_commit": {

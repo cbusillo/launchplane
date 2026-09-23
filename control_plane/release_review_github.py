@@ -93,10 +93,19 @@ def read_release_changes(
                 head = pull.get("head", {})
                 if not isinstance(head, dict):
                     raise ValueError("GitHub pull request source is unavailable.")
+                number = pull.get("number")
+                title = pull.get("title")
+                if (
+                    not isinstance(number, int)
+                    or number < 1
+                    or not isinstance(title, str)
+                    or not title
+                ):
+                    raise ValueError("GitHub pull request number or title is unavailable.")
                 item = ReleaseReviewItem(
-                    pull_request_number=pull["number"],
-                    title=pull["title"],
-                    url=f"https://github.com/{repository}/pull/{pull['number']}",
+                    pull_request_number=number,
+                    title=title,
+                    url=f"https://github.com/{repository}/pull/{number}",
                     head_sha=head.get("sha", ""),
                     merge_commit=pull["merge_commit_sha"],
                     owner_test_notes=owner_test_notes(pull.get("body") or ""),

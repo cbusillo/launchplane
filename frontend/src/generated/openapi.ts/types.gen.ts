@@ -817,6 +817,7 @@ export type LaunchplaneProductProfileRecord = {
     preview: ProductPreviewProfile;
     product: string;
     production_use: 'unknown' | 'prelaunch' | 'live';
+    production_use_reason: string;
     promotion_workflow: ProductPromotionWorkflowProfile;
     repository: string;
     repository_id: string;
@@ -3652,6 +3653,7 @@ export type ProviderTargetRecord = {
 };
 
 export type ReleaseChecklist = {
+    additional_changes: Array<string>;
     candidate: ReleaseVersion;
     items: Array<ReleaseReviewItem>;
     owner_github_id: string;
@@ -3730,6 +3732,7 @@ export type ReleaseTupleRecord = {
 
 export type ReleaseVersion = {
     artifact_id: string;
+    shared_addons_digest: string;
     source_commit: string;
 };
 

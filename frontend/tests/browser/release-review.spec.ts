@@ -1,5 +1,12 @@
 import { expect, test } from "@playwright/test";
 
+test("Owner cannot accept undisclosed shared component changes", async ({ page }) => {
+  await page.goto("/ui/owner-review?product=example-site&fixture=missing");
+  await expect(page.getByText("Shared website components changed outside this repository's checklist. Operator review is required.")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Accept release" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Record operator override" })).toHaveCount(0);
+});
+
 test("Owner reviews the complete release and can request changes after accepting", async ({ page }) => {
   const mutations: string[] = [];
   const errors: string[] = [];

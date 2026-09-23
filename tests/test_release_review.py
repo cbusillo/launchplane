@@ -7,6 +7,7 @@ from typing import cast
 import click
 
 from control_plane.contracts.artifact_identity import (
+    ArtifactAddonSource,
     ArtifactIdentityManifest,
     ArtifactImageReference,
 )
@@ -137,6 +138,41 @@ class ReleaseReviewTests(unittest.TestCase):
         self.assertEqual(review.checklist.items[0].owner_test_notes, "Check the repair prices.")
         self.store.write_release_review_decision_record(decision(self.store))
         self.assertTrue(self.review().approved)
+
+    def test_shared_addon_only_change_is_visible_and_cannot_be_owner_accepted(self) -> None:
+        artifact = self.store.read_artifact_manifest("artifact-testing")
+        self.store.write_artifact_manifest(
+            artifact.model_copy(
+                update={
+                    "source_commit": BASE,
+                    "addon_sources": (
+                        ArtifactAddonSource(repository="example/shared-addons", ref=HEAD),
+                    ),
+                }
+            )
+        )
+        review = build_release_review(
+            store=self.store,
+            profile=profile(),
+            read=lambda path: {
+                "status": "identical",
+                "total_commits": 0,
+                "commits": [],
+            },
+        )
+        assert review.checklist is not None
+        self.assertEqual(review.checklist.items, ())
+        self.assertTrue(review.checklist.additional_changes)
+        self.assertFalse(review.approved)
+        self.assertIn("Shared website components", review.blockers[0])
+
+    def test_prelaunch_profile_write_requires_recorded_reason(self) -> None:
+        prelaunch = profile().model_copy(update={"production_use": "prelaunch"})
+        with self.assertRaisesRegex(ValueError, "classification reason"):
+            prelaunch.validate_write_contract()
+        prelaunch.model_copy(
+            update={"production_use_reason": "Not serving real customers."}
+        ).validate_write_contract()
 
     def test_rejection_supersedes_acceptance_without_deploying(self) -> None:
         self.store.write_release_review_decision_record(decision(self.store))
@@ -287,6 +323,21 @@ class ReleaseReviewTests(unittest.TestCase):
 
 
 class ReleaseGitHubTests(unittest.TestCase):
+    def test_malformed_pull_request_fails_as_incomplete_evidence(self) -> None:
+        def malformed(path: str) -> object:
+            result = github_read(path)
+            if isinstance(result, list):
+                del result[0]["number"]
+            return result
+
+        with self.assertRaisesRegex(ValueError, "number or title"):
+            read_release_changes(
+                repository="example/site",
+                production_commit=BASE,
+                candidate_commit=HEAD,
+                read=malformed,
+            )
+
     def test_notes_ignore_fenced_heading_and_preserve_subheadings(self) -> None:
         self.assertEqual(
             owner_test_notes(

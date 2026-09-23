@@ -18,7 +18,7 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
     setReason("");
     setRecorded(false);
     const request = fixtureMode
-      ? loadDevFixtures().then((fixtures) => fixtures.releaseReviewForFixture())
+      ? loadDevFixtures().then((fixtures) => fixtures.releaseReviewForFixture(fixtureMode))
       : readReleaseReview(product, controller.signal);
     void request.then((value) => {
       if (!controller.signal.aborted) setResponse(value);
@@ -49,7 +49,7 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
 
   const checklist = response?.review.checklist;
   const testingUrl = checklist ? safeExternalUrl(checklist.testing_url) : null;
-  const incomplete = !checklist || !checklist.owner_github_id || !testingUrl || checklist.untracked_commits.length > 0 || checklist.items.some((item) => !item.owner_test_notes.trim());
+  const incomplete = !checklist || !checklist.owner_github_id || !testingUrl || checklist.untracked_commits.length > 0 || checklist.additional_changes.length > 0 || checklist.items.some((item) => !item.owner_test_notes.trim());
   return <section className="owner-review-page">
     <div className="owner-review-intro">
       <p className="eyebrow">Release decision</p>

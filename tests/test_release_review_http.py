@@ -4,6 +4,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from httpx2 import Response
+from control_plane.contracts.artifact_identity import ArtifactAddonSource
 
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.release_review import build_release_review
@@ -148,5 +149,32 @@ class ReleaseReviewHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rejected.status_code, 200, rejected.text)
         self.assertFalse(rejected.json()["review"]["approved"])
         self.assertFalse(
+            build_release_review(store=self.store, profile=profile(), read=github_read).approved
+        )
+
+    async def test_shared_addon_changes_need_recorded_operator_review(self) -> None:
+        artifact = self.store.read_artifact_manifest("artifact-testing")
+        self.store.write_artifact_manifest(
+            artifact.model_copy(
+                update={
+                    "addon_sources": (
+                        ArtifactAddonSource(repository="example/shared", ref="d" * 40),
+                    ),
+                }
+            )
+        )
+        refused = await self.post()
+        self.assertEqual(refused.status_code, 409, refused.text)
+        self.assertEqual(
+            self.store.list_release_review_decision_records(product="example-site"), ()
+        )
+        approved = await self.post(
+            actor="operator",
+            github_id=9003,
+            outcome="overridden",
+            reason="Reviewed the shared component change and tested its repair flow.",
+        )
+        self.assertEqual(approved.status_code, 200, approved.text)
+        self.assertTrue(
             build_release_review(store=self.store, profile=profile(), read=github_read).approved
         )

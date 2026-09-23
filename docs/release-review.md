@@ -23,6 +23,11 @@ incomplete responses, unavailable source control, and missing lane evidence
 fail closed. Missing test notes and commits without a merged pull request are
 visible checklist blockers. `Nothing for the owner to test` is valid test notes.
 Previous preview acceptance is an annotation, never release approval.
+Changes to shared Odoo addon sources or selections are also bound into the
+checklist and shown as an explicit blocker. They cannot be represented as an
+empty, acceptable website checklist. Until their test instructions are supported
+across repositories, an operator must review them and record a release-scoped
+override; ordinary Owner acceptance cannot waive the coverage gap.
 
 The decision stores the complete checklist and its digest. The digest includes
 the production and candidate artifact and commit, repository, Owner identity,
@@ -44,6 +49,9 @@ Existing records default to `unknown`, which requires review. No real product
 names or classifications are supplied by code or checked-in configuration.
 Operators must review this distinction before deploying the gate; deployment
 does not change product classifications, Owner identities, or existing grants.
+Writing `prelaunch` also requires `production_use_reason`, persisted on the
+profile. A transition back to prelaunch requires a new reason, rather than
+reusing a reason from an earlier classification.
 
 The gate replaces manager-preview approval in the product promotion read model
 and raw generic-web promotion routes. Odoo evaluates it before backup in the
@@ -51,6 +59,18 @@ combined run and again before direct promotion. The existing VeriReel service
 promotion wrapper also checks it. Readiness and direct dry-runs remain available
 while an Owner decision is pending. Recording a decision never merges, backs up,
 dispatches a workflow, or deploys.
+
+This gate covers promotion, not the existing direct stable-deploy,
+target-replacement, and rollback operations. Those retain their separate
+operator authorization boundaries and must not be used to bypass a refused
+release. Closing direct production-deploy paths while preserving authorized
+recovery is separate work.
+
+An initial product needs a verified prelaunch production-lane baseline before
+this comparison can run. Missing production records do not prove that no live
+site exists, so the service does not silently interpret missing evidence as a
+first release. Bootstrap a non-live lane explicitly, then request review before
+live activation. The CM baseline must be verified from deployed service records.
 
 Release decisions are persisted in `launchplane_release_review_decisions`, with
 file storage reserved for tests and rehearsal. Deployments must migrate the

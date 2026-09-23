@@ -10874,6 +10874,11 @@
             "title": "Production Use",
             "type": "string"
           },
+          "production_use_reason": {
+            "default": "",
+            "title": "Production Use Reason",
+            "type": "string"
+          },
           "promotion_workflow": {
             "$ref": "#/components/schemas/ProductPromotionWorkflowProfile"
           },
@@ -10927,6 +10932,7 @@
           "preview",
           "product",
           "production_use",
+          "production_use_reason",
           "promotion_workflow",
           "repository",
           "repository_id",
@@ -28015,6 +28021,14 @@
       "ReleaseChecklist": {
         "additionalProperties": false,
         "properties": {
+          "additional_changes": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Additional Changes",
+            "type": "array"
+          },
           "candidate": {
             "$ref": "#/components/schemas/ReleaseVersion"
           },
@@ -28054,6 +28068,7 @@
           }
         },
         "required": [
+          "additional_changes",
           "candidate",
           "items",
           "owner_github_id",
@@ -28415,6 +28430,11 @@
             "title": "Artifact Id",
             "type": "string"
           },
+          "shared_addons_digest": {
+            "default": "",
+            "title": "Shared Addons Digest",
+            "type": "string"
+          },
           "source_commit": {
             "pattern": "^[0-9a-f]{40}$",
             "title": "Source Commit",
@@ -28423,6 +28443,7 @@
         },
         "required": [
           "artifact_id",
+          "shared_addons_digest",
           "source_commit"
         ],
         "title": "ReleaseVersion",
