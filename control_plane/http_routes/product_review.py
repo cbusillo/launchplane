@@ -116,9 +116,7 @@ def register_product_review_routes(
         repository: str,
         identity: LaunchplaneIdentity,
         trace_id: str,
-    ) -> tuple[LaunchplaneProductProfileRecord, GitHubHumanIdentity]:
-        if not isinstance(identity, GitHubHumanIdentity):
-            unavailable(trace_id)
+    ) -> LaunchplaneProductProfileRecord:
         for profile in product_profiles_for_repository(store=store, repository=repository):
             if viewer_is_product_owner(
                 profile=profile, identity=identity
@@ -128,14 +126,14 @@ def register_product_review_routes(
                 product=profile.product,
                 context=LAUNCHPLANE_SERVICE_CONTEXT,
             ):
-                return profile, identity
+                return profile
         unavailable(trace_id)
 
     def build_response(
         *,
         store: ProductReviewStore,
         profile: LaunchplaneProductProfileRecord,
-        identity: GitHubHumanIdentity,
+        identity: LaunchplaneIdentity,
         pull_request_number: int,
         trace_id: str,
     ) -> ProductReviewResponse:
@@ -183,13 +181,13 @@ def register_product_review_routes(
     ) -> ProductReviewResponse:
         trace_id = common.next_trace_id()
         store = review_store(record_store, trace_id)
-        profile, human = visible_profile(
+        profile = visible_profile(
             store=store, repository=repository, identity=identity, trace_id=trace_id
         )
         return build_response(
             store=store,
             profile=profile,
-            identity=human,
+            identity=identity,
             pull_request_number=pull_request,
             trace_id=trace_id,
         )
@@ -204,7 +202,7 @@ def register_product_review_routes(
     ) -> ProductReviewResponse:
         trace_id = common.next_trace_id()
         store = review_store(record_store, trace_id)
-        profile, human = visible_profile(
+        profile = visible_profile(
             store=store, repository=envelope.repository, identity=identity, trace_id=trace_id
         )
         if not profile.owner.is_set:
@@ -214,7 +212,7 @@ def register_product_review_routes(
                 code="product_owner_not_set",
                 message=_NO_OWNER_REASON,
             )
-        if not viewer_is_product_owner(profile=profile, identity=human):
+        if not viewer_is_product_owner(profile=profile, identity=identity):
             unavailable(trace_id)
         preview = resolve_serving_preview(
             store=store, profile=profile, pull_request_number=envelope.pull_request
@@ -233,13 +231,13 @@ def register_product_review_routes(
             preview=preview,
             decision=envelope.decision,
             reason=envelope.reason,
-            identity=human,
+            identity=identity,
         )
         dependencies.publish_owner_review_status(store, profile, envelope.pull_request)
         return build_response(
             store=store,
             profile=profile,
-            identity=human,
+            identity=identity,
             pull_request_number=envelope.pull_request,
             trace_id=trace_id,
         )

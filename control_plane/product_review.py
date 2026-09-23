@@ -1,6 +1,6 @@
 """The small Owner product-review path.
 
-Authorization is one question: is the signed-in GitHub user the Owner named on the
+Decision authorization is one question: is the signed-in GitHub user the Owner named on the
 product record? A decision is a recorded opinion and never merges or deploys.
 """
 
@@ -16,7 +16,7 @@ from control_plane.contracts.product_review import (
     ProductReviewDecision,
     ProductReviewDecisionRecord,
 )
-from control_plane.service_auth import GitHubHumanIdentity
+from control_plane.service_auth import GitHubHumanIdentity, LaunchplaneIdentity
 
 
 class ProductReviewStore(Protocol):
@@ -94,9 +94,13 @@ def product_profiles_for_repository(
 
 
 def viewer_is_product_owner(
-    *, profile: LaunchplaneProductProfileRecord, identity: GitHubHumanIdentity
+    *, profile: LaunchplaneProductProfileRecord, identity: LaunchplaneIdentity
 ) -> bool:
-    return profile.owner.is_set and profile.owner.github_id == str(identity.github_id)
+    return (
+        isinstance(identity, GitHubHumanIdentity)
+        and profile.owner.is_set
+        and profile.owner.github_id == str(identity.github_id)
+    )
 
 
 def resolve_serving_preview(
