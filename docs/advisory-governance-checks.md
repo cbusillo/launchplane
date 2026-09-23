@@ -4,35 +4,16 @@ title: Governance Check Projection
 
 ## Purpose
 
-Launchplane projects its server-owned engineering review and Owner acceptance
-decisions into GitHub as check runs. GitHub is a visibility and routing surface,
-not an authority source. The projection cannot authorize merge, tenant
-admission, promotion, or production deployment.
+Launchplane projects engineering review into the `launchplane/engineering-review`
+GitHub check as a neutral advisory observation. GitHub is a visibility and routing
+surface; this projection grants no merge, promotion, or deployment authority.
 
-The two stable check names are:
-
-- `launchplane/engineering-review`
-- `launchplane/owner-acceptance`
-
-Engineering review remains a neutral advisory observation. Owner acceptance uses
-an `in_progress` check while an ordinary Owner decision is pending, `success`
-after acceptance or when review is not required, `action_required` for stale or
-negative human decisions, and `failure` when authority or evidence is
-unavailable. Its summary routes the reviewer to Launchplane, the only Owner
-action surface. Owner projection uses one stable aggregate check and lists each
-affected product decision instead of product-derived check names.
-
-For product pull requests this check is a leftover of the change-impact model
-and is no longer the Owner's signal. Product Owner review is shown by the
-`launchplane/owner-review` commit status described in
-[preview-workflow-contract.md](preview-workflow-contract.md#owner-review-request).
-When Launchplane next writes a ready preview comment for a pull request, an
-existing `launchplane/owner-acceptance` check run on the current head that this
-App created and that is not already `neutral` is updated once to `neutral` with
-the title "Retired" and a summary pointing to `launchplane/owner-review`.
-Launchplane never creates the check for that purpose. Launchplane's own merge
-train still evaluates Owner acceptance; removing that is a later step of issue
-`#2446`.
+Owner preview review uses the `launchplane/owner-review` commit status described
+in [preview-workflow-contract.md](preview-workflow-contract.md#owner-review-request).
+The exact-binding `launchplane/owner-acceptance` check is retired. When Launchplane
+next publishes current review feedback, it neutralizes any old App-owned check
+on that head with the title "Retired" and a pointer to the current status. It
+never creates an old check for cleanup and never reads it as merge authority.
 
 ## GitHub App Identity
 
