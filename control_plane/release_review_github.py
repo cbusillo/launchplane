@@ -102,13 +102,19 @@ def read_release_changes(
                     or not title
                 ):
                     raise ValueError("GitHub pull request number or title is unavailable.")
+                try:
+                    notes = owner_test_notes(pull.get("body") or "")
+                except ValueError:
+                    # Ambiguous notes are visible missing coverage, so an
+                    # operator can still inspect the PR and record an override.
+                    notes = ""
                 item = ReleaseReviewItem(
                     pull_request_number=number,
                     title=title,
                     url=f"https://github.com/{repository}/pull/{number}",
                     head_sha=head.get("sha", ""),
                     merge_commit=pull["merge_commit_sha"],
-                    owner_test_notes=owner_test_notes(pull.get("body") or ""),
+                    owner_test_notes=notes,
                 )
                 if item.pull_request_number in items and items[item.pull_request_number] != item:
                     raise ValueError("Owner test notes changed while compiling the release.")

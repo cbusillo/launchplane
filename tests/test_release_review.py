@@ -343,6 +343,20 @@ class ReleaseReviewTests(unittest.TestCase):
 
 
 class ReleaseGitHubTests(unittest.TestCase):
+    def test_ambiguous_notes_are_a_visible_coverage_blocker(self) -> None:
+        def ambiguous(path: str) -> object:
+            result = github_read(path)
+            if isinstance(result, list):
+                result[0]["body"] = "## Owner test notes\nFirst\n## Owner test notes\nSecond"
+            return result
+
+        items, untracked = read_release_changes(
+            repository="example/site", production_commit=BASE, candidate_commit=HEAD, read=ambiguous
+        )
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0].owner_test_notes, "")
+        self.assertEqual(untracked, ())
+
     def test_malformed_pull_request_fails_as_incomplete_evidence(self) -> None:
         def malformed(path: str) -> object:
             result = github_read(path)

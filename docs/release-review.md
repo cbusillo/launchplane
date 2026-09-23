@@ -46,6 +46,12 @@ promotion. Recording the same pending decision retries its publication with the
 same decision ID, including recovery when GitHub accepted a write whose response
 was lost. GitHub issue contents and membership never decide release contents or
 approval; the saved Launchplane decision remains authoritative.
+Large records continue in numbered comments without truncating the checklist;
+promotion stays blocked until every part is confirmed. Recovery compares the
+complete expected contents, not only a marker. Lookup stops once creation dates
+predate the saved decision, so unrelated old repository history does not prevent
+new releases. Ambiguous duplicate notes headings remain visible as missing
+coverage that requires correction or a reasoned operator override.
 
 Product CI must require a nonempty **Owner test notes** section on every pull
 request, including changes that need no manual test. The shared
