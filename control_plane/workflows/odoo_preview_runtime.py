@@ -108,7 +108,7 @@ ODOO_PREVIEW_GENERATED_ENV_KEYS = (
     "ODOO_DB_VOLUME",
 )
 ODOO_PREVIEW_MAX_APPLY_TIMEOUT_SECONDS = 600
-ODOO_PREVIEW_DESTROY_SUPERSESSION_GRACE_SECONDS = ODOO_PREVIEW_MAX_APPLY_TIMEOUT_SECONDS + 300
+ODOO_PREVIEW_SUPERSESSION_GRACE_SECONDS = ODOO_PREVIEW_MAX_APPLY_TIMEOUT_SECONDS + 300
 
 
 class OdooPreviewTargetDiscoveryAmbiguousError(click.ClickException):
@@ -1388,14 +1388,14 @@ def observe_odoo_preview_dokploy_apply(
     return OdooPreviewDokployObservation(outcome="unknown")
 
 
-def odoo_preview_destroy_target_is_quiescent(
+def odoo_preview_target_is_quiescent(
     *,
     control_plane_root: Path,
     request: OdooPreviewDokployApplyRequest,
     database_url: str | None,
 ) -> bool:
     plan = request.dry_run_plan
-    if plan.operation != "destroy" or not plan.compose_ref:
+    if not plan.compose_ref or plan.compose_ref.startswith("${created."):
         return False
     try:
         host, token = dokploy_source.read_dokploy_config(

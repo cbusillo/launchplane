@@ -50,7 +50,7 @@ from control_plane.workflows.odoo_preview_runtime import (
     build_odoo_preview_apply_inputs,
     execute_odoo_preview_dokploy_apply,
     observe_odoo_preview_dokploy_apply,
-    odoo_preview_destroy_target_is_quiescent,
+    odoo_preview_target_is_quiescent,
     odoo_preview_apply_plan_sha256,
 )
 from control_plane.workflows.launchplane import (
@@ -841,13 +841,13 @@ def _odoo_preview_existing_operation_issued_at(
     return generation.requested_at if generation is not None else ""
 
 
-def odoo_preview_destroy_supersession_is_quiescent(
+def odoo_preview_supersession_is_quiescent(
     *,
     control_plane_root_path: Path,
     request: OdooPreviewApplyEnvelope,
     database_url: str | None,
 ) -> bool:
-    return odoo_preview_destroy_target_is_quiescent(
+    return odoo_preview_target_is_quiescent(
         control_plane_root=control_plane_root_path,
         request=request.apply,
         database_url=database_url,
