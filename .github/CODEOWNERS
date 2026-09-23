@@ -1,0 +1,3 @@
+# The operator approves every change to the direction and to this file.
+/DIRECTION.md @cbusillo
+/.github/CODEOWNERS @cbusillo
