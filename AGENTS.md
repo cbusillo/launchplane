@@ -6,7 +6,7 @@ Treat this file as the launch checklist for each engineering session in
 ## Start Here
 
 - Use the documentation index in `docs/README.md` before reading deeper files.
-- Read `docs/direction.md` first. It is the current direction, roles, and stop
+- Read `DIRECTION.md` first. It is the current direction, roles, and stop
   boundaries, and it wins over any issue, milestone, or older doc. Issues are a
   work list, not instructions.
 - Before changing code, open the matching style page in `docs/style/`.

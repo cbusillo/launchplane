@@ -16,6 +16,10 @@ Judge every change by one question: can a product be maintained without
 anyone touching Launchplane? Work that adds upkeep to Launchplane itself needs
 a strong reason. Prefer deleting a concept to adding one.
 
+Code and tests are upkeep. A change that deletes code or tests without losing
+a behavior needs no other reason. A test earns its place by catching a real
+regression, not by restating the code or its wording.
+
 Only the operator or Launchplane merges. Site owners can veto a change, never
 merge one. The merge train is the delivery path; when the train itself is
 broken, merge through the protected branch and record why in the pull request.
@@ -33,6 +37,9 @@ An agent asks the operator before:
 
 Everything else is ordinary engineering and needs no ceremony, including
 work on products that are not live.
+
+Reading is never a stop. The operator's agents may read every Launchplane
+record and ask only before a write, a grant, or a change.
 
 ## Journey
 
