@@ -10,8 +10,8 @@ test("Owner cannot accept undisclosed shared component changes", async ({ page }
 test("Owner reviews the complete release and can request changes after accepting", async ({ page }) => {
   const mutations: string[] = [];
   const errors: string[] = [];
-  page.on("request", (request) => { if (request.method() !== "GET") mutations.push(request.url()); });
-  page.on("pageerror", (error) => errors.push(error.message));
+  page.on("request", request => { if (request.method() !== "GET") mutations.push(request.url()); });
+  page.on("pageerror", error => errors.push(error.message));
   await page.goto("/ui/owner-review?product=example-site&fixture=products");
   await expect(page.getByRole("heading", { name: "Review this release" })).toBeVisible();
   await expect(page.getByRole("link", { name: "Open the testing site" })).toHaveAttribute("href", "https://testing.example.invalid/");
