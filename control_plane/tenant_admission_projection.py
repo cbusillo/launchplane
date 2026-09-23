@@ -308,6 +308,8 @@ def write_tenant_admission_projection(
 def _projection_state_and_description(
     category: TenantAdmissionStatusCategory,
 ) -> tuple[TenantAdmissionGitHubState, str]:
+    if category == "eligible":
+        return "success", "Repository is eligible for required technical merge checks."
     if category == "engineering":
         return "success", "Tenant admission is not required for this repository."
     if category == "pending":

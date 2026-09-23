@@ -18,6 +18,7 @@ from control_plane.merge_train_github import MergeTrainGitHubError
 from control_plane.merge_train_github import MergeTrainGitHubStaleHeadError
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.tenant_admission_controller import (
+    evaluate_tenant_admission_candidate,
     TenantAdmissionControllerRunOnceEnvelope,
     execute_tenant_admission_controller_run_once,
 )
@@ -27,7 +28,7 @@ from tests.test_tenant_admission_status import (
     _candidate,
     _classification,
     _classification_only_store,
-    _status_with_path_states,
+    _eligible_status,
 )
 
 
@@ -36,51 +37,21 @@ MERGE_COMMIT_SHA = "c" * 40
 
 
 class TenantAdmissionControllerTests(unittest.TestCase):
-    def test_each_tenant_admission_path_can_be_ready(self) -> None:
-        cases = (
-            _status_with_path_states(
-                trusted_state="satisfied",
-                waiver_state="pending",
-                manager_state="pending",
-            ),
-            _status_with_path_states(
-                trusted_state="pending",
-                waiver_state="satisfied",
-                manager_state="pending",
-            ),
-            _status_with_path_states(
-                trusted_state="pending",
-                waiver_state="pending",
-                manager_state="satisfied",
-            ),
+    def test_tenant_is_ready_without_manager_or_waiver_records(self) -> None:
+        transport = _TenantControllerTransport()
+        result = evaluate_tenant_admission_candidate(
+            request=_request(mutate=False),
+            store=_classification_only_store((_classification(),)),
+            token="token",
+            transport_factory=lambda _token: transport,
         )
-        for admission in cases:
-            with self.subTest(category=admission.category), TemporaryDirectory() as temporary_name:
-                transport = _TenantControllerTransport()
-                with patch(
-                    "control_plane.tenant_admission_controller.get_tenant_admission_status",
-                    return_value=admission,
-                ):
-                    result = execute_tenant_admission_controller_run_once(
-                        request=_request(mutate=False),
-                        store=FilesystemRecordStore(state_dir=Path(temporary_name)),
-                        token="token",
-                        trace_id="trace-ready",
-                        transport_factory=lambda _token: transport,
-                    )
-
-                self.assertEqual(result.outcome, "ready")
-                checks = result.technical_checks
-                assert checks is not None
-                self.assertEqual(checks.status, "pass")
-                self.assertFalse(transport.merge_called)
+        self.assertEqual(result.outcome, "ready")
+        assert result.technical_checks is not None
+        self.assertEqual(result.technical_checks.status, "pass")
+        self.assertFalse(transport.merge_called)
 
     def test_launchplane_advisory_checks_are_excluded_from_technical_inputs(self) -> None:
-        admission = _status_with_path_states(
-            trusted_state="pending",
-            waiver_state="pending",
-            manager_state="satisfied",
-        )
+        admission = _eligible_status()
         with TemporaryDirectory() as temporary_name, TemporaryDirectory() as baseline_name:
             transport = _TenantControllerTransport(include_launchplane_projection_signals=True)
             baseline_transport = _TenantControllerTransport()
@@ -117,11 +88,7 @@ class TenantAdmissionControllerTests(unittest.TestCase):
         with TemporaryDirectory() as temporary_name:
             store = FilesystemRecordStore(state_dir=Path(temporary_name))
             transport = _TenantControllerTransport()
-            admission = _status_with_path_states(
-                trusted_state="pending",
-                waiver_state="pending",
-                manager_state="satisfied",
-            )
+            admission = _eligible_status()
             with patch(
                 "control_plane.tenant_admission_controller.get_tenant_admission_status",
                 return_value=admission,
@@ -177,39 +144,8 @@ class TenantAdmissionControllerTests(unittest.TestCase):
         self.assertFalse(transport.merge_called)
         self.assertFalse(transport.technical_checks_read)
 
-    def test_pending_tenant_admission_still_reports_technical_readiness(self) -> None:
-        admission = _status_with_path_states(
-            trusted_state="pending",
-            waiver_state="pending",
-            manager_state="pending",
-        )
-        with TemporaryDirectory() as temporary_name:
-            transport = _TenantControllerTransport()
-            with patch(
-                "control_plane.tenant_admission_controller.get_tenant_admission_status",
-                return_value=admission,
-            ):
-                result = execute_tenant_admission_controller_run_once(
-                    request=_request(mutate=False),
-                    store=FilesystemRecordStore(state_dir=Path(temporary_name)),
-                    token="token",
-                    trace_id="trace-pending-admission",
-                    transport_factory=lambda _token: transport,
-                )
-
-        self.assertEqual(result.outcome, "blocked")
-        self.assertTrue(transport.technical_checks_read)
-        self.assertIsNotNone(result.technical_checks)
-        assert result.technical_checks is not None
-        self.assertEqual(result.technical_checks.status, "pass")
-        self.assertIn("Tenant admission is pending", result.detail)
-
     def test_failed_or_missing_technical_checks_block_merge(self) -> None:
-        admission = _status_with_path_states(
-            trusted_state="pending",
-            waiver_state="satisfied",
-            manager_state="pending",
-        )
+        admission = _eligible_status()
         cases = (
             _TenantControllerTransport(technical_state="failure"),
             _TenantControllerTransport(technical_state="pending"),
@@ -243,11 +179,7 @@ class TenantAdmissionControllerTests(unittest.TestCase):
                 self.assertIn(checks.status, {"fail", "pending", "unavailable"})
 
     def test_optional_failed_check_does_not_replace_required_gate_policy(self) -> None:
-        admission = _status_with_path_states(
-            trusted_state="pending",
-            waiver_state="satisfied",
-            manager_state="pending",
-        )
+        admission = _eligible_status()
         with TemporaryDirectory() as temporary_name:
             transport = _TenantControllerTransport(
                 include_optional_signal=True,
@@ -275,11 +207,7 @@ class TenantAdmissionControllerTests(unittest.TestCase):
         )
 
     def test_draft_or_unmergeable_pull_request_blocks_before_checks(self) -> None:
-        admission = _status_with_path_states(
-            trusted_state="satisfied",
-            waiver_state="pending",
-            manager_state="pending",
-        )
+        admission = _eligible_status()
         cases = (
             _pull_request_payload(draft=True),
             _pull_request_payload(mergeable=False),
@@ -307,11 +235,7 @@ class TenantAdmissionControllerTests(unittest.TestCase):
                 self.assertFalse(transport.merge_called)
 
     def test_missing_or_malformed_draft_and_merged_evidence_fails_closed(self) -> None:
-        admission = _status_with_path_states(
-            trusted_state="satisfied",
-            waiver_state="pending",
-            manager_state="pending",
-        )
+        admission = _eligible_status()
         cases: list[dict[str, object]] = []
         for field_name, malformed_value in (("draft", "false"), ("merged", "false")):
             missing_payload = _pull_request_payload()
@@ -343,11 +267,7 @@ class TenantAdmissionControllerTests(unittest.TestCase):
                 self.assertFalse(transport.merge_called)
 
     def test_strict_required_checks_require_head_to_contain_current_base(self) -> None:
-        admission = _status_with_path_states(
-            trusted_state="satisfied",
-            waiver_state="pending",
-            manager_state="pending",
-        )
+        admission = _eligible_status()
         with TemporaryDirectory() as temporary_name:
             strict_transport = _TenantControllerTransport(head_contains_base=False)
             with patch(
@@ -393,11 +313,7 @@ class TenantAdmissionControllerTests(unittest.TestCase):
         self.assertIsNone(non_strict_checks.base_up_to_date)
 
     def test_missing_or_malformed_required_check_strict_policy_fails_closed(self) -> None:
-        admission = _status_with_path_states(
-            trusted_state="satisfied",
-            waiver_state="pending",
-            manager_state="pending",
-        )
+        admission = _eligible_status()
         for strict_policy_value in (None, "true"):
             with self.subTest(strict=strict_policy_value), TemporaryDirectory() as temporary_name:
                 transport = _TenantControllerTransport(
@@ -422,11 +338,7 @@ class TenantAdmissionControllerTests(unittest.TestCase):
 
     def test_same_repository_head_identity_is_required(self) -> None:
         candidate = _candidate()
-        admission = _status_with_path_states(
-            trusted_state="satisfied",
-            waiver_state="pending",
-            manager_state="pending",
-        )
+        admission = _eligible_status()
         transport = _TenantControllerTransport(
             pull_request_payloads=(
                 _pull_request_payload(head_repository_id=int(candidate.repository_id) + 1),
@@ -450,16 +362,10 @@ class TenantAdmissionControllerTests(unittest.TestCase):
 
         self.assertFalse(transport.merge_called)
 
-    def test_admission_revoked_between_rechecks_blocks_merge(self) -> None:
-        admitted = _status_with_path_states(
-            trusted_state="pending",
-            waiver_state="satisfied",
-            manager_state="pending",
-        )
-        blocked = _status_with_path_states(
-            trusted_state="pending",
-            waiver_state="pending",
-            manager_state="pending",
+    def test_classification_removed_between_rechecks_blocks_merge(self) -> None:
+        admitted = _eligible_status()
+        blocked = get_tenant_admission_status(
+            store=_classification_only_store(()), candidate=_candidate(), evaluated_at=EVALUATED_AT
         )
         with TemporaryDirectory() as temporary_name:
             transport = _TenantControllerTransport()
@@ -479,11 +385,7 @@ class TenantAdmissionControllerTests(unittest.TestCase):
         self.assertFalse(transport.merge_called)
 
     def test_required_check_policy_drift_between_rechecks_blocks_merge(self) -> None:
-        admission = _status_with_path_states(
-            trusted_state="pending",
-            waiver_state="satisfied",
-            manager_state="pending",
-        )
+        admission = _eligible_status()
         with TemporaryDirectory() as temporary_name:
             transport = _TenantControllerTransport(required_check_app_ids=(15368, 999))
             with patch(
@@ -502,11 +404,7 @@ class TenantAdmissionControllerTests(unittest.TestCase):
         self.assertFalse(transport.merge_called)
 
     def test_technical_evidence_must_match_exact_head(self) -> None:
-        admission = _status_with_path_states(
-            trusted_state="satisfied",
-            waiver_state="pending",
-            manager_state="pending",
-        )
+        admission = _eligible_status()
         cases = (
             _TenantControllerTransport(status_response_sha="d" * 40),
             _TenantControllerTransport(check_run_head_sha="d" * 40),
@@ -531,11 +429,7 @@ class TenantAdmissionControllerTests(unittest.TestCase):
                 self.assertFalse(transport.merge_called)
 
     def test_head_move_between_rechecks_fails_before_merge(self) -> None:
-        admission = _status_with_path_states(
-            trusted_state="satisfied",
-            waiver_state="pending",
-            manager_state="pending",
-        )
+        admission = _eligible_status()
         transport = _TenantControllerTransport(
             pull_request_payloads=(
                 _pull_request_payload(),
@@ -568,11 +462,7 @@ class TenantAdmissionControllerTests(unittest.TestCase):
         self.assertEqual(controller_state.status, "idle")
 
     def test_base_move_between_rechecks_fails_before_merge(self) -> None:
-        admission = _status_with_path_states(
-            trusted_state="satisfied",
-            waiver_state="pending",
-            manager_state="pending",
-        )
+        admission = _eligible_status()
         transport = _TenantControllerTransport(
             pull_request_payloads=(
                 _pull_request_payload(),
@@ -599,11 +489,7 @@ class TenantAdmissionControllerTests(unittest.TestCase):
         self.assertFalse(transport.merge_called)
 
     def test_merge_confirmation_mismatch_requires_reconciliation(self) -> None:
-        admission = _status_with_path_states(
-            trusted_state="pending",
-            waiver_state="pending",
-            manager_state="satisfied",
-        )
+        admission = _eligible_status()
         with TemporaryDirectory() as temporary_name:
             store = FilesystemRecordStore(state_dir=Path(temporary_name))
             transport = _TenantControllerTransport(merge_response_sha="d" * 40)
@@ -630,11 +516,7 @@ class TenantAdmissionControllerTests(unittest.TestCase):
         self.assertEqual(controller_state.status, "reconcile_required")
 
     def test_expected_sha_rejection_is_stale_without_reconciliation(self) -> None:
-        admission = _status_with_path_states(
-            trusted_state="pending",
-            waiver_state="pending",
-            manager_state="satisfied",
-        )
+        admission = _eligible_status()
         with TemporaryDirectory() as temporary_name:
             store = FilesystemRecordStore(state_dir=Path(temporary_name))
             transport = _TenantControllerTransport(stale_merge=True)
@@ -891,11 +773,7 @@ class TenantAdmissionControllerTests(unittest.TestCase):
             self.assertEqual(adopted.active_action, active_action)
 
     def test_provider_uncertainty_adopts_exact_merged_pull_request(self) -> None:
-        admission = _status_with_path_states(
-            trusted_state="pending",
-            waiver_state="pending",
-            manager_state="satisfied",
-        )
+        admission = _eligible_status()
         request = _request(mutate=True)
         with TemporaryDirectory() as temporary_name:
             store = FilesystemRecordStore(state_dir=Path(temporary_name))

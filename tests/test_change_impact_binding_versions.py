@@ -17,18 +17,12 @@ from control_plane.contracts.change_impact import (
 from control_plane.contracts.engineering_review_decision import EngineeringReviewDecisionRecord
 from control_plane.contracts.owner_acceptance import (
     OwnerAcceptanceBinding,
-    OwnerAcceptanceDecision,
     OwnerAcceptanceEventRecord,
     OwnerAcceptanceTransitionError,
     owner_acceptance_event_replay_digest,
     owner_acceptance_event_replay_matches,
 )
 from control_plane.http_routes.owner_acceptance import _owner_acceptance_event_persistence_outcome
-from control_plane.merge_admission_impact_binding import (
-    impact_binding_fingerprints,
-    select_current_engineering_decision,
-)
-from control_plane.merge_readiness import _engineering_review_facet
 from control_plane.owner_acceptance import (
     OwnerAcceptanceEventConflictError,
     evaluate_owner_acceptance_for_binding,
@@ -36,7 +30,7 @@ from control_plane.owner_acceptance import (
 )
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
-from tests.test_merge_readiness import _engineering_decision, _target
+from tests.test_merge_readiness import _engineering_decision
 from tests.test_owner_acceptance import (
     REPOSITORY,
     _EvidenceProvider,
@@ -342,62 +336,3 @@ class ChangeImpactBindingVersionTests(unittest.TestCase):
                 assert replay.decision.binding is not None
                 self.assertEqual(replay.decision.binding.change_impact_policy_revision, 2)
                 self.assertEqual(replay.record.binding.change_impact_policy_revision, 1)
-
-    def test_admission_compares_scoped_identity_and_rejects_mixed_versions(self) -> None:
-        engineering = _v2_engineering()
-        impact = ChangeImpactEvaluation(
-            status="success",
-            reason_code="change_impact_classified",
-            target=engineering.target,
-            policy_digest="d" * 64,
-            binding_hash_version=2,
-            change_impact_decision_digest=SEMANTIC_DIGEST,
-        )
-        owner = OwnerAcceptanceDecision(
-            status="not_required",
-            reason_code="engineering_only",
-            evaluated_at=engineering.evaluated_at,
-        )
-        self.assertEqual(
-            impact_binding_fingerprints(
-                impact=impact, owner_decision=owner, engineering_decision=engineering
-            ),
-            (SEMANTIC_DIGEST, SEMANTIC_DIGEST),
-        )
-        self.assertIsNone(
-            impact_binding_fingerprints(
-                impact=impact, owner_decision=owner, engineering_decision=_engineering_decision()
-            )[1]
-        )
-        changed = impact.model_copy(update={"change_impact_decision_digest": "f" * 64})
-        self.assertEqual(
-            impact_binding_fingerprints(
-                impact=changed, owner_decision=owner, engineering_decision=engineering
-            ),
-            (SEMANTIC_DIGEST, "f" * 64),
-        )
-
-    def test_admission_requires_latest_hash_version_and_still_checks_exact_head(self) -> None:
-        current = _v2_engineering()
-        legacy = _engineering_decision()
-        impact = ChangeImpactEvaluation(
-            status="success",
-            reason_code="change_impact_classified",
-            target=current.target,
-            binding_hash_version=2,
-            change_impact_decision_digest=SEMANTIC_DIGEST,
-        )
-        self.assertEqual(
-            select_current_engineering_decision(impact=impact, decisions=(current, legacy)), current
-        )
-        self.assertIsNone(
-            select_current_engineering_decision(impact=impact, decisions=(legacy, current))
-        )
-        self.assertIsNone(select_current_engineering_decision(impact=impact, decisions=(legacy,)))
-        facet = _engineering_review_facet(
-            target=_target(pull_request_head_sha="f" * 40),
-            decision=current,
-            evidence=(),
-        )
-        self.assertIn("engineering_review_head_mismatch", facet.reason_codes)
-        self.assertNotEqual(facet.state, "ready")

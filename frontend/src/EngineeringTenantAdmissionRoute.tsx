@@ -1,13 +1,10 @@
 import {
-  Bot,
   CheckCircle2,
   ExternalLink,
   GitPullRequest,
   ListChecks,
   Search,
   ShieldCheck,
-  UserRoundCheck,
-  Wrench,
 } from "lucide-react";
 import { useCallback, useMemo, useState, type FormEvent } from "react";
 
@@ -30,8 +27,6 @@ import { safeExternalUrl } from "./url";
 import type {
   TenantAdmissionEvaluationReadModel,
   TenantAdmissionEvaluationReadResponse,
-  TenantAdmissionHumanActionReadModel,
-  TenantAdmissionPathResult,
   TenantAdmissionTechnicalChecks,
 } from "./generated/openapi.ts";
 
@@ -154,16 +149,15 @@ export function EngineeringTenantAdmissionRoute({
           />
         ) : undefined
       }
-      description="Inspect one exact pull-request head, its DB-backed repository classification, all admission paths, GitHub mergeability, and required technical checks without granting browser write authority."
+      description="Inspect one exact pull-request head, its DB-backed repository classification, GitHub mergeability, and required technical checks without granting browser write authority."
       icon={ShieldCheck}
       title="Tenant admission"
       view="tenant-admission"
     >
-      <EngineeringBoundaryNote title="One human gate, no agent waiver authority">
-        Tenant UI work needs manager preview approval, a reasoned repository-owner
-        technical waiver, or explicit trusted-maintenance evidence. Engineering
-        repositories retain normal flow. This browser route can explain those paths;
-        it cannot approve, waive, delegate, reconcile, or merge.
+      <EngineeringBoundaryNote title="Technical merge checks">
+        Tenant merges use the current repository classification, required checks,
+        mergeability, and exact commit identity. Site Owners review previews and
+        release checklists in the product review flow. This page is read-only.
       </EngineeringBoundaryNote>
 
       <TenantAdmissionLookupForm
@@ -326,7 +320,6 @@ function TenantAdmissionEvaluation({
   const admission = evaluation.admission;
   const checks = evaluation.technical_checks;
   const pullRequestUrl = safeExternalUrl(evaluation.pull_request_facts.pull_request_url);
-  const trustedMaintenance = admission?.paths.trusted_maintenance ?? null;
   return (
     <div className="tenant-admission-result">
       <section
@@ -376,42 +369,18 @@ function TenantAdmissionEvaluation({
         />
       </div>
 
-      {admission?.classification_kind === "tenant_ui" ? (
-        <section className="tenant-admission-path-section" aria-labelledby="human-paths-title">
-          <header>
-            <div>
-              <span className="engineering-kicker">Human paths</span>
-              <h2 id="human-paths-title">One current human action is enough</h2>
-            </div>
-            <span className="tenant-admission-agent-boundary">
-              <Bot size={15} aria-hidden="true" />
-              Agent authoring disabled
-            </span>
-          </header>
-          <div className="tenant-admission-action-grid">
-            {readModel.human_actions.map((action) => (
-              <HumanActionCard action={action} key={action.action_kind} />
-            ))}
-            <AutomaticPathCard path={trustedMaintenance} />
-          </div>
-        </section>
-      ) : admission?.classification_kind === "engineering" ? (
-        <EngineeringBoundaryNote title="No manager gate for engineering">
-          This repository is classified as engineering. Launchplane reports normal
-          flow and does not ask a manager or repository owner to approve the PR.
-        </EngineeringBoundaryNote>
-      ) : evaluation.outcome === "already_merged" ? (
+      {evaluation.outcome === "already_merged" ?
         <EngineeringBoundaryNote title="Pull request already merged">
           This exact pull request is already on the target branch, so Launchplane
           does not offer an admission action for it.
         </EngineeringBoundaryNote>
-      ) : (
+      : !admission?.classification_kind ?
         <EngineeringBoundaryNote title="Classification evidence unavailable">
           Launchplane cannot prove that this repository is engineering or tenant UI.
           The candidate remains blocked until the DB-backed repository classification
           and exact admission evidence are available.
         </EngineeringBoundaryNote>
-      )}
+      : null}
 
       <div className="tenant-admission-detail-grid">
         <section className="tenant-admission-evidence-card">
@@ -453,54 +422,6 @@ function TenantAdmissionEvaluation({
         </span>
       </footer>
     </div>
-  );
-}
-
-function HumanActionCard({
-  action,
-}: {
-  action: TenantAdmissionHumanActionReadModel;
-}) {
-  return (
-    <article className="tenant-admission-action-card" data-state={action.availability}>
-      <header>
-        <span>
-          {action.action_kind === "manager_preview_approval" ? (
-            <UserRoundCheck size={18} aria-hidden="true" />
-          ) : (
-            <Wrench size={18} aria-hidden="true" />
-          )}
-          {action.title}
-        </span>
-        <StatePill state={action.path_state} />
-      </header>
-      <p>{action.detail}</p>
-      <small>
-        {action.agent_authoring_allowed
-          ? "Agent may author"
-          : "Requires an authorized human; agents can only explain this path."}
-      </small>
-    </article>
-  );
-}
-
-function AutomaticPathCard({ path }: { path: TenantAdmissionPathResult | null }) {
-  const state = path?.state ?? "unavailable";
-  return (
-    <article className="tenant-admission-action-card" data-state={state}>
-      <header>
-        <span>
-          <ShieldCheck size={18} aria-hidden="true" />
-          Trusted maintenance
-        </span>
-        <StatePill state={state} />
-      </header>
-      <p>
-        Explicit numeric actor and event policy may admit routine maintenance. It
-        is automatic evidence, not a human bypass and never a blanket bot rule.
-      </p>
-      <small>No manager or owner action is requested for this path.</small>
-    </article>
   );
 }
 
@@ -607,10 +528,6 @@ function evaluationTone(readModel: TenantAdmissionEvaluationReadModel): string {
   if (readModel.evaluation.outcome === "not_applicable") {
     return "neutral";
   }
-  const admission = readModel.evaluation.admission;
-  if (admission?.category === "pending" && readModel.evaluation.technical_checks?.status === "pass") {
-    return "pending";
-  }
   return "blocked";
 }
 
@@ -624,9 +541,6 @@ function evaluationTitle(readModel: TenantAdmissionEvaluationReadModel): string 
   }
   if (evaluation.outcome === "not_applicable") {
     return "Engineering normal flow";
-  }
-  if (evaluation.admission?.category === "pending") {
-    return "Waiting for one current admission path";
   }
   return "Merge remains blocked";
 }
@@ -643,7 +557,7 @@ function classificationTone(classification: string): string {
 
 function admissionTone(category: string): string {
   if (
-    ["engineering", "manager-approved", "technical-waived", "maintenance-admitted"].includes(
+    ["engineering", "eligible"].includes(
       category,
     )
   ) {

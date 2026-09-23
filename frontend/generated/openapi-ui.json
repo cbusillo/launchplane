@@ -29167,9 +29167,8 @@
           },
           "human_actions": {
             "default": [],
-            "items": {
-              "$ref": "#/components/schemas/TenantAdmissionHumanActionReadModel"
-            },
+            "maxItems": 0,
+            "minItems": 0,
             "title": "Human Actions",
             "type": "array"
           },
@@ -29213,77 +29212,6 @@
           "trace_id"
         ],
         "title": "TenantAdmissionEvaluationReadResponse",
-        "type": "object"
-      },
-      "TenantAdmissionHumanActionReadModel": {
-        "additionalProperties": false,
-        "properties": {
-          "action_kind": {
-            "enum": [
-              "manager_preview_approval",
-              "technical_human_waiver"
-            ],
-            "title": "Action Kind",
-            "type": "string"
-          },
-          "agent_authoring_allowed": {
-            "const": false,
-            "default": false,
-            "title": "Agent Authoring Allowed",
-            "type": "boolean"
-          },
-          "availability": {
-            "enum": [
-              "available",
-              "satisfied",
-              "unavailable"
-            ],
-            "title": "Availability",
-            "type": "string"
-          },
-          "detail": {
-            "title": "Detail",
-            "type": "string"
-          },
-          "path_state": {
-            "enum": [
-              "satisfied",
-              "pending",
-              "denied",
-              "stale",
-              "unavailable"
-            ],
-            "title": "Path State",
-            "type": "string"
-          },
-          "requires_human": {
-            "const": true,
-            "default": true,
-            "title": "Requires Human",
-            "type": "boolean"
-          },
-          "schema_version": {
-            "default": 1,
-            "minimum": 1,
-            "title": "Schema Version",
-            "type": "integer"
-          },
-          "title": {
-            "title": "Title",
-            "type": "string"
-          }
-        },
-        "required": [
-          "action_kind",
-          "agent_authoring_allowed",
-          "availability",
-          "detail",
-          "path_state",
-          "requires_human",
-          "schema_version",
-          "title"
-        ],
-        "title": "TenantAdmissionHumanActionReadModel",
         "type": "object"
       },
       "TenantAdmissionPathResult": {
@@ -29478,6 +29406,7 @@
           "category": {
             "enum": [
               "engineering",
+              "eligible",
               "pending",
               "manager-approved",
               "technical-waived",
@@ -29833,6 +29762,7 @@
           "reason_code": {
             "enum": [
               "engineering_normal_flow",
+              "tenant_normal_flow",
               "trusted_maintenance_admitted",
               "technical_human_waiver_admitted",
               "manager_preview_approved",

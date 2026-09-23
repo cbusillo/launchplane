@@ -59,7 +59,6 @@ TenantAdmissionControllerOutcome = Literal[
 TenantAdmissionTechnicalCheckSource = Literal["commit_status", "check_run"]
 TenantAdmissionTechnicalCheckState = Literal["pass", "pending", "fail", "unavailable"]
 
-_ADMITTED_CATEGORIES = frozenset({"manager-approved", "technical-waived", "maintenance-admitted"})
 _EXCLUDED_TECHNICAL_CONTEXTS = frozenset(
     {
         TENANT_ADMISSION_STATUS_CONTEXT.casefold(),
@@ -592,14 +591,6 @@ def require_tenant_admission_controller_store(
 ) -> TenantAdmissionControllerStore:
     required_methods = (
         "list_tenant_repository_classification_records",
-        "list_repository_human_role_policy_records",
-        "list_tenant_technical_human_waiver_event_records",
-        "list_trusted_maintenance_policy_records",
-        "list_trusted_maintenance_evidence_records",
-        "list_authz_policy_records",
-        "list_preview_records",
-        "read_preview_generation_record",
-        "list_manager_preview_approval_event_records",
         "list_merge_train_controller_state_records",
         "acquire_merge_train_controller_state_record",
         "compare_and_set_merge_train_controller_state_record",
@@ -950,7 +941,7 @@ def _evaluate_tenant_admission_candidate(
         head_sha=request.candidate.head_sha,
         evaluated_at=utc_now_timestamp(),
     )
-    if admission.category not in _ADMITTED_CATEGORIES or not admission.decision.admitted:
+    if admission.category != "eligible" or not admission.decision.admitted:
         return TenantAdmissionControllerRunOnceResult(
             outcome="blocked",
             candidate=request.candidate,

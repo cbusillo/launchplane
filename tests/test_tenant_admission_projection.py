@@ -15,7 +15,7 @@ from tests.test_tenant_admission_status import (
     _candidate,
     _classification,
     _classification_only_store,
-    _status_with_path_states,
+    _eligible_status,
 )
 from control_plane.tenant_admission_status import get_tenant_admission_status
 
@@ -24,75 +24,25 @@ EVALUATED_AT = "2026-07-31T12:10:00Z"
 
 
 class TenantAdmissionProjectionTests(unittest.TestCase):
-    def test_projection_maps_public_status_categories(self) -> None:
+    def test_projection_distinguishes_eligible_missing_and_drifted_classification(self) -> None:
         cases = (
-            (
-                _status_with_path_states(
-                    trusted_state="pending",
-                    waiver_state="pending",
-                    manager_state="pending",
-                ),
-                "pending",
-            ),
-            (
-                _status_with_path_states(
-                    trusted_state="pending",
-                    waiver_state="pending",
-                    manager_state="satisfied",
-                ),
-                "success",
-            ),
-            (
-                _status_with_path_states(
-                    trusted_state="pending",
-                    waiver_state="satisfied",
-                    manager_state="pending",
-                ),
-                "success",
-            ),
-            (
-                _status_with_path_states(
-                    trusted_state="satisfied",
-                    waiver_state="pending",
-                    manager_state="pending",
-                ),
-                "success",
-            ),
-            (
-                _status_with_path_states(
-                    trusted_state="pending",
-                    waiver_state="pending",
-                    manager_state="stale",
-                ),
-                "failure",
-            ),
-            (
-                _status_with_path_states(
-                    trusted_state="pending",
-                    waiver_state="pending",
-                    manager_state="denied",
-                ),
-                "failure",
-            ),
-            (
-                _status_with_path_states(
-                    trusted_state="pending",
-                    waiver_state="pending",
-                    manager_state="unavailable",
-                ),
-                "error",
-            ),
+            ((_classification(),), "success"),
+            ((), "error"),
+            ((_classification(product="other"),), "failure"),
         )
-        for read_model, expected_state in cases:
+        for records, expected_state in cases:
+            read_model = get_tenant_admission_status(
+                store=_classification_only_store(records),
+                candidate=_candidate(),
+                evaluated_at=EVALUATED_AT,
+            )
             with self.subTest(category=read_model.category):
                 projection = build_tenant_admission_projection(
                     read_model=read_model,
                     candidate=_candidate(),
                     pull_request_url="https://github.com/example/example-site/pull/17",
                 )
-                self.assertTrue(projection.required)
                 self.assertEqual(projection.state, expected_state)
-                self.assertLessEqual(len(projection.description), 140)
 
     def test_engineering_projection_is_not_required(self) -> None:
         candidate = _candidate()
@@ -146,11 +96,7 @@ class TenantAdmissionProjectionTests(unittest.TestCase):
 
     def test_projection_replays_matching_current_status(self) -> None:
         projection = build_tenant_admission_projection(
-            read_model=_status_with_path_states(
-                trusted_state="pending",
-                waiver_state="pending",
-                manager_state="satisfied",
-            ),
+            read_model=_eligible_status(),
             candidate=_candidate(),
             pull_request_url="https://github.com/example/example-site/pull/17",
         )
@@ -180,11 +126,7 @@ class TenantAdmissionProjectionTests(unittest.TestCase):
 
     def test_projection_writes_exact_context_and_validates_response(self) -> None:
         projection = build_tenant_admission_projection(
-            read_model=_status_with_path_states(
-                trusted_state="pending",
-                waiver_state="satisfied",
-                manager_state="pending",
-            ),
+            read_model=_eligible_status(),
             candidate=_candidate(),
             pull_request_url="https://github.com/example/example-site/pull/17",
         )
@@ -237,11 +179,7 @@ class TenantAdmissionProjectionTests(unittest.TestCase):
 
     def test_projection_delivery_failure_never_returns_success(self) -> None:
         projection = build_tenant_admission_projection(
-            read_model=_status_with_path_states(
-                trusted_state="pending",
-                waiver_state="pending",
-                manager_state="satisfied",
-            ),
+            read_model=_eligible_status(),
             candidate=_candidate(),
             pull_request_url="https://github.com/example/example-site/pull/17",
         )
