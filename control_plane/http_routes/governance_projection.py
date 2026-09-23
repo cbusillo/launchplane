@@ -16,18 +16,16 @@ from control_plane.contracts.engineering_review_run import (
 )
 from control_plane.contracts.governance_projection import GovernanceProjectionResponse
 from control_plane.contracts.merge_train_policy import MERGE_TRAIN_POLICY_TARGETS_READ_ACTION
-from control_plane.contracts.owner_acceptance import OWNER_ACCEPTANCE_READ_ACTION
 from control_plane.governance_projection import (
     GovernanceCurrentReadinessProvider,
     build_governance_projection,
 )
 from control_plane.http_routes.support import ApiRouteRegistrar, ReadRouteDependencies
-from control_plane.owner_acceptance import OwnerAcceptanceEvaluationUnavailableError
 from control_plane.merge_train_policy_source import (
     MergeTrainPolicyStoreMissingError,
     resolve_merge_train_policy_record,
 )
-from control_plane.service_auth import AuthorizationTarget, LaunchplaneIdentity
+from control_plane.service_auth import LaunchplaneIdentity
 
 
 GOVERNANCE_PROJECTION_ROUTE = "/v1/governance/projection"
@@ -67,13 +65,6 @@ def register_governance_projection_routes(
                 code="invalid_request",
                 message="Governance base branch must be non-empty.",
             )
-        owner_read_allowed = common.authorization_allows(
-            identity=identity,
-            action=OWNER_ACCEPTANCE_READ_ACTION,
-            product="launchplane",
-            context="owner-acceptance",
-            target=AuthorizationTarget(scope="context"),
-        )
         engineering_reads_allowed = all(
             common.authorization_allows(
                 identity=identity,
@@ -87,7 +78,7 @@ def register_governance_projection_routes(
                 ENGINEERING_REVIEW_AUTHORITY_READ_ACTION,
             )
         )
-        if not owner_read_allowed or not engineering_reads_allowed:
+        if not engineering_reads_allowed:
             raise common.http_error(
                 status_code=403,
                 trace_id=trace_id,
@@ -165,7 +156,7 @@ def register_governance_projection_routes(
                 repository_evidence=repository_evidence,
                 github_token_env_var=repository_policy.github_token.env_var,
             )
-        except (LookupError, OwnerAcceptanceEvaluationUnavailableError, TypeError, ValueError):
+        except (LookupError, TypeError, ValueError):
             raise common.http_error(
                 status_code=503,
                 trace_id=trace_id,

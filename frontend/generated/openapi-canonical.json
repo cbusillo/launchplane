@@ -11815,7 +11815,14 @@
             "type": "string"
           },
           "owner_judgment": {
-            "$ref": "#/components/schemas/GovernanceOwnerJudgmentFacet"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GovernanceOwnerJudgmentFacet"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "schema_version": {
             "const": 1,
@@ -11829,7 +11836,6 @@
         },
         "required": [
           "target",
-          "owner_judgment",
           "merge_readiness",
           "merge_admission",
           "landing_outcome",
@@ -15846,7 +15852,14 @@
             "$ref": "#/components/schemas/MergeReadinessPolicyFingerprintEvidence"
           },
           "impact": {
-            "$ref": "#/components/schemas/MergeReadinessPolicyFingerprintEvidence"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MergeReadinessPolicyFingerprintEvidence"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "merge_train": {
             "$ref": "#/components/schemas/MergeReadinessPolicyFingerprintEvidence"
@@ -15859,7 +15872,6 @@
           }
         },
         "required": [
-          "impact",
           "technical_checks",
           "engineering_review",
           "ruleset",
@@ -15916,6 +15928,7 @@
             "type": "string"
           },
           "owner_facets": {
+            "default": [],
             "items": {
               "$ref": "#/components/schemas/MergeReadinessOwnerFacet"
             },
@@ -16031,7 +16044,6 @@
           "target",
           "state",
           "reason_codes",
-          "owner_facets",
           "technical_checks",
           "engineering_review",
           "policy",

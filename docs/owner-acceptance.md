@@ -10,16 +10,15 @@ GitHub user may Accept or Request changes when their GitHub id equals the Owner
 named on the product profile, and the decision merges and deploys nothing. See
 [DIRECTION.md](../DIRECTION.md), issue `#2446`, and the Product Review API section
 of [service-boundary.md](service-boundary.md). The rest of this page describes the
-older Owner-acceptance machinery that the merge train still reads until it is
-de-wired and deleted under `#2446`.
+retired Owner-acceptance machinery. The merge train and governance projection no
+longer read it; its remaining routes and storage are pending deletion under `#2446`.
 
 ## Purpose
 
-Owner acceptance is Launchplane's authoritative exact-change product decision for
-pull requests. Every affected product receives an independent binding and decision.
-A current accepted decision is required by merge readiness; it does not replace
-technical checks, engineering review, merge admission, landing, or production
-authorization.
+The retired design recorded an exact-change decision for each affected product.
+Those bindings and decisions no longer participate in merge readiness. The
+remaining sections document the old routes until their deletion, not current
+delivery authority.
 
 Owner authority on this surface is limited to viewing product change and
 observed runtime state and recording `accepted`, `changes_requested`, `revoked`,
@@ -608,11 +607,10 @@ to the Owner milestone pause in #2164.
 
 ## Combined Governance Read Model
 
-`GET /v1/governance/projection` and the Governance evidence workbench preserve
-the current Owner evaluation and immutable event history alongside separate L2
-readiness, L3 admission, landing outcome, and projection facets. The Level 1
-facet is authoritative Owner acceptance and preserves the immutable event history;
-later readiness, admission, and landing records remain independent evidence.
+`GET /v1/governance/projection` and the Governance evidence workbench now show
+machine readiness, recorded admission, landing outcome, and advisory observations.
+They do not evaluate the retired Owner records; the transitional `owner_judgment`
+field is null. See [governance-evidence.md](governance-evidence.md).
 
 ## Out Of Scope
 

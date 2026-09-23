@@ -6,9 +6,8 @@ Launchplane records structural candidate provenance for each merge-train batch.
 The record binds the repository and base branch, base commit and tree, policy
 identity, ordered PR positions, exact PR head commits and trees, every rolling
 parent/head/result commit and tree, the terminal candidate
-identity, and an optional proven stack-collapse root. Impact and review facts
-are intentionally supplied at evaluation time instead of being injected into
-the candidate builder.
+identity, and an optional proven stack-collapse root. The candidate builder and
+live evaluator do not consume retired Owner or change-impact authority.
 
 The provenance and candidate fingerprints are canonical SHA-256 digests. A
 landing-plan fingerprint separately binds the active plan while excluding
@@ -20,52 +19,23 @@ the `exact | recorded_rolling | mismatch | unknown` status consumed by merge
 readiness:
 
 - `exact` requires the active candidate and landing plan, unchanged policy and
-  queue, exact head/tree evidence, complete reviewed/current delta
-  fingerprints, and the original recorded base.
+  queue, exact head/tree evidence, and the original recorded base.
 - `recorded_rolling` additionally requires every prior plan entry to be durably
   recorded as landed at its exact head/tree, with an unbroken actual rolling
   base and result-tree chain. A proven stack-collapse root is also recorded
   rolling composition, including at position one.
 - `mismatch` means available evidence contradicts the live candidate, queue,
-  plan, policy, base, head/tree, impact, stack, or rolling chain.
+  plan, policy, base, head/tree, stack, or rolling chain.
 - `unknown` means required evidence is absent or legacy records predate this
   additive contract. Old records remain readable but never default to exact.
 
-Evaluation entries carry both reviewed and current fingerprints. Each
-fingerprint binds the exact head SHA/tree, normalized changed paths, and
-affected product/system subjects. Live fingerprints also attest the supported
-change-impact model and exact policy digest that classified the delta. A changed
-path shared by multiple entries composes without Owner evidence only when every
-reviewed/current fingerprint is exact, uses the same policy digest and the same
-recognized current model, and has no affected subjects. This deliberately
-requires every batch entry to be engineering-only. Unknown models, policy
-drift, affected subjects, delta drift, and impact expansion retain the existing
-fail-closed result. Missing review or change-impact evidence is `unknown`;
-contradictory current evidence is `mismatch`.
-
-Risky composition requires combined-candidate Owner evidence bound to the exact
-candidate digest, landing-plan digest, policy, and evaluation entries. That
-evidence must carry non-empty exact L1 Owner event IDs and their immutable
-binding digests. It is explicitly non-authoritative, authorizes no merge or
-other effect, and cannot be replaced by a free-text evidence ID.
-
-The guarded merge-admission adapter is the first production caller of this pure
-boundary. It derives reviewed/current deltas and combined-candidate evidence
-from current Owner and change-impact services immediately before each batch
-entry. Combined-candidate reviews are ephemeral evaluation inputs, so the live
-adapter rebuilds their digest chain from the current deltas and existing bound
-Owner event identities on every admission evaluation. The structural module
-itself remains non-authoritative and adds no HTTP
-or UI surface; [merge-admission.md](merge-admission.md) owns the L3 record and
-provider-effect boundary.
-
-Candidate construction reads immutable GitHub commit objects for the recorded
-base and each PR head. For every non-no-op merge it resolves the result commit
-again by SHA, requires the candidate ref to point at that commit, and requires
-its complete parent list to be exactly the prior rolling parent plus the PR
-head. A response-embedded tree is never accepted as commit identity evidence.
-GitHub `204` already-contained responses are explicit no-op steps whose ref,
-commit, and tree preserve the parent identity.
+Legacy delta fingerprints, affected subjects and combined Owner bindings remain
+optional readable fields during retirement; the evaluator does not use them.
+Changes to a batch are qualified by the exact candidate, ordered head/tree
+identities, recorded parent/result chain and technical checks. The live adapter
+reads repository evidence immediately before each landing, without querying
+Owner events or change-impact policies. Candidate no-op entries still require
+exact structural containment and landing evidence.
 
 Landing observes and stores the actual rolling-base SHA/tree, landed-head
 SHA/tree, and merge-result SHA/tree on normal, retry, and already-merged crash

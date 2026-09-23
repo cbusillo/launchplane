@@ -10231,7 +10231,14 @@
             "type": "string"
           },
           "owner_judgment": {
-            "$ref": "#/components/schemas/GovernanceOwnerJudgmentFacet"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GovernanceOwnerJudgmentFacet"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "schema_version": {
             "const": 1,
@@ -12824,7 +12831,14 @@
             "$ref": "#/components/schemas/MergeReadinessPolicyFingerprintEvidence"
           },
           "impact": {
-            "$ref": "#/components/schemas/MergeReadinessPolicyFingerprintEvidence"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MergeReadinessPolicyFingerprintEvidence"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "merge_train": {
             "$ref": "#/components/schemas/MergeReadinessPolicyFingerprintEvidence"
@@ -12894,6 +12908,7 @@
             "type": "string"
           },
           "owner_facets": {
+            "default": [],
             "items": {
               "$ref": "#/components/schemas/MergeReadinessOwnerFacet"
             },

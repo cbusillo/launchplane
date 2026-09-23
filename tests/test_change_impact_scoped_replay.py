@@ -13,7 +13,6 @@ from control_plane.contracts.change_impact import (
 from control_plane.merge_admission_impact_binding import impact_binding_fingerprints
 from control_plane.owner_acceptance import evaluate_owner_acceptance, record_owner_acceptance_event
 from control_plane.storage.filesystem import FilesystemRecordStore
-from tests.test_merge_admission_live import _evaluate_owner_live, _owner_facet
 from tests.test_owner_acceptance import (
     REPOSITORY,
     _EvidenceProvider,
@@ -47,43 +46,6 @@ def _install_v2_policy(store: FilesystemRecordStore) -> ChangeImpactPolicyRecord
 
 
 class ScopedImpactReplayTests(unittest.TestCase):
-    def test_actual_engineering_only_v2_candidate_is_exact_without_owner_evidence(self) -> None:
-        with TemporaryDirectory() as directory:
-            store = _store(Path(directory), include_dependency_evidence=False)
-            policy = _install_v2_policy(store)
-            evidence = _repository_evidence(path="control_plane/service_auth.py")
-            evidence = evidence.model_copy(
-                update={
-                    "changed_files": tuple(
-                        file.model_copy(update={"change_kind": "modified"})
-                        for file in evidence.changed_files
-                    )
-                }
-            )
-            impact = evaluate_change_impact(repository_evidence=evidence, policies=(policy,))
-            self.assertEqual(
-                (impact.status, impact.owner_impact, impact.binding_hash_version),
-                ("success", "not_required", 2),
-            )
-            provider = _EvidenceProvider(evidence)
-            owner = evaluate_owner_acceptance(
-                store=store,
-                repository_evidence_provider=provider,
-                target=ChangeImpactTargetReference(repository=REPOSITORY, pull_request_number=2022),
-                evaluated_at="2026-08-11T03:00:00Z",
-            )
-            self.assertEqual(
-                (owner.status, owner.binding, owner.products), ("not_required", None, ())
-            )
-            admission = _evaluate_owner_live(store=store, provider=provider, evidence=evidence)
-            facet = _owner_facet(admission)
-            self.assertEqual(
-                (admission.structural_result.status, facet.owner_status, facet.event_id),
-                ("exact", "not_required", ""),
-            )
-            self.assertIn("structural_single_entry_exact", admission.structural_result.reason_codes)
-            self.assertEqual(store.list_owner_acceptance_event_records(), ())
-
     def test_actual_v2_producer_preserves_owner_replay_and_admission_after_irrelevant_revision(
         self,
     ) -> None:

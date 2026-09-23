@@ -202,9 +202,9 @@ These diagnostics do not change rule accumulation, product scope, review
 requirements, policy selection, or acceptance-binding identities. Full policy
 provenance remains authoritative; coverage is not a replacement for it.
 
-The evaluation is the authoritative source for which product Owner decisions are
-required by Launchplane merge readiness. GitHub checks only project the resulting
-state and are never accepted as substitute evidence.
+This retired evaluation no longer participates in Launchplane merge readiness.
+Its remaining API and storage are pending deletion under #2446. Current site Owner
+decisions use product review and the release checklist.
 
 ## HTTP API
 

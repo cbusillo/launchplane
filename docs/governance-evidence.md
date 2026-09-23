@@ -2,98 +2,30 @@
 title: Governance Evidence Projection
 ---
 
-## Purpose
+`GET /v1/governance/projection` reads current machine readiness, immutable merge
+admission, landing outcomes, and advisory observations for a repository/PR/base
+branch. The requested base must match the live pull request. Repository policy
+or merge-train policy-target read authority controls access; the retired Owner
+acceptance read grant is not required.
 
-Launchplane exposes one bounded read-only governance projection for one pull
-request. The projection prevents API consumers and Owners from stitching
-unrelated routes into a fused approval claim.
+The response authorizes no effect. `merge_readiness` is ephemeral and recomputed
+with the same live evaluator used for landing. `merge_admission` describes the
+latest recorded exact attempt, without granting current effect authority.
+`landing_outcome` independently records landed, rejected, reconciliation-required,
+or not-observed state. Admission and outcome targets are classified as current or
+historical against the live head/tree. GitHub observations are advisory only.
 
-`GET /v1/governance/projection` accepts `repository`,
-`pull_request_number`, and an optional `base_branch`. The caller supplies only
-scope. Launchplane resolves current repository evidence, Owner history,
-ephemeral readiness, immutable admission, landing outcomes, and advisory
-observations from service-owned providers and records.
+Retired Owner acceptance and change-impact evaluation are absent from this read.
+`owner_judgment` is nullable for transitional schema compatibility and current
+responses return null. Site Owner decisions use the product-review and release
+checklist pages. Historical admission payloads remain unchanged.
 
-The requested base branch must match the current pull request base ref. The
-route accepts either the matching repository policy's service authorization or
-the Launchplane merge-train policy-target read permission, and it never requires
-mutation authority solely to inspect the projection. Live Level 2 evaluation
-uses the GitHub token source declared by that repository policy.
+When no active landing lineage exists, readiness is `not_active`; missing current
+provider, policy, candidate or controller evidence is `unavailable`. Existing
+admission and outcome records remain visible in both cases. The endpoint uses the
+repository policy's configured GitHub token source and performs no writes.
 
-## Independent Facets
-
-The response preserves these independent facts:
-
-- **Level 1 Owner acceptance:** the authoritative current product-review decision
-  plus immutable stored events. `accepted` retains
-  `human_action_semantics=product_review_accepted`. Each
-  event is explicitly classified as current or historical for the resolved
-  head/tree and as current or historical to the folded decision.
-- **Level 2 merge readiness:** current ephemeral readiness with every Owner,
-  technical-check, engineering-review, policy, candidate, and fence reason.
-  It remains `mode=ephemeral`, `authoritative=false`, and `authorizes=[]`.
-- **Level 3 merge admission:** the latest immutable admission for one exact
-  provider-effect attempt. Its only bounded effect is
-  `one_exact_merge_attempt` at record creation; it grants no current effect
-  authority. The facet states whether the record targets the current head/tree
-  or a historical target and does not claim that landing occurred.
-- **Landing outcome:** the latest immutable `landed`, `rejected`, or
-  `reconcile_required` observation keyed to that admission. Missing outcome
-  evidence is `not_observed`, never landed, and recorded outcomes carry the
-  same current/historical target classification as their admission. Landing
-  observations are `authoritative=false` and `authorizes=[]`.
-- **GitHub projection observations:** reserved Launchplane GitHub check observations
-  copied from current Level 2 evidence or, when no current readiness result is
-  available, the admitted Level 2 snapshot. They remain non-authoritative routing
-  evidence and authorize nothing; Owner checks may visibly require action.
-
-Historical Level 1 evidence remains visible after current policy, authority,
-age, self-review, preview isolation, or binding changes make it inadmissible.
-Level 3 and landing records remain immutable after later Owner revocation or
-changes requested.
-
-Change-impact policy provenance and review identity remain separate. Legacy
-reviews retain their original full-policy binding. V2 reviews use the scoped
-decision digest for semantic comparison and keep the original full-policy
-provenance in the immutable event. Replaying an unchanged v2 review under an
-unrelated policy revision returns that original event, without refreshing its
-timestamp or appending another human action. A current evaluation can therefore
-show newer policy provenance alongside the unchanged historical review; it
-does not imply a second review. See
-[versioned bindings](owner-acceptance.md#versioned-change-impact-bindings).
-
-An engineering-only result reports Owner `not_required` with no invented
-product subject or acceptance event. Governance-sensitive engineering floors
-remain independent of product Owner requirements. Where an existing Owner
-evaluation includes `change_impact_coverage`, bounded unmatched-path diagnostics
-describe that evaluation only. Absent coverage does not mean complete coverage,
-and neither coverage samples nor advisory GitHub observations grant authority.
-The projection does not add a pull-request lifecycle trigger.
-
-## Current Readiness
-
-The endpoint recomputes Level 2 only when an active landing-plan lineage exists
-for the pull request. It uses the same `LiveMergeAdmissionEvaluator` as guarded
-landing; HTTP and UI layers do not duplicate merge-readiness evaluation logic.
-
-If no active lineage exists, or the matching landing entry is already merged,
-skipped, stale, or blocked, the response reports `not_active` with no result.
-If current GitHub, controller, candidate, policy, or other required evidence is
-unavailable, it reports `unavailable` with no reusable authority. Historical
-Owner, admission, and outcome records remain visible in both cases.
-
-## Workbench
-
-`/ui/engineering/governance-projection` renders five separately named regions:
-
-1. authoritative current Owner acceptance with immutable history;
-2. current ephemeral merge readiness and every sub-facet reason;
-3. immutable merge admission;
-4. separate landing outcome;
-5. non-authoritative GitHub status observations.
-
-The same vocabulary and hierarchy are preserved on desktop and narrow
-viewports. Text and semantic headings identify historical/current,
-advisory/authoritative, admitted/landed, and blocked/unknown distinctions; color
-is supplemental only. The workbench is read-only and adds no mutation route or
-authority.
+`/ui/engineering/governance-projection` shows four separate regions: current
+readiness, recorded admission, landing outcome, and GitHub observations. It keeps
+technical-check reasons, cached evidence, unavailable state and access refusal
+visible on desktop and narrow viewports. It has no mutation controls.

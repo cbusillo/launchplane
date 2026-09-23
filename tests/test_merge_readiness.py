@@ -298,7 +298,6 @@ def _checks(
 def _evaluate(**updates: object) -> MergeReadinessResult:
     payload: dict[str, object] = {
         "target": _target(),
-        "owner_decision": _owner_decision(_owner_product()),
         "technical_checks": _checks(),
         "engineering_decision": _engineering_decision(),
         "engineering_evidence": _engineering_evidence(),
@@ -368,21 +367,6 @@ def _merge_admission(**updates: object) -> MergeAdmissionRecord:
 
 
 class MergeReadinessScenarioTests(unittest.TestCase):
-    def test_scenario_1_owner_acceptance_remains_historical_while_checks_pending(self) -> None:
-        owner_decision = _owner_decision(_owner_product())
-        owner_payload = owner_decision.model_dump(mode="json")
-
-        result = _evaluate(
-            owner_decision=owner_decision,
-            technical_checks=_checks(status="pending"),
-        )
-
-        self.assertEqual(result.state, "blocked_checks")
-        self.assertEqual(result.owner_facets[0].state, "ready")
-        self.assertIn("checks_pending", result.reason_codes)
-        self.assertEqual(owner_decision.model_dump(mode="json"), owner_payload)
-        self.assertEqual(result.authorizes, ())
-
     def test_scenario_2_exact_evidence_becomes_ready_without_authority(self) -> None:
         result = _evaluate()
 
@@ -390,34 +374,6 @@ class MergeReadinessScenarioTests(unittest.TestCase):
         self.assertFalse(result.authoritative)
         self.assertEqual(result.mode, "ephemeral")
         self.assertEqual(result.authorizes, ())
-
-    def test_engineering_only_owner_decision_without_products_is_ready(self) -> None:
-        owner_decision = OwnerAcceptanceDecision(
-            status="not_required",
-            reason_code="engineering_only",
-            evaluated_at=EVALUATED_AT,
-        )
-
-        result = _evaluate(owner_decision=owner_decision)
-
-        self.assertEqual(result.state, "ready")
-        self.assertEqual(len(result.owner_facets), 1)
-        self.assertEqual(result.owner_facets[0].product, "__not_applicable__")
-        self.assertEqual(result.owner_facets[0].state, "ready")
-        self.assertEqual(result.owner_facets[0].reason_codes, ("owner_not_required",))
-
-    def test_unavailable_owner_decision_without_products_fails_closed(self) -> None:
-        owner_decision = OwnerAcceptanceDecision(
-            status="unavailable",
-            reason_code="change_impact_unavailable",
-            evaluated_at=EVALUATED_AT,
-        )
-
-        result = _evaluate(owner_decision=owner_decision)
-
-        self.assertEqual(result.state, "unknown")
-        self.assertEqual(result.owner_facets[0].state, "unknown")
-        self.assertIn("owner_evidence_unavailable", result.reason_codes)
 
     def test_scenario_3_failed_or_unknown_checks_cannot_be_ready(self) -> None:
         cases = (
@@ -430,84 +386,6 @@ class MergeReadinessScenarioTests(unittest.TestCase):
                 self.assertEqual(result.state, expected_state)
                 self.assertIn(reason, result.reason_codes)
                 self.assertEqual(result.authorizes, ())
-
-    def test_owner_not_required_is_an_independent_ready_product_facet(self) -> None:
-        not_required = _owner_product(
-            product="docs",
-            system="documentation",
-            status="not_required",
-            reason_code="engineering_only",
-            admissible=False,
-        )
-
-        result = _evaluate(owner_decision=_owner_decision(not_required))
-
-        self.assertEqual(result.state, "ready")
-        self.assertEqual(result.owner_facets[0].state, "ready")
-        self.assertEqual(result.owner_facets[0].reason_codes, ("owner_not_required",))
-
-    def test_scenario_7_authority_age_and_self_review_fail_closed(self) -> None:
-        cases = (
-            ("unavailable", "owner_authority_denied", "owner_authority_denied"),
-            ("stale", "owner_review_expired", "owner_review_expired"),
-            ("unavailable", "self_review_denied", "owner_self_review_denied"),
-            (
-                "unavailable",
-                "contributing_identity_unknown",
-                "owner_contributing_identity_unknown",
-            ),
-        )
-        for owner_status, owner_reason, expected_reason in cases:
-            with self.subTest(owner_reason=owner_reason):
-                owner = _owner_product(
-                    status=owner_status,
-                    reason_code=owner_reason,
-                    admissible=False,
-                )
-                result = _evaluate(owner_decision=_owner_decision(owner))
-                self.assertEqual(result.state, "blocked_owner_evidence")
-                self.assertIn(expected_reason, result.reason_codes)
-
-    def test_owner_authority_blocks_every_nonaccepted_current_state(self) -> None:
-        cases = (
-            ("pending", "acceptance_missing", "owner_acceptance_missing"),
-            ("changes_requested", "changes_requested", "owner_changes_requested"),
-            ("revoked", "acceptance_revoked", "owner_acceptance_revoked"),
-            ("stale", "acceptance_stale", "owner_acceptance_stale"),
-            ("unavailable", "change_impact_unavailable", "owner_evidence_unavailable"),
-        )
-        for owner_status, owner_reason, expected_reason in cases:
-            with self.subTest(owner_status=owner_status):
-                result = _evaluate(
-                    owner_decision=_owner_decision(
-                        _owner_product(
-                            status=owner_status,
-                            reason_code=owner_reason,
-                            admissible=False,
-                        )
-                    )
-                )
-                self.assertEqual(result.state, "blocked_owner_evidence")
-                self.assertIn(expected_reason, result.reason_codes)
-
-        accepted = _evaluate(owner_decision=_owner_decision(_owner_product()))
-        self.assertEqual(accepted.state, "ready")
-        self.assertIn("owner_acceptance_valid", accepted.reason_codes)
-
-    def test_scenario_20_preview_isolation_history_remains_inadmissible(self) -> None:
-        owner = _owner_product(
-            status="stale",
-            reason_code="preview_isolation_insufficient",
-            admissible=False,
-        )
-        owner_payload = owner.model_dump(mode="json")
-
-        result = _evaluate(owner_decision=_owner_decision(owner))
-
-        self.assertEqual(result.state, "blocked_owner_evidence")
-        self.assertIn("owner_preview_isolation_insufficient", result.reason_codes)
-        self.assertEqual(owner.model_dump(mode="json"), owner_payload)
-        self.assertEqual(result.authorizes, ())
 
     def test_scenario_8_policy_or_unrelated_base_drift_replans(self) -> None:
         policy_result = _evaluate(policy_fingerprints=_policy_fingerprints(drift="merge_train"))
@@ -532,19 +410,6 @@ class MergeReadinessScenarioTests(unittest.TestCase):
 
     def test_scenario_12_every_live_dimension_revalidates_between_entries(self) -> None:
         cases = (
-            (
-                {
-                    "owner_decision": _owner_decision(
-                        _owner_product(
-                            status="unavailable",
-                            reason_code="owner_authority_unavailable",
-                            admissible=False,
-                        )
-                    )
-                },
-                "blocked_owner_evidence",
-                "owner_authority_unavailable",
-            ),
             (
                 {"technical_checks": _checks(status="fail")},
                 "blocked_checks",
@@ -595,46 +460,8 @@ class MergeReadinessScenarioTests(unittest.TestCase):
                 self.assertIn(expected_reason, result.reason_codes)
                 self.assertEqual(result.authorizes, ())
 
-    def test_scenario_24_mixed_products_retain_each_facet_and_worst_state(self) -> None:
-        products = (
-            _owner_product(product="ready-product"),
-            _owner_product(
-                product="not-required-product",
-                system="docs",
-                status="not_required",
-                reason_code="engineering_only",
-                admissible=False,
-            ),
-            _owner_product(
-                product="blocked-product",
-                status="changes_requested",
-                reason_code="changes_requested",
-                admissible=False,
-            ),
-        )
-
-        result = _evaluate(owner_decision=_owner_decision(*reversed(products)))
-
-        self.assertEqual(result.state, "blocked_owner_evidence")
-        self.assertEqual(
-            tuple(facet.product for facet in result.owner_facets),
-            ("blocked-product", "not-required-product", "ready-product"),
-        )
-        self.assertIn("owner_changes_requested", result.reason_codes)
-        self.assertIn("owner_not_required", result.reason_codes)
-        self.assertIn("owner_acceptance_valid", result.reason_codes)
-
 
 class MergeReadinessFacetTests(unittest.TestCase):
-    def test_owner_head_and_tree_drift_remain_distinguishable(self) -> None:
-        result = _evaluate(
-            owner_decision=_owner_decision(_owner_product(head_sha=OTHER_SHA, tree_sha=OTHER_SHA))
-        )
-
-        self.assertEqual(result.state, "blocked_owner_evidence")
-        self.assertIn("owner_evidence_head_mismatch", result.reason_codes)
-        self.assertIn("owner_evidence_tree_mismatch", result.reason_codes)
-
     def test_checks_pending_fail_unknown_and_exact_head_are_independent(self) -> None:
         result = _evaluate(technical_checks=_checks(status="unknown", head_sha=OTHER_SHA))
 
@@ -813,28 +640,6 @@ class MergeReadinessDeterminismTests(unittest.TestCase):
         self.assertNotEqual(first.evaluated_at, second.evaluated_at)
         self.assertEqual(first.readiness_digest, second.readiness_digest)
 
-    def test_product_order_and_worst_state_ties_are_deterministic(self) -> None:
-        alpha = _owner_product(
-            product="alpha",
-            status="changes_requested",
-            reason_code="changes_requested",
-            admissible=False,
-        )
-        beta = _owner_product(
-            product="beta",
-            status="revoked",
-            reason_code="acceptance_revoked",
-            admissible=False,
-        )
-
-        first = _evaluate(owner_decision=_owner_decision(alpha, beta))
-        second = _evaluate(owner_decision=_owner_decision(beta, alpha))
-
-        self.assertEqual(first.state, "blocked_owner_evidence")
-        self.assertEqual(first.owner_facets, second.owner_facets)
-        self.assertEqual(first.reason_codes, second.reason_codes)
-        self.assertEqual(first.readiness_digest, second.readiness_digest)
-
 
 class MergeReadinessLiveAdapterTests(unittest.TestCase):
     def test_cleared_observed_lease_uses_explicit_expected_owner(self) -> None:
@@ -853,11 +658,6 @@ class MergeReadinessLiveAdapterTests(unittest.TestCase):
 
         result = evaluate_merge_readiness_from_live_evidence(
             target=_target(),
-            owner_decision=OwnerAcceptanceDecision(
-                status="not_required",
-                reason_code="engineering_only",
-                evaluated_at=EVALUATED_AT,
-            ),
             engineering_decision=None,
             engineering_runs=(),
             technical_checks=None,
@@ -898,11 +698,6 @@ class MergeReadinessLiveAdapterTests(unittest.TestCase):
 
         result = evaluate_merge_readiness_from_live_evidence(
             target=_target(),
-            owner_decision=OwnerAcceptanceDecision(
-                status="not_required",
-                reason_code="engineering_only",
-                evaluated_at=EVALUATED_AT,
-            ),
             engineering_decision=None,
             engineering_runs=(),
             technical_checks=None,
@@ -1003,7 +798,6 @@ class MergeReadinessLiveAdapterTests(unittest.TestCase):
 
         result = evaluate_merge_readiness_from_live_evidence(
             target=target,
-            owner_decision=_owner_decision(_owner_product()),
             engineering_decision=_engineering_decision(),
             engineering_runs=(engineering_run,),
             technical_checks=technical_checks,
@@ -1025,11 +819,6 @@ class MergeReadinessLiveAdapterTests(unittest.TestCase):
     def test_missing_live_evidence_returns_unknown_without_authority(self) -> None:
         result = evaluate_merge_readiness_from_live_evidence(
             target=_target(),
-            owner_decision=OwnerAcceptanceDecision(
-                status="not_required",
-                reason_code="engineering_only",
-                evaluated_at=EVALUATED_AT,
-            ),
             engineering_decision=None,
             engineering_runs=(),
             technical_checks=None,
@@ -1159,7 +948,7 @@ class MergeAdmissionRecordTests(unittest.TestCase):
                 with self.assertRaises(ValidationError):
                     MergeReadinessResult.model_validate(payload)
 
-    def test_policy_contract_requires_all_seven_exact_dimensions(self) -> None:
+    def test_policy_contract_requires_current_exact_dimensions(self) -> None:
         payload = _policy_fingerprints().model_dump(mode="json")
         payload.pop("ruleset")
         with self.assertRaises(ValidationError):

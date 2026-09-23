@@ -1029,7 +1029,7 @@ test.describe("operator journeys", () => {
     await expect(page.getByText("Engineering normal flow")).toHaveCount(0);
   });
 
-  test("governance evidence keeps Owner judgment, readiness, admission, and landing separate", async ({
+  test("governance evidence shows machine readiness, admission, and landing", async ({
     page,
   }, testInfo) => {
     const diagnostics = monitorBrowser(page);
@@ -1042,10 +1042,8 @@ test.describe("operator journeys", () => {
       page.getByRole("heading", { level: 1, name: "Governance evidence" }),
     ).toBeFocused();
     await expect(
-      page.getByRole("region", {
-        name: "Level 1 authoritative Owner acceptance",
-      }),
-    ).toBeVisible();
+      page.getByRole("region", { name: "Level 1 authoritative Owner acceptance" }),
+    ).toHaveCount(0);
     await expect(
       page.getByRole("region", { name: "Level 2 current merge readiness" }),
     ).toBeVisible();
@@ -1058,12 +1056,6 @@ test.describe("operator journeys", () => {
     await expect(
       page.getByRole("region", { name: "GitHub status observations" }),
     ).toBeVisible();
-    const owner = page.getByRole("region", {
-      name: "Level 1 authoritative Owner acceptance",
-    });
-    await expect(owner).toContainText("Owner acceptance");
-    await expect(owner).toContainText("authoritative product decision");
-    await expect(owner).toContainText("product_review_accepted");
     await expect(
       page.getByText("No admission recorded", { exact: true }),
     ).toBeVisible();
@@ -1082,7 +1074,7 @@ test.describe("operator journeys", () => {
     diagnostics.assertClean();
   });
 
-  test("governance scenario 15 preserves landed history after Owner revocation", async ({
+  test("governance preserves the recorded landing independently of current readiness", async ({
     page,
   }, testInfo) => {
     const diagnostics = monitorBrowser(page);
@@ -1091,12 +1083,6 @@ test.describe("operator journeys", () => {
       "/ui/engineering/governance-projection?fixture=products&scenario=15",
     );
 
-    const owner = page.getByRole("region", {
-      name: "Level 1 authoritative Owner acceptance",
-    });
-    await expect(
-      owner.getByText("Revoked", { exact: true }).first(),
-    ).toBeVisible();
     await expect(
       page.getByRole("region", { name: "Level 3 immutable merge admission" }),
     ).toContainText("Recorded for current target");
@@ -1107,29 +1093,16 @@ test.describe("operator journeys", () => {
     await captureScreenshot(
       page,
       testInfo,
-      "governance-evidence-revoked-after-landing",
+      "governance-evidence-recorded-landing",
     );
     diagnostics.assertClean();
   });
 
-  test("governance mixed products and unknown checks retain every reason", async ({
+  test("governance keeps unknown technical checks visible", async ({
     page,
   }) => {
     const diagnostics = monitorBrowser(page);
 
-    await page.goto(
-      "/ui/engineering/governance-projection?fixture=products&scenario=24",
-    );
-
-    await expect(
-      page.getByText("example-secondary", { exact: true }),
-    ).toBeVisible();
-    await expect(
-      page.getByText("owner_changes_requested", { exact: true }).first(),
-    ).toBeVisible();
-    await expect(
-      page.getByText("Blocked Owner Evidence", { exact: true }).first(),
-    ).toBeVisible();
     await page.goto(
       "/ui/engineering/governance-projection?fixture=products&scenario=3",
     );
@@ -1146,10 +1119,10 @@ test.describe("operator journeys", () => {
     const diagnostics = monitorBrowser(page);
 
     await page.goto(
-      "/ui/engineering/governance-projection?fixture=products&scenario=20&refresh=error",
+      "/ui/engineering/governance-projection?fixture=products&scenario=3&refresh=error",
     );
     await expect(
-      page.getByText("preview_isolation_insufficient", { exact: true }).first(),
+      page.getByText("checks_unknown", { exact: true }).first(),
     ).toBeVisible();
     await page.getByRole("button", { name: "Refresh governance" }).click();
     await expect(
@@ -1157,7 +1130,7 @@ test.describe("operator journeys", () => {
     ).toBeVisible();
     await expect(
       page.getByRole("region", {
-        name: "Level 1 authoritative Owner acceptance",
+        name: "Level 2 current merge readiness",
       }),
     ).toBeVisible();
 

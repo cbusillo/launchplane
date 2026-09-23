@@ -41,13 +41,13 @@ not describe runtime authority until it is implemented, deployed, and activated.
   graph snapshot and recommendation queue contract.
 - [merge-train-policy.md](merge-train-policy.md) — repository/base-branch merge
   train policy contract, enqueue authority, and smoke-target policy.
-- [merge-readiness.md](merge-readiness.md) — ephemeral Owner-aware L2 merge
+- [merge-readiness.md](merge-readiness.md) — ephemeral machine-derived merge
   readiness facets, fail-closed aggregation, and live-evidence adapter boundary.
 - [governance-evidence.md](governance-evidence.md) — one read-only API and
-  workbench projection that keeps L1 judgment, L2 readiness, L3 admission,
+  workbench projection that keeps current readiness, recorded admission,
   landing outcomes, and advisory observations independent.
 - [merge-train-structural-provenance.md](merge-train-structural-provenance.md) —
-  deterministic candidate, rolling-base, impact-subject, and landing-plan
+  deterministic candidate, rolling-base, and landing-plan
   provenance consumed by merge readiness.
 - [merge-admission.md](merge-admission.md) — immutable per-attempt Level 3
   admission, truthful landing outcomes, and append-only reconciliation.

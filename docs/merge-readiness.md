@@ -1,195 +1,41 @@
 ---
-title: Ephemeral Owner-Aware Merge Readiness
+title: Merge Readiness
 ---
 
-# Ephemeral Owner-Aware Merge Readiness
+Merge readiness is an ephemeral read of the evidence for one exact merge attempt.
+It authorizes no effect. The live adapter uses the same evaluation for guarded
+landing and the engineering governance view.
 
-`control_plane.merge_readiness` implements the L2 contract approved in #2051.
-It computes a current, non-authoritative view immediately before a later L3
-admission attempt. The evaluator never writes a record, authorizes an effect, or
-claims that a merge occurred.
+Current readiness checks the required technical checks at the exact candidate
+SHA, engineering-review evidence under the repository's required/advisory mode,
+current policy fingerprints, candidate and rolling-base provenance, and the
+controller lease plus expected effect SHA. Missing evidence stays unknown;
+contradictory evidence blocks the attempt. Each landing re-reads these inputs.
 
-## Boundary
+Retired Owner acceptance and change-impact policies do not participate. Live
+results have no Owner facets or impact fingerprint. Optional legacy fields remain
+readable in stored admission snapshots so their existing digests and historical
+outcomes are preserved; their presence does not cause a fresh Owner evaluation.
+The site's current Owner decision is recorded through product review and the
+release checklist, separately from machine merge readiness.
 
-The contract is intentionally limited to ephemeral readiness:
+The six current policy dimensions are `technical_checks`, `engineering_review`,
+`ruleset`, `merge_train`, `authorization`, and `admission_algorithm`. Advisory
+engineering review remains visible without blocking; required engineering review
+still needs the exact qualifying runs and current authority. Reserved Launchplane
+advisory check projections never count as required technical-check authority.
 
-- `mode` is always `ephemeral`.
-- `authoritative` is always `false`.
-- `authorizes` is always empty.
-- `evaluated_at` describes the observation time, not durable authority.
-- `readiness_digest` is reproducible evidence for one evaluation payload, not
-  an admission token.
-- persistence, migrations, HTTP/OpenAPI/UI projection, structural candidate
-  proof, and durable L3 admission or landing effects remain outside this
-  module.
+States aggregate deterministically: unknown, candidate identity, policy,
+engineering review, technical checks, then ready. Every active facet keeps its
+reason codes. Legacy Owner-blocked states remain readable only in old snapshots.
+Policy, evidence, and state collections are canonicalized; observation timestamps
+and advisory GitHub observations do not change the readiness digest.
 
-Structural candidate composition is produced by the pure, read-only
-`evaluate_merge_train_structural_candidate` boundary documented in
-`merge-train-structural-provenance.md` as one of `exact`, `recorded_rolling`,
-`mismatch`, or `unknown`. L2 consumes that result;
-it does not attempt to reproduce structural provenance.
+The candidate must match the current repository, base, queue position, PR head and
+tree, and expected effect. A recorded rolling base is accepted only with complete
+prior landing evidence. The controller must still own its unexpired lease and the
+observed effect must equal the admitted SHA. None of these checks can be replaced
+by a site Owner decision or a GitHub approval.
 
-## Canonical States
-
-Canonical state and detailed reason codes are independent. The only states are:
-
-1. `ready`
-2. `blocked_owner_evidence`
-3. `blocked_checks`
-4. `blocked_engineering_review`
-5. `blocked_policy`
-6. `blocked_candidate_identity`
-7. `unknown`
-
-Aggregation retains every product and global facet, then selects the worst
-state with the frozen precedence:
-
-`unknown` → `blocked_candidate_identity` → `blocked_policy` →
-`blocked_engineering_review` → `blocked_checks` →
-`blocked_owner_evidence` → `ready`.
-
-Input order never breaks a tie. Product facets, evidence references, advisory
-observations, and reason codes are sorted canonically. Any `unknown` facet makes
-the aggregate non-ready.
-
-## Evidence Facets
-
-The pure evaluator consumes these current inputs:
-
-- the current `OwnerAcceptanceDecision`, projected into independent
-  product/system/action/environment facets;
-- the current `EngineeringReviewDecisionRecord` plus exact qualifying run
-  evidence references;
-- an explicit engineering-review authority mode. `required` includes the
-  engineering facet and policy fingerprint in aggregate readiness;
-  `advisory` preserves their independent state and reason codes without letting
-  shadow-only evidence worsen the aggregate state;
-- required technical-check state for the exact effect SHA;
-- all seven scoped policy fingerprints: `impact`, `technical_checks`,
-  `engineering_review`, `ruleset`, `merge_train`, `authorization`, and
-  `admission_algorithm`;
-- the #2084 structural candidate status plus the current candidate record
-  identity, queue position, base, and PR head;
-- the current merge-controller lease and expected-SHA fence.
-
-The live adapter accepts existing Owner, engineering-run, tenant technical-check,
-batch-candidate, and controller-state models and converts them into the safe
-pure-evaluator inputs. It performs no storage operation.
-
-## Detailed Reasons
-
-Reason codes are a closed Pydantic literal contract. They preserve both passing
-and blocking facet detail without changing the canonical state vocabulary.
-
-- Owner: `owner_not_required`, `owner_acceptance_valid`,
-  `owner_acceptance_missing`, `owner_changes_requested`,
-  `owner_acceptance_revoked`, `owner_acceptance_stale`,
-  `owner_evidence_stale`, `owner_evidence_unavailable`,
-  `owner_authority_unavailable`, `owner_authority_denied`,
-  `owner_preview_evidence_unavailable`, `owner_preview_evidence_stale`,
-  `owner_review_expired`, `owner_preview_isolation_insufficient`,
-  `owner_contributing_identity_unknown`, `owner_self_review_denied`,
-  `owner_review_context_missing`, `owner_evidence_head_mismatch`, and
-  `owner_evidence_tree_mismatch`.
-- Checks: `checks_passed`, `checks_pending`, `checks_failed`, `checks_unknown`,
-  and `checks_head_mismatch`.
-- Engineering review: `engineering_review_approved`,
-  `engineering_review_pending`, `engineering_review_changes_requested`,
-  `engineering_review_blocked`, `engineering_review_unknown`,
-  `engineering_review_stale`, `engineering_review_head_mismatch`,
-  `engineering_review_tree_mismatch`, and
-  `engineering_review_evidence_missing`.
-- Policy: `policy_fingerprints_match`, plus a distinct `_missing` and `_drift`
-  reason for each of the seven required dimensions.
-- Candidate and fence: `candidate_exact`, `candidate_recorded_rolling`,
-  `candidate_identity_mismatch`, `candidate_identity_unknown`,
-  `candidate_queue_mismatch`, `candidate_base_mismatch`,
-  `candidate_head_mismatch`, `controller_scope_mismatch`,
-  `controller_lease_held`, `controller_lease_missing`,
-  `controller_lease_lost`, `controller_lease_expired`, `expected_sha_match`,
-  and `expected_sha_mismatch`.
-
-Owner `not_required` is a passing product facet, not missing evidence. Current
-authority loss, review expiry, self-review denial, and changed human outcomes
-remain distinguishable blockers without rewriting historical L1 evidence.
-When current impact evidence proves that Owner review is not required and has no
-affected-product subjects, the adapter emits one canonical
-`__not_applicable__` facet so the passing Owner outcome remains explicit. If
-impact evidence is unavailable before subjects can be resolved, that same
-unscoped facet is `unknown` and fails closed.
-
-If that successful `not_required` path has no Owner or required engineering
-binding record supplied to the comparison, the live adapter binds the expected
-impact fingerprint to the same current policy evaluation that proved the change
-has no affected-product subjects. Missing or non-successful impact evidence never
-receives this fallback and continues to fail closed.
-
-The impact fingerprint follows the evaluation's binding version. Legacy
-bindings retain their full-policy digest comparison. V2 bindings compare the
-scoped decision digest while retaining the full policy record ID, revision and
-digest as provenance. Unrelated policy edits can preserve the scoped identity;
-changed authoritative classification inputs cannot. Among records supplied to
-the impact comparison, mixed binding versions or missing or inconsistent v2
-digests fail closed. The latest engineering decision from a different version is
-not used; the existing
-required/advisory engineering policy determines the consequence of missing
-evidence. The adapter never searches older decisions for a usable review. See
-[change-impact policy](change-impact-policy.md#scoped-decision-identity-and-total-fallback)
-for the exact projection and [Owner acceptance](owner-acceptance.md#versioned-change-impact-bindings)
-for immutable replay semantics.
-
-A successful engineering-only v2 classification can have governance-sensitive
-review floors and no affected products. Its `owner_not_required` facet requires
-no Owner binding or event. A required v2 engineering review decision contributes
-its recorded scoped digest to the comparison and must match the current
-evaluation. Missing or inconsistent digests fail closed. Only when no binding
-record is supplied does the adapter use the current evaluation's own scoped
-fingerprint, failing closed if it is absent. Exact structural candidate,
-head/tree, technical, policy and controller-fence checks still apply. This path
-creates no human acceptance and does not activate v2 policy.
-
-Advisory engineering records remain diagnostic evidence in the engineering
-facet and are excluded from the impact authority comparison. A stale shadow
-record cannot introduce an impact-policy blocker. Current Owner binding drift
-still fails that comparison; advisory mode does not exempt the impact dimension.
-
-## Advisory Checks
-
-The `launchplane/owner-acceptance`, `launchplane/engineering-review`, and legacy
-`launchplane/engineering-review-shadow` check contexts are observations only.
-The live adapter removes them from required technical-check policy and signal
-aggregation. Their observed names and states may be returned for diagnostics,
-but they cannot change readiness state or reason codes.
-
-Engineering-review records remain shadow-only while the repository's active
-DB-backed merge-train policy selects `engineering_review_mode = "advisory"`.
-Missing, stale, or failed shadow evidence remains visible, but it cannot
-authorize or block merge admission. A future enforcement rollout must replace
-that policy deliberately with `engineering_review_mode = "required"`; required
-mode retains exact-head, evidence, and policy fail-closed behavior.
-
-`readiness_digest` excludes both `evaluated_at` and advisory observations. Thus
-clock movement and advisory conclusion changes do not alter the authoritative
-technical/Owner/engineering/policy/candidate/fence payload digest. Advisory
-ruleset drift enforcement remains owned by #2031 rather than this L2 contract.
-
-## Revalidation
-
-Callers must recompute L2 under the current controller lease immediately before
-each later L3 attempt. The guarded caller binds the expected lease owner from
-its acquired controller authority before current state is re-read; the fresh
-controller record remains observed evidence only. A lost, missing, expired, or
-wrong-owner lease; controller scope mismatch; expected-SHA mismatch;
-current-head drift; queue movement; policy drift; or evidence loss produces a
-non-ready result. A previous L2 result is never reusable authority.
-
-The production guarded landing adapter follows this rule for every constituent
-PR and persists the complete result only inside the subsequent immutable L3
-admission. See [merge-admission.md](merge-admission.md).
-
-The read-only governance projection uses the same live admission evaluator only
-when an active landing-plan lineage and running controller lease exist. It never
-persists the recomputed L2 view and reports current evidence as unavailable
-rather than deriving expected authority from an idle controller record or
-reusing a prior admission snapshot as current readiness. The immutable
-admission snapshot remains independently inspectable.
+See [merge admission](merge-admission.md), [structural provenance](merge-train-structural-provenance.md),
+and [release review](release-review.md) for their distinct authority boundaries.

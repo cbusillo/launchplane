@@ -1,4 +1,4 @@
-import { History, Search, ShieldCheck } from "lucide-react";
+import { Search, ShieldCheck } from "lucide-react";
 import { useCallback, useMemo, useState, type FormEvent } from "react";
 
 import { readGovernanceProjection } from "./api";
@@ -22,7 +22,6 @@ import type {
   GovernanceProjection,
   GovernanceProjectionResponse,
   MergeReadinessResult,
-  OwnerAcceptanceProductDecision,
 } from "./generated/openapi.ts";
 
 interface GovernanceLookup {
@@ -113,17 +112,16 @@ export function EngineeringGovernanceProjectionRoute({
           />
         ) : undefined
       }
-      description="Inspect authoritative Owner acceptance, current ephemeral merge readiness, immutable admission, separate landing outcome, and GitHub status projections for one pull request."
+      description="Inspect current merge readiness, recorded admission, landing outcome, and GitHub status observations for one pull request."
       icon={ShieldCheck}
       title="Governance evidence"
       view="governance-projection"
     >
-      <EngineeringBoundaryNote title="Independent evidence — one authoritative Owner decision">
-        Level 1 records authoritative Owner acceptance for the exact change.
-        Level 2 remains <code>mode: ephemeral</code>, <code>authoritative: false</code>,
-        and authorizes no effect. Level 3 admits one exact attempt; it does not mean
-        the provider effect landed. Landing outcome is an independent durable fact.
-        GitHub checks route reviewers and mirror status; decisions remain in Launchplane.
+      <EngineeringBoundaryNote title="Readiness, admission, and landing">
+        Current readiness reports the machine checks for this change. An admission
+        records permission for one exact merge attempt; the landing outcome records
+        what happened. Site Owners review previews and release checklists in the
+        product review flow. Their decisions do not enter merge readiness here.
       </EngineeringBoundaryNote>
 
       <GovernanceLookupForm
@@ -206,86 +204,11 @@ function GovernanceLookupForm({
 function GovernanceWorkbench({ projection }: { projection: GovernanceProjection }) {
   return (
     <article className="governance-workbench" aria-label="Independent governance evidence">
-      <GovernanceOwnerFacet projection={projection} />
       <GovernanceReadinessFacet readiness={projection.merge_readiness.result} projection={projection} />
       <GovernanceAdmissionFacet projection={projection} />
       <GovernanceLandingFacet projection={projection} />
       <GovernanceAdvisoryFacet projection={projection} />
     </article>
-  );
-}
-
-function GovernanceOwnerFacet({ projection }: { projection: GovernanceProjection }) {
-  const owner = projection.owner_judgment;
-  return (
-    <section className="governance-facet" aria-label="Level 1 authoritative Owner acceptance">
-      <GovernanceFacetHeader
-        eyebrow="Level 1 · authoritative"
-        label="Owner acceptance"
-        status={ownerTone(owner.current.status)}
-        value={humanize(owner.current.status)}
-      />
-      <p className="governance-authority-note">
-        Owner <code>accepted</code> is the authoritative product decision for this exact change.
-        It never means merge-ready, admitted, landed, release-authorized, or
-        production-authorized.
-      </p>
-      <dl className="governance-meta-grid">
-        <div>
-          <dt>Current reason</dt>
-          <dd><code>{owner.current.reason_code}</code></dd>
-        </div>
-        <div>
-          <dt>Human semantics</dt>
-          <dd><code>{owner.current.human_action_semantics}</code></dd>
-        </div>
-        <div>
-          <dt>History events</dt>
-          <dd>{owner.history.length}</dd>
-        </div>
-      </dl>
-      <OwnerProductFacets products={owner.current.products} />
-      <div className="governance-history" aria-label="Immutable Owner review history">
-        <h3><History size={15} aria-hidden="true" /> Immutable event history</h3>
-        {owner.history.length ? (
-          <ol>
-            {owner.history.map((entry) => (
-              <li key={entry.record.event_id}>
-                <strong>{humanize(entry.record.action)}</strong>
-                <span>{entry.record.binding.product}</span>
-                <time dateTime={entry.record.occurred_at}>{formatTime(entry.record.occurred_at)}</time>
-                <code>{entry.human_action_semantics}</code>
-                <code>{entry.target_status} target</code>
-                <code>{entry.decision_relationship} decision</code>
-              </li>
-            ))}
-          </ol>
-        ) : (
-          <p>No Owner review event has been recorded for this exact change.</p>
-        )}
-      </div>
-    </section>
-  );
-}
-
-function OwnerProductFacets({ products }: { products: OwnerAcceptanceProductDecision[] }) {
-  if (!products.length) return null;
-  return (
-    <ul className="governance-product-list" aria-label="Per-product Owner judgments">
-      {products.map((product) => (
-        <li key={`${product.product}:${product.system}:${product.action}:${product.environment}`}>
-          <span className="engineering-status-chip" data-status={ownerTone(product.status)}>
-            <StatusIcon status={ownerTone(product.status)} />
-            {humanize(product.status)}
-          </span>
-          <div>
-            <strong>{product.product}</strong>
-            <span>{product.system} · {product.action} · {product.environment}</span>
-            <code>{product.reason_code}</code>
-          </div>
-        </li>
-      ))}
-    </ul>
   );
 }
 
@@ -331,11 +254,6 @@ function GovernanceReadinessFacet({
         The word ready belongs only to this current machine-derived layer.
       </p>
       <div className="governance-readiness-grid">
-        <ReadinessSubfacet
-          label="Owner evidence"
-          state={worstOwnerState(readiness)}
-          reasons={readiness.owner_facets.flatMap((facet) => facet.reason_codes)}
-        />
         {facets.map(([label, state, reasons]) => (
           <ReadinessSubfacet key={label} label={label} state={state} reasons={reasons} />
         ))}
@@ -513,13 +431,6 @@ function validLookup(lookup: GovernanceLookup): boolean {
   );
 }
 
-function ownerTone(status: string): Status {
-  if (status === "accepted") return "pass";
-  if (status === "changes_requested" || status === "revoked") return "fail";
-  if (status === "not_required") return "skipped";
-  return "unknown";
-}
-
 function readinessTone(state: string): Status {
   if (state === "ready") return "pass";
   if (state.startsWith("blocked")) return "blocked";
@@ -531,10 +442,6 @@ function landingTone(status: string): Status {
   if (status === "rejected") return "fail";
   if (status === "reconcile_required") return "blocked";
   return "skipped";
-}
-
-function worstOwnerState(readiness: MergeReadinessResult): string {
-  return readiness.owner_facets.find((facet) => facet.state !== "ready")?.state ?? "ready";
 }
 
 function humanize(value: string): string {

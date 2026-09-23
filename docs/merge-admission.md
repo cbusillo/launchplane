@@ -13,10 +13,14 @@ after the effect boundary.
 
 ## Admission Boundary
 
+New admissions record algorithm `merge-admission-v2`, which removes retired
+Owner/change-impact merge gates. Existing v1 admissions and landing outcomes
+remain immutable and readable. Site Owner review is recorded separately by the
+product-review and release-checklist paths.
+
 Each batch entry is re-evaluated under the current repository/base controller
 lease immediately before its provider merge. The live adapter resolves current
-Owner acceptance, change impact, engineering decision and run evidence,
-required technical checks, policy fingerprints, structural candidate
+engineering decision and run evidence, required technical checks, policy fingerprints, structural candidate
 provenance, queue position, rolling base, exact head/tree, candidate identity,
 and the expected effect SHA. It re-reads the active merge-train policy record
 and GitHub queue for every entry rather than treating request-start policy or
@@ -87,7 +91,7 @@ successor.
 
 The controller and direct batch-landing endpoint share the same guarded
 boundary. Each constituent PR receives independent evidence and fresh
-revalidation against the actual rolling base. Queue, head, policy, Owner,
+revalidation against the actual rolling base. Queue, head, policy,
 technical-check, structural, lease, or expected-SHA drift refuses the next
 admission before mutation.
 
