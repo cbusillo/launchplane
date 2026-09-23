@@ -3,7 +3,7 @@ title: Ordinary Agent Execution Contracts
 ---
 
 > **Retired.** This design is no longer the direction and is scheduled for
-> deletion with its code. Do not build on it. See [direction.md](direction.md).
+> deletion with its code. Do not build on it. See [DIRECTION.md](../DIRECTION.md).
 
 # Ordinary Agent Execution Contracts
 

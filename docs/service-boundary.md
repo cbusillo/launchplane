@@ -3852,7 +3852,7 @@ See `docs/product-owner-policy.md` for routes and persisted record contracts.
 
 ## Product Review API
 
-The small Owner review path from `docs/direction.md` and issue `#2446`. It is
+The small Owner review path from `DIRECTION.md` and issue `#2446`. It is
 parallel to the Owner Acceptance API below and reads none of its records.
 
 `GET /v1/product-review?repository=<owner/repo>&pull_request=<n>` returns the

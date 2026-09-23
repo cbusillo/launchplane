@@ -8,7 +8,7 @@ The Owner product-review route `/ui/owner-review` no longer uses the exact-bindi
 machinery described below. It uses the small product-review path: the signed-in
 GitHub user may Accept or Request changes when their GitHub id equals the Owner
 named on the product profile, and the decision merges and deploys nothing. See
-[direction.md](direction.md), issue `#2446`, and the Product Review API section
+[DIRECTION.md](../DIRECTION.md), issue `#2446`, and the Product Review API section
 of [service-boundary.md](service-boundary.md). The rest of this page describes the
 older Owner-acceptance machinery that the merge train still reads until it is
 de-wired and deleted under `#2446`.

@@ -3,7 +3,7 @@ title: Provider Delivery Inspection
 ---
 
 > **Retired.** This design is no longer the direction and is scheduled for
-> deletion with its code. Do not build on it. See [direction.md](direction.md).
+> deletion with its code. Do not build on it. See [DIRECTION.md](../DIRECTION.md).
 
 Ordinary guarded delivery requires a current, independently observed provider
 protection result. Launchplane refreshes that evidence on demand during ordinary
