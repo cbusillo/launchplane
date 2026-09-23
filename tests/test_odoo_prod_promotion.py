@@ -148,7 +148,7 @@ class OdooProdPromotionWorkflowTests(unittest.TestCase):
                     control_plane_root=Path("/control-plane"),
                     state_dir=Path("/state"),
                     database_url=None,
-                    record_store=_promotion_store(),
+                    record_store=Mock(),
                     request=OdooProdPromotionRequest(
                         product=product,
                         context="test-context",
