@@ -9,7 +9,13 @@ from pydantic import ValidationError
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.product_review import ProductReviewDecisionRecord
 from control_plane.http_app import create_launchplane_fastapi_app
-from control_plane.service_auth import GitHubHumanIdentity, LaunchplaneAuthzPolicy, TokenVerifier
+from control_plane.service_auth import (
+    BearerIdentityConfig,
+    GitHubHumanIdentity,
+    LaunchplaneAuthzPolicy,
+    LocalOperatorPolicyRule,
+    TokenVerifier,
+)
 from control_plane.service_human_auth import HumanSessionManager, InMemoryHumanSessionStore
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
@@ -300,6 +306,67 @@ class ProductReviewHttpTests(unittest.IsolatedAsyncioTestCase):
             ),
             (),
         )
+
+    async def test_local_operator_reads_only_granted_product_and_cannot_change_owner_decision(
+        self,
+    ) -> None:
+        self._write_product()
+        decision = _decision(record_id="owner-accepted", decided_at="2026-09-20T10:00:00Z")
+        self.store.write_product_review_decision_record(decision)
+        headers = {"Authorization": "Bearer operator-token"}
+        for granted_product in ("example-site", "another-site"):
+            with self.subTest(granted_product=granted_product):
+                app = create_launchplane_fastapi_app(
+                    verifier=_RejectingVerifier(),
+                    authz_policy=LaunchplaneAuthzPolicy(
+                        local_operators=(
+                            LocalOperatorPolicyRule(
+                                subjects=("example-operator",),
+                                token_labels=("review-reader",),
+                                products=(granted_product,),
+                                contexts=("launchplane",),
+                                actions=("product_profile.read",),
+                            ),
+                        )
+                    ),
+                    bearer_identity_config=BearerIdentityConfig(
+                        local_operator_token="operator-token",
+                        local_operator_subject="example-operator",
+                        local_operator_token_label="review-reader",
+                    ),
+                    record_store_factory=lambda: self.store,
+                    human_session_manager=self.session_manager,
+                )
+                read = await _asgi_get(app, _REVIEW_PATH, headers=headers)
+                if granted_product == "example-site":
+                    self.assertEqual(read.status_code, 200)
+                    self.assertEqual(read.json()["preview_url"], "https://pr-42.example.invalid")
+                    self.assertEqual(
+                        read.json()["latest_decision"]["record_id"], decision.record_id
+                    )
+                    self.assertFalse(read.json()["viewer_is_owner"])
+                    self.assertFalse(read.json()["can_decide"])
+                else:
+                    self.assertEqual(read.status_code, 403)
+                write = await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/product-review/decisions",
+                    headers=headers,
+                    payload={
+                        "repository": _REPOSITORY,
+                        "pull_request": _PULL_REQUEST,
+                        "decision": "changes_requested",
+                        "reason": "A machine must not replace the Owner decision.",
+                    },
+                )
+                self.assertEqual(write.status_code, 403)
+                self.assertEqual(
+                    self.store.list_product_review_decision_records(
+                        repository=_REPOSITORY, pull_request_number=_PULL_REQUEST
+                    ),
+                    (decision,),
+                )
 
     async def test_owner_decision_without_browser_mutation_headers_is_rejected(self) -> None:
         self._write_product()
