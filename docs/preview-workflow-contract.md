@@ -260,7 +260,7 @@ focused `/ui/owner-review` page. A marked pull request on a product with no
 Owner says so instead of mentioning anyone. Unmarked pull requests get no Owner
 section. If the labels cannot be read, the comment is still delivered without an
 Owner section; release approval is the safety net (see
-[direction.md](direction.md)).
+[DIRECTION.md](../DIRECTION.md)).
 
 The Owner's answer is shown on the pull request as one commit status,
 `launchplane/owner-review`, on the current head. Launchplane writes it with the
