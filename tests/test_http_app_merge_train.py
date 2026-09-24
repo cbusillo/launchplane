@@ -2587,8 +2587,10 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(resumed.json()["result"]["controller_action"], "idle")
                 build.assert_not_called()
 
-    async def test_reflows_candidate_after_head_changes_before_build_or_landing(self) -> None:
-        for controller_steps in (1, 3):
+    async def test_reflows_candidate_after_head_changes_before_build_checks_or_landing(
+        self,
+    ) -> None:
+        for controller_steps in (1, 2, 3):
             with self.subTest(controller_steps=controller_steps):
 
                 class MovedHeadMergeTrainSnapshotReader(_FakeMergeTrainSnapshotReader):
@@ -2945,9 +2947,15 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
             ):
                 await _post_merge_train_controller_run_once(app, request_payload)
                 await _post_merge_train_controller_run_once(app, request_payload)
-            with patch(
-                "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
-                _FakeFailingMergeTrainGitHubClient,
+            with (
+                patch(
+                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                    _FakeFailingMergeTrainGitHubClient,
+                ),
+                patch(
+                    "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
+                    _FakeMergeTrainSnapshotReader,
+                ),
             ):
                 failed_response = await _post_merge_train_controller_run_once(app, request_payload)
             with patch(
