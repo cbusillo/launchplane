@@ -448,8 +448,8 @@ class ProductSecretConfigRequirement(BaseModel):
             raise ValueError("product secret config requirement requires integration")
         if self.instance.strip() and not self.context.strip():
             raise ValueError("instance secret config requirement requires context")
-        if self.owner_input is not None and not (self.context.strip() and self.instance.strip()):
-            raise ValueError("Owner secret input requires one explicit context and instance")
+        if self.owner_input is not None and not self.context.strip():
+            raise ValueError("Owner secret input requires one explicit product context")
         self.binding_key = self.binding_key.strip()
         self.integration = self.integration.strip()
         self.context = self.context.strip()

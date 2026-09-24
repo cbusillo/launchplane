@@ -26,7 +26,10 @@ from control_plane.http_routes.owner_secret_inputs import (
     OwnerSecretInputDependencies,
     register_owner_secret_input_routes,
 )
-from control_plane.owner_secret_inputs import resolve_owner_secret_submission
+from control_plane.owner_secret_inputs import (
+    OwnerSecretSubmissionUnavailable,
+    resolve_owner_secret_submission,
+)
 from fastapi.responses import JSONResponse, RedirectResponse
 from jwt import InvalidTokenError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
@@ -13845,6 +13848,20 @@ def create_launchplane_fastapi_app(
                     )
                 ),
             )
+        except OwnerSecretSubmissionUnavailable as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="owner_secret_submission_changed",
+                message="The Owner credential changed. Refresh the saved credential and run a new dry-run.",
+            ) from error
+        except click.ClickException as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="secret_storage_unavailable",
+                message="The saved credential cannot be decrypted. Restore the managed-secret key configuration.",
+            ) from error
         except (ValidationError, ValueError) as error:
             raise _launchplane_http_error(
                 status_code=400,

@@ -2,7 +2,7 @@ import { expect, test } from "@playwright/test";
 
 const request = {
   status: "ok", trace_id: "test-read", product: "example-site", display_name: "Example Site", environment: "testing", can_submit: true,
-  fields: [{ integration: "runtime_environment", binding_key: "SMTP_PASSWORD", label: "Mail credential", instructions: "Enter the account's app credential.", request_revision: "a".repeat(64), submitted_at: "", submission_version_id: "" }],
+  fields: [{ integration: "runtime_environment", binding_key: "SMTP_PASSWORD", label: "Mail credential", instructions: "Enter the account's app credential.", environments: ["testing"], request_revision: "a".repeat(64), submitted_at: "", submission_version_id: "" }],
 };
 
 test.beforeEach(async ({ page }) => {

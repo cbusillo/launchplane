@@ -262,6 +262,7 @@ export function ManagedSecretsChangePanel({
   const secretInputs = useRef(new Map<string, HTMLInputElement>());
   const [ownerFields, setOwnerFields] = useState<OwnerSecretInputField[]>([]);
   const [ownerSources, setOwnerSources] = useState(new Map<string, string>());
+  const [ownerRefresh, setOwnerRefresh] = useState(0);
   useEffect(() => {
     if (fixtureMode) return;
     const controller = new AbortController();
@@ -269,7 +270,7 @@ export function ManagedSecretsChangePanel({
       .then(result => { if (!controller.signal.aborted) setOwnerFields(result.fields); })
       .catch(() => { if (!controller.signal.aborted) setOwnerFields([]); });
     return () => controller.abort();
-  }, [config.product, config.environment, fixtureMode]);
+  }, [config.product, config.environment, fixtureMode, ownerRefresh]);
   const planOperation = useProductConfigOperation(
     `${config.product}:${config.environment}:managed-secrets:plan`,
     config.product,
@@ -406,6 +407,14 @@ export function ManagedSecretsChangePanel({
       title="Plan managed-secret changes"
     >
       <AvailabilityBlockers availability={availability} />
+      {ownerFields.length ? <button className="button" type="button" disabled={draftLocked} onClick={() => {
+        setOwnerSources(new Map());
+        setPlanResult(null);
+        setConfirmed(false);
+        clearManagedSecretInputs(secretInputs.current);
+        setOwnerFields([]);
+        setOwnerRefresh(current => current + 1);
+      }}>Refresh Owner credentials</button> : null}
       <fieldset disabled={!availability.plan.enabled || draftLocked}>
         <legend className="sr-only">Managed secrets to change</legend>
         <div className="product-config-fields">

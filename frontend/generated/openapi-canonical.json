@@ -22738,6 +22738,13 @@
             "title": "Binding Key",
             "type": "string"
           },
+          "environments": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Environments",
+            "type": "array"
+          },
           "instructions": {
             "title": "Instructions",
             "type": "string"
@@ -22770,6 +22777,7 @@
           "binding_key",
           "label",
           "instructions",
+          "environments",
           "request_revision"
         ],
         "title": "OwnerSecretInputField",

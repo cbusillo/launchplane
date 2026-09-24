@@ -11,7 +11,9 @@ title: Secrets
 
 An operator can request a credential by setting `owner_input` on one managed-secret
 requirement in the stored product profile. It contains a human-readable `label` and
-`instructions` and requires an explicit context and environment. Omitted input
+`instructions` and requires an explicit product context. An optional instance
+restricts it to one environment; a context request shares one submission across
+the profile's named environments in that context, which the form lists. Omitted input
 declarations grant no submission surface. Real account names and provider details
 belong in these records, not application defaults.
 
@@ -19,7 +21,7 @@ The named Owner signs in with GitHub at
 `/ui/owner-secrets?product=PRODUCT&environment=ENVIRONMENT`. The page reads
 `GET /v1/owner-secret-inputs` and submits one write-only value to
 `POST /v1/owner-secret-inputs/submit`. The service checks the immutable Owner id,
-the current request revision, CSRF, database storage and encryption availability.
+the current request revision (including its environment set), CSRF, database storage and encryption availability.
 The password input is cleared before dispatch and on unmount; responses contain
 only request metadata and a receipt. Operators with product-profile read access
 can inspect receipts but cannot submit as the Owner.
@@ -42,6 +44,12 @@ and actual application verification remain separate operator work.
 
 This is credential input, not an Owner operational role or a release decision.
 Product-profile write authority still controls which inputs are requested.
+
+The receipt follows the submission audit event through recorded key re-encryption
+events. Re-encryption changes the encrypted version without changing who supplied
+the value or the displayed receipt time. Superseded requests remain encrypted
+history and are not runtime-bound; automatic removal of retained secret history is
+not part of this input flow.
 
 ## Current Contract
 

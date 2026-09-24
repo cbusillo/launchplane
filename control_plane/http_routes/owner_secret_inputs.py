@@ -18,7 +18,9 @@ from control_plane.http_routes.support import (
 )
 from control_plane.owner_secret_inputs import (
     owner_secret_request_revision,
+    owner_secret_environments,
     owner_submission_record,
+    owner_submission_receipt,
     requested_owner_secrets,
     store_owner_secret_submission,
 )
@@ -38,6 +40,7 @@ class OwnerSecretInputField(BaseModel):
     binding_key: str
     label: str
     instructions: str
+    environments: tuple[str, ...]
     request_revision: str
     submitted_at: str = ""
     submission_version_id: str = ""
@@ -130,15 +133,21 @@ def register_owner_secret_input_routes(
             record = owner_submission_record(
                 store, profile=profile, lane=lane, requirement=requirement
             )
+            receipt = (
+                owner_submission_receipt(store, record, owner_github_id=profile.owner.github_id)
+                if record
+                else None
+            )
             fields.append(
                 OwnerSecretInputField(
                     integration=requirement.integration,
                     binding_key=requirement.binding_key,
                     label=requirement.owner_input.label,
                     instructions=requirement.owner_input.instructions,
+                    environments=owner_secret_environments(profile, requirement),
                     request_revision=owner_secret_request_revision(profile, lane, requirement),
-                    submitted_at=record.updated_at if record else "",
-                    submission_version_id=record.current_version_id if record else "",
+                    submitted_at=receipt.recorded_at if receipt else "",
+                    submission_version_id=record.current_version_id if record and receipt else "",
                 )
             )
         return OwnerSecretInputResponse(

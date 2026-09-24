@@ -17,6 +17,10 @@ from control_plane.workflows.ship import utc_now_timestamp
 OWNER_SUBMISSION_INTEGRATION = "owner_secret_submission"
 
 
+class OwnerSecretSubmissionUnavailable(ValueError):
+    """The requested submission must be refreshed before operator application."""
+
+
 def requested_owner_secrets(
     profile: LaunchplaneProductProfileRecord, lane: ProductLaneProfile
 ) -> tuple[ProductSecretConfigRequirement, ...]:
@@ -25,7 +29,20 @@ def requested_owner_secrets(
         for requirement in profile.expected_config.managed_secret_bindings
         if requirement.owner_input is not None
         and requirement.context == lane.context
-        and requirement.instance == lane.instance
+        and (not requirement.instance or requirement.instance == lane.instance)
+    )
+
+
+def owner_secret_environments(
+    profile: LaunchplaneProductProfileRecord, requirement: ProductSecretConfigRequirement
+) -> tuple[str, ...]:
+    return tuple(
+        sorted(
+            lane.instance
+            for lane in profile.lanes
+            if lane.context == requirement.context
+            and (not requirement.instance or requirement.instance == lane.instance)
+        )
     )
 
 
@@ -38,7 +55,7 @@ def owner_secret_request_revision(
         "product": profile.product,
         "owner_github_id": profile.owner.github_id,
         "context": lane.context,
-        "environment": lane.instance,
+        "environments": owner_secret_environments(profile, requirement),
         "requirement": requirement.model_dump(mode="json"),
     }
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
@@ -52,11 +69,11 @@ def owner_submission_record(
     requirement: ProductSecretConfigRequirement,
 ) -> SecretRecord | None:
     return store.find_secret_record(
-        scope="context_instance",
+        scope="context_instance" if requirement.instance else "context",
         integration=OWNER_SUBMISSION_INTEGRATION,
         name=owner_secret_request_revision(profile, lane, requirement),
         context=lane.context,
-        instance=lane.instance,
+        instance=requirement.instance,
     )
 
 
@@ -74,7 +91,7 @@ def store_owner_secret_submission(
         integration=OWNER_SUBMISSION_INTEGRATION,
         name=revision,
         context=lane.context,
-        instance=lane.instance,
+        instance=requirement.instance,
     )
     now = utc_now_timestamp()
     actor = f"github:{profile.owner.github_id}"
@@ -89,11 +106,11 @@ def store_owner_secret_submission(
     )
     record = SecretRecord(
         secret_id=secret_id,
-        scope="context_instance",
+        scope="context_instance" if requirement.instance else "context",
         integration=OWNER_SUBMISSION_INTEGRATION,
         name=revision,
         context=lane.context,
-        instance=lane.instance,
+        instance=requirement.instance,
         current_version_id=version.version_id,
         created_at=existing.created_at if existing else now,
         updated_at=now,
@@ -106,7 +123,11 @@ def store_owner_secret_submission(
         recorded_at=now,
         actor=actor,
         detail="Owner submitted a requested credential; no runtime binding was changed.",
-        metadata={"product": profile.product, "request_revision": revision},
+        metadata={
+            "product": profile.product,
+            "request_revision": revision,
+            "submission_version_id": version.version_id,
+        },
     )
     store.write_product_authority_bundle(
         ProductAuthorityBundle(
@@ -116,6 +137,34 @@ def store_owner_secret_submission(
             secret_audit_events=(event,),
         )
     )
+
+
+def owner_submission_receipt(
+    store: PostgresRecordStore, record: SecretRecord, *, owner_github_id: str
+) -> SecretAuditEvent | None:
+    events = store.list_secret_audit_events(secret_id=record.secret_id)
+    submissions = {
+        event.metadata["submission_version_id"]: event
+        for event in events
+        if event.actor == f"github:{owner_github_id}"
+        and event.metadata.get("request_revision") == record.name
+        and event.metadata.get("submission_version_id")
+    }
+    rotations = {
+        event.metadata["new_version_id"]: event.metadata["old_version_id"]
+        for event in events
+        if event.metadata.get("rotation_plan_digest")
+        and event.metadata.get("new_version_id")
+        and event.metadata.get("old_version_id")
+    }
+    version_id = record.current_version_id
+    seen: set[str] = set()
+    while version_id and version_id not in seen:
+        if version_id in submissions:
+            return submissions[version_id]
+        seen.add(version_id)
+        version_id = rotations.get(version_id, "")
+    return None
 
 
 def resolve_owner_secret_submission(
@@ -128,14 +177,20 @@ def resolve_owner_secret_submission(
 ) -> str:
     """Called only after the existing operator config authorization succeeds."""
     if requirement not in requested_owner_secrets(profile, lane) or not profile.owner.is_set:
-        raise ValueError("This credential is not requested from the current Owner.")
+        raise OwnerSecretSubmissionUnavailable(
+            "This credential is not requested from the current Owner."
+        )
     record = owner_submission_record(store, profile=profile, lane=lane, requirement=requirement)
     if record is None or record.status != "configured" or record.current_version_id != version_id:
-        raise ValueError("The Owner submission changed; refresh and run a new dry-run.")
+        raise OwnerSecretSubmissionUnavailable(
+            "The Owner submission changed; refresh and run a new dry-run."
+        )
     version = store.read_secret_version(version_id)
     if (
         version.secret_id != record.secret_id
-        or version.created_by != f"github:{profile.owner.github_id}"
+        or owner_submission_receipt(store, record, owner_github_id=profile.owner.github_id) is None
     ):
-        raise ValueError("The Owner submission does not match the requested credential.")
+        raise OwnerSecretSubmissionUnavailable(
+            "The Owner submission does not match the requested credential."
+        )
     return secrets._decrypt_secret_value(version.ciphertext, version.key_id)

@@ -78,6 +78,7 @@ function SecretInput({ field, request, onSaved, fixtureMode }: { field: OwnerSec
 
   return <form className="owner-review-card" onSubmit={event => void submit(event)}>
     <h2>{field.label}</h2>
+    <p>Requested for: {field.environments.join(", ")}</p>
     <p>{field.instructions}</p>
     {field.submitted_at ? <p>Last received: {formatTime(field.submitted_at)}</p> : null}
     {request.can_submit ? <>

@@ -1988,6 +1988,7 @@ export type OwnerSecretInputEnvelope = {
 
 export type OwnerSecretInputField = {
     binding_key: string;
+    environments: Array<string>;
     instructions: string;
     integration: string;
     label: string;

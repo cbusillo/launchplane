@@ -11,6 +11,7 @@ from control_plane.storage.product_authority_bundle import ProductAuthorityBundl
 from cryptography.fernet import Fernet
 
 from control_plane import secrets
+from control_plane.owner_secret_inputs import resolve_owner_secret_submission
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyPolicyRecord
 from control_plane.http_app import create_launchplane_fastapi_app
@@ -211,6 +212,96 @@ class OwnerSecretInputTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 503)
         self.assertEqual(self.store.list_secret_records(), ())
 
+    async def test_key_rotation_preserves_the_owner_receipt_and_applicable_value(self) -> None:
+        with patch(
+            "control_plane.owner_secret_inputs.utc_now_timestamp",
+            return_value="2026-09-24T01:00:00Z",
+        ):
+            written = await self.post(await self.submission())
+        before = written.json()["fields"][0]
+        key_ring = json.loads(os.environ["LAUNCHPLANE_SECRET_KEYS_JSON"])
+        key_ring["keys"]["rotated"] = Fernet.generate_key().decode()
+        key_ring["active_key_id"] = "rotated"
+        with (
+            patch.dict(os.environ, {"LAUNCHPLANE_SECRET_KEYS_JSON": json.dumps(key_ring)}),
+            patch("control_plane.secrets.utc_now_timestamp", return_value="2026-09-24T02:00:00Z"),
+        ):
+            plan = secrets.reencrypt_secrets(record_store=self.store)
+            applied = secrets.reencrypt_secrets(
+                record_store=self.store,
+                apply=True,
+                expected_plan_digest=str(plan["plan_digest"]),
+                actor="operator:key-rotation",
+                reason="Rotate the test key.",
+            )
+            self.assertEqual(applied["status"], "ok")
+            after = (await self.read()).json()["fields"][0]
+            self.assertNotEqual(before["submission_version_id"], after["submission_version_id"])
+            self.assertEqual(after["submitted_at"], "2026-09-24T01:00:00Z")
+            value = resolve_owner_secret_submission(
+                self.store,
+                profile=self.profile,
+                lane=self.profile.lanes[0],
+                requirement=self.profile.expected_config.managed_secret_bindings[0],
+                version_id=after["submission_version_id"],
+            )
+            self.assertEqual(value, "mail-secret-value")
+        self.assertEqual(self.store.list_secret_bindings(), ())
+
+    async def test_shared_product_context_request_has_one_receipt_for_its_named_environments(
+        self,
+    ) -> None:
+        payload = self.profile.model_dump()
+        payload["expected_config"]["managed_secret_bindings"][0]["instance"] = ""
+        self.profile = LaunchplaneProductProfileRecord.model_validate(payload)
+        self.store.write_product_profile_record(self.profile)
+        written = await self.post(await self.submission())
+        field = written.json()["fields"][0]
+        self.assertEqual(field["environments"], ["prod", "testing"])
+        session = self.sessions.issue(_human())
+        production = await _asgi_get(
+            self.app,
+            _READ.replace("environment=testing", "environment=prod"),
+            headers={"Cookie": self.sessions.session_cookie_header(session)},
+        )
+        self.assertEqual(
+            production.json()["fields"][0]["submission_version_id"], field["submission_version_id"]
+        )
+        value = resolve_owner_secret_submission(
+            self.store,
+            profile=self.profile,
+            lane=self.profile.lanes[1],
+            requirement=self.profile.expected_config.managed_secret_bindings[0],
+            version_id=field["submission_version_id"],
+        )
+        self.assertEqual(value, "mail-secret-value")
+        self.assertEqual(self.store.list_secret_bindings(), ())
+
+    async def test_operator_receives_a_bounded_error_when_the_saved_key_is_unavailable(
+        self,
+    ) -> None:
+        written = await self.post(await self.submission())
+        payload: dict[str, object] = {
+            "mode": "dry-run",
+            "reason": "Apply the mail credential.",
+            "managed_secrets": [
+                {
+                    "integration": "runtime_environment",
+                    "binding_key": "SMTP_PASSWORD",
+                    "owner_submission_version_id": written.json()["fields"][0][
+                        "submission_version_id"
+                    ],
+                }
+            ],
+        }
+        with patch.dict(os.environ, {}, clear=True):
+            response = await self.post(
+                payload, human=_human("operator", 9003, "admin"), path=_CONFIG
+            )
+        self.assertEqual(response.status_code, 503, response.text)
+        self.assertEqual(response.json()["error"]["code"], "secret_storage_unavailable")
+        self.assertNotIn("mail-secret-value", response.text)
+
     async def test_owner_change_between_authorization_and_commit_rolls_back_submission(
         self,
     ) -> None:
@@ -293,5 +384,6 @@ class OwnerSecretInputTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(active_after, active_before)
         stale_plan = await self.post(payload, human=operator, path=_CONFIG)
-        self.assertEqual(stale_plan.status_code, 400)
+        self.assertEqual(stale_plan.status_code, 409)
+        self.assertIn("Refresh", stale_plan.json()["error"]["message"])
         self.assertNotIn("mail-secret-value", planned.text + applied.text + stale_plan.text)
