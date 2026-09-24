@@ -1443,6 +1443,7 @@ export type OdooOverrideValue = {
 
 export type OdooWebsiteBootstrapPayload = {
     canonical_url: string;
+    company_email: string;
     default_lang: string;
     homepage_url: string;
     logo_alt: string;

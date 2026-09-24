@@ -14421,6 +14421,11 @@
             "title": "Canonical Url",
             "type": "string"
           },
+          "company_email": {
+            "default": "",
+            "title": "Company Email",
+            "type": "string"
+          },
           "default_lang": {
             "default": "",
             "title": "Default Lang",
@@ -14476,6 +14481,7 @@
         },
         "required": [
           "canonical_url",
+          "company_email",
           "default_lang",
           "homepage_url",
           "logo_alt",
