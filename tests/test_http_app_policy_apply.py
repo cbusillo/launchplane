@@ -1,6 +1,7 @@
 import json
 import os
 import unittest
+from contextlib import closing
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import (
@@ -13,7 +14,10 @@ from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
 )
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
-from control_plane.contracts.runtime_key_safety_policy import RuntimeSecretSafetyRule
+from control_plane.contracts.runtime_key_safety_policy import (
+    RuntimeKeySafetyPolicyRecord,
+    RuntimeSecretSafetyRule,
+)
 from control_plane.http_app import (
     AcceptedEvidenceResponse,
     create_launchplane_fastapi_app,
@@ -1137,6 +1141,94 @@ class FastApiNotificationPolicyApplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("/v1/public-ingress/notification-policies/apply", paths)
         self.assertIn("/v1/every-code/notification-policies/apply", paths)
         self.assertIn("/v1/previews/pr-feedback/notification-policies/apply", paths)
+
+
+class FastApiRuntimeKeySafetyPolicyReadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_read_returns_current_policy_without_changing_records(self) -> None:
+        with (
+            TemporaryDirectory() as directory,
+            closing(
+                PostgresRecordStore(
+                    database_url=_sqlite_database_url(Path(directory) / "launchplane.sqlite3")
+                )
+            ) as store,
+        ):
+            store.ensure_schema()
+            record = RuntimeKeySafetyPolicyRecord.model_validate(
+                {
+                    "record_id": "policy-current",
+                    "source": "operator",
+                    "updated_at": "2026-09-24T12:00:00Z",
+                    "rules": [
+                        {
+                            "binding_key": "EXAMPLE_PASSWORD",
+                            "secret_class": "non_prod",
+                            "allowed_targets": [
+                                {"context": "example-site", "instances": ["testing"]}
+                            ],
+                        }
+                    ],
+                }
+            )
+            store.write_runtime_key_safety_policy_record(
+                record.model_copy(
+                    update={"record_id": "policy-old", "updated_at": "2026-09-23T12:00:00Z"}
+                )
+            )
+            store.write_runtime_key_safety_policy_record(record)
+            store.write_runtime_key_safety_policy_record(
+                record.model_copy(
+                    update={
+                        "record_id": "policy-superseded",
+                        "updated_at": "2026-09-25T12:00:00Z",
+                        "status": "superseded",
+                    }
+                )
+            )
+            before = store.list_runtime_key_safety_policy_records()
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_runtime_key_safety_policy_apply_policy(action="operations.read"),
+                record_store_factory=lambda: store,
+            )
+            async with lifespan_client(app) as client:
+                response = await client.get(
+                    "/v1/runtime-key-safety/policies/active",
+                    headers={"Authorization": "Bearer valid-token"},
+                )
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.headers["Cache-Control"], "no-store")
+            self.assertEqual(response.json()["record"], record.model_dump(mode="json"))
+            self.assertEqual(response.json()["policy_sha256"], record.policy_sha256)
+            self.assertEqual(store.list_runtime_key_safety_policy_records(), before)
+
+    async def test_read_requires_read_authority_and_reports_absent_policy(self) -> None:
+        with (
+            TemporaryDirectory() as directory,
+            closing(
+                PostgresRecordStore(
+                    database_url=_sqlite_database_url(Path(directory) / "launchplane.sqlite3")
+                )
+            ) as store,
+        ):
+            store.ensure_schema()
+            for action, expected_status in (
+                ("runtime_key_safety.write", 403),
+                ("operations.read", 404),
+            ):
+                with self.subTest(action=action):
+                    app = create_launchplane_fastapi_app(
+                        verifier=_StubVerifier(_identity()),
+                        authz_policy=_runtime_key_safety_policy_apply_policy(action=action),
+                        record_store_factory=lambda: store,
+                    )
+                    async with lifespan_client(app) as client:
+                        response = await client.get(
+                            "/v1/runtime-key-safety/policies/active",
+                            headers={"Authorization": "Bearer valid-token"},
+                        )
+                    self.assertEqual(response.status_code, expected_status, response.text)
+            self.assertEqual(store.list_runtime_key_safety_policy_records(), ())
 
 
 class FastApiRuntimeKeySafetyPolicyApplyTests(unittest.IsolatedAsyncioTestCase):

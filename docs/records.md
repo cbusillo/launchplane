@@ -2244,6 +2244,12 @@ run` is the foreground loop intended for an external process supervisor, and
 
 - One record per imported runtime key-safety policy version under
   `launchplane_runtime_key_safety_policies`.
+- Read the current active classification and target scopes with
+  `GET /v1/runtime-key-safety/policies/active` before proposing a policy change.
+  The route uses existing `operations.read` authority for the Launchplane context
+  and returns the typed policy plus its digest, with no secret values or binding
+  resolution. Missing active policy is an explicit 404. The read does not change
+  policy, configure a credential, or contact a runtime provider.
 - Store policy metadata, status, source, timestamp, and binding-key
   classifications only. Do not store secret plaintext, ciphertext, provider env
   dumps, token prefixes, or operator-local overrides in these records.
