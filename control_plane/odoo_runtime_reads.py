@@ -597,11 +597,10 @@ def _mail_result(
             "exception": "failed",
             "cancel": "cancelled",
         }
-        state = states.get(row["state"], "unknown")
         messages.append(
             OutgoingEmailStatus(
                 mail_id=row["id"],
-                state=state,
+                state=states[row["state"]] if row["state"] in states else "unknown",
                 failure_type=_redact(row.get("failure_type"), credentials),
                 failure_reason=_redact(row.get("failure_reason"), credentials),
                 message_id=_redact(row.get("message_id"), credentials),
