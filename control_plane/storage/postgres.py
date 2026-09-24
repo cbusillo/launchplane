@@ -659,6 +659,7 @@ from control_plane.service_human_auth import HumanSessionStore, LaunchplaneHuman
 from control_plane.storage import landing_authority
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.product_authority_bundle import (
+    ProductProfileConflictError,
     ProductAuthorityBundle,
     ProviderTargetWrite,
     RuntimeEnvironmentConflictError,
@@ -6176,9 +6177,22 @@ class PostgresRecordStore(HumanSessionStore):
                 session,
                 *(
                     landing_authority.product_profile(record.product)
-                    for record in bundle.product_profiles
+                    for record in (*bundle.product_profiles, *bundle.expected_product_profiles)
                 ),
             )
+            for expected_profile in bundle.expected_product_profiles:
+                current_profile_row = session.scalar(
+                    select(LaunchplaneProductProfileRow)
+                    .where(LaunchplaneProductProfileRow.product == expected_profile.product)
+                    .with_for_update()
+                )
+                if current_profile_row is None or (
+                    self._read_product_profile_payload(current_profile_row.payload)
+                    != expected_profile
+                ):
+                    raise ProductProfileConflictError(
+                        "Product profile changed during bundle write."
+                    )
             for delete_item in bundle.delete_runtime_environments:
                 row = session.scalar(
                     self._runtime_environment_statement(

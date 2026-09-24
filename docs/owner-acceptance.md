@@ -11,6 +11,11 @@ nothing. The release checklist is a separate decision bound to the testing
 candidate and its change list. See [release-review.md](release-review.md) and the
 Product Review API in [service-boundary.md](service-boundary.md).
 
+The same named Owner may supply an explicitly requested credential through the
+separate `/ui/owner-secrets` page. This stores an encrypted submission for operator
+application; it does not apply product configuration or grant operational access.
+See [Owner credential input](secrets.md#owner-credential-input).
+
 ## Retired exact-binding machinery
 
 The old `/v1/owner-acceptance/*` API and

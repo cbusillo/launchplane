@@ -127,7 +127,8 @@
   font-weight: 650;
 }
 
-.owner-review-action textarea {
+.owner-review-action textarea,
+.owner-secret-field input {
   width: 100%;
   border: 1px solid var(--border);
   border-radius: 7px;
@@ -139,6 +140,12 @@
 .owner-review-action textarea {
   min-height: 96px;
   resize: vertical;
+}
+
+.owner-secret-field {
+  display: grid;
+  gap: 0.5rem;
+  min-width: 0;
 }
 
 .owner-review-state {

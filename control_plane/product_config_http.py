@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -58,7 +59,8 @@ class ProductEnvironmentManagedSecretInput(BaseModel):
 
     binding_key: str
     integration: str
-    value: str
+    value: str = Field(default="", repr=False)
+    owner_submission_version_id: str = ""
 
     @model_validator(mode="after")
     def _validate_secret(self) -> "ProductEnvironmentManagedSecretInput":
@@ -68,8 +70,8 @@ class ProductEnvironmentManagedSecretInput(BaseModel):
             raise ValueError("Managed secret input requires binding_key.")
         if not self.integration:
             raise ValueError("Managed secret input requires integration.")
-        if not self.value.strip():
-            raise ValueError("Managed secret input requires a non-empty value.")
+        if bool(self.value.strip()) == bool(self.owner_submission_version_id.strip()):
+            raise ValueError("Managed secret input requires a value or one Owner submission.")
         return self
 
 
@@ -317,6 +319,7 @@ def product_environment_config_apply_request(
     profile: LaunchplaneProductProfileRecord,
     lane: ProductLaneProfile,
     request: ProductEnvironmentConfigApplyEnvelope,
+    owner_submission_resolver: Callable[[ProductSecretConfigRequirement, str], str] | None = None,
 ) -> ProductConfigApplyEnvelope:
     runtime_requirements = {
         requirement.key
@@ -347,14 +350,21 @@ def product_environment_config_apply_request(
     if unknown_secret_keys:
         raise ValueError("Managed secrets contain bindings not declared for this environment.")
 
-    secrets = [
-        _product_config_secret_input(
-            requirement=secret_requirements[(secret.integration, secret.binding_key)],
-            lane=lane,
-            value=secret.value,
+    secrets = []
+    for secret in request.managed_secrets:
+        requirement = secret_requirements[(secret.integration, secret.binding_key)]
+        value = secret.value
+        if secret.owner_submission_version_id:
+            if owner_submission_resolver is None:
+                raise ValueError("Owner submissions require the authorized service resolver.")
+            value = owner_submission_resolver(requirement, secret.owner_submission_version_id)
+        secrets.append(
+            _product_config_secret_input(
+                requirement=secret_requirements[(secret.integration, secret.binding_key)],
+                lane=lane,
+                value=value,
+            )
         )
-        for secret in request.managed_secrets
-    ]
     runtime_env = None
     if request.runtime_settings:
         runtime_env = ProductConfigRuntimeInput(

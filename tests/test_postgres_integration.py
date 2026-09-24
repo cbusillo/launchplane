@@ -245,6 +245,7 @@ from tests.test_detached_application_retirement import (
     _plan as _detached_application_retirement_plan,
 )
 from control_plane.storage.product_authority_bundle import (
+    ProductProfileConflictError,
     ProductAuthorityBundle,
     RuntimeEnvironmentConflictError,
     RuntimeEnvironmentWrite,
@@ -1158,6 +1159,44 @@ def _owner_acceptance_system_event(
 
 
 class RealPostgresSchemaIntegrationTests(unittest.TestCase):
+    def test_profile_guard_rejects_a_bundle_after_another_connection_changes_the_owner(
+        self,
+    ) -> None:
+        with _store_for_fresh_head_database() as store:
+            original = _product_profile()
+            store.write_product_profile_record(original)
+            changed_payload = original.model_dump()
+            changed_payload["owner"] = {"github_id": "9123", "github_login": "new-owner"}
+            changed = LaunchplaneProductProfileRecord.model_validate(changed_payload)
+            second_store = PostgresRecordStore(database_url=store.database_url)
+            try:
+                second_store.write_product_profile_record(changed)
+            finally:
+                second_store.close()
+            runtime = RuntimeEnvironmentRecord(
+                scope="instance",
+                context="example-site",
+                instance="testing",
+                env={"MAIL_MODE": "configured"},
+                updated_at="2026-09-24T00:00:00Z",
+                source_label="test",
+            )
+            with self.assertRaises(ProductProfileConflictError):
+                store.write_product_authority_bundle(
+                    ProductAuthorityBundle(
+                        expected_product_profiles=(original,),
+                        runtime_environments=(runtime,),
+                    )
+                )
+            self.assertEqual(store.list_runtime_environment_records(), ())
+            store.write_product_authority_bundle(
+                ProductAuthorityBundle(
+                    expected_product_profiles=(changed,),
+                    runtime_environments=(runtime,),
+                )
+            )
+            self.assertEqual(store.list_runtime_environment_records(), (runtime,))
+
     def test_historical_preflight_scopes_database_history_before_limits(self) -> None:
         with TemporaryDirectory() as directory, _store_for_fresh_head_database() as store:
             fixture = _HistoricalCompletionFixture(Path(directory))

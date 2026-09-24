@@ -424,6 +424,13 @@ class ProductRuntimeConfigRequirement(BaseModel):
         return self
 
 
+class ProductOwnerSecretInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    label: str = Field(min_length=1, max_length=120)
+    instructions: str = Field(default="", max_length=2000)
+
+
 class ProductSecretConfigRequirement(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -431,6 +438,7 @@ class ProductSecretConfigRequirement(BaseModel):
     integration: str = "runtime_environment"
     context: str = ""
     instance: str = ""
+    owner_input: ProductOwnerSecretInput | None = None
 
     @model_validator(mode="after")
     def _validate_requirement(self) -> "ProductSecretConfigRequirement":
@@ -440,6 +448,8 @@ class ProductSecretConfigRequirement(BaseModel):
             raise ValueError("product secret config requirement requires integration")
         if self.instance.strip() and not self.context.strip():
             raise ValueError("instance secret config requirement requires context")
+        if self.owner_input is not None and not (self.context.strip() and self.instance.strip()):
+            raise ValueError("Owner secret input requires one explicit context and instance")
         self.binding_key = self.binding_key.strip()
         self.integration = self.integration.strip()
         self.context = self.context.strip()

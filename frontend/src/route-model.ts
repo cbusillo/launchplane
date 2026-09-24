@@ -9,6 +9,7 @@ export type AppRoute =
       view: EnvironmentView;
     }
   | { kind: "owner-review" }
+  | { kind: "owner-secrets" }
   | { kind: "engineering"; view: EngineeringView }
   | { kind: "not-found"; path: string };
 
@@ -95,6 +96,9 @@ export function parseAppRoute(pathname: string): AppRoute {
   }
   if (normalizedPath === ownerReviewPath()) {
     return { kind: "owner-review" };
+  }
+  if (normalizedPath === "/ui/owner-secrets") {
+    return { kind: "owner-secrets" };
   }
   if (normalizedPath === engineeringPath()) {
     return { kind: "engineering", view: "hub" };

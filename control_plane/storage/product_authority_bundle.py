@@ -35,6 +35,10 @@ class RuntimeEnvironmentConflictError(ValueError):
     """Raised when runtime configuration changed after bundle planning."""
 
 
+class ProductProfileConflictError(ValueError):
+    """A product profile changed after it authorized a bundled write."""
+
+
 class RuntimeEnvironmentWrite(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -98,6 +102,7 @@ class ProductAuthorityBundle(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     product_profiles: tuple[LaunchplaneProductProfileRecord, ...] = ()
+    expected_product_profiles: tuple[LaunchplaneProductProfileRecord, ...] = ()
     dokploy_targets: tuple[DokployTargetRecord, ...] = ()
     dokploy_target_ids: tuple[DokployTargetIdRecord, ...] = ()
     provider_target_writes: tuple[ProviderTargetWrite, ...] = ()

@@ -7,6 +7,42 @@ title: Secrets
 - Define the control-plane-owned secret contract for deploy and operator
   workflows.
 
+## Owner credential input
+
+An operator can request a credential by setting `owner_input` on one managed-secret
+requirement in the stored product profile. It contains a human-readable `label` and
+`instructions` and requires an explicit context and environment. Omitted input
+declarations grant no submission surface. Real account names and provider details
+belong in these records, not application defaults.
+
+The named Owner signs in with GitHub at
+`/ui/owner-secrets?product=PRODUCT&environment=ENVIRONMENT`. The page reads
+`GET /v1/owner-secret-inputs` and submits one write-only value to
+`POST /v1/owner-secret-inputs/submit`. The service checks the immutable Owner id,
+the current request revision, CSRF, database storage and encryption availability.
+The password input is cleared before dispatch and on unmount; responses contain
+only request metadata and a receipt. Operators with product-profile read access
+can inspect receipts but cannot submit as the Owner.
+
+Submissions reuse managed-secret encryption and atomic authority bundles, under
+the `owner_secret_submission` integration with **no secret bindings**. The profile
+that authorized the submission is checked under the product lock during commit.
+A changed Owner or request cannot produce a stale authorized write. No runtime
+environment, active runtime secret, provider target, or deployment changes.
+
+An operator separately selects the saved submission in the environment's Managed
+secrets form. The existing product-config dry-run/apply route accepts
+`owner_submission_version_id` instead of a plaintext `value`. It resolves only the
+current version for the exact product, environment, declared binding and Owner,
+after operator authorization. Normal matching dry-run, confirmation, idempotency
+and runtime key-safety checks still apply. Application copies the value to a
+separate runtime secret; a later Owner submission cannot rotate that active value.
+Changing the profile during application aborts the atomic write. Live-target sync
+and actual application verification remain separate operator work.
+
+This is credential input, not an Owner operational role or a release decision.
+Product-profile write authority still controls which inputs are requested.
+
 ## Current Contract
 
 - Dokploy credentials belong to `launchplane`.

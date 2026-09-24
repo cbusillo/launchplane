@@ -22,9 +22,14 @@ export function productConfigManagedSecretIdentity(
 export function consumeManagedSecretValues(
   selections: readonly ManagedSecretSelection[],
   inputs: ReadonlyMap<string, SecretValueInput>,
+  ownerSubmissions: ReadonlyMap<string, string> = new Map(),
 ): ProductEnvironmentManagedSecretInput[] {
   try {
     return selections.map(({ bindingKey, integration, identity }) => {
+      const submissionVersion = ownerSubmissions.get(identity);
+      if (submissionVersion) {
+        return { binding_key: bindingKey, integration, owner_submission_version_id: submissionVersion };
+      }
       const value = inputs.get(identity)?.value ?? "";
       if (!value.trim()) {
         throw new Error(`Enter a value for ${bindingKey} (${integration}).`);

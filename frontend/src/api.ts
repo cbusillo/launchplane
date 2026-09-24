@@ -69,6 +69,8 @@ import type {
   WorkGraphSnapshot,
   WorkGraphSnapshotResponse,
   ProductReviewResponse,
+  OwnerSecretInputResponse,
+  SubmitOwnerSecretInputData,
   WriteProductReviewDecisionData,
   ReleaseReviewResponse,
   ReleaseReviewDecisionEnvelope,
@@ -655,6 +657,14 @@ export function readProductReview(
     undefined,
     signal,
   );
+}
+
+export function readOwnerSecretInputs(product: string, environment: string, signal?: AbortSignal): Promise<OwnerSecretInputResponse> {
+  return requestJson<OwnerSecretInputResponse>(`/v1/owner-secret-inputs?${new URLSearchParams({ product, environment })}`, "GET", undefined, signal);
+}
+
+export function submitOwnerSecretInput(payload: SubmitOwnerSecretInputData["body"]): Promise<OwnerSecretInputResponse> {
+  return requestJson<OwnerSecretInputResponse>(BROWSER_WRITE_ROUTES.ownerSecretSubmit, "POST", payload);
 }
 
 export function readReleaseReview(product: string, signal?: AbortSignal): Promise<ReleaseReviewResponse> {
