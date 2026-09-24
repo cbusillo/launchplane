@@ -149,6 +149,7 @@ def evaluate_merge_readiness_from_live_evidence(
         technical_checks=_technical_check_evidence(
             target=target,
             evidence=technical_checks,
+            structural_candidate_status=structural_candidate_status,
         ),
         engineering_decision=engineering_decision,
         engineering_evidence=_engineering_evidence(
@@ -413,6 +414,7 @@ def _technical_check_evidence(
     *,
     target: MergeReadinessTarget,
     evidence: TenantAdmissionTechnicalChecks | None,
+    structural_candidate_status: MergeReadinessStructuralCandidateStatus,
 ) -> MergeReadinessTechnicalCheckEvidence:
     if evidence is None:
         return MergeReadinessTechnicalCheckEvidence(
@@ -440,7 +442,9 @@ def _technical_check_evidence(
         required_checks=required_checks,
         signals=signals,
         strict=evidence.strict,
-        base_up_to_date=evidence.base_up_to_date,
+        base_up_to_date=(
+            evidence.base_up_to_date or structural_candidate_status == "recorded_rolling"
+        ),
     )
     return MergeReadinessTechnicalCheckEvidence(
         head_sha=evidence.head_sha,

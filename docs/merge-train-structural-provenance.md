@@ -37,6 +37,15 @@ reads repository evidence immediately before each landing, without querying
 Owner events or change-impact policies. Candidate no-op entries still require
 exact structural containment and landing evidence.
 
+Strict technical checks still read current required-check policy and results
+for the exact final candidate against the observed base. A proven
+`recorded_rolling` result satisfies base freshness when GitHub's actual landing
+commit differs from the synthetic candidate commit despite identical trees.
+Every prior merge must have the recorded head and result tree, and the actual
+base must match that chain. The original technical observation and its digest
+remain unchanged; readiness combines it with structural proof. Missing
+evidence, tree drift, or failed required checks continue to refuse landing.
+
 Landing observes and stores the actual rolling-base SHA/tree, landed-head
 SHA/tree, and merge-result SHA/tree on normal, retry, and already-merged crash
 recovery paths. Candidate no-op entries land as `skipped`, preserve the rolling
