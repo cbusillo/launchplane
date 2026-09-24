@@ -721,8 +721,12 @@ Controller actions have these retry/stop semantics:
   the stale records under the controller lease and replans. An empty queue
   returns `idle`, without building the obsolete ref.
   Mutate once, then call again.
-- `observe_candidate`: A built candidate needs check observation. Mutate or
-  dry-run later until checks pass, fail, or remain pending.
+- `observe_candidate`: A built candidate needs check observation. First compare
+  its queue, PR heads, and base with a fresh snapshot. Drift supersedes the old
+  records under the controller lease and replans, even when the old checks never
+  started. An unchanged candidate keeps waiting for its real checks; transient
+  readiness changes alone do not replace it. Mutate or dry-run later until
+  checks pass, fail, or remain pending.
 - `candidate_failed`: Candidate checks failed and still matches the current
   eligible queue. Stop and surface the candidate record id and failed check
   evidence. If the eligible queue/base changes, the next controller action may
