@@ -138,6 +138,7 @@ class OdooRuntimeReadTests(unittest.IsolatedAsyncioTestCase):
         self.health_identity = self.preview_identity
         self.domains = [urlsplit(self.preview.canonical_url).hostname, "testing.example.invalid"]
         self.mail_error = False
+        self.mail_missing_result = False
         self.destroy_on_logs = False
         self.patch = patch(
             "control_plane.odoo_runtime_reads.source.read_dokploy_config",
@@ -239,14 +240,18 @@ class OdooRuntimeReadTests(unittest.IsolatedAsyncioTestCase):
         assert isinstance(req.data, bytes)
         body = json.loads(req.data)
         self.rpc_calls.append(body)
+        envelope = {"jsonrpc": "2.0", "id": body["id"]}
         if req.full_url.endswith("/web/session/authenticate"):
-            return {"result": {"uid": 7}}
+            return {**envelope, "result": {"uid": 7}}
         if req.full_url.endswith("/web/session/destroy"):
-            return {"result": None}
+            # Odoo omits result when a controller returns None.
+            return envelope
         self.assertTrue(req.full_url.endswith("/web/dataset/call_kw"))
         if self.mail_error:
-            return {"error": {"message": "admin-secret"}}
-        return {"result": self.mail_rows}
+            return {**envelope, "error": {"message": "admin-secret"}}
+        if self.mail_missing_result:
+            return envelope
+        return {**envelope, "result": self.mail_rows}
 
     def app(
         self,
@@ -432,6 +437,13 @@ class OdooRuntimeReadTests(unittest.IsolatedAsyncioTestCase):
         response = await self.get(self.base + "/outgoing-email", self.filters)
         self.assertEqual(response.status_code, 503, response.text)
         self.assertNotIn("admin-secret", response.text)
+        self.assertEqual(self.rpc_calls[-1]["params"], {})
+
+    async def test_missing_mail_result_is_not_accepted_as_a_successful_empty_logout(self) -> None:
+        self.mail_missing_result = True
+        response = await self.get(self.base + "/outgoing-email", self.filters)
+        self.assertEqual(response.status_code, 503, response.text)
+        self.assertEqual(response.json()["error"]["code"], "odoo_read_rejected")
         self.assertEqual(self.rpc_calls[-1]["params"], {})
 
     async def test_wrong_public_runtime_never_receives_credentials(self) -> None:

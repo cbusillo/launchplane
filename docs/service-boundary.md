@@ -3085,7 +3085,9 @@ the running container's configured Odoo credentials internally and only calls
 belong to the selected compose's provider domains and report the selected runtime
 identity before authentication and after the read; redirects are rejected.
 The temporary authenticated Odoo session is destroyed after the read, including
-when the mail query fails. Authentication can produce Odoo login audit records;
+when the mail query fails. Odoo's successful empty logout response is accepted;
+authentication and mail queries still require a result payload in their JSON-RPC
+response. Authentication can produce Odoo login audit records;
 no business record is written. No body, attachment, environment value, or credential
 is returned. Provider errors do not echo remote payloads.
 
