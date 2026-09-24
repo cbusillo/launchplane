@@ -1,12 +1,16 @@
 import json
+import io
 import unittest
 from collections.abc import Mapping
+from email.message import Message
+from http.client import IncompleteRead
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, cast
-from unittest.mock import patch
-from urllib.parse import urlencode
-from urllib.request import Request
+from unittest.mock import MagicMock, patch
+from urllib.parse import urlencode, urlsplit
+from urllib.request import BaseHandler, OpenerDirector, Request, build_opener
+from urllib.response import addinfourl
 
 from fastapi import FastAPI
 from httpx2 import Response
@@ -18,6 +22,7 @@ from control_plane.contracts.product_profile_record import LaunchplaneProductPro
 from control_plane.contracts.promotion_record import DeploymentEvidence
 from control_plane.contracts.runtime_identity import RuntimeIdentity, RUNTIME_IDENTITY_ENV_KEY
 from control_plane.http_app import create_launchplane_fastapi_app
+from control_plane.odoo_runtime_reads import _NoRedirects
 from control_plane.service_auth import LaunchplaneAuthzPolicy
 from control_plane.storage.filesystem import FilesystemRecordStore
 from tests.http_app_test_support import (
@@ -131,6 +136,8 @@ class OdooRuntimeReadTests(unittest.IsolatedAsyncioTestCase):
         self.container_identity = self.preview_identity
         self.container_image = self.preview_identity.image_reference
         self.health_identity = self.preview_identity
+        self.domains = [urlsplit(self.preview.canonical_url).hostname, "testing.example.invalid"]
+        self.mail_error = False
         self.destroy_on_logs = False
         self.patch = patch(
             "control_plane.odoo_runtime_reads.source.read_dokploy_config",
@@ -188,6 +195,8 @@ class OdooRuntimeReadTests(unittest.IsolatedAsyncioTestCase):
                 "appName": "selected-compose",
                 "serverId": "server",
             }
+        if path == "/api/domain.byComposeId":
+            return [{"host": domain} for domain in self.domains]
         if path == "/api/docker.getContainersByAppNameMatch":
             return [
                 {
@@ -221,7 +230,7 @@ class OdooRuntimeReadTests(unittest.IsolatedAsyncioTestCase):
                     )
                 )
             return "old mail\nMAIL SMTP_PASSWORD=mail-secret\nhealth ok"
-        raise AssertionError(f"Unexpected provider request: {path}")
+        raise AssertionError(f"Unexpected provider request: {path!r}")
 
     def http_json(self, _opener: object, req: Request) -> object:
         if req.data is None:
@@ -231,7 +240,11 @@ class OdooRuntimeReadTests(unittest.IsolatedAsyncioTestCase):
         self.rpc_calls.append(body)
         if req.full_url.endswith("/web/session/authenticate"):
             return {"result": {"uid": 7}}
+        if req.full_url.endswith("/web/session/destroy"):
+            return {"result": None}
         self.assertTrue(req.full_url.endswith("/web/dataset/call_kw"))
+        if self.mail_error:
+            return {"error": {"message": "admin-secret"}}
         return {"result": self.mail_rows}
 
     def app(
@@ -328,6 +341,15 @@ class OdooRuntimeReadTests(unittest.IsolatedAsyncioTestCase):
             any(call["path"] == "/api/compose.readLogs" for call in self.provider_calls)
         )
 
+    async def test_refresh_in_progress_is_a_conflict_not_a_provider_outage(self) -> None:
+        self.store.write_preview_record(
+            self.preview.model_copy(update={"latest_manifest_fingerprint": "new-manifest"})
+        )
+        response = await self.get(self.base + "/logs")
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(response.json()["error"]["code"], "preview_identity_mismatch")
+        self.assertFalse(self.provider_calls)
+
     async def test_image_drift_rejects_before_mail_credentials_are_sent(self) -> None:
         self.container_image = "ghcr.io/example/site:latest"
         response = await self.get(self.base + "/outgoing-email", self.filters)
@@ -389,11 +411,74 @@ class OdooRuntimeReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["runtime"]["target_id"], "stable-target")
         self.assertEqual(self.rpc_calls[0]["params"]["db"], "actual_deployed_database")
 
+    async def test_unbound_stable_origin_cannot_receive_credentials_even_if_health_matches(
+        self,
+    ) -> None:
+        self.container_identity = self.stable_identity
+        self.health_identity = self.stable_identity
+        self.domains = ["different.example.invalid"]
+        response = await self.get(
+            "/v1/products/example-site/environments/testing/outgoing-email", self.filters
+        )
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(response.json()["error"]["code"], "runtime_domain_mismatch")
+        self.assertFalse(self.rpc_calls)
+
+    async def test_rejected_mail_read_still_destroys_its_session_without_leaking_error(
+        self,
+    ) -> None:
+        self.mail_error = True
+        response = await self.get(self.base + "/outgoing-email", self.filters)
+        self.assertEqual(response.status_code, 503, response.text)
+        self.assertNotIn("admin-secret", response.text)
+        self.assertEqual(self.rpc_calls[-1]["params"], {})
+
     async def test_wrong_public_runtime_never_receives_credentials(self) -> None:
         self.health_identity = self.stable_identity
         response = await self.get(self.base + "/outgoing-email", self.filters)
         self.assertEqual(response.status_code, 409, response.text)
         self.assertFalse(self.rpc_calls)
+
+    async def test_redirect_is_not_followed_and_never_receives_credentials(self) -> None:
+        self.http_patch.stop()
+        urls: list[str] = []
+
+        class RedirectResponse(addinfourl):
+            msg = "Found"
+
+        class RedirectingOrigin(BaseHandler):
+            handler_order = 100
+
+            def https_open(self, req: Request) -> addinfourl:
+                urls.append(req.full_url)
+                headers = Message()
+                headers["Location"] = "https://wrong.example.invalid/launchplane/health"
+                return RedirectResponse(io.BytesIO(b""), headers, req.full_url, 302)
+
+        opener = build_opener(_NoRedirects(), RedirectingOrigin())
+        with patch("control_plane.odoo_runtime_reads.build_opener", return_value=opener):
+            response = await self.get(self.base + "/outgoing-email", self.filters)
+        self.assertEqual(response.status_code, 503, response.text)
+        self.assertEqual(response.json()["error"]["code"], "odoo_redirect")
+        self.assertEqual(urls, [self.preview.canonical_url + "/launchplane/health"])
+
+    async def test_partial_or_oversized_http_response_returns_sanitized_unavailable(self) -> None:
+        self.http_patch.stop()
+        for failure in (
+            IncompleteRead(b"admin-secret"),
+            ConnectionResetError("admin-secret"),
+            None,
+        ):
+            with self.subTest(failure=type(failure).__name__):
+                opener = MagicMock(spec=OpenerDirector)
+                reader = opener.open.return_value.__enter__.return_value.read
+                reader.side_effect = failure
+                reader.return_value = b"x" * 1_000_001
+                with patch("control_plane.odoo_runtime_reads.build_opener", return_value=opener):
+                    response = await self.get(self.base + "/outgoing-email", self.filters)
+                self.assertEqual(response.status_code, 503, response.text)
+                self.assertNotIn("admin-secret", response.text)
+                self.assertEqual(opener.open.call_count, 1)
 
     async def test_invalid_query_is_rejected_before_provider_access(self) -> None:
         for update in ({"created_after": "2026-09-23T00:00:00"}, {"subject": " "}, {"limit": 500}):

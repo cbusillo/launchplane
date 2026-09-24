@@ -3,10 +3,10 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from http.client import HTTPException as HTTPTransportError
 from http.cookiejar import CookieJar
 from pathlib import Path
 from typing import Literal, Protocol
-from urllib.error import URLError
 from urllib.parse import urlsplit
 from urllib.request import (
     HTTPCookieProcessor,
@@ -32,7 +32,10 @@ from control_plane.contracts.runtime_identity import (
 )
 from control_plane.dokploy import api, source
 from control_plane.preview_serving_evidence import verify_serving_preview
-from control_plane.workflows.odoo_preview_runtime import discover_odoo_preview_target
+from control_plane.workflows.odoo_preview_runtime import (
+    discover_odoo_preview_target,
+    odoo_compose_has_domain,
+)
 from control_plane.workflows.ship import utc_now_timestamp
 
 
@@ -151,7 +154,7 @@ def assert_selection_current(store: OdooRuntimeReadStore, selection: OdooRuntime
     else:
         profile = store.read_product_profile_record(selection.identity.product)
         current = select_stable_runtime(store, profile, selection.identity.instance)
-    if current != selection:
+    if current.identity != selection.identity or current.base_url != selection.base_url:
         raise OdooRuntimeReadError(
             "runtime_changed",
             "The runtime changed during the read; retry against its current generation.",
@@ -418,7 +421,7 @@ def _http_json(opener: OpenerDirector, request: Request) -> object:
                 "odoo_response_too_large", "Odoo returned an oversized response.", 503
             )
         return json.loads(raw)
-    except (URLError, TimeoutError, UnicodeError, json.JSONDecodeError) as error:
+    except (OSError, HTTPTransportError, UnicodeError, json.JSONDecodeError) as error:
         raise OdooRuntimeReadError(
             "odoo_read_unavailable",
             "Odoo did not return a valid response to the bounded read.",
@@ -468,6 +471,16 @@ def read_outgoing_email(
             "The running Odoo container has no configured diagnostic credentials.",
             503,
         )
+    if not odoo_compose_has_domain(
+        host=connection.host,
+        token=connection.token,
+        compose_id=connection.evidence.target_id,
+        domain_host=url.hostname,
+    ):
+        raise OdooRuntimeReadError(
+            "runtime_domain_mismatch",
+            "The recorded origin is not bound to the selected Odoo deployment.",
+        )
     opener = build_opener(_NoRedirects(), HTTPCookieProcessor(CookieJar()))
     health = _http_json(opener, Request(base_url + "/launchplane/health"))
     require_runtime_identity(
@@ -505,7 +518,21 @@ def read_outgoing_email(
         "write_date",
         "auto_delete",
     ]
-    result = _rpc(
+    try:
+        result = _search_mail(opener, base_url, fields, query)
+    finally:
+        _rpc(opener, base_url, "/web/session/destroy", {})
+    health = _http_json(opener, Request(base_url + "/launchplane/health"))
+    require_runtime_identity(
+        connection.selection.identity, runtime_identity_from_health_payload(health)
+    )
+    return _mail_result(query, result, credentials)
+
+
+def _search_mail(
+    opener: OpenerDirector, base_url: str, fields: list[str], query: OutgoingEmailQuery
+) -> object:
+    return _rpc(
         opener,
         base_url,
         "/web/dataset/call_kw",
@@ -530,6 +557,13 @@ def read_outgoing_email(
             },
         },
     )
+
+
+def _mail_result(
+    query: OutgoingEmailQuery,
+    result: object,
+    credentials: dict[str, str],
+) -> OutgoingEmailResult:
     if not isinstance(result, list) or len(result) > query.limit + 1:
         raise OdooRuntimeReadError(
             "invalid_mail_status", "Odoo returned an invalid bounded mail-status result.", 503
@@ -564,10 +598,6 @@ def read_outgoing_email(
                 auto_delete=row.get("auto_delete") is True,
             )
         )
-    health = _http_json(opener, Request(base_url + "/launchplane/health"))
-    require_runtime_identity(
-        connection.selection.identity, runtime_identity_from_health_payload(health)
-    )
     unique = len(result) == 1
     left_odoo = (messages[0].state == "sent") if unique and messages[0].state != "unknown" else None
     return OutgoingEmailResult(
@@ -583,7 +613,7 @@ def _literal_like(value: str) -> str:
 
 
 def _redact(value: object, credentials: dict[str, str]) -> str:
-    text = str(value or "")
+    text = value if isinstance(value, str) else ""
     password = credentials.get("ODOO_ADMIN_PASSWORD", "")
     if password:
         text = text.replace(password, "[redacted]")

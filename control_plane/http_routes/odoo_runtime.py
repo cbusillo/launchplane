@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict
 from control_plane import odoo_runtime_reads as reads
 from control_plane.dokploy import api
 from control_plane.http_routes.support import ApiRouteRegistrar, ReadRouteDependencies
+from control_plane.preview_serving_evidence import PreviewServingEvidenceError
 from control_plane.service_auth import AuthorizationTarget, LaunchplaneIdentity
 
 
@@ -56,6 +57,13 @@ def register_odoo_runtime_read_routes(
         except reads.OdooRuntimeReadError as error:
             raise common.http_error(
                 status_code=error.status_code,
+                trace_id=trace_id,
+                code=error.code,
+                message=str(error),
+            ) from error
+        except PreviewServingEvidenceError as error:
+            raise common.http_error(
+                status_code=409,
                 trace_id=trace_id,
                 code=error.code,
                 message=str(error),

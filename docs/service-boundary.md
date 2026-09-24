@@ -3071,6 +3071,8 @@ container's compose membership, runtime identity, and immutable image. Reads
 return the observed generation and container with bounded, redacted log lines.
 Refresh needs no extra target row; destroyed previews return `410
 preview_destroyed`. A concurrent lifecycle change discards the result.
+Failed previews and refreshes whose current manifest no longer matches the
+serving generation return `409` with the lifecycle/identity reason.
 
 Odoo mail status is available through `GET
 /v1/previews/{preview_id}/outgoing-email` and `GET
@@ -3080,8 +3082,11 @@ Odoo mail status is available through `GET
 `email_to` value, and a timezone-qualified `created_after`. The service uses
 the running container's configured Odoo credentials internally and only calls
 `mail.mail.search_read` with a fixed field list. The recorded HTTPS origin must
-report the selected runtime identity before authentication and after the read;
-redirects are rejected. No body, attachment, environment value, or credential
+belong to the selected compose's provider domains and report the selected runtime
+identity before authentication and after the read; redirects are rejected.
+The temporary authenticated Odoo session is destroyed after the read, including
+when the mail query fails. Authentication can produce Odoo login audit records;
+no business record is written. No body, attachment, environment value, or credential
 is returned. Provider errors do not echo remote payloads.
 
 Results distinguish queued, sent, failed, cancelled, and unknown mail, retaining

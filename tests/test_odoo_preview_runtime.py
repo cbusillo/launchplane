@@ -1825,7 +1825,7 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         )
         with (
             patch(
-                "control_plane.workflows.odoo_preview_runtime._discover_odoo_preview_target",
+                "control_plane.workflows.odoo_preview_runtime.discover_odoo_preview_target",
                 return_value=_target(),
             ),
             patch(
@@ -2155,7 +2155,7 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
                 return_value=("https://dokploy.example", "token"),
             ),
             patch(
-                "control_plane.workflows.odoo_preview_runtime._discover_odoo_preview_target",
+                "control_plane.workflows.odoo_preview_runtime.discover_odoo_preview_target",
                 return_value=_target(),
             ),
             patch(
