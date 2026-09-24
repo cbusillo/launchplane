@@ -9,8 +9,18 @@ from fastapi import Depends, Path, Query, Response
 from pydantic import BaseModel, ConfigDict
 
 from control_plane import odoo_runtime_reads as reads
+from control_plane.contracts.odoo_instance_override_record import (
+    OdooOverrideApplyPhase,
+    OdooWebsiteBootstrapPayload,
+)
 from control_plane.dokploy import api
 from control_plane.http_routes.support import ApiRouteRegistrar, ReadRouteDependencies
+from control_plane.odoo_post_deploy_http import OdooInstanceOverrideStore
+from control_plane.odoo_product_driver_http import (
+    OdooProductMismatchError,
+    OdooRouteDependencyError,
+    resolve_odoo_product_route,
+)
 from control_plane.preview_serving_evidence import PreviewServingEvidenceError
 from control_plane.service_auth import AuthorizationTarget, LaunchplaneIdentity
 
@@ -45,6 +55,20 @@ class OdooOutgoingEmailResponse(BaseModel):
     email: reads.OutgoingEmailResult
 
 
+class OdooWebsiteBootstrapResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    product: str
+    context: str
+    instance: str
+    website_bootstrap: OdooWebsiteBootstrapPayload | None
+    apply_on: tuple[OdooOverrideApplyPhase, ...]
+    updated_at: str
+    source_label: str
+
+
 def register_odoo_runtime_read_routes(
     app: ApiRouteRegistrar, *, dependencies: OdooRuntimeReadDependencies
 ) -> None:
@@ -68,7 +92,7 @@ def register_odoo_runtime_read_routes(
                 code=error.code,
                 message=str(error),
             ) from error
-        except FileNotFoundError as error:
+        except (FileNotFoundError, OdooRouteDependencyError) as error:
             raise common.http_error(
                 status_code=404,
                 trace_id=trace_id,
@@ -227,6 +251,46 @@ def register_odoo_runtime_read_routes(
             selection = reads.select_stable_runtime(typed, profile, environment)
             return email_response(record_store, selection, query, trace_id)
 
+    def read_environment_website_bootstrap(
+        product: Annotated[str, Path(min_length=1)],
+        environment: Annotated[str, Path(min_length=1)],
+        identity: Annotated[LaunchplaneIdentity, Depends(common.read_identity)],
+        record_store: Annotated[object, Depends(common.get_record_store)],
+        response: Response,
+    ) -> OdooWebsiteBootstrapResponse:
+        trace_id = common.next_trace_id()
+        response.headers["Cache-Control"] = "no-store"
+        with errors(trace_id):
+            try:
+                profile = resolve_odoo_product_route(
+                    record_store=record_store, product=product, instance=environment
+                )
+            except OdooProductMismatchError as error:
+                raise reads.OdooRuntimeReadError(
+                    "invalid_odoo_environment",
+                    "The product does not own this Odoo environment.",
+                    400,
+                ) from error
+            lane = next(
+                lane for lane in profile.lanes if lane.instance.strip() == environment.strip()
+            )
+            authorize(identity, "operations.read", lane.context, trace_id, lane.instance)
+            record = cast(
+                OdooInstanceOverrideStore, record_store
+            ).read_odoo_instance_override_record(
+                context_name=lane.context, instance_name=lane.instance
+            )
+            return OdooWebsiteBootstrapResponse(
+                trace_id=trace_id,
+                product=profile.product,
+                context=lane.context,
+                instance=lane.instance,
+                website_bootstrap=record.website_bootstrap,
+                apply_on=record.apply_on,
+                updated_at=record.updated_at,
+                source_label=record.source_label,
+            )
+
     for path, endpoint, model, operation_id, summary in (
         (
             "/v1/previews/{preview_id}/logs",
@@ -248,6 +312,13 @@ def register_odoo_runtime_read_routes(
             OdooOutgoingEmailResponse,
             "read_environment_outgoing_email",
             "Read Odoo environment outgoing-email status",
+        ),
+        (
+            "/v1/products/{product}/environments/{environment}/website-bootstrap",
+            read_environment_website_bootstrap,
+            OdooWebsiteBootstrapResponse,
+            "read_environment_website_bootstrap",
+            "Read persisted Odoo website bootstrap settings",
         ),
     ):
         app.add_api_route(
