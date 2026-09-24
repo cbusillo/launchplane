@@ -357,6 +357,12 @@ class OdooRuntimeReadTests(unittest.IsolatedAsyncioTestCase):
         wrong_lane = await self.get(path.replace("/testing/", "/prod/"))
         self.assertEqual(wrong_lane.status_code, 400)
         self.store.write_product_profile_record(
+            self.profile.model_copy(update={"product": "other-site"})
+        )
+        ambiguous_lane = await self.get(path)
+        self.assertEqual(ambiguous_lane.status_code, 400)
+        self.assertEqual(ambiguous_lane.json()["error"]["code"], "invalid_odoo_environment")
+        self.store.write_product_profile_record(
             self.profile.model_copy(update={"driver_id": "generic_web"})
         )
         wrong_driver = await self.get(path)

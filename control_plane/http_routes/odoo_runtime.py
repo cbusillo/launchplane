@@ -16,6 +16,11 @@ from control_plane.contracts.odoo_instance_override_record import (
 from control_plane.dokploy import api
 from control_plane.http_routes.support import ApiRouteRegistrar, ReadRouteDependencies
 from control_plane.odoo_post_deploy_http import OdooInstanceOverrideStore
+from control_plane.odoo_product_driver_http import (
+    OdooProductMismatchError,
+    OdooRouteDependencyError,
+    resolve_odoo_product_route,
+)
 from control_plane.preview_serving_evidence import PreviewServingEvidenceError
 from control_plane.service_auth import AuthorizationTarget, LaunchplaneIdentity
 
@@ -87,7 +92,7 @@ def register_odoo_runtime_read_routes(
                 code=error.code,
                 message=str(error),
             ) from error
-        except FileNotFoundError as error:
+        except (FileNotFoundError, OdooRouteDependencyError) as error:
             raise common.http_error(
                 status_code=404,
                 trace_id=trace_id,
@@ -256,16 +261,19 @@ def register_odoo_runtime_read_routes(
         trace_id = common.next_trace_id()
         response.headers["Cache-Control"] = "no-store"
         with errors(trace_id):
-            profile = cast(reads.OdooRuntimeReadStore, record_store).read_product_profile_record(
-                product
-            )
-            lane = next((lane for lane in profile.lanes if lane.instance == environment), None)
-            if profile.driver_id != "odoo" or lane is None:
+            try:
+                profile = resolve_odoo_product_route(
+                    record_store=record_store, product=product, instance=environment
+                )
+            except OdooProductMismatchError as error:
                 raise reads.OdooRuntimeReadError(
                     "invalid_odoo_environment",
                     "The product does not own this Odoo environment.",
                     400,
-                )
+                ) from error
+            lane = next(
+                lane for lane in profile.lanes if lane.instance.strip() == environment.strip()
+            )
             authorize(identity, "operations.read", lane.context, trace_id, lane.instance)
             record = cast(
                 OdooInstanceOverrideStore, record_store
