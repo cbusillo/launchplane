@@ -267,7 +267,7 @@ class OrdinaryAgentActivationAuthorizationHttpTests(unittest.IsolatedAsyncioTest
             cast(ApiRouteRegistrar, app),
             dependencies=PrivilegedOperationRouteDependencies(
                 common=ReadRouteDependencies(
-                    read_identity=_agent,
+                    read_identity=read_human,
                     get_record_store=lambda: store,
                     next_trace_id=lambda: f"trace-{next(trace_counter)}",
                     authorization_allows=lambda **_: False,

@@ -691,19 +691,24 @@ def register_privileged_operation_routes(
             raise ValueError("Privileged-operation descriptor does not expose this action.")
         return action
 
+    def read_record_identity(
+        identity: Annotated[LaunchplaneIdentity, Depends(dependencies.common.read_identity)],
+    ) -> GitHubHumanIdentity | LocalOperatorIdentity:
+        if not isinstance(identity, GitHubHumanIdentity | LocalOperatorIdentity):
+            raise dependencies.common.http_error(
+                status_code=403,
+                trace_id=dependencies.common.next_trace_id(),
+                code="authorization_denied",
+                message="Identity cannot read privileged-operation records.",
+            )
+        return identity
+
     def require_record_read(
         *,
         identity: LaunchplaneIdentity,
         descriptor_id: PrivilegedOperationDescriptorId,
         trace_id: str,
     ) -> None:
-        if not isinstance(identity, GitHubHumanIdentity | LocalOperatorIdentity):
-            raise dependencies.common.http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="authorization_denied",
-                message="Identity cannot read privileged-operation records.",
-            )
         action = descriptor_action(descriptor_id, "human_read_action")
         require_managed_rule(
             identity=identity, action=action, trace_id=trace_id, descriptor_id=descriptor_id
@@ -733,7 +738,7 @@ def register_privileged_operation_routes(
     def read_ordinary_agent_delivery_activation_options(
         identity: Annotated[
             LaunchplaneIdentity,
-            Depends(dependencies.common.read_identity),
+            Depends(read_record_identity),
         ],
         record_store: Annotated[object, Depends(dependencies.common.get_record_store)],
     ) -> OrdinaryAgentDeliveryActivationOptionsResponse:
@@ -1035,7 +1040,7 @@ def register_privileged_operation_routes(
     def list_human_privileged_operations(
         identity: Annotated[
             LaunchplaneIdentity,
-            Depends(dependencies.common.read_identity),
+            Depends(read_record_identity),
         ],
         record_store: Annotated[object, Depends(dependencies.common.get_record_store)],
         status: Annotated[PrivilegedOperationStatus | None, Query()] = None,
@@ -1086,7 +1091,7 @@ def register_privileged_operation_routes(
     def read_human_privileged_operation(
         identity: Annotated[
             LaunchplaneIdentity,
-            Depends(dependencies.common.read_identity),
+            Depends(read_record_identity),
         ],
         record_store: Annotated[object, Depends(dependencies.common.get_record_store)],
         operation_id: Annotated[str, Path(min_length=1, max_length=96)],
@@ -1125,7 +1130,7 @@ def register_privileged_operation_routes(
     def read_human_privileged_operation_review(
         identity: Annotated[
             LaunchplaneIdentity,
-            Depends(dependencies.common.read_identity),
+            Depends(read_record_identity),
         ],
         record_store: Annotated[object, Depends(dependencies.common.get_record_store)],
         operation_id: Annotated[str, Path(min_length=1, max_length=96)],
