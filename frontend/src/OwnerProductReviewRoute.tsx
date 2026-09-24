@@ -66,7 +66,7 @@ export function OwnerReviewShell({
         Skip to content
       </a>
       <header className="owner-review-header">
-        <div className="owner-review-brand" aria-label="Launchplane product review">
+        <div className="owner-review-brand" aria-label={`Launchplane ${title.toLowerCase()}`}>
           <img
             alt=""
             src={`${import.meta.env.BASE_URL}assets/brand/launchplane-icon.svg`}

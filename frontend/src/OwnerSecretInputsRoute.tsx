@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type SubmitEvent } from "react";
 
 import { readOwnerSecretInputs, submitOwnerSecretInput } from "./api";
 import { loadDevFixtures, type DevFixtureMode } from "./dev-fixture-loader";
@@ -54,7 +54,7 @@ function SecretInput({ field, request, onSaved, fixtureMode }: { field: OwnerSec
     return () => { if (element) element.value = ""; };
   }, []);
 
-  async function submit(event: FormEvent) {
+  async function submit(event: SubmitEvent<HTMLFormElement>) {
     event.preventDefault();
     const value = input.current?.value || "";
     if (input.current) input.current.value = "";

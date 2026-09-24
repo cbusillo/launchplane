@@ -42,6 +42,10 @@ separate runtime secret; a later Owner submission cannot rotate that active valu
 Changing the profile during application aborts the atomic write. Live-target sync
 and actual application verification remain separate operator work.
 
+An exact retry of a completed application replays its stored receipt before
+resolving the submitted credential. Owner replacement or encryption-key retirement
+cannot strand a credential-reference-only request after a lost apply response.
+
 This is credential input, not an Owner operational role or a release decision.
 Product-profile write authority still controls which inputs are requested.
 

@@ -94,6 +94,7 @@ def register_owner_secret_input_routes(
                 code="database_storage_required",
                 message="Owner credential input requires database storage.",
             )
+        lane: ProductLaneProfile | None = None
         try:
             profile = record_store.read_product_profile_record(product)
             lane = next(lane for lane in profile.lanes if lane.instance == environment)
@@ -111,7 +112,7 @@ def register_owner_secret_input_routes(
                 )
             )
         )
-        if not allowed or profile is None:
+        if not allowed or profile is None or lane is None:
             raise common.http_error(
                 status_code=403,
                 trace_id=trace_id,

@@ -161,7 +161,7 @@ export function App() {
     if (
       authState.status !== "signed_in" ||
       route.kind === "engineering" ||
-      (route.kind === "owner-review" || route.kind === "owner-secrets")
+      route.kind === "owner-review" || route.kind === "owner-secrets"
     ) {
       setProductsResource(emptyResource());
       return;
@@ -273,7 +273,7 @@ export function App() {
     );
   }
 
-  if ((route.kind === "owner-review" || route.kind === "owner-secrets")) {
+  if (route.kind === "owner-review" || route.kind === "owner-secrets") {
     return (
       <OwnerReviewShell
         title={route.kind === "owner-secrets" ? "Credential setup" : "Product review"}

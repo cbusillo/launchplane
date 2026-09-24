@@ -162,7 +162,7 @@ class OwnerSecretInputTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_non_owner_and_stale_owner_cannot_submit(self) -> None:
         payload = await self.submission()
-        for human in (_human("owner", 9002), _human("operator", 9003, "admin")):
+        for human in (_human(github_id=9002), _human("operator", 9003, "admin")):
             response = await self.post(payload, human=human)
             self.assertEqual(response.status_code, 403, response.text)
         changed = self.profile.model_dump()
@@ -227,10 +227,12 @@ class OwnerSecretInputTests(unittest.IsolatedAsyncioTestCase):
             patch("control_plane.secrets.utc_now_timestamp", return_value="2026-09-24T02:00:00Z"),
         ):
             plan = secrets.reencrypt_secrets(record_store=self.store)
+            plan_digest = plan["plan_digest"]
+            assert isinstance(plan_digest, str)
             applied = secrets.reencrypt_secrets(
                 record_store=self.store,
                 apply=True,
-                expected_plan_digest=str(plan["plan_digest"]),
+                expected_plan_digest=plan_digest,
                 actor="operator:key-rotation",
                 reason="Rotate the test key.",
             )
@@ -383,6 +385,30 @@ class OwnerSecretInputTests(unittest.IsolatedAsyncioTestCase):
             instance_name="testing",
         )
         self.assertEqual(active_after, active_before)
+        # A lost response remains recoverable even after replacement and key retirement.
+        with patch.dict(os.environ, {}, clear=True):
+            replay = await self.post(
+                {**payload, "mode": "apply", "confirmation": "APPLY example-site/testing"},
+                human=operator,
+                path=_CONFIG,
+                key="apply-mail-submission",
+            )
+        self.assertEqual(replay.status_code, 202, replay.text)
+        self.assertTrue(replay.json()["replayed"])
+        self.assertEqual(replay.json()["original_trace_id"], applied.json()["trace_id"])
+        conflicting_retry = await self.post(
+            {
+                **payload,
+                "mode": "apply",
+                "confirmation": "APPLY example-site/testing",
+                "reason": "Changed request",
+            },
+            human=operator,
+            path=_CONFIG,
+            key="apply-mail-submission",
+        )
+        self.assertEqual(conflicting_retry.status_code, 409)
+        self.assertEqual(conflicting_retry.json()["error"]["code"], "idempotency_key_reused")
         stale_plan = await self.post(payload, human=operator, path=_CONFIG)
         self.assertEqual(stale_plan.status_code, 409)
         self.assertIn("Refresh", stale_plan.json()["error"]["message"])

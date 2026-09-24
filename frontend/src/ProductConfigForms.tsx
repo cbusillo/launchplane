@@ -263,12 +263,14 @@ export function ManagedSecretsChangePanel({
   const [ownerFields, setOwnerFields] = useState<OwnerSecretInputField[]>([]);
   const [ownerSources, setOwnerSources] = useState(new Map<string, string>());
   const [ownerRefresh, setOwnerRefresh] = useState(0);
+  const [ownerLoadError, setOwnerLoadError] = useState("");
   useEffect(() => {
     if (fixtureMode) return;
     const controller = new AbortController();
+    setOwnerLoadError("");
     void readOwnerSecretInputs(config.product, config.environment, controller.signal)
       .then(result => { if (!controller.signal.aborted) setOwnerFields(result.fields); })
-      .catch(() => { if (!controller.signal.aborted) setOwnerFields([]); });
+      .catch(() => { if (!controller.signal.aborted) setOwnerLoadError("Saved Owner credentials could not be loaded. Refresh to try again."); });
     return () => controller.abort();
   }, [config.product, config.environment, fixtureMode, ownerRefresh]);
   const planOperation = useProductConfigOperation(
@@ -407,7 +409,8 @@ export function ManagedSecretsChangePanel({
       title="Plan managed-secret changes"
     >
       <AvailabilityBlockers availability={availability} />
-      {ownerFields.length ? <button className="button" type="button" disabled={draftLocked} onClick={() => {
+      {ownerLoadError ? <p role="alert">{ownerLoadError}</p> : null}
+      {ownerFields.length || ownerLoadError ? <button className="button" type="button" disabled={draftLocked} onClick={() => {
         setOwnerSources(new Map());
         setPlanResult(null);
         setConfirmed(false);
