@@ -110,6 +110,7 @@ from control_plane.service_auth import (
     GitHubHumanIdentity,
     LaunchplaneAuthzPolicy,
     LaunchplaneIdentity,
+    LocalOperatorIdentity,
     TerminalAgentIdentity,
     authz_policy_allows_immutable_github_id_administration,
 )
@@ -690,18 +691,56 @@ def register_privileged_operation_routes(
             raise ValueError("Privileged-operation descriptor does not expose this action.")
         return action
 
+    def require_record_read(
+        *,
+        identity: LaunchplaneIdentity,
+        descriptor_id: PrivilegedOperationDescriptorId,
+        trace_id: str,
+    ) -> None:
+        if not isinstance(identity, GitHubHumanIdentity | LocalOperatorIdentity):
+            raise dependencies.common.http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Identity cannot read privileged-operation records.",
+            )
+        action = descriptor_action(descriptor_id, "human_read_action")
+        require_managed_rule(
+            identity=identity, action=action, trace_id=trace_id, descriptor_id=descriptor_id
+        )
+        if isinstance(identity, GitHubHumanIdentity):
+            return
+        active_record = read_active_policy_record(trace_id=trace_id)
+        try:
+            if active_record.status != "active":
+                raise ManagedRuleAuthorizationError("Authorization policy is not active.")
+            require_single_explicit_action_managed_rule_identity(
+                policy=active_record.policy,
+                identity=identity,
+                action=action,
+                product="launchplane",
+                context="launchplane",
+                target=AuthorizationTarget(scope="global"),
+            )
+        except ManagedRuleAuthorizationError as error:
+            raise dependencies.common.http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Identity has no current explicit privileged-operation read grant.",
+            ) from error
+
     def read_ordinary_agent_delivery_activation_options(
         identity: Annotated[
-            GitHubHumanIdentity,
-            Depends(dependencies.read_github_human_identity),
+            LaunchplaneIdentity,
+            Depends(dependencies.common.read_identity),
         ],
         record_store: Annotated[object, Depends(dependencies.common.get_record_store)],
     ) -> OrdinaryAgentDeliveryActivationOptionsResponse:
         trace_id = dependencies.common.next_trace_id()
         descriptor_id: PrivilegedOperationDescriptorId = "ordinary-agent-delivery-activation"
-        require_managed_rule(
+        require_record_read(
             identity=identity,
-            action=descriptor_action(descriptor_id, "human_read_action"),
             trace_id=trace_id,
             descriptor_id=descriptor_id,
         )
@@ -995,8 +1034,8 @@ def register_privileged_operation_routes(
 
     def list_human_privileged_operations(
         identity: Annotated[
-            GitHubHumanIdentity,
-            Depends(dependencies.read_github_human_identity),
+            LaunchplaneIdentity,
+            Depends(dependencies.common.read_identity),
         ],
         record_store: Annotated[object, Depends(dependencies.common.get_record_store)],
         status: Annotated[PrivilegedOperationStatus | None, Query()] = None,
@@ -1007,9 +1046,8 @@ def register_privileged_operation_routes(
     ) -> PrivilegedOperationListResponse:
         trace_id = dependencies.common.next_trace_id()
         generated_at = datetime.now(timezone.utc)
-        require_managed_rule(
+        require_record_read(
             identity=identity,
-            action=descriptor_action(descriptor_id, "human_read_action"),
             trace_id=trace_id,
             descriptor_id=descriptor_id,
         )
@@ -1047,21 +1085,25 @@ def register_privileged_operation_routes(
 
     def read_human_privileged_operation(
         identity: Annotated[
-            GitHubHumanIdentity,
-            Depends(dependencies.read_github_human_identity),
+            LaunchplaneIdentity,
+            Depends(dependencies.common.read_identity),
         ],
         record_store: Annotated[object, Depends(dependencies.common.get_record_store)],
         operation_id: Annotated[str, Path(min_length=1, max_length=96)],
     ) -> PrivilegedOperationHumanResponse:
         trace_id = dependencies.common.next_trace_id()
-        record = read_operation_or_error(
+        reader = (
+            read_operation_or_error
+            if isinstance(identity, GitHubHumanIdentity)
+            else read_operation_projection_or_error
+        )
+        record = reader(
             record_store=record_store,
             operation_id=operation_id,
             trace_id=trace_id,
         )
-        require_managed_rule(
+        require_record_read(
             identity=identity,
-            action=descriptor_action(record.descriptor_id, "human_read_action"),
             trace_id=trace_id,
             descriptor_id=record.descriptor_id,
         )
@@ -1082,8 +1124,8 @@ def register_privileged_operation_routes(
 
     def read_human_privileged_operation_review(
         identity: Annotated[
-            GitHubHumanIdentity,
-            Depends(dependencies.read_github_human_identity),
+            LaunchplaneIdentity,
+            Depends(dependencies.common.read_identity),
         ],
         record_store: Annotated[object, Depends(dependencies.common.get_record_store)],
         operation_id: Annotated[str, Path(min_length=1, max_length=96)],
@@ -1094,9 +1136,8 @@ def register_privileged_operation_routes(
             operation_id=operation_id,
             trace_id=trace_id,
         )
-        require_managed_rule(
+        require_record_read(
             identity=identity,
-            action=descriptor_action(record.descriptor_id, "human_read_action"),
             trace_id=trace_id,
             descriptor_id=record.descriptor_id,
         )
