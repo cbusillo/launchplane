@@ -39936,6 +39936,82 @@
         "title": "RuntimeKeySafetyPolicyApplyEnvelope",
         "type": "object"
       },
+      "RuntimeKeySafetyPolicyRecord": {
+        "additionalProperties": false,
+        "properties": {
+          "record_id": {
+            "title": "Record Id",
+            "type": "string"
+          },
+          "rules": {
+            "items": {
+              "$ref": "#/components/schemas/RuntimeSecretSafetyRule"
+            },
+            "title": "Rules",
+            "type": "array"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "status": {
+            "default": "active",
+            "enum": [
+              "active",
+              "superseded"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "record_id",
+          "source",
+          "updated_at",
+          "rules"
+        ],
+        "title": "RuntimeKeySafetyPolicyRecord",
+        "type": "object"
+      },
+      "RuntimeKeySafetyPolicyResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "policy_sha256": {
+            "title": "Policy Sha256",
+            "type": "string"
+          },
+          "record": {
+            "$ref": "#/components/schemas/RuntimeKeySafetyPolicyRecord"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "record",
+          "policy_sha256"
+        ],
+        "title": "RuntimeKeySafetyPolicyResponse",
+        "type": "object"
+      },
       "RuntimeKeySafetyTarget": {
         "additionalProperties": false,
         "properties": {
@@ -81654,6 +81730,96 @@
           }
         },
         "summary": "Read one provider-neutral environment route binding"
+      }
+    },
+    "/v1/runtime-key-safety/policies/active": {
+      "get": {
+        "operationId": "read_runtime_key_safety_policy",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RuntimeKeySafetyPolicyResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read the active runtime key-safety classification and target scopes"
       }
     },
     "/v1/runtime-key-safety/policies/apply": {

@@ -1,6 +1,6 @@
 from typing import Annotated, Literal, Protocol, cast
 
-from fastapi import Depends, Path
+from fastapi import Depends, Path, Response
 from pydantic import BaseModel, ConfigDict
 
 from control_plane import secrets as control_plane_secrets
@@ -8,6 +8,7 @@ from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.promotion_record import PromotionRecord
+from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyPolicyRecord
 from control_plane.contracts.secret_record import SecretScope
 from control_plane.http_routes.support import (
     LAUNCHPLANE_SERVICE_CONTEXT,
@@ -15,6 +16,7 @@ from control_plane.http_routes.support import (
     ReadRouteDependencies,
 )
 from control_plane.service_auth import AuthorizationTarget, LaunchplaneIdentity
+from control_plane.runtime_key_safety import RuntimeKeySafetyPolicyReadStore
 from control_plane.storage.factory import storage_backend_name
 
 
@@ -117,6 +119,15 @@ class SecretStatusListResponse(BaseModel):
     context: str
     instance: str
     secrets: tuple[SecretStatusReadModel, ...]
+
+
+class RuntimeKeySafetyPolicyResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    record: RuntimeKeySafetyPolicyRecord
+    policy_sha256: str
 
 
 class DeploymentReadStore(Protocol):
@@ -543,6 +554,48 @@ def register_managed_secret_read_routes(
     *,
     dependencies: ReadRouteDependencies,
 ) -> None:
+    def read_runtime_key_safety_policy(
+        identity: Annotated[LaunchplaneIdentity, Depends(dependencies.read_identity)],
+        record_store: Annotated[object, Depends(dependencies.get_record_store)],
+        response: Response,
+    ) -> RuntimeKeySafetyPolicyResponse:
+        trace_id = dependencies.next_trace_id()
+        response.headers["Cache-Control"] = "no-store"
+        if not dependencies.authorization_allows(
+            identity=identity,
+            action="operations.read",
+            product=LAUNCHPLANE_SERVICE_CONTEXT,
+            context=LAUNCHPLANE_SERVICE_CONTEXT,
+            target=AuthorizationTarget(scope="context"),
+        ):
+            raise dependencies.http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="The caller cannot read Launchplane runtime key-safety policy.",
+            )
+        if not callable(getattr(record_store, "list_runtime_key_safety_policy_records", None)):
+            raise dependencies.http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message="The record store does not support runtime key-safety policy reads.",
+            )
+        records = cast(
+            RuntimeKeySafetyPolicyReadStore, record_store
+        ).list_runtime_key_safety_policy_records(status="active", limit=1)
+        if not records:
+            raise dependencies.http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message="No active runtime key-safety policy record exists.",
+            )
+        record = records[0]
+        return RuntimeKeySafetyPolicyResponse(
+            trace_id=trace_id, record=record, policy_sha256=record.policy_sha256
+        )
+
     def list_secret_statuses_for_context(
         *,
         context: str,
@@ -675,6 +728,17 @@ def register_managed_secret_read_routes(
             )
         return SecretStatusResponse(trace_id=trace_id, secret=secret_status)
 
+    app.add_api_route(
+        "/v1/runtime-key-safety/policies/active",
+        read_runtime_key_safety_policy,
+        methods=["GET"],
+        response_model=RuntimeKeySafetyPolicyResponse,
+        operation_id="read_runtime_key_safety_policy",
+        summary="Read the active runtime key-safety classification and target scopes",
+        responses={
+            code: {"model": dependencies.error_response_model} for code in (401, 403, 404, 503)
+        },
+    )
     app.add_api_route(
         "/v1/contexts/{context}/secrets",
         list_context_secret_statuses,
