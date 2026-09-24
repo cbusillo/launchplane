@@ -16201,6 +16201,25 @@ def create_launchplane_fastapi_app(
     ) -> LaunchplaneActiveAuthzPolicyResponse:
         trace_id = next_trace_id()
         if isinstance(
+            identity, LocalOperatorIdentity
+        ) and resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action=AUTHZ_POLICY_ADMINISTRATION_READ_ACTION,
+            product="launchplane",
+            context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        ):
+            _, active_record = require_authz_policy_administration_read(
+                identity=identity,
+                record_store=record_store,
+                trace_id=trace_id,
+            )
+            return LaunchplaneActiveAuthzPolicyResponse(
+                trace_id=trace_id,
+                policy=control_plane_authz_grant_service.summarize_active_authz_policy_record(
+                    active_record
+                ),
+            )
+        if isinstance(
             identity, TerminalAgentIdentity
         ) or not resolved_authz_policy_runtime.policy.allows(
             identity=identity,
@@ -16282,7 +16301,7 @@ def create_launchplane_fastapi_app(
         record_store: object,
         trace_id: str,
     ) -> tuple[PostgresRecordStore, LaunchplaneAuthzPolicyRecord]:
-        is_administrator = isinstance(identity, LocalAdminIdentity) or (
+        is_reader = isinstance(identity, LocalAdminIdentity | LocalOperatorIdentity) or (
             isinstance(identity, GitHubHumanIdentity) and identity.role == "admin"
         )
         preflight_authorized = resolved_authz_policy_runtime.policy.allows(
@@ -16291,7 +16310,7 @@ def create_launchplane_fastapi_app(
             product="launchplane",
             context=_LAUNCHPLANE_SERVICE_CONTEXT,
         )
-        if not is_administrator or not preflight_authorized:
+        if not is_reader or not preflight_authorized:
             raise _launchplane_http_error(
                 status_code=403,
                 trace_id=trace_id,
@@ -16431,7 +16450,7 @@ def create_launchplane_fastapi_app(
         record_store: Annotated[object, Depends(get_record_store)],
     ) -> AuthzPolicyHealthResponse:
         trace_id = next_trace_id()
-        is_administrator = isinstance(identity, LocalAdminIdentity) or (
+        is_reader = isinstance(identity, LocalAdminIdentity | LocalOperatorIdentity) or (
             isinstance(identity, GitHubHumanIdentity) and identity.role == "admin"
         )
         preflight_authorized = resolved_authz_policy_runtime.policy.allows(
@@ -16440,7 +16459,7 @@ def create_launchplane_fastapi_app(
             product="launchplane",
             context=_LAUNCHPLANE_SERVICE_CONTEXT,
         )
-        if not is_administrator or not preflight_authorized:
+        if not is_reader or not preflight_authorized:
             raise _launchplane_http_error(
                 status_code=403,
                 trace_id=trace_id,
@@ -16721,7 +16740,7 @@ def create_launchplane_fastapi_app(
         record_store: Annotated[object, Depends(get_record_store)],
     ) -> EffectiveAccessEvaluateResponse:
         trace_id = next_trace_id()
-        is_administrator = isinstance(identity, LocalAdminIdentity) or (
+        is_reader = isinstance(identity, LocalAdminIdentity | LocalOperatorIdentity) or (
             isinstance(identity, GitHubHumanIdentity) and identity.role == "admin"
         )
         preflight_authorized = resolved_authz_policy_runtime.policy.allows(
@@ -16730,7 +16749,7 @@ def create_launchplane_fastapi_app(
             product="launchplane",
             context=_LAUNCHPLANE_SERVICE_CONTEXT,
         )
-        if not is_administrator or not preflight_authorized:
+        if not is_reader or not preflight_authorized:
             raise _launchplane_http_error(
                 status_code=403,
                 trace_id=trace_id,
