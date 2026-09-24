@@ -1520,24 +1520,25 @@ def _advance_active_candidate_record(
             "candidate": active_candidate_record.candidate.model_dump(mode="json"),
         }
 
+    reflow_result = _reflow_stale_candidate_record(
+        request=request,
+        policy=policy,
+        policy_sha256=policy_sha256,
+        repository_policy=repository_policy,
+        transport=transport,
+        github_client=github_client,
+        candidate_store=candidate_store,
+        stack_collapse_store=stack_collapse_store,
+        candidate_record=active_candidate_record,
+        trace_id=trace_id,
+        recorded_at=recorded_at,
+        lease=lease,
+    )
+    if reflow_result is not None:
+        return reflow_result
+
     candidate_build_error: MergeTrainGitHubStaleHeadError | None = None
     if active_candidate_record.candidate.status in {"planned", "building"}:
-        reflow_result = _reflow_stale_candidate_record(
-            request=request,
-            policy=policy,
-            policy_sha256=policy_sha256,
-            repository_policy=repository_policy,
-            transport=transport,
-            github_client=github_client,
-            candidate_store=candidate_store,
-            stack_collapse_store=stack_collapse_store,
-            candidate_record=active_candidate_record,
-            trace_id=trace_id,
-            recorded_at=recorded_at,
-            lease=lease,
-        )
-        if reflow_result is not None:
-            return reflow_result
         controller_action = "build_candidate"
         if request.mutate:
             lease.checkpoint(
@@ -1667,7 +1668,7 @@ def _reflow_stale_candidate_record(
     recorded_at: str,
     lease: MergeTrainControllerLeaseContext,
 ) -> dict[str, object] | None:
-    """Replan obsolete candidates before any build or landing-plan mutation."""
+    """Replan obsolete candidates before build, check observation, or landing."""
     snapshot = github_client.read_merge_train_snapshot(
         repository=request.repository,
         base_branch=request.base_branch,
