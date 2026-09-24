@@ -21,9 +21,8 @@ concurrency:
 
 jobs:
   verified_tree:
-    # A merge of an up-to-date pull request has the same tree as the pull request
-    # head that already passed this workflow. Re-testing identical content only
-    # delays the deploy, so the heavy jobs are skipped when that can be proven.
+    # Train base pushes can reuse the same commit's successful main CI. Main
+    # also reuses an up-to-date PR tree; new candidate combinations run full CI.
     name: verified-tree
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -44,20 +43,47 @@ jobs:
         run: |
           set -uo pipefail
           verified=false
-          if [ "${EVENT_NAME}" = "push" ] && [ "${REF}" = "refs/heads/main" ]; then
+          passed_ci() {
+            local checks suite_id suite
+            checks="$(gh api \
+              "repos/${REPOSITORY}/commits/$1/check-runs?check_name=ci-gate&per_page=100" \
+              2>/dev/null || true)"
+            jq -e '[.check_runs[] | select(.app.slug == "github-actions")] |
+              length > 0 and all(.status == "completed" and .conclusion == "success")' \
+              <<<"${checks}" >/dev/null 2>&1 || return 1
+            if [ "${2:-}" != "main" ]; then return 0; fi
+            while read -r suite_id; do
+              suite="$(gh api "repos/${REPOSITORY}/check-suites/${suite_id}" 2>/dev/null || true)"
+              if jq -e --arg sha "$1" \
+                '.head_sha == $sha and .head_branch == "main" and .pull_requests == []' \
+                <<<"${suite}" >/dev/null 2>&1; then return 0; fi
+            done < <(jq -r '.check_runs[] | select(.app.slug == "github-actions") | .check_suite.id' <<<"${checks}")
+            return 1
+          }
+          if [ "${EVENT_NAME}" = "push" ] && \
+            [[ "${REF}" == "refs/heads/main" || "${REF}" == refs/heads/launchplane/train/* ]]; then
+            if passed_ci "${SHA}" main; then
+              echo "Commit ${SHA} already passed main ci-gate."
+              echo "verified=true" >> "${GITHUB_OUTPUT}"
+              exit 0
+            fi
+            if [ "${REF}" != "refs/heads/main" ]; then
+              echo "verified=false" >> "${GITHUB_OUTPUT}"
+              exit 0
+            fi
             commit="$(gh api "repos/${REPOSITORY}/git/commits/${SHA}" 2>/dev/null || true)"
             tree="$(jq -r '.tree.sha // empty' <<<"${commit}" 2>/dev/null || true)"
             parent_count="$(jq -r '.parents | length' <<<"${commit}" 2>/dev/null || echo 0)"
             if [ -n "${tree}" ] && [ "${parent_count}" = "2" ]; then
+              base="$(jq -r '.parents[0].sha' <<<"${commit}")"
               merged_head="$(jq -r '.parents[1].sha' <<<"${commit}")"
               merged_tree="$(gh api "repos/${REPOSITORY}/git/commits/${merged_head}" \
                 --jq '.tree.sha' 2>/dev/null || true)"
               if [ "${merged_tree}" = "${tree}" ]; then
-                passed="$(gh api \
-                  "repos/${REPOSITORY}/commits/${merged_head}/check-runs?check_name=ci-gate&per_page=100" \
-                  --jq '[.check_runs[] | select(.app.slug == "github-actions" and .status == "completed" and .conclusion == "success")] | length' \
-                  2>/dev/null || echo 0)"
-                if [ "${passed:-0}" -ge 1 ]; then
+                comparison="$(gh api "repos/${REPOSITORY}/compare/${base}...${merged_head}" \
+                  --jq '.status' 2>/dev/null || true)"
+                if [[ "${comparison}" == "ahead" || "${comparison}" == "identical" ]] && \
+                  passed_ci "${merged_head}"; then
                   verified=true
                   echo "Tree ${tree} already passed ci-gate on ${merged_head}."
                 fi
@@ -723,7 +749,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ "${VERIFIED_TREE}" = "true" ]; then
-            echo "This exact tree already passed ci-gate on the merged pull request head."
+            echo "This exact commit or up-to-date pull request tree already passed ci-gate."
             exit 0
           fi
           require_success() {
