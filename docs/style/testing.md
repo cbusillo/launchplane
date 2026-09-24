@@ -76,10 +76,20 @@ large. This lets hot modules distribute across shards without physical file
 moves. Timing files are balancing hints only; discovered tests remain the source
 of truth.
 
-A push to `main` that is a merge of an up-to-date pull request has the same tree
-as the pull request head that already passed CI. The `verified-tree` job proves
-that from commit trees and the head's `ci-gate` result, and the heavy jobs are
-skipped for that push. Any doubt falls through to the full run.
+For pushes to `main` and `launchplane/train/**`, the `verified-tree` job can
+reuse a completed, successful GitHub Actions `ci-gate` on the exact pushed
+commit. Its check suite must identify that same commit on main without a PR
+merge context; conflicting pending or failed gates veto reuse. This avoids full
+work on already-tested train base creation/reset without trusting a fork or
+retargeted PR's merge-ref checks. New candidate commits still run full CI.
+
+Main retains its existing PR-tree reuse, tightened to require that the base is
+an ancestor of the PR head as well as matching trees and a successful gate.
+The train does not extend that shortcut: a historical PR gate alone cannot
+identify the merge-ref tree tested before a retarget. PR events, unrelated
+branches, and missing API evidence run the full suite. Candidate construction,
+concurrency and required checks are unchanged, and every final candidate SHA
+still receives its own gate.
 
 Same-repo CI currently uses 12 unittest shards with a 20-test/30-second split
 threshold to keep large app and service targets under the tool wall-clock
