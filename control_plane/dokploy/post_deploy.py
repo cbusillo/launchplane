@@ -89,6 +89,7 @@ ODOO_POST_DEPLOY_BOOLEAN_READBACK_MARKERS = frozenset(
         "website_bootstrap_primary_page_xmlid_found",
         "website_bootstrap_homepage_matches_page",
         "website_bootstrap_logo_present",
+        "website_bootstrap_company_email_matches",
         "website_bootstrap_applied",
     }
 )

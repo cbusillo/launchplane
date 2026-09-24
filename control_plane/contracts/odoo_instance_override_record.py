@@ -29,6 +29,11 @@ def validate_odoo_website_bootstrap_contract(
     # Payload model construction strips text; this helper only enforces
     # write-path shape so persisted record reads remain repairable.
     _validate_local_route_path(payload.homepage_url, label="homepage_url")
+    if (
+        payload.company_email
+        and re.fullmatch(r"[^\s@<>]+@[^\s@<>]+", payload.company_email) is None
+    ):
+        raise ValueError("Odoo website bootstrap company_email must be one email address")
     if payload.primary_page_xmlid and _ODOO_XMLID_RE.fullmatch(payload.primary_page_xmlid) is None:
         raise ValueError("Odoo website bootstrap primary_page_xmlid must be a dotted XML ID")
     route_urls = [route.url for route in payload.routes]
@@ -145,6 +150,7 @@ class OdooWebsiteBootstrapPayload(BaseModel):
     logo_path: str = ""
     logo_alt: str = ""
     canonical_url: str = ""
+    company_email: str = ""
     pages_source: dict[str, object] = Field(default_factory=dict)
     routes_source: dict[str, object] = Field(default_factory=dict)
     routes: tuple[OdooWebsiteBootstrapRoute, ...] = ()
@@ -158,6 +164,7 @@ class OdooWebsiteBootstrapPayload(BaseModel):
         "logo_path",
         "logo_alt",
         "canonical_url",
+        "company_email",
         mode="after",
     )
     @classmethod

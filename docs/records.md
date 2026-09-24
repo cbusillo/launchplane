@@ -1976,6 +1976,14 @@ run` is the foreground loop intended for an external process supervisor, and
   including site identity, canonical URL, logo path, source metadata, and route
   definitions. Product repos remain the source of that intent; Launchplane
   persists the typed payload and renders it during Odoo post-deploy.
+- Optional `website_bootstrap.company_email` is one sender address for the
+  selected website's company. The runtime bootstrap saves and reads it back;
+  omission preserves the existing company email. Native website contact forms
+  use this company field when constructing the sender. SMTP transport and its
+  credential remain separate managed runtime configuration. Deploy an Odoo
+  artifact whose devkit supports the field and verify the
+  `website_bootstrap_company_email_matches` readback marker before treating the
+  sender as configured; old runtime artifacts do not consume this new field.
 - New website-bootstrap writes through the service route enforce the devkit-safe
   contract: homepage and route URLs are local Odoo route paths,
   `primary_page_xmlid` is a dotted XML ID, and at most one route can be marked
