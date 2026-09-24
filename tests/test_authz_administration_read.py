@@ -13,6 +13,8 @@ from fastapi import FastAPI
 from control_plane.contracts.authz_access_read import (
     AUTHZ_POLICY_ADMINISTRATION_HISTORY_LIMIT,
     AUTHZ_POLICY_ADMINISTRATION_READ_ACTION,
+    AUTHZ_POLICY_HEALTH_READ_ACTION,
+    EFFECTIVE_ACCESS_READ_ACTION,
 )
 from control_plane.contracts.authz_policy_record import (
     AuthzPolicyStatus,
@@ -137,6 +139,27 @@ def _github_human_policy(
     )
 
 
+def _operator_read_policy() -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy.model_validate(
+        {
+            "schema_version": 2,
+            "local_operators": [
+                {
+                    "subjects": ["record-reader"],
+                    "token_labels": ["record-reader-label"],
+                    "products": ["launchplane"],
+                    "contexts": ["launchplane"],
+                    "actions": [
+                        AUTHZ_POLICY_ADMINISTRATION_READ_ACTION,
+                        AUTHZ_POLICY_HEALTH_READ_ACTION,
+                        EFFECTIVE_ACCESS_READ_ACTION,
+                    ],
+                }
+            ],
+        }
+    )
+
+
 def _app(
     *,
     root: Path,
@@ -160,6 +183,9 @@ def _app(
             local_admin_token="admin-token",
             local_admin_subject="authz-admin",
             local_admin_token_label="authz-admin-label",
+            local_operator_token="reader-token",
+            local_operator_subject="record-reader",
+            local_operator_token_label="record-reader-label",
         ),
         control_plane_root_path=root,
         state_dir=root / "state",
@@ -221,6 +247,81 @@ def _browser_headers(
 
 
 class AuthzAdministrationReadHttpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_operator_reads_policy_evidence_without_receiving_write_authority(self) -> None:
+        policy = _operator_read_policy()
+        headers = {"Authorization": "Bearer reader-token"}
+        with _database_app(policy) as (store, record, app):
+            async with lifespan_client(app) as client:
+                for path in (
+                    "/v1/authz-policies/active",
+                    "/v1/authz-policies/administration",
+                    "/v1/authz-policies/revisions",
+                    "/v1/authz-diagnostics/active-policy/health",
+                ):
+                    with self.subTest(path=path):
+                        response = await client.get(path, headers=headers)
+                        self.assertEqual(response.status_code, 200, response.text)
+                        self.assertNotIn("record-reader", response.text)
+                        self.assertNotIn("reader-token", response.text)
+                for action, decision in (
+                    (AUTHZ_POLICY_ADMINISTRATION_READ_ACTION, "allowed"),
+                    ("authz_policy_grant.write", "denied"),
+                ):
+                    response = await client.post(
+                        "/v1/authz-diagnostics/effective-access/evaluate",
+                        headers=headers,
+                        json={
+                            "principal": {
+                                "principal_type": "local_operator",
+                                "subject": "record-reader",
+                                "token_label": "record-reader-label",
+                            },
+                            "action": action,
+                            "product": "launchplane",
+                            "context": "launchplane",
+                            "target_scope": "context",
+                        },
+                    )
+                    self.assertEqual(response.status_code, 200, response.text)
+                    self.assertEqual(response.json()["evaluation"]["decision"], decision)
+                reconcile = await client.post(
+                    "/v1/authz-policies/managed-rule-sets/reconcile",
+                    headers=headers,
+                    json={
+                        "schema_version": 2,
+                        "product": "launchplane",
+                        "mode": "dry_run",
+                        "managed_set_id": "test.attempted-write",
+                        "reason": "Read access must not authorize policy changes.",
+                        "desired_policy": {"schema_version": 2},
+                    },
+                )
+                self.assertEqual(reconcile.status_code, 403, reconcile.text)
+                self.assertEqual(store.list_authz_policy_records(limit=10), (record,))
+
+    async def test_operator_reads_require_matching_current_policy_grants(self) -> None:
+        allowed_policy = _operator_read_policy()
+        denied_policy = LaunchplaneAuthzPolicy(schema_version=2)
+        for runtime_policy, database_policy in (
+            (denied_policy, allowed_policy),
+            (allowed_policy, denied_policy),
+        ):
+            with _database_app(database_policy, runtime_policy=runtime_policy) as (_, _, app):
+                async with lifespan_client(app) as client:
+                    for path in (
+                        "/v1/authz-policies/active",
+                        "/v1/authz-policies/administration",
+                        "/v1/authz-policies/revisions",
+                        "/v1/authz-diagnostics/active-policy/health",
+                    ):
+                        with self.subTest(
+                            path=path, runtime_allows=runtime_policy is allowed_policy
+                        ):
+                            response = await client.get(
+                                path, headers={"Authorization": "Bearer reader-token"}
+                            )
+                            self.assertEqual(response.status_code, 403, response.text)
+
     async def test_local_admin_reads_redacted_administration_and_history_without_writes(
         self,
     ) -> None:

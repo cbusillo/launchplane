@@ -1161,7 +1161,7 @@ class AuthzAccessReadHttpTests(unittest.IsolatedAsyncioTestCase):
                             "subjects": ["support-reader"],
                             "token_labels": ["support-reader-label"],
                             "products": ["launchplane"],
-                            "contexts": ["launchplane"],
+                            "contexts": ["other-context"],
                             "actions": [AUTHZ_POLICY_HEALTH_READ_ACTION],
                         }
                     ],

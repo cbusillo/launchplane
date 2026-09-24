@@ -361,9 +361,9 @@ governed expectation, custody and currentness contract.
     `Idempotency-Key` completion. Managed reconciliation is the sole policy
     write contract and requires immutable numeric `repository_id` and
     `repository_owner_id` selectors for GitHub Actions rules.)
-  - The two bounded administration GET routes require an eligible GitHub or
-    local administrator, runtime and fresh active-DB authorization for the
-    ungranted `authz_policy_administration.read` action, strict same-origin Fetch
+  - The two bounded administration GET routes accept an eligible GitHub or
+    local administrator or a local operator with runtime and fresh active-DB
+    authorization for `authz_policy_administration.read`, strict same-origin Fetch
     Metadata and CSRF proof for browser sessions, PostgreSQL record storage, and
     exactly one active policy. Same-origin GETs may omit `Origin`; the service
     validates it when present and rejects duplicates or mismatches, while POST
@@ -371,6 +371,13 @@ governed expectation, custody and currentness contract.
     are `no-store`, nonrenewing, nonpersisting reads and expose no raw policy,
     raw audit, principal identity, selector, managed-rule identity, proposal,
     export, rollback, or mutation surface.
+  - Local operators can also read the existing `/active` summary with
+    `authz_policy_administration.read`; its existing policy-writer access and
+    browser-session behavior remain supported. This older summary includes
+    managed-set IDs, managed-rule IDs, and rule hashes, unlike the two bounded
+    administration GETs above. It does not return raw rule selectors or secret
+    values. Read grants do not authorize policy reconciliation, Owner decisions,
+    or provider changes.
 
 - Every Code local automation work-request routes:
   - `GET /v1/every-code/summary` (native FastAPI for bearer-token,
@@ -785,8 +792,8 @@ and the count of privileged GitHub Actions rules that still lack an immutable
 reusable-workflow identity.
 
 `GET /v1/authz-diagnostics/active-policy/health` is a separate read-only
-administrator contract. It requires a GitHub administrator or local
-administrator with `authz_policy_health.read`, reloads the exact active DB
+support contract. It requires a GitHub administrator, local administrator, or
+local operator with `authz_policy_health.read`, reloads the exact active DB
 policy after preflight authorization, and reauthorizes against that record. The
 response contains active-record identity, revision, digest, schema version,
 bounded health reason codes, at most 100 lexically ordered managed-set summaries
@@ -795,6 +802,12 @@ does not expose managed rule IDs, rule hashes, selectors, actions, repositories,
 workflows, or principal identifiers. Missing active state returns `503`, and
 multiple active records return `409`; the service never falls back to cached
 policy state for the response.
+
+Local operators with `authz_policy_effective_access.read` can likewise evaluate
+one explicit principal through `POST /v1/authz-diagnostics/effective-access/evaluate`.
+Both the runtime policy and fresh active DB policy must allow the read. The
+evaluation reports a decision without impersonating that principal or granting
+its permissions to the caller.
 
 `GET /v1/authz-diagnostics/activation-preflight/self` is the signed-in
 browser-human self-check for policy-administration authority. It rejects every
