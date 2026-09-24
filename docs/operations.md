@@ -2114,6 +2114,25 @@ return a typed blocked result rather than guessing a domain.
   selected deployment is bound to the requested tracked target before reading
   its detached log id. Provider failures return a bounded redacted operation
   label/detail instead of raw credentials or unrestricted provider output.
+- Serving Odoo previews use `GET /v1/previews/{preview_id}/logs` when their
+  runtime has no stable-lane tracked-target record. The route verifies the
+  current serving generation and actual web container, resolves the exact
+  Dokploy compose and matching domain, and requires `preview.read` plus
+  `target_logs.read` for the serving runtime instance. Destroyed previews return
+  `410 preview_destroyed`; no orphan tracked-target records are created.
+- Runtime log searches filter the bounded redacted tail locally, preserving
+  Dokploy's literal, case-insensitive behavior while returning an empty list
+  when no lines match. Real provider errors still fail the read.
+- `GET /v1/previews/{preview_id}/outgoing-email` and `GET
+  /v1/products/{product}/environments/{environment}/outgoing-email` read Odoo mail
+  status with exact `subject` and `recipient` filters plus a timezone-qualified
+  `created_after` (for example, `2026-01-01T12:00:00Z`). These require
+  `operations.read` for the runtime instance, plus `preview.read` for previews.
+  A unique `sent` message proves Odoo's SMTP handoff; inbox delivery remains
+  separate. Queued and failed records include redacted failure details, message
+  IDs, sender, and creation/update times. Empty or ambiguous results remain
+  unknown; sent mail may have been auto-deleted. Reads return no bodies or
+  credentials and never send or retry a message.
 - The manual Tracked Target Logs workflow calls that service route with GitHub
   OIDC and uploads the redacted JSON result, so operators can inspect runtime or
   deployment failures without local Dokploy credentials. Tenant contexts need a

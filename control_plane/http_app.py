@@ -474,6 +474,10 @@ from control_plane.verireel_prod_http import (
     apply_verireel_prod_rollback_result,
     should_store_verireel_prod_result_idempotency,
 )
+from control_plane.http_routes.odoo_runtime import (
+    OdooRuntimeReadDependencies,
+    register_odoo_runtime_read_routes,
+)
 from control_plane.odoo_artifact_publish_inputs_http import (
     ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE as _ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE,
     OdooArtifactPublishInputsEnvelope,
@@ -5007,6 +5011,11 @@ def create_launchplane_fastapi_app(
         github_token=resolve_launchplane_github_token,
     )
     driver_read_route_dependencies = DriverReadRouteDependencies(
+        common=read_route_dependencies,
+        control_plane_root=resolved_control_plane_root,
+        database_url=database_url,
+    )
+    odoo_runtime_read_dependencies = OdooRuntimeReadDependencies(
         common=read_route_dependencies,
         control_plane_root=resolved_control_plane_root,
         database_url=database_url,
@@ -25357,6 +25366,11 @@ def create_launchplane_fastapi_app(
     register_change_impact_write_routes(
         app,
         dependencies=change_impact_write_route_dependencies,
+    )
+
+    register_odoo_runtime_read_routes(
+        app,
+        dependencies=odoo_runtime_read_dependencies,
     )
 
     def read_operator_ui(path: str = "") -> Response:

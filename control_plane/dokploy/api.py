@@ -484,8 +484,6 @@ def fetch_dokploy_application_logs(
         "tail": normalized_line_count,
         "since": normalized_since,
     }
-    if normalized_search:
-        query["search"] = normalized_search
     payload = dokploy_request(
         host=host,
         token=token,
@@ -493,7 +491,7 @@ def fetch_dokploy_application_logs(
         query=query,
     )
     lines = normalize_dokploy_log_payload(payload)
-    return lines[-normalized_line_count:]
+    return filter_dokploy_log_lines(lines[-normalized_line_count:], normalized_search)
 
 
 def fetch_dokploy_compose_logs(
@@ -556,8 +554,6 @@ def fetch_dokploy_compose_logs(
             )
         if container_id:
             query["containerId"] = container_id
-    if normalized_search:
-        query["search"] = normalized_search
     payload = dokploy_request(
         host=host,
         token=token,
@@ -565,7 +561,13 @@ def fetch_dokploy_compose_logs(
         query=query,
     )
     lines = normalize_dokploy_log_payload(payload)
-    return lines[-normalized_line_count:]
+    return filter_dokploy_log_lines(lines[-normalized_line_count:], normalized_search)
+
+
+def filter_dokploy_log_lines(lines: tuple[str, ...], search: str) -> tuple[str, ...]:
+    # Dokploy applies grep after tail; no matches return exit 1 on remote hosts.
+    # Filter the bounded redacted tail here without hiding real provider failures.
+    return tuple(line for line in lines if search.casefold() in line.casefold())
 
 
 def fetch_dokploy_deployment_logs(

@@ -3062,6 +3062,36 @@ target before reading its detached log id. Provider failures expose only a
 bounded redacted operation label/detail, and the manual workflow preserves the
 redacted response artifact before reporting failure.
 
+Serving Odoo previews use `GET /v1/previews/{preview_id}/logs` because their
+ephemeral runtimes do not have stable tracked-target rows. The route requires
+`preview.read` for the stored context and `target_logs.read` for the serving
+runtime's exact context/instance before provider access. It resolves the compose
+from the recorded serving runtime and preview domain, then checks the web
+container's compose membership, runtime identity, and immutable image. Reads
+return the observed generation and container with bounded, redacted log lines.
+Refresh needs no extra target row; destroyed previews return `410
+preview_destroyed`. A concurrent lifecycle change discards the result.
+
+Odoo mail status is available through `GET
+/v1/previews/{preview_id}/outgoing-email` and `GET
+/v1/products/{product}/environments/{environment}/outgoing-email`. Both require
+`operations.read` for the resolved exact context/instance; previews also require
+`preview.read`. Queries require an exact subject, a case-insensitive exact
+`email_to` value, and a timezone-qualified `created_after`. The service uses
+the running container's configured Odoo credentials internally and only calls
+`mail.mail.search_read` with a fixed field list. The recorded HTTPS origin must
+report the selected runtime identity before authentication and after the read;
+redirects are rejected. No body, attachment, environment value, or credential
+is returned. Provider errors do not echo remote payloads.
+
+Results distinguish queued, sent, failed, cancelled, and unknown mail, retaining
+redacted failure reasons, message IDs, senders, and Odoo creation/update times.
+An empty or ambiguous match has `left_odoo: null`. A unique sent record proves
+Odoo's SMTP handoff, not recipient inbox delivery. Creation/update timestamps
+are not represented as send timestamps. Odoo can auto-delete sent mail, so an
+empty result is never proof that a message was not sent. Reads neither retry
+mail nor alter SMTP configuration.
+
 Authorization policy schema v2 treats these instance targets as first-class
 selectors. A grant scoped to `testing` cannot read `prod` logs or driver state
 even when both lanes share one context. Multi-lane operations must satisfy the

@@ -783,6 +783,27 @@ def _discover_odoo_preview_target(
     return None
 
 
+def discover_odoo_preview_target(
+    *,
+    control_plane_root: Path,
+    context_name: str,
+    preview_slug: str,
+    preview_url: str,
+    compose_name: str,
+    database_url: str | None,
+) -> OdooPreviewRuntimeTargetEvidence | None:
+    """Resolve one preview compose through the configured Dokploy authority."""
+
+    return _discover_odoo_preview_target(
+        control_plane_root=control_plane_root,
+        context_name=context_name,
+        preview_slug=preview_slug,
+        preview_url=preview_url,
+        compose_name=compose_name,
+        database_url=database_url,
+    )
+
+
 def _append_preview_target_match(
     *,
     matches: list[OdooPreviewRuntimeTargetEvidence],
