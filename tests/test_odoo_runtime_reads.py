@@ -17,6 +17,7 @@ from httpx2 import Response
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
 from control_plane.contracts.odoo_preview_runtime_plan import OdooPreviewRuntimeTargetEvidence
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.promotion_record import DeploymentEvidence
@@ -290,6 +291,78 @@ class OdooRuntimeReadTests(unittest.IsolatedAsyncioTestCase):
             path + ("?" + urlencode(params) if params else ""),
             headers={"Authorization": "Bearer valid-token"},
         )
+
+    async def test_website_bootstrap_read_preserves_intent_without_exposing_other_overrides(
+        self,
+    ) -> None:
+        record = OdooInstanceOverrideRecord.model_validate(
+            {
+                "context": "example-site",
+                "instance": "testing",
+                "updated_at": "2026-09-24T12:00:00Z",
+                "source_label": "operator",
+                "website_bootstrap": {
+                    "name": "Example",
+                    "company_email": "sender@example.invalid",
+                    "canonical_url": "https://testing.example.invalid",
+                    "logo_path": "/example/static/logo.svg",
+                    "routes": [{"name": "Home", "url": "/", "homepage": True}],
+                },
+                "config_parameters": [
+                    {"key": "private.key", "value": {"source": "literal", "value": "private-value"}}
+                ],
+                "addon_settings": [
+                    {
+                        "addon": "example",
+                        "setting": "credential",
+                        "value": {
+                            "source": "secret_binding",
+                            "secret_binding_id": "private-binding",
+                        },
+                    }
+                ],
+            }
+        )
+        self.store.write_odoo_instance_override_record(record)
+        response = await self.get(
+            "/v1/products/example-site/environments/testing/website-bootstrap"
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.headers["Cache-Control"], "no-store")
+        self.assertEqual(
+            response.json()["website_bootstrap"],
+            record.model_dump(mode="json")["website_bootstrap"],
+        )
+        self.assertEqual(response.json()["updated_at"], record.updated_at)
+        self.assertNotIn("private-value", response.text)
+        self.assertNotIn("private-binding", response.text)
+        self.assertNotIn("config_parameters", response.json())
+        self.assertNotIn("addon_settings", response.json())
+        self.assertEqual(
+            self.store.read_odoo_instance_override_record(
+                context_name="example-site", instance_name="testing"
+            ),
+            record,
+        )
+        self.assertEqual(self.provider_calls, [])
+        self.assertEqual(self.rpc_calls, [])
+
+    async def test_website_bootstrap_read_requires_the_owned_odoo_lane_and_read_scope(self) -> None:
+        path = "/v1/products/example-site/environments/testing/website-bootstrap"
+        denied = await self.get(path, instances=("prod",))
+        self.assertEqual(denied.status_code, 403)
+        self.assertEqual(denied.json()["error"]["code"], "authorization_denied")
+        missing = await self.get(path)
+        self.assertEqual(missing.status_code, 404)
+        wrong_lane = await self.get(path.replace("/testing/", "/prod/"))
+        self.assertEqual(wrong_lane.status_code, 400)
+        self.store.write_product_profile_record(
+            self.profile.model_copy(update={"driver_id": "generic_web"})
+        )
+        wrong_driver = await self.get(path)
+        self.assertEqual(wrong_driver.status_code, 400)
+        self.assertEqual(self.provider_calls, [])
+        self.assertEqual(self.rpc_calls, [])
 
     async def test_preview_without_tracked_rows_reads_current_container_and_redacts_bounded_logs(
         self,

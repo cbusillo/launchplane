@@ -1996,6 +1996,12 @@ run` is the foreground loop intended for an external process supervisor, and
   repair writes only. Persisted record reads remain tolerant so older records
   can be inspected and repaired instead of becoming unreadable after validation
   hardening.
+- Before replacing website-bootstrap settings, read the current persisted payload
+  with `GET /v1/products/{product}/environments/{environment}/website-bootstrap`.
+  It requires the existing instance-scoped `operations.read` authority, resolves
+  the lane from the product profile, and returns website intent plus record
+  metadata. It does not return config parameters, addon settings, or secrets, and
+  does not contact the runtime provider. Missing records return 404.
 - The supported operator write path is a thin dispatch workflow pinned to an
   immutable reusable worker. The worker persists through the service route,
   records only redacted request-shape evidence, and treats the write as complete
