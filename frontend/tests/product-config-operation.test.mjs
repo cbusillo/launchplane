@@ -84,7 +84,8 @@ test("managed-secret validation errors clear every plaintext input", () => {
 test("selecting an Owner submission sends its version and discards any typed value", () => {
   const identity = productConfigManagedSecretIdentity("runtime_environment", "SMTP_PASSWORD");
   /** @type {Map<string, {value: string}>} */
-  const inputs = new Map([[identity, { value: "discarded-typed-secret" }]]);
+  const inputs = new Map();
+  inputs.set(identity, { value: "discarded-typed-secret" });
   const result = consumeManagedSecretValues(
     [{ bindingKey: "SMTP_PASSWORD", integration: "runtime_environment", identity }],
     inputs,
