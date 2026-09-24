@@ -9,6 +9,7 @@ from typing import Literal, TypeVar
 
 import click
 
+from control_plane.contracts.odoo_post_deploy_payload import OdooPostDeployPayload
 from control_plane.contracts.odoo_prod_retained_volume_backup_import import (
     ODOO_PROD_RETAINED_VOLUME_BACKUP_IMPORT_FAILURE_STAGE_BY_CODE,
     OdooProdRetainedVolumeBackupImportInspectionEvidence,
@@ -89,6 +90,7 @@ ODOO_POST_DEPLOY_BOOLEAN_READBACK_MARKERS = frozenset(
         "website_bootstrap_primary_page_xmlid_found",
         "website_bootstrap_homepage_matches_page",
         "website_bootstrap_logo_present",
+        "website_bootstrap_company_email_matches",
         "website_bootstrap_applied",
     }
 )
@@ -339,6 +341,20 @@ def run_compose_post_deploy_update(
     else:
         desired_env_map.pop("ODOO_ADDONS_PATH", None)
     resolved_workflow_environment_overrides = dict(workflow_environment_overrides or {})
+    require_company_email = False
+    encoded_payload = resolved_workflow_environment_overrides.get(
+        ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY, ""
+    )
+    if encoded_payload:
+        try:
+            override_payload = OdooPostDeployPayload.model_validate_json(
+                base64.b64decode(encoded_payload, validate=True)
+            )
+        except ValueError as error:
+            raise click.ClickException("Odoo post-deploy override payload is invalid.") from error
+        require_company_email = bool(
+            override_payload.website_bootstrap and override_payload.website_bootstrap.company_email
+        )
     resolved_required_workflow_environment_keys = tuple(required_workflow_environment_keys)
     runtime_override_target_environment = {
         key: value
@@ -558,7 +574,7 @@ def run_compose_post_deploy_update(
     )
     if api.deployment_key(completed_schedule_deployment) != completed_schedule_deployment_key:
         completed_schedule_deployment = None
-    return _read_odoo_post_deploy_log_markers(
+    evidence = _read_odoo_post_deploy_log_markers(
         host=host,
         token=token,
         schedule_id=schedule_id,
@@ -566,6 +582,11 @@ def run_compose_post_deploy_update(
         deployment_id=completed_schedule_deployment_key,
         deployment=completed_schedule_deployment,
     )
+    if require_company_email and evidence.get("website_bootstrap_company_email_matches") != "true":
+        raise click.ClickException(
+            "Odoo post-deploy did not prove the requested website company sender was saved."
+        )
+    return evidence
 
 
 def run_compose_odoo_stable_bootstrap(

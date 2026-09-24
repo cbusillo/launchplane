@@ -65,6 +65,17 @@ def _assert_direct_db_mutation_rejected(test_case: unittest.TestCase, result: Re
 
 
 class OdooInstanceOverrideTests(unittest.TestCase):
+    def test_website_bootstrap_rejects_invalid_company_sender_on_write(self) -> None:
+        for email in (
+            "not-an-address",
+            "Name <sender@example.test>",
+            "sender@example.test\nBcc: other@example.test",
+        ):
+            with self.subTest(email=email), self.assertRaisesRegex(ValueError, "company_email"):
+                validate_odoo_website_bootstrap_contract(
+                    OdooWebsiteBootstrapPayload(name="Example", company_email=email)
+                )
+
     def test_website_bootstrap_payload_accepts_devkit_route_shape(self) -> None:
         payload = validate_odoo_website_bootstrap_contract(
             OdooWebsiteBootstrapPayload(
@@ -358,6 +369,7 @@ class OdooInstanceOverrideTests(unittest.TestCase):
                 tenant="cm",
                 name="Cell Mechanic",
                 canonical_url="https://cm-testing.example.com",
+                company_email="support@example.test",
             ),
             updated_at="2026-06-13T18:00:00Z",
         )
@@ -370,6 +382,9 @@ class OdooInstanceOverrideTests(unittest.TestCase):
             ).decode("utf-8")
         )
         self.assertIn("website_bootstrap", decoded_payload)
+        self.assertEqual(
+            decoded_payload["website_bootstrap"]["company_email"], "support@example.test"
+        )
         self.assertEqual(
             environment.inline_environment[LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY],
             "true",
@@ -407,6 +422,7 @@ class OdooInstanceOverrideTests(unittest.TestCase):
                 tenant="cm",
                 name="Cell Mechanic",
                 canonical_url="https://cm-testing.example.com",
+                company_email="support@example.test",
             ),
             updated_at="2026-07-31T18:00:00Z",
         )
@@ -426,6 +442,9 @@ class OdooInstanceOverrideTests(unittest.TestCase):
         self.assertEqual(decoded_payload["config_parameters"], [])
         self.assertEqual(decoded_payload["addon_settings"], [])
         self.assertEqual(decoded_payload["website_bootstrap"]["name"], "Cell Mechanic")
+        self.assertEqual(
+            decoded_payload["website_bootstrap"]["company_email"], "support@example.test"
+        )
         self.assertEqual(
             decoded_payload["website_bootstrap"]["canonical_url"],
             "https://pr-70.cm-preview.example.test",
