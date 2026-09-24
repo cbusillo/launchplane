@@ -38,6 +38,7 @@ from control_plane.contracts.privileged_operation import (
     ManagedAuthzPolicySetHumanEvidence,
     ManagedAuthzPolicySetProposalInput,
     ManagedMergeTrainPolicyImportProposalInput,
+    ORDINARY_AGENT_DELIVERY_ACTIVATION_READ_ACTION,
     PRIVILEGED_OPERATION_SUMMARY_READ_ACTION,
     PRIVILEGED_POLICY_OPERATION_SUMMARY_READ_ACTION,
     PRIVILEGED_SECRET_OPERATION_APPROVE_ACTION,
@@ -69,6 +70,7 @@ from control_plane.http_routes.support import ApiRouteRegistrar, ReadRouteDepend
 from control_plane.service_auth import (
     GitHubHumanIdentity,
     LaunchplaneAuthzPolicy,
+    LocalAdminIdentity,
     TerminalAgentIdentity,
 )
 from control_plane.storage.filesystem import FilesystemRecordStore
@@ -432,7 +434,7 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
             cast(ApiRouteRegistrar, app),
             dependencies=PrivilegedOperationRouteDependencies(
                 common=ReadRouteDependencies(
-                    read_identity=lambda: _agent(),
+                    read_identity=read_human,
                     get_record_store=lambda: store,
                     next_trace_id=lambda: f"trace-{next(trace_counter)}",
                     authorization_allows=lambda **_: False,
@@ -462,6 +464,42 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("/v1/privileged-operations/plans/{operation_id}/revoke", paths)
         self.assertIn("/v1/privileged-operations/plans/{operation_id}/cancel", paths)
         self.assertNotIn("/v1/privileged-operations/plans/{operation_id}/execute", paths)
+
+    async def test_other_machine_identities_are_rejected_before_record_lookup(self) -> None:
+        payload = _policy().model_dump(mode="json")
+        payload["terminal_agents"][0]["actions"] = [
+            PRIVILEGED_SECRET_OPERATION_READ_ACTION,
+            AUTHZ_POLICY_OPERATION_READ_ACTION,
+            MERGE_TRAIN_POLICY_OPERATION_READ_ACTION,
+            ORDINARY_AGENT_DELIVERY_ACTIVATION_READ_ACTION,
+        ]
+        payload["local_admins"] = [
+            {**payload["terminal_agents"][0], "managed_set_id": "privileged-operations.local-admin"}
+        ]
+        policy = LaunchplaneAuthzPolicy.model_validate(payload)
+        for identity in (
+            _agent(),
+            LocalAdminIdentity(subject="agent:planner", token_label="planner"),
+        ):
+            with self.subTest(identity=identity), TemporaryDirectory() as directory:
+                store = FilesystemRecordStore(Path(directory))
+                app = self._app(
+                    store=store, policy=policy, human_reader=Mock(return_value=identity)
+                )
+                with patch.object(
+                    store,
+                    "read_privileged_operation_record",
+                    side_effect=AssertionError("Rejected identity reached record storage"),
+                ):
+                    async with lifespan_client(app) as client:
+                        for path in (
+                            "/v1/privileged-operations/plans",
+                            "/v1/privileged-operations/plans/missing-plan",
+                            "/v1/privileged-operations/plans/missing-plan/review",
+                            "/v1/privileged-operations/ordinary-agent-delivery-activation/options",
+                        ):
+                            response = await client.get(path)
+                            self.assertEqual(response.status_code, 403, response.text)
 
     async def test_closed_authorization_candidate_plans_once_and_replays(self) -> None:
         with TemporaryDirectory() as directory:

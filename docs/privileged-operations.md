@@ -139,31 +139,41 @@ time. The approval record has no approval-time policy-schema field, so this
 check carries current policy provenance and does not claim a capture-time schema
 transition.
 
-The human routes use a named GitHub-human browser dependency that:
+The mutation routes use a named GitHub-human browser dependency that:
 
 1. authenticates the Launchplane GitHub session;
 2. enforces same-origin/fetch-metadata and single-use CSRF checks for writes;
 3. rejects bearer, GitHub Actions, terminal-agent, local-operator, and local-
    admin identities before policy evaluation.
 
+Plan lists, full records, semantic reviews, and delivery-activation options also
+accept local operators with the descriptor's explicit managed
+read grant. These callers must pass both runtime-policy authorization and a
+fresh active-policy read. Their full-record reads do not reconcile expiry or
+write operation events. Browser-human detail reads retain their existing expiry
+reconciliation; list and semantic-review projections remain non-mutating.
+The terminal-agent summary remains a separate, restricted projection. Reading
+a record grants no planning, approval, revocation, cancellation, or execution
+authority, and returns no plaintext secret values.
+
 The planning and approval actions are:
 
 | Action                                     | Safety          | Surface                                         |
 | ------------------------------------------ | --------------- | ----------------------------------------------- |
 | `privileged_secret_operation.plan`         | `secret_backed` | GitHub-human plan creation                      |
-| `privileged_secret_operation.read`         | `secret_backed` | GitHub-human plan reads                         |
+| `privileged_secret_operation.read`         | `secret_backed` | Explicitly authorized plan reads                |
 | `privileged_secret_operation.cancel`       | `secret_backed` | GitHub-human cancellation                       |
 | `privileged_secret_operation.approve`      | `secret_backed` | GitHub-human browser approval                   |
 | `privileged_secret_operation.revoke`       | `secret_backed` | GitHub-human browser revocation                 |
 | `privileged_operation_summary.read`        | `read`          | Counts-only agent projection                    |
 | `authz_policy_operation.propose`           | `policy_admin`  | Inert GitHub-human or terminal-agent proposal   |
-| `authz_policy_operation.read`              | `policy_admin`  | GitHub-human policy-plan reads                  |
+| `authz_policy_operation.read`              | `policy_admin`  | Explicitly authorized policy-plan reads         |
 | `authz_policy_operation.cancel`            | `policy_admin`  | GitHub-human policy-plan cancellation           |
 | `authz_policy_operation.approve`           | `policy_admin`  | GitHub-human browser approval                   |
 | `authz_policy_operation.revoke`            | `policy_admin`  | GitHub-human browser revocation                 |
 | `privileged_policy_operation_summary.read` | `read`          | Proposal-owner agent projection                 |
 | `merge_train_policy_operation.propose`     | `policy_admin`  | Inert GitHub-human or terminal-agent proposal   |
-| `merge_train_policy_operation.read`        | `policy_admin`  | GitHub-human policy-plan reads                  |
+| `merge_train_policy_operation.read`        | `policy_admin`  | Explicitly authorized policy-plan reads         |
 | `merge_train_policy_operation.cancel`      | `policy_admin`  | GitHub-human policy-plan cancellation           |
 | `merge_train_policy_operation.approve`     | `policy_admin`  | GitHub-human browser approval                   |
 | `merge_train_policy_operation.revoke`      | `policy_admin`  | GitHub-human browser revocation                 |
