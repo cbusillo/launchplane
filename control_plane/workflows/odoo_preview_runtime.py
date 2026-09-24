@@ -462,7 +462,7 @@ def build_odoo_preview_apply_inputs(
     discovery_error = ""
     block_discovery_error = False
     try:
-        target = _discover_odoo_preview_target(
+        target = discover_odoo_preview_target(
             control_plane_root=control_plane_root,
             context_name=preview_profile.context,
             preview_slug=preview_slug,
@@ -725,7 +725,7 @@ def _preview_template_target_definition(
     )
 
 
-def _discover_odoo_preview_target(
+def discover_odoo_preview_target(
     *,
     control_plane_root: Path,
     context_name: str,
@@ -800,7 +800,7 @@ def _append_preview_target_match(
     compose_id = str(compose.get("composeId") or compose.get("id") or "").strip()
     if not compose_id:
         return
-    if domain_host and not _compose_has_domain(
+    if domain_host and not odoo_compose_has_domain(
         host=host,
         token=token,
         compose_id=compose_id,
@@ -907,7 +907,7 @@ def _iter_dokploy_search_composes(raw_search_matches: object) -> tuple[JsonObjec
     return tuple(composes)
 
 
-def _compose_has_domain(*, host: str, token: str, compose_id: str, domain_host: str) -> bool:
+def odoo_compose_has_domain(*, host: str, token: str, compose_id: str, domain_host: str) -> bool:
     for domain in _compose_domains(host=host, token=token, compose_id=compose_id):
         if str(domain.get("host") or "").strip().lower() == domain_host:
             return True
@@ -1328,7 +1328,7 @@ def observe_odoo_preview_dokploy_apply(
                 outcome="present",
                 result=_apply_result(request=request, status="pass", compose_id=plan.compose_ref),
             )
-        target = _discover_odoo_preview_target(
+        target = discover_odoo_preview_target(
             control_plane_root=control_plane_root,
             context_name=context_name,
             preview_slug=plan.preview_slug,

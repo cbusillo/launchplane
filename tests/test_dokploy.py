@@ -665,7 +665,7 @@ class DokployConfigTests(unittest.TestCase):
         )
         self.assertEqual(lines, ("two", "THREE_TOKEN=[redacted]"))
 
-    def test_fetch_compose_logs_calls_dokploy_read_logs_endpoint(self) -> None:
+    def test_fetch_compose_logs_filters_the_bounded_tail_without_provider_grep(self) -> None:
         requests: list[dict[str, object]] = []
 
         def capture_request(**kwargs: object) -> object:
@@ -675,7 +675,7 @@ class DokployConfigTests(unittest.TestCase):
                     {"containerId": "database-container", "name": "cm-database-1"},
                     {"containerId": "web-container", "name": "cm-web-1"},
                 ]
-            return {"logs": "one\ntwo\nTHREE_TOKEN=secret"}
+            return {"logs": "odoo old\ntwo\nODOO TOKEN=secret"}
 
         with patch(
             "control_plane.dokploy.api.dokploy_request",
@@ -710,10 +710,31 @@ class DokployConfigTests(unittest.TestCase):
                 "containerId": "web-container",
                 "tail": 2,
                 "since": "5m",
-                "search": "odoo",
             },
         )
-        self.assertEqual(lines, ("two", "THREE_TOKEN=[redacted]"))
+        self.assertEqual(lines, ("ODOO TOKEN=[redacted]",))
+
+    def test_log_search_no_matches_is_empty_but_provider_errors_still_fail(self) -> None:
+        for target_type in ("application", "compose"):
+            with self.subTest(target_type=target_type):
+                reader = getattr(dokploy_api, f"fetch_dokploy_{target_type}_logs")
+                kwargs = {
+                    "host": "https://provider.invalid",
+                    "token": "test",
+                    f"{target_type}_id": "target",
+                    "search": "mail",
+                }
+                with patch(
+                    "control_plane.dokploy.api.dokploy_request", return_value="health ok"
+                ) as provider:
+                    self.assertEqual(reader(**kwargs), ())
+                    self.assertNotIn("search", provider.call_args.kwargs["query"])
+                with patch(
+                    "control_plane.dokploy.api.dokploy_request",
+                    side_effect=click.ClickException("target missing"),
+                ):
+                    with self.assertRaises(click.ClickException):
+                        reader(**kwargs)
 
     def test_fetch_compose_logs_selects_exact_service(self) -> None:
         requests: list[dict[str, object]] = []
