@@ -429,7 +429,14 @@ def _http_json(opener: OpenerDirector, request: Request) -> object:
         ) from error
 
 
-def _rpc(opener: OpenerDirector, base_url: str, path: str, params: dict[str, object]) -> object:
+def _rpc(
+    opener: OpenerDirector,
+    base_url: str,
+    path: str,
+    params: dict[str, object],
+    *,
+    expect_result: bool = True,
+) -> object:
     result = _http_json(
         opener,
         Request(
@@ -440,11 +447,17 @@ def _rpc(opener: OpenerDirector, base_url: str, path: str, params: dict[str, obj
             headers={"Content-Type": "application/json"},
         ),
     )
-    if not isinstance(result, dict) or "error" in result or "result" not in result:
+    if (
+        not isinstance(result, dict)
+        or result.get("jsonrpc") != "2.0"
+        or result.get("id") != 1
+        or "error" in result
+        or (expect_result and "result" not in result)
+    ):
         raise OdooRuntimeReadError(
             "odoo_read_rejected", "Odoo rejected the authenticated mail-status read.", 503
         )
-    return result["result"]
+    return result.get("result")
 
 
 def read_outgoing_email(
@@ -521,7 +534,7 @@ def read_outgoing_email(
     try:
         result = _search_mail(opener, base_url, fields, query)
     finally:
-        _rpc(opener, base_url, "/web/session/destroy", {})
+        _rpc(opener, base_url, "/web/session/destroy", {}, expect_result=False)
     health = _http_json(opener, Request(base_url + "/launchplane/health"))
     require_runtime_identity(
         connection.selection.identity, runtime_identity_from_health_payload(health)
