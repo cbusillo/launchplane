@@ -187,6 +187,7 @@ class OdooRuntimeReadTests(unittest.IsolatedAsyncioTestCase):
     def provider(self, **kwargs: object) -> object:
         self.provider_calls.append(kwargs)
         path = kwargs["path"]
+        assert isinstance(path, str)
         query = cast(dict[str, object], kwargs.get("query", {}))
         if path == "/api/compose.one":
             stable = query.get("composeId") == "stable-target"
@@ -449,11 +450,12 @@ class OdooRuntimeReadTests(unittest.IsolatedAsyncioTestCase):
         class RedirectingOrigin(BaseHandler):
             handler_order = 100
 
-            def https_open(self, req: Request) -> addinfourl:
+            @staticmethod
+            def https_open(req: Request) -> addinfourl:
                 urls.append(req.full_url)
                 headers = Message()
                 headers["Location"] = "https://wrong.example.invalid/launchplane/health"
-                return RedirectResponse(io.BytesIO(b""), headers, req.full_url, 302)
+                return RedirectResponse(io.BytesIO(), headers, req.full_url, 302)
 
         opener = build_opener(_NoRedirects(), RedirectingOrigin())
         with patch("control_plane.odoo_runtime_reads.build_opener", return_value=opener):
