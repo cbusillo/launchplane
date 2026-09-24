@@ -279,9 +279,12 @@ and remains fail-closed in `ready_for_checks`.
 Candidate observation reads the target branch's live required-status-check
 policy and requires every named check, including any pinned GitHub App id, to be
 present and successful on the candidate SHA. Partial workflow evidence cannot
-promote a candidate. Reading that live policy requires the merge-train GitHub
-identity to have `administration: read` for the repository. A pinned app id must
-be proven by check-run evidence; commit statuses can satisfy only unpinned or
+promote a candidate. It reads the enforced required-check projection from
+GitHub's [Get a branch endpoint](https://docs.github.com/en/rest/branches/branches#get-a-branch),
+which requires `contents: read` for the repository. An unprotected branch,
+missing protection metadata, disabled enforcement, or an empty required-check
+list fails closed; observation does not request administration access. A pinned
+app id must be proven by check-run evidence; commit statuses can satisfy only unpinned or
 GitHub `app_id = -1` any-app requirements. Once unrelated evidence is terminal,
 missing pinned or named evidence is surfaced explicitly instead of remaining an
 unexplained pending candidate.

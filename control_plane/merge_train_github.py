@@ -2343,20 +2343,27 @@ def _required_branch_checks(
     try:
         raw_payload = transport.request(
             method="GET",
-            path=(
-                f"/repos/{repository_path}/branches/{encoded_base_branch}"
-                "/protection/required_status_checks"
-            ),
+            path=f"/repos/{repository_path}/branches/{encoded_base_branch}",
         )
     except MergeTrainGitHubError as error:
         if error.status_code in {403, 404}:
             raise MergeTrainGitHubError(
                 "Merge train candidate validation requires a readable protected-branch "
-                "required-check policy and GitHub administration: read permission.",
+                "required-check policy and GitHub contents: read permission.",
                 status_code=error.status_code,
             ) from error
         raise
-    payload = _json_object(raw_payload, "GitHub required status checks response")
+    branch = _json_object(raw_payload, "GitHub protected branch response")
+    if branch.get("protected") is not True:
+        raise MergeTrainGitHubError("Merge train candidate validation requires a protected branch.")
+    protection = _json_object(branch.get("protection"), "GitHub branch protection")
+    payload = _json_object(
+        protection.get("required_status_checks"), "GitHub required status checks response"
+    )
+    if payload.get("enforcement_level") not in {"everyone", "non_admins"}:
+        raise MergeTrainGitHubError(
+            "Merge train candidate validation requires enforced protected-branch status checks."
+        )
     required_checks: dict[tuple[str, int | None], tuple[str, int | None]] = {}
     raw_checks = payload.get("checks")
     if raw_checks is not None:
