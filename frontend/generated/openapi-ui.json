@@ -881,6 +881,88 @@
         ]
       }
     },
+    "/v1/owner-secret-inputs": {
+      "get": {
+        "operationId": "read_owner_secret_inputs",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "maxLength": 256,
+              "minLength": 1,
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "environment",
+            "required": true,
+            "schema": {
+              "maxLength": 256,
+              "minLength": 1,
+              "title": "Environment",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OwnerSecretInputResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read Owner Secret Inputs"
+      }
+    },
     "/v1/previews/readiness": {
       "get": {
         "operationId": "read_preview_readiness",
@@ -4204,6 +4286,76 @@
         "tags": [
           "ordinary-agent"
         ]
+      }
+    },
+    "/v1/owner-secret-inputs/submit": {
+      "post": {
+        "operationId": "submit_owner_secret_input",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OwnerSecretInputEnvelope"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OwnerSecretInputResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Submit Owner Secret Input"
       }
     },
     "/v1/privileged-operations/authorization-candidates/ordinary-agent-delivery/prepare": {
@@ -17388,6 +17540,146 @@
         "title": "OwnerAcceptanceRuntimeIdentityBinding",
         "type": "object"
       },
+      "OwnerSecretInputEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "environment": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Environment",
+            "type": "string"
+          },
+          "product": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Product",
+            "type": "string"
+          },
+          "request_revision": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Request Revision",
+            "type": "string"
+          },
+          "value": {
+            "format": "password",
+            "maxLength": 65536,
+            "minLength": 1,
+            "title": "Value",
+            "type": "string",
+            "writeOnly": true
+          }
+        },
+        "required": [
+          "product",
+          "environment",
+          "request_revision",
+          "value"
+        ],
+        "title": "OwnerSecretInputEnvelope",
+        "type": "object"
+      },
+      "OwnerSecretInputField": {
+        "additionalProperties": false,
+        "properties": {
+          "binding_key": {
+            "title": "Binding Key",
+            "type": "string"
+          },
+          "environments": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Environments",
+            "type": "array"
+          },
+          "instructions": {
+            "title": "Instructions",
+            "type": "string"
+          },
+          "integration": {
+            "title": "Integration",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "request_revision": {
+            "title": "Request Revision",
+            "type": "string"
+          },
+          "submission_version_id": {
+            "default": "",
+            "title": "Submission Version Id",
+            "type": "string"
+          },
+          "submitted_at": {
+            "default": "",
+            "title": "Submitted At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "binding_key",
+          "environments",
+          "instructions",
+          "integration",
+          "label",
+          "request_revision",
+          "submission_version_id",
+          "submitted_at"
+        ],
+        "title": "OwnerSecretInputField",
+        "type": "object"
+      },
+      "OwnerSecretInputResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "can_submit": {
+            "title": "Can Submit",
+            "type": "boolean"
+          },
+          "display_name": {
+            "title": "Display Name",
+            "type": "string"
+          },
+          "environment": {
+            "title": "Environment",
+            "type": "string"
+          },
+          "fields": {
+            "items": {
+              "$ref": "#/components/schemas/OwnerSecretInputField"
+            },
+            "title": "Fields",
+            "type": "array"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "status": {
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "can_submit",
+          "display_name",
+          "environment",
+          "fields",
+          "product",
+          "status",
+          "trace_id"
+        ],
+        "title": "OwnerSecretInputResponse",
+        "type": "object"
+      },
       "PostDeployUpdateEvidence": {
         "additionalProperties": false,
         "properties": {
@@ -20757,15 +21049,20 @@
             "title": "Integration",
             "type": "string"
           },
+          "owner_submission_version_id": {
+            "default": "",
+            "title": "Owner Submission Version Id",
+            "type": "string"
+          },
           "value": {
+            "default": "",
             "title": "Value",
             "type": "string"
           }
         },
         "required": [
           "binding_key",
-          "integration",
-          "value"
+          "integration"
         ],
         "title": "ProductEnvironmentManagedSecretInput",
         "type": "object"
@@ -23717,6 +24014,29 @@
           "review_label"
         ]
       },
+      "ProductOwnerSecretInput": {
+        "additionalProperties": false,
+        "properties": {
+          "instructions": {
+            "default": "",
+            "maxLength": 2000,
+            "title": "Instructions",
+            "type": "string"
+          },
+          "label": {
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Label",
+            "type": "string"
+          }
+        },
+        "required": [
+          "instructions",
+          "label"
+        ],
+        "title": "ProductOwnerSecretInput",
+        "type": "object"
+      },
       "ProductPreviewProfile": {
         "additionalProperties": false,
         "properties": {
@@ -25764,13 +26084,24 @@
             "default": "runtime_environment",
             "title": "Integration",
             "type": "string"
+          },
+          "owner_input": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProductOwnerSecretInput"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
           "binding_key",
           "context",
           "instance",
-          "integration"
+          "integration",
+          "owner_input"
         ],
         "title": "ProductSecretConfigRequirement",
         "type": "object"

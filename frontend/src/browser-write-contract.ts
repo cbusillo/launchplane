@@ -16,9 +16,11 @@ import type {
   PrepareOrdinaryAgentDeliveryPolicyData,
   WriteProductReviewDecisionData,
   WriteReleaseReviewDecisionData,
+  SubmitOwnerSecretInputData,
 } from "./generated/openapi.ts";
 
 export const BROWSER_WRITE_ROUTES = {
+  ownerSecretSubmit: "/v1/owner-secret-inputs/submit" satisfies SubmitOwnerSecretInputData["url"],
   releaseReviewDecision: "/v1/release-review/decisions" satisfies WriteReleaseReviewDecisionData["url"],
   ordinaryAgentApprove: "/v1/ordinary-agent-operations/{principal_id}/{operation_id}/approve" satisfies ApproveOrdinaryAgentOperationData["url"],
   ordinaryAgentCancel: "/v1/ordinary-agent-operations/{principal_id}/{operation_id}/cancel" satisfies CancelOrdinaryAgentOperationData["url"],

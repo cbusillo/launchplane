@@ -22693,6 +22693,143 @@
         "title": "OwnerAcceptanceRuntimeIdentityBinding",
         "type": "object"
       },
+      "OwnerSecretInputEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "environment": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Environment",
+            "type": "string"
+          },
+          "product": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Product",
+            "type": "string"
+          },
+          "request_revision": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Request Revision",
+            "type": "string"
+          },
+          "value": {
+            "format": "password",
+            "maxLength": 65536,
+            "minLength": 1,
+            "title": "Value",
+            "type": "string",
+            "writeOnly": true
+          }
+        },
+        "required": [
+          "product",
+          "environment",
+          "request_revision",
+          "value"
+        ],
+        "title": "OwnerSecretInputEnvelope",
+        "type": "object"
+      },
+      "OwnerSecretInputField": {
+        "additionalProperties": false,
+        "properties": {
+          "binding_key": {
+            "title": "Binding Key",
+            "type": "string"
+          },
+          "environments": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Environments",
+            "type": "array"
+          },
+          "instructions": {
+            "title": "Instructions",
+            "type": "string"
+          },
+          "integration": {
+            "title": "Integration",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "request_revision": {
+            "title": "Request Revision",
+            "type": "string"
+          },
+          "submission_version_id": {
+            "default": "",
+            "title": "Submission Version Id",
+            "type": "string"
+          },
+          "submitted_at": {
+            "default": "",
+            "title": "Submitted At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "integration",
+          "binding_key",
+          "label",
+          "instructions",
+          "environments",
+          "request_revision"
+        ],
+        "title": "OwnerSecretInputField",
+        "type": "object"
+      },
+      "OwnerSecretInputResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "can_submit": {
+            "title": "Can Submit",
+            "type": "boolean"
+          },
+          "display_name": {
+            "title": "Display Name",
+            "type": "string"
+          },
+          "environment": {
+            "title": "Environment",
+            "type": "string"
+          },
+          "fields": {
+            "items": {
+              "$ref": "#/components/schemas/OwnerSecretInputField"
+            },
+            "title": "Fields",
+            "type": "array"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "status": {
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "product",
+          "display_name",
+          "environment",
+          "can_submit",
+          "fields"
+        ],
+        "title": "OwnerSecretInputResponse",
+        "type": "object"
+      },
       "PostDeployUpdateEvidence": {
         "additionalProperties": false,
         "properties": {
@@ -31254,6 +31391,28 @@
         "title": "ProductOwnerRoutingRecord",
         "type": "object"
       },
+      "ProductOwnerSecretInput": {
+        "additionalProperties": false,
+        "properties": {
+          "instructions": {
+            "default": "",
+            "maxLength": 2000,
+            "title": "Instructions",
+            "type": "string"
+          },
+          "label": {
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Label",
+            "type": "string"
+          }
+        },
+        "required": [
+          "label"
+        ],
+        "title": "ProductOwnerSecretInput",
+        "type": "object"
+      },
       "ProductOwnerSelfReviewPolicy": {
         "additionalProperties": false,
         "description": "Self-review denial policy for one product Owner scope.\n\nSelf-review is denied by default. A product policy may permit it only for\nroutine changes, and only through an explicitly revisioned exception. Sensitive,\nunknown, and production-affecting changes are always denied.",
@@ -33241,6 +33400,16 @@
             "default": "runtime_environment",
             "title": "Integration",
             "type": "string"
+          },
+          "owner_input": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProductOwnerSecretInput"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -69976,6 +70145,158 @@
         ]
       }
     },
+    "/v1/owner-secret-inputs": {
+      "get": {
+        "operationId": "read_owner_secret_inputs",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "maxLength": 256,
+              "minLength": 1,
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "environment",
+            "required": true,
+            "schema": {
+              "maxLength": 256,
+              "minLength": 1,
+              "title": "Environment",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OwnerSecretInputResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read Owner Secret Inputs"
+      }
+    },
+    "/v1/owner-secret-inputs/submit": {
+      "post": {
+        "operationId": "submit_owner_secret_input",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OwnerSecretInputEnvelope"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OwnerSecretInputResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Submit Owner Secret Input"
+      }
+    },
     "/v1/previews/desired-state": {
       "post": {
         "operationId": "apply_preview_desired_state",
@@ -74486,6 +74807,28 @@
                     "title": "ProductOnboardingTargetManifest",
                     "type": "object"
                   },
+                  "ProductOwnerSecretInput": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "instructions": {
+                        "default": "",
+                        "maxLength": 2000,
+                        "title": "Instructions",
+                        "type": "string"
+                      },
+                      "label": {
+                        "maxLength": 120,
+                        "minLength": 1,
+                        "title": "Label",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "label"
+                    ],
+                    "title": "ProductOwnerSecretInput",
+                    "type": "object"
+                  },
                   "ProductPromotionWorkflowProfile": {
                     "additionalProperties": false,
                     "properties": {
@@ -74583,6 +74926,16 @@
                         "default": "runtime_environment",
                         "title": "Integration",
                         "type": "string"
+                      },
+                      "owner_input": {
+                        "anyOf": [
+                          {
+                            "$ref": "#/$defs/ProductOwnerSecretInput"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
                       }
                     },
                     "required": [
@@ -75720,6 +76073,28 @@
             "application/json": {
               "schema": {
                 "$defs": {
+                  "ProductOwnerSecretInput": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "instructions": {
+                        "default": "",
+                        "maxLength": 2000,
+                        "title": "Instructions",
+                        "type": "string"
+                      },
+                      "label": {
+                        "maxLength": 120,
+                        "minLength": 1,
+                        "title": "Label",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "label"
+                    ],
+                    "title": "ProductOwnerSecretInput",
+                    "type": "object"
+                  },
                   "ProductRuntimeConfigRequirement": {
                     "additionalProperties": false,
                     "properties": {
@@ -75765,6 +76140,16 @@
                         "default": "runtime_environment",
                         "title": "Integration",
                         "type": "string"
+                      },
+                      "owner_input": {
+                        "anyOf": [
+                          {
+                            "$ref": "#/$defs/ProductOwnerSecretInput"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
                       }
                     },
                     "required": [
@@ -78521,15 +78906,20 @@
                         "title": "Integration",
                         "type": "string"
                       },
+                      "owner_submission_version_id": {
+                        "default": "",
+                        "title": "Owner Submission Version Id",
+                        "type": "string"
+                      },
                       "value": {
+                        "default": "",
                         "title": "Value",
                         "type": "string"
                       }
                     },
                     "required": [
                       "binding_key",
-                      "integration",
-                      "value"
+                      "integration"
                     ],
                     "title": "ProductEnvironmentManagedSecretInput",
                     "type": "object"
@@ -84903,6 +85293,7 @@
     "/v1/governance/projection": "read_governance_projection",
     "/v1/ordinary-agent-jobs/{principal_id}/{request_id}": "read_human_ordinary_agent_job",
     "/v1/ordinary-agent-operations/{principal_id}/{operation_id}": "read_human_ordinary_agent_operation",
+    "/v1/owner-secret-inputs": "read_owner_secret_inputs",
     "/v1/previews/readiness": "read_preview_readiness",
     "/v1/privileged-operations/authorization-candidates/ordinary-agent-delivery/inputs": "read_ordinary_agent_delivery_authorization_candidate_inputs",
     "/v1/privileged-operations/merge-train-targets/inputs": "read_ordinary_agent_merge_train_target_inputs",
@@ -84937,6 +85328,7 @@
     "/v1/ordinary-agent-operations/{principal_id}/{operation_id}/approve": "approve_ordinary_agent_operation",
     "/v1/ordinary-agent-operations/{principal_id}/{operation_id}/cancel": "cancel_ordinary_agent_operation",
     "/v1/ordinary-agent-sessions/{principal_id}/{session_id}/revoke": "revoke_ordinary_agent_session",
+    "/v1/owner-secret-inputs/submit": "submit_owner_secret_input",
     "/v1/privileged-operations/authorization-candidates/ordinary-agent-delivery/prepare": "prepare_ordinary_agent_delivery_policy",
     "/v1/privileged-operations/authorization-candidates/prepare": "prepare_authorization_candidate",
     "/v1/privileged-operations/merge-train-targets/prepare": "prepare_ordinary_agent_merge_train_target",

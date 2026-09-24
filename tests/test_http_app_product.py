@@ -2930,6 +2930,7 @@ class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
                     "integration": "runtime_environment",
                     "context": "sellyouroutboard-prod",
                     "instance": "prod",
+                    "owner_input": None,
                 }
             ],
         )

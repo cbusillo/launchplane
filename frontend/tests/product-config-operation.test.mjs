@@ -81,6 +81,20 @@ test("managed-secret validation errors clear every plaintext input", () => {
   );
 });
 
+test("selecting an Owner submission sends its version and discards any typed value", () => {
+  const identity = productConfigManagedSecretIdentity("runtime_environment", "SMTP_PASSWORD");
+  /** @type {Map<string, {value: string}>} */
+  const inputs = new Map();
+  inputs.set(identity, { value: "discarded-typed-secret" });
+  const result = consumeManagedSecretValues(
+    [{ bindingKey: "SMTP_PASSWORD", integration: "runtime_environment", identity }],
+    inputs,
+    new Map([[identity, "owner-version-1"]]),
+  );
+  assert.deepEqual(result, [{ binding_key: "SMTP_PASSWORD", integration: "runtime_environment", owner_submission_version_id: "owner-version-1" }]);
+  assert.equal(inputs.get(identity).value, "");
+});
+
 test("route cleanup clears every managed-secret input", () => {
   const inputs = new Map([
     ["SMTP_PASSWORD", { value: "smtp-secret-value" }],

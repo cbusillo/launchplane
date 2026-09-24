@@ -1,3 +1,4 @@
+import { OwnerSecretInputsRoute } from "./OwnerSecretInputsRoute";
 import { AlertTriangle, KeyRound, LoaderCircle, ShieldCheck } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
@@ -160,7 +161,7 @@ export function App() {
     if (
       authState.status !== "signed_in" ||
       route.kind === "engineering" ||
-      route.kind === "owner-review"
+      route.kind === "owner-review" || route.kind === "owner-secrets"
     ) {
       setProductsResource(emptyResource());
       return;
@@ -223,7 +224,7 @@ export function App() {
 
   const signOut = useCallback(async () => {
     const signedOutDestination =
-      route.kind === "owner-review"
+      (route.kind === "owner-review" || route.kind === "owner-secrets")
         ? `${window.location.pathname}${window.location.search}`
         : productIndexPath();
     setSigningOut(true);
@@ -265,15 +266,17 @@ export function App() {
     return (
       <SessionGate
         ownerReview={route.kind === "owner-review"}
+        ownerSecrets={route.kind === "owner-secrets"}
         state={authState}
         onRetry={() => setAuthRefreshToken((current) => current + 1)}
       />
     );
   }
 
-  if (route.kind === "owner-review") {
+  if (route.kind === "owner-review" || route.kind === "owner-secrets") {
     return (
       <OwnerReviewShell
+        title={route.kind === "owner-secrets" ? "Credential setup" : "Product review"}
         identity={authState.identity}
         notice={sessionNotice}
         onDismissNotice={() => setSessionNotice("")}
@@ -282,7 +285,7 @@ export function App() {
         signingOut={signingOut}
         theme={theme}
       >
-        <OwnerProductReviewRoute fixtureMode={fixtureMode} />
+        {route.kind === "owner-secrets" ? <OwnerSecretInputsRoute fixtureMode={fixtureMode} /> : <OwnerProductReviewRoute fixtureMode={fixtureMode} />}
       </OwnerReviewShell>
     );
   }
@@ -347,10 +350,12 @@ export function App() {
 
 function SessionGate({
   ownerReview,
+  ownerSecrets,
   state,
   onRetry,
 }: {
   ownerReview: boolean;
+  ownerSecrets: boolean;
   state: Exclude<AuthState, { status: "signed_in" }>;
   onRetry: () => void;
 }) {
@@ -388,13 +393,15 @@ function SessionGate({
             <ShieldCheck aria-hidden="true" />
           )}
         </div>
-        <p className="eyebrow">{ownerReview ? "Product review" : "Operator access"}</p>
+        <p className="eyebrow">{ownerSecrets ? "Credential setup" : ownerReview ? "Product review" : "Operator access"}</p>
         <h1 data-route-heading tabIndex={-1}>
           {checking
             ? "Verifying your session"
             : failed
               ? "Session verification failed"
-              : ownerReview
+              : ownerSecrets
+                ? "Sign in to provide a credential"
+                : ownerReview
                 ? "Sign in to review this change"
                 : "Sign in to operate products"}
         </h1>
@@ -403,7 +410,9 @@ function SessionGate({
             ? "Launchplane is checking the browser session before loading operational evidence."
             : failed
               ? state.error
-              : ownerReview
+              : ownerSecrets
+                ? "Sign in as the product Owner to provide the requested credential."
+                : ownerReview
                 ? "GitHub authentication protects this product review and returns you to the exact change."
                 : "GitHub authentication protects product evidence and operator actions."}
         </p>

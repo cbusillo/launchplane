@@ -193,6 +193,7 @@ UI_OPENAPI_READ_OPERATIONS: dict[str, str] = {
     "/v1/work-graph/tenant-admission/evaluation": "read_tenant_admission_evaluation",
     "/v1/governance/projection": "read_governance_projection",
     "/v1/product-review": "read_product_review",
+    "/v1/owner-secret-inputs": "read_owner_secret_inputs",
     "/v1/release-review": "read_release_review",
     "/v1/privileged-operations/plans": "list_human_privileged_operations",
     "/v1/privileged-operations/plans/{operation_id}": ("read_human_privileged_operation"),
@@ -240,6 +241,7 @@ UI_OPENAPI_WRITE_OPERATIONS: dict[str, str] = {
         "dispatch_product_promotion_workflow"
     ),
     "/v1/product-review/decisions": "write_product_review_decision",
+    "/v1/owner-secret-inputs/submit": "submit_owner_secret_input",
     "/v1/release-review/decisions": "write_release_review_decision",
     "/v1/privileged-operations/plans/{operation_id}/approve": (
         "approve_human_privileged_operation"

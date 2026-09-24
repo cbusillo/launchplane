@@ -37,6 +37,7 @@ export function OwnerReviewShell({
   onThemeChange,
   signingOut,
   theme,
+  title = "Product review",
 }: {
   children: ReactNode;
   identity: GitHubHumanIdentityResponse;
@@ -46,32 +47,33 @@ export function OwnerReviewShell({
   onThemeChange: (theme: Theme) => void;
   signingOut: boolean;
   theme: Theme;
+  title?: string;
 }) {
   useEffect(() => {
     const previousTitle = document.title;
-    document.title = "Product review · Launchplane";
+    document.title = `${title} · Launchplane`;
     document.querySelector<HTMLElement>("[data-route-heading]")?.focus({
       preventScroll: true,
     });
     return () => {
       document.title = previousTitle;
     };
-  }, []);
+  }, [title]);
 
   return (
     <div className="owner-review-shell">
       <a className="skip-link" href="#main-content">
-        Skip to review
+        Skip to content
       </a>
       <header className="owner-review-header">
-        <div className="owner-review-brand" aria-label="Launchplane product review">
+        <div className="owner-review-brand" aria-label={`Launchplane ${title.toLowerCase()}`}>
           <img
             alt=""
             src={`${import.meta.env.BASE_URL}assets/brand/launchplane-icon.svg`}
           />
           <span>
             <strong>Launchplane</strong>
-            <small>Product review</small>
+            <small>{title}</small>
           </span>
         </div>
         <div className="owner-review-session">

@@ -7,6 +7,54 @@ title: Secrets
 - Define the control-plane-owned secret contract for deploy and operator
   workflows.
 
+## Owner credential input
+
+An operator can request a credential by setting `owner_input` on one managed-secret
+requirement in the stored product profile. It contains a human-readable `label` and
+`instructions` and requires an explicit product context. An optional instance
+restricts it to one environment; a context request shares one submission across
+the profile's named environments in that context, which the form lists. Omitted input
+declarations grant no submission surface. Real account names and provider details
+belong in these records, not application defaults.
+
+The named Owner signs in with GitHub at
+`/ui/owner-secrets?product=PRODUCT&environment=ENVIRONMENT`. The page reads
+`GET /v1/owner-secret-inputs` and submits one write-only value to
+`POST /v1/owner-secret-inputs/submit`. The service checks the immutable Owner id,
+the current request revision (including its environment set), CSRF, database storage and encryption availability.
+The password input is cleared before dispatch and on unmount; responses contain
+only request metadata and a receipt. Operators with product-profile read access
+can inspect receipts but cannot submit as the Owner.
+
+Submissions reuse managed-secret encryption and atomic authority bundles, under
+the `owner_secret_submission` integration with **no secret bindings**. The profile
+that authorized the submission is checked under the product lock during commit.
+A changed Owner or request cannot produce a stale authorized write. No runtime
+environment, active runtime secret, provider target, or deployment changes.
+
+An operator separately selects the saved submission in the environment's Managed
+secrets form. The existing product-config dry-run/apply route accepts
+`owner_submission_version_id` instead of a plaintext `value`. It resolves only the
+current version for the exact product, environment, declared binding and Owner,
+after operator authorization. Normal matching dry-run, confirmation, idempotency
+and runtime key-safety checks still apply. Application copies the value to a
+separate runtime secret; a later Owner submission cannot rotate that active value.
+Changing the profile during application aborts the atomic write. Live-target sync
+and actual application verification remain separate operator work.
+
+An exact retry of a completed application replays its stored receipt before
+resolving the submitted credential. Owner replacement or encryption-key retirement
+cannot strand a credential-reference-only request after a lost apply response.
+
+This is credential input, not an Owner operational role or a release decision.
+Product-profile write authority still controls which inputs are requested.
+
+The receipt follows the submission audit event through recorded key re-encryption
+events. Re-encryption changes the encrypted version without changing who supplied
+the value or the displayed receipt time. Superseded requests remain encrypted
+history and are not runtime-bound; automatic removal of retained secret history is
+not part of this input flow.
+
 ## Current Contract
 
 - Dokploy credentials belong to `launchplane`.

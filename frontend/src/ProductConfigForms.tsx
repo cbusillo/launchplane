@@ -10,7 +10,7 @@ import {
 } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 
-import { applyProductEnvironmentConfig } from "./api";
+import { applyProductEnvironmentConfig, readOwnerSecretInputs } from "./api";
 import type { BrowserOperationState } from "./browser-operation";
 import { loadDevFixtures, type DevFixtureMode } from "./dev-fixture-loader";
 import {
@@ -35,6 +35,7 @@ import type {
   ProductEnvironmentConfigStatus,
   ProductManagedSecretConfigStatusItem,
   ProductRuntimeConfigStatusItem,
+  OwnerSecretInputField,
 } from "./generated/openapi.ts";
 
 type EnvironmentConfigRequest = ApplyProductEnvironmentConfigData["body"];
@@ -259,6 +260,19 @@ export function ManagedSecretsChangePanel({
   const [plannedSelectionKey, setPlannedSelectionKey] = useState("");
   const [confirmed, setConfirmed] = useState(false);
   const secretInputs = useRef(new Map<string, HTMLInputElement>());
+  const [ownerFields, setOwnerFields] = useState<OwnerSecretInputField[]>([]);
+  const [ownerSources, setOwnerSources] = useState(new Map<string, string>());
+  const [ownerRefresh, setOwnerRefresh] = useState(0);
+  const [ownerLoadError, setOwnerLoadError] = useState("");
+  useEffect(() => {
+    if (fixtureMode) return;
+    const controller = new AbortController();
+    setOwnerLoadError("");
+    void readOwnerSecretInputs(config.product, config.environment, controller.signal)
+      .then(result => { if (!controller.signal.aborted) setOwnerFields(result.fields); })
+      .catch(() => { if (!controller.signal.aborted) setOwnerLoadError("Saved Owner credentials could not be loaded. Refresh to try again."); });
+    return () => controller.abort();
+  }, [config.product, config.environment, fixtureMode, ownerRefresh]);
   const planOperation = useProductConfigOperation(
     `${config.product}:${config.environment}:managed-secrets:plan`,
     config.product,
@@ -283,7 +297,7 @@ export function ManagedSecretsChangePanel({
       ? [{ bindingKey: secret.binding_key, integration: secret.integration, identity }]
       : [];
   });
-  const selectionKey = productConfigSelectionKey(selectedIdentities);
+  const selectionKey = productConfigSelectionKey(selectedIdentities.map(identity => `${identity}:${ownerSources.get(identity) || ""}`));
   const planMatchesSelection = Boolean(planResult && selectionKey === plannedSelectionKey);
   const operationBusy = isOperationBusy(planOperation.state) || isOperationBusy(applyOperation.state);
   const draftLocked = productConfigDraftLocked(planOperation.state, applyOperation.state);
@@ -311,7 +325,7 @@ export function ManagedSecretsChangePanel({
     }
     let managedSecrets;
     try {
-      managedSecrets = consumeManagedSecretValues(selectedSecrets, secretInputs.current);
+      managedSecrets = consumeManagedSecretValues(selectedSecrets, secretInputs.current, ownerSources);
     } catch (error) {
       setLocalError(error instanceof Error ? error.message : "Secret input validation failed.");
       return;
@@ -350,7 +364,7 @@ export function ManagedSecretsChangePanel({
     }
     let managedSecrets;
     try {
-      managedSecrets = consumeManagedSecretValues(selectedSecrets, secretInputs.current);
+      managedSecrets = consumeManagedSecretValues(selectedSecrets, secretInputs.current, ownerSources);
     } catch (error) {
       setLocalError(error instanceof Error ? error.message : "Secret input validation failed.");
       return;
@@ -378,6 +392,7 @@ export function ManagedSecretsChangePanel({
       return;
     }
     setSelectedIdentities([]);
+    setOwnerSources(new Map());
     setReason("");
     setLocalError("");
     setPlanResult(null);
@@ -394,10 +409,22 @@ export function ManagedSecretsChangePanel({
       title="Plan managed-secret changes"
     >
       <AvailabilityBlockers availability={availability} />
+      {ownerLoadError ? <p role="alert">{ownerLoadError}</p> : null}
+      {ownerFields.length || ownerLoadError ? <button className="button" type="button" disabled={draftLocked} onClick={() => {
+        setOwnerSources(new Map());
+        setPlanResult(null);
+        setConfirmed(false);
+        clearManagedSecretInputs(secretInputs.current);
+        setOwnerFields([]);
+        setOwnerRefresh(current => current + 1);
+      }}>Refresh Owner credentials</button> : null}
       <fieldset disabled={!availability.plan.enabled || draftLocked}>
         <legend className="sr-only">Managed secrets to change</legend>
         <div className="product-config-fields">
-          {config.managed_secrets.map((secret) => (
+          {config.managed_secrets.map((secret) => {
+            const identity = productConfigManagedSecretIdentity(secret.integration, secret.binding_key);
+            const submitted = ownerFields.find(field => field.integration === secret.integration && field.binding_key === secret.binding_key && field.submission_version_id);
+            return (
             <ManagedSecretInput
               key={`${secret.integration}:${secret.binding_key}`}
               inputRef={(element) => {
@@ -412,6 +439,7 @@ export function ManagedSecretsChangePanel({
                 }
               }}
               secret={secret}
+              usingOwnerSubmission={ownerSources.has(identity)}
               selected={selectedIdentities.includes(
                 productConfigManagedSecretIdentity(secret.integration, secret.binding_key),
               )}
@@ -433,8 +461,25 @@ export function ManagedSecretsChangePanel({
                     : current.filter((currentIdentity) => currentIdentity !== identity),
                 );
               }}
-            />
-          ))}
+            >
+              {submitted ? <label>
+                <input type="checkbox" checked={ownerSources.has(identity)} disabled={!selectedIdentities.includes(identity) || draftLocked} onChange={event => {
+                  const input = secretInputs.current.get(identity);
+                  if (input) input.value = "";
+                  const checked = event.target.checked;
+                  setOwnerSources(current => {
+                    const next = new Map(current);
+                    if (checked) next.set(identity, submitted.submission_version_id);
+                    else next.delete(identity);
+                    return next;
+                  });
+                  setPlanResult(null);
+                  setConfirmed(false);
+                }} />
+                Use the Owner’s saved credential
+              </label> : null}
+            </ManagedSecretInput>
+          );})}
         </div>
         <ReasonField reason={reason} onChange={setReason} />
       </fieldset>
@@ -581,7 +626,11 @@ function ManagedSecretInput({
   onSelected,
   secret,
   selected,
+  usingOwnerSubmission,
+  children,
 }: {
+  usingOwnerSubmission: boolean;
+  children?: ReactNode;
   inputRef: (element: HTMLInputElement | null) => void;
   onSelected: (selected: boolean) => void;
   secret: ProductManagedSecretConfigStatusItem;
@@ -606,13 +655,14 @@ function ManagedSecretInput({
         Write-only value
         <input
           autoComplete="new-password"
-          disabled={!selected}
+          disabled={!selected || usingOwnerSubmission}
           id={inputId}
           placeholder="Value is cleared on submit"
           ref={inputRef}
           type="password"
         />
       </label>
+      {children}
     </div>
   );
 }

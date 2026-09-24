@@ -518,6 +518,13 @@ draft field so the only mutation retry preserves the original operation key and
 payload. Live-target endpoints returned in `next_actions` are rendered as
 inspect-only evidence until they have a separate generated browser adapter.
 
+The environment Managed secrets form can also select a credential supplied by the
+named Owner. The Owner receives the focused `/ui/owner-secrets` page, containing
+only profile-declared input requests. It exposes no existing values or operator
+navigation. Its receipt means the credential was stored, not that a running
+product uses it. The operator reviews and applies the selected submission version
+through the existing dry-run/apply form. See [secrets.md](secrets.md#owner-credential-input).
+
 ## Cleanup Safety
 
 Legacy cleanup is an admin or maintenance action, not a primary product flow.

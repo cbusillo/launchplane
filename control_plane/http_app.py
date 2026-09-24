@@ -22,6 +22,14 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Res
 from fastapi.datastructures import DefaultPlaceholder
 from fastapi.concurrency import run_in_threadpool
 from fastapi.exceptions import RequestValidationError
+from control_plane.http_routes.owner_secret_inputs import (
+    OwnerSecretInputDependencies,
+    register_owner_secret_input_routes,
+)
+from control_plane.owner_secret_inputs import (
+    OwnerSecretSubmissionUnavailable,
+    resolve_owner_secret_submission,
+)
 from fastapi.responses import JSONResponse, RedirectResponse
 from jwt import InvalidTokenError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
@@ -789,6 +797,7 @@ from control_plane.storage.factory import build_shared_record_store
 from control_plane.storage.factory import storage_backend_name
 from control_plane.storage.product_authority_bundle import (
     ProductAuthorityBundle,
+    ProductProfileConflictError,
     RuntimeEnvironmentConflictError,
 )
 from control_plane.storage.postgres import (
@@ -13482,6 +13491,8 @@ def create_launchplane_fastapi_app(
         route_path: str,
         product_config_request: ProductConfigApplyEnvelope,
         expected_confirmation: str = "",
+        expected_product_profile: LaunchplaneProductProfileRecord | None = None,
+        idempotency_request_payload: dict[str, object] | None = None,
     ) -> ProductConfigApplyResponse:
         if isinstance(identity, TerminalAgentIdentity):
             raise _launchplane_http_error(
@@ -13580,7 +13591,7 @@ def create_launchplane_fastapi_app(
                 idempotency_key=idempotency_key,
                 trace_id=trace_id,
                 check_replay=bool(idempotency_key.strip()),
-                request_payload=request_payload,
+                request_payload=idempotency_request_payload or request_payload,
             )
         except click.ClickException as error:
             raise _launchplane_http_error(
@@ -13628,6 +13639,10 @@ def create_launchplane_fastapi_app(
                 trace_id=trace_id,
                 code=product_config_error.code,
                 message=product_config_error.message,
+            )
+        if expected_product_profile is not None:
+            authority_bundle = authority_bundle.model_copy(
+                update={"expected_product_profiles": (expected_product_profile,)}
             )
         driver_result: dict[str, object] = {
             **planned_driver_result,
@@ -13819,12 +13834,73 @@ def create_launchplane_fastapi_app(
                 code="not_found",
                 message="Product environment was not found.",
             )
+        idempotency_request_payload = None
+        if any(item.owner_submission_version_id for item in environment_request.managed_secrets):
+            # Pin replay to the submitted references, not their decryptable current values.
+            # Typed values still require the existing keyed secret fingerprint.
+            idempotency_request_payload = {
+                **environment_request.model_dump(mode="json", exclude_none=True),
+                "product": profile.product,
+                "context": lane.context,
+                "instance": lane.instance,
+                "secrets": [
+                    item.model_dump(mode="json")
+                    for item in environment_request.managed_secrets
+                    if not item.owner_submission_version_id
+                ],
+            }
+            if idempotency_key.strip():
+                try:
+                    _, _, replay_response = await replay_apply_idempotency(
+                        request=request,
+                        record_store=database_store,
+                        identity=identity,
+                        route_path=_PRODUCT_ENVIRONMENT_CONFIG_APPLY_ROUTE,
+                        idempotency_key=idempotency_key,
+                        trace_id=trace_id,
+                        check_replay=True,
+                        request_payload=idempotency_request_payload,
+                    )
+                except click.ClickException as error:
+                    raise _launchplane_http_error(
+                        status_code=503,
+                        trace_id=trace_id,
+                        code="secret_configuration_required",
+                        message="Launchplane service is missing required secret write configuration.",
+                    ) from error
+                if replay_response is not None:
+                    return ProductConfigApplyResponse.model_validate(
+                        replay_response.model_dump(mode="json")
+                    )
         try:
             product_config_request = product_environment_config_apply_request(
                 profile=profile,
                 lane=lane,
                 request=environment_request,
+                owner_submission_resolver=lambda requirement, version_id: (
+                    resolve_owner_secret_submission(
+                        database_store,
+                        profile=profile,
+                        lane=lane,
+                        requirement=requirement,
+                        version_id=version_id,
+                    )
+                ),
             )
+        except OwnerSecretSubmissionUnavailable as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="owner_secret_submission_changed",
+                message="The Owner credential changed. Refresh the saved credential and run a new dry-run.",
+            ) from error
+        except click.ClickException as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="secret_storage_unavailable",
+                message="The saved credential cannot be decrypted. Restore the managed-secret key configuration.",
+            ) from error
         except (ValidationError, ValueError) as error:
             raise _launchplane_http_error(
                 status_code=400,
@@ -13845,7 +13921,20 @@ def create_launchplane_fastapi_app(
                     product=profile.product,
                     environment=lane.instance,
                 ),
+                idempotency_request_payload=idempotency_request_payload,
+                expected_product_profile=profile
+                if any(
+                    item.owner_submission_version_id for item in environment_request.managed_secrets
+                )
+                else None,
             )
+        except ProductProfileConflictError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="product_profile_conflict",
+                message="The product configuration changed. Refresh and run a new dry-run.",
+            ) from error
         except RuntimeEnvironmentConflictError as error:
             raise runtime_environment_conflict_http_error(trace_id=trace_id, error=error) from error
 
@@ -24030,6 +24119,13 @@ def create_launchplane_fastapi_app(
                 profile=profile,
                 decision=decision,
             ),
+        ),
+    )
+    register_owner_secret_input_routes(
+        app,
+        dependencies=OwnerSecretInputDependencies(
+            common=read_route_dependencies,
+            read_human_mutation_identity=read_github_human_browser_mutation_identity,
         ),
     )
     register_product_review_routes(

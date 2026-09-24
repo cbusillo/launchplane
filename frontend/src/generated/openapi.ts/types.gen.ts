@@ -1980,6 +1980,33 @@ export type OwnerAcceptanceRuntimeIdentityBinding = {
     source_git_ref: string;
 };
 
+export type OwnerSecretInputEnvelope = {
+    environment: string;
+    product: string;
+    request_revision: string;
+};
+
+export type OwnerSecretInputField = {
+    binding_key: string;
+    environments: Array<string>;
+    instructions: string;
+    integration: string;
+    label: string;
+    request_revision: string;
+    submission_version_id: string;
+    submitted_at: string;
+};
+
+export type OwnerSecretInputResponse = {
+    can_submit: boolean;
+    display_name: string;
+    environment: string;
+    fields: Array<OwnerSecretInputField>;
+    product: string;
+    status: string;
+    trace_id: string;
+};
+
 export type PostDeployUpdateEvidence = {
     attempted: boolean;
     detail: string;
@@ -2570,7 +2597,8 @@ export type ProductEnvironmentListResponse = {
 export type ProductEnvironmentManagedSecretInput = {
     binding_key: string;
     integration: string;
-    value: string;
+    owner_submission_version_id?: string;
+    value?: string;
 };
 
 export type ProductEnvironmentResponse = {
@@ -3017,6 +3045,11 @@ export type ProductOwnerProfile = {
     review_label: string;
 };
 
+export type ProductOwnerSecretInput = {
+    instructions: string;
+    label: string;
+};
+
 export type ProductPreviewProfile = {
     app_name_prefix: string;
     context: string;
@@ -3362,6 +3395,7 @@ export type ProductSecretConfigRequirement = {
     context: string;
     instance: string;
     integration: string;
+    owner_input: ProductOwnerSecretInput | null;
 };
 
 export type ProductSiteOverview = {
@@ -3951,6 +3985,13 @@ export type WorkGraphSnapshotResponse = {
     trace_id: string;
 };
 
+export type OwnerSecretInputEnvelopeWritable = {
+    environment: string;
+    product: string;
+    request_revision: string;
+    value: string;
+};
+
 export type ReadHumanAuthSessionData = {
     body?: never;
     headers?: {
@@ -4201,6 +4242,33 @@ export type ReadHumanOrdinaryAgentOperationResponses = {
 };
 
 export type ReadHumanOrdinaryAgentOperationResponse = ReadHumanOrdinaryAgentOperationResponses[keyof ReadHumanOrdinaryAgentOperationResponses];
+
+export type ReadOwnerSecretInputsData = {
+    body?: never;
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path?: never;
+    query: {
+        product: string;
+        environment: string;
+    };
+    url: '/v1/owner-secret-inputs';
+};
+
+export type ReadOwnerSecretInputsErrors = {
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type ReadOwnerSecretInputsError = ReadOwnerSecretInputsErrors[keyof ReadOwnerSecretInputsErrors];
+
+export type ReadOwnerSecretInputsResponses = {
+    200: OwnerSecretInputResponse;
+};
+
+export type ReadOwnerSecretInputsResponse = ReadOwnerSecretInputsResponses[keyof ReadOwnerSecretInputsResponses];
 
 export type ReadPreviewReadinessData = {
     body?: never;
@@ -5118,6 +5186,30 @@ export type RevokeOrdinaryAgentSessionResponses = {
 };
 
 export type RevokeOrdinaryAgentSessionResponse = RevokeOrdinaryAgentSessionResponses[keyof RevokeOrdinaryAgentSessionResponses];
+
+export type SubmitOwnerSecretInputData = {
+    body: OwnerSecretInputEnvelopeWritable;
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/owner-secret-inputs/submit';
+};
+
+export type SubmitOwnerSecretInputErrors = {
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type SubmitOwnerSecretInputError = SubmitOwnerSecretInputErrors[keyof SubmitOwnerSecretInputErrors];
+
+export type SubmitOwnerSecretInputResponses = {
+    200: OwnerSecretInputResponse;
+};
+
+export type SubmitOwnerSecretInputResponse = SubmitOwnerSecretInputResponses[keyof SubmitOwnerSecretInputResponses];
 
 export type PrepareOrdinaryAgentDeliveryPolicyData = {
     body: OrdinaryAgentDeliveryPolicyPrepareEnvelope;
