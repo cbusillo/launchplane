@@ -1981,9 +1981,12 @@ run` is the foreground loop intended for an external process supervisor, and
   omission preserves the existing company email. Native website contact forms
   use this company field when constructing the sender. SMTP transport and its
   credential remain separate managed runtime configuration. Deploy an Odoo
-  artifact whose devkit supports the field and verify the
-  `website_bootstrap_company_email_matches` readback marker before treating the
-  sender as configured; old runtime artifacts do not consume this new field.
+  artifact whose devkit supports the field. Post-deploy requires the
+  `website_bootstrap_company_email_matches` readback marker whenever a sender
+  is requested; an older runtime that ignores the field fails this check.
+  Deploy the supporting Launchplane version before storing the new field;
+  rolling back to an older service requires removing the field from the record
+  through the supported record workflow first.
 - New website-bootstrap writes through the service route enforce the devkit-safe
   contract: homepage and route URLs are local Odoo route paths,
   `primary_page_xmlid` is a dotted XML ID, and at most one route can be marked

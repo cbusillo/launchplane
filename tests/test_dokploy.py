@@ -12,7 +12,7 @@ from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import cast
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from urllib.error import HTTPError
 
 import click
@@ -3107,6 +3107,68 @@ domains = ["cm-testing.shinycomputers.com"]
                 "website_bootstrap_website_id": "7",
             },
         )
+
+    def test_post_deploy_refuses_unproved_company_sender(self) -> None:
+        payload = base64.b64encode(
+            json.dumps(
+                {
+                    "context": "example",
+                    "instance": "testing",
+                    "website_bootstrap": {
+                        "name": "Example",
+                        "company_email": "support@example.test",
+                    },
+                }
+            ).encode()
+        ).decode()
+        target = control_plane_dokploy.DokployTargetDefinition(
+            context="example", instance="testing", target_id="compose-example"
+        )
+        for marker in (None, "false", "true"):
+            logs = [] if marker is None else [f"website_bootstrap_company_email_matches={marker}"]
+            with (
+                self.subTest(marker=marker),
+                patch.multiple(
+                    dokploy_api,
+                    fetch_dokploy_target_payload=Mock(
+                        return_value={
+                            "env": f"ODOO_DB_NAME=example\n{ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY}={payload}\n",
+                            "appName": "example-app",
+                            "serverId": "server-example",
+                        }
+                    ),
+                    find_matching_dokploy_schedule=Mock(return_value=None),
+                    upsert_dokploy_schedule=Mock(return_value={"scheduleId": "schedule-example"}),
+                    latest_deployment_for_schedule=Mock(
+                        side_effect=[
+                            {"id": "before"},
+                            {"id": "after", "logs": logs},
+                        ]
+                    ),
+                    wait_for_dokploy_schedule_deployment=Mock(
+                        return_value="deployment=after status=done"
+                    ),
+                    fetch_dokploy_deployment_logs=Mock(return_value=logs),
+                    dokploy_request=Mock(return_value={"ok": True}),
+                ),
+            ):
+
+                def deploy() -> dict[str, str]:
+                    return control_plane_dokploy.run_compose_post_deploy_update(
+                        host="https://dokploy.example.test",
+                        token="test-token",
+                        target_definition=target,
+                        env_file=None,
+                        workflow_environment_overrides={
+                            ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY: payload
+                        },
+                    )
+
+                if marker == "true":
+                    self.assertEqual(deploy()["website_bootstrap_company_email_matches"], "true")
+                else:
+                    with self.assertRaisesRegex(click.ClickException, "company sender"):
+                        deploy()
 
     def test_run_compose_post_deploy_update_reads_inline_schedule_log_markers(
         self,
