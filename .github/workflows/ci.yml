@@ -194,7 +194,7 @@ jobs:
         with:
           version: v5.3.1
 
-      - name: Log in to GHCR for build cache
+      - name: Log in to GHCR
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
@@ -212,8 +212,6 @@ jobs:
           no-cache-filters: runtime
           cache-from: >-
             type=gha,scope=launchplane-ci
-          cache-to: >-
-            type=gha,scope=launchplane-ci,mode=max
 
       - name: Qualify ordinary worker Compose lifecycle
         run: bash scripts/qualify-ordinary-agent-compose.sh "$LAUNCHPLANE_CI_IMAGE_TAG"
