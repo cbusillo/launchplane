@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+# Preserve these existing compatibility exports for callers of this module.
+# noinspection PyUnusedImports
 from control_plane.contracts.ordinary_agent_provider import (
     ordinary_agent_enrollment_effect_profiles as ordinary_agent_enrollment_effect_profiles,
     ordinary_agent_enrollment_permissions as ordinary_agent_enrollment_permissions,
@@ -81,6 +83,14 @@ GitHubApiRequest = Callable[..., object]
 
 class GitHubAppIdentityError(ValueError):
     pass
+
+
+class GitHubAppPermissionError(GitHubAppIdentityError):
+    def __init__(self, missing: Mapping[str, str]) -> None:
+        self.required_grants = ", ".join(f"{key}:{level}" for key, level in sorted(missing.items()))
+        super().__init__(
+            f"GitHub App installation lacks required permissions: {self.required_grants}."
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -635,7 +645,7 @@ def _validate_permissions(
     if allowed_permissions is None:
         # A shared installation may serve other operations. Its required grants
         # are a floor; the separately requested and verified token remains exact.
-        levels = {"read": 1, "write": 2}
+        levels = {"read": 1, "write": 2, "admin": 3}
         if any(
             not isinstance(key, str)
             or not key
@@ -644,11 +654,13 @@ def _validate_permissions(
             for key, permission in value.items()
         ):
             raise GitHubAppIdentityError(f"GitHub App {label} permissions are malformed.")
-        if any(
-            levels.get(observed.get(key, ""), 0) < levels[permission]
+        missing = {
+            key: permission
             for key, permission in required_permissions.items()
-        ):
-            raise GitHubAppIdentityError(f"GitHub App {label} lacks required permission.")
+            if levels.get(observed.get(key, ""), 0) < levels[permission]
+        }
+        if missing:
+            raise GitHubAppPermissionError(missing)
         return observed
     missing = {
         key: permission

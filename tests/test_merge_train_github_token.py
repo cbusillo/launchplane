@@ -55,11 +55,13 @@ class MergeTrainGitHubTokenTests(unittest.TestCase):
             "vulnerability_alerts": "read",
             "secret_scanning_alerts": "read",
             "deployments": "read",
+            "repository_projects": "admin",
         }
 
     def provider(self, _request: object, **kwargs: object) -> object:
         self.calls.append(dict(kwargs))
         path = kwargs["path"]
+        assert isinstance(path, str)
         if path == "/app":
             return {"id": 42}
         if path == "/repos/example/repo/installation":
@@ -161,8 +163,14 @@ class MergeTrainGitHubTokenTests(unittest.TestCase):
                         "control_plane.github_app_identity._github_api_request",
                         side_effect=self.provider,
                     ),
+                    self.assertLogs(
+                        "control_plane.merge_train_github_token", level="WARNING"
+                    ) as logs,
                 ):
                     self.assertEqual(self.resolve(), "")
+                if permission in {"workflows", "contents"}:
+                    self.assertIn(f"missing_grants ({permission}:write)", logs.output[-1])
+                self.assertNotIn(self.private_key, "".join(logs.output))
                 self.assertEqual(self.minted, 0)
                 self.assertFalse(any(call.get("method") == "POST" for call in self.calls))
 
