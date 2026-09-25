@@ -188,20 +188,23 @@ See [driver-development.md](driver-development.md) for the driver workflow and
 
 Before treating the repo as Launchplane-ready:
 
-- Verify the intended delivery path, including the automation authors that
-  normally open PRs. Read the active [merge-train policy](merge-train-policy.md)
-  and run a nonmutating controller pass against real open PRs when available.
-  The current GitHub adapter evaluates the PR author, not the ready-label actor;
-  passing CI and an authorized labeler do not admit an unrecognized author.
-  A missing ready label alone is expected before enqueueing. Report unavailable
-  author evidence explicitly rather than declaring onboarding proved.
-- Verify GitHub App installation coverage and permissions for the intended
-  operations, including workflow dispatch and rerun where used. App permissions
-  apply to the repositories covered by that installation; train author
-  allowlists are separate repository/base records. Collect known capability
-  gaps for the intended workflow into one reviewed setup change. Store any
-  approved author identities in Launchplane records, preserving the configured
-  label, check, and merge-identity requirements.
+- For repositories using the train, verify the intended PR authors against the
+  active [merge-train policy](merge-train-policy.md). Inspect a controller dry-run
+  against real open PRs when the target and required access are configured.
+  The GitHub adapter evaluates the PR author, not the ready-label actor;
+  passing CI and a ready label do not admit an unrecognized author. A missing
+  ready label alone is expected before enqueueing. Report an unconfigured target
+  or unavailable author evidence separately from product deploy readiness.
+- Verify the agent's GitHub App installation coverage and permissions for its
+  operations, including dispatch and rerun where used. Preserve the dedicated
+  train App's separate [credential contract](merge-train-policy.md#credential-source-and-policy-readback);
+  widening that App can make its installation fail verification. App permissions
+  cover the installation's repositories; train author allowlists are separate
+  repository/base records. Present verified gaps together for operator approval
+  under [DIRECTION.md](../DIRECTION.md#stop-boundaries), then use each system's
+  supported change path. Author-policy changes use the
+  [managed policy import](merge-train-policy.md#operator-changes); check all
+  targets for in-flight work because their records bind the full policy digest.
 - CI and pull-request dependency regression checks pass, and the current
   default-branch/artifact absolute health evidence is acceptable.
 - The image or artifact is immutable and traceable to a source SHA.
