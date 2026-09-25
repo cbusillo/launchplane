@@ -421,6 +421,7 @@ def execute_merge_train_controller_with_client(
             trace_id=trace_id,
             recorded_at=recorded_at,
             github_client=github_client,
+            candidate_store=candidate_store,
             landing_store=landing_store,
             stack_collapse_store=stack_collapse_store,
             lease=lease,
@@ -530,6 +531,7 @@ def _resume_merge_train_controller_state(
     trace_id: str,
     recorded_at: str,
     github_client: GitHubMergeTrainClient,
+    candidate_store: MergeTrainBatchCandidateRecordStore,
     landing_store: MergeTrainBatchLandingPlanRecordStore,
     stack_collapse_store: MergeTrainStackCollapsePlanRecordStore,
     lease: MergeTrainControllerLeaseContext,
@@ -559,6 +561,7 @@ def _resume_merge_train_controller_state(
         "merge_batch_entries",
         "merge_pull_request",
         "landing_entry_merged",
+        "retire_stale_policy_landing",
     }:
         planned_record = _merge_train_landing_record_by_id(
             record_store=landing_store,
@@ -577,6 +580,12 @@ def _resume_merge_train_controller_state(
         )
         if landed_record is None:
             return None
+        if lease.record.active_phase == "retire_stale_policy_landing":
+            return _finish_retired_policy_landing(
+                candidate_store=candidate_store,
+                retired_record=landed_record,
+                lease=lease,
+            )
         return _finish_landed_merge_train_batch(
             request=request,
             policy_sha256=policy_sha256,
@@ -876,6 +885,24 @@ def _advance_active_landing_record(
     active_landing_record: MergeTrainBatchLandingPlanRecord,
     lease: MergeTrainControllerLeaseContext,
 ) -> dict[str, object]:
+    if (
+        active_landing_record.ordinary_job_binding is None
+        and active_landing_record.landing_plan.policy_key == repository_policy.policy_key
+        and active_landing_record.landing_plan.policy_sha256 != policy_sha256
+    ):
+        return _retire_changed_policy_landing(
+            request=request,
+            trace_id=trace_id,
+            recorded_at=recorded_at,
+            github_client=github_client,
+            candidate_store=candidate_store,
+            landing_store=landing_store,
+            stack_collapse_store=stack_collapse_store,
+            admission_store=admission_store,
+            admission_evaluator=admission_evaluator,
+            landing_record=active_landing_record,
+            lease=lease,
+        )
     try:
         validate_merge_train_landing_record_for_controller(
             landing_record=active_landing_record,
@@ -1191,6 +1218,124 @@ def _advance_active_landing_record(
         landed_record=landed_record,
         lease=lease,
     )
+
+
+def _retire_changed_policy_landing(
+    *,
+    request: MergeTrainControllerRunOnceEnvelope,
+    trace_id: str,
+    recorded_at: str,
+    github_client: GitHubMergeTrainClient,
+    candidate_store: MergeTrainBatchCandidateRecordStore,
+    landing_store: MergeTrainBatchLandingPlanRecordStore,
+    stack_collapse_store: MergeTrainStackCollapsePlanRecordStore,
+    admission_store: MergeAdmissionRecordStore,
+    admission_evaluator: MergeAdmissionEvaluator,
+    landing_record: MergeTrainBatchLandingPlanRecord,
+    lease: MergeTrainControllerLeaseContext,
+) -> dict[str, object]:
+    plan = landing_record.landing_plan
+    if (
+        latest_merge_train_stack_collapse_plan_record_for_landing(
+            record_store=stack_collapse_store,
+            repository=request.repository,
+            base_branch=request.base_branch,
+            landing_plan=plan,
+            policy_sha256=plan.policy_sha256,
+        )
+        is not None
+    ):
+        raise MergeTrainControllerRequestError(
+            "Policy-change recovery of a collapsed stack requires explicit reconciliation."
+        )
+    candidate_record = _candidate_record_for_landing_plan(
+        record_store=candidate_store, landing_plan_record=landing_record
+    )
+    if candidate_record is None:
+        raise MergeTrainControllerRequestError(
+            "Policy-change recovery requires the exact recorded candidate."
+        )
+    if request.mutate:
+        lease.checkpoint(
+            active_action="land_batch",
+            active_phase="retire_stale_policy_landing",
+            active_record_id=landing_record.record_id,
+            active_pull_request_number=None,
+            step_payload={"landing_plan_record_id": landing_record.record_id},
+        )
+    github_client.verify_unlanded_batch(landing_plan=plan)
+    if not request.mutate:
+        return {
+            "repository": plan.repository,
+            "base_branch": plan.base_branch,
+            "mode": "dry-run",
+            "controller_action": "retire_stale_landing",
+            "merge_train_batch_landing_plan_record_id": landing_record.record_id,
+        }
+    lease.checkpoint()
+    guard = GuardedMergeAdmission(
+        record_store=admission_store,
+        evaluator=admission_evaluator,
+        candidate_record=candidate_record,
+        landing_plan_record=landing_record,
+        controller_state=lease.record,
+        trace_id=trace_id,
+    )
+    for entry in plan.entries:
+        guard.reconcile_existing_no_effect(
+            entry=entry,
+            observed_base_sha=plan.entries[0].expected_base_sha,
+            observed_base_tree_sha=plan.entries[0].recorded_candidate_parent_tree_sha,
+            observed_head_sha=entry.expected_head_sha,
+            observed_head_tree_sha=entry.expected_head_tree_sha,
+            observed_pull_request_state="open",
+            observed_at=recorded_at,
+        )
+    lease.checkpoint()
+    retired_record = build_merge_train_batch_landing_plan_record(
+        landing_plan=stale_merge_train_landing_plan(plan),
+        source=f"service:controller:policy-changed-landing:{trace_id}",
+        updated_at=recorded_at,
+    )
+    landing_store.write_merge_train_batch_landing_plan_record(retired_record)
+    return _finish_retired_policy_landing(
+        candidate_store=candidate_store, retired_record=retired_record, lease=lease
+    )
+
+
+def _finish_retired_policy_landing(
+    *,
+    candidate_store: MergeTrainBatchCandidateRecordStore,
+    retired_record: MergeTrainBatchLandingPlanRecord,
+    lease: MergeTrainControllerLeaseContext,
+) -> dict[str, object]:
+    plan = retired_record.landing_plan
+    if (
+        retired_record.ordinary_job_binding is not None
+        or not retired_record.source.startswith("service:controller:policy-changed-landing:")
+        or any(entry.status != "stale" for entry in plan.entries)
+    ):
+        raise MergeTrainControllerRequestError("Policy-change retirement evidence is incomplete.")
+    lease.checkpoint()
+    for record in candidate_store.list_merge_train_batch_candidate_records(
+        repository=plan.repository, base_branch=plan.base_branch, status="active"
+    ):
+        if (
+            record.candidate.batch_id == plan.batch_id
+            and record.candidate.policy_sha256 == plan.policy_sha256
+        ):
+            _supersede_merge_train_batch_candidate_record(
+                record_store=candidate_store, record=record
+            )
+    return {
+        "repository": plan.repository,
+        "base_branch": plan.base_branch,
+        "mode": "stale_landing",
+        "controller_action": "retire_stale_landing",
+        "merge_train_batch_landing_plan_record_id": retired_record.record_id,
+        "landing_plan": plan.model_dump(mode="json"),
+        "candidate_ref_cleanup_status": "retained",
+    }
 
 
 def _finish_landed_merge_train_batch(
