@@ -72,7 +72,9 @@ class GovernanceProjectionTests(unittest.TestCase):
                 }
             )
             provider = LiveGovernanceCurrentReadinessProvider(
-                github_token=lambda source: "test-token" if source.env_var == "GH_TOKEN" else "",
+                github_token=lambda source, _repository: (
+                    "test-token" if source.env_var == "GH_TOKEN" else ""
+                ),
                 evaluator_factory=lambda _store, _provider, _token: evaluator,
             )
 
@@ -133,7 +135,7 @@ class GovernanceProjectionTests(unittest.TestCase):
             store.write_merge_train_batch_landing_plan_record(landing_record)
             store.write_merge_train_controller_state_record(idle_controller_state)
             provider = LiveGovernanceCurrentReadinessProvider(
-                github_token=lambda _env_var: self.fail("idle controller used a token")
+                github_token=lambda _source, _repository: self.fail("idle controller used a token")
             )
 
             result = provider(
@@ -274,7 +276,8 @@ class GovernanceProjectionTests(unittest.TestCase):
 
         self.assertEqual(result.availability, "available")
         token.assert_called_once_with(
-            MergeTrainGitHubTokenSource(runtime_context="example_context")
+            MergeTrainGitHubTokenSource(runtime_context="example_context"),
+            evidence.target.repository,
         )
         evaluator_factory.assert_called_once()
         evaluator.evaluate.assert_called_once()
@@ -399,7 +402,9 @@ class GovernanceProjectionTests(unittest.TestCase):
                 store.write_merge_train_batch_landing_plan_record(terminal_record)
                 store.write_merge_train_controller_state_record(controller_state)
                 provider = LiveGovernanceCurrentReadinessProvider(
-                    github_token=lambda _env_var: self.fail("terminal lineage used a token")
+                    github_token=lambda _source, _repository: self.fail(
+                        "terminal lineage used a token"
+                    )
                 )
 
                 result = provider(

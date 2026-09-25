@@ -76,7 +76,9 @@ class MergeTrainPolicyTests(unittest.TestCase):
         legacy_digest = legacy.policy_sha256
         token_source = payload["policies"][0]["github_token"]
         self.assertNotIn("runtime_context", token_source)
+        self.assertNotIn("github_app", token_source)
         token_source["runtime_context"] = ""
+        token_source["github_app"] = None
         restored = MergeTrainPolicy.model_validate(payload)
         self.assertEqual(restored.policy_sha256, legacy_digest)
         self.assertEqual(restored.model_dump(mode="json"), legacy.model_dump(mode="json"))

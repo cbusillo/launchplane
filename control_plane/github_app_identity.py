@@ -23,6 +23,18 @@ ADVISORY_GITHUB_APP_ID_ENV_KEY = "LAUNCHPLANE_ADVISORY_GITHUB_APP_ID"
 ADVISORY_GITHUB_APP_PRIVATE_KEY_ENV_KEY = "LAUNCHPLANE_ADVISORY_GITHUB_APP_PRIVATE_KEY"
 _LAUNCHPLANE_SERVICE_CONTEXT = "launchplane"
 _ALLOWED_INSTALLATION_PERMISSIONS = {"checks": "write", "metadata": "read"}
+_MERGE_TRAIN_TOKEN_PERMISSIONS = {
+    "checks": "read",
+    "contents": "write",
+    "metadata": "read",
+    "pull_requests": "write",
+    "statuses": "read",
+}
+_MERGE_TRAIN_INSTALLATION_PERMISSIONS = {
+    **_MERGE_TRAIN_TOKEN_PERMISSIONS,
+    "actions": "read",
+    "issues": "write",
+}
 _ORDINARY_AGENT_EFFECT_PERMISSION_CEILINGS: dict[str, dict[str, str]] = {
     "guarded_merge": {
         "contents": "write",
@@ -146,6 +158,32 @@ def mint_repository_installation_token(
         allowed_token_permissions=_ALLOWED_INSTALLATION_PERMISSIONS,
         identity_label="Launchplane advisory GitHub App",
         permission_boundary_label="advisory check projection",
+        api_request=api_request,
+        now=now,
+    )
+
+
+def mint_merge_train_installation_token(
+    *,
+    identity: GitHubAppIdentity,
+    repository: str,
+    repository_id: str,
+    api_request: GitHubApiRequest = github_api_request,
+    now: datetime | None = None,
+) -> GitHubAppInstallationToken:
+    """Mint a fresh token for one native train repository and its required effects."""
+    return _mint_repository_installation_token(
+        identity=identity,
+        repository=repository,
+        repository_id=repository_id,
+        requested_permissions={
+            key: value for key, value in _MERGE_TRAIN_TOKEN_PERMISSIONS.items() if key != "metadata"
+        },
+        required_installation_permissions=_MERGE_TRAIN_TOKEN_PERMISSIONS,
+        allowed_installation_permissions=_MERGE_TRAIN_INSTALLATION_PERMISSIONS,
+        allowed_token_permissions=_MERGE_TRAIN_TOKEN_PERMISSIONS,
+        identity_label="Merge train GitHub App",
+        permission_boundary_label="native merge train",
         api_request=api_request,
         now=now,
     )

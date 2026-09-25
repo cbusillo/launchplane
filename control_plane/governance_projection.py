@@ -74,7 +74,7 @@ class GovernanceMergeTrainReadStore(Protocol):
 
 @dataclass(frozen=True)
 class LiveGovernanceCurrentReadinessProvider:
-    github_token: Callable[[MergeTrainGitHubTokenSource], str]
+    github_token: Callable[[MergeTrainGitHubTokenSource, str], str]
     evaluator_factory: Callable[
         [object, ChangeImpactRepositoryEvidenceProvider, str],
         object,
@@ -173,7 +173,7 @@ class LiveGovernanceCurrentReadinessProvider:
                 )
             ):
                 return _unavailable_readiness()
-            token = self.github_token(github_token_source).strip()
+            token = self.github_token(github_token_source, repository).strip()
             if not token:
                 return _unavailable_readiness()
             evaluator = cast(

@@ -1268,8 +1268,15 @@ export type MergeTrainEnqueuePolicyOutput = {
     [key: string]: unknown;
 };
 
+export type MergeTrainGitHubAppSource = {
+    app_id: number;
+    private_key_context: string;
+    repository_id: number;
+};
+
 export type MergeTrainGitHubTokenSource = {
     env_var: string;
+    github_app?: MergeTrainGitHubAppSource | null;
     runtime_context?: string;
 };
 

@@ -16841,6 +16841,33 @@
         "additionalProperties": true,
         "type": "object"
       },
+      "MergeTrainGitHubAppSource": {
+        "additionalProperties": false,
+        "properties": {
+          "app_id": {
+            "exclusiveMinimum": 0.0,
+            "title": "App Id",
+            "type": "integer"
+          },
+          "private_key_context": {
+            "minLength": 1,
+            "title": "Private Key Context",
+            "type": "string"
+          },
+          "repository_id": {
+            "exclusiveMinimum": 0.0,
+            "title": "Repository Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "app_id",
+          "repository_id",
+          "private_key_context"
+        ],
+        "title": "MergeTrainGitHubAppSource",
+        "type": "object"
+      },
       "MergeTrainGitHubTokenSource": {
         "additionalProperties": false,
         "properties": {
@@ -16848,6 +16875,17 @@
             "default": "",
             "title": "Env Var",
             "type": "string"
+          },
+          "github_app": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MergeTrainGitHubAppSource"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
           },
           "runtime_context": {
             "default": "",
@@ -69408,6 +69446,33 @@
                     "title": "MergeTrainEnqueuePolicy",
                     "type": "object"
                   },
+                  "MergeTrainGitHubAppSource": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "app_id": {
+                        "exclusiveMinimum": 0,
+                        "title": "App Id",
+                        "type": "integer"
+                      },
+                      "private_key_context": {
+                        "minLength": 1,
+                        "title": "Private Key Context",
+                        "type": "string"
+                      },
+                      "repository_id": {
+                        "exclusiveMinimum": 0,
+                        "title": "Repository Id",
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "app_id",
+                      "repository_id",
+                      "private_key_context"
+                    ],
+                    "title": "MergeTrainGitHubAppSource",
+                    "type": "object"
+                  },
                   "MergeTrainGitHubTokenSource": {
                     "additionalProperties": false,
                     "properties": {
@@ -69415,6 +69480,17 @@
                         "default": "",
                         "title": "Env Var",
                         "type": "string"
+                      },
+                      "github_app": {
+                        "anyOf": [
+                          {
+                            "$ref": "#/$defs/MergeTrainGitHubAppSource"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "x-launchplane-optional-response": true
                       },
                       "runtime_context": {
                         "default": "",
