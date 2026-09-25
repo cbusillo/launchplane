@@ -188,6 +188,20 @@ See [driver-development.md](driver-development.md) for the driver workflow and
 
 Before treating the repo as Launchplane-ready:
 
+- Verify the intended delivery path, including the automation authors that
+  normally open PRs. Read the active [merge-train policy](merge-train-policy.md)
+  and run a nonmutating controller pass against real open PRs when available.
+  The current GitHub adapter evaluates the PR author, not the ready-label actor;
+  passing CI and an authorized labeler do not admit an unrecognized author.
+  A missing ready label alone is expected before enqueueing. Report unavailable
+  author evidence explicitly rather than declaring onboarding proved.
+- Verify GitHub App installation coverage and permissions for the intended
+  operations, including workflow dispatch and rerun where used. App permissions
+  apply to the repositories covered by that installation; train author
+  allowlists are separate repository/base records. Collect known capability
+  gaps for the intended workflow into one reviewed setup change. Store any
+  approved author identities in Launchplane records, preserving the configured
+  label, check, and merge-identity requirements.
 - CI and pull-request dependency regression checks pass, and the current
   default-branch/artifact absolute health evidence is acceptable.
 - The image or artifact is immutable and traceable to a source SHA.
