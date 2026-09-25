@@ -39,10 +39,10 @@ from control_plane.merge_train_controller_run_once import (
     require_merge_train_controller_state_record_store,
 )
 from control_plane.merge_train_github import (
+    GitHubMergeTrainClient,
     MergeTrainGitHubError,
     UrllibMergeTrainGitHubTransport,
 )
-from control_plane.tenant_admission_controller import TenantAdmissionControllerGitHubClient
 from control_plane.workflows.merge_train_controller import (
     latest_merge_train_batch_candidate_progress_record,
     latest_merge_train_batch_landing_progress_record,
@@ -81,7 +81,7 @@ class LiveGovernanceCurrentReadinessProvider:
     ] = lambda store, provider, token: LiveMergeAdmissionEvaluator(
         store=store,
         repository_evidence_provider=provider,
-        technical_check_client=TenantAdmissionControllerGitHubClient(
+        technical_check_client=GitHubMergeTrainClient(
             transport=UrllibMergeTrainGitHubTransport(token=token)
         ),
     )

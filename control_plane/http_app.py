@@ -387,7 +387,6 @@ from control_plane.merge_train_run_once import (
     execute_merge_train_run_once,
     require_merge_train_run_record_store,
 )
-from control_plane.tenant_admission_controller import TenantAdmissionControllerGitHubClient
 from control_plane.merge_train_stack_collapse import (
     MergeTrainStackCollapseBatchCandidateStoreMissingError,
     MergeTrainStackCollapsePlanRecordNotFoundError,
@@ -6112,7 +6111,7 @@ def create_launchplane_fastapi_app(
             admission_evaluator = LiveMergeAdmissionEvaluator(
                 store=record_store,
                 repository_evidence_provider=resolved_change_impact_repository_evidence_provider,
-                technical_check_client=TenantAdmissionControllerGitHubClient(
+                technical_check_client=GitHubMergeTrainClient(
                     transport=UrllibMergeTrainGitHubTransport(
                         token=token,
                         api_base_url=controller_request.github_api_base_url,
@@ -9922,7 +9921,7 @@ def create_launchplane_fastapi_app(
                         repository_evidence_provider=(
                             resolved_change_impact_repository_evidence_provider
                         ),
-                        technical_check_client=TenantAdmissionControllerGitHubClient(
+                        technical_check_client=GitHubMergeTrainClient(
                             transport=UrllibMergeTrainGitHubTransport(
                                 token=token,
                                 api_base_url=landing_request.github_api_base_url,

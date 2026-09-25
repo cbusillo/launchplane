@@ -289,6 +289,16 @@ GitHub `app_id = -1` any-app requirements. Once unrelated evidence is terminal,
 missing pinned or named evidence is surfaced explicitly instead of remaining an
 unexplained pending candidate.
 
+Native landing admission reads that same required-check projection. The train
+always requires current-base freshness, independently of GitHub's optional
+strict setting: its technical evidence records `strict: true` as the train's
+requirement and retains the observed commit-containment result. Admission can
+also accept a proved recorded-rolling tree, as described in
+[structural provenance](merge-train-structural-provenance.md). Missing or stale
+structural proof still blocks. This does not claim to observe GitHub's strict
+setting and does not grant, change, or bypass provider protection; GitHub's
+guarded merge endpoint continues to enforce its own policy.
+
 Candidate-ref workflow concurrency must keep create/force-reset pushes separate
 from normal construction pushes. Normal intermediate pushes cancel each other
 for the same ref, while the reset run retains its own SHA-keyed group so a

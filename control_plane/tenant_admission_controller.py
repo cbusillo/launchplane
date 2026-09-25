@@ -461,7 +461,6 @@ class TenantAdmissionControllerGitHubClient:
     ) -> TenantAdmissionTechnicalChecks:
         owner, repo = repository.split("/", 1)
         repository_path = f"{quote(owner, safe='')}/{quote(repo, safe='')}"
-        encoded_head_sha = quote(head_sha, safe="")
         encoded_base_branch = quote(base_branch, safe="")
         try:
             required_checks_payload = json_object(
@@ -480,84 +479,15 @@ class TenantAdmissionControllerGitHubClient:
                 raise
             required_checks_payload = {"strict": False, "checks": [], "contexts": []}
         strict, required_checks = _required_technical_checks(required_checks_payload)
-        base_up_to_date = (
-            self.merge_client.branch_contains_commit(
-                repository=repository,
-                branch_ref=head_sha,
-                commit_sha=base_sha,
-            )
-            if strict
-            else None
-        )
-        status_payload = json_object(
-            self.transport.request(
-                method="GET",
-                path=f"/repos/{repository_path}/commits/{encoded_head_sha}/status",
-            ),
-            "GitHub combined status response",
-            error_type=TenantAdmissionControllerError,
-        )
-        current_status_sha = required_string_text(
-            status_payload.get("sha"),
-            "GitHub combined status response requires sha.",
-            error_type=TenantAdmissionControllerError,
-        ).lower()
-        if current_status_sha != head_sha:
-            raise TenantAdmissionControllerStaleCandidateError(
-                "GitHub commit status response does not match the expected head."
-            )
-        signals = list(_technical_status_signals(status_payload))
-        page = 1
-        while True:
-            query = urlencode({"filter": "latest", "per_page": "100", "page": str(page)})
-            check_runs_payload = json_object(
-                self.transport.request(
-                    method="GET",
-                    path=(
-                        f"/repos/{repository_path}/commits/{encoded_head_sha}/check-runs?{query}"
-                    ),
-                ),
-                "GitHub check runs response",
-                error_type=TenantAdmissionControllerError,
-            )
-            raw_check_runs = check_runs_payload.get("check_runs")
-            if not isinstance(raw_check_runs, list):
-                raise TenantAdmissionControllerError(
-                    "GitHub check runs response must include check_runs."
-                )
-            signals.extend(
-                _technical_check_run_signals(
-                    raw_check_runs,
-                    expected_head_sha=head_sha,
-                )
-            )
-            if len(raw_check_runs) < 100:
-                break
-            page += 1
-        normalized_signals = tuple(
-            sorted(
-                signals,
-                key=lambda signal: (
-                    signal.source,
-                    signal.name.casefold(),
-                    signal.app_id or 0,
-                ),
-            )
-        )
-        return TenantAdmissionTechnicalChecks(
-            head_sha=head_sha,
+        return read_technical_checks_for_requirements(
+            transport=self.transport,
+            merge_client=self.merge_client,
+            repository=repository,
             base_sha=base_sha,
-            strict=strict,
-            base_up_to_date=base_up_to_date,
-            status=_required_technical_check_state(
-                required_checks=required_checks,
-                signals=normalized_signals,
-                strict=strict,
-                base_up_to_date=base_up_to_date,
-            ),
-            required_checks=required_checks,
-            signals=normalized_signals,
+            head_sha=head_sha,
             evaluated_at=evaluated_at,
+            strict=strict,
+            required_checks=required_checks,
         )
 
     def merge_pull_request(
@@ -584,6 +514,100 @@ class TenantAdmissionControllerGitHubClient:
             branch_ref=base_branch,
             commit_sha=commit_sha,
         )
+
+
+def read_technical_checks_for_requirements(
+    *,
+    transport: MergeTrainGitHubTransport,
+    merge_client: GitHubMergeTrainClient,
+    repository: str,
+    base_sha: str,
+    head_sha: str,
+    evaluated_at: str,
+    strict: bool,
+    required_checks: tuple[TenantAdmissionRequiredTechnicalCheck, ...],
+) -> TenantAdmissionTechnicalChecks:
+    """Read exact-commit evidence for the caller's required checks and freshness."""
+    owner, repo = repository.split("/", 1)
+    repository_path = f"{quote(owner, safe='')}/{quote(repo, safe='')}"
+    encoded_head_sha = quote(head_sha, safe="")
+    base_up_to_date = (
+        merge_client.branch_contains_commit(
+            repository=repository,
+            branch_ref=head_sha,
+            commit_sha=base_sha,
+        )
+        if strict
+        else None
+    )
+    status_payload = json_object(
+        transport.request(
+            method="GET",
+            path=f"/repos/{repository_path}/commits/{encoded_head_sha}/status",
+        ),
+        "GitHub combined status response",
+        error_type=TenantAdmissionControllerError,
+    )
+    current_status_sha = required_string_text(
+        status_payload.get("sha"),
+        "GitHub combined status response requires sha.",
+        error_type=TenantAdmissionControllerError,
+    ).lower()
+    if current_status_sha != head_sha:
+        raise TenantAdmissionControllerStaleCandidateError(
+            "GitHub commit status response does not match the expected head."
+        )
+    signals = list(_technical_status_signals(status_payload))
+    page = 1
+    while True:
+        query = urlencode({"filter": "latest", "per_page": "100", "page": str(page)})
+        check_runs_payload = json_object(
+            transport.request(
+                method="GET",
+                path=(f"/repos/{repository_path}/commits/{encoded_head_sha}/check-runs?{query}"),
+            ),
+            "GitHub check runs response",
+            error_type=TenantAdmissionControllerError,
+        )
+        raw_check_runs = check_runs_payload.get("check_runs")
+        if not isinstance(raw_check_runs, list):
+            raise TenantAdmissionControllerError(
+                "GitHub check runs response must include check_runs."
+            )
+        signals.extend(
+            _technical_check_run_signals(
+                raw_check_runs,
+                expected_head_sha=head_sha,
+            )
+        )
+        if len(raw_check_runs) < 100:
+            break
+        page += 1
+    normalized_signals = tuple(
+        sorted(
+            signals,
+            key=lambda signal: (
+                signal.source,
+                signal.name.casefold(),
+                signal.app_id or 0,
+            ),
+        )
+    )
+    return TenantAdmissionTechnicalChecks(
+        head_sha=head_sha,
+        base_sha=base_sha,
+        strict=strict,
+        base_up_to_date=base_up_to_date,
+        status=_required_technical_check_state(
+            required_checks=required_checks,
+            signals=normalized_signals,
+            strict=strict,
+            base_up_to_date=base_up_to_date,
+        ),
+        required_checks=required_checks,
+        signals=normalized_signals,
+        evaluated_at=evaluated_at,
+    )
 
 
 def require_tenant_admission_controller_store(

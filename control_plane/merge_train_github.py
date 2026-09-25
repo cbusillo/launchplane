@@ -1,6 +1,6 @@
 import json
 from time import sleep
-from typing import Callable, Literal, Protocol, TypeVar
+from typing import TYPE_CHECKING, Callable, Literal, Protocol, TypeVar
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
@@ -49,6 +49,9 @@ from control_plane.merge_train import MergeTrainMergeableState
 from control_plane.merge_train import MergeTrainPullRequestSnapshot
 from control_plane.merge_train import MergeTrainPullRequestState
 from control_plane.merge_admission import GuardedMergeAdmission, MergeAdmissionDeniedError
+
+if TYPE_CHECKING:
+    from control_plane.tenant_admission_controller import TenantAdmissionTechnicalChecks
 
 
 class MergeTrainGitHubError(RuntimeError):
@@ -534,6 +537,46 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             candidate,
             required_checks_status=check_status,
             status=candidate_status,
+        )
+
+    def read_technical_checks(
+        self,
+        *,
+        repository: str,
+        base_branch: str,
+        base_sha: str,
+        head_sha: str,
+        evaluated_at: str,
+    ) -> "TenantAdmissionTechnicalChecks":
+        from control_plane.tenant_admission_controller import (
+            _required_technical_checks,
+            read_technical_checks_for_requirements,
+        )
+
+        required_checks = _required_branch_checks(
+            transport=self.transport,
+            repository_path=_repository_path(repository),
+            base_branch=base_branch,
+        )
+        _, normalized_checks = _required_technical_checks(
+            {
+                "strict": True,
+                "checks": [{"context": name, "app_id": app_id} for name, app_id in required_checks],
+                "contexts": [],
+            }
+        )
+        # Strict freshness is a native train requirement, independent of
+        # GitHub's optional strict flag. Admission separately proves exact or
+        # recorded-rolling structural provenance against the current base.
+        return read_technical_checks_for_requirements(
+            transport=self.transport,
+            merge_client=self,
+            repository=repository,
+            base_sha=base_sha,
+            head_sha=head_sha,
+            evaluated_at=evaluated_at,
+            strict=True,
+            required_checks=normalized_checks,
         )
 
     def land_batch_candidate(
