@@ -35,7 +35,7 @@ _ROUTING_CURRENT_INDEX = "launchplane_product_owner_routing_current_idx"
 
 
 def _json_payload_type() -> TypeEngine[object]:
-    return sa.JSON().with_variant(
+    return sa.JSON[object]().with_variant(
         postgresql.JSONB(astext_type=sa.Text()),
         "postgresql",
     )

@@ -31,7 +31,7 @@ _WAIVER_POLICY_INDEX = "launchplane_tenant_human_waiver_policy_idx"
 
 
 def _json_payload_type() -> TypeEngine[object]:
-    return sa.JSON().with_variant(
+    return sa.JSON[object]().with_variant(
         postgresql.JSONB(astext_type=sa.Text()),
         "postgresql",
     )

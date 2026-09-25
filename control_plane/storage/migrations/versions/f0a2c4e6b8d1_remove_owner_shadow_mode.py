@@ -83,7 +83,9 @@ def _archive_and_replace_requirements() -> None:
     table = sa.Table(_TABLE, sa.MetaData(), autoload_with=connection)
     archive = _archive_table()
     rows = tuple(connection.execute(sa.select(table)).mappings())
-    archived_record_ids = set(connection.execute(sa.select(archive.c.record_id)).scalars())
+    archived_record_ids: set[str] = set(
+        connection.execute(sa.select(archive.c.record_id)).scalars()
+    )
     for row in rows:
         if row["record_id"] in archived_record_ids:
             continue

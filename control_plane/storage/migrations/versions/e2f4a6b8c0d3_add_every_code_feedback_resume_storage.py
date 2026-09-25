@@ -18,7 +18,7 @@ depends_on: tuple[str, ...] | None = None
 
 
 def _payload() -> TypeEngine[object]:
-    return sa.JSON().with_variant(postgresql.JSONB(astext_type=sa.Text()), "postgresql")
+    return sa.JSON[object]().with_variant(postgresql.JSONB(astext_type=sa.Text()), "postgresql")
 
 
 def _create_table_if_missing(table_name: str, *elements: SchemaItem) -> None:

@@ -5962,7 +5962,9 @@ class PostgresRecordStore(HumanSessionStore):
             "ORDER BY required.relation_name"
         )
         with self._engine.connect() as connection:
-            missing_relations = tuple(connection.execute(statement, parameters).scalars().all())
+            missing_relations: tuple[str, ...] = tuple(
+                connection.execute(statement, parameters).scalars().all()
+            )
         if missing_relations:
             raise RuntimeError(
                 "Launchplane runtime schema is missing required relation(s): "
@@ -37535,7 +37537,12 @@ class PostgresRecordStore(HumanSessionStore):
             )
             if self.database_dialect_name == "postgresql":
                 statement = statement.with_for_update()
-            rows = tuple(session.scalars(statement).all())
+            rows: tuple[
+                LaunchplaneProductOwnerPolicyRow
+                | LaunchplaneProductOwnerRequirementRow
+                | LaunchplaneProductOwnerRoutingRow,
+                ...,
+            ] = tuple(session.scalars(statement).all())
             records = tuple(model_class.model_validate(row.payload) for row in rows)
             same_id = tuple(
                 existing for existing in records if existing.record_id == record.record_id
