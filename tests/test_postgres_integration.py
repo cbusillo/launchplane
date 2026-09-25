@@ -1963,7 +1963,7 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                 active_records = store.list_authz_policy_records(status="active")
                 superseded_records = store.list_authz_policy_records(status="superseded")
                 with store._engine.connect() as connection:
-                    revisions = tuple(
+                    revisions: tuple[int, ...] = tuple(
                         connection.execute(
                             text(
                                 "select revision from launchplane_authz_policies order by revision"
@@ -2450,7 +2450,7 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                         "payload": json.dumps(legacy_payload),
                     },
                 )
-                stored_payload = connection.execute(
+                stored_payload: dict[str, object] = connection.execute(
                     text(
                         "select payload from launchplane_authz_policies "
                         "where record_id = :record_id"
@@ -5296,7 +5296,7 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                 with blocker.connect() as connection:
                     transaction = connection.begin()
                     try:
-                        locked_delivery_id = connection.execute(
+                        locked_delivery_id: str = connection.execute(
                             text(
                                 "select delivery_id from launchplane_outbox_deliveries "
                                 "where delivery_id = :delivery_id for update"
@@ -7188,7 +7188,7 @@ class RealPostgresOrdinaryAgentLifecycleTests(unittest.TestCase):
                     )
                     self.assertTrue(worker_reached_idempotency_lock.wait(timeout=5))
                     with store._engine.connect() as probe:
-                        principal_lock_available = probe.execute(
+                        principal_lock_available: bool = probe.execute(
                             text(
                                 "select pg_try_advisory_xact_lock(hashtextextended(:lock_name, 0))"
                             ),
@@ -7235,7 +7235,7 @@ class RealPostgresOrdinaryAgentLifecycleTests(unittest.TestCase):
 
             self.assertEqual(sorted(statuses), ["invalid_transition", "written"])
             with store._engine.connect() as connection:
-                counts = tuple(
+                counts: tuple[int, ...] = tuple(
                     connection.execute(text(f"select count(*) from {table_name}")).scalar_one()
                     for table_name in (
                         "launchplane_ordinary_agent_principals",
@@ -7269,7 +7269,7 @@ class RealPostgresOrdinaryAgentLifecycleTests(unittest.TestCase):
                 event.remove(store._engine, "before_cursor_execute", reject_audit_insert)
 
             with store._engine.connect() as connection:
-                counts = tuple(
+                counts: tuple[int, ...] = tuple(
                     connection.execute(text(f"select count(*) from {table_name}")).scalar_one()
                     for table_name in (
                         "launchplane_ordinary_agent_principals",
@@ -7321,7 +7321,7 @@ class RealPostgresOrdinaryAgentLifecycleTests(unittest.TestCase):
                 store.verify_ordinary_agent_token(parse_ordinary_agent_token(token.value))
             )
             with store._engine.connect() as connection:
-                counts = tuple(
+                counts: tuple[int, ...] = tuple(
                     connection.execute(text(f"select count(*) from {name}")).scalar_one()
                     for name in (
                         "launchplane_ordinary_agent_authentication_credentials",

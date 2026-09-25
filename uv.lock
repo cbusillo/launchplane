@@ -430,7 +430,7 @@ requires-dist = [
     { name = "pyjwt", extras = ["crypto"], specifier = ">=2.13.0" },
     { name = "requests", specifier = ">=2.34.2" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.16.3" },
-    { name = "sqlalchemy", specifier = ">=2.0.52" },
+    { name = "sqlalchemy", specifier = ">=2.1.0" },
     { name = "uvicorn", specifier = ">=0.52.3" },
 ]
 provides-extras = ["dev"]

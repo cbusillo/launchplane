@@ -89,7 +89,9 @@ _EXPECTED_CHECKS = {
 def _payload_column() -> sa.Column[dict[str, object]]:
     return sa.Column(
         "payload",
-        sa.JSON().with_variant(postgresql.JSONB(astext_type=sa.Text()), "postgresql"),
+        sa.JSON[dict[str, object]]().with_variant(
+            postgresql.JSONB(astext_type=sa.Text()), "postgresql"
+        ),
         nullable=False,
     )
 

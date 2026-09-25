@@ -27,7 +27,7 @@ _CURRENT_INDEX = "launchplane_change_impact_policy_current_idx"
 
 
 def _json_payload_type() -> TypeEngine[object]:
-    return sa.JSON().with_variant(
+    return sa.JSON[object]().with_variant(
         postgresql.JSONB(astext_type=sa.Text()),
         "postgresql",
     )
