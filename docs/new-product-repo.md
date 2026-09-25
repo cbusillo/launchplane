@@ -198,15 +198,17 @@ Before treating the repo as Launchplane-ready:
 - Verify the agent's GitHub App installation coverage and permissions for its
   operations using the shared
   [GitHub capability profile](https://github.com/cbusillo/codex-skills/blob/main/skills/github/references/github-permissions.md),
-  including dispatch and rerun where used. Resolve the actual App IDs
-  used by the agent and train before changing permissions; they may share an
-  installation. Verify the train's
+  including dispatch and rerun where used. Resolve the train's configured
+  credential source first: it may use an App, an environment variable, or a
+  runtime context. Where Apps are used, resolve their actual IDs before changing
+  permissions; agent and train may share an installation. Verify the train's
   [credential contract](merge-train-policy.md#credential-source-and-policy-readback);
   its installation minimums and exact issued token scope are separate. Check
   other consumers' installation limits before expanding shared grants. App
   permissions cover the installation's repositories; train author allowlists are separate
-  repository/base records. Apply existing authorization. Present any additional
-  grants together for operator approval
+  repository/base records. Apply existing authorization that covers this task
+  and scope. Present any additional permission or repository-coverage grants
+  together for operator approval
   under [DIRECTION.md](../DIRECTION.md#stop-boundaries), then use each system's
   supported change path. Author-policy changes use the
   [managed policy import](merge-train-policy.md#operator-changes); check all
