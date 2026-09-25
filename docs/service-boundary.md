@@ -233,7 +233,8 @@ governed expectation, custody and currentness contract.
     provider-domain count without disclosing sibling domain names or granting
     route authority over them.
 - native FastAPI Dokploy target inspect read:
-  - `GET /v1/dokploy-targets/inspect`, requiring `dokploy_target.inspect` for
+  - `GET /v1/dokploy-targets/inspect`, requiring `dokploy_target.inspect` (or
+    `driver.read` for a local operator) for
     the Launchplane service context and returning redacted provider identity
     evidence only
 - native FastAPI deployment, promotion, preview, inventory, operations, and
@@ -1741,7 +1742,7 @@ Future OpenFGA checks consume the normalized subject facts described above plus
 Launchplane resource facts. They should map existing service actions to generic
 relations without storing real tuple assignments in this repo:
 
-- provider inspect: `dokploy_target.inspect` and provider-target audit/read
+- provider inspect: `dokploy_target.inspect` (or local-operator `driver.read`) and provider-target audit/read
   actions check inspect permission on a provider-neutral target resource.
 - private health apply/read: `private_health_endpoint.apply` and
   `private_health_endpoint.read` check apply or read permission on a private
@@ -2412,7 +2413,12 @@ summary only: target ids, names, project/environment/server identity, domain
 summaries, source metadata, and environment key names/counts. It must not return
 raw provider payloads or environment values. The manual `Dokploy Target Inspect`
 workflow is the supported shared and production caller when operators need
-provider evidence without mutating Dokploy or Launchplane records.
+provider evidence without mutating Dokploy or Launchplane records. A local
+operator may also use its existing `driver.read` grant for the same
+`launchplane` product/context. This connects the standing operator read bundle
+to the bounded provider evidence without a new grant. Other caller types still
+require `dokploy_target.inspect`; the response redaction and write permissions
+are unchanged.
 
 Callers may additionally provide an exact compose `service`, expected immutable
 `expected_image`, and an optional allow-listed structured `event` name for
@@ -2457,7 +2463,7 @@ Provider failures expose only a bounded operation stage such as
 messages remain excluded.
 
 Runtime-event diagnostics and heartbeat proof remain under
-`dokploy_target.inspect` because the
+`dokploy_target.inspect` (or local-operator `driver.read`) because the
 service accepts only code-owned allow-listed event names and returns counts, not
 log content, while the DB heartbeat is read-only evidence from existing
 Launchplane records rather than a new authorization surface. It is not an

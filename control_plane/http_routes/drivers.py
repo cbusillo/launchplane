@@ -50,7 +50,11 @@ from control_plane.odoo_prod_retained_volume_backup_import_http import (
 from control_plane.odoo_target_replacement_apply_http import (
     ODOO_TARGET_REPLACEMENT_APPLY_ROUTE,
 )
-from control_plane.service_auth import AuthorizationTarget, LaunchplaneIdentity
+from control_plane.service_auth import (
+    AuthorizationTarget,
+    LaunchplaneIdentity,
+    LocalOperatorIdentity,
+)
 from control_plane.storage.postgres import PostgresRecordStore
 
 _LAUNCHPLANE_DRIVER_READ_PRODUCT = "launchplane"
@@ -830,12 +834,20 @@ def register_dokploy_target_inspect_read_routes(
         expected_image: Annotated[str, Query()] = "",
     ) -> DokployTargetInspectResponse:
         trace_id = common.next_trace_id()
-        if not common.authorization_allows(
+        inspect_allowed = common.authorization_allows(
             identity=identity,
             action="dokploy_target.inspect",
             product="launchplane",
             context=LAUNCHPLANE_SERVICE_CONTEXT,
-        ):
+        )
+        if not inspect_allowed and isinstance(identity, LocalOperatorIdentity):
+            inspect_allowed = common.authorization_allows(
+                identity=identity,
+                action="driver.read",
+                product="launchplane",
+                context=LAUNCHPLANE_SERVICE_CONTEXT,
+            )
+        if not inspect_allowed:
             raise common.http_error(
                 status_code=403,
                 trace_id=trace_id,
