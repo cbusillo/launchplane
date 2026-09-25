@@ -44,6 +44,17 @@ class MergeTrainGitHubTokenTests(unittest.TestCase):
             "metadata": "read",
             "pull_requests": "write",
             "statuses": "read",
+            "workflows": "write",
+        }
+        self.installation_permissions = {
+            **self.token_permissions,
+            "actions": "write",
+            "issues": "write",
+            "administration": "read",
+            "security_events": "read",
+            "vulnerability_alerts": "read",
+            "secret_scanning_alerts": "read",
+            "deployments": "read",
         }
 
     def provider(self, _request: object, **kwargs: object) -> object:
@@ -55,15 +66,7 @@ class MergeTrainGitHubTokenTests(unittest.TestCase):
             return {
                 "id": 77,
                 "app_id": 42,
-                "permissions": {
-                    "checks": "read",
-                    "contents": "write",
-                    "metadata": "read",
-                    "pull_requests": "write",
-                    "statuses": "read",
-                    "actions": "read",
-                    "issues": "write",
-                },
+                "permissions": self.installation_permissions,
             }
         if path == "/installation/token" and kwargs["method"] == "DELETE":
             return None
@@ -113,18 +116,66 @@ class MergeTrainGitHubTokenTests(unittest.TestCase):
                     "contents": "write",
                     "pull_requests": "write",
                     "statuses": "read",
+                    "workflows": "write",
                 },
             },
         )
 
-    def test_wrong_repository_or_excess_token_authority_is_revoked_without_fallback(self) -> None:
-        for wrong_repository in (True, False):
-            with self.subTest(wrong_repository=wrong_repository):
+    def test_shared_installation_write_grants_are_downscoped_for_observation(self) -> None:
+        self.installation_permissions.update(checks="write", statuses="write")
+        with (
+            patch(
+                "control_plane.merge_train_github_token.secrets.resolve_context_secret_value",
+                return_value=self.private_key,
+            ),
+            patch(
+                "control_plane.github_app_identity._github_api_request", side_effect=self.provider
+            ),
+        ):
+            self.assertEqual(self.resolve(), "example-installation-token-1")
+        mint = next(call for call in self.calls if call.get("method") == "POST")
+        body = mint["body"]
+        assert isinstance(body, dict)
+        permissions = body["permissions"]
+        self.assertEqual(permissions["checks"], "read")
+        self.assertEqual(permissions["statuses"], "read")
+        self.assertNotIn("actions", permissions)
+        self.assertNotIn("administration", permissions)
+
+    def test_missing_or_invalid_installation_capability_fails_before_mint(self) -> None:
+        for permission, value in (
+            ("workflows", "read"),
+            ("contents", "read"),
+            ("actions", "invalid"),
+        ):
+            with self.subTest(permission=permission, value=value):
                 self.setUp()
-                if wrong_repository:
+                self.installation_permissions[permission] = value
+                with (
+                    patch.dict("os.environ", {"GH_TOKEN": "must-not-be-used"}),
+                    patch(
+                        "control_plane.merge_train_github_token.secrets.resolve_context_secret_value",
+                        return_value=self.private_key,
+                    ),
+                    patch(
+                        "control_plane.github_app_identity._github_api_request",
+                        side_effect=self.provider,
+                    ),
+                ):
+                    self.assertEqual(self.resolve(), "")
+                self.assertEqual(self.minted, 0)
+                self.assertFalse(any(call.get("method") == "POST" for call in self.calls))
+
+    def test_wrong_repository_or_excess_token_authority_is_revoked_without_fallback(self) -> None:
+        for failure in ("repository", "administration", "actions", "workflow_permission"):
+            with self.subTest(failure=failure):
+                self.setUp()
+                if failure == "repository":
                     self.returned_repository = "example/another-product"
+                elif failure == "workflow_permission":
+                    self.token_permissions["workflows"] = "read"
                 else:
-                    self.token_permissions["administration"] = "write"
+                    self.token_permissions[failure] = "write"
                 with (
                     patch.dict("os.environ", {"GH_TOKEN": "must-not-be-used"}),
                     patch(

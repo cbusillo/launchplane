@@ -99,7 +99,11 @@ A repository policy names one GitHub credential source:
   required; global, instance-scoped and duplicate bindings are refused. The
   policy's merge identity must have kind `github_app`. Each resolution mints a
   fresh installation token for exactly the policy's repository, with Contents
-  and Pull requests write and Checks and Commit statuses read. App and
+  and Pull requests write, Workflows write for workflow-file changes, and Checks
+  and Commit statuses read. The installation must provide at least those grants;
+  it may also serve other approved operations. The freshly issued train token
+  must contain only the native train permissions, regardless of the installation's
+  broader capabilities. App and
   installation identity, returned repository ID/name, token permissions and
   expiry are verified; a token that fails verification is revoked. Tokens are
   not stored as runtime configuration. No Administration permission is used.

@@ -29,11 +29,7 @@ _MERGE_TRAIN_TOKEN_PERMISSIONS = {
     "metadata": "read",
     "pull_requests": "write",
     "statuses": "read",
-}
-_MERGE_TRAIN_INSTALLATION_PERMISSIONS = {
-    **_MERGE_TRAIN_TOKEN_PERMISSIONS,
-    "actions": "read",
-    "issues": "write",
+    "workflows": "write",
 }
 _ORDINARY_AGENT_EFFECT_PERMISSION_CEILINGS: dict[str, dict[str, str]] = {
     "guarded_merge": {
@@ -180,7 +176,7 @@ def mint_merge_train_installation_token(
             key: value for key, value in _MERGE_TRAIN_TOKEN_PERMISSIONS.items() if key != "metadata"
         },
         required_installation_permissions=_MERGE_TRAIN_TOKEN_PERMISSIONS,
-        allowed_installation_permissions=_MERGE_TRAIN_INSTALLATION_PERMISSIONS,
+        allowed_installation_permissions=None,
         allowed_token_permissions=_MERGE_TRAIN_TOKEN_PERMISSIONS,
         identity_label="Merge train GitHub App",
         permission_boundary_label="native merge train",
@@ -397,7 +393,7 @@ def _mint_repository_installation_token(
     repository_owner_id: str | None = None,
     requested_permissions: Mapping[str, str],
     required_installation_permissions: Mapping[str, str],
-    allowed_installation_permissions: Mapping[str, str],
+    allowed_installation_permissions: Mapping[str, str] | None,
     allowed_token_permissions: Mapping[str, str],
     identity_label: str,
     permission_boundary_label: str,
@@ -630,12 +626,30 @@ def _validate_permissions(
     *,
     label: str,
     required_permissions: Mapping[str, str],
-    allowed_permissions: Mapping[str, str],
+    allowed_permissions: Mapping[str, str] | None,
     permission_boundary_label: str,
 ) -> dict[str, str]:
     if not isinstance(value, Mapping):
         raise GitHubAppIdentityError(f"GitHub App {label} permissions are malformed.")
     observed = {str(key): str(permission) for key, permission in value.items()}
+    if allowed_permissions is None:
+        # A shared installation may serve other operations. Its required grants
+        # are a floor; the separately requested and verified token remains exact.
+        levels = {"read": 1, "write": 2}
+        if any(
+            not isinstance(key, str)
+            or not key
+            or not isinstance(permission, str)
+            or permission not in levels
+            for key, permission in value.items()
+        ):
+            raise GitHubAppIdentityError(f"GitHub App {label} permissions are malformed.")
+        if any(
+            levels.get(observed.get(key, ""), 0) < levels[permission]
+            for key, permission in required_permissions.items()
+        ):
+            raise GitHubAppIdentityError(f"GitHub App {label} lacks required permission.")
+        return observed
     missing = {
         key: permission
         for key, permission in required_permissions.items()
