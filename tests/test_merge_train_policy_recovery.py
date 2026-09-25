@@ -16,6 +16,7 @@ from control_plane.storage.filesystem import FilesystemRecordStore
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_record
 from tests.test_merge_admission_live import _queued_pull_request
 from tests.test_merge_admission_records import _StaticEvaluator, _guard_records
+from tests.test_merge_train_github import _landing_plan
 from tests.test_merge_readiness import (
     BASE_SHA,
     HEAD_SHA,
@@ -186,6 +187,35 @@ class MergeTrainPolicyRecoveryTests(unittest.TestCase):
         self.assertEqual(outcomes[0].reason, "reconciliation_confirmed_no_effect")
         self.assertEqual(outcomes[0].prior_outcome_id, outcomes[1].outcome_id)
 
+    def test_confirmed_rejection_allows_unrelated_base_movement(self) -> None:
+        self._record_failure(405)
+        original_outcome = self.store.list_merge_landing_outcome_records()[0]
+        self.transport.base_sha = "9" * 40
+        result = self._run()
+        self.assertEqual(result.accepted_result["controller_action"], "retire_stale_landing")
+        self.assertEqual(self.store.list_merge_train_controller_state_records()[0].status, "idle")
+        self.assertEqual(self.store.list_merge_landing_outcome_records(), (original_outcome,))
+
+    def test_old_stale_record_cannot_suppress_same_sha_candidate_under_new_policy(self) -> None:
+        self._record_failure(405)
+        self._run()
+        fresh_candidate, _, _, _ = _guard_records(policy_sha256=self.policy.policy_sha256)
+        fresh_candidate = fresh_candidate.model_copy(update={"record_id": "new-policy-candidate"})
+        self.store.write_merge_train_batch_candidate_record(fresh_candidate)
+        snapshot = MergeTrainDryRunSnapshot(
+            repository=REPOSITORY,
+            base_branch="main",
+            base_sha=BASE_SHA,
+            pull_requests=(
+                _queued_pull_request(
+                    number=2083, head_sha=HEAD_SHA, created_at="2026-08-11T01:00:00Z"
+                ),
+            ),
+        )
+        with patch.object(self.client, "read_merge_train_snapshot", return_value=snapshot):
+            result = self._run(mutate=False)
+        self.assertEqual(result.accepted_result["controller_action"], "plan_landing")
+
     def test_dry_run_inspects_an_idle_stale_plan_without_writing_records(self) -> None:
         self._record_failure(500)
         controller = self.store.list_merge_train_controller_state_records()[0]
@@ -210,9 +240,14 @@ class MergeTrainPolicyRecoveryTests(unittest.TestCase):
         self.assertEqual(self.store.list_merge_train_batch_landing_plan_records(), (self.landing,))
 
     def test_partial_landing_cannot_be_declared_unlanded(self) -> None:
-        entry = self.landing.landing_plan.entries[0]
-        partial = self.landing.landing_plan.model_copy(
-            update={"entries": (entry.model_copy(update={"status": "merged"}), entry)}
+        plan = _landing_plan()
+        partial = plan.model_copy(
+            update={
+                "entries": (
+                    plan.entries[0].model_copy(update={"status": "merged"}),
+                    plan.entries[1],
+                )
+            }
         )
         with self.assertRaisesRegex(MergeTrainGitHubError, "no completed entries"):
             self.client.verify_unlanded_batch(landing_plan=partial)
@@ -220,6 +255,7 @@ class MergeTrainPolicyRecoveryTests(unittest.TestCase):
 
     def test_changed_or_unreadable_provider_state_preserves_the_recovery_fence(self) -> None:
         self._record_failure(500)
+        checkpoint = self.store.list_merge_train_controller_state_records()[0]
         for field, value in (
             ("base_sha", "9" * 40),
             ("head_sha", "9" * 40),
@@ -242,6 +278,12 @@ class MergeTrainPolicyRecoveryTests(unittest.TestCase):
                     self.store.list_merge_train_controller_state_records()[0].status,
                     "reconcile_required",
                 )
+                current = self.store.list_merge_train_controller_state_records()[0]
+                self.assertEqual(current.active_phase, checkpoint.active_phase)
+                self.assertEqual(
+                    current.active_pull_request_number, checkpoint.active_pull_request_number
+                )
+                self.assertEqual(current.step_payload, checkpoint.step_payload)
                 self.assertEqual(
                     self.store.list_merge_landing_outcome_records()[0].status, "reconcile_required"
                 )

@@ -577,6 +577,7 @@ def _resume_merge_train_controller_state(
             base_branch=request.base_branch,
             batch_id=planned_record.landing_plan.batch_id,
             candidate_sha=planned_record.landing_plan.candidate_sha,
+            policy_sha256=planned_record.landing_plan.policy_sha256,
         )
         if landed_record is None:
             return None
@@ -692,6 +693,7 @@ def latest_passed_merge_train_batch_candidate_record(
         base_branch=base_branch,
         batch_id=latest_record.candidate.batch_id,
         candidate_sha=latest_record.candidate.candidate_sha,
+        policy_sha256=latest_record.candidate.policy_sha256,
     )
     if completed_landing_record is not None:
         return None
@@ -783,6 +785,7 @@ def latest_completed_merge_train_batch_landing_plan_record(
     base_branch: str,
     batch_id: str,
     candidate_sha: str,
+    policy_sha256: str,
 ) -> MergeTrainBatchLandingPlanRecord | None:
     records = record_store.list_merge_train_batch_landing_plan_records(
         repository=repository,
@@ -791,7 +794,9 @@ def latest_completed_merge_train_batch_landing_plan_record(
         limit=25,
     )
     return latest_completed_merge_train_batch_landing_progress_record(
-        landing_plan_records=records,
+        landing_plan_records=tuple(
+            record for record in records if record.landing_plan.policy_sha256 == policy_sha256
+        ),
         batch_id=batch_id,
         candidate_sha=candidate_sha,
     )
@@ -1255,15 +1260,23 @@ def _retire_changed_policy_landing(
         raise MergeTrainControllerRequestError(
             "Policy-change recovery requires the exact recorded candidate."
         )
-    if request.mutate:
-        lease.checkpoint(
-            active_action="land_batch",
-            active_phase="retire_stale_policy_landing",
-            active_record_id=landing_record.record_id,
-            active_pull_request_number=None,
-            step_payload={"landing_plan_record_id": landing_record.record_id},
+    allow_changed_base = True
+    for entry in plan.entries:
+        admissions = admission_store.list_merge_admission_records(
+            repository=plan.repository,
+            base_branch=plan.base_branch,
+            pull_request_number=entry.pull_request_number,
+            landing_plan_id=plan.plan_id,
         )
-    github_client.verify_unlanded_batch(landing_plan=plan)
+        if admissions:
+            outcomes = admission_store.list_merge_landing_outcome_records(
+                admission_id=admissions[0].admission_id, limit=1
+            )
+            if not outcomes or outcomes[0].status != "rejected":
+                allow_changed_base = False
+    observed_base_sha, observed_base_tree_sha = github_client.verify_unlanded_batch(
+        landing_plan=plan, allow_changed_base=allow_changed_base
+    )
     if not request.mutate:
         return {
             "repository": plan.repository,
@@ -1284,14 +1297,20 @@ def _retire_changed_policy_landing(
     for entry in plan.entries:
         guard.reconcile_existing_no_effect(
             entry=entry,
-            observed_base_sha=plan.entries[0].expected_base_sha,
-            observed_base_tree_sha=plan.entries[0].recorded_candidate_parent_tree_sha,
+            observed_base_sha=observed_base_sha,
+            observed_base_tree_sha=observed_base_tree_sha,
             observed_head_sha=entry.expected_head_sha,
             observed_head_tree_sha=entry.expected_head_tree_sha,
             observed_pull_request_state="open",
             observed_at=recorded_at,
         )
-    lease.checkpoint()
+    lease.checkpoint(
+        active_action="land_batch",
+        active_phase="retire_stale_policy_landing",
+        active_record_id=landing_record.record_id,
+        active_pull_request_number=None,
+        step_payload={"landing_plan_record_id": landing_record.record_id},
+    )
     retired_record = build_merge_train_batch_landing_plan_record(
         landing_plan=stale_merge_train_landing_plan(plan),
         source=f"service:controller:policy-changed-landing:{trace_id}",
@@ -1906,6 +1925,7 @@ def _advance_passed_candidate_record(
         base_branch=request.base_branch,
         batch_id=passed_candidate_record.candidate.batch_id,
         candidate_sha=passed_candidate_record.candidate.candidate_sha,
+        policy_sha256=passed_candidate_record.candidate.policy_sha256,
     )
     if completed_landing_record is not None:
         try:
