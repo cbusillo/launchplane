@@ -196,10 +196,12 @@ Before treating the repo as Launchplane-ready:
   ready label alone is expected before enqueueing. Report an unconfigured target
   or unavailable author evidence separately from product deploy readiness.
 - Verify the agent's GitHub App installation coverage and permissions for its
-  operations, including dispatch and rerun where used. Preserve the dedicated
-  train App's separate [credential contract](merge-train-policy.md#credential-source-and-policy-readback);
-  widening that App can make its installation fail verification. App permissions
-  cover the installation's repositories; train author allowlists are separate
+  operations, including dispatch and rerun where used. Resolve the actual App IDs
+  used by the agent and train before changing permissions; they may share an
+  installation. Preserve the train's
+  [credential contract](merge-train-policy.md#credential-source-and-policy-readback);
+  expanding a shared installation can make the train fail verification. App
+  permissions cover the installation's repositories; train author allowlists are separate
   repository/base records. Present verified gaps together for operator approval
   under [DIRECTION.md](../DIRECTION.md#stop-boundaries), then use each system's
   supported change path. Author-policy changes use the
