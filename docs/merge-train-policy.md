@@ -171,6 +171,21 @@ and re-observes provider state; no out-of-band record edit is required or
 supported. Read-only controller calls report either state without acquiring or
 mutating the lease record.
 
+If an approved policy change invalidates an unlanded native batch, the controller
+can retire its old landing plan after fresh GitHub reads prove every PR is still
+open at its recorded head/tree. An unresolved attempt also requires the original
+base/tree; when every admission already has a rejection outcome (or no admission
+was issued), unrelated base movement does not prevent retirement. It records
+no-effect reconciliation for any unresolved admission, appends a stale landing
+record, and supersedes only that batch's old-policy candidates. The next pass
+plans a fresh candidate under the current policy; old checks, admissions, and
+terminal records from the previous policy cannot authorize or suppress it.
+Candidate refs remain as recovery evidence; a rebuild reuses one only when its
+base and heads still identify the same batch.
+An interrupted retirement resumes from its persisted evidence. Partial landings,
+collapsed stacks, retired ordinary-agent jobs, and unreadable or conflicting
+provider evidence still require explicit reconciliation.
+
 Lease expiry semantics are fail closed. PostgreSQL observes acquisition,
 heartbeat, and expiry time inside the advisory-locked transaction rather than
 trusting a caller timestamp. Once a lease expires and another controller

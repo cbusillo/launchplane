@@ -579,6 +579,63 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             required_checks=normalized_checks,
         )
 
+    def verify_unlanded_batch(
+        self, *, landing_plan: MergeTrainBatchLandingPlan, allow_changed_base: bool = False
+    ) -> tuple[str, str]:
+        """Prove that a changed-policy plan can be retired without losing a landing."""
+        if any(entry.status not in {"planned", "merging"} for entry in landing_plan.entries):
+            raise MergeTrainGitHubStaleHeadError(
+                "Policy-change recovery requires a batch with no completed entries.",
+                status_code=409,
+            )
+        repository_path = _repository_path(landing_plan.repository)
+        first_entry = landing_plan.entries[0]
+        expected_base = (
+            first_entry.expected_base_sha,
+            _required_value(
+                first_entry.recorded_candidate_parent_tree_sha,
+                "Policy-change recovery requires the recorded base tree.",
+            ),
+        )
+        observed_base = _base_branch_identity(
+            transport=self.transport,
+            repository_path=repository_path,
+            base_branch=landing_plan.base_branch,
+        )
+        if not allow_changed_base and observed_base != expected_base:
+            raise MergeTrainGitHubStaleHeadError(
+                "Policy-change recovery cannot prove the base is unchanged.", status_code=409
+            )
+        for entry in landing_plan.entries:
+            head_sha, head_tree_sha = _git_commit_identity(
+                transport=self.transport,
+                repository_path=repository_path,
+                commit_sha=entry.expected_head_sha,
+            )
+            if (head_sha, head_tree_sha) != (entry.expected_head_sha, entry.expected_head_tree_sha):
+                raise MergeTrainGitHubStaleHeadError(
+                    "Policy-change recovery cannot prove the recorded head tree.", status_code=409
+                )
+            self._validate_open_landing_pull_request(
+                repository_path=repository_path,
+                entry=entry,
+                expected_base_ref=landing_plan.base_branch,
+                expected_base_sha=observed_base[0],
+                expected_base_tree_sha=observed_base[1],
+            )
+        if (
+            _base_branch_identity(
+                transport=self.transport,
+                repository_path=repository_path,
+                base_branch=landing_plan.base_branch,
+            )
+            != observed_base
+        ):
+            raise MergeTrainGitHubStaleHeadError(
+                "Base branch moved during policy-change recovery.", status_code=409
+            )
+        return observed_base
+
     def land_batch_candidate(
         self,
         *,
