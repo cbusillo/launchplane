@@ -179,8 +179,9 @@ was issued), unrelated base movement does not prevent retirement. It records
 no-effect reconciliation for any unresolved admission, appends a stale landing
 record, and supersedes only that batch's old-policy candidates. The next pass
 plans a fresh candidate under the current policy; old checks, admissions, and
-terminal records from the previous policy cannot authorize or suppress it. The
-temporary candidate ref is retained for that rebuild.
+terminal records from the previous policy cannot authorize or suppress it.
+Candidate refs remain as recovery evidence; a rebuild reuses one only when its
+base and heads still identify the same batch.
 An interrupted retirement resumes from its persisted evidence. Partial landings,
 collapsed stacks, retired ordinary-agent jobs, and unreadable or conflicting
 provider evidence still require explicit reconciliation.

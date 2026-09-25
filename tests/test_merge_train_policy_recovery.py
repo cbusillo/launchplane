@@ -6,6 +6,7 @@ from unittest.mock import patch
 from control_plane.contracts.merge_readiness import MergeReadinessCandidateEvidence
 from control_plane.merge_admission import GuardedMergeAdmission, MergeAdmissionEvaluation
 from control_plane.merge_train import MergeTrainDryRunSnapshot
+from control_plane.merge_train_admission import build_merge_train_controller_status_read_model
 from control_plane.merge_train_controller_run_once import (
     MergeTrainControllerRunOnceEnvelope,
     MergeTrainControllerRunOnceResult,
@@ -155,7 +156,7 @@ class MergeTrainPolicyRecoveryTests(unittest.TestCase):
         self.assertEqual(
             self.store.list_merge_train_batch_candidate_records()[0].status, "superseded"
         )
-        self.assertEqual(self.landing.landing_plan.entries[0].status, "planned")
+        self.assertIn(self.landing, self.store.list_merge_train_batch_landing_plan_records())
 
         snapshot = MergeTrainDryRunSnapshot(
             repository=REPOSITORY,
@@ -297,6 +298,16 @@ class MergeTrainPolicyRecoveryTests(unittest.TestCase):
         ):
             with self.assertRaises(OSError):
                 self._run()
+        status = build_merge_train_controller_status_read_model(
+            store=self.store,
+            repository=REPOSITORY,
+            base_branch="main",
+            generated_at="2026-08-11T03:05:00Z",
+            current_policy_key=self.policy.policy.policies[0].policy_key,
+            current_policy_sha256=self.policy.policy_sha256,
+        )
+        (diagnostic,) = status.reconciliation_diagnostics
+        self.assertEqual(diagnostic.binding_detail, "plan_binding_changed")
         provider_reads = len(self.transport.calls)
         self._run()
         self.assertEqual(len(self.transport.calls), provider_reads)

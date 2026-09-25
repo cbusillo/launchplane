@@ -1309,7 +1309,11 @@ def _retire_changed_policy_landing(
         active_phase="retire_stale_policy_landing",
         active_record_id=landing_record.record_id,
         active_pull_request_number=None,
-        step_payload={"landing_plan_record_id": landing_record.record_id},
+        step_payload={
+            "landing_plan_record_id": landing_record.record_id,
+            "landing_plan_id": plan.plan_id,
+            "expected_effect_sha": plan.candidate_sha,
+        },
     )
     retired_record = build_merge_train_batch_landing_plan_record(
         landing_plan=stale_merge_train_landing_plan(plan),

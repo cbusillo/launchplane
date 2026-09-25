@@ -54,7 +54,13 @@ MergeTrainReconciliationBindingDetail = Literal[
     "outcome_status_unknown",
 ]
 _LANDING_RECONCILIATION_PHASES = frozenset(
-    {"merge_batch_entries", "admit_pull_request", "merge_pull_request", "landing_entry_merged"}
+    {
+        "merge_batch_entries",
+        "admit_pull_request",
+        "merge_pull_request",
+        "landing_entry_merged",
+        "retire_stale_policy_landing",
+    }
 )
 _MAX_RECONCILIATION_DIAGNOSTICS = 25
 
