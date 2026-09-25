@@ -188,6 +188,31 @@ See [driver-development.md](driver-development.md) for the driver workflow and
 
 Before treating the repo as Launchplane-ready:
 
+- For repositories using the train, verify the intended PR authors against the
+  active [merge-train policy](merge-train-policy.md). Inspect a controller dry-run
+  against real open PRs when the target and required access are configured.
+  The GitHub adapter evaluates the PR author, not the ready-label actor;
+  passing CI and a ready label do not admit an unrecognized author. A missing
+  ready label alone is expected before enqueueing. Report an unconfigured target
+  or unavailable author evidence separately from product deploy readiness.
+- Verify the agent's GitHub App installation coverage and permissions for its
+  operations using the shared
+  [GitHub capability profile](https://github.com/cbusillo/codex-skills/blob/main/skills/github/references/github-permissions.md),
+  including dispatch and rerun where used. Resolve the train's configured
+  credential source first: it may use an App, an environment variable, or a
+  runtime context. Where Apps are used, resolve their actual IDs before changing
+  permissions; agent and train may share an installation. Verify the train's
+  [credential contract](merge-train-policy.md#credential-source-and-policy-readback);
+  its installation minimums and exact issued token scope are separate. Check
+  other consumers' installation limits before expanding shared grants. App
+  permissions cover the installation's repositories; train author allowlists are separate
+  repository/base records. Apply existing authorization that covers this task
+  and scope. Present any additional permission or repository-coverage grants
+  together for operator approval
+  under [DIRECTION.md](../DIRECTION.md#stop-boundaries), then use each system's
+  supported change path. Author-policy changes use the
+  [managed policy import](merge-train-policy.md#operator-changes); check all
+  targets for in-flight work because their records bind the full policy digest.
 - CI and pull-request dependency regression checks pass, and the current
   default-branch/artifact absolute health evidence is acceptable.
 - The image or artifact is immutable and traceable to a source SHA.
