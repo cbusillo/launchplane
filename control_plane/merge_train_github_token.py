@@ -9,7 +9,11 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from control_plane import secrets
 from control_plane.contracts.merge_train_policy import MergeTrainGitHubTokenSource
-from control_plane.github_app_identity import GitHubAppIdentity, mint_merge_train_installation_token
+from control_plane.github_app_identity import (
+    GitHubAppIdentity,
+    GitHubAppPermissionError,
+    mint_merge_train_installation_token,
+)
 from control_plane.workflows.launchplane import resolve_launchplane_github_token
 
 MERGE_TRAIN_GITHUB_APP_SECRET_INTEGRATION = "merge_train_github_app"
@@ -37,6 +41,13 @@ def resolve_merge_train_github_token(
                 repository=repository,
                 repository_id=str(app.repository_id),
             ).token
+        except GitHubAppPermissionError as error:
+            # Only schema-owned permission names/levels; never provider errors or secret values.
+            _LOGGER.warning(
+                "Merge train App credentials unavailable: missing_grants (%s)",
+                error.required_grants,
+            )
+            return ""
         except (click.ClickException, SQLAlchemyError, OSError, TypeError, ValueError) as error:
             _LOGGER.warning(
                 "Merge train App credentials unavailable: resolution_failed (%s)",
