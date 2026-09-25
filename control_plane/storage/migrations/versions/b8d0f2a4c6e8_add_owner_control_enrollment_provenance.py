@@ -28,7 +28,7 @@ def _table_exists(table_name: str) -> bool:
 def _payload_column() -> sa.Column[object]:
     return sa.Column(
         "payload",
-        sa.JSON().with_variant(postgresql.JSONB(astext_type=sa.Text()), "postgresql"),
+        sa.JSON[object]().with_variant(postgresql.JSONB(astext_type=sa.Text()), "postgresql"),
         nullable=False,
     )
 

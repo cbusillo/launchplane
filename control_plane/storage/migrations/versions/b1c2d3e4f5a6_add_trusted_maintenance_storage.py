@@ -31,7 +31,7 @@ _EVIDENCE_ACTOR_EVENT_INDEX = "launchplane_trusted_maintenance_actor_event_idx"
 
 
 def _json_payload_type() -> TypeEngine[object]:
-    return sa.JSON().with_variant(
+    return sa.JSON[object]().with_variant(
         postgresql.JSONB(astext_type=sa.Text()),
         "postgresql",
     )

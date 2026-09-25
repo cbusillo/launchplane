@@ -828,7 +828,7 @@ class SchemaMigrationTests(unittest.TestCase):
                         ),
                         {"incident_id": incident_id},
                     ).all()
-                    policy_value = connection.execute(
+                    policy_value: str = connection.execute(
                         text(
                             "select payload from launchplane_public_ingress_notification_policies "
                             "where policy_id = 'example-policy'"
@@ -849,9 +849,7 @@ class SchemaMigrationTests(unittest.TestCase):
                     if isinstance(events[0].payload, str)
                     else events[0].payload
                 )
-                migrated_policy = (
-                    json.loads(policy_value) if isinstance(policy_value, str) else policy_value
-                )
+                migrated_policy = json.loads(policy_value)
                 self.assertEqual(observation_row.incident_id, incident_id)
                 self.assertEqual(observation_row.check_token, "")
                 self.assertEqual(observation_row.check_kind, "public_http")
@@ -1095,17 +1093,13 @@ class SchemaMigrationTests(unittest.TestCase):
                     )
                 command.upgrade(config, EXPECTED_ALEMBIC_HEAD_REVISION)
                 with engine.connect() as connection:
-                    migrated_payload = connection.execute(
+                    migrated_payload: str = connection.execute(
                         text(
                             "select payload from launchplane_product_profiles "
                             "where product = 'example-site'"
                         )
                     ).scalar_one()
-                migrated = (
-                    json.loads(migrated_payload)
-                    if isinstance(migrated_payload, str)
-                    else migrated_payload
-                )
+                migrated = json.loads(migrated_payload)
                 self.assertEqual(
                     [lane["health_monitoring"]["monitoring_intent"] for lane in migrated["lanes"]],
                     ["public", "private", "prelaunch"],
@@ -1113,17 +1107,13 @@ class SchemaMigrationTests(unittest.TestCase):
 
                 command.downgrade(config, "b3d5f7a9c1e4")
                 with engine.connect() as connection:
-                    downgraded_payload = connection.execute(
+                    downgraded_payload: str = connection.execute(
                         text(
                             "select payload from launchplane_product_profiles "
                             "where product = 'example-site'"
                         )
                     ).scalar_one()
-                downgraded = (
-                    json.loads(downgraded_payload)
-                    if isinstance(downgraded_payload, str)
-                    else downgraded_payload
-                )
+                downgraded = json.loads(downgraded_payload)
                 self.assertTrue(
                     all(
                         "monitoring_intent" not in lane["health_monitoring"]
@@ -1316,7 +1306,7 @@ class SchemaMigrationTests(unittest.TestCase):
                         )
                 active_records = store.list_authz_policy_records(status="active")
                 with store._engine.connect() as connection:
-                    revisions = tuple(
+                    revisions: tuple[int, ...] = tuple(
                         connection.execute(
                             text(
                                 "select revision from launchplane_authz_policies order by revision"

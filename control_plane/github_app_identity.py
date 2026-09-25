@@ -29,11 +29,7 @@ _MERGE_TRAIN_TOKEN_PERMISSIONS = {
     "metadata": "read",
     "pull_requests": "write",
     "statuses": "read",
-}
-_MERGE_TRAIN_INSTALLATION_PERMISSIONS = {
-    **_MERGE_TRAIN_TOKEN_PERMISSIONS,
-    "actions": "read",
-    "issues": "write",
+    "workflows": "write",
 }
 _ORDINARY_AGENT_EFFECT_PERMISSION_CEILINGS: dict[str, dict[str, str]] = {
     "guarded_merge": {
@@ -82,9 +78,38 @@ _PROVIDER_DELIVERY_INSPECTION_PERMISSION_CEILING = {
 
 GitHubApiRequest = Callable[..., object]
 
+__all__ = [
+    "ADVISORY_GITHUB_APP_ID_ENV_KEY",
+    "ADVISORY_GITHUB_APP_PRIVATE_KEY_ENV_KEY",
+    "GitHubApiRequest",
+    "GitHubAppIdentityError",
+    "GitHubAppPermissionError",
+    "GitHubAppIdentity",
+    "GitHubAppInstallationToken",
+    "GitHubAppInstallationInspection",
+    "resolve_advisory_github_app_identity",
+    "mint_repository_installation_token",
+    "mint_merge_train_installation_token",
+    "mint_ordinary_agent_installation_token",
+    "mint_provider_delivery_inspection_token",
+    "ordinary_agent_effect_permissions",
+    "ordinary_agent_enrollment_effect_profiles",
+    "ordinary_agent_enrollment_permissions",
+    "inspect_ordinary_agent_github_app_installation",
+    "revoke_installation_token",
+]
+
 
 class GitHubAppIdentityError(ValueError):
     pass
+
+
+class GitHubAppPermissionError(GitHubAppIdentityError):
+    def __init__(self, missing: Mapping[str, str]) -> None:
+        self.required_grants = ", ".join(f"{key}:{level}" for key, level in sorted(missing.items()))
+        super().__init__(
+            f"GitHub App installation lacks required permissions: {self.required_grants}."
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,7 +205,7 @@ def mint_merge_train_installation_token(
             key: value for key, value in _MERGE_TRAIN_TOKEN_PERMISSIONS.items() if key != "metadata"
         },
         required_installation_permissions=_MERGE_TRAIN_TOKEN_PERMISSIONS,
-        allowed_installation_permissions=_MERGE_TRAIN_INSTALLATION_PERMISSIONS,
+        allowed_installation_permissions=None,
         allowed_token_permissions=_MERGE_TRAIN_TOKEN_PERMISSIONS,
         identity_label="Merge train GitHub App",
         permission_boundary_label="native merge train",
@@ -397,7 +422,7 @@ def _mint_repository_installation_token(
     repository_owner_id: str | None = None,
     requested_permissions: Mapping[str, str],
     required_installation_permissions: Mapping[str, str],
-    allowed_installation_permissions: Mapping[str, str],
+    allowed_installation_permissions: Mapping[str, str] | None,
     allowed_token_permissions: Mapping[str, str],
     identity_label: str,
     permission_boundary_label: str,
@@ -630,12 +655,32 @@ def _validate_permissions(
     *,
     label: str,
     required_permissions: Mapping[str, str],
-    allowed_permissions: Mapping[str, str],
+    allowed_permissions: Mapping[str, str] | None,
     permission_boundary_label: str,
 ) -> dict[str, str]:
     if not isinstance(value, Mapping):
         raise GitHubAppIdentityError(f"GitHub App {label} permissions are malformed.")
     observed = {str(key): str(permission) for key, permission in value.items()}
+    if allowed_permissions is None:
+        # A shared installation may serve other operations. Its required grants
+        # are a floor; the separately requested and verified token remains exact.
+        levels = {"read": 1, "write": 2, "admin": 3}
+        if any(
+            not isinstance(key, str)
+            or not key
+            or not isinstance(permission, str)
+            or permission not in levels
+            for key, permission in value.items()
+        ):
+            raise GitHubAppIdentityError(f"GitHub App {label} permissions are malformed.")
+        missing = {
+            key: permission
+            for key, permission in required_permissions.items()
+            if levels.get(observed.get(key, ""), 0) < levels[permission]
+        }
+        if missing:
+            raise GitHubAppPermissionError(missing)
+        return observed
     missing = {
         key: permission
         for key, permission in required_permissions.items()
