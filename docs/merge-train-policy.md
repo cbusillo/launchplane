@@ -94,7 +94,9 @@ A repository policy names one GitHub credential source:
   create a credential or expand its provider permissions.
 - `github_token.github_app` names an `app_id`, immutable `repository_id`, and
   `private_key_context`. The key comes from the managed secret integration
-  `merge_train_github_app`, binding key `private_key`, in that context. The
+  `merge_train_github_app`, binding key `private_key`, in that exact context.
+  One configured binding to a context-scoped, write-only current secret is
+  required; global, instance-scoped and duplicate bindings are refused. The
   policy's merge identity must have kind `github_app`. Each resolution mints a
   fresh installation token for exactly the policy's repository, with Contents
   and Pull requests write and Checks and Commit statuses read. App and

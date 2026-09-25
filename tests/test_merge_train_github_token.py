@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
@@ -7,6 +8,8 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from pydantic import ValidationError
 
+from control_plane import secrets
+from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.contracts.merge_train_policy import (
     MergeTrainGitHubAppSource,
     MergeTrainGitHubTokenSource,
@@ -84,8 +87,8 @@ class MergeTrainGitHubTokenTests(unittest.TestCase):
     def test_app_source_renews_exact_repository_tokens_from_managed_key(self) -> None:
         with (
             patch(
-                "control_plane.merge_train_github_token.secrets.resolve_secret_values_for_integration",
-                return_value={"private_key": self.private_key},
+                "control_plane.merge_train_github_token.secrets.resolve_context_secret_value",
+                return_value=self.private_key,
             ) as managed_key,
             patch(
                 "control_plane.github_app_identity._github_api_request", side_effect=self.provider
@@ -96,7 +99,9 @@ class MergeTrainGitHubTokenTests(unittest.TestCase):
         self.assertNotEqual(first, second)
         self.assertEqual(self.minted, 2)
         managed_key.assert_called_with(
-            integration="merge_train_github_app", context_name="example_context"
+            integration="merge_train_github_app",
+            context_name="example_context",
+            binding_key="private_key",
         )
         mint = next(call for call in self.calls if call.get("method") == "POST")
         self.assertEqual(
@@ -123,8 +128,8 @@ class MergeTrainGitHubTokenTests(unittest.TestCase):
                 with (
                     patch.dict("os.environ", {"GH_TOKEN": "must-not-be-used"}),
                     patch(
-                        "control_plane.merge_train_github_token.secrets.resolve_secret_values_for_integration",
-                        return_value={"private_key": self.private_key},
+                        "control_plane.merge_train_github_token.secrets.resolve_context_secret_value",
+                        return_value=self.private_key,
                     ),
                     patch(
                         "control_plane.github_app_identity._github_api_request",
@@ -139,8 +144,8 @@ class MergeTrainGitHubTokenTests(unittest.TestCase):
         with (
             patch.dict("os.environ", {"GH_TOKEN": "must-not-be-used"}),
             patch(
-                "control_plane.merge_train_github_token.secrets.resolve_secret_values_for_integration",
-                return_value={},
+                "control_plane.merge_train_github_token.secrets.resolve_context_secret_value",
+                return_value="",
             ),
             patch("control_plane.github_app_identity._github_api_request") as provider,
         ):
@@ -149,3 +154,62 @@ class MergeTrainGitHubTokenTests(unittest.TestCase):
         for competing_source in ({"env_var": "GH_TOKEN"}, {"runtime_context": "example_context"}):
             with self.subTest(source=competing_source), self.assertRaises(ValidationError):
                 MergeTrainGitHubTokenSource(github_app=self.source.github_app, **competing_source)
+
+    def test_real_store_does_not_inherit_global_keys_or_choose_duplicate_context_bindings(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as directory:
+            database_url = f"sqlite+pysqlite:///{Path(directory) / 'secrets.db'}"
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            try:
+                with (
+                    patch.dict(
+                        "os.environ",
+                        {
+                            "LAUNCHPLANE_DATABASE_URL": database_url,
+                            secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key",
+                        },
+                        clear=True,
+                    ),
+                    patch(
+                        "control_plane.github_app_identity._github_api_request",
+                        side_effect=self.provider,
+                    ),
+                ):
+                    secrets.write_secret_value(
+                        record_store=store,
+                        scope="global",
+                        integration="merge_train_github_app",
+                        name="global-key",
+                        binding_key="private_key",
+                        plaintext_value=self.private_key,
+                        actor="test",
+                    )
+                    self.assertEqual(self.resolve(), "")
+                    self.assertEqual(self.calls, [])
+                    secrets.write_secret_value(
+                        record_store=store,
+                        scope="context",
+                        context_name="example_context",
+                        integration="merge_train_github_app",
+                        name="context-key",
+                        binding_key="private_key",
+                        plaintext_value=self.private_key,
+                        actor="test",
+                    )
+                    self.assertEqual(self.resolve(), "example-installation-token-1")
+                    secrets.write_secret_value(
+                        record_store=store,
+                        scope="context",
+                        context_name="example_context",
+                        integration="merge_train_github_app",
+                        name="duplicate-key",
+                        binding_key="private_key",
+                        plaintext_value=self.private_key,
+                        actor="test",
+                    )
+                    self.assertEqual(self.resolve(), "")
+                    self.assertEqual(self.minted, 1)
+            finally:
+                store.close()
