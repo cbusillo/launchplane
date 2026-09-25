@@ -279,12 +279,25 @@ and remains fail-closed in `ready_for_checks`.
 Candidate observation reads the target branch's live required-status-check
 policy and requires every named check, including any pinned GitHub App id, to be
 present and successful on the candidate SHA. Partial workflow evidence cannot
-promote a candidate. Reading that live policy requires the merge-train GitHub
-identity to have `administration: read` for the repository. A pinned app id must
-be proven by check-run evidence; commit statuses can satisfy only unpinned or
+promote a candidate. It reads the enforced required-check projection from
+GitHub's [Get a branch endpoint](https://docs.github.com/en/rest/branches/branches#get-a-branch),
+which requires `contents: read` for the repository. An unprotected branch,
+missing protection metadata, disabled enforcement, or an empty required-check
+list fails closed; observation does not request administration access. A pinned
+app id must be proven by check-run evidence; commit statuses can satisfy only unpinned or
 GitHub `app_id = -1` any-app requirements. Once unrelated evidence is terminal,
 missing pinned or named evidence is surfaced explicitly instead of remaining an
 unexplained pending candidate.
+
+Native landing admission reads that same required-check projection. The train
+always requires current-base freshness, independently of GitHub's optional
+strict setting: its technical evidence records `strict: true` as the train's
+requirement and retains the observed commit-containment result. Admission can
+also accept a proved recorded-rolling tree, as described in
+[structural provenance](merge-train-structural-provenance.md). Missing or stale
+structural proof still blocks. This does not claim to observe GitHub's strict
+setting and does not grant, change, or bypass provider protection; GitHub's
+guarded merge endpoint continues to enforce its own policy.
 
 Candidate-ref workflow concurrency must keep create/force-reset pushes separate
 from normal construction pushes. Normal intermediate pushes cancel each other

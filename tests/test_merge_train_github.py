@@ -988,7 +988,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
         )
         transport = RecordingMergeTrainGitHubTransport(
             responses=(
-                _required_status_checks(),
+                _protected_branch_with_checks(),
                 _combined_status(),
                 {
                     "check_runs": [
@@ -1008,7 +1008,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
         self.assertEqual(
             [request.path for request in transport.requests],
             [
-                "/repos/example/merge-train-repo/branches/main/protection/required_status_checks",
+                "/repos/example/merge-train-repo/branches/main",
                 "/repos/example/merge-train-repo/commits/candidate-sha/status?per_page=100&page=1",
                 "/repos/example/merge-train-repo/commits/candidate-sha/check-runs?per_page=100&page=1",
             ],
@@ -1020,7 +1020,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
         )
         transport = RecordingMergeTrainGitHubTransport(
             responses=(
-                _required_status_checks(),
+                _protected_branch_with_checks(),
                 _combined_status(state="pending"),
                 {
                     "check_runs": [
@@ -1044,7 +1044,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
         )
         transport = RecordingMergeTrainGitHubTransport(
             responses=(
-                _required_status_checks(),
+                _protected_branch_with_checks(),
                 _combined_status(),
                 {
                     "check_runs": [
@@ -1072,7 +1072,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
         )
         transport = RecordingMergeTrainGitHubTransport(
             responses=(
-                _required_status_checks("ci-status", app_id=None),
+                _protected_branch_with_checks("ci-status", app_id=None),
                 _combined_status(),
                 {"check_runs": []},
             )
@@ -1091,7 +1091,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
         )
         transport = RecordingMergeTrainGitHubTransport(
             responses=(
-                _required_status_checks("ci-status", app_id=None),
+                _protected_branch_with_checks("ci-status", app_id=None),
                 _combined_status(
                     statuses=(
                         {"context": "ci-status", "state": "success"},
@@ -1115,7 +1115,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
         )
         transport = RecordingMergeTrainGitHubTransport(
             responses=(
-                _required_status_checks("ci-status", app_id=None),
+                _protected_branch_with_checks("ci-status", app_id=None),
                 _combined_status(
                     statuses=(
                         {"context": "ci-status", "state": "pending"},
@@ -1139,7 +1139,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
         )
         transport = RecordingMergeTrainGitHubTransport(
             responses=(
-                _required_status_checks("ci-gate", app_id=-1),
+                _protected_branch_with_checks("ci-gate", app_id=-1),
                 _combined_status(),
                 {
                     "check_runs": [
@@ -1162,7 +1162,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
         )
         transport = RecordingMergeTrainGitHubTransport(
             responses=(
-                _required_status_checks("ci-status", include_checks=False),
+                _protected_branch_with_checks("ci-status", include_checks=False),
                 _combined_status(),
                 {"check_runs": []},
             )
@@ -1181,7 +1181,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
         )
         transport = RecordingMergeTrainGitHubTransport(
             responses=(
-                _required_status_checks("ci-gate"),
+                _protected_branch_with_checks("ci-gate"),
                 _combined_status(),
                 {"check_runs": [_required_check_run("ci-gate", "completed", "failure")]},
             )
@@ -1204,7 +1204,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             MergeTrainGitHubError,
-            "GitHub administration: read permission",
+            "GitHub contents: read permission",
         ):
             GitHubMergeTrainClient(transport=transport).observe_batch_candidate_checks(
                 candidate=candidate
@@ -1215,7 +1215,18 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
             update={"candidate_sha": "candidate-sha", "status": "ready_for_checks"}
         )
         transport = RecordingMergeTrainGitHubTransport(
-            responses=({"strict": True, "checks": [], "contexts": []},)
+            responses=(
+                {
+                    "protected": True,
+                    "protection": {
+                        "required_status_checks": {
+                            "enforcement_level": "everyone",
+                            "checks": [],
+                            "contexts": [],
+                        }
+                    },
+                },
+            )
         )
 
         with self.assertRaisesRegex(
@@ -1226,13 +1237,38 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                 candidate=candidate
             )
 
+    def test_observe_batch_candidate_checks_rejects_unenforced_policy(self) -> None:
+        candidate = _batch_candidate().model_copy(
+            update={"candidate_sha": "candidate-sha", "status": "ready_for_checks"}
+        )
+        for protected, enforcement in ((False, "everyone"), (True, "off")):
+            with self.subTest(protected=protected, enforcement=enforcement):
+                branch = {
+                    "protected": protected,
+                    "protection": {
+                        "required_status_checks": {
+                            "enforcement_level": enforcement,
+                            "contexts": ["ci-gate"],
+                            "checks": [{"context": "ci-gate", "app_id": 15368}],
+                        }
+                    },
+                }
+                transport = RecordingMergeTrainGitHubTransport(responses=(branch,))
+
+                with self.assertRaises(MergeTrainGitHubError):
+                    GitHubMergeTrainClient(transport=transport).observe_batch_candidate_checks(
+                        candidate=candidate
+                    )
+
+                self.assertEqual(len(transport.requests), 1)
+
     def test_observe_batch_candidate_checks_requires_pinned_check_app(self) -> None:
         candidate = _batch_candidate().model_copy(
             update={"candidate_sha": "candidate-sha", "status": "ready_for_checks"}
         )
         transport = RecordingMergeTrainGitHubTransport(
             responses=(
-                _required_status_checks("ci-gate"),
+                _protected_branch_with_checks("ci-gate"),
                 _combined_status(),
                 {
                     "check_runs": [
@@ -1256,14 +1292,14 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
         )
         baseline_transport = RecordingMergeTrainGitHubTransport(
             responses=(
-                _required_status_checks("ci-gate"),
+                _protected_branch_with_checks("ci-gate"),
                 _combined_status(),
                 {"check_runs": [_required_check_run("ci-gate", "completed", "success")]},
             )
         )
         transport = RecordingMergeTrainGitHubTransport(
             responses=(
-                _required_status_checks("ci-gate"),
+                _protected_branch_with_checks("ci-gate"),
                 _combined_status(),
                 {
                     "check_runs": [
@@ -1296,7 +1332,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
         )
         baseline_transport = RecordingMergeTrainGitHubTransport(
             responses=(
-                _required_status_checks(),
+                _protected_branch_with_checks(),
                 _combined_status(),
                 {
                     "check_runs": [
@@ -1308,7 +1344,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
         )
         transport = RecordingMergeTrainGitHubTransport(
             responses=(
-                _required_status_checks(),
+                _protected_branch_with_checks(),
                 {
                     "state": "failure",
                     "total_count": 2,
@@ -2780,21 +2816,21 @@ def _required_check_run(
     }
 
 
-def _required_status_checks(
+def _protected_branch_with_checks(
     *contexts: str,
     app_id: int | None = 15368,
     include_checks: bool = True,
 ) -> dict[str, object]:
     resolved_contexts = contexts or ("ci-gate", "security-gate")
     payload: dict[str, object] = {
-        "strict": True,
+        "enforcement_level": "everyone",
         "contexts": list(resolved_contexts),
     }
     if include_checks:
         payload["checks"] = [
             {"context": context, "app_id": app_id} for context in resolved_contexts
         ]
-    return payload
+    return {"protected": True, "protection": {"required_status_checks": payload}}
 
 
 def _batch_candidate() -> MergeTrainBatchCandidate:

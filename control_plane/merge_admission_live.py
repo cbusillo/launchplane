@@ -54,7 +54,7 @@ from control_plane.merge_train import (
     MergeTrainSnapshotReader,
     build_merge_train_dry_run_result,
 )
-from control_plane.merge_train_github import GitHubMergeTrainSnapshotReader
+from control_plane.merge_train_github import GitHubMergeTrainClient, GitHubMergeTrainSnapshotReader
 from control_plane.merge_train_policy_source import (
     MergeTrainPolicyStoreMissingError,
     resolve_merge_train_policy_record,
@@ -202,7 +202,8 @@ class LiveMergeAdmissionEvaluator:
 
     def __post_init__(self) -> None:
         if self.snapshot_reader is None and not isinstance(
-            self.technical_check_client, TenantAdmissionControllerGitHubClient
+            self.technical_check_client,
+            (GitHubMergeTrainClient, TenantAdmissionControllerGitHubClient),
         ):
             raise ValueError("A transport-free check reader requires an explicit snapshot reader.")
 
@@ -224,7 +225,10 @@ class LiveMergeAdmissionEvaluator:
         landing_plan = landing_plan_record.landing_plan
         snapshot_reader = self.snapshot_reader
         if snapshot_reader is None:
-            assert isinstance(self.technical_check_client, TenantAdmissionControllerGitHubClient)
+            assert isinstance(
+                self.technical_check_client,
+                (GitHubMergeTrainClient, TenantAdmissionControllerGitHubClient),
+            )
             snapshot_reader = GitHubMergeTrainSnapshotReader(
                 transport=self.technical_check_client.transport
             )

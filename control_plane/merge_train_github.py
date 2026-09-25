@@ -1,6 +1,6 @@
 import json
 from time import sleep
-from typing import Callable, Literal, Protocol, TypeVar
+from typing import TYPE_CHECKING, Callable, Literal, Protocol, TypeVar
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
@@ -49,6 +49,9 @@ from control_plane.merge_train import MergeTrainMergeableState
 from control_plane.merge_train import MergeTrainPullRequestSnapshot
 from control_plane.merge_train import MergeTrainPullRequestState
 from control_plane.merge_admission import GuardedMergeAdmission, MergeAdmissionDeniedError
+
+if TYPE_CHECKING:
+    from control_plane.tenant_admission_controller import TenantAdmissionTechnicalChecks
 
 
 class MergeTrainGitHubError(RuntimeError):
@@ -534,6 +537,46 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             candidate,
             required_checks_status=check_status,
             status=candidate_status,
+        )
+
+    def read_technical_checks(
+        self,
+        *,
+        repository: str,
+        base_branch: str,
+        base_sha: str,
+        head_sha: str,
+        evaluated_at: str,
+    ) -> "TenantAdmissionTechnicalChecks":
+        from control_plane.tenant_admission_controller import (
+            _required_technical_checks,
+            read_technical_checks_for_requirements,
+        )
+
+        required_checks = _required_branch_checks(
+            transport=self.transport,
+            repository_path=_repository_path(repository),
+            base_branch=base_branch,
+        )
+        _, normalized_checks = _required_technical_checks(
+            {
+                "strict": True,
+                "checks": [{"context": name, "app_id": app_id} for name, app_id in required_checks],
+                "contexts": [],
+            }
+        )
+        # Strict freshness is a native train requirement, independent of
+        # GitHub's optional strict flag. Admission separately proves exact or
+        # recorded-rolling structural provenance against the current base.
+        return read_technical_checks_for_requirements(
+            transport=self.transport,
+            merge_client=self,
+            repository=repository,
+            base_sha=base_sha,
+            head_sha=head_sha,
+            evaluated_at=evaluated_at,
+            strict=True,
+            required_checks=normalized_checks,
         )
 
     def land_batch_candidate(
@@ -2343,20 +2386,27 @@ def _required_branch_checks(
     try:
         raw_payload = transport.request(
             method="GET",
-            path=(
-                f"/repos/{repository_path}/branches/{encoded_base_branch}"
-                "/protection/required_status_checks"
-            ),
+            path=f"/repos/{repository_path}/branches/{encoded_base_branch}",
         )
     except MergeTrainGitHubError as error:
         if error.status_code in {403, 404}:
             raise MergeTrainGitHubError(
                 "Merge train candidate validation requires a readable protected-branch "
-                "required-check policy and GitHub administration: read permission.",
+                "required-check policy and GitHub contents: read permission.",
                 status_code=error.status_code,
             ) from error
         raise
-    payload = _json_object(raw_payload, "GitHub required status checks response")
+    branch = _json_object(raw_payload, "GitHub protected branch response")
+    if branch.get("protected") is not True:
+        raise MergeTrainGitHubError("Merge train candidate validation requires a protected branch.")
+    protection = _json_object(branch.get("protection"), "GitHub branch protection")
+    payload = _json_object(
+        protection.get("required_status_checks"), "GitHub required status checks response"
+    )
+    if payload.get("enforcement_level") not in {"everyone", "non_admins"}:
+        raise MergeTrainGitHubError(
+            "Merge train candidate validation requires enforced protected-branch status checks."
+        )
     required_checks: dict[tuple[str, int | None], tuple[str, int | None]] = {}
     raw_checks = payload.get("checks")
     if raw_checks is not None:

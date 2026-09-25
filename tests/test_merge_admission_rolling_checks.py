@@ -19,7 +19,7 @@ from control_plane.contracts.merge_train_structural_provenance import (
 from control_plane.merge_admission import MergeAdmissionEvaluation
 from control_plane.merge_admission_live import LiveMergeAdmissionEvaluator
 from control_plane.merge_train import MergeTrainDryRunSnapshot
-from control_plane.tenant_admission_controller import TenantAdmissionControllerGitHubClient
+from control_plane.merge_train_github import GitHubMergeTrainClient
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_record
 from tests.test_merge_admission_live import (
     _EmptyEngineeringReviewStore,
@@ -43,11 +43,16 @@ class _StrictCandidateChecks:
     def request(self, *, method: str, path: str, body: dict[str, object] | None = None) -> object:
         if method != "GET" or body is not None:
             raise AssertionError("Admission evidence must be read-only")
-        if path.endswith("/protection/required_status_checks"):
+        if path.endswith("/branches/main"):
             return {
-                "strict": True,
-                "checks": [{"context": "ci-gate", "app_id": 1}],
-                "contexts": ["ci-gate"],
+                "protected": True,
+                "protection": {
+                    "required_status_checks": {
+                        "enforcement_level": "everyone",
+                        "checks": [{"context": "ci-gate", "app_id": 1}],
+                        "contexts": ["ci-gate"],
+                    }
+                },
             }
         if "/compare/" in path:
             # GitHub's actual first landing has the candidate step's tree, but
@@ -186,7 +191,7 @@ class RollingCandidateCheckTests(unittest.TestCase):
         evaluator = LiveMergeAdmissionEvaluator(
             store=object(),
             repository_evidence_provider=_UnusedRepositoryEvidenceProvider(),
-            technical_check_client=TenantAdmissionControllerGitHubClient(
+            technical_check_client=GitHubMergeTrainClient(
                 transport=_StrictCandidateChecks(conclusion=conclusion)
             ),
             policy_record_provider=lambda: self.policy,
