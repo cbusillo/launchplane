@@ -92,13 +92,24 @@ A repository policy names one GitHub credential source:
   Selecting a context selects its resolved credential for GitHub operations;
   this is a credential-authority decision for the policy reviewer. It does not
   create a credential or expand its provider permissions.
+- `github_token.github_app` names an `app_id`, immutable `repository_id`, and
+  `private_key_context`. The key comes from the managed secret integration
+  `merge_train_github_app`, binding key `private_key`, in that exact context.
+  One configured binding to a context-scoped, write-only current secret is
+  required; global, instance-scoped and duplicate bindings are refused. The
+  policy's merge identity must have kind `github_app`. Each resolution mints a
+  fresh installation token for exactly the policy's repository, with Contents
+  and Pull requests write and Checks and Commit statuses read. App and
+  installation identity, returned repository ID/name, token permissions and
+  expiry are verified; a token that fails verification is revoked. Tokens are
+  not stored as runtime configuration. No Administration permission is used.
 
-The two sources cannot be combined. If both are empty, the target remains
-unconfigured. If the selected context cannot resolve a token, the service
+The sources cannot be combined. If all are empty, the target remains
+unconfigured. If the selected source cannot resolve a token, the service
 refuses the operation; it never tries a service-host bootstrap token, a different
 context, or an agent's local credential. Configured global runtime values are
 part of the selected context, not an alternate source. Controller, phase-specific operations, historical proof and
-current governance readiness use the same resolver. Adding this optional field
+current governance readiness use the same resolver. Adding optional source fields
 does not change existing policy bytes or digests. Selecting a managed source
 changes the full policy digest and therefore requires a new reviewed policy
 revision. Check every repository in that policy for active train work before

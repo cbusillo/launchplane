@@ -5836,6 +5836,7 @@ def create_launchplane_fastapi_app(
             )
         token = resolve_merge_train_github_token(
             source=repository_policy.github_token,
+            repository=repository_policy.repository,
             control_plane_root=resolved_control_plane_root,
         )
         if not token:
@@ -6042,6 +6043,7 @@ def create_launchplane_fastapi_app(
             )
         token = resolve_merge_train_github_token(
             source=repository_policy.github_token,
+            repository=repository_policy.repository,
             control_plane_root=resolved_control_plane_root,
         )
         if not token:
@@ -9645,6 +9647,7 @@ def create_launchplane_fastapi_app(
             )
         token = resolve_merge_train_github_token(
             source=repository_policy.github_token,
+            repository=repository_policy.repository,
             control_plane_root=resolved_control_plane_root,
         )
         if not token:
@@ -9845,6 +9848,7 @@ def create_launchplane_fastapi_app(
             )
         token = resolve_merge_train_github_token(
             source=repository_policy.github_token,
+            repository=repository_policy.repository,
             control_plane_root=resolved_control_plane_root,
         )
         if not token:
@@ -10067,6 +10071,7 @@ def create_launchplane_fastapi_app(
             )
         token = resolve_merge_train_github_token(
             source=repository_policy.github_token,
+            repository=repository_policy.repository,
             control_plane_root=resolved_control_plane_root,
         )
         if not token:
@@ -10251,6 +10256,7 @@ def create_launchplane_fastapi_app(
             )
         token = resolve_merge_train_github_token(
             source=repository_policy.github_token,
+            repository=repository_policy.repository,
             control_plane_root=resolved_control_plane_root,
         )
         if not token:
@@ -24164,8 +24170,10 @@ def create_launchplane_fastapi_app(
             common=read_route_dependencies,
             repository_evidence_provider=resolved_change_impact_repository_evidence_provider,
             current_readiness_provider=LiveGovernanceCurrentReadinessProvider(
-                github_token=lambda source: resolve_merge_train_github_token(
-                    source=source, control_plane_root=resolved_control_plane_root
+                github_token=lambda source, repository: resolve_merge_train_github_token(
+                    source=source,
+                    repository=repository,
+                    control_plane_root=resolved_control_plane_root,
                 ),
             ),
             now=utc_now_timestamp,

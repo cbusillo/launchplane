@@ -121,6 +121,19 @@ class MergeTrainServiceAuthz(BaseModel):
         return self
 
 
+class MergeTrainGitHubAppSource(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    app_id: int = Field(strict=True, gt=0)
+    repository_id: int = Field(strict=True, gt=0)
+    private_key_context: str = Field(min_length=1)
+
+    @field_validator("private_key_context")
+    @classmethod
+    def _normalize_context(cls, value: str) -> str:
+        return _normalize_required_value(value, "Merge train App private key requires context")
+
+
 class MergeTrainGitHubTokenSource(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -130,13 +143,18 @@ class MergeTrainGitHubTokenSource(BaseModel):
         exclude_if=lambda value: not value,
         json_schema_extra={"x-launchplane-optional-response": True},
     )
+    github_app: MergeTrainGitHubAppSource | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
 
     @model_validator(mode="after")
     def _validate_token_source(self) -> "MergeTrainGitHubTokenSource":
         self.env_var = self.env_var.strip()
         self.runtime_context = self.runtime_context.strip()
-        if self.env_var and self.runtime_context:
-            raise ValueError("Merge train GitHub token cannot define both credential sources.")
+        if sum(bool(value) for value in (self.env_var, self.runtime_context, self.github_app)) > 1:
+            raise ValueError("Merge train GitHub token cannot define multiple credential sources.")
         return self
 
 
@@ -308,6 +326,8 @@ class MergeTrainRepositoryPolicy(BaseModel):
 
     @model_validator(mode="after")
     def _validate_repository_policy(self) -> "MergeTrainRepositoryPolicy":
+        if self.github_token.github_app is not None and self.merge_identity.kind != "github_app":
+            raise ValueError("Merge train App credentials require a github_app merge identity")
         self.repository = _normalize_required_value(
             self.repository, "merge train policy requires repository"
         )
