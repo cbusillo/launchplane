@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-# Preserve these existing compatibility exports for callers of this module.
-# noinspection PyUnusedImports
 from control_plane.contracts.ordinary_agent_provider import (
     ordinary_agent_enrollment_effect_profiles as ordinary_agent_enrollment_effect_profiles,
     ordinary_agent_enrollment_permissions as ordinary_agent_enrollment_permissions,
@@ -79,6 +77,27 @@ _PROVIDER_DELIVERY_INSPECTION_PERMISSION_CEILING = {
 }
 
 GitHubApiRequest = Callable[..., object]
+
+__all__ = [
+    "ADVISORY_GITHUB_APP_ID_ENV_KEY",
+    "ADVISORY_GITHUB_APP_PRIVATE_KEY_ENV_KEY",
+    "GitHubApiRequest",
+    "GitHubAppIdentityError",
+    "GitHubAppPermissionError",
+    "GitHubAppIdentity",
+    "GitHubAppInstallationToken",
+    "GitHubAppInstallationInspection",
+    "resolve_advisory_github_app_identity",
+    "mint_repository_installation_token",
+    "mint_merge_train_installation_token",
+    "mint_ordinary_agent_installation_token",
+    "mint_provider_delivery_inspection_token",
+    "ordinary_agent_effect_permissions",
+    "ordinary_agent_enrollment_effect_profiles",
+    "ordinary_agent_enrollment_permissions",
+    "inspect_ordinary_agent_github_app_installation",
+    "revoke_installation_token",
+]
 
 
 class GitHubAppIdentityError(ValueError):
