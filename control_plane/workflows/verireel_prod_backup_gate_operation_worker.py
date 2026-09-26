@@ -26,6 +26,7 @@ from control_plane.workflows.verireel_prod_backup_gate import (
     _run_delegated_worker,
 )
 from control_plane.workflows.production_backup_gate import execute_shared_production_backup
+from control_plane.workflows.production_backup_provider import ProductionBackupProviderError
 
 DEFAULT_VERIREEL_BACKUP_GATE_WORKER_LEASE_SECONDS = 300
 DEFAULT_VERIREEL_BACKUP_GATE_WORKER_HEARTBEAT_SECONDS = 60
@@ -65,6 +66,7 @@ class VeriReelProdBackupGateOperationWorkerStore(Protocol):
         lease_owner: str,
         phase: str,
         updated_at: str,
+        progress_evidence: dict[str, str] | None = None,
     ) -> VeriReelProdBackupGateOperationRecord | None: ...
 
     def complete_verireel_prod_backup_gate_operation_record(
@@ -365,35 +367,50 @@ def _execute_operation(
         authorization=operation.authorization,
         policy_record_reader=lambda: read_active_authz_policy_record(record_store),
     )
+    running_operation = operation
     try:
         authorization_guard.authorize_execution()
-        running_operation = record_store.mark_verireel_prod_backup_gate_operation_phase(
+        marked_operation = record_store.mark_verireel_prod_backup_gate_operation_phase(
             operation_id=operation.operation_id,
             lease_owner=lease_owner,
             phase="backup_gate",
             updated_at=_utc_now_timestamp(),
         )
-        if running_operation is None:
+        if marked_operation is None:
             logging.error(
                 "VeriReel prod backup gate operation %s lost its lease before backup execution.",
                 operation.operation_id,
             )
             return False
+        running_operation = marked_operation
         authorization_guard.checkpoint_provider_effect("backup_gate")
         if running_operation.binding is not None:
 
+            def record_progress(evidence: dict[str, str]) -> None:
+                nonlocal running_operation
+                updated = record_store.mark_verireel_prod_backup_gate_operation_phase(
+                    operation_id=operation.operation_id,
+                    lease_owner=lease_owner,
+                    phase="backup_gate",
+                    updated_at=_utc_now_timestamp(),
+                    progress_evidence=evidence,
+                )
+                if updated is None:
+                    raise ProductionBackupProviderError("backup_lease_lost")
+                running_operation = updated
+
             def checkpoint(phase: str) -> None:
                 if heartbeat_lost_event.is_set():
-                    raise ValueError(
-                        "Production backup worker lost its lease before provider effect."
-                    )
-                authorization_guard.checkpoint_provider_effect(phase)
+                    raise ProductionBackupProviderError("backup_lease_lost")
+                authorization_guard.authorize_execution()
+                record_progress({**running_operation.progress_evidence, "provider_stage": phase})
 
             worker_result = execute_shared_production_backup(
                 record_store=record_store,
                 binding=running_operation.binding,
                 control_plane_root=control_plane_root_path,
                 checkpoint=checkpoint,
+                record_progress=record_progress,
             )
         else:
             worker_result = _run_delegated_worker(
@@ -430,11 +447,12 @@ def _execute_operation(
             error,
         )
         backup_gate_record = _failed_backup_gate_record(
-            request=operation.request,
+            request=running_operation.request,
             error_message=str(error),
+            evidence=running_operation.progress_evidence,
         )
         finished_at = _utc_now_timestamp()
-        terminal_operation = operation.model_copy(
+        terminal_operation = running_operation.model_copy(
             update={
                 "status": "fail",
                 "phase": "failed",
@@ -450,17 +468,30 @@ def _execute_operation(
             "VeriReel prod backup gate operation %s failed before producing a result.",
             operation.operation_id,
         )
-        backup_gate_record = _failed_backup_gate_record(
-            request=operation.request, error_message=str(error)
+        error_code = (
+            (
+                str(error)
+                if isinstance(error, ProductionBackupProviderError)
+                else "backup_preflight_unavailable"
+            )
+            if operation.binding is not None
+            else ""
         )
-        terminal_operation = operation.model_copy(
+        error_message = error_code or str(error)
+        backup_gate_record = _failed_backup_gate_record(
+            request=running_operation.request,
+            error_message=error_message,
+            evidence=running_operation.progress_evidence,
+        )
+        terminal_operation = running_operation.model_copy(
             update={
                 "status": "fail",
                 "phase": "failed",
                 "updated_at": _utc_now_timestamp(),
                 "finished_at": _utc_now_timestamp(),
                 "lease_owner": lease_owner,
-                "error_message": str(error),
+                "error_code": error_code,
+                "error_message": error_message,
             }
         )
     finally:
@@ -494,7 +525,9 @@ def _terminal_operation(
             "finished_at": finished_at,
             "lease_owner": lease_owner,
             "result": result,
-            "error_code": "",
+            "error_code": result.error_message
+            if operation.binding is not None and not passed
+            else "",
             "error_message": "" if passed else (result.error_message or "Backup gate failed."),
         }
     )

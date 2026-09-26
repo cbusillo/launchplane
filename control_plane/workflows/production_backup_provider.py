@@ -29,17 +29,22 @@ def _snapshot_names(output: str, prefix: str) -> list[str]:
     return sorted(set(pattern.findall(output)))
 
 
-def _backup_volume(output: str, *, storage: str, archive: str) -> str:
+def _verify_backup_volume(output: str, *, storage: str, archive: str) -> None:
     matches = {
         fields[0]
         for line in output.splitlines()
-        if (fields := line.split())
-        and fields[0].startswith(f"{storage}:backup/")
-        and fields[0].endswith(f"/{archive}")
+        if (fields := line.split()) and fields[0] == f"{storage}:backup/{archive}"
     }
     if len(matches) != 1:
         raise ProductionBackupProviderError("independent_backup_not_found")
-    return matches.pop()
+
+
+def _failure_code(error: Exception, stage: str) -> str:
+    if isinstance(error, ProductionBackupProviderError):
+        return str(error)
+    if isinstance(error, subprocess.TimeoutExpired):
+        return "backup_timeout"
+    return f"{stage}_unavailable"
 
 
 def execute_production_backup_provider(
@@ -48,6 +53,7 @@ def execute_production_backup_provider(
     ssh_private_key: str,
     ssh_known_hosts: str,
     checkpoint: Callable[[str], None] | None = None,
+    record_progress: Callable[[dict[str, str]], None] | None = None,
 ) -> ProductionBackupGateWorkerResult:
     """Capture both policy operations through one exact forced-command boundary."""
     started_at = utc_now_timestamp()
@@ -72,7 +78,17 @@ def execute_production_backup_provider(
     }
     stage = "preflight"
     deadline = time.monotonic() + binding.request.timeout_seconds
+
+    def save_progress() -> None:
+        evidence["provider_stage"] = stage
+        if record_progress is not None:
+            try:
+                record_progress(dict(evidence))
+            except Exception as error:
+                raise ProductionBackupProviderError("backup_progress_unavailable") from error
+
     try:
+        save_progress()
         if not ssh_private_key.strip() or not ssh_known_hosts.strip():
             raise ProductionBackupProviderError("backup_ssh_material_missing")
         if (
@@ -125,13 +141,15 @@ def execute_production_backup_provider(
                     capture_output=True,
                     text=True,
                     timeout=remaining,
-                    check=False,
                 )
                 if result.returncode != 0:
                     raise ProductionBackupProviderError(f"{stage}_command_failed")
                 return f"{result.stdout}\n{result.stderr}"
 
-            boundary = json.loads(run(["launchplane-backup-boundary"]))
+            try:
+                boundary = json.loads(run(["launchplane-backup-boundary"]))
+            except json.JSONDecodeError as error:
+                raise ProductionBackupProviderError("backup_boundary_invalid") from error
             if boundary != {
                 "schema_version": 1,
                 "guest_kind": source.guest_kind,
@@ -149,9 +167,11 @@ def execute_production_backup_provider(
                 raise ProductionBackupProviderError("backup_storage_not_active_pbs")
 
             stage = "snapshot"
+            evidence["requested_snapshot_name"] = snapshot
+            evidence["snapshot_started_at"] = utc_now_timestamp()
+            save_progress()
             if checkpoint is not None:
                 checkpoint(stage)
-            evidence["snapshot_started_at"] = utc_now_timestamp()
             run([guest_command, "snapshot", source.guest_id, snapshot])
             evidence["snapshot_name"] = snapshot
             if snapshot not in _snapshot_names(
@@ -159,11 +179,13 @@ def execute_production_backup_provider(
             ):
                 raise ProductionBackupProviderError("snapshot_not_found")
             evidence["snapshot_finished_at"] = utc_now_timestamp()
+            save_progress()
 
             stage = "independent_backup"
+            evidence["independent_backup_started_at"] = utc_now_timestamp()
+            save_progress()
             if checkpoint is not None:
                 checkpoint(stage)
-            evidence["independent_backup_started_at"] = utc_now_timestamp()
             backup_output = run(
                 ["vzdump", source.guest_id, "--mode", "snapshot", "--storage", storage]
             )
@@ -176,37 +198,38 @@ def execute_production_backup_provider(
                 raise ProductionBackupProviderError("independent_backup_identity_missing")
             archive = archives.pop().strip("'")
             evidence["independent_backup_id"] = archive
-            evidence["independent_backup_volume_id"] = _backup_volume(
+            save_progress()
+            _verify_backup_volume(
                 run(["pvesm", "list", storage, "--vmid", source.guest_id, "--content", "backup"]),
                 storage=storage,
                 archive=archive,
             )
             evidence["independent_backup_finished_at"] = utc_now_timestamp()
+            evidence["capture_status"] = "verified"
+            save_progress()
 
             stage = "snapshot_retention"
-            snapshots = _snapshot_names(
-                run([guest_command, "listsnapshot", source.guest_id]), prefix
-            )
-            delete_count = max(len(snapshots) - max(1, policy.fast_snapshot.retention_count), 0)
-            for name in [name for name in snapshots if name != snapshot][:delete_count]:
-                if checkpoint is not None:
-                    checkpoint(stage)
-                run([guest_command, "delsnapshot", source.guest_id, name])
-    except ProductionBackupProviderError as error:
+            try:
+                snapshots = _snapshot_names(
+                    run([guest_command, "listsnapshot", source.guest_id]), prefix
+                )
+                delete_count = max(len(snapshots) - max(1, policy.fast_snapshot.retention_count), 0)
+                for name in [name for name in snapshots if name != snapshot][:delete_count]:
+                    save_progress()
+                    if checkpoint is not None:
+                        checkpoint(stage)
+                    run([guest_command, "delsnapshot", source.guest_id, name])
+                evidence["retention_status"] = "pass"
+            except (OSError, ValueError, subprocess.TimeoutExpired) as error:
+                evidence["retention_status"] = "fail"
+                evidence["retention_error_code"] = _failure_code(error, stage)
+    except (OSError, ValueError, subprocess.TimeoutExpired) as error:
         return ProductionBackupGateWorkerResult(
             status="fail",
             started_at=started_at,
             finished_at=utc_now_timestamp(),
             evidence=evidence,
-            error_code=str(error),
-        )
-    except (OSError, ValueError, subprocess.TimeoutExpired):
-        return ProductionBackupGateWorkerResult(
-            status="fail",
-            started_at=started_at,
-            finished_at=utc_now_timestamp(),
-            evidence=evidence,
-            error_code=f"{stage}_unavailable",
+            error_code=_failure_code(error, stage),
         )
     return ProductionBackupGateWorkerResult(
         status="pass",

@@ -8246,6 +8246,17 @@ def create_launchplane_fastapi_app(
                 code="not_found",
                 message="Durable operation was not found.",
             ) from error
+        if (
+            read_method_name == "read_verireel_prod_backup_gate_operation_record"
+            and operation.binding is not None
+            and action != "production_backup_gate.execute"
+        ):
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message="Operation is not supported by this cancellation route.",
+            )
         if not resolved_authz_policy_runtime.policy.allows(
             identity=identity,
             action=action,
@@ -24239,6 +24250,7 @@ def create_launchplane_fastapi_app(
         dependencies=ProductionBackupGateRouteDependencies(
             common=read_route_dependencies,
             read_write_identity=read_write_identity,
+            cancel_pending_operation=cancel_pending_durable_operation,
         ),
     )
 

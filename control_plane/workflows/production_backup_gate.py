@@ -14,12 +14,16 @@ from control_plane.contracts.verireel_prod_backup_gate import VeriReelProdBackup
 from control_plane.contracts.verireel_prod_backup_gate_operation import (
     VeriReelProdBackupGateOperationRecord,
 )
+from control_plane.durable_operation_authorization import DurableOperationAuthorizationDeniedError
 from control_plane.production_backup_authority import (
     require_production_backup_authority_store,
     resolve_production_backup_authority,
 )
 from control_plane.storage.postgres import PostgresRecordStore
-from control_plane.workflows.production_backup_provider import execute_production_backup_provider
+from control_plane.workflows.production_backup_provider import (
+    ProductionBackupProviderError,
+    execute_production_backup_provider,
+)
 from control_plane.workflows.ship import utc_now_timestamp
 from control_plane.workflows.worker_runtime_key_safety import enforce_worker_runtime_key_safety
 
@@ -81,8 +85,7 @@ def enqueue_production_backup_gate(
     authorization: DurableOperationAuthorization,
     operation_key: str,
 ) -> VeriReelProdBackupGateOperationRecord:
-    binding = resolve_production_backup_binding(record_store, request)
-    fingerprint = hashlib.sha256(binding.model_dump_json().encode()).hexdigest()
+    fingerprint = hashlib.sha256(request.model_dump_json().encode()).hexdigest()
     operation_id = (
         "production-backup-gate-" + hashlib.sha256(operation_key.encode()).hexdigest()[:32]
     )
@@ -92,14 +95,9 @@ def enqueue_production_backup_gate(
         existing = None
     if existing is not None:
         if existing.request_fingerprint != fingerprint:
-            raise ValueError("Production backup request conflicts with its existing binding.")
+            raise ValueError("Production backup request conflicts with its existing request.")
         return existing
-    try:
-        record_store.read_backup_gate_record(request.backup_record_id)
-    except FileNotFoundError:
-        pass
-    else:
-        raise ValueError("Production backup record ID is already in use.")
+    binding = resolve_production_backup_binding(record_store, request)
     recorded_at = utc_now_timestamp()
     operation = VeriReelProdBackupGateOperationRecord(
         schema_version=3,
@@ -131,12 +129,19 @@ def execute_shared_production_backup(
     binding: ProductionBackupGateWorkerRequest,
     control_plane_root: Path,
     checkpoint: Callable[[str], None],
+    record_progress: Callable[[dict[str, str]], None],
 ) -> VeriReelProdBackupGateWorkerResult:
     def check_effect(phase: str) -> None:
-        current = resolve_production_backup_binding(record_store, binding.request)
+        try:
+            current = resolve_production_backup_binding(record_store, binding.request)
+        except (ValueError, FileNotFoundError) as error:
+            raise ProductionBackupProviderError("backup_authority_unavailable") from error
         if current != binding:
-            raise ValueError("Production backup authority changed before provider execution.")
-        checkpoint(phase)
+            raise ProductionBackupProviderError("backup_authority_changed")
+        try:
+            checkpoint(phase)
+        except DurableOperationAuthorizationDeniedError as error:
+            raise ProductionBackupProviderError(error.code) from error
 
     check_effect("backup_preflight")
     enforce_worker_runtime_key_safety(
@@ -155,6 +160,7 @@ def execute_shared_production_backup(
         ssh_private_key=values.get(SSH_PRIVATE_KEY, ""),
         ssh_known_hosts=values.get(SSH_KNOWN_HOSTS, ""),
         checkpoint=check_effect,
+        record_progress=record_progress,
     )
     return VeriReelProdBackupGateWorkerResult(
         status=result.status,

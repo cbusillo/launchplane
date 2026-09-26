@@ -9,6 +9,9 @@ from control_plane.contracts.production_backup_gate import (
     PRODUCTION_BACKUP_GATE_EXECUTE_ACTION,
     ProductionBackupGateRequest,
 )
+from control_plane.contracts.durable_operation_authorization import (
+    DurableOperationCancellationRequest,
+)
 from control_plane.contracts.verireel_prod_backup_gate_operation import (
     VeriReelProdBackupGateOperationRecord,
 )
@@ -33,6 +36,7 @@ PRODUCTION_BACKUP_GATE_OPERATION_ROUTE = "/v1/production-backup-gates/operations
 class ProductionBackupGateRouteDependencies:
     common: ReadRouteDependencies
     read_write_identity: Callable[..., LaunchplaneIdentity]
+    cancel_pending_operation: Callable[..., VeriReelProdBackupGateOperationRecord]
 
 
 class ProductionBackupGateResponse(BaseModel):
@@ -55,7 +59,7 @@ def _response(
         operation_id=operation.operation_id,
         operation_status=operation.status,
         backup_record_id=operation.backup_record_id,
-        evidence=operation.result.evidence if operation.result else {},
+        evidence=operation.result.evidence if operation.result else operation.progress_evidence,
         error_code=operation.error_code or ("backup_failed" if operation.status == "fail" else ""),
     )
 
@@ -135,19 +139,20 @@ def register_production_backup_gate_routes(
             ) from error
         return _response(operation, trace_id)
 
-    def read_backup_operation(
-        operation_id: Annotated[str, Path(min_length=1, max_length=256)],
-        product: Annotated[str, Query(min_length=1)],
-        context: Annotated[str, Query(min_length=1)],
-        instance: Annotated[str, Query(min_length=1)],
-        identity: Annotated[LaunchplaneIdentity, Depends(common.read_identity)],
-        record_store: Annotated[object, Depends(common.get_record_store)],
-    ) -> ProductionBackupGateResponse:
-        trace_id = common.next_trace_id()
+    def scoped_operation(
+        operation_id: str,
+        product: str,
+        context: str,
+        instance: str,
+        identity: LaunchplaneIdentity,
+        record_store: object,
+        trace_id: str,
+        action: str,
+    ) -> VeriReelProdBackupGateOperationRecord:
         scope = (product.strip().lower(), context.strip().lower(), instance.strip().lower())
         if not common.authorization_allows(
             identity=identity,
-            action="production_backup_authority.read",
+            action=action,
             product=scope[0],
             context=scope[1],
             target=AuthorizationTarget(scope="instance", instances=(scope[2],)),
@@ -156,7 +161,7 @@ def register_production_backup_gate_routes(
                 status_code=403,
                 trace_id=trace_id,
                 code="authorization_denied",
-                message="Identity cannot read this production backup gate.",
+                message="Identity cannot access this production backup gate operation.",
             )
         if not isinstance(record_store, PostgresRecordStore):
             raise common.http_error(
@@ -179,9 +184,62 @@ def register_production_backup_gate_routes(
                 code="not_found",
                 message="Production backup operation was not found.",
             ) from error
+        return operation
+
+    def read_backup_operation(
+        operation_id: Annotated[str, Path(min_length=1, max_length=256)],
+        product: Annotated[str, Query(min_length=1)],
+        context: Annotated[str, Query(min_length=1)],
+        instance: Annotated[str, Query(min_length=1)],
+        identity: Annotated[LaunchplaneIdentity, Depends(common.read_identity)],
+        record_store: Annotated[object, Depends(common.get_record_store)],
+    ) -> ProductionBackupGateResponse:
+        trace_id = common.next_trace_id()
+        operation = scoped_operation(
+            operation_id,
+            product,
+            context,
+            instance,
+            identity,
+            record_store,
+            trace_id,
+            "production_backup_authority.read",
+        )
         return _response(operation, trace_id)
 
-    for path, handler, method, operation_id in (
+    def cancel_backup_operation(
+        operation_id: Annotated[str, Path(min_length=1, max_length=256)],
+        cancellation_request: DurableOperationCancellationRequest,
+        product: Annotated[str, Query(min_length=1)],
+        context: Annotated[str, Query(min_length=1)],
+        instance: Annotated[str, Query(min_length=1)],
+        identity: Annotated[LaunchplaneIdentity, Depends(dependencies.read_write_identity)],
+        record_store: Annotated[object, Depends(common.get_record_store)],
+    ) -> ProductionBackupGateResponse:
+        trace_id = common.next_trace_id()
+        scoped_operation(
+            operation_id,
+            product,
+            context,
+            instance,
+            identity,
+            record_store,
+            trace_id,
+            PRODUCTION_BACKUP_GATE_EXECUTE_ACTION,
+        )
+        operation = dependencies.cancel_pending_operation(
+            trace_id=trace_id,
+            record_store=record_store,
+            identity=identity,
+            operation_id=operation_id,
+            action=PRODUCTION_BACKUP_GATE_EXECUTE_ACTION,
+            read_method_name="read_verireel_prod_backup_gate_operation_record",
+            cancel_method_name="cancel_pending_verireel_prod_backup_gate_operation_record",
+            cancellation_request=cancellation_request,
+        )
+        return _response(operation, trace_id)
+
+    for path, handler, method, route_operation_id in (
         (PRODUCTION_BACKUP_GATE_ROUTE, enqueue_backup, "POST", "enqueue_production_backup_gate"),
         (
             PRODUCTION_BACKUP_GATE_OPERATION_ROUTE,
@@ -189,13 +247,19 @@ def register_production_backup_gate_routes(
             "GET",
             "read_production_backup_gate_operation",
         ),
+        (
+            PRODUCTION_BACKUP_GATE_OPERATION_ROUTE + "/cancel",
+            cancel_backup_operation,
+            "POST",
+            "cancel_production_backup_gate_operation",
+        ),
     ):
         app.add_api_route(
             path,
             handler,
             methods=[method],
             response_model=ProductionBackupGateResponse,
-            operation_id=operation_id,
+            operation_id=route_operation_id,
             responses={
                 status: {"model": common.error_response_model}
                 for status in (400, 401, 403, 404, 409, 503)

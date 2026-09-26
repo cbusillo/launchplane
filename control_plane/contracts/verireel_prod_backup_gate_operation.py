@@ -64,6 +64,7 @@ class VeriReelProdBackupGateOperationRecord(BaseModel):
     heartbeat_at: str = ""
     attempt: int = Field(default=0, ge=0)
     result: VeriReelProdBackupGateResult | None = None
+    progress_evidence: dict[str, str] = Field(default_factory=dict)
     cancellation: DurableOperationCancellation | None = None
     error_code: str = ""
     error_message: str = ""
@@ -210,7 +211,9 @@ def build_cancelled_verireel_prod_backup_gate_record(
         context=operation.context,
         instance=operation.instance,
         created_at=operation.cancellation.cancelled_at,
-        source="launchplane-verireel-prod-backup-gate-cancellation",
+        source="launchplane-production-backup-gate-cancellation"
+        if operation.binding is not None
+        else "launchplane-verireel-prod-backup-gate-cancellation",
         required=True,
         status="fail",
         evidence={

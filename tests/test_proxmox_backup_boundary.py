@@ -17,7 +17,7 @@ class ProxmoxBackupBoundaryTests(unittest.TestCase):
             "SSH_ORIGINAL_COMMAND": "launchplane-backup-boundary",
         }
         binding = subprocess.run(
-            ["bash", str(script)], env=environment, text=True, capture_output=True, check=False
+            ["bash", str(script)], env=environment, text=True, capture_output=True
         )
         self.assertEqual(binding.returncode, 0, binding.stderr)
         self.assertEqual(
@@ -50,7 +50,6 @@ class ProxmoxBackupBoundaryTests(unittest.TestCase):
                     env={**environment, "SSH_ORIGINAL_COMMAND": command},
                     text=True,
                     capture_output=True,
-                    check=False,
                 )
                 self.assertEqual(denied.returncode, 126, denied.stderr)
                 self.assertEqual(denied.stdout, "")

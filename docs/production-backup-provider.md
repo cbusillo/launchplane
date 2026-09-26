@@ -14,16 +14,26 @@ action, backup record ID and timeout. It requires
 `production_backup_gate.execute` for that exact scope, PostgreSQL, a managed
 authorization rule with durable provenance, and `Idempotency-Key`. The service
 resolves current typed authority and stores the exact binding in a durable
-operation. The same caller/key reuses that operation; changed requests or
-bindings conflict. Backup record IDs cannot be reused for another capture.
+operation. The same caller/key and request reuses that operation even after
+authority changes; changed requests conflict. New captures resolve current
+authority. Backup record IDs cannot be reused for another capture, including
+after an operation finishes.
 
 `GET /v1/production-backup-gates/operations/{operation_id}` takes the same
 product/context/instance as query parameters and requires
 `production_backup_authority.read`. It returns status and bounded evidence,
 without host coordinates, SSH material or raw provider output. Passing evidence
 includes policy revision/digest, target record IDs/digests, snapshot identity,
-PBS archive/volume identity, and timestamps. Partial captures fail and retain
-the evidence already collected.
+PBS archive identity, and timestamps. Storage coordinates are not exposed.
+Partial captures fail and retain the evidence already collected, with a bounded
+error code. The worker persists capture intent and verified progress as it goes;
+lease-expiry recovery retains that evidence and reports an unknown effect rather
+than replaying a possibly completed host command.
+
+`POST /v1/production-backup-gates/operations/{operation_id}/cancel` takes the
+same scope query and a cancellation reason. It requires the capture action for
+that scope and only cancels pending operations. The claim/cancel race is resolved
+atomically; running captures cannot be cancelled through this route.
 
 The shared operation uses schema version 3 of the existing backup-operation
 record. It reuses the database queue, claims, heartbeats, authorization checks,
@@ -72,7 +82,9 @@ and recovery exercises remain separate evidence.
 Snapshot pruning runs only after both captures pass. It removes only names
 matching this provider's configured prefix and timestamp/hash format, preserves
 the just-created snapshot, and retains at least one snapshot even when retention
-is zero. Existing snapshots outside that format are kept.
+is zero. Existing snapshots outside that format are kept. Retention failure is
+recorded separately with a bounded error code and does not invalidate a verified
+capture; authority or lease loss stops further deletion.
 
 Deploying this code does not install host filters, grant access, create secret
 bindings, activate a backup policy, or change the legacy promotion gates. The

@@ -59,7 +59,10 @@ class VeriReelProdBackupGateStore(Protocol):
 
 class VeriReelProdBackupGateOperationStore(VeriReelProdBackupGateStore, Protocol):
     def create_verireel_prod_backup_gate_operation_record_if_no_active_record(
-        self, record: VeriReelProdBackupGateOperationRecord
+        self,
+        record: VeriReelProdBackupGateOperationRecord,
+        *,
+        pending_backup_record: BackupGateRecord | None = None,
     ) -> tuple[VeriReelProdBackupGateOperationRecord, bool]: ...
 
     def list_verireel_prod_backup_gate_operation_records(
@@ -222,16 +225,22 @@ def _failed_backup_gate_record(
     *,
     request: VeriReelProdBackupGateRequest | ProductionBackupGateRequest,
     error_message: str,
+    evidence: dict[str, str] | None = None,
 ) -> BackupGateRecord:
     return BackupGateRecord(
         record_id=request.backup_record_id,
         context=request.context,
         instance=request.instance,
         created_at=utc_now_timestamp(),
-        source=ASYNC_SOURCE,
+        source="launchplane-production-backup-gate"
+        if isinstance(request, ProductionBackupGateRequest)
+        else ASYNC_SOURCE,
         required=True,
         status="fail",
-        evidence={"error_message": error_message} if error_message else {},
+        evidence={
+            **(evidence or {}),
+            **({"error_message": error_message} if error_message else {}),
+        },
     )
 
 
@@ -309,14 +318,16 @@ def enqueue_verireel_prod_backup_gate(
         record_store=record_store,
         record_id=request.backup_record_id,
     )
+    if existing_record is not None and (
+        existing_record.context != request.context
+        or existing_record.instance != request.instance
+        or existing_record.source.startswith("launchplane-production-backup-gate")
+    ):
+        raise click.ClickException("Backup record ID belongs to another backup scope or provider.")
     if existing_record is not None and existing_record.status in {"pass", "fail"}:
         return _result_from_backup_gate_record(request=request, record=existing_record)
 
     recorded_at = now or utc_now_timestamp()
-    if existing_record is None:
-        existing_record = _pending_backup_gate_record(request=request)
-        record_store.write_backup_gate_record(existing_record)
-
     operation = _build_operation_record(
         request=request,
         created_at=recorded_at,
@@ -333,6 +344,8 @@ def enqueue_verireel_prod_backup_gate(
         raise click.ClickException(
             "VeriReel prod backup gate request conflicts with an existing operation."
         )
+    if existing_record is None:
+        existing_record = _pending_backup_gate_record(request=request)
     if (
         operation_records
         and operation_records[0].status in VERIREEL_PROD_BACKUP_GATE_TERMINAL_OPERATION_STATUSES
@@ -355,7 +368,7 @@ def enqueue_verireel_prod_backup_gate(
             )
     persisted_operation, _created = (
         record_store.create_verireel_prod_backup_gate_operation_record_if_no_active_record(
-            operation
+            operation, pending_backup_record=existing_record
         )
     )
     if persisted_operation.request_fingerprint != operation.request_fingerprint:
@@ -387,7 +400,9 @@ def _backup_gate_record_from_terminal_operation(
         context=operation.context,
         instance=operation.instance,
         created_at=operation.finished_at or operation.updated_at,
-        source=ASYNC_SOURCE,
+        source="launchplane-production-backup-gate"
+        if operation.binding is not None
+        else ASYNC_SOURCE,
         required=True,
         status=status,
         evidence=evidence,

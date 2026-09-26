@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 import subprocess
+from typing import Callable
 import unittest
 from unittest.mock import patch
 
@@ -8,7 +9,10 @@ from control_plane.contracts.production_backup_gate import (
     ProductionBackupGateRequest,
     ProductionBackupGateWorkerRequest,
 )
-from control_plane.workflows.production_backup_provider import execute_production_backup_provider
+from control_plane.workflows.production_backup_provider import (
+    ProductionBackupProviderError,
+    execute_production_backup_provider,
+)
 from tests.test_production_backup_authority import _destination_target, _policy, _source_target
 
 
@@ -27,7 +31,98 @@ def _binding() -> ProductionBackupGateWorkerRequest:
     )
 
 
+class BackupHost:
+    def __init__(self, *, after_snapshot: Callable[[], None] | None = None) -> None:
+        self.commands: list[list[str]] = []
+        self.snapshot = ""
+        self.old_snapshots: list[str] = []
+        self.after_snapshot = after_snapshot
+        self.fail_retention = False
+
+    def run(self, command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        args = command[command.index("--") + 2 :]
+        self.commands.append(args)
+        if args == ["launchplane-backup-boundary"]:
+            output = json.dumps(
+                {
+                    "schema_version": 1,
+                    "guest_kind": "lxc",
+                    "guest_id": "101",
+                    "storage_id": "pbs-production",
+                    "snapshot_prefix": "example-predeploy",
+                }
+            )
+        elif args == ["pvesm", "status", "--storage", "pbs-production"]:
+            output = "pbs-production pbs active 100 10 90 10%"
+        elif args[:3] == ["pct", "snapshot", "101"]:
+            self.snapshot = args[3]
+            if self.after_snapshot is not None:
+                self.after_snapshot()
+            output = ""
+        elif args == ["pct", "listsnapshot", "101"]:
+            output = "\n".join(
+                f"`-> {name} 2026-09-26" for name in [self.snapshot, *self.old_snapshots]
+            )
+        elif args == ["vzdump", "101", "--mode", "snapshot", "--storage", "pbs-production"]:
+            output = "INFO: creating Proxmox Backup Server archive 'ct/101/2026-09-26T10:00:00Z'"
+        elif args == ["pvesm", "list", "pbs-production", "--vmid", "101", "--content", "backup"]:
+            output = "pbs-production:backup/ct/101/2026-09-26T10:00:00Z pbs backup 1000 101"
+        elif args[:3] == ["pct", "delsnapshot", "101"]:
+            if self.fail_retention:
+                return subprocess.CompletedProcess(command, 1, stdout="", stderr="private-error")
+            self.old_snapshots.remove(args[3])
+            output = ""
+        else:
+            raise AssertionError(f"Unexpected provider command: {args}")
+        return subprocess.CompletedProcess(command, 0, stdout=output, stderr="")
+
+
 class ProductionBackupProviderTests(unittest.TestCase):
+    def test_retention_failure_keeps_verified_capture(self) -> None:
+        host = BackupHost()
+        host.old_snapshots = [f"example-predeploy-2026090{i}-100000-abcdef" for i in range(1, 7)]
+        host.fail_retention = True
+        with patch(
+            "control_plane.workflows.production_backup_provider.subprocess.run",
+            side_effect=host.run,
+        ):
+            result = execute_production_backup_provider(
+                _binding(), ssh_private_key="private-material", ssh_known_hosts="host-material"
+            )
+        self.assertEqual(result.status, "pass")
+        self.assertEqual(result.evidence["capture_status"], "verified")
+        self.assertEqual(result.evidence["retention_status"], "fail")
+        self.assertEqual(
+            result.evidence["retention_error_code"], "snapshot_retention_command_failed"
+        )
+        self.assertNotIn("private-", result.model_dump_json())
+        self.assertNotIn("pbs-production", result.model_dump_json())
+
+    def test_revocation_after_snapshot_preserves_partial_evidence_and_stops_backup(self) -> None:
+        host = BackupHost()
+        progress: list[dict[str, str]] = []
+
+        def checkpoint(phase: str) -> None:
+            if phase == "independent_backup":
+                raise ProductionBackupProviderError("operation_authorization_revoked")
+
+        with patch(
+            "control_plane.workflows.production_backup_provider.subprocess.run",
+            side_effect=host.run,
+        ):
+            result = execute_production_backup_provider(
+                _binding(),
+                ssh_private_key="private-material",
+                ssh_known_hosts="host-material",
+                checkpoint=checkpoint,
+                record_progress=progress.append,
+            )
+        self.assertEqual(result.status, "fail")
+        self.assertEqual(result.error_code, "operation_authorization_revoked")
+        self.assertEqual(result.evidence["snapshot_name"], host.snapshot)
+        self.assertIn("snapshot_finished_at", progress[-1])
+        self.assertTrue(all(command[0] != "vzdump" for command in host.commands))
+
     def test_capture_binds_both_operations_and_removes_ssh_material(self) -> None:
         commands: list[list[str]] = []
         identity_paths: list[Path] = []
@@ -73,7 +168,7 @@ class ProductionBackupProviderTests(unittest.TestCase):
             ]:
                 output = "Volid Format Type Size VMID\npbs-production:backup/ct/101/2026-09-26T10:00:00Z pbs backup 1000 101"
             else:
-                self.fail(f"Unexpected provider operation: {args}")
+                raise AssertionError(f"Unexpected provider operation: {args}")
             return subprocess.CompletedProcess(command, 0, stdout=output, stderr="")
 
         with patch(

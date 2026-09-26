@@ -7,6 +7,7 @@ from urllib.parse import urlencode
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.service_auth import LaunchplaneAuthzPolicy, LocalOperatorPolicyRule
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.contracts.verireel_prod_backup_gate import VeriReelProdBackupGateResult
 from tests.http_app_test_support import _local_operator_bearer_config, _RejectingVerifier
 from tests.support.http import get, request
 from tests.test_production_backup_provider import _binding
@@ -118,7 +119,6 @@ class ProductionBackupGatePostgresHttpTests(unittest.IsolatedAsyncioTestCase):
                 workflow_ref=_WORKFLOW_REF,
                 job_workflow_ref=_JOB_WORKFLOW_REF,
                 event_name="workflow_dispatch",
-                environment="prod",
                 repository_id="1001",
                 repository_owner_id="1000",
             )
@@ -160,6 +160,69 @@ class ProductionBackupGatePostgresHttpTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(read.status_code, 200, read.text)
             self.assertNotIn("proxmox.example.invalid", read.text)
             self.assertNotIn("pbs-production", read.text)
+            legacy_cancel = await request(
+                app,
+                "POST",
+                f"/v1/drivers/verireel/prod-backup-gate/operations/{operation_id}/cancel",
+                headers=headers,
+                payload={"reason": "Wrong route"},
+            )
+            self.assertEqual(legacy_cancel.status_code, 404, legacy_cancel.text)
+            cancelled = await request(
+                app,
+                "POST",
+                f"/v1/production-backup-gates/operations/{operation_id}/cancel?{query}",
+                headers=headers,
+                payload={"reason": "Cancel pending test capture"},
+            )
+            self.assertEqual(cancelled.status_code, 200, cancelled.text)
+            self.assertEqual(cancelled.json()["operation_status"], "cancelled")
+            self.assertEqual(
+                store.read_backup_gate_record(binding.request.backup_record_id).source,
+                "launchplane-production-backup-gate-cancellation",
+            )
+
+            second = await request(
+                app,
+                "POST",
+                "/v1/production-backup-gates",
+                headers=headers | {"Idempotency-Key": "capture-2"},
+                payload=payload | {"backup_record_id": "backup-2"},
+            )
+            self.assertEqual(second.status_code, 200, second.text)
+            second_id = second.json()["operation_id"]
+            failed = store.read_verireel_prod_backup_gate_operation_record(second_id).model_copy(
+                update={
+                    "status": "fail",
+                    "phase": "failed",
+                    "finished_at": "2026-09-26T12:00:00Z",
+                    "error_code": "operation_authorization_revoked",
+                    "error_message": "operation_authorization_revoked",
+                    "result": VeriReelProdBackupGateResult(
+                        backup_record_id="backup-2",
+                        backup_status="fail",
+                        error_message="operation_authorization_revoked",
+                        evidence={"snapshot_name": "partial-snapshot"},
+                    ),
+                }
+            )
+            store.write_verireel_prod_backup_gate_operation_record(failed)
+            read_failure = await get(
+                app,
+                f"/v1/production-backup-gates/operations/{second_id}?{query}",
+                headers=headers,
+            )
+            self.assertEqual(read_failure.status_code, 200, read_failure.text)
+            self.assertEqual(read_failure.json()["error_code"], "operation_authorization_revoked")
+            self.assertEqual(read_failure.json()["evidence"], {"snapshot_name": "partial-snapshot"})
+            cancel_failure = await request(
+                app,
+                "POST",
+                f"/v1/production-backup-gates/operations/{second_id}/cancel?{query}",
+                headers=headers,
+                payload={"reason": "Cannot cancel terminal work"},
+            )
+            self.assertEqual(cancel_failure.status_code, 409, cancel_failure.text)
 
 
 if __name__ == "__main__":

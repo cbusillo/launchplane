@@ -79,12 +79,3 @@ class ProductionBackupGateWorkerResult(BaseModel):
     finished_at: str
     evidence: dict[str, str] = Field(default_factory=dict)
     error_code: str = ""
-
-
-class ProductionBackupGateResult(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    backup_record_id: str
-    backup_status: Literal["pending", "pass", "fail"]
-    evidence: dict[str, str] = Field(default_factory=dict)
-    error_code: str = ""
