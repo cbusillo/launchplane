@@ -2378,7 +2378,12 @@ mark-apply` require `--allow-direct-db-mutation` before they persist local DB
   settings. Unknown provider keys are discarded during replacement so an earlier
   failed write cannot keep worker keys or multiline credential fragments in the
   application target. Declare application settings in the product profile before
-  using them; this uses the same key selection as product-scoped runtime sync.
+  using them. Before any provider write, replacement refuses missing required
+  compose inputs and undeclared existing compose options, preventing silent
+  resets to defaults. Discarded provider entries are counted without recording
+  potentially sensitive malformed key names. Product-scoped runtime sync uses
+  the same key selection for incoming values but merges into the provider env;
+  replacement rebuilds it and removes unknown entries.
 - Odoo stable target replacement also merges the required Launchplane-managed
   operational modules into `ODOO_INSTALL_MODULES` before redeploying the web
   container. Artifact inputs or base images make addon files available, but the

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -1388,6 +1389,7 @@ def execute_odoo_stable_target_replacement_apply(
                 instance_name=plan.instance,
             )
         )
+        resolved_runtime_keys = set(runtime_environment_values)
         try:
             application_runtime_keys = (
                 control_plane_live_target_runtime.require_product_profile_runtime_keys(
@@ -1437,6 +1439,47 @@ def execute_odoo_stable_target_replacement_apply(
             image_reference=image_reference,
             domain_hosts=plan.expected_domain_hosts,
             runtime_port=profile.runtime_port,
+        )
+        current_env_map = dokploy_api.parse_dokploy_env_text(str(target_payload.get("env") or ""))
+        application_env = {
+            key: value
+            for key, value in (current_env_map | runtime_environment_values).items()
+            if key in application_runtime_keys
+        }
+        # Validate the inputs of this driver's rendered template before any
+        # provider write. A profile omission must not erase a required setting
+        # or silently reset a configured compose option to its default.
+        required_compose_keys = set(re.findall(r"\$\{([A-Z][A-Z0-9_]*):\?", compose_file))
+        missing_compose_keys = sorted(
+            key for key in required_compose_keys if not application_env.get(key, "").strip()
+        )
+        if missing_compose_keys:
+            raise click.ClickException(
+                "Odoo target replacement requires application env key(s): "
+                + ", ".join(missing_compose_keys)
+            )
+        compose_keys = set(re.findall(r"\$\{([A-Z][A-Z0-9_]*)", compose_file))
+        driver_keys = {
+            "PLATFORM_CONTEXT",
+            "PLATFORM_INSTANCE",
+            "DOCKER_IMAGE_REFERENCE",
+            *runtime_identity_env(runtime_identity),
+            *dokploy_post_deploy.ODOO_RUNTIME_OVERRIDE_TARGET_ENV_KEYS,
+        }
+        undeclared_compose_keys = sorted(
+            (compose_keys & (current_env_map.keys() | resolved_runtime_keys))
+            - application_runtime_keys
+            - driver_keys
+        )
+        if undeclared_compose_keys:
+            raise click.ClickException(
+                "Odoo target replacement requires product-profile declarations for env key(s): "
+                + ", ".join(undeclared_compose_keys)
+            )
+        # Malformed multiline fragments can contain secrets in their parsed key
+        # names, so record only a count of discarded provider entries.
+        runtime_source["discarded_provider_env_key_count"] = str(
+            len(current_env_map.keys() - application_runtime_keys - driver_keys)
         )
         runtime_source.update(
             {
@@ -1498,7 +1541,6 @@ def execute_odoo_stable_target_replacement_apply(
                 ).items()
             }
         )
-        current_env_map = dokploy_api.parse_dokploy_env_text(str(target_payload.get("env") or ""))
         legacy_odoo_install_modules = current_env_map.get(ODOO_INSTALL_MODULES_ENV_KEY, "")
         # Rebuild only application-authorized values. Retaining arbitrary provider
         # keys would preserve worker credentials (including malformed multiline
