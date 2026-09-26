@@ -2338,7 +2338,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
                 "refusal_diagnosis": "head_behind_base",
             },
         )
-        self.assertIn("refresh the branch", payload["error"]["message"])
+        self.assertIn("inspect the refusal diagnosis", payload["error"]["message"])
         self.assertIn(payload["trace_id"], progress_record.source)
         self.assertEqual(
             [
