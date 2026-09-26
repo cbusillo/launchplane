@@ -1389,6 +1389,23 @@ def execute_odoo_stable_target_replacement_apply(
             )
         )
         try:
+            application_runtime_keys = (
+                control_plane_live_target_runtime.require_product_profile_runtime_keys(
+                    record_store=record_store,
+                    product_name=plan.product,
+                    context_name=plan.context,
+                    instance_name=plan.instance,
+                )
+            )
+            # These settings are also owned by this driver's required-module contract.
+            application_runtime_keys.update(
+                (ODOO_ADDONS_PATH_ENV_KEY, ODOO_INSTALL_MODULES_ENV_KEY)
+            )
+            runtime_environment_values = {
+                key: value
+                for key, value in runtime_environment_values.items()
+                if key in application_runtime_keys
+            }
             runtime_secret_binding_keys = (
                 control_plane_live_target_runtime.require_product_profile_runtime_secret_keys(
                     record_store=record_store,
@@ -1483,7 +1500,12 @@ def execute_odoo_stable_target_replacement_apply(
         )
         current_env_map = dokploy_api.parse_dokploy_env_text(str(target_payload.get("env") or ""))
         legacy_odoo_install_modules = current_env_map.get(ODOO_INSTALL_MODULES_ENV_KEY, "")
-        desired_env_map = dict(current_env_map)
+        # Rebuild only application-authorized values. Retaining arbitrary provider
+        # keys would preserve worker credentials (including malformed multiline
+        # fragments) from an earlier failed environment write.
+        desired_env_map = {
+            key: value for key, value in current_env_map.items() if key in application_runtime_keys
+        }
         for key in dokploy_post_deploy.ODOO_RUNTIME_OVERRIDE_TARGET_ENV_KEYS:
             desired_env_map.pop(key, None)
         desired_env_map.pop(ODOO_INSTALL_MODULES_ENV_KEY, None)

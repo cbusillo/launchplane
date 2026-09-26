@@ -31,6 +31,7 @@ from control_plane.contracts.product_profile_record import (
     ProductOdooLaneDataPolicy,
     ProductOdooPrelaunchRebuildPolicy,
     ProductPreviewProfile,
+    ProductRuntimeConfigRequirement,
     ProductLaneHealthMonitoringPolicy,
     ProductSecretConfigRequirement,
 )
@@ -212,6 +213,18 @@ def _profile(driver_id: str = "odoo") -> LaunchplaneProductProfileRecord:
             ),
         ),
         preview=ProductPreviewProfile(enabled=True, context="cm"),
+        expected_config=ProductExpectedConfigProfile(
+            runtime_environment_keys=tuple(
+                ProductRuntimeConfigRequirement(key=key)
+                for key in (
+                    "ODOO_WORKERS",
+                    "ODOO_DATA_VOLUME",
+                    "ODOO_LOG_VOLUME",
+                    "ODOO_DB_VOLUME",
+                    "ODOO_WEB_COMMAND",
+                )
+            ),
+        ),
         updated_at="2026-05-09T00:00:00Z",
         source="test",
     )
@@ -244,13 +257,14 @@ def _profile_with_runtime_secret(
     return _profile().model_copy(
         update={
             "expected_config": ProductExpectedConfigProfile(
+                runtime_environment_keys=_profile().expected_config.runtime_environment_keys,
                 managed_secret_bindings=(
                     ProductSecretConfigRequirement(
                         binding_key=binding_key,
                         context="cm",
                         instance="testing",
                     ),
-                )
+                ),
             )
         }
     )
@@ -302,6 +316,7 @@ def _opw_profile_with_prelaunch_policy(*, enabled: bool) -> LaunchplaneProductPr
         image=ProductImageProfile(repository="ghcr.io/cbusillo/odoo-tenant-opw"),
         runtime_port=8069,
         health_path="/web/health",
+        expected_config=_profile().expected_config,
         lanes=(
             ProductLaneProfile(
                 instance="prod",
@@ -2715,7 +2730,19 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 ),
             ),
         )
-        persisted_env = ""
+        worker_private_key = (
+            "-----BEGIN FAKE KEY-----\nWORKER_FRAGMENT=fake\n-----END FAKE KEY-----"
+        )
+        worker_known_hosts = "backup.example ssh-ed25519 fake-host-key\n"
+        persisted_env = "\n".join(
+            (
+                "ODOO_DATA_VOLUME=cm_testing_odoo_data",
+                "ODOO_LOG_VOLUME=cm_testing_odoo_logs",
+                "ODOO_DB_VOLUME=cm_testing_odoo_db",
+                f"PRODUCTION_BACKUP_SSH_PRIVATE_KEY={worker_private_key}",
+                f"PRODUCTION_BACKUP_SSH_KNOWN_HOSTS={worker_known_hosts}",
+            )
+        )
 
         def _fetch_target_payload(**_: object) -> JsonValue:
             return {
@@ -2752,7 +2779,11 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             ),
             patch(
                 "control_plane.workflows.odoo_stable_target_replacement.control_plane_runtime_environments.resolve_runtime_environment_values",
-                return_value={"ODOO_DB_PASSWORD": "managed-secret-value"},
+                return_value={
+                    "ODOO_DB_PASSWORD": "managed-secret-value",
+                    "PRODUCTION_BACKUP_SSH_PRIVATE_KEY": worker_private_key,
+                    "PRODUCTION_BACKUP_SSH_KNOWN_HOSTS": worker_known_hosts,
+                },
             ),
             patch(
                 "control_plane.workflows.odoo_stable_target_replacement.dokploy_compose.sync_dokploy_compose_raw_source"
@@ -2806,6 +2837,12 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             )
 
         self.assertEqual(result.deploy_status, "pass")
+        self.assertIn("ODOO_DB_PASSWORD=managed-secret-value", persisted_env)
+        self.assertIn("ODOO_DATA_VOLUME=cm_testing_odoo_data", persisted_env)
+        self.assertNotIn("PRODUCTION_BACKUP_SSH_", persisted_env)
+        self.assertNotIn("WORKER_FRAGMENT", persisted_env)
+        self.assertNotIn(worker_private_key, persisted_env)
+        self.assertNotIn(worker_known_hosts, persisted_env)
         final_deployment = store.deployment_records[-1]
         self.assertEqual(final_deployment.runtime_source["runtime_key_safety_required"], "True")
         self.assertEqual(final_deployment.runtime_source["runtime_key_safety_status"], "pass")
