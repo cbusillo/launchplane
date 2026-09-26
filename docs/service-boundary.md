@@ -3302,9 +3302,12 @@ native route owns execution.
 
 `POST /v1/drivers/odoo/prod-promotion-run` is the preferred thin-workflow
 mutation route for Odoo prod promotion. The tenant workflow supplies product,
-context, and a stable request ID; Launchplane resolves the promotable testing
-artifact, captures the prod backup gate, executes the testing-to-prod promotion,
-and returns the phase statuses and written record IDs. The lower-level inputs,
+context, and a stable request ID to the shared Launchplane workflow. That workflow
+captures the typed infrastructure backup and supplies
+`run.infrastructure_backup_record_id`. Launchplane requires its current passing
+policy/evidence, resolves the promotable testing artifact, captures the logical
+prod backup gate, executes the testing-to-prod promotion, and returns the phase
+statuses and written record IDs. The lower-level inputs,
 backup-gate, and promotion routes remain available for diagnostics and explicit
 operator workflows, but product repos should not own the chain.
 The route is owned by native FastAPI and preserves request-context authorization,
@@ -3314,6 +3317,11 @@ driver results. Its descriptor remains discoverable. The older
 `POST /v1/drivers/odoo/prod-promotion` compatibility route is also native
 FastAPI for explicit operator workflows and diagnostics, but product repos
 should prefer the thin `prod-promotion-run` path.
+Both routes enforce the same infrastructure policy and retain the logical backup
+requirement. The direct route takes `promotion.infrastructure_backup_record_id`
+alongside its logical `backup_record_id`. See the
+[shared backup promotion contract](production-backup-provider.md#promotion-enforcement)
+for freshness, exact revision binding, generic-web enforcement, and rollout.
 
 ### Tenant Admission, Classification, And Role-Policy API Boundary
 

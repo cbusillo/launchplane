@@ -191,10 +191,70 @@ jobs:
               "$run_scope"
           } >>"$GITHUB_OUTPUT"
 
+      - name: Read production lane from Launchplane
+        if: ${{ !inputs.dry_run }}
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@052db9d452f05381a3b43a82dfddfeefb34a8b72 # launchplane-request
+        with:
+          launchplane-url: >-
+            ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
+          audience: ${{ inputs.launchplane_audience }}
+          method: GET
+          route-path: /v1/product-profiles/${{ steps.request.outputs.product }}
+          response-output-file: .launchplane/production-backup-profile.json
+          log-response-body: "false"
+
+      - name: Resolve production backup capture request
+        if: ${{ !inputs.dry_run }}
+        env:
+          PRODUCT: ${{ steps.request.outputs.product }}
+          TO_INSTANCE: ${{ steps.request.outputs.to_instance }}
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs = require('node:fs');
+          const {profile} = JSON.parse(fs.readFileSync('.launchplane/production-backup-profile.json', 'utf8'));
+          const lanes = profile.lanes.filter(lane => lane.instance === process.env.TO_INSTANCE);
+          if (profile.product !== process.env.PRODUCT || lanes.length !== 1 || !lanes[0].context) {
+            throw new Error('Launchplane did not return one matching production lane.');
+          }
+          const request = {
+            schema_version: 1,
+            product: profile.product,
+            context: lanes[0].context,
+            instance: lanes[0].instance,
+            promotion_action: 'generic_web_prod_promotion.execute',
+            backup_record_id: `infrastructure-${profile.product}-${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT}`,
+          };
+          fs.writeFileSync('.launchplane/production-backup-request.json', JSON.stringify(request));
+          NODE
+
+      - name: Capture and verify infrastructure backup for generic-web promotion
+        id: infrastructure_backup
+        if: ${{ !inputs.dry_run }}
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@052db9d452f05381a3b43a82dfddfeefb34a8b72 # launchplane-request
+        with:
+          launchplane-url: >-
+            ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
+          audience: ${{ inputs.launchplane_audience }}
+          route-path: /v1/production-backup-gates
+          payload-file: .launchplane/production-backup-request.json
+          idempotency-key: infrastructure-${{ steps.request.outputs.idempotency_key }}
+          timeout-ms: "60000"
+          poll-result-path: operation_status
+          poll-result-statuses: pending,running
+          poll-timeout-ms: ${{ inputs['timeout-ms'] }}
+          fail-result-paths: operation_status
+          fail-result-statuses: fail,cancelled
+          output-paths: >-
+            backup_record_id=backup_record_id,
+            operation_id=operation_id,
+            trace_id=trace_id
+
       - name: Write Launchplane generic-web promotion payload
         id: payload
         env:
           ARTIFACT_ID: ${{ inputs.artifact_id }}
+          BACKUP_RECORD_ID: ${{ steps.infrastructure_backup.outputs.backup_record_id }}
           DEPLOY_REFERENCE: ${{ inputs.deploy_reference }}
           DRY_RUN: ${{ inputs.dry_run }}
           FROM_INSTANCE: ${{ steps.request.outputs.from_instance }}
@@ -236,6 +296,7 @@ jobs:
           const promotion = {
             schema_version: 1,
             product: process.env.PRODUCT,
+            backup_record_id: String(process.env.BACKUP_RECORD_ID ?? '').trim(),
             artifact_id: requestedArtifact,
             deploy_reference: String(process.env.DEPLOY_REFERENCE ?? '').trim(),
             source_git_ref: requestedSource,

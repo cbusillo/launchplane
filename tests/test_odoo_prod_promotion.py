@@ -1,6 +1,7 @@
 import unittest
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from tests.support.profiles import product_profile_payload
+from tests.support.promotion_backup import stub_verified_promotion_backup
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -118,6 +119,9 @@ def _replacement_result() -> OdooStableTargetReplacementApplyResult:
 
 
 class OdooProdPromotionWorkflowTests(unittest.TestCase):
+    def setUp(self) -> None:
+        stub_verified_promotion_backup(self, "control_plane.workflows.odoo_prod_promotion")
+
     def test_promotion_request_accepts_profile_owned_context(self) -> None:
         request = OdooProdPromotionRequest(
             context=" New-Site ",

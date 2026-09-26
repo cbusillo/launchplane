@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, cast
 from unittest.mock import patch
+from tests.support.promotion_backup import stub_verified_promotion_backup
 
 import click
 from pydantic import ValidationError
@@ -144,6 +145,8 @@ def _request(**overrides: object) -> GenericWebProdPromotionRequest:
         "source_git_ref": "abc123",
     }
     payload.update(overrides)
+    if not payload.get("dry_run"):
+        payload.setdefault("backup_record_id", "infrastructure-example")
     return GenericWebProdPromotionRequest.model_validate(payload)
 
 
@@ -242,6 +245,9 @@ def _deploy_result(*, deploy_status: Literal["pass", "fail"] = "pass") -> Generi
 
 
 class GenericWebProdPromotionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        stub_verified_promotion_backup(self, "control_plane.workflows.generic_web_promotion")
+
     def test_execute_accepts_based_driver_product_profile(self) -> None:
         store = _GenericWebPromotionStore(_profile(driver_id="odoo"))
         store.write_environment_inventory(_testing_inventory())
@@ -317,7 +323,7 @@ class GenericWebProdPromotionTests(unittest.TestCase):
         self.assertFalse(hasattr(result, "target_type"))
         self.assertEqual(len(store.promotions), 1)
         promotion = next(iter(store.promotions.values()))
-        self.assertEqual(promotion.backup_gate.status, "skipped")
+        self.assertEqual(promotion.backup_gate.status, "pass")
         self.assertEqual(promotion.source_health.status, "pass")
         self.assertEqual(promotion.destination_health.status, "pass")
         deployment = store.deployments["deployment-syo-prod"]

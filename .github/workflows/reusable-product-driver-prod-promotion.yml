@@ -284,6 +284,34 @@ jobs:
             target_id=result.target_id,
             error_message=result.error_message
 
+      - name: Capture and verify infrastructure backup for Odoo promotion
+        id: infrastructure_backup
+        if: ${{ steps.request.outputs.driver == 'odoo' }}
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@052db9d452f05381a3b43a82dfddfeefb34a8b72 # launchplane-request
+        with:
+          launchplane-url: >-
+            ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
+          audience: ${{ inputs.launchplane_audience }}
+          route-path: /v1/production-backup-gates
+          payload: >-
+            {"schema_version":1,"promotion_action":"odoo_prod_promotion_run.execute"}
+          payload-fields: |-
+            product=${{ steps.request.outputs.product }}
+            context=${{ steps.request.outputs.context }}
+            instance=${{ steps.request.outputs.to_instance }}
+            backup_record_id=infrastructure-${{ steps.request.outputs.context }}-${{ steps.request.outputs.request_id }}
+          idempotency-key: infrastructure-${{ steps.request.outputs.idempotency_key }}
+          timeout-ms: "60000"
+          poll-result-path: operation_status
+          poll-result-statuses: pending,running
+          poll-timeout-ms: ${{ inputs['timeout-ms'] }}
+          fail-result-paths: operation_status
+          fail-result-statuses: fail,cancelled
+          output-paths: >-
+            backup_record_id=backup_record_id,
+            operation_id=operation_id,
+            trace_id=trace_id
+
       - name: Request Launchplane Odoo prod promotion
         id: lp_odoo
         if: ${{ steps.request.outputs.driver == 'odoo' }}
@@ -299,6 +327,7 @@ jobs:
             product=${{ steps.request.outputs.product }}
             run.context=${{ steps.request.outputs.context }}
             run.request_id=${{ steps.request.outputs.request_id }}
+            run.infrastructure_backup_record_id=${{ steps.infrastructure_backup.outputs.backup_record_id }}
           idempotency-key: ${{ steps.request.outputs.idempotency_key }}
           timeout-ms: ${{ inputs['timeout-ms'] }}
           fail-result-paths: >-

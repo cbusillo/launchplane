@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from tests.support.profiles import product_profile_payload
+from tests.support.promotion_backup import stub_verified_promotion_backup
 from pathlib import Path
 from typing import cast
 from unittest.mock import Mock, patch
@@ -20,6 +21,9 @@ from control_plane.workflows.odoo_prod_promotion_run import (
 
 
 class OdooProdPromotionRunTests(unittest.TestCase):
+    def setUp(self) -> None:
+        stub_verified_promotion_backup(self, "control_plane.workflows.odoo_prod_promotion_run")
+
     def test_run_request_requires_testing_to_prod(self) -> None:
         with self.assertRaises(ValidationError):
             OdooProdPromotionRunRequest(
