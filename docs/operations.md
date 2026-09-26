@@ -2371,6 +2371,22 @@ mark-apply` require `--allow-direct-db-mutation` before they persist local DB
   persisted to the Dokploy compose target environment before the web container
   is redeployed, and the same payload is passed to the Odoo data-workflow
   runner for post-deploy maintenance.
+- Odoo stable target replacement projects resolved runtime values and retained
+  provider settings onto the product profile's exact lane configuration keys,
+  alongside the driver's addon-path, module-installation, override, and runtime
+  identity fields. Secret keys required by a typed instance-override payload are
+  also application inputs. Worker credentials that share a context are not
+  application settings. Undeclared shared-context keys and malformed provider
+  fragments are discarded during replacement so an earlier failed write cannot
+  keep worker credentials in the application target. Declare application settings
+  in the product profile before using them; a lane with no declared runtime keys
+  is refused. Before any provider write, replacement refuses missing required
+  compose inputs or override secrets, undeclared existing compose options, and
+  undeclared provider-only environment settings, preventing silent loss of
+  application configuration. Discarded provider entries are counted without recording
+  potentially sensitive malformed key names. Product-scoped runtime sync uses
+  the same key selection for incoming values but merges into the provider env;
+  replacement rebuilds it and removes unknown entries.
 - Odoo stable target replacement also merges the required Launchplane-managed
   operational modules into `ODOO_INSTALL_MODULES` before redeploying the web
   container. Artifact inputs or base images make addon files available, but the
