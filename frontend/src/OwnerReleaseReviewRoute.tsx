@@ -68,7 +68,7 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
       {!response.owner_github_login ? <p role="alert">No Owner set for this product. Ask the operator to name one.</p> : null}
       {testingUrl ? <a className="button button-primary owner-review-preview" href={testingUrl.toString()} target="_blank" rel="noreferrer">Open the testing site</a> : null}
       {latestDecision ? <section className="owner-review-latest" aria-label="Latest release decision">
-        <h3>{latestDecision.decision === "overridden" ? "Operator override recorded" : latestDecision.decision === "accepted" ? "Owner approval recorded" : "Changes requested"}</h3>
+        <h3>{latestDecision.decision === "overridden" ? "Operator approval override recorded" : latestDecision.decision === "accepted" ? "Owner approval recorded" : "Changes requested"}</h3>
         <p>Recorded by {latestDecision.actor_github_login} for this proposed version.</p>
         {latestDecision.reason ? <blockquote>{latestDecision.reason}</blockquote> : null}
         {!latestDecision.release_issue_url ? <p role="alert" className="owner-review-alert">Decision saved, but its release record has not been published. Approval cannot be used for deployment yet. Retry the same decision to publish its record.</p> : null}
@@ -92,15 +92,15 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
           <button className="button" type="button" disabled={busy || !reason.trim()} onClick={() => void decide("changes_requested", reason)}>Request changes</button>
         </div>
       </section> : null}
-      {checklist && response.can_override ? <section className="owner-review-action release-review-override" aria-label="Operator override">
-        <h3>Operator override</h3>
+      {checklist && response.can_override ? <section className="owner-review-action release-review-override" aria-label="Operator Approval Override">
+        <h3>Operator Approval Override</h3>
         <p>This records approval under your operator identity for a later production deployment without Owner acceptance. It replaces any earlier request for changes. Explain why you are overriding the Owner review.</p>
-        <label><span>Reason for operator override</span><textarea value={overrideReason} maxLength={4000} disabled={busy} onChange={event => setOverrideReason(event.target.value)} /></label>
+        <label><span>Justification for approving this release by override</span><textarea value={overrideReason} maxLength={4000} disabled={busy} onChange={event => setOverrideReason(event.target.value)} /></label>
         <div className="owner-review-action-buttons">
-          <button className="button" type="button" disabled={busy || !overrideReason.trim()} onClick={() => void decide("overridden", overrideReason)}>Record operator override</button>
+          <button className="button" type="button" disabled={busy || !overrideReason.trim()} onClick={() => void decide("overridden", overrideReason)}>Record operator approval override</button>
         </div>
       </section> : null}
-      {checklist && (response.viewer_is_owner || response.can_override) ? <p className="owner-review-state">Recording a decision does not deploy anything. Production deployment is a separate action and still requires the release and backup checks.</p> : null}
+      {checklist && (response.viewer_is_owner || response.can_override) ? <p className="owner-review-state">Each new decision is saved and published as a separate release record. Recording a decision does not deploy anything. Production deployment is a separate action and still requires the release and backup checks.</p> : null}
       {recorded ? <p role="status" className="owner-review-success">Decision recorded. Nothing has been deployed.</p> : null}
       {checklist ? <details className="release-review-technical">
         <summary>Technical details</summary>

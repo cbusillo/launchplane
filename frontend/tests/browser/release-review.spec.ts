@@ -4,7 +4,7 @@ test("Owner cannot accept undisclosed shared component changes", async ({ page }
   await page.goto("/ui/owner-review?product=example-site&fixture=missing");
   await expect(page.getByText("Shared website components changed outside this repository's checklist. Operator review is required.")).toBeVisible();
   await expect(page.getByRole("button", { name: "Accept release" })).toBeDisabled();
-  await expect(page.getByRole("button", { name: "Record operator override" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Record operator approval override" })).toHaveCount(0);
 });
 
 test("Owner reviews the complete release and can request changes after accepting", async ({ page }, testInfo) => {
@@ -42,7 +42,7 @@ test("Operator records a separate reasoned override without Owner controls", asy
   await page.goto("/ui/owner-review?product=example-site&fixture=operator");
   await expect(page.getByRole("button", { name: "Accept release" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Request changes" })).toHaveCount(0);
-  const override = page.getByRole("region", { name: "Operator override", exact: true });
+  const override = page.getByRole("region", { name: "Operator Approval Override", exact: true });
   const record = override.getByRole("button");
   await expect(record).toBeDisabled();
   await page.screenshot({ path: testInfo.outputPath("operator-initial.png"), fullPage: true });

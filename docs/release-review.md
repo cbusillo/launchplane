@@ -14,8 +14,9 @@ section identifies the **Current production version** and **Proposed production
 version** (currently in testing). Accepting records approval for that proposed
 version to become production; requesting changes replaces earlier approval or
 an operator override. The latest decision and its written feedback appear above
-the checklist. Operators get a separate override section explaining that their
-decision supplies approval under their own identity and replaces an earlier
+the checklist. Operators get a separate **Operator Approval Override** section
+and approval-justification field explaining that their decision supplies
+approval under their own identity and replaces an earlier
 request for changes. A saved decision whose release record has not been
 published shows that pending state beside the decision. Every decision is
 recorded without deploying; deployment remains a later operation with its own
