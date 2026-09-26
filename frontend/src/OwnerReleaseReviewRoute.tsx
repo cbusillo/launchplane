@@ -71,6 +71,7 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
         <h3>{latestDecision.decision === "overridden" ? "Operator override recorded" : latestDecision.decision === "accepted" ? "Owner approval recorded" : "Changes requested"}</h3>
         <p>Recorded by {latestDecision.actor_github_login} for this proposed version.</p>
         {latestDecision.reason ? <blockquote>{latestDecision.reason}</blockquote> : null}
+        {!latestDecision.release_issue_url ? <p role="alert" className="owner-review-alert">Decision saved, but its release record has not been published. Approval cannot be used for deployment yet. Retry the same decision to publish its record.</p> : null}
       </section> : null}
       {checklist ? <>
         <h3>Changes to review</h3>
@@ -84,7 +85,7 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
       {checklist && response.viewer_is_owner ? <section className="owner-review-action" aria-label="Owner release decision">
         <h3>Your release decision</h3>
         <p><strong>Accept release</strong> records your approval for the proposed version to become production. Deployment happens later.</p>
-        <p><strong>Request changes</strong> records your feedback and replaces any approval you already gave for this release.</p>
+        <p><strong>Request changes</strong> records your feedback and replaces any earlier approval or operator override for this release.</p>
         <label><span>What should change? (needed only when you request changes)</span><textarea value={reason} maxLength={4000} disabled={busy} onChange={event => setReason(event.target.value)} /></label>
         <div className="owner-review-action-buttons">
           <button className="button button-primary" type="button" disabled={busy || incomplete} onClick={() => void decide("accepted", reason)}>Accept release</button>
@@ -93,7 +94,7 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
       </section> : null}
       {checklist && response.can_override ? <section className="owner-review-action release-review-override" aria-label="Operator override">
         <h3>Operator override</h3>
-        <p>This records approval under your operator identity, allowing a later production deployment without Owner acceptance. Explain why you are overriding the Owner review.</p>
+        <p>This records approval under your operator identity for a later production deployment without Owner acceptance. It replaces any earlier request for changes. Explain why you are overriding the Owner review.</p>
         <label><span>Reason for operator override</span><textarea value={overrideReason} maxLength={4000} disabled={busy} onChange={event => setOverrideReason(event.target.value)} /></label>
         <div className="owner-review-action-buttons">
           <button className="button" type="button" disabled={busy || !overrideReason.trim()} onClick={() => void decide("overridden", overrideReason)}>Record operator override</button>

@@ -56,3 +56,12 @@ test("Operator records a separate reasoned override without Owner controls", asy
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   expect(mutations).toEqual([]);
 });
+
+test("A saved decision exposes publication failure and allows retry", async ({ page }) => {
+  await page.goto("/ui/owner-review?product=example-site&fixture=error");
+  const latest = page.getByRole("region", { name: "Latest release decision" });
+  await expect(latest.getByRole("alert")).toBeVisible();
+  await page.getByRole("button", { name: "Accept release", exact: true }).click();
+  await expect(page.getByRole("status")).toBeVisible();
+  await expect(latest.getByRole("alert")).toHaveCount(0);
+});

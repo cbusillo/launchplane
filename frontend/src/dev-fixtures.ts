@@ -3172,7 +3172,7 @@ function assertEngineeringFixtureAvailable(fixture: DataFixtureMode): void {
 }
 export function releaseReviewForFixture(mode: string): import("./generated/openapi.ts").ReleaseReviewResponse {
   const additionalChanges = mode === "missing" ? ["Shared website components changed outside this repository's checklist. Operator review is required."] : [];
-  return {
+  const response: import("./generated/openapi.ts").ReleaseReviewResponse = {
     trace_id: "fixture-release-review", product: "example-site", display_name: "Example site",
     owner_github_login: "site-owner", viewer_is_owner: mode !== "operator", can_override: mode === "operator",
     review: {
@@ -3189,25 +3189,27 @@ export function releaseReviewForFixture(mode: string): import("./generated/opena
       },
     },
   };
+  return mode === "error" ? releaseDecisionForFixture(response, "accepted", "", false) : response;
 }
 
 export function releaseDecisionForFixture(
   response: import("./generated/openapi.ts").ReleaseReviewResponse,
   decision: import("./generated/openapi.ts").ReleaseReviewDecisionEnvelope["decision"],
   reason: string,
+  published = true,
 ): import("./generated/openapi.ts").ReleaseReviewResponse {
   const checklist = response.review.checklist;
   if (!checklist) return response;
   return { ...response, review: {
     ...response.review,
-    approved: decision !== "changes_requested",
-    blockers: decision === "changes_requested" ? ["The Owner requested changes."] : [],
+    approved: published && decision !== "changes_requested",
+    blockers: !published ? ["The release record could not be published."] : decision === "changes_requested" ? ["The Owner requested changes."] : [],
     latest_decision: {
       record_id: "fixture-release-decision", product: response.product,
       checklist_digest: response.review.checklist_digest, checklist, decision, reason,
       actor_github_id: decision === "overridden" ? "9002" : "9001",
       actor_github_login: decision === "overridden" ? "site-operator" : "site-owner",
-      decided_at: "2026-09-26T12:00:00Z", release_issue_url: "https://github.com/example/site/issues/43",
+      decided_at: "2026-09-26T12:00:00Z", release_issue_url: published ? "https://github.com/example/site/issues/43" : "",
     },
   } };
 }
