@@ -213,21 +213,29 @@ class OwnerReviewStatusPublisher:
                 actor.get("id"), "GitHub feedback actor requires id.", error_type=ValueError
             )
             for decision in reversed(pending):
-                feedback_url = publish_owner_feedback(
-                    decision=decision,
-                    review_url=owner_review_reference_url(
-                        public_origin=self.public_origin,
-                        repository=profile.repository,
-                        pull_request_number=pull_request_number,
-                        decision_id=decision.record_id,
-                    ),
-                    token=token,
-                    actor_id=actor_id,
-                    api_request=self.api_request,
-                )
-                store.write_product_review_decision_record(
-                    decision.model_copy(update={"feedback_url": feedback_url})
-                )
+                try:
+                    feedback_url = publish_owner_feedback(
+                        decision=decision,
+                        review_url=owner_review_reference_url(
+                            public_origin=self.public_origin,
+                            repository=profile.repository,
+                            pull_request_number=pull_request_number,
+                            decision_id=decision.record_id,
+                        ),
+                        token=token,
+                        actor_id=actor_id,
+                        api_request=self.api_request,
+                    )
+                    store.write_product_review_decision_record(
+                        decision.model_copy(update={"feedback_url": feedback_url})
+                    )
+                except Exception:
+                    # Keep this receipt pending, but do not strand later feedback.
+                    _LOGGER.warning(
+                        "Saved Owner decision feedback delivery is pending.",
+                        exc_info=True,
+                        extra={"repository": profile.repository, "record_id": decision.record_id},
+                    )
 
     def _pull_request_facts(
         self, *, repository: str, pull_request_number: int, token: str

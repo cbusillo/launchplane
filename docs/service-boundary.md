@@ -3953,6 +3953,15 @@ pull request exists. Repeating the latest identical decision for the same served
 preview reuses its record and retries pending feedback publication. A decision
 merges and deploys nothing. See [Owner feedback delivery](owner-acceptance.md).
 
+`POST /v1/product-review/feedback/retry` takes `{repository, pull_request,
+decision_id}` using the same Owner browser mutation identity and CSRF boundary.
+It requires a saved decision on that visible PR (404 otherwise), reconciles pending
+feedback, and returns that selected decision and its delivery receipt. It needs
+no serving preview and records no new decision. Operators and bearer identities
+cannot use this Owner action. A still-empty receipt means delivery remains pending;
+the saved decision is unchanged. Historical review links also provide a link back
+to the latest review.
+
 ## Retired Owner Acceptance API
 
 The `/v1/owner-acceptance/*` routes and old engineering workbench are removed.

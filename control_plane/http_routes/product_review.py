@@ -31,6 +31,7 @@ from control_plane.service_auth import GitHubHumanIdentity, LaunchplaneIdentity
 
 PRODUCT_REVIEW_ROUTE = "/v1/product-review"
 PRODUCT_REVIEW_DECISIONS_ROUTE = "/v1/product-review/decisions"
+PRODUCT_REVIEW_FEEDBACK_RETRY_ROUTE = "/v1/product-review/feedback/retry"
 
 _NO_OWNER_REASON = "No Owner set for this product"
 _NOT_OWNER_REASON = "You are not this product's Owner."
@@ -61,6 +62,14 @@ class ProductReviewDecisionEnvelope(BaseModel):
         if self.decision == "changes_requested" and not self.reason:
             raise ValueError("Requesting changes requires a reason.")
         return self
+
+
+class ProductReviewFeedbackRetryEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    repository: str = Field(min_length=3, max_length=256, pattern=r"^[^/\s]+/[^/\s]+$")
+    pull_request: int = Field(ge=1)
+    decision_id: str = Field(min_length=1, max_length=512)
 
 
 class ProductReviewResponse(BaseModel):
@@ -129,6 +138,25 @@ def register_product_review_routes(
                 return profile
         return unavailable(trace_id)
 
+    def saved_decision(
+        store: ProductReviewStore,
+        profile: LaunchplaneProductProfileRecord,
+        pull_request_number: int,
+        decision_id: str,
+        trace_id: str,
+    ) -> ProductReviewDecisionRecord:
+        for record in store.list_product_review_decision_records(
+            repository=profile.repository, pull_request_number=pull_request_number
+        ):
+            if record.record_id == decision_id:
+                return record
+        raise common.http_error(
+            status_code=404,
+            trace_id=trace_id,
+            code="product_review_decision_not_found",
+            message="This saved review decision was not found.",
+        )
+
     def build_response(
         *,
         store: ProductReviewStore,
@@ -136,6 +164,7 @@ def register_product_review_routes(
         identity: LaunchplaneIdentity,
         pull_request_number: int,
         trace_id: str,
+        decision_id: str = "",
     ) -> ProductReviewResponse:
         preview = resolve_serving_preview(
             store=store, profile=profile, pull_request_number=pull_request_number
@@ -165,8 +194,12 @@ def register_product_review_routes(
             viewer_is_owner=viewer_is_owner,
             can_decide=not cannot_decide_reason,
             cannot_decide_reason=cannot_decide_reason,
-            latest_decision=latest_product_review_decision(
-                store=store, profile=profile, pull_request_number=pull_request_number
+            latest_decision=(
+                saved_decision(store, profile, pull_request_number, decision_id, trace_id)
+                if decision_id
+                else latest_product_review_decision(
+                    store=store, profile=profile, pull_request_number=pull_request_number
+                )
             ),
         )
 
@@ -185,33 +218,41 @@ def register_product_review_routes(
         profile = visible_profile(
             store=store, repository=repository, identity=identity, trace_id=trace_id
         )
-        response = build_response(
+        return build_response(
             store=store,
             profile=profile,
             identity=identity,
             pull_request_number=pull_request,
             trace_id=trace_id,
+            decision_id=decision_id,
         )
-        if not decision_id:
-            return response
-        decision = next(
-            (
-                record
-                for record in store.list_product_review_decision_records(
-                    repository=profile.repository, pull_request_number=pull_request
-                )
-                if record.record_id == decision_id
-            ),
-            None,
+
+    def retry_product_review_feedback(
+        envelope: ProductReviewFeedbackRetryEnvelope,
+        identity: Annotated[
+            GitHubHumanIdentity,
+            Depends(dependencies.read_github_human_browser_mutation_identity),
+        ],
+        record_store: Annotated[object, Depends(common.get_record_store)],
+    ) -> ProductReviewResponse:
+        trace_id = common.next_trace_id()
+        store = review_store(record_store, trace_id)
+        profile = visible_profile(
+            store=store, repository=envelope.repository, identity=identity, trace_id=trace_id
         )
-        if decision is None:
-            raise common.http_error(
-                status_code=404,
-                trace_id=trace_id,
-                code="product_review_decision_not_found",
-                message="This saved review decision was not found.",
-            )
-        return response.model_copy(update={"latest_decision": decision})
+        if not viewer_is_product_owner(profile=profile, identity=identity):
+            unavailable(trace_id)
+        saved_decision(store, profile, envelope.pull_request, envelope.decision_id, trace_id)
+        # Reconcile delivery only. Never record a new decision or require a live preview.
+        dependencies.publish_owner_review_status(store, profile, envelope.pull_request)
+        return build_response(
+            store=store,
+            profile=profile,
+            identity=identity,
+            pull_request_number=envelope.pull_request,
+            trace_id=trace_id,
+            decision_id=envelope.decision_id,
+        )
 
     def write_product_review_decision(
         envelope: ProductReviewDecisionEnvelope,
@@ -271,6 +312,18 @@ def register_product_review_routes(
         tags=["product-review"],
         operation_id="read_product_review",
         summary="Read the Owner review page for one pull request",
+        responses={
+            status: {"model": common.error_response_model} for status in (401, 403, 404, 503)
+        },
+    )
+    app.add_api_route(
+        PRODUCT_REVIEW_FEEDBACK_RETRY_ROUTE,
+        retry_product_review_feedback,
+        methods=["POST"],
+        response_model=ProductReviewResponse,
+        tags=["product-review"],
+        operation_id="retry_product_review_feedback",
+        summary="Retry delivery of a saved Owner decision without recording a new decision",
         responses={
             status: {"model": common.error_response_model} for status in (401, 403, 404, 503)
         },

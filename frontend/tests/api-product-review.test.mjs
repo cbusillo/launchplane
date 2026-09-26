@@ -4,6 +4,7 @@ import { afterEach, test } from "node:test";
 import {
   readProductReview,
   writeProductReviewDecision,
+  retryProductReviewFeedback,
 } from "../src/api.ts";
 
 const originalFetch = globalThis.fetch;
@@ -62,4 +63,10 @@ test("Owner decision is sent with the session CSRF token to the product-review r
     decision: "changes_requested",
     reason: "The price is wrong.",
   });
+  await retryProductReviewFeedback({ repository: "example/tenant-site", pull_request: 42, decision_id: "saved-decision" });
+  const retry = calls.at(-1);
+  assert.equal(retry.input, "/v1/product-review/feedback/retry");
+  assert.equal(retry.init.method, "POST");
+  assert.equal(retry.init.headers["X-CSRF-Token"], "csrf-owner");
+  assert.deepEqual(JSON.parse(retry.init.body), { repository: "example/tenant-site", pull_request: 42, decision_id: "saved-decision" });
 });

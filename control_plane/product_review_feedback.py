@@ -70,8 +70,6 @@ def publish_owner_feedback(
             if not isinstance(author, dict) or author.get("id") != actor_id:
                 # A copied marker from another author is not our delivery receipt.
                 continue
-            if text != body:
-                raise ValueError("The published Owner feedback differs from its saved decision.")
             matches.append(comment)
         if len(comments) < 100:
             break
@@ -87,6 +85,18 @@ def publish_owner_feedback(
     comment_id = comment.get("id") if isinstance(comment, dict) else None
     if not isinstance(comment_id, int) or isinstance(comment_id, bool) or comment_id < 1:
         raise ValueError("Owner feedback delivery was not confirmed.")
+    if matches and matches[0].get("body") != body:
+        # Repair our own unique receipt from the authoritative saved record. A
+        # changed public origin or an edited comment must not strand a decision
+        # after a successful POST whose response/receipt write was lost.
+        updated = api_request(
+            path=f"/repos/{quote(decision.repository, safe='/')}/issues/comments/{comment_id}",
+            token=token,
+            method="PATCH",
+            body={"body": body},
+        )
+        if not isinstance(updated, dict) or updated.get("id") != comment_id:
+            raise ValueError("Owner feedback repair was not confirmed.")
     return (
         f"https://github.com/{decision.repository}/pull/{decision.pull_request_number}"
         f"#issuecomment-{comment_id}"

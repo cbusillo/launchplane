@@ -10,6 +10,7 @@ import {
 import {
   LaunchplaneApiError,
   readProductReview,
+  retryProductReviewFeedback,
   writeProductReviewDecision,
 } from "./api";
 import type { DevFixtureMode } from "./dev-fixture-loader";
@@ -201,6 +202,7 @@ function OwnerPreviewReviewRoute({
         <OwnerReviewState tone="error">{error}</OwnerReviewState>
       ) : review ? (
         <ProductReviewCard
+          historical={Boolean(decisionId)}
           fixtureMode={fixtureMode}
           review={review}
           onDecided={setReview}
@@ -229,10 +231,12 @@ function OwnerReviewState({
 }
 
 function ProductReviewCard({
+  historical,
   fixtureMode,
   onDecided,
   review,
 }: {
+  historical: boolean;
   fixtureMode: DevFixtureMode;
   onDecided: (review: ProductReviewResponse) => void;
   review: ProductReviewResponse;
@@ -274,7 +278,16 @@ function ProductReviewCard({
         </p>
       ) : null}
       {review.latest_decision ? (
-        <LatestDecision decision={review.latest_decision} currentHead={review.head_sha} />
+        <LatestDecision
+          key={review.latest_decision.record_id}
+          decision={review.latest_decision}
+          review={review}
+          fixtureMode={fixtureMode}
+          onDecided={onDecided}
+        />
+      ) : null}
+      {historical ? (
+        <p><a href={`?repository=${encodeURIComponent(review.repository)}&pull_request=${review.pull_request_number}`}>View latest review</a></p>
       ) : null}
       {review.can_decide && previewUrl ? (
         <ProductReviewDecisionForm
@@ -299,7 +312,36 @@ function cannotDecideMessage(review: ProductReviewResponse): string {
   return "No preview yet. Come back when the pull request says the preview is ready.";
 }
 
-function LatestDecision({ decision, currentHead }: { decision: ProductReviewDecisionRecord; currentHead: string }) {
+function LatestDecision({ decision, review, fixtureMode, onDecided }: {
+  decision: ProductReviewDecisionRecord;
+  review: ProductReviewResponse;
+  fixtureMode: DevFixtureMode;
+  onDecided: (review: ProductReviewResponse) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [failure, setFailure] = useState("");
+  const retry = async () => {
+    setBusy(true);
+    setFailure("");
+    try {
+      const response = fixtureMode
+        ? { ...review, latest_decision: { ...decision, feedback_url: `${review.pull_request_url}#issuecomment-1` } }
+        : await retryProductReviewFeedback({
+            repository: review.repository,
+            pull_request: review.pull_request_number,
+            decision_id: decision.record_id,
+          });
+      onDecided(response);
+      if (!response.latest_decision?.feedback_url) {
+        setFailure("Delivery is still pending. Your saved decision has not changed.");
+      }
+    } catch {
+      setFailure("Delivery could not be retried. Your saved decision has not changed.");
+    } finally {
+      setBusy(false);
+    }
+  };
+  const currentHead = review.head_sha;
   return (
     <section className="owner-review-latest" aria-label="Recorded decision">
       <p>
@@ -315,11 +357,18 @@ function LatestDecision({ decision, currentHead }: { decision: ProductReviewDeci
       </p>
       {decision.reason ? <blockquote>{decision.reason}</blockquote> : null}
       {!decision.feedback_url ? (
-        <OwnerReviewState tone="error">
-          Your decision is saved, but delivery to the agent is pending. You can retry
-          the same decision; Launchplane also retries when the preview refreshes.
-        </OwnerReviewState>
+        <>
+          <OwnerReviewState tone="error">
+            Your decision is saved, but delivery to the agent is pending.
+          </OwnerReviewState>
+          {review.viewer_is_owner ? (
+            <button className="button" type="button" disabled={busy} onClick={() => void retry()}>
+              {busy ? "Retrying delivery…" : "Retry delivery"}
+            </button>
+          ) : null}
+        </>
       ) : null}
+      {failure ? <OwnerReviewState tone="error">{failure}</OwnerReviewState> : null}
     </section>
   );
 }

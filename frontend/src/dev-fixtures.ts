@@ -2826,7 +2826,7 @@ export function productReviewForFixture(
   const ownerSet = scenario !== "no-owner";
   const viewerIsOwner = ownerSet && params.get("viewer") !== "non-owner";
   const previewUrl =
-    scenario === "missing-preview" ? "" : "https://site.preview.example.invalid/";
+    ["missing-preview", "pending-without-preview"].includes(scenario) ? "" : "https://site.preview.example.invalid/";
   const cannotDecideReason = !ownerSet
     ? "No Owner set for this product"
     : !viewerIsOwner
@@ -2854,7 +2854,9 @@ export function productReviewForFixture(
         ...latestDecision,
         feedback_url: scenario === "delivery-pending" ? "" : latestDecision.feedback_url,
       } : null) ??
-      (scenario === "earlier-decision"
+      (scenario === "pending-without-preview"
+        ? { ...productReviewDecisionForFixture("accepted", ""), feedback_url: "", head_sha: "b".repeat(40) }
+        : scenario === "earlier-decision"
         ? { ...productReviewDecisionForFixture("accepted", ""), head_sha: "b".repeat(40) }
         : scenario === "decided"
         ? productReviewDecisionForFixture("changes_requested", "Please adjust the checkout flow.")

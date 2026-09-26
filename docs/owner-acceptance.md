@@ -18,16 +18,20 @@ credential and verifies its GitHub `/user` identity. An unreadable identity or
 failed comment lookup leaves delivery pending; it never selects another credential.
 Comments are reconciled by decision ID and publishing actor under a per-PR
 storage lock. Retrying after a lost provider response recovers the existing comment.
+If that unique comment was edited, retry repairs it from the saved decision.
+One failed historical delivery does not prevent later decisions from being sent.
 
 The decision remains saved during a delivery failure. The review page reports
-pending delivery and keeps entered feedback available for retry. Resubmitting the
-same decision for the same serving preview reuses its record; a new decision or
+pending delivery and provides **Retry delivery** for the saved decision, even
+after the preview is gone. This never records acceptance of another revision.
+Resubmitting the same decision for the same serving preview reuses its record; a new decision or
 preview creates a new record. A ready-preview refresh also retries undelivered
 decisions. The Owner-review status remains pending until the current decision's
 feedback has a delivery receipt. Historical decisions keep their reviewed commit.
 
-The maintained agent watcher recognizes the configured publishing automation
-identity, checks the PR/revision metadata, and retains full Owner feedback in
+The maintained `codex-skills` agent watcher uses the configured publishing identity
+to find candidates, then verifies the complete decision and exact comment receipt
+against Launchplane through its configured private read route. It retains full Owner feedback in
 every snapshot, including after restart. Agents read and summarize that feedback
 before changing the product. The GitHub copy conveys feedback, not authority to
 approve a newer commit, merge, or deploy.

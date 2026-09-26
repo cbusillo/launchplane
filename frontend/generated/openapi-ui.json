@@ -5177,6 +5177,109 @@
         ]
       }
     },
+    "/v1/product-review/feedback/retry": {
+      "post": {
+        "operationId": "retry_product_review_feedback",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProductReviewFeedbackRetryEnvelope"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductReviewResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Retry delivery of a saved Owner decision without recording a new decision",
+        "tags": [
+          "product-review"
+        ]
+      }
+    },
     "/v1/products/{product}/environments/{environment}/config/apply": {
       "post": {
         "operationId": "apply_product_environment_config",
@@ -25816,6 +25919,36 @@
           "schema_version"
         ],
         "title": "ProductReviewDecisionRecord",
+        "type": "object"
+      },
+      "ProductReviewFeedbackRetryEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "decision_id": {
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Decision Id",
+            "type": "string"
+          },
+          "pull_request": {
+            "minimum": 1,
+            "title": "Pull Request",
+            "type": "integer"
+          },
+          "repository": {
+            "maxLength": 256,
+            "minLength": 3,
+            "pattern": "^[^/\\s]+/[^/\\s]+$",
+            "title": "Repository",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repository",
+          "pull_request",
+          "decision_id"
+        ],
+        "title": "ProductReviewFeedbackRetryEnvelope",
         "type": "object"
       },
       "ProductReviewResponse": {

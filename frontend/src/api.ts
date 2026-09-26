@@ -72,6 +72,7 @@ import type {
   OwnerSecretInputResponse,
   SubmitOwnerSecretInputData,
   WriteProductReviewDecisionData,
+  RetryProductReviewFeedbackData,
   ReleaseReviewResponse,
   ReleaseReviewDecisionEnvelope,
 } from "./generated/openapi.ts";
@@ -690,6 +691,14 @@ export function writeProductReviewDecision(
     "POST",
     request.body,
     signal,
+  );
+}
+
+export function retryProductReviewFeedback(
+  payload: RetryProductReviewFeedbackData["body"],
+): Promise<ProductReviewResponse> {
+  return requestJson<ProductReviewResponse>(
+    BROWSER_WRITE_ROUTES.productReviewFeedbackRetry, "POST", payload,
   );
 }
 

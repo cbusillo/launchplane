@@ -3341,6 +3341,12 @@ export type ProductReviewDecisionRecord = {
     schema_version: number;
 };
 
+export type ProductReviewFeedbackRetryEnvelope = {
+    decision_id: string;
+    pull_request: number;
+    repository: string;
+};
+
 export type ProductReviewResponse = {
     can_decide: boolean;
     cannot_decide_reason: string;
@@ -5440,6 +5446,33 @@ export type WriteProductReviewDecisionResponses = {
 };
 
 export type WriteProductReviewDecisionResponse = WriteProductReviewDecisionResponses[keyof WriteProductReviewDecisionResponses];
+
+export type RetryProductReviewFeedbackData = {
+    body: ProductReviewFeedbackRetryEnvelope;
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/product-review/feedback/retry';
+};
+
+export type RetryProductReviewFeedbackErrors = {
+    401: LaunchplaneErrorResponse;
+    403: LaunchplaneErrorResponse;
+    404: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type RetryProductReviewFeedbackError = RetryProductReviewFeedbackErrors[keyof RetryProductReviewFeedbackErrors];
+
+export type RetryProductReviewFeedbackResponses = {
+    200: ProductReviewResponse;
+};
+
+export type RetryProductReviewFeedbackResponse = RetryProductReviewFeedbackResponses[keyof RetryProductReviewFeedbackResponses];
 
 export type ApplyProductEnvironmentConfigData = {
     body: {
