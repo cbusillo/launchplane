@@ -3125,7 +3125,13 @@ domains = ["cm-testing.shinycomputers.com"]
             context="example", instance="testing", target_id="compose-example"
         )
         for marker in (None, "false", "true"):
-            logs = [] if marker is None else [f"website_bootstrap_company_email_matches={marker}"]
+            logs = [
+                "odoo_module_update_completed=true",
+                "odoo_module_update_image_match=true",
+                "odoo_module_update_modules_configured=true",
+            ]
+            if marker is not None:
+                logs.append(f"website_bootstrap_company_email_matches={marker}")
             with (
                 self.subTest(marker=marker),
                 patch.multiple(
@@ -3167,8 +3173,16 @@ domains = ["cm-testing.shinycomputers.com"]
                 if marker == "true":
                     self.assertEqual(deploy()["website_bootstrap_company_email_matches"], "true")
                 else:
-                    with self.assertRaisesRegex(click.ClickException, "company sender"):
+                    with self.assertRaisesRegex(
+                        dokploy_post_deploy.OdooPostDeployReadbackFailure, "company sender"
+                    ) as raised:
                         deploy()
+                    self.assertEqual(raised.exception.evidence["schedule_id"], "schedule-example")
+                    self.assertEqual(raised.exception.evidence["schedule_deployment_id"], "after")
+                    self.assertEqual(
+                        raised.exception.evidence.get("website_bootstrap_company_email_matches"),
+                        marker,
+                    )
 
     def test_run_compose_post_deploy_update_reads_inline_schedule_log_markers(
         self,
