@@ -2311,7 +2311,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             result.error_message,
         )
         self.assertIn("ODOO_OVERRIDE_SECRET__ADDON__OPENAI__API_KEY", result.error_message)
-        sync_source.assert_called_once()
+        sync_source.assert_not_called()
         update_env.assert_not_called()
         trigger_deploy.assert_not_called()
         post_deploy.assert_not_called()
@@ -2721,6 +2721,8 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             ("ODOO_DB_NAME", False),
             ("ODOO_DB_NAME", True),
             ("ODOO_WEB_HOST_PORT", False),
+            ("ADDON_FEATURE", False),
+            ("addon_feature", False),
         ):
             with self.subTest(key=key, declared=declared):
                 profile = _profile()
@@ -2752,8 +2754,8 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                         "ODOO_DB_VOLUME=cm_testing_odoo_db",
                     )
                 )
-                if key == "ODOO_WEB_HOST_PORT":
-                    provider_env += "\nODOO_WEB_HOST_PORT=18069"
+                if key != "ODOO_DB_NAME":
+                    provider_env += f"\n{key}=18069"
                 with (
                     patch(
                         "control_plane.workflows.odoo_stable_target_replacement.dokploy_source.read_dokploy_config",
@@ -2793,7 +2795,11 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                         dokploy_request=cast(DokployRequest, _request),
                     )
                 self.assertEqual(result.deploy_status, "fail")
-                self.assertIn(key, result.error_message)
+                if key in {"ADDON_FEATURE", "addon_feature"}:
+                    self.assertIn("1 undeclared provider-only env key(s)", result.error_message)
+                    self.assertNotIn(key, result.error_message)
+                else:
+                    self.assertIn(key, result.error_message)
                 sync_source.assert_not_called()
                 ensure_domain.assert_not_called()
                 update_env.assert_not_called()
@@ -2805,6 +2811,21 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             target_record=_target_record(),
             target_id_record=_target_id_record(),
             inventory=_inventory(),
+            odoo_instance_override_record=OdooInstanceOverrideRecord(
+                context="cm",
+                instance="testing",
+                addon_settings=(
+                    OdooAddonSettingOverride(
+                        addon="openai",
+                        setting="api_key",
+                        value=OdooOverrideValue(
+                            source="secret_binding",
+                            secret_binding_id="secret-openai-api-key",
+                        ),
+                    ),
+                ),
+                updated_at="2026-06-13T18:00:00Z",
+            ),
         )
         store.secret_bindings = (
             SecretBinding(
@@ -2855,6 +2876,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 "ODOO_DATA_VOLUME": "cm_testing_odoo_data",
                 "ODOO_LOG_VOLUME": "cm_testing_odoo_logs",
                 "ODOO_DB_VOLUME": "cm_testing_odoo_db",
+                "ODOO_OVERRIDE_SECRET__ADDON__OPENAI__API_KEY": "fake-override-secret",
                 "PRODUCTION_BACKUP_SSH_PRIVATE_KEY": worker_private_key,
                 "PRODUCTION_BACKUP_SSH_KNOWN_HOSTS": worker_known_hosts,
             }
@@ -2961,6 +2983,9 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         self.assertEqual(result.deploy_status, "pass")
         self.assertIn("ODOO_DB_PASSWORD=managed-secret-value", persisted_env)
         self.assertIn("ODOO_DATA_VOLUME=cm_testing_odoo_data", persisted_env)
+        self.assertIn(
+            "ODOO_OVERRIDE_SECRET__ADDON__OPENAI__API_KEY=fake-override-secret", persisted_env
+        )
         self.assertNotIn("PRODUCTION_BACKUP_SSH_", persisted_env)
         self.assertNotIn("ZmFrZS1rZXk", persisted_env)
         self.assertNotIn(worker_private_key, persisted_env)

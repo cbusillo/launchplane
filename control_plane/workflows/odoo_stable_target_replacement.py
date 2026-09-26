@@ -1403,6 +1403,19 @@ def execute_odoo_stable_target_replacement_apply(
             application_runtime_keys.update(
                 (ODOO_ADDONS_PATH_ENV_KEY, ODOO_INSTALL_MODULES_ENV_KEY)
             )
+            if runtime_override_payload is not None:
+                application_runtime_keys.update(
+                    runtime_override_payload.required_container_environment_keys
+                )
+            non_application_provider_keys = dokploy_api.parse_dokploy_env_text(
+                dokploy_api.serialize_dokploy_env_text(
+                    {
+                        key: value
+                        for key, value in runtime_environment_values.items()
+                        if key not in application_runtime_keys
+                    }
+                )
+            ).keys()
             runtime_environment_values = {
                 key: value
                 for key, value in runtime_environment_values.items()
@@ -1476,6 +1489,31 @@ def execute_odoo_stable_target_replacement_apply(
                 "Odoo target replacement requires product-profile declarations for env key(s): "
                 + ", ".join(undeclared_compose_keys)
             )
+        undeclared_provider_keys = {
+            key
+            for key in current_env_map.keys()
+            - application_runtime_keys
+            - driver_keys
+            - non_application_provider_keys
+            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key)
+        }
+        if undeclared_provider_keys:
+            raise click.ClickException(
+                "Odoo target replacement found "
+                f"{len(undeclared_provider_keys)} undeclared provider-only env key(s). "
+                "Declare application settings in the product profile before replacement."
+            )
+        if runtime_override_payload is not None:
+            missing_override_secret_keys = tuple(
+                key
+                for key in runtime_override_payload.required_container_environment_keys
+                if not application_env.get(key, "").strip()
+            )
+            if missing_override_secret_keys:
+                raise click.ClickException(
+                    "Odoo target replacement requires override secret env key(s) before deployment: "
+                    + ", ".join(missing_override_secret_keys)
+                )
         # Malformed multiline fragments can contain secrets in their parsed key
         # names, so record only a count of discarded provider entries.
         runtime_source["discarded_provider_env_key_count"] = str(
@@ -1580,17 +1618,6 @@ def execute_odoo_stable_target_replacement_apply(
             artifact_manifest.odoo_install_modules
         )
         runtime_source["odoo_install_modules"] = desired_env_map[ODOO_INSTALL_MODULES_ENV_KEY]
-        if runtime_override_payload is not None:
-            missing_override_secret_keys = tuple(
-                key
-                for key in runtime_override_payload.required_container_environment_keys
-                if not desired_env_map.get(key, "").strip()
-            )
-            if missing_override_secret_keys:
-                raise click.ClickException(
-                    "Odoo target replacement requires override secret env key(s) before deployment: "
-                    + ", ".join(missing_override_secret_keys)
-                )
         if desired_env_map.get("ODOO_WEB_COMMAND", "").strip() == "/odoo/odoo-bin":
             desired_env_map.pop("ODOO_WEB_COMMAND", None)
         desired_env_map["PLATFORM_CONTEXT"] = plan.context
