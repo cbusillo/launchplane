@@ -334,6 +334,19 @@ def execute_generic_web_prod_promotion(
         instance=destination_lane.instance,
         promotion_action=GENERIC_WEB_PROMOTION_BACKUP_ACTION,
         backup_record_id=request.backup_record_id,
+        pending_promotion=_build_promotion_record(
+            request=request,
+            promotion_record_id=promotion_record_id,
+            context=destination_lane.context,
+            source_health=source_health,
+            backup_gate=backup_gate,
+            destination_health=destination_health,
+            deployment_record=None,
+            deployment_status="pending",
+            target_name=_fallback_target_name(request=request, lane=destination_lane),
+            target_type="application",
+            deployment_record_id="",
+        ),
     ) as backup_checkpoint:
 
         def promotion_checkpoint(phase: str) -> None:
@@ -490,7 +503,7 @@ def _resolve_backup_gate(
 ) -> BackupGateEvidence:
     if not request.backup_record_id:
         if request.dry_run:
-            return BackupGateEvidence(required=True, status="pending")
+            return BackupGateEvidence()
         raise click.ClickException("Production promotion requires infrastructure backup evidence.")
     return require_production_promotion_backup(
         record_store=record_store,

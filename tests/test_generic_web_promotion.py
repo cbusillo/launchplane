@@ -322,7 +322,7 @@ class GenericWebProdPromotionTests(unittest.TestCase):
         store = _GenericWebPromotionStore(_profile())
         store.write_environment_inventory(_testing_inventory())
 
-        def fake_deploy(**kwargs: object) -> GenericWebDeployResult:
+        def fake_deploy(**_kwargs: object) -> GenericWebDeployResult:
             store.write_deployment_record(_deployment_record())
             return _deploy_result()
 
@@ -460,7 +460,7 @@ class GenericWebProdPromotionTests(unittest.TestCase):
         store.write_environment_inventory(_testing_inventory())
         github_requests: list[tuple[str, str, dict[str, object] | None]] = []
 
-        def fake_deploy(**kwargs: object) -> GenericWebDeployResult:
+        def fake_deploy(**_kwargs: object) -> GenericWebDeployResult:
             store.write_deployment_record(_deployment_record())
             return _deploy_result()
 
@@ -765,7 +765,7 @@ class GenericWebProdPromotionTests(unittest.TestCase):
         store = _GenericWebPromotionStore(_profile())
         store.write_environment_inventory(_testing_inventory())
 
-        def fake_deploy(**kwargs: object) -> GenericWebDeployResult:
+        def fake_deploy(**_kwargs: object) -> GenericWebDeployResult:
             store.write_deployment_record(_deployment_record())
             return _deploy_result()
 
@@ -790,7 +790,7 @@ class GenericWebProdPromotionTests(unittest.TestCase):
         )
         store.write_environment_inventory(_testing_inventory())
 
-        def fake_deploy(**kwargs: object) -> GenericWebDeployResult:
+        def fake_deploy(**_kwargs: object) -> GenericWebDeployResult:
             store.write_deployment_record(_deployment_record())
             return _deploy_result()
 
@@ -891,7 +891,7 @@ class GenericWebProdPromotionTests(unittest.TestCase):
         store = _GenericWebPromotionStore(_profile())
         store.write_environment_inventory(_testing_inventory())
 
-        def fake_deploy(**kwargs: object) -> GenericWebDeployResult:
+        def fake_deploy(**_kwargs: object) -> GenericWebDeployResult:
             store.write_deployment_record(_deployment_record())
             return _deploy_result()
 
@@ -936,7 +936,7 @@ class GenericWebProdPromotionTests(unittest.TestCase):
             source_git_ref="abc123",
         )
 
-        def fake_deploy(**kwargs: object) -> GenericWebDeployResult:
+        def fake_deploy(**_kwargs: object) -> GenericWebDeployResult:
             store.write_deployment_record(_deployment_record())
             return _deploy_result()
 

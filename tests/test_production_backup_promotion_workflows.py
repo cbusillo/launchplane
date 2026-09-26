@@ -43,7 +43,9 @@ class ProductionBackupPromotionWorkflowTests(unittest.TestCase):
         ):
             with self.subTest(workflow=filename):
                 workflow = load_workflow(ROOT / ".github/workflows" / filename)
-                steps = {step.data.get("id"): step for step in workflow.steps("prod-promotion")}
+                steps = {
+                    str(step.data.get("id")): step for step in workflow.steps("prod-promotion")
+                }
                 capture = steps["infrastructure_backup"]
                 self.assertLess(steps["release_approval"].index, capture.index)
                 self.assertEqual(steps["release_approval"].data["if"], capture.data["if"])
@@ -51,6 +53,7 @@ class ProductionBackupPromotionWorkflowTests(unittest.TestCase):
                 self.assertEqual(capture.with_values["route-path"], "/v1/production-backup-gates")
                 self.assertEqual(capture.with_values["poll-result-path"], "operation_status")
                 self.assertEqual(capture.with_values["poll-result-statuses"], "pending,running")
+                self.assertEqual(capture.with_values["poll-retry-on-request-error"], "true")
                 self.assertEqual(capture.with_values["fail-result-paths"], "operation_status")
                 self.assertEqual(capture.with_values["fail-result-statuses"], "fail,cancelled")
                 self.assertIn("idempotency-key", capture.with_values)

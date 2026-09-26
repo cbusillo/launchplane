@@ -270,6 +270,7 @@ jobs:
           timeout-ms: "60000"
           poll-result-path: operation_status
           poll-result-statuses: pending,running
+          poll-retry-on-request-error: "true"
           poll-timeout-ms: ${{ inputs['timeout-ms'] }}
           fail-result-paths: operation_status
           fail-result-statuses: fail,cancelled

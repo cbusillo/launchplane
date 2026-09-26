@@ -12,7 +12,13 @@ from pydantic import ValidationError
 from control_plane.contracts.durable_operation_authorization import DurableOperationAuthorization
 from control_plane.contracts.production_backup_authority import ProductionBackupPolicyRecord
 from control_plane.contracts.production_backup_gate import ProductionBackupGateWorkerRequest
-from control_plane.contracts.promotion_record import BackupGateEvidence
+from control_plane.contracts.promotion_record import (
+    ArtifactIdentityReference,
+    BackupGateEvidence,
+    DeploymentEvidence,
+    PromotionRecord,
+)
+from control_plane.workflows.promote import generate_promotion_record_id
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.production_backup_gate import enqueue_production_backup_gate
 from control_plane.workflows.production_promotion_backup import (
@@ -116,8 +122,9 @@ class ProductionPromotionBackupTests(unittest.TestCase):
         self.assertEqual(store.read_backup_gate_record("backup-example").status, "pass")
         return store
 
+    @staticmethod
     def require(
-        self, store: PostgresRecordStore, action: str = ODOO_PROMOTION_BACKUP_ACTION
+        store: PostgresRecordStore, action: str = ODOO_PROMOTION_BACKUP_ACTION
     ) -> BackupGateEvidence:
         return require_production_promotion_backup(
             record_store=store,
@@ -126,6 +133,26 @@ class ProductionPromotionBackupTests(unittest.TestCase):
             instance="prod",
             promotion_action=action,
             backup_record_id="backup-example",
+        )
+
+    def pending(
+        self, store: PostgresRecordStore, action: str = ODOO_PROMOTION_BACKUP_ACTION
+    ) -> PromotionRecord:
+        return PromotionRecord(
+            record_id=generate_promotion_record_id(
+                context_name="example-product",
+                from_instance_name="testing",
+                to_instance_name="prod",
+            ),
+            context="example-product",
+            from_instance="testing",
+            to_instance="prod",
+            artifact_identity=ArtifactIdentityReference(artifact_id="example-artifact"),
+            backup_record_id="backup-example",
+            backup_gate=self.require(store, action),
+            deploy=DeploymentEvidence(
+                target_name="example-prod", target_type="compose", deploy_mode="dokploy-compose-api"
+            ),
         )
 
     def test_worker_capture_binds_exact_policy_and_operation(self) -> None:
@@ -319,6 +346,7 @@ class ProductionPromotionBackupTests(unittest.TestCase):
                 instance="prod",
                 promotion_action=ODOO_PROMOTION_BACKUP_ACTION,
                 backup_record_id="backup-example",
+                pending_promotion=self.pending(store),
             ) as checkpoint:
                 check.side_effect = RuntimeError("lost connection")
                 with self.assertRaisesRegex(click.ClickException, "lock was lost"):
@@ -336,6 +364,7 @@ class ProductionPromotionBackupTests(unittest.TestCase):
             instance="prod",
             promotion_action=ODOO_PROMOTION_BACKUP_ACTION,
             backup_record_id="backup-example",
+            pending_promotion=self.pending(store),
         ) as checkpoint:
             checkpoint("target_update")
             request = original.binding.request.model_copy(
@@ -357,7 +386,8 @@ class ProductionPromotionBackupTests(unittest.TestCase):
                 }
             )
             store.write_verireel_prod_backup_gate_operation_record(refused)
-            self.require(store)
+            with self.assertRaisesRegex(click.ClickException, "already used"):
+                self.require(store)
             policy = original.binding.policy
             store.write_production_backup_policy_record(
                 ProductionBackupPolicyRecord.model_validate(
@@ -383,6 +413,7 @@ class ProductionPromotionBackupTests(unittest.TestCase):
             instance="prod",
             promotion_action=ODOO_PROMOTION_BACKUP_ACTION,
             backup_record_id="backup-example",
+            pending_promotion=self.pending(store),
         ) as checkpoint:
             record = store.read_backup_gate_record("backup-example")
             store.write_backup_gate_record(record.model_copy(update={"status": "fail"}))
@@ -408,6 +439,7 @@ class ProductionPromotionBackupTests(unittest.TestCase):
                 instance="prod",
                 promotion_action=ODOO_PROMOTION_BACKUP_ACTION,
                 backup_record_id="backup-example",
+                pending_promotion=self.pending(store),
             ) as checkpoint:
                 checkpoint("target_update")
                 check.side_effect = RuntimeError("lost connection")
@@ -416,6 +448,7 @@ class ProductionPromotionBackupTests(unittest.TestCase):
         self.assertIn("source_lock_lost_at", checkpoint.evidence)
 
         check.side_effect = None
+        store = self.capture()
         with (
             patch.object(store, "production_backup_source_lock", side_effect=lock),
             self.assertLogs(level="WARNING"),
@@ -427,10 +460,42 @@ class ProductionPromotionBackupTests(unittest.TestCase):
                 instance="prod",
                 promotion_action=ODOO_PROMOTION_BACKUP_ACTION,
                 backup_record_id="backup-example",
+                pending_promotion=self.pending(store),
             ) as completed:
                 completed("target_update")
                 check.side_effect = RuntimeError("lost connection on completion")
         self.assertEqual(completed.evidence["source_lock_status"], "lost_after_effect")
+
+    def test_admitted_or_crashed_promotion_cannot_reuse_a_capture(self) -> None:
+        for action in (ODOO_PROMOTION_BACKUP_ACTION, GENERIC_WEB_PROMOTION_BACKUP_ACTION):
+            with self.subTest(action=action):
+                store = self.capture(action)
+                pending = self.pending(store, action)
+                with production_promotion_backup_guard(
+                    record_store=store,
+                    product="example-product",
+                    context="example-product",
+                    instance="prod",
+                    promotion_action=action,
+                    backup_record_id="backup-example",
+                    pending_promotion=pending,
+                ) as checkpoint:
+                    checkpoint("target_update")
+                self.assertEqual(store.read_promotion_record(pending.record_id), pending)
+                with self.assertRaisesRegex(click.ClickException, "already used"):
+                    self.require(store, action)
+                self.assert_entrypoints_block(store, action)
+                self.assertEqual(store.read_promotion_record(pending.record_id), pending)
+
+    def test_same_second_promotions_keep_distinct_admission_records(self) -> None:
+        store = self.capture()
+        with patch("control_plane.workflows.promote.datetime") as clock:
+            clock.now.return_value = datetime(2026, 9, 26, tzinfo=UTC)
+            first = self.pending(store)
+            second = self.pending(store)
+        store.write_promotion_record(first)
+        store.write_promotion_record(second)
+        self.assertEqual(len(store.list_promotion_records()), 2)
 
     def test_generic_web_cannot_opt_out(self) -> None:
         with self.assertRaises(ValidationError):

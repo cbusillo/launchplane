@@ -3397,7 +3397,8 @@ class FastApiOdooProdPromotionTests(unittest.IsolatedAsyncioTestCase):
             },
         }
 
-    def _run_payload(self, *, product: str = "odoo-tenant-cm") -> dict[str, object]:
+    @staticmethod
+    def _run_payload(*, product: str = "odoo-tenant-cm") -> dict[str, object]:
         return {
             "product": product,
             "run": {
@@ -3407,7 +3408,8 @@ class FastApiOdooProdPromotionTests(unittest.IsolatedAsyncioTestCase):
             },
         }
 
-    def _promotion_payload(self, *, product: str = "odoo-tenant-cm") -> dict[str, object]:
+    @staticmethod
+    def _promotion_payload(*, product: str = "odoo-tenant-cm") -> dict[str, object]:
         return {
             "product": product,
             "promotion": {
@@ -3450,8 +3452,8 @@ class FastApiOdooProdPromotionTests(unittest.IsolatedAsyncioTestCase):
             error_message=error_message,
         )
 
+    @staticmethod
     def _run_result(
-        self,
         *,
         run_status: Literal["pass", "fail", "blocked"] = "pass",
     ) -> OdooProdPromotionRunResult:
@@ -3479,8 +3481,8 @@ class FastApiOdooProdPromotionTests(unittest.IsolatedAsyncioTestCase):
             error_message="blocked" if run_status == "blocked" else "",
         )
 
+    @staticmethod
     def _promotion_result(
-        self,
         *,
         promotion_status: Literal["pass", "fail"] = "pass",
     ) -> OdooProdPromotionResult:

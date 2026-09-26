@@ -142,6 +142,8 @@ def execute_odoo_prod_promotion(
         from_instance=request.from_instance,
         to_instance=request.to_instance,
     )
+    backup_gate = None
+    infrastructure_backup = None
     try:
         infrastructure_backup = require_production_promotion_backup(
             record_store=record_store,
@@ -172,8 +174,6 @@ def execute_odoo_prod_promotion(
             backup_gate=backup_gate,
             infrastructure_backup=infrastructure_backup,
         )
-        record_store.write_promotion_record(pending_record)
-
         with production_promotion_backup_guard(
             record_store=record_store,
             product=product,
@@ -181,6 +181,7 @@ def execute_odoo_prod_promotion(
             instance=request.to_instance,
             promotion_action=ODOO_PROMOTION_BACKUP_ACTION,
             backup_record_id=request.infrastructure_backup_record_id,
+            pending_promotion=pending_record,
         ) as backup_checkpoint:
             replacement_result = execute_odoo_stable_target_replacement_apply(
                 control_plane_root=control_plane_root,
@@ -190,7 +191,6 @@ def execute_odoo_prod_promotion(
                     instance=request.to_instance,
                     artifact_id=request.artifact_id,
                     source_git_ref=request.source_git_ref or artifact_manifest.source_commit,
-                    allow_empty_data=True,
                     data_source_mode="existing",
                     verify_health=request.verify_health,
                     verify_canonical=request.verify_health,
@@ -245,6 +245,8 @@ def execute_odoo_prod_promotion(
             request=request,
             deployment_record=None,
             deployment_status="fail",
+            backup_gate=backup_gate,
+            infrastructure_backup=infrastructure_backup,
         )
         record_store.write_promotion_record(failed_record)
         return _result_from_record(
@@ -304,7 +306,7 @@ def _backup_gate_evidence(
     infrastructure_backup: BackupGateEvidence | None,
 ) -> BackupGateEvidence:
     if backup_gate is None:
-        return BackupGateEvidence(status="pending")
+        return BackupGateEvidence()
     return BackupGateEvidence(
         required=backup_gate.required,
         status=backup_gate.status,

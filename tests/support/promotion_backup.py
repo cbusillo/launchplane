@@ -1,15 +1,26 @@
-from contextlib import nullcontext
+from contextlib import AbstractContextManager, nullcontext
+from typing import cast
 import unittest
 from unittest.mock import patch
 
-from control_plane.contracts.promotion_record import BackupGateEvidence
-from control_plane.workflows.production_promotion_backup import ProductionPromotionBackupGuard
+from control_plane.contracts.promotion_record import BackupGateEvidence, PromotionRecord
+from control_plane.workflows.production_promotion_backup import (
+    ProductionPromotionBackupGuard,
+    ProductionPromotionBackupStore,
+)
+
+
+def _stub_guard(**kwargs: object) -> AbstractContextManager[ProductionPromotionBackupGuard]:
+    store = cast(ProductionPromotionBackupStore, kwargs["record_store"])
+    store.write_promotion_record(cast(PromotionRecord, kwargs["pending_promotion"]))
+    return nullcontext(
+        ProductionPromotionBackupGuard(lambda _phase: None, {"source_lock_status": "held"})
+    )
 
 
 def stub_verified_promotion_backup(test: unittest.TestCase, module: str) -> None:
     """Isolate existing deployment tests; the backup gate has store-backed tests."""
     evidence = BackupGateEvidence(
-        required=True,
         status="pass",
         evidence={"backup_record_id": "infrastructure-example", "policy_revision": "1"},
     )
@@ -19,8 +30,6 @@ def stub_verified_promotion_backup(test: unittest.TestCase, module: str) -> None
     test.enterContext(
         patch(
             f"{module}.production_promotion_backup_guard",
-            side_effect=lambda **_kwargs: nullcontext(
-                ProductionPromotionBackupGuard(lambda _phase: None, {"source_lock_status": "held"})
-            ),
+            side_effect=_stub_guard,
         )
     )

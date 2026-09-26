@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from uuid import uuid4
 
 from control_plane.contracts.dokploy_target_record import DokployTargetType
 from control_plane.contracts.promotion_record import (
@@ -55,7 +56,7 @@ def generate_promotion_record_id(
     *, context_name: str, from_instance_name: str, to_instance_name: str
 ) -> str:
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    return f"promotion-{timestamp}-{context_name}-{from_instance_name}-to-{to_instance_name}"
+    return f"promotion-{timestamp}-{uuid4().hex}-{context_name}-{from_instance_name}-to-{to_instance_name}"
 
 
 def _resolve_post_deploy_update(

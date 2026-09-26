@@ -1,4 +1,6 @@
 import unittest
+from typing import cast
+from contextlib import AbstractContextManager
 from contextlib import nullcontext
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from tests.support.profiles import product_profile_payload
@@ -21,6 +23,7 @@ from control_plane.contracts.promotion_record import (
     DeploymentEvidence,
     HealthcheckEvidence,
     PostDeployUpdateEvidence,
+    PromotionRecord,
 )
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.contracts.odoo_stable_target_replacement import (
@@ -28,6 +31,7 @@ from control_plane.contracts.odoo_stable_target_replacement import (
 )
 from control_plane.workflows.odoo_prod_promotion import (
     OdooProdPromotionRequest,
+    OdooProdPromotionStore,
     execute_odoo_prod_promotion,
 )
 from control_plane.workflows.odoo_prod_backup_gate import (
@@ -170,14 +174,20 @@ class OdooProdPromotionWorkflowTests(unittest.TestCase):
         record_store.read_backup_gate_record.return_value = _backup_gate()
         record_store.read_deployment_record.return_value = _deployment_record()
 
+        def guarded_deployment(
+            **kwargs: object,
+        ) -> AbstractContextManager[ProductionPromotionBackupGuard]:
+            record_store.write_promotion_record(cast(PromotionRecord, kwargs["pending_promotion"]))
+            return nullcontext(
+                ProductionPromotionBackupGuard(
+                    lambda _phase: None, {"source_lock_status": "lost_after_effect"}
+                )
+            )
+
         with (
             patch(
                 "control_plane.workflows.odoo_prod_promotion.production_promotion_backup_guard",
-                side_effect=lambda **_kwargs: nullcontext(
-                    ProductionPromotionBackupGuard(
-                        lambda _phase: None, {"source_lock_status": "lost_after_effect"}
-                    )
-                ),
+                side_effect=guarded_deployment,
             ),
             patch(
                 "control_plane.workflows.promote.generate_promotion_record_id",
@@ -192,7 +202,7 @@ class OdooProdPromotionWorkflowTests(unittest.TestCase):
                 control_plane_root=Path("/control-plane"),
                 state_dir=Path("/state"),
                 database_url="postgresql://launchplane.example/db",
-                record_store=record_store,
+                record_store=cast(OdooProdPromotionStore, record_store),
                 request=OdooProdPromotionRequest(
                     product="odoo-tenant-cm",
                     context="cm",
@@ -241,7 +251,7 @@ class OdooProdPromotionWorkflowTests(unittest.TestCase):
                 control_plane_root=Path("/control-plane"),
                 state_dir=Path("/state"),
                 database_url="postgresql://launchplane.example/db",
-                record_store=record_store,
+                record_store=cast(OdooProdPromotionStore, record_store),
                 request=OdooProdPromotionRequest(
                     product="odoo-tenant-cm",
                     context="cm",
@@ -274,7 +284,7 @@ class OdooProdPromotionWorkflowTests(unittest.TestCase):
                 control_plane_root=Path("/control-plane"),
                 state_dir=Path("/state"),
                 database_url="postgresql://launchplane.example/db",
-                record_store=record_store,
+                record_store=cast(OdooProdPromotionStore, record_store),
                 request=OdooProdPromotionRequest(
                     product="odoo-tenant-cm",
                     context="cm",
@@ -287,6 +297,12 @@ class OdooProdPromotionWorkflowTests(unittest.TestCase):
         self.assertIn("target replacement failed", result.error_message)
         final_record = record_store.write_promotion_record.call_args_list[-1].args[0]
         self.assertEqual(final_record.deploy.status, "fail")
+        self.assertEqual(final_record.backup_gate.status, "pass")
+        self.assertEqual(final_record.backup_gate.evidence["snapshot"], "backup.tar.gz")
+        self.assertEqual(
+            final_record.backup_gate.evidence["infrastructure_backup_record_id"],
+            "infrastructure-example",
+        )
 
 
 if __name__ == "__main__":

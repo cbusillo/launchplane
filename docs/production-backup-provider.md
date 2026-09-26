@@ -145,6 +145,10 @@ Every live entrypoint requires a successful worker operation and matching
 backup record for the exact product, context and instance. It compares the
 saved policy and both target revisions/digests with current authority, requires
 both verified capture identities, and applies each policy's evidence-age limit.
+Set the snapshot freshness budget to cover the independent PBS capture, queue
+delays and any driver-specific logical backup before deployment starts. Each
+age is measured from that operation's own completion time; completing PBS does
+not reset the snapshot clock. Size the policy from observed backup durations.
 Missing, failed, partial, stale, future-dated, mismatched or superseded evidence
 refuses deployment. Promotion records retain the infrastructure backup and
 operation IDs plus exact policy/target evidence. Odoo keeps its logical evidence
@@ -152,7 +156,10 @@ in the same record and prefixes the additional infrastructure evidence keys.
 
 Deployment holds the same canonical guest lock as capture and retention. Current
 authority, evidence age and capture supersession are checked under that lock
-before the first provider effect. Subsequent checkpoints verify the lock;
+before the first provider effect. A durable pending promotion reserves the capture
+under that lock; another promotion cannot reuse it, including after a crash or
+failed attempt. Promotion IDs include a unique component so same-second attempts
+cannot overwrite this evidence. Subsequent checkpoints verify the lock;
 the admitted evidence remains bound for the rest of that promotion, including
 Odoo module updates. An elapsed freshness limit or a later policy edit must not
 interrupt a promotion after its image has changed. Existing execution-authorization

@@ -14,7 +14,7 @@ from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.production_backup_authority import (
     ProxmoxGuestBackupDestinationReference,
 )
-from control_plane.contracts.promotion_record import BackupGateEvidence
+from control_plane.contracts.promotion_record import BackupGateEvidence, PromotionRecord
 from control_plane.contracts.verireel_prod_backup_gate_operation import (
     VeriReelProdBackupGateOperationRecord,
 )
@@ -38,6 +38,17 @@ class ProductionPromotionBackupGuard:
 class ProductionPromotionBackupStore(Protocol):
     def read_backup_gate_record(self, record_id: str) -> BackupGateRecord: ...
 
+    def write_promotion_record(self, record: PromotionRecord) -> object: ...
+
+    def list_promotion_records(
+        self,
+        *,
+        context_name: str = "",
+        from_instance_name: str = "",
+        to_instance_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[PromotionRecord, ...]: ...
+
     def list_verireel_prod_backup_gate_operation_records(
         self,
         *,
@@ -58,6 +69,7 @@ def require_production_promotion_backup(
     instance: str,
     promotion_action: str,
     backup_record_id: str,
+    active_promotion_record_id: str = "",
 ) -> BackupGateEvidence:
     """Require worker-completed evidence for the exact current policy and targets."""
     operation = _read_operation(
@@ -143,8 +155,17 @@ def require_production_promotion_backup(
             raise click.ClickException(
                 "Production backup evidence was superseded by another capture."
             )
+    for promotion in store.list_promotion_records(context_name=context, to_instance_name=instance):
+        if promotion.record_id == active_promotion_record_id:
+            continue
+        if backup_record_id in (
+            promotion.backup_gate.evidence.get("backup_record_id"),
+            promotion.backup_gate.evidence.get("infrastructure_backup_record_id"),
+        ):
+            raise click.ClickException(
+                "Production backup evidence was already used by a promotion."
+            )
     return BackupGateEvidence(
-        required=True,
         status="pass",
         evidence={
             **evidence,
@@ -163,6 +184,7 @@ def production_promotion_backup_guard(
     instance: str,
     promotion_action: str,
     backup_record_id: str,
+    pending_promotion: PromotionRecord,
 ) -> Iterator[ProductionPromotionBackupGuard]:
     """Validate before effects; retain the backup lock through the promotion."""
     operation = _read_operation(
@@ -170,6 +192,16 @@ def production_promotion_backup_guard(
     )
     if not isinstance(record_store, PostgresRecordStore):
         raise click.ClickException("Production promotion backup locking requires database storage.")
+    if (
+        (pending_promotion.context, pending_promotion.to_instance) != (context, instance)
+        or pending_promotion.deploy.status != "pending"
+        or backup_record_id
+        not in (
+            pending_promotion.backup_gate.evidence.get("backup_record_id"),
+            pending_promotion.backup_gate.evidence.get("infrastructure_backup_record_id"),
+        )
+    ):
+        raise click.ClickException("Production promotion admission does not bind its backup.")
     with record_store.production_backup_source_lock(_source_key(operation)) as check_lock:
         if check_lock is None:
             raise click.ClickException("Production backup source is busy.")
@@ -198,7 +230,7 @@ def production_promotion_backup_guard(
                     "finishing the admitted deployment and preserving protection evidence."
                 )
 
-        def require_evidence() -> None:
+        def require_evidence(*, active_promotion_record_id: str = "") -> None:
             require_production_promotion_backup(
                 record_store=record_store,
                 product=product,
@@ -206,17 +238,22 @@ def production_promotion_backup_guard(
                 instance=instance,
                 promotion_action=promotion_action,
                 backup_record_id=backup_record_id,
+                active_promotion_record_id=active_promotion_record_id,
             )
 
         def checkpoint(_phase: str) -> None:
             nonlocal effects_started
             require_lock()
             if not effects_started:
-                require_evidence()
+                require_evidence(active_promotion_record_id=pending_promotion.record_id)
                 effects_started = True
 
         require_lock()
         require_evidence()
+        # Reserve this capture before effects, while holding the same source
+        # lock as other promotions and capture/retention. A crash leaves a
+        # durable pending record, so the next attempt must take a fresh backup.
+        record_store.write_promotion_record(pending_promotion)
         yield ProductionPromotionBackupGuard(checkpoint, protection_evidence)
         require_lock()
 
