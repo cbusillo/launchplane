@@ -49,6 +49,7 @@ class FastApiBrowserMutationBoundaryTests(unittest.IsolatedAsyncioTestCase):
             "/v1/product-config/apply",
             "/v1/product-profiles/{product}/owner",
             "/v1/product-review/decisions",
+            "/v1/product-review/feedback/retry",
             "/v1/owner-secret-inputs/submit",
             "/v1/release-review/decisions",
             "/v1/privileged-operations/authorization-candidates/prepare",

@@ -33126,6 +33126,16 @@
             "title": "Decision",
             "type": "string"
           },
+          "feedback_requested": {
+            "default": false,
+            "title": "Feedback Requested",
+            "type": "boolean"
+          },
+          "feedback_url": {
+            "default": "",
+            "title": "Feedback Url",
+            "type": "string"
+          },
           "head_sha": {
             "default": "",
             "title": "Head Sha",
@@ -33185,6 +33195,36 @@
           "decided_at"
         ],
         "title": "ProductReviewDecisionRecord",
+        "type": "object"
+      },
+      "ProductReviewFeedbackRetryEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "decision_id": {
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Decision Id",
+            "type": "string"
+          },
+          "pull_request": {
+            "minimum": 1.0,
+            "title": "Pull Request",
+            "type": "integer"
+          },
+          "repository": {
+            "maxLength": 256,
+            "minLength": 3,
+            "pattern": "^[^/\\s]+/[^/\\s]+$",
+            "title": "Repository",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repository",
+          "pull_request",
+          "decision_id"
+        ],
+        "title": "ProductReviewFeedbackRetryEnvelope",
         "type": "object"
       },
       "ProductReviewResponse": {
@@ -77749,6 +77789,17 @@
             }
           },
           {
+            "in": "query",
+            "name": "decision_id",
+            "required": false,
+            "schema": {
+              "default": "",
+              "maxLength": 512,
+              "title": "Decision Id",
+              "type": "string"
+            }
+          },
+          {
             "in": "header",
             "name": "Authorization",
             "required": false,
@@ -77799,6 +77850,16 @@
               }
             },
             "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
           },
           "409": {
             "content": {
@@ -77915,6 +77976,109 @@
           }
         },
         "summary": "Record the product Owner's accept or request-changes decision",
+        "tags": [
+          "product-review"
+        ]
+      }
+    },
+    "/v1/product-review/feedback/retry": {
+      "post": {
+        "operationId": "retry_product_review_feedback",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProductReviewFeedbackRetryEnvelope"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductReviewResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Retry delivery of a saved Owner decision without recording a new decision",
         "tags": [
           "product-review"
         ]
@@ -86300,6 +86464,7 @@
     "/v1/privileged-operations/plans/{operation_id}/revoke": "revoke_human_privileged_operation",
     "/v1/product-profiles/{product}/owner": "apply_product_owner",
     "/v1/product-review/decisions": "write_product_review_decision",
+    "/v1/product-review/feedback/retry": "retry_product_review_feedback",
     "/v1/products/{product}/environments/{environment}/config/apply": "apply_product_environment_config",
     "/v1/products/{product}/environments/{environment}/promotion/dry-run": "dry_run_product_promotion",
     "/v1/products/{product}/environments/{environment}/promotion/workflow-dispatch": "dispatch_product_promotion_workflow",
