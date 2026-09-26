@@ -205,7 +205,7 @@ def skipped_runtime_key_safety_summary() -> dict[str, object]:
     return {"required": False, "status": "skipped", "checked_binding_keys": []}
 
 
-def _require_product_profile_runtime_keys(
+def require_product_profile_runtime_keys(
     *,
     record_store: LiveTargetRuntimeProfileStore,
     product_name: str,
@@ -414,7 +414,7 @@ def apply_live_target_runtime_environment(
             postgres_store.ensure_schema()
             desired_env_map = _filter_runtime_environment_to_product_keys(
                 desired_env_map=desired_env_map,
-                allowed_keys=_require_product_profile_runtime_keys(
+                allowed_keys=require_product_profile_runtime_keys(
                     record_store=postgres_store,
                     product_name=product_name.strip(),
                     context_name=context_name,

@@ -31,6 +31,7 @@ from control_plane.contracts.product_profile_record import (
     ProductOdooLaneDataPolicy,
     ProductOdooPrelaunchRebuildPolicy,
     ProductPreviewProfile,
+    ProductRuntimeConfigRequirement,
     ProductLaneHealthMonitoringPolicy,
     ProductSecretConfigRequirement,
 )
@@ -68,6 +69,13 @@ from control_plane.workflows.runtime_identity_health import (
 from control_plane.workflows.odoo_verification import (
     OdooVerificationEvidence,
     OdooVerificationResult,
+)
+
+
+_DATABASE_ENV_LINES = (
+    "ODOO_DB_NAME=test_db",
+    "ODOO_DB_USER=test_user",
+    "ODOO_DB_PASSWORD=test_password",
 )
 
 
@@ -212,6 +220,21 @@ def _profile(driver_id: str = "odoo") -> LaunchplaneProductProfileRecord:
             ),
         ),
         preview=ProductPreviewProfile(enabled=True, context="cm"),
+        expected_config=ProductExpectedConfigProfile(
+            runtime_environment_keys=tuple(
+                ProductRuntimeConfigRequirement(key=key)
+                for key in (
+                    "ODOO_DB_NAME",
+                    "ODOO_DB_USER",
+                    "ODOO_DB_PASSWORD",
+                    "ODOO_WORKERS",
+                    "ODOO_DATA_VOLUME",
+                    "ODOO_LOG_VOLUME",
+                    "ODOO_DB_VOLUME",
+                    "ODOO_WEB_COMMAND",
+                )
+            ),
+        ),
         updated_at="2026-05-09T00:00:00Z",
         source="test",
     )
@@ -244,13 +267,14 @@ def _profile_with_runtime_secret(
     return _profile().model_copy(
         update={
             "expected_config": ProductExpectedConfigProfile(
+                runtime_environment_keys=_profile().expected_config.runtime_environment_keys,
                 managed_secret_bindings=(
                     ProductSecretConfigRequirement(
                         binding_key=binding_key,
                         context="cm",
                         instance="testing",
                     ),
-                )
+                ),
             )
         }
     )
@@ -302,6 +326,7 @@ def _opw_profile_with_prelaunch_policy(*, enabled: bool) -> LaunchplaneProductPr
         image=ProductImageProfile(repository="ghcr.io/cbusillo/odoo-tenant-opw"),
         runtime_port=8069,
         health_path="/web/health",
+        expected_config=_profile().expected_config,
         lanes=(
             ProductLaneProfile(
                 instance="prod",
@@ -538,6 +563,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                     "name": "cm-testing",
                     "env": "\n".join(
                         (
+                            *_DATABASE_ENV_LINES,
                             "ODOO_DATA_VOLUME=cm_testing_odoo_data",
                             "ODOO_LOG_VOLUME=cm_testing_odoo_logs",
                             "ODOO_DB_VOLUME=cm_testing_odoo_db",
@@ -591,6 +617,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                     "composeFile": "services: {}",
                     "env": "\n".join(
                         (
+                            *_DATABASE_ENV_LINES,
                             "ODOO_DATA_VOLUME=cm_testing_odoo_data",
                             "ODOO_LOG_VOLUME=cm_testing_odoo_logs",
                             "ODOO_DB_VOLUME=cm_testing_odoo_db",
@@ -644,6 +671,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                     "composeFile": "services: {}",
                     "env": "\n".join(
                         (
+                            *_DATABASE_ENV_LINES,
                             "ODOO_DATA_VOLUME=cm_testing_odoo_data",
                             "ODOO_LOG_VOLUME=cm_testing_odoo_logs",
                             "ODOO_DB_VOLUME=cm_testing_odoo_db",
@@ -694,6 +722,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                     "composeFile": "services: {}",
                     "env": "\n".join(
                         (
+                            *_DATABASE_ENV_LINES,
                             "ODOO_DATA_VOLUME=cm_testing_odoo_data",
                             "ODOO_LOG_VOLUME=cm_testing_odoo_logs",
                             "ODOO_DB_VOLUME=cm_testing_odoo_db",
@@ -744,6 +773,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                     "composeFile": "services: {}",
                     "env": "\n".join(
                         (
+                            *_DATABASE_ENV_LINES,
                             "ODOO_DATA_VOLUME=cm_testing_odoo_data",
                             "ODOO_LOG_VOLUME=cm_testing_odoo_logs",
                             "ODOO_DB_VOLUME=cm_testing_odoo_db",
@@ -795,6 +825,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                     "composeFile": "services: {}",
                     "env": "\n".join(
                         (
+                            *_DATABASE_ENV_LINES,
                             "ODOO_DATA_VOLUME=cm_testing_odoo_data",
                             "ODOO_LOG_VOLUME=cm_testing_odoo_logs",
                             "ODOO_DB_VOLUME=cm_testing_odoo_db",
@@ -850,6 +881,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                     "name": "cm-testing",
                     "env": "\n".join(
                         (
+                            *_DATABASE_ENV_LINES,
                             "ODOO_DATA_VOLUME=cm_testing_odoo_data",
                             "ODOO_LOG_VOLUME=cm_testing_odoo_logs",
                             "ODOO_DB_VOLUME=cm_testing_odoo_db",
@@ -897,6 +929,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                     "name": "cm-testing",
                     "env": "\n".join(
                         (
+                            *_DATABASE_ENV_LINES,
                             "ODOO_DATA_VOLUME=cm_testing_odoo_data",
                             "ODOO_LOG_VOLUME=cm_testing_odoo_logs",
                             "ODOO_DB_VOLUME=cm_testing_odoo_db",
@@ -947,6 +980,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                     "name": "cm-testing",
                     "env": "\n".join(
                         (
+                            *_DATABASE_ENV_LINES,
                             "ODOO_DATA_VOLUME=cm_testing_odoo_data",
                             "ODOO_LOG_VOLUME=cm_testing_odoo_logs",
                             "ODOO_DB_VOLUME=cm_testing_odoo_db",
@@ -994,6 +1028,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                     "name": "cm-testing",
                     "env": "\n".join(
                         (
+                            *_DATABASE_ENV_LINES,
                             "ODOO_DATA_VOLUME=cm_testing_odoo_data",
                             "ODOO_LOG_VOLUME=cm_testing_odoo_logs",
                             "ODOO_DB_VOLUME=cm_testing_odoo_db",
@@ -1112,6 +1147,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                     "name": "cm-testing",
                     "env": "\n".join(
                         (
+                            *_DATABASE_ENV_LINES,
                             "ODOO_DATA_VOLUME=cm_testing_odoo_data",
                             "ODOO_LOG_VOLUME=cm_testing_odoo_logs",
                             "ODOO_DB_VOLUME=cm_testing_odoo_db",
@@ -1262,6 +1298,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                     "env": persisted_env
                     or "\n".join(
                         (
+                            *_DATABASE_ENV_LINES,
                             "ODOO_DATA_VOLUME=cm_testing_odoo_data",
                             "ODOO_LOG_VOLUME=cm_testing_odoo_logs",
                             "ODOO_DB_VOLUME=cm_testing_odoo_db",
@@ -1707,6 +1744,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 "env": persisted_env
                 or "\n".join(
                     (
+                        *_DATABASE_ENV_LINES,
                         "ODOO_DATA_VOLUME=cm_testing_odoo_data",
                         "ODOO_LOG_VOLUME=cm_testing_odoo_logs",
                         "ODOO_DB_VOLUME=cm_testing_odoo_db",
@@ -1857,6 +1895,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 "env": persisted_env
                 or "\n".join(
                     (
+                        *_DATABASE_ENV_LINES,
                         "ODOO_DATA_VOLUME=cm_testing_odoo_data",
                         "ODOO_LOG_VOLUME=cm_testing_odoo_logs",
                         "ODOO_DB_VOLUME=cm_testing_odoo_db",
@@ -2011,6 +2050,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 "env": persisted_env
                 or "\n".join(
                     (
+                        *_DATABASE_ENV_LINES,
                         "ODOO_DATA_VOLUME=cm_testing_odoo_data",
                         "ODOO_LOG_VOLUME=cm_testing_odoo_logs",
                         "ODOO_DB_VOLUME=cm_testing_odoo_db",
@@ -2130,6 +2170,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                     "composeFile": "services: {}",
                     "env": "\n".join(
                         (
+                            *_DATABASE_ENV_LINES,
                             "ODOO_DATA_VOLUME=cm_testing_odoo_data",
                             "ODOO_LOG_VOLUME=cm_testing_odoo_logs",
                             "ODOO_DB_VOLUME=cm_testing_odoo_db",
@@ -2211,6 +2252,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                     "composeFile": rendered_compose_file,
                     "env": "\n".join(
                         (
+                            *_DATABASE_ENV_LINES,
                             "ODOO_DATA_VOLUME=cm_testing_odoo_data",
                             "ODOO_LOG_VOLUME=cm_testing_odoo_logs",
                             "ODOO_DB_VOLUME=cm_testing_odoo_db",
@@ -2269,7 +2311,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             result.error_message,
         )
         self.assertIn("ODOO_OVERRIDE_SECRET__ADDON__OPENAI__API_KEY", result.error_message)
-        sync_source.assert_called_once()
+        sync_source.assert_not_called()
         update_env.assert_not_called()
         trigger_deploy.assert_not_called()
         post_deploy.assert_not_called()
@@ -2318,6 +2360,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 "env": persisted_env
                 or "\n".join(
                     (
+                        *_DATABASE_ENV_LINES,
                         "ODOO_DATA_VOLUME=opw_prod_odoo_data",
                         "ODOO_LOG_VOLUME=opw_prod_odoo_logs",
                         "ODOO_DB_VOLUME=opw_prod_odoo_db",
@@ -2444,6 +2487,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                     "composeFile": "services: {}",
                     "env": "\n".join(
                         (
+                            *_DATABASE_ENV_LINES,
                             "ODOO_DATA_VOLUME=cm_testing_odoo_data",
                             "ODOO_LOG_VOLUME=cm_testing_odoo_logs",
                             "ODOO_DB_VOLUME=cm_testing_odoo_db",
@@ -2535,6 +2579,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                     "composeFile": "services: {}",
                     "env": "\n".join(
                         (
+                            *_DATABASE_ENV_LINES,
                             "ODOO_DATA_VOLUME=cm_testing_odoo_data",
                             "ODOO_LOG_VOLUME=cm_testing_odoo_logs",
                             "ODOO_DB_VOLUME=cm_testing_odoo_db",
@@ -2627,6 +2672,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                     "composeFile": "services: {}",
                     "env": "\n".join(
                         (
+                            *_DATABASE_ENV_LINES,
                             "ODOO_DATA_VOLUME=cm_testing_odoo_data",
                             "ODOO_LOG_VOLUME=cm_testing_odoo_logs",
                             "ODOO_DB_VOLUME=cm_testing_odoo_db",
@@ -2668,12 +2714,118 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         update_env.assert_not_called()
         trigger_deploy.assert_not_called()
 
+    def test_apply_refuses_missing_or_undeclared_compose_inputs_before_provider_writes(
+        self,
+    ) -> None:
+        for key, declared in (
+            ("ODOO_DB_NAME", False),
+            ("ODOO_DB_NAME", True),
+            ("ODOO_WEB_HOST_PORT", False),
+            ("ADDON_FEATURE", False),
+            ("addon_feature", False),
+        ):
+            with self.subTest(key=key, declared=declared):
+                profile = _profile()
+                if not declared:
+                    profile = profile.model_copy(
+                        update={
+                            "expected_config": profile.expected_config.model_copy(
+                                update={
+                                    "runtime_environment_keys": tuple(
+                                        requirement
+                                        for requirement in profile.expected_config.runtime_environment_keys
+                                        if requirement.key != key
+                                    )
+                                }
+                            )
+                        }
+                    )
+                store = _Store(
+                    profile=profile,
+                    target_record=_target_record(),
+                    target_id_record=_target_id_record(),
+                    inventory=_inventory(),
+                )
+                provider_env = "\n".join(
+                    (
+                        *_DATABASE_ENV_LINES,
+                        "ODOO_DATA_VOLUME=cm_testing_odoo_data",
+                        "ODOO_LOG_VOLUME=cm_testing_odoo_logs",
+                        "ODOO_DB_VOLUME=cm_testing_odoo_db",
+                    )
+                )
+                if key != "ODOO_DB_NAME":
+                    provider_env += f"\n{key}=18069"
+                with (
+                    patch(
+                        "control_plane.workflows.odoo_stable_target_replacement.dokploy_source.read_dokploy_config",
+                        return_value=("host", "token"),
+                    ),
+                    patch(
+                        "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.fetch_dokploy_target_payload",
+                        return_value={"name": "cm-testing", "env": provider_env},
+                    ),
+                    patch(
+                        "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.latest_deployment_for_target",
+                        return_value={"deploymentId": "deploy-123", "status": "success"},
+                    ),
+                    patch(
+                        "control_plane.workflows.odoo_stable_target_replacement.control_plane_runtime_environments.resolve_runtime_environment_values",
+                        return_value={key: ""} if declared else {},
+                    ),
+                    patch(
+                        "control_plane.workflows.odoo_stable_target_replacement.dokploy_compose.sync_dokploy_compose_raw_source"
+                    ) as sync_source,
+                    patch(
+                        "control_plane.workflows.odoo_stable_target_replacement.dokploy_compose.ensure_compose_web_domain_route"
+                    ) as ensure_domain,
+                    patch(
+                        "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.update_dokploy_target_env"
+                    ) as update_env,
+                    patch(
+                        "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.trigger_deployment"
+                    ) as trigger_deploy,
+                ):
+                    result = execute_odoo_stable_target_replacement_apply(
+                        control_plane_root=Path("."),
+                        record_store=store,
+                        request=OdooStableTargetReplacementApplyRequest(
+                            product="odoo-tenant-cm", instance="testing"
+                        ),
+                        dokploy_request=cast(DokployRequest, _request),
+                    )
+                self.assertEqual(result.deploy_status, "fail")
+                if key in {"ADDON_FEATURE", "addon_feature"}:
+                    self.assertIn("1 undeclared provider-only env key(s)", result.error_message)
+                    self.assertNotIn(key, result.error_message)
+                else:
+                    self.assertIn(key, result.error_message)
+                sync_source.assert_not_called()
+                ensure_domain.assert_not_called()
+                update_env.assert_not_called()
+                trigger_deploy.assert_not_called()
+
     def test_apply_records_runtime_key_safety_pass_evidence(self) -> None:
         store = _Store(
             profile=_profile_with_runtime_secret(),
             target_record=_target_record(),
             target_id_record=_target_id_record(),
             inventory=_inventory(),
+            odoo_instance_override_record=OdooInstanceOverrideRecord(
+                context="cm",
+                instance="testing",
+                addon_settings=(
+                    OdooAddonSettingOverride(
+                        addon="openai",
+                        setting="api_key",
+                        value=OdooOverrideValue(
+                            source="secret_binding",
+                            secret_binding_id="secret-openai-api-key",
+                        ),
+                    ),
+                ),
+                updated_at="2026-06-13T18:00:00Z",
+            ),
         )
         store.secret_bindings = (
             SecretBinding(
@@ -2715,7 +2867,25 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 ),
             ),
         )
-        persisted_env = ""
+        worker_private_key = "-----BEGIN FAKE KEY-----\nZmFrZS1rZXk=\n-----END FAKE KEY-----"
+        worker_known_hosts = "backup.example ssh-ed25519 fake-host-key\n"
+        persisted_env = control_plane_dokploy.serialize_dokploy_env_text(
+            {
+                "ODOO_DB_NAME": "test_db",
+                "ODOO_DB_USER": "test_user",
+                "ODOO_DATA_VOLUME": "cm_testing_odoo_data",
+                "ODOO_LOG_VOLUME": "cm_testing_odoo_logs",
+                "ODOO_DB_VOLUME": "cm_testing_odoo_db",
+                "ODOO_OVERRIDE_SECRET__ADDON__OPENAI__API_KEY": "fake-override-secret",
+                "PRODUCTION_BACKUP_SSH_PRIVATE_KEY": worker_private_key,
+                "PRODUCTION_BACKUP_SSH_KNOWN_HOSTS": worker_known_hosts,
+            }
+        )
+        previous_readback = control_plane_dokploy.parse_dokploy_env_text(persisted_env)
+        self.assertNotEqual(
+            previous_readback["PRODUCTION_BACKUP_SSH_PRIVATE_KEY"], worker_private_key
+        )
+        self.assertIn("ZmFrZS1rZXk", previous_readback)
 
         def _fetch_target_payload(**_: object) -> JsonValue:
             return {
@@ -2726,6 +2896,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 "env": persisted_env
                 or "\n".join(
                     (
+                        *_DATABASE_ENV_LINES,
                         "ODOO_DATA_VOLUME=cm_testing_odoo_data",
                         "ODOO_LOG_VOLUME=cm_testing_odoo_logs",
                         "ODOO_DB_VOLUME=cm_testing_odoo_db",
@@ -2752,7 +2923,11 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             ),
             patch(
                 "control_plane.workflows.odoo_stable_target_replacement.control_plane_runtime_environments.resolve_runtime_environment_values",
-                return_value={"ODOO_DB_PASSWORD": "managed-secret-value"},
+                return_value={
+                    "ODOO_DB_PASSWORD": "managed-secret-value",
+                    "PRODUCTION_BACKUP_SSH_PRIVATE_KEY": worker_private_key,
+                    "PRODUCTION_BACKUP_SSH_KNOWN_HOSTS": worker_known_hosts,
+                },
             ),
             patch(
                 "control_plane.workflows.odoo_stable_target_replacement.dokploy_compose.sync_dokploy_compose_raw_source"
@@ -2806,6 +2981,15 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             )
 
         self.assertEqual(result.deploy_status, "pass")
+        self.assertIn("ODOO_DB_PASSWORD=managed-secret-value", persisted_env)
+        self.assertIn("ODOO_DATA_VOLUME=cm_testing_odoo_data", persisted_env)
+        self.assertIn(
+            "ODOO_OVERRIDE_SECRET__ADDON__OPENAI__API_KEY=fake-override-secret", persisted_env
+        )
+        self.assertNotIn("PRODUCTION_BACKUP_SSH_", persisted_env)
+        self.assertNotIn("ZmFrZS1rZXk", persisted_env)
+        self.assertNotIn(worker_private_key, persisted_env)
+        self.assertNotIn(worker_known_hosts, persisted_env)
         final_deployment = store.deployment_records[-1]
         self.assertEqual(final_deployment.runtime_source["runtime_key_safety_required"], "True")
         self.assertEqual(final_deployment.runtime_source["runtime_key_safety_status"], "pass")
@@ -2831,6 +3015,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                     "name": "cm-testing",
                     "env": "\n".join(
                         (
+                            *_DATABASE_ENV_LINES,
                             "ODOO_DATA_VOLUME=cm_testing_odoo_data",
                             "ODOO_LOG_VOLUME=cm_testing_odoo_logs",
                             "ODOO_DB_VOLUME=cm_testing_odoo_db",
@@ -2876,6 +3061,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                     "name": "cm-testing",
                     "env": "\n".join(
                         (
+                            *_DATABASE_ENV_LINES,
                             "ODOO_DATA_VOLUME=cm_testing_odoo_data",
                             "ODOO_LOG_VOLUME=cm_testing_odoo_logs",
                             "ODOO_DB_VOLUME=cm_testing_odoo_db",
@@ -2919,6 +3105,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                     "name": "cm-testing",
                     "env": "\n".join(
                         (
+                            *_DATABASE_ENV_LINES,
                             "ODOO_DATA_VOLUME=cm_testing_odoo_data",
                             "ODOO_LOG_VOLUME=cm_testing_odoo_logs",
                             "ODOO_DB_VOLUME=cm_testing_odoo_db",
