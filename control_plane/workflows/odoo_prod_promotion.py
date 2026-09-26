@@ -144,6 +144,7 @@ def execute_odoo_prod_promotion(
     )
     backup_gate = None
     infrastructure_backup = None
+    backup_checkpoint = None
     try:
         infrastructure_backup = require_production_promotion_backup(
             record_store=record_store,
@@ -191,7 +192,7 @@ def execute_odoo_prod_promotion(
                     instance=request.to_instance,
                     artifact_id=request.artifact_id,
                     source_git_ref=request.source_git_ref or artifact_manifest.source_commit,
-                    data_source_mode="existing",
+                    allow_empty_data=True,
                     verify_health=request.verify_health,
                     verify_canonical=request.verify_health,
                     verify_logo=request.verify_health,
@@ -240,6 +241,8 @@ def execute_odoo_prod_promotion(
             error_message=replacement_result.error_message,
         )
     except click.ClickException as error:
+        if infrastructure_backup is not None and backup_checkpoint is not None:
+            infrastructure_backup.evidence.update(backup_checkpoint.evidence)
         failed_record = _build_promotion_record(
             record_id=promotion_record_id,
             request=request,

@@ -214,7 +214,8 @@ jobs:
           node <<'NODE'
           const fs = require('node:fs');
           const response = JSON.parse(fs.readFileSync('.launchplane/promotion-release-review.json', 'utf8'));
-          if (response.product !== process.env.PRODUCT || response.review?.approved !== true) {
+          if (response.product !== process.env.PRODUCT ||
+              !(response.review?.required === false || response.review?.approved === true)) {
             throw new Error('The current release must be approved before its production backup.');
           }
           NODE

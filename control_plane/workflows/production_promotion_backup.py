@@ -254,8 +254,18 @@ def production_promotion_backup_guard(
         # lock as other promotions and capture/retention. A crash leaves a
         # durable pending record, so the next attempt must take a fresh backup.
         record_store.write_promotion_record(pending_promotion)
-        yield ProductionPromotionBackupGuard(checkpoint, protection_evidence)
-        require_lock()
+        try:
+            yield ProductionPromotionBackupGuard(checkpoint, protection_evidence)
+            require_lock()
+        except Exception:
+            protection_evidence["provider_effects_status"] = (
+                "unknown_after_failure" if effects_started else "not_started"
+            )
+            failed = pending_promotion.model_copy(deep=True)
+            failed.deploy.status = "fail"
+            failed.backup_gate.evidence.update(protection_evidence)
+            record_store.write_promotion_record(failed)
+            raise
 
 
 def _read_operation(

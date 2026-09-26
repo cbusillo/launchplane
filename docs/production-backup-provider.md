@@ -122,10 +122,11 @@ remain separate rollout steps. Product repositories pass no provider topology.
 
 ## Promotion enforcement
 
-The Launchplane reusable Odoo and generic-web promotion workflows first require
-current release approval, then enqueue the shared capture and poll the same
+The Launchplane reusable Odoo and generic-web promotion workflows first enforce
+the current release-review requirement, then enqueue the shared capture and poll the same
 idempotent request until it completes. The service checks release approval again
-before deployment.
+before deployment. A prelaunch product whose review explicitly says `required=false`
+follows the service's existing exemption; absent review metadata does not grant it.
 Failure or cancellation stops the workflow before promotion. Generic-web reads
 the production context from the current product profile. Odoo's thin workflow
 then sends `run.infrastructure_backup_record_id`; Launchplane resolves the
@@ -175,6 +176,20 @@ evidence cannot authorize a new promotion. A capture refused before verification
 including a source-lock refusal during promotion, cannot prune the selected
 snapshot and does not invalidate the in-flight promotion. Other host/name aliases
 and legacy commands remain outside this lock, as described above.
+
+Serialize the whole capture/logical-backup/promotion sequence for products that
+share a guest. The lock covers each capture and deployment; it does not queue
+the intervening Odoo logical backup. An overlapping capture can supersede the
+first product's evidence even when retention has not yet removed its snapshot.
+That conservative refusal requires a new capture after the other promotion
+finishes; do not run competing retry loops for tenants on one guest.
+
+An exception after admission marks the promotion failed and retains its backup
+reservation. Evidence distinguishes `provider_effects_status=not_started` from
+`unknown_after_failure`; a failed attempt after effects does not prove the
+provider rolled back. A process crash or unavailable database can still leave
+the durable pending record for reconciliation. Neither state permits capture
+reuse.
 
 A generic-web dry run creates no backup. Without a supplied capture it reports
 backup status `pending` with `required=true`; a successful dry run never provides

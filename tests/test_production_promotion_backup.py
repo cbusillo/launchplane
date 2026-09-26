@@ -497,6 +497,34 @@ class ProductionPromotionBackupTests(unittest.TestCase):
         store.write_promotion_record(second)
         self.assertEqual(len(store.list_promotion_records()), 2)
 
+    def test_admitted_exception_records_failed_attempt_and_preserves_uncertainty(self) -> None:
+        for start_effects in (False, True):
+            with self.subTest(start_effects=start_effects):
+                store = self.capture()
+                pending = self.pending(store)
+                with self.assertRaisesRegex(click.ClickException, "provider interrupted"):
+                    with production_promotion_backup_guard(
+                        record_store=store,
+                        product="example-product",
+                        context="example-product",
+                        instance="prod",
+                        promotion_action=ODOO_PROMOTION_BACKUP_ACTION,
+                        backup_record_id="backup-example",
+                        pending_promotion=pending,
+                    ) as checkpoint:
+                        if start_effects:
+                            checkpoint("target_update")
+                        raise click.ClickException("provider interrupted")
+                recorded = store.read_promotion_record(pending.record_id)
+                self.assertEqual(recorded.deploy.status, "fail")
+                self.assertEqual(recorded.backup_gate.status, "pass")
+                self.assertEqual(
+                    recorded.backup_gate.evidence["provider_effects_status"],
+                    "unknown_after_failure" if start_effects else "not_started",
+                )
+                with self.assertRaisesRegex(click.ClickException, "already used"):
+                    self.require(store)
+
     def test_generic_web_cannot_opt_out(self) -> None:
         with self.assertRaises(ValidationError):
             GenericWebProdPromotionRequest.model_validate(

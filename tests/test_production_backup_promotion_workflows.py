@@ -80,6 +80,9 @@ class ProductionBackupPromotionWorkflowTests(unittest.TestCase):
                     ({}, False),
                     ({"approved": False}, False),
                     ({"approved": True}, True),
+                    ({"required": False, "approved": False}, True),
+                    ({"required": True, "approved": False}, False),
+                    ({"required": "false", "approved": False}, False),
                 ):
                     with self.subTest(workflow=filename, review=review):
                         (root / ".launchplane/promotion-release-review.json").write_text(

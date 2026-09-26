@@ -202,7 +202,7 @@ class OdooProdPromotionWorkflowTests(unittest.TestCase):
                 control_plane_root=Path("/control-plane"),
                 state_dir=Path("/state"),
                 database_url="postgresql://launchplane.example/db",
-                record_store=cast(OdooProdPromotionStore, record_store),
+                record_store=cast(OdooProdPromotionStore, cast(object, record_store)),
                 request=OdooProdPromotionRequest(
                     product="odoo-tenant-cm",
                     context="cm",
@@ -251,7 +251,7 @@ class OdooProdPromotionWorkflowTests(unittest.TestCase):
                 control_plane_root=Path("/control-plane"),
                 state_dir=Path("/state"),
                 database_url="postgresql://launchplane.example/db",
-                record_store=cast(OdooProdPromotionStore, record_store),
+                record_store=cast(OdooProdPromotionStore, cast(object, record_store)),
                 request=OdooProdPromotionRequest(
                     product="odoo-tenant-cm",
                     context="cm",
@@ -284,7 +284,7 @@ class OdooProdPromotionWorkflowTests(unittest.TestCase):
                 control_plane_root=Path("/control-plane"),
                 state_dir=Path("/state"),
                 database_url="postgresql://launchplane.example/db",
-                record_store=cast(OdooProdPromotionStore, record_store),
+                record_store=cast(OdooProdPromotionStore, cast(object, record_store)),
                 request=OdooProdPromotionRequest(
                     product="odoo-tenant-cm",
                     context="cm",
