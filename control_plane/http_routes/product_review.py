@@ -242,7 +242,16 @@ def register_product_review_routes(
         )
         if not viewer_is_product_owner(profile=profile, identity=identity):
             unavailable(trace_id)
-        saved_decision(store, profile, envelope.pull_request, envelope.decision_id, trace_id)
+        with store.product_review_lock(
+            repository=profile.repository, pull_request_number=envelope.pull_request
+        ):
+            decision = saved_decision(
+                store, profile, envelope.pull_request, envelope.decision_id, trace_id
+            )
+            if not decision.feedback_requested:
+                store.write_product_review_decision_record(
+                    decision.model_copy(update={"feedback_requested": True})
+                )
         # Reconcile delivery only. Never record a new decision or require a live preview.
         dependencies.publish_owner_review_status(store, profile, envelope.pull_request)
         return build_response(

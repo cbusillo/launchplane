@@ -19824,10 +19824,16 @@ class PostgresRecordStore(HumanSessionStore):
         )
 
     @contextmanager
-    def product_review_lock(self, *, repository: str, pull_request_number: int) -> Iterator[None]:
+    def product_review_lock(
+        self,
+        *,
+        repository: str,
+        pull_request_number: int,
+        purpose: Literal["decision", "feedback"] = "decision",
+    ) -> Iterator[None]:
         with self._session_factory() as session, session.begin():
             self._lock_landing_authority(
-                session, f"product-review:{repository.casefold()}#{pull_request_number}"
+                session, f"product-review-{purpose}:{repository.casefold()}#{pull_request_number}"
             )
             yield
 

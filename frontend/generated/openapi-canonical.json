@@ -33126,6 +33126,11 @@
             "title": "Decision",
             "type": "string"
           },
+          "feedback_requested": {
+            "default": false,
+            "title": "Feedback Requested",
+            "type": "boolean"
+          },
           "feedback_url": {
             "default": "",
             "title": "Feedback Url",

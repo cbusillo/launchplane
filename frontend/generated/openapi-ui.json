@@ -25850,6 +25850,11 @@
             "title": "Decision",
             "type": "string"
           },
+          "feedback_requested": {
+            "default": false,
+            "title": "Feedback Requested",
+            "type": "boolean"
+          },
           "feedback_url": {
             "default": "",
             "title": "Feedback Url",
@@ -25906,6 +25911,7 @@
         "required": [
           "decided_at",
           "decision",
+          "feedback_requested",
           "feedback_url",
           "head_sha",
           "owner_github_id",

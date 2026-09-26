@@ -11,13 +11,15 @@ nothing. The release checklist is a separate decision bound to the testing
 candidate and its change list. See [release-review.md](release-review.md) and the
 Product Review API in [service-boundary.md](service-boundary.md).
 
-Each saved preview decision is projected onto its pull request with the complete
+Each new preview decision is projected onto its pull request with the complete
 Owner reason, immutable Owner ID, reviewed commit, and a link to that saved
 decision in Launchplane. Publication uses the existing preview-feedback
 credential and verifies its GitHub `/user` identity. An unreadable identity or
 failed comment lookup leaves delivery pending; it never selects another credential.
 Comments are reconciled by decision ID and publishing actor under a per-PR
 storage lock. Retrying after a lost provider response recovers the existing comment.
+Delivery and status updates serialize separately from decision saves, so provider
+I/O cannot prevent the Owner's decision from being persisted.
 If that unique comment was edited, retry repairs it from the saved decision.
 One failed historical delivery does not prevent later decisions from being sent.
 
@@ -28,6 +30,10 @@ Resubmitting the same decision for the same serving preview reuses its record; a
 preview creates a new record. A ready-preview refresh also retries undelivered
 decisions. The Owner-review status remains pending until the current decision's
 feedback has a delivery receipt. Historical decisions keep their reviewed commit.
+Decisions saved before this feature have `feedback_requested=false`: refreshes
+do not backfill their prose or downgrade their existing acceptance status.
+The Owner can explicitly send that saved feedback or resubmit their decision.
+The form explains that new decisions and feedback are shared on the pull request.
 
 The maintained `codex-skills` agent watcher uses the configured publishing identity
 to find candidates, then verifies the complete decision and exact comment receipt

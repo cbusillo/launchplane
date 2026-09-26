@@ -7141,9 +7141,15 @@ class FilesystemRecordStore:
         return tuple(records if limit is None else records[:limit])
 
     @contextmanager
-    def product_review_lock(self, *, repository: str, pull_request_number: int) -> Iterator[None]:
+    def product_review_lock(
+        self,
+        *,
+        repository: str,
+        pull_request_number: int,
+        purpose: Literal["decision", "feedback"] = "decision",
+    ) -> Iterator[None]:
         with self._exclusive_record_lock(
-            "product-review", f"{repository.casefold()}#{pull_request_number}"
+            f"product-review-{purpose}", f"{repository.casefold()}#{pull_request_number}"
         ):
             yield
 

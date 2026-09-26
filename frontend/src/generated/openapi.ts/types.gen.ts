@@ -3328,6 +3328,7 @@ export type ProductReviewDecisionEnvelope = {
 export type ProductReviewDecisionRecord = {
     decided_at: string;
     decision: 'accepted' | 'changes_requested';
+    feedback_requested: boolean;
     feedback_url: string;
     head_sha: string;
     owner_github_id: string;

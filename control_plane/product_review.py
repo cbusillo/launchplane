@@ -7,7 +7,7 @@ product record? A decision is a recorded opinion and never merges or deploys.
 from dataclasses import dataclass
 from contextlib import AbstractContextManager
 from datetime import datetime, timezone
-from typing import Protocol, cast
+from typing import Literal, Protocol, cast
 from uuid import uuid4
 
 from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
@@ -22,7 +22,11 @@ from control_plane.service_auth import GitHubHumanIdentity, LaunchplaneIdentity
 
 class ProductReviewStore(Protocol):
     def product_review_lock(
-        self, *, repository: str, pull_request_number: int
+        self,
+        *,
+        repository: str,
+        pull_request_number: int,
+        purpose: Literal["decision", "feedback"] = "decision",
     ) -> AbstractContextManager[None]: ...
 
     def list_product_profile_records(
@@ -187,6 +191,9 @@ def record_product_review_decision(
             and previous.decision == decision
             and previous.reason == reason.strip()
         ):
+            if not previous.feedback_requested:
+                previous = previous.model_copy(update={"feedback_requested": True})
+                store.write_product_review_decision_record(previous)
             return previous
         return _append_product_review_decision(
             store=store,
@@ -212,6 +219,7 @@ def _append_product_review_decision(
     decided_at = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
     record = ProductReviewDecisionRecord(
         record_id=f"product-review-{profile.product}-pr-{pull_request_number}-{uuid4().hex}",
+        feedback_requested=True,
         product=profile.product,
         repository=profile.repository,
         pull_request_number=pull_request_number,

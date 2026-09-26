@@ -36,3 +36,13 @@ test("delivery of a historical saved decision can be retried without a preview",
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await page.screenshot({ path: testInfo.outputPath("owner-feedback-retried.png"), fullPage: true });
 });
+
+test("legacy feedback is shared only when the Owner explicitly sends it", async ({ page }) => {
+  await page.goto("/ui/owner-review?fixture=products&repository=example%2Fcontrol-plane&pull_request=308&scenario=legacy-decision&decision_id=saved");
+  const decision = page.getByLabel("Recorded decision");
+  await expect(decision).toContainText("This saved decision has not been shared on the pull request.");
+  await expect(page.getByRole("button", { name: "Accept", exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "Send feedback to the agent", exact: true }).click();
+  await expect(decision).not.toContainText("has not been shared");
+  await expect(decision).toContainText("Reviewed preview version aaaaaaa");
+});

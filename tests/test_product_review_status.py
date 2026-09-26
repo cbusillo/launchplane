@@ -13,6 +13,7 @@ from control_plane.contracts.product_review import (
 )
 from control_plane.github_app_identity import GitHubAppInstallationToken
 from control_plane.http_app import create_launchplane_fastapi_app
+from control_plane.product_review import ProductReviewPreview, record_product_review_decision
 from control_plane.product_review_status import (
     OwnerReviewStatusPublisher,
     owner_review_reference_url,
@@ -174,6 +175,7 @@ def _decision(
 ) -> ProductReviewDecisionRecord:
     return ProductReviewDecisionRecord(
         record_id=f"decision-{decided_at}",
+        feedback_requested=True,
         product="example-site",
         repository=_REPOSITORY,
         pull_request_number=_PULL_REQUEST,
@@ -460,6 +462,55 @@ class OwnerReviewStatusTests(unittest.TestCase):
                 future.result()
         self.assertEqual(len(github.comments), 1)
 
+    def test_legacy_decision_is_not_automatically_posted_or_downgraded(self) -> None:
+        github = _GitHub()
+        original = _decision(decision="accepted", decided_at="2026-09-25T12:00:00Z").model_copy(
+            update={"feedback_requested": False}
+        )
+        self.store.write_product_review_decision_record(original)
+        self._publish(github)
+        self.assertEqual(github.comments, [])
+        self.assertEqual(github.statuses[0]["state"], "success")
+        self.assertEqual(
+            self.store.list_product_review_decision_records(
+                repository=_REPOSITORY, pull_request_number=_PULL_REQUEST
+            ),
+            (original,),
+        )
+
+    def test_owner_decision_persists_while_feedback_delivery_is_locked(self) -> None:
+        owner = GitHubHumanIdentity(
+            login="site-owner",
+            github_id=_OWNER_GITHUB_ID,
+            name="site-owner",
+            email="",
+            organizations=frozenset(),
+            teams=frozenset(),
+            role="read_only",
+        )
+        with ThreadPoolExecutor(max_workers=1) as workers:
+            with self.store.product_review_lock(
+                repository=_REPOSITORY, pull_request_number=_PULL_REQUEST, purpose="feedback"
+            ):
+                written = workers.submit(
+                    record_product_review_decision,
+                    store=self.store,
+                    profile=_profile(),
+                    pull_request_number=_PULL_REQUEST,
+                    preview=ProductReviewPreview(
+                        preview_url="https://pr-42.example.invalid", head_sha=_HEAD_SHA
+                    ),
+                    decision="changes_requested",
+                    reason="Keep this feedback.",
+                    identity=owner,
+                ).result(timeout=2)
+                self.assertEqual(
+                    self.store.list_product_review_decision_records(
+                        repository=_REPOSITORY, pull_request_number=_PULL_REQUEST
+                    ),
+                    (written,),
+                )
+
 
 class OwnerReviewStatusHttpTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
@@ -547,7 +598,7 @@ class OwnerReviewStatusHttpTests(unittest.IsolatedAsyncioTestCase):
         self.store.write_product_profile_record(_profile())
         original = _decision(
             decision="accepted", head_sha=_OLDER_HEAD_SHA, decided_at="2026-09-25T12:00:00Z"
-        )
+        ).model_copy(update={"feedback_requested": False})
         self.store.write_product_review_decision_record(original)
         app = create_launchplane_fastapi_app(
             verifier=_RejectingVerifier(),
@@ -587,9 +638,10 @@ class OwnerReviewStatusHttpTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(len(saved), 1)
         self.assertEqual(
-            saved[0].model_dump(exclude={"feedback_url"}),
-            original.model_dump(exclude={"feedback_url"}),
+            saved[0].model_dump(exclude={"feedback_url", "feedback_requested"}),
+            original.model_dump(exclude={"feedback_url", "feedback_requested"}),
         )
+        self.assertTrue(saved[0].feedback_requested)
         self.assertEqual(len(github.comments), 1)
         self.assertEqual(github.statuses[0]["state"], "pending")
 

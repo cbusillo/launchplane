@@ -3931,6 +3931,8 @@ Optional `decision_id` selects a saved decision from this same visible PR in
 `latest_decision`, returning 404 when absent. This supports historical decision
 links without making their acceptance apply to the currently served preview.
 Decisions include `feedback_url`, empty until GitHub comment delivery is confirmed.
+`feedback_requested` is true for new submissions and explicit delivery requests;
+it defaults to false on older records, which are not automatically published.
 The caller must be the browser-authenticated GitHub Owner or an authenticated
 identity allowed `product_profile.read` for that product in the Launchplane
 context. A scoped operator or agent can inspect the preview and latest decision;
@@ -3956,7 +3958,8 @@ merges and deploys nothing. See [Owner feedback delivery](owner-acceptance.md).
 `POST /v1/product-review/feedback/retry` takes `{repository, pull_request,
 decision_id}` using the same Owner browser mutation identity and CSRF boundary.
 It requires a saved decision on that visible PR (404 otherwise), reconciles pending
-feedback, and returns that selected decision and its delivery receipt. It needs
+feedback (explicitly enabling publication of that record if it predates delivery),
+and returns that selected decision and its delivery receipt. It needs
 no serving preview and records no new decision. Operators and bearer identities
 cannot use this Owner action. A still-empty receipt means delivery remains pending;
 the saved decision is unchanged. Historical review links also provide a link back

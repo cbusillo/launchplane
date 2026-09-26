@@ -188,7 +188,8 @@ function OwnerPreviewReviewRoute({
         <h1 data-route-heading tabIndex={-1}>Review this change</h1>
         <p>
           Open the preview and look at the change. Then accept it, or say what
-          should change. Your decision does not publish anything.
+          should change. Your decision does not publish the site.
+          Your decision and feedback are shared on the pull request for the agent to read.
         </p>
       </div>
       {!lookup.valid ? (
@@ -289,12 +290,14 @@ function ProductReviewCard({
       {historical ? (
         <p><a href={`?repository=${encodeURIComponent(review.repository)}&pull_request=${review.pull_request_number}`}>View latest review</a></p>
       ) : null}
-      {review.can_decide && previewUrl ? (
+      {!historical && review.can_decide && previewUrl ? (
         <ProductReviewDecisionForm
           fixtureMode={fixtureMode}
           review={review}
           onDecided={onDecided}
         />
+      ) : historical ? (
+        <OwnerReviewState>Open the latest review to record a new decision.</OwnerReviewState>
       ) : (
         <OwnerReviewState>{cannotDecideMessage(review)}</OwnerReviewState>
       )}
@@ -325,7 +328,7 @@ function LatestDecision({ decision, review, fixtureMode, onDecided }: {
     setFailure("");
     try {
       const response = fixtureMode
-        ? { ...review, latest_decision: { ...decision, feedback_url: `${review.pull_request_url}#issuecomment-1` } }
+        ? { ...review, latest_decision: { ...decision, feedback_requested: true, feedback_url: `${review.pull_request_url}#issuecomment-1` } }
         : await retryProductReviewFeedback({
             repository: review.repository,
             pull_request: review.pull_request_number,
@@ -358,12 +361,14 @@ function LatestDecision({ decision, review, fixtureMode, onDecided }: {
       {decision.reason ? <blockquote>{decision.reason}</blockquote> : null}
       {!decision.feedback_url ? (
         <>
-          <OwnerReviewState tone="error">
-            Your decision is saved, but delivery to the agent is pending.
+          <OwnerReviewState tone={decision.feedback_requested ? "error" : "neutral"}>
+            {decision.feedback_requested
+              ? "Your decision is saved, but delivery to the agent is pending."
+              : "This saved decision has not been shared on the pull request."}
           </OwnerReviewState>
           {review.viewer_is_owner ? (
             <button className="button" type="button" disabled={busy} onClick={() => void retry()}>
-              {busy ? "Retrying delivery…" : "Retry delivery"}
+              {busy ? "Sending feedback…" : decision.feedback_requested ? "Retry delivery" : "Send feedback to the agent"}
             </button>
           ) : null}
         </>

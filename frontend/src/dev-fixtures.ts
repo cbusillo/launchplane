@@ -2854,7 +2854,9 @@ export function productReviewForFixture(
         ...latestDecision,
         feedback_url: scenario === "delivery-pending" ? "" : latestDecision.feedback_url,
       } : null) ??
-      (scenario === "pending-without-preview"
+      (scenario === "legacy-decision"
+        ? { ...productReviewDecisionForFixture("accepted", ""), feedback_requested: false, feedback_url: "" }
+        : scenario === "pending-without-preview"
         ? { ...productReviewDecisionForFixture("accepted", ""), feedback_url: "", head_sha: "b".repeat(40) }
         : scenario === "earlier-decision"
         ? { ...productReviewDecisionForFixture("accepted", ""), head_sha: "b".repeat(40) }
@@ -2871,6 +2873,7 @@ export function productReviewDecisionForFixture(
   return {
     schema_version: 1,
     record_id: `fixture-product-review-${decision}`,
+    feedback_requested: true,
     feedback_url: "https://github.com/example/control-plane/pull/308#issuecomment-1",
     product: "example-site",
     repository: "example/control-plane",
