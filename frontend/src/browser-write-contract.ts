@@ -15,6 +15,7 @@ import type {
   PrepareOrdinaryAgentMergeTrainTargetData,
   PrepareOrdinaryAgentDeliveryPolicyData,
   WriteProductReviewDecisionData,
+  RetryProductReviewFeedbackData,
   WriteReleaseReviewDecisionData,
   SubmitOwnerSecretInputData,
 } from "./generated/openapi.ts";
@@ -38,6 +39,8 @@ export const BROWSER_WRITE_ROUTES = {
     "/v1/work-graph/rank" satisfies RankWorkGraphSnapshotData["url"],
   productReviewDecision:
     "/v1/product-review/decisions" satisfies WriteProductReviewDecisionData["url"],
+  productReviewFeedbackRetry:
+    "/v1/product-review/feedback/retry" satisfies RetryProductReviewFeedbackData["url"],
   privilegedOperationApprove:
     "/v1/privileged-operations/plans/{operation_id}/approve" satisfies ApproveHumanPrivilegedOperationData["url"],
   privilegedOperationRevoke:

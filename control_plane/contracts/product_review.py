@@ -27,6 +27,8 @@ class ProductReviewDecisionRecord(BaseModel):
     owner_github_id: str
     owner_github_login: str
     decided_at: str
+    feedback_url: str = ""
+    feedback_requested: bool = False
 
     @model_validator(mode="after")
     def _validate_record(self) -> "ProductReviewDecisionRecord":

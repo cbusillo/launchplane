@@ -4,9 +4,20 @@ import { afterEach, test } from "node:test";
 import {
   readProductReview,
   writeProductReviewDecision,
+  retryProductReviewFeedback,
 } from "../src/api.ts";
 
 const originalFetch = globalThis.fetch;
+
+test("a decision link requests the selected saved review", async () => {
+  let requested;
+  globalThis.fetch = async (input) => {
+    requested = String(input);
+    return new Response(JSON.stringify({ status: "ok" }), { headers: { "Content-Type": "application/json" } });
+  };
+  await readProductReview("example/tenant-site", 42, undefined, "review:old");
+  assert.equal(requested, "/v1/product-review?repository=example%2Ftenant-site&pull_request=42&decision_id=review%3Aold");
+});
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
@@ -52,4 +63,10 @@ test("Owner decision is sent with the session CSRF token to the product-review r
     decision: "changes_requested",
     reason: "The price is wrong.",
   });
+  await retryProductReviewFeedback({ repository: "example/tenant-site", pull_request: 42, decision_id: "saved-decision" });
+  const retry = calls.at(-1);
+  assert.equal(retry.input, "/v1/product-review/feedback/retry");
+  assert.equal(retry.init.method, "POST");
+  assert.equal(retry.init.headers["X-CSRF-Token"], "csrf-owner");
+  assert.deepEqual(JSON.parse(retry.init.body), { repository: "example/tenant-site", pull_request: 42, decision_id: "saved-decision" });
 });

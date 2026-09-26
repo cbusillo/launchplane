@@ -26,6 +26,8 @@ from control_plane.github_app_identity import (
     revoke_installation_token,
 )
 from control_plane.product_review import ProductReviewStore
+from control_plane.github_payload import json_object, required_positive_int
+from control_plane.product_review_feedback import publish_owner_feedback
 from control_plane.workflows.launchplane import (
     github_api_request,
     resolve_launchplane_github_token,
@@ -82,6 +84,8 @@ def owner_review_status(
             state="pending",
             description=f"Waiting for @{owner.github_login} to review the preview",
         )
+    if decision.feedback_requested and not decision.feedback_url:
+        return OwnerReviewStatus(state="pending", description="Owner feedback delivery is pending")
     if decision.decision == "accepted":
         return OwnerReviewStatus(
             state="success", description=f"Accepted by @{decision.owner_github_login}"
@@ -136,14 +140,33 @@ class OwnerReviewStatusPublisher:
             return None
         written: OwnerReviewStatus | None = None
         try:
-            if profile.owner.review_label.strip().casefold() in facts.labels:
-                written = self._write_status(
-                    store=store,
-                    profile=profile,
-                    pull_request_number=pull_request_number,
-                    facts=facts,
-                    token=token,
-                )
+            with store.product_review_lock(
+                repository=repository, pull_request_number=pull_request_number, purpose="feedback"
+            ):
+                try:
+                    self._publish_feedback(
+                        store=store,
+                        profile=profile,
+                        pull_request_number=pull_request_number,
+                        token=token,
+                    )
+                except Exception:
+                    _LOGGER.warning(
+                        "Owner decision is saved but feedback delivery is pending.",
+                        exc_info=True,
+                        extra={
+                            "repository": repository,
+                            "pull_request_number": pull_request_number,
+                        },
+                    )
+                if profile.owner.review_label.strip().casefold() in facts.labels:
+                    written = self._write_status(
+                        store=store,
+                        profile=profile,
+                        pull_request_number=pull_request_number,
+                        facts=facts,
+                        token=token,
+                    )
         except Exception:
             _LOGGER.warning(
                 "Owner review status could not be written.",
@@ -164,6 +187,60 @@ class OwnerReviewStatusPublisher:
                         },
                     )
         return written
+
+    def _publish_feedback(
+        self,
+        *,
+        store: ProductReviewStore,
+        profile: LaunchplaneProductProfileRecord,
+        pull_request_number: int,
+        token: str,
+    ) -> None:
+        # The caller serializes delivery and its resulting status. Decision saves
+        # use a separate lock so slow provider I/O cannot prevent persistence.
+        pending = tuple(
+            decision
+            for decision in store.list_product_review_decision_records(
+                repository=profile.repository, pull_request_number=pull_request_number
+            )
+            if decision.feedback_requested and not decision.feedback_url
+        )
+        if not pending:
+            return
+        if not self.public_origin:
+            raise ValueError("Owner feedback needs the public review origin.")
+        actor = json_object(
+            self.api_request(path="/user", token=token),
+            "GitHub feedback actor",
+            error_type=ValueError,
+        )
+        actor_id = required_positive_int(
+            actor.get("id"), "GitHub feedback actor requires id.", error_type=ValueError
+        )
+        for decision in reversed(pending):
+            try:
+                feedback_url = publish_owner_feedback(
+                    decision=decision,
+                    review_url=owner_review_reference_url(
+                        public_origin=self.public_origin,
+                        repository=profile.repository,
+                        pull_request_number=pull_request_number,
+                        decision_id=decision.record_id,
+                    ),
+                    token=token,
+                    actor_id=actor_id,
+                    api_request=self.api_request,
+                )
+                store.write_product_review_decision_record(
+                    decision.model_copy(update={"feedback_url": feedback_url})
+                )
+            except Exception:
+                # Keep this receipt pending, but do not strand later feedback.
+                _LOGGER.warning(
+                    "Saved Owner decision feedback delivery is pending.",
+                    exc_info=True,
+                    extra={"repository": profile.repository, "record_id": decision.record_id},
+                )
 
     def _pull_request_facts(
         self, *, repository: str, pull_request_number: int, token: str
@@ -343,6 +420,7 @@ def owner_review_reference_url(
     public_origin: str,
     repository: str,
     pull_request_number: int,
+    decision_id: str = "",
 ) -> str:
     origin = public_origin.strip()
     try:
@@ -372,7 +450,8 @@ def owner_review_reference_url(
         raise ValueError("Owner review requires a valid repository target.")
     if pull_request_number < 1:
         raise ValueError("Owner review requires a positive pull request number.")
-    return (
+    url = (
         f"{origin.rstrip('/')}/ui/owner-review"
         f"?repository={quote(repository, safe='')}&pull_request={pull_request_number}"
     )
+    return f"{url}&decision_id={quote(decision_id, safe='')}" if decision_id else url

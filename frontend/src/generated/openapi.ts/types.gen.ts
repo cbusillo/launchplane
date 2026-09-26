@@ -3328,6 +3328,8 @@ export type ProductReviewDecisionEnvelope = {
 export type ProductReviewDecisionRecord = {
     decided_at: string;
     decision: 'accepted' | 'changes_requested';
+    feedback_requested: boolean;
+    feedback_url: string;
     head_sha: string;
     owner_github_id: string;
     owner_github_login: string;
@@ -3338,6 +3340,12 @@ export type ProductReviewDecisionRecord = {
     record_id: string;
     repository: string;
     schema_version: number;
+};
+
+export type ProductReviewFeedbackRetryEnvelope = {
+    decision_id: string;
+    pull_request: number;
+    repository: string;
 };
 
 export type ProductReviewResponse = {
@@ -4539,6 +4547,7 @@ export type ReadProductReviewData = {
     query: {
         repository: string;
         pull_request: number;
+        decision_id?: string;
     };
     url: '/v1/product-review';
 };
@@ -4546,6 +4555,7 @@ export type ReadProductReviewData = {
 export type ReadProductReviewErrors = {
     401: LaunchplaneErrorResponse;
     403: LaunchplaneErrorResponse;
+    404: LaunchplaneErrorResponse;
     409: LaunchplaneErrorResponse;
     503: LaunchplaneErrorResponse;
 };
@@ -5437,6 +5447,33 @@ export type WriteProductReviewDecisionResponses = {
 };
 
 export type WriteProductReviewDecisionResponse = WriteProductReviewDecisionResponses[keyof WriteProductReviewDecisionResponses];
+
+export type RetryProductReviewFeedbackData = {
+    body: ProductReviewFeedbackRetryEnvelope;
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/product-review/feedback/retry';
+};
+
+export type RetryProductReviewFeedbackErrors = {
+    401: LaunchplaneErrorResponse;
+    403: LaunchplaneErrorResponse;
+    404: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type RetryProductReviewFeedbackError = RetryProductReviewFeedbackErrors[keyof RetryProductReviewFeedbackErrors];
+
+export type RetryProductReviewFeedbackResponses = {
+    200: ProductReviewResponse;
+};
+
+export type RetryProductReviewFeedbackResponse = RetryProductReviewFeedbackResponses[keyof RetryProductReviewFeedbackResponses];
 
 export type ApplyProductEnvironmentConfigData = {
     body: {
