@@ -11,8 +11,17 @@ from unittest.mock import patch
 
 from click import ClickException
 
-from control_plane.http_app import create_launchplane_fastapi_app
-from control_plane.service_auth import GitHubActionsIdentity, LaunchplaneAuthzPolicy
+from control_plane.contracts.authz_policy_record import (
+    LaunchplaneAuthzPolicyRecord,
+    authz_policy_sha256,
+    build_authz_policy_record_id,
+)
+from control_plane.http_app import LaunchplaneAuthzPolicyRuntime, create_launchplane_fastapi_app
+from control_plane.service_auth import (
+    GitHubActionsIdentity,
+    LaunchplaneAuthzPolicy,
+    LocalOperatorPolicyRule,
+)
 from control_plane.service_human_auth import (
     HumanSessionManager,
     InMemoryHumanSessionStore,
@@ -41,7 +50,7 @@ from tests.http_app_test_support import (
     _RejectingVerifier,
     _seed_dokploy_target_inspect_records,
 )
-from tests.support.auth import _identity, _StubVerifier
+from tests.support.auth import _identity, _StubVerifier, local_operator_policy
 from tests.support.stores import _seed_tracked_target_records, _sqlite_database_url
 
 
@@ -529,6 +538,166 @@ class FastApiDriverContextViewTests(unittest.IsolatedAsyncioTestCase):
 
 
 class FastApiDokployTargetInspectReadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_operator_target_read_preserves_scope_and_redaction(self) -> None:
+        cases = (
+            ("driver.read", "launchplane", "cm_website", ("prod",), "local-owner-agent", 200),
+            ("driver.read", "launchplane", "*", ("*",), "local-owner-agent", 200),
+            ("dokploy_target.inspect", "launchplane", "launchplane", (), "local-owner-agent", 200),
+            (
+                "product_environment.read",
+                "launchplane",
+                "cm_website",
+                ("prod",),
+                "local-owner-agent",
+                403,
+            ),
+            ("driver.read", "other-product", "cm_website", ("prod",), "local-owner-agent", 403),
+            ("driver.read", "launchplane", "other-context", ("prod",), "local-owner-agent", 403),
+            ("driver.read", "launchplane", "cm_website", ("testing",), "local-owner-agent", 403),
+            ("driver.read", "launchplane", "launchplane", (), "local-owner-agent", 403),
+            ("driver.read", "launchplane", "cm_website", ("prod",), "other-operator", 403),
+        )
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            _seed_dokploy_target_inspect_records(database_url)
+            store = PostgresRecordStore(database_url=database_url)
+            self.addCleanup(store.close)
+            for action, product, context, instances, subject, expected_status in cases:
+                with (
+                    self.subTest(
+                        action=action,
+                        product=product,
+                        context=context,
+                        instances=instances,
+                        subject=subject,
+                    ),
+                    patch(
+                        "control_plane.http_routes.drivers.dokploy_source.read_dokploy_config",
+                        return_value=("https://dokploy.example.invalid", "provider-token"),
+                    ) as read_config,
+                    patch(
+                        "control_plane.dokploy_target_inspect.dokploy_api.fetch_dokploy_target_payload",
+                        return_value={
+                            "id": "compose-cm-prod",
+                            "name": "cm-prod",
+                            "serverId": "server-123",
+                            "env": "ODOO_DB_PASSWORD=private-value\n",
+                        },
+                    ) as fetch_target,
+                ):
+                    app = create_launchplane_fastapi_app(
+                        verifier=_RejectingVerifier(),
+                        authz_policy=LaunchplaneAuthzPolicy(
+                            schema_version=2,
+                            local_operators=(
+                                LocalOperatorPolicyRule(
+                                    actions=(action,),
+                                    products=(product,),
+                                    contexts=(context,),
+                                    instances=instances,
+                                    subjects=(subject,),
+                                    token_labels=("local-owner-read",),
+                                ),
+                            ),
+                        ),
+                        bearer_identity_config=_local_operator_bearer_config(),
+                        database_url=database_url,
+                        record_store_factory=lambda: store,
+                        control_plane_root_path=root,
+                    )
+                    response = await _get_dokploy_target_inspect(
+                        app,
+                        context="cm_website",
+                        instance="prod",
+                        authorization="Bearer local-operator-token",
+                    )
+                    self.assertEqual(response.status_code, expected_status)
+                    payload = response.json()
+                    self.assertNotIn("private-value", str(payload))
+                    self.assertNotIn("provider-token", str(payload))
+                    if expected_status == 200:
+                        self.assertEqual(payload["inspect"]["target_id"], "compose-cm-prod")
+                        self.assertEqual(
+                            payload["inspect"]["provider"]["env"]["keys"], ["ODOO_DB_PASSWORD"]
+                        )
+                        self.assertTrue(payload["inspect"]["provider_payload_redacted"])
+                        fetch_target.assert_called_once()
+                    else:
+                        self.assertEqual(payload["error"]["code"], "authorization_denied")
+                        read_config.assert_not_called()
+                        fetch_target.assert_not_called()
+
+    async def test_operator_driver_read_does_not_authorize_explicit_target(self) -> None:
+        with patch(
+            "control_plane.http_routes.drivers.dokploy_source.read_dokploy_config"
+        ) as read_config:
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=local_operator_policy(
+                    actions=("driver.read",), token_label="local-owner-read"
+                ),
+                bearer_identity_config=_local_operator_bearer_config(),
+                record_store_factory=lambda: _MissingProductReadStore(),
+            )
+            response = await _get_dokploy_target_inspect(
+                app,
+                target_type="compose",
+                target_id="compose-123",
+                authorization="Bearer local-operator-token",
+            )
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+        read_config.assert_not_called()
+
+    async def test_operator_denial_records_inspect_action(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(root / "launchplane.sqlite3")
+            )
+            self.addCleanup(store.close)
+            store.ensure_schema()
+            policy = LaunchplaneAuthzPolicy()
+            digest = authz_policy_sha256(policy)
+            record = store.seed_authz_policy_if_absent(
+                LaunchplaneAuthzPolicyRecord(
+                    record_id=build_authz_policy_record_id(revision=1, policy_sha256=digest),
+                    source="test:target-inspect",
+                    updated_at=datetime.now(timezone.utc).isoformat(),
+                    policy_sha256=digest,
+                    policy=policy,
+                )
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=policy,
+                authz_policy_runtime=LaunchplaneAuthzPolicyRuntime(
+                    policy,
+                    policy_sha256=digest,
+                    source="db",
+                    record_id=record.record_id,
+                    revision=record.revision,
+                ),
+                bearer_identity_config=_local_operator_bearer_config(),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+            response = await _get_dokploy_target_inspect(
+                app,
+                context="cm_website",
+                instance="prod",
+                authorization="Bearer local-operator-token",
+            )
+            self.assertEqual(response.status_code, 403)
+            denial = store.read_authz_denial_record(
+                trace_id=response.json()["trace_id"],
+                observed_at=datetime.now(timezone.utc).isoformat(),
+            )
+            self.assertIsNotNone(denial)
+            assert denial is not None
+            self.assertEqual(denial.action, "dokploy_target.inspect")
+
     async def test_dokploy_target_inspect_reads_redacted_provider_identity(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -616,6 +785,20 @@ class FastApiDokployTargetInspectReadTests(unittest.IsolatedAsyncioTestCase):
         payload = response.json()
         self.assertEqual(payload["status"], "rejected")
         self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    async def test_workflow_driver_read_does_not_authorize_provider_inspection(self) -> None:
+        with patch(
+            "control_plane.http_routes.drivers.dokploy_source.read_dokploy_config"
+        ) as read_config:
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_record_read_policy(action="driver.read", context="cm_website"),
+                record_store_factory=lambda: _MissingProductReadStore(),
+            )
+            response = await _get_dokploy_target_inspect(app, context="cm_website", instance="prod")
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+        read_config.assert_not_called()
 
     async def test_dokploy_target_inspect_requires_database_storage(self) -> None:
         app = create_launchplane_fastapi_app(
