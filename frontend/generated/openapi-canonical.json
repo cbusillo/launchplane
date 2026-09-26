@@ -9965,7 +9965,8 @@
             "type": "string"
           },
           "backup_required": {
-            "default": false,
+            "const": true,
+            "default": true,
             "title": "Backup Required",
             "type": "boolean"
           },
@@ -52176,7 +52177,8 @@
                         "type": "string"
                       },
                       "backup_required": {
-                        "default": false,
+                        "const": true,
+                        "default": true,
                         "title": "Backup Required",
                         "type": "boolean"
                       },
@@ -57611,6 +57613,11 @@
                         ],
                         "title": "Health Timeout Seconds"
                       },
+                      "infrastructure_backup_record_id": {
+                        "default": "",
+                        "title": "Infrastructure Backup Record Id",
+                        "type": "string"
+                      },
                       "no_cache": {
                         "default": false,
                         "title": "No Cache",
@@ -58004,6 +58011,11 @@
                           }
                         ],
                         "title": "Health Timeout Seconds"
+                      },
+                      "infrastructure_backup_record_id": {
+                        "default": "",
+                        "title": "Infrastructure Backup Record Id",
+                        "type": "string"
                       },
                       "no_cache": {
                         "default": false,

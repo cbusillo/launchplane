@@ -190,6 +190,7 @@ def _prod_promotion_run_records(
         "deployment_record_id": driver_result.deployment_record_id,
         "release_tuple_id": driver_result.release_tuple_id,
         "request_id": driver_result.request_id,
+        "infrastructure_backup_record_id": driver_result.infrastructure_backup_record_id,
     }
 
 
@@ -199,4 +200,5 @@ def _prod_promotion_records(driver_result: OdooProdPromotionResult) -> dict[str,
         "deployment_record_id": driver_result.deployment_record_id,
         "backup_record_id": driver_result.backup_record_id,
         "release_tuple_id": driver_result.release_tuple_id,
+        "infrastructure_backup_record_id": driver_result.infrastructure_backup_record_id,
     }

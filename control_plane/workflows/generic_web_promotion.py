@@ -11,6 +11,11 @@ from control_plane.release_review import require_release_approval
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.backup_gate_record import BackupGateRecord
+from control_plane.workflows.production_promotion_backup import (
+    GENERIC_WEB_PROMOTION_BACKUP_ACTION,
+    production_promotion_backup_guard,
+    require_production_promotion_backup,
+)
 from control_plane.contracts.deploy_target import DeployTargetCategory
 from control_plane.contracts.deploy_reference import (
     is_non_floating_tag_reference,
@@ -85,7 +90,7 @@ class GenericWebProdPromotionRequest(BaseModel):
     from_instance: str = "testing"
     to_instance: str = "prod"
     backup_record_id: str = ""
-    backup_required: bool = False
+    backup_required: Literal[True] = True
     wait: bool = True
     timeout_seconds: int | None = Field(default=None, ge=1)
     verify_health: bool = True
@@ -112,10 +117,6 @@ class GenericWebProdPromotionRequest(BaseModel):
             raise ValueError("generic web prod promotion source and destination must differ")
         if self.from_instance != "testing" or self.to_instance != "prod":
             raise ValueError("generic web prod promotion requires testing -> prod")
-        if self.backup_required and not self.backup_record_id:
-            raise ValueError(
-                "generic web prod promotion requires backup_record_id when backup_required=true"
-            )
         if not self.wait:
             raise ValueError("generic web prod promotion requires wait=true")
         return self
@@ -326,26 +327,54 @@ def execute_generic_web_prod_promotion(
             error_message=str(error),
         )
 
-    deploy_result = execute_generic_web_deploy(
-        control_plane_root=control_plane_root,
+    with production_promotion_backup_guard(
         record_store=record_store,
-        request=GenericWebDeployRequest(
-            product=request.product,
-            instance=destination_lane.instance,
-            artifact_id=request.artifact_id,
-            deploy_reference=request.deploy_reference,
-            source_git_ref=request.source_git_ref,
-            timeout_seconds=request.timeout_seconds,
-            no_cache=request.no_cache,
+        product=request.product,
+        context=destination_lane.context,
+        instance=destination_lane.instance,
+        promotion_action=GENERIC_WEB_PROMOTION_BACKUP_ACTION,
+        backup_record_id=request.backup_record_id,
+        pending_promotion=_build_promotion_record(
+            request=request,
+            promotion_record_id=promotion_record_id,
+            context=destination_lane.context,
+            source_health=source_health,
+            backup_gate=backup_gate,
+            destination_health=destination_health,
+            deployment_record=None,
+            deployment_status="pending",
+            target_name=_fallback_target_name(request=request, lane=destination_lane),
+            target_type="application",
+            deployment_record_id="",
         ),
-        profile=profile,
-        lane=destination_lane,
-        deploy_provider=deploy_provider,
-        resolved_deploy_target=resolved_deploy_target,
-        provider_operation_title=provider_operation_title,
-        deployment_record_id=deployment_record_id,
-        provider_effect_checkpoint=provider_effect_checkpoint,
-    )
+    ) as backup_checkpoint:
+
+        def promotion_checkpoint(phase: str) -> None:
+            backup_checkpoint(phase)
+            if provider_effect_checkpoint is not None:
+                provider_effect_checkpoint(phase)
+
+        deploy_result = execute_generic_web_deploy(
+            control_plane_root=control_plane_root,
+            record_store=record_store,
+            request=GenericWebDeployRequest(
+                product=request.product,
+                instance=destination_lane.instance,
+                artifact_id=request.artifact_id,
+                deploy_reference=request.deploy_reference,
+                source_git_ref=request.source_git_ref,
+                timeout_seconds=request.timeout_seconds,
+                no_cache=request.no_cache,
+            ),
+            profile=profile,
+            lane=destination_lane,
+            deploy_provider=deploy_provider,
+            resolved_deploy_target=resolved_deploy_target,
+            provider_operation_title=provider_operation_title,
+            deployment_record_id=deployment_record_id,
+            provider_effect_checkpoint=promotion_checkpoint,
+        )
+    backup_gate.evidence.update(backup_checkpoint.evidence)
     deployment_record = _read_deployment_record(
         record_store=record_store,
         deployment_record_id=deploy_result.deployment_record_id,
@@ -473,37 +502,16 @@ def _resolve_backup_gate(
     *, record_store: GenericWebPromotionStore, request: GenericWebProdPromotionRequest, context: str
 ) -> BackupGateEvidence:
     if not request.backup_record_id:
-        return BackupGateEvidence(required=request.backup_required, status="skipped", evidence={})
-    try:
-        backup_record: BackupGateRecord = record_store.read_backup_gate_record(
-            request.backup_record_id
-        )
-    except FileNotFoundError as exc:
-        raise click.ClickException(
-            f"Generic web prod promotion requires stored backup gate record '{request.backup_record_id}'."
-        ) from exc
-    if backup_record.instance != request.to_instance:
-        raise click.ClickException(
-            "Backup gate record instance does not match generic web prod promotion destination. "
-            f"Record={backup_record.instance} request={request.to_instance}."
-        )
-    if backup_record.context != context:
-        raise click.ClickException(
-            "Backup gate record context does not match generic web prod promotion context. "
-            f"Record={backup_record.context} request={context}."
-        )
-    if backup_record.required and backup_record.status != "pass":
-        raise click.ClickException(
-            f"Backup gate record '{backup_record.record_id}' must have status=pass before prod promotion."
-        )
-    if request.backup_required and not backup_record.required:
-        raise click.ClickException(
-            f"Backup gate record '{backup_record.record_id}' is marked required=false."
-        )
-    return BackupGateEvidence(
-        required=backup_record.required or request.backup_required,
-        status=backup_record.status,
-        evidence=dict(backup_record.evidence),
+        if request.dry_run:
+            return BackupGateEvidence()
+        raise click.ClickException("Production promotion requires infrastructure backup evidence.")
+    return require_production_promotion_backup(
+        record_store=record_store,
+        product=request.product,
+        context=context,
+        instance=request.to_instance,
+        promotion_action=GENERIC_WEB_PROMOTION_BACKUP_ACTION,
+        backup_record_id=request.backup_record_id,
     )
 
 

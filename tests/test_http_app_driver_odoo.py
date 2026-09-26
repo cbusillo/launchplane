@@ -3397,16 +3397,19 @@ class FastApiOdooProdPromotionTests(unittest.IsolatedAsyncioTestCase):
             },
         }
 
-    def _run_payload(self, *, product: str = "odoo-tenant-cm") -> dict[str, object]:
+    @staticmethod
+    def _run_payload(*, product: str = "odoo-tenant-cm") -> dict[str, object]:
         return {
             "product": product,
             "run": {
                 "context": "cm",
                 "request_id": "run-123-attempt-1",
+                "infrastructure_backup_record_id": "infrastructure-cm-prod",
             },
         }
 
-    def _promotion_payload(self, *, product: str = "odoo-tenant-cm") -> dict[str, object]:
+    @staticmethod
+    def _promotion_payload(*, product: str = "odoo-tenant-cm") -> dict[str, object]:
         return {
             "product": product,
             "promotion": {
@@ -3415,6 +3418,7 @@ class FastApiOdooProdPromotionTests(unittest.IsolatedAsyncioTestCase):
                 "to_instance": "prod",
                 "artifact_id": "artifact-cm-new",
                 "backup_record_id": "backup-gate-cm-prod-run-1",
+                "infrastructure_backup_record_id": "infrastructure-cm-prod",
                 "source_git_ref": "848bf1b69ff3adbe9b255c61c7b8f5ca04efbcbb",
             },
         }
@@ -3448,8 +3452,8 @@ class FastApiOdooProdPromotionTests(unittest.IsolatedAsyncioTestCase):
             error_message=error_message,
         )
 
+    @staticmethod
     def _run_result(
-        self,
         *,
         run_status: Literal["pass", "fail", "blocked"] = "pass",
     ) -> OdooProdPromotionRunResult:
@@ -3468,6 +3472,7 @@ class FastApiOdooProdPromotionTests(unittest.IsolatedAsyncioTestCase):
             artifact_id="artifact-cm-new",
             source_git_ref="848bf1b69ff3adbe9b255c61c7b8f5ca04efbcbb",
             backup_record_id="backup-gate-cm-prod-run-123-attempt-1",
+            infrastructure_backup_record_id="infrastructure-cm-prod",
             promotion_record_id="promotion-cm-testing-to-prod",
             deployment_record_id="deployment-cm-prod",
             release_tuple_id="cm-prod-artifact-cm-new",
@@ -3476,8 +3481,8 @@ class FastApiOdooProdPromotionTests(unittest.IsolatedAsyncioTestCase):
             error_message="blocked" if run_status == "blocked" else "",
         )
 
+    @staticmethod
     def _promotion_result(
-        self,
         *,
         promotion_status: Literal["pass", "fail"] = "pass",
     ) -> OdooProdPromotionResult:
@@ -3487,6 +3492,7 @@ class FastApiOdooProdPromotionTests(unittest.IsolatedAsyncioTestCase):
             to_instance="prod",
             artifact_id="artifact-cm-new",
             backup_record_id="backup-gate-cm-prod-run-1",
+            infrastructure_backup_record_id="infrastructure-cm-prod",
             promotion_record_id="promotion-cm-testing-to-prod",
             deployment_record_id="deployment-cm-prod",
             release_tuple_id="cm-prod-artifact-cm-new",
@@ -3528,6 +3534,7 @@ class FastApiOdooProdPromotionTests(unittest.IsolatedAsyncioTestCase):
                 "deployment_record_id": "deployment-cm-prod",
                 "backup_record_id": "backup-gate-cm-prod-run-1",
                 "release_tuple_id": "cm-prod-artifact-cm-new",
+                "infrastructure_backup_record_id": "infrastructure-cm-prod",
             },
         )
         self.assertEqual(payload["result"]["promotion_status"], "pass")
@@ -3541,6 +3548,9 @@ class FastApiOdooProdPromotionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(promotion_call["request"].from_instance, "testing")
         self.assertEqual(promotion_call["request"].to_instance, "prod")
         self.assertEqual(promotion_call["request"].product, "odoo-tenant-cm")
+        self.assertEqual(
+            promotion_call["request"].infrastructure_backup_record_id, "infrastructure-cm-prod"
+        )
 
     async def test_odoo_prod_promotion_accepts_product_profile_driver_id(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -4033,6 +4043,7 @@ class FastApiOdooProdPromotionTests(unittest.IsolatedAsyncioTestCase):
                 "deployment_record_id": "deployment-cm-prod",
                 "release_tuple_id": "cm-prod-artifact-cm-new",
                 "request_id": "run-123-attempt-1",
+                "infrastructure_backup_record_id": "infrastructure-cm-prod",
             },
         )
         run_call = execute_mock.call_args.kwargs
@@ -4040,6 +4051,9 @@ class FastApiOdooProdPromotionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(run_call["state_dir"], root / "state")
         self.assertIsNone(run_call["database_url"])
         self.assertEqual(run_call["request"].product, "odoo-tenant-cm")
+        self.assertEqual(
+            run_call["request"].infrastructure_backup_record_id, "infrastructure-cm-prod"
+        )
 
     async def test_odoo_prod_promotion_run_allows_reusable_launchplane_workflow(self) -> None:
         reusable_ref = "cbusillo/launchplane/.github/workflows/reusable-product-driver-prod-promotion.yml@refs/heads/main"

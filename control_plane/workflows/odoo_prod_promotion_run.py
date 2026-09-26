@@ -7,6 +7,10 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 import click
 
 from control_plane.release_review import require_release_approval
+from control_plane.workflows.production_promotion_backup import (
+    ODOO_PROMOTION_BACKUP_ACTION,
+    require_production_promotion_backup,
+)
 
 from control_plane.workflows.odoo_prod_backup_gate import (
     OdooProdBackupGateResult,
@@ -46,6 +50,7 @@ class OdooProdPromotionRunRequest(BaseModel):
     to_instance: str = "prod"
     product: str = ""
     request_id: str
+    infrastructure_backup_record_id: str = ""
     backup_timeout_seconds: int | None = Field(default=None, ge=1)
     promotion_timeout_seconds: int | None = Field(default=None, ge=1)
     health_timeout_seconds: int | None = Field(default=None, ge=1)
@@ -60,6 +65,7 @@ class OdooProdPromotionRunRequest(BaseModel):
         self.to_instance = self.to_instance.strip().lower()
         self.product = self.product.strip()
         self.request_id = self.request_id.strip()
+        self.infrastructure_backup_record_id = self.infrastructure_backup_record_id.strip()
         if not self.context:
             raise ValueError("Odoo prod promotion run requires context.")
         if self.from_instance != "testing" or self.to_instance != "prod":
@@ -88,6 +94,7 @@ class OdooProdPromotionRunResult(BaseModel):
     artifact_id: str = ""
     source_git_ref: str = ""
     backup_record_id: str = ""
+    infrastructure_backup_record_id: str = ""
     promotion_record_id: str = ""
     deployment_record_id: str = ""
     release_tuple_id: str = ""
@@ -129,6 +136,14 @@ def execute_odoo_prod_promotion_run(
             artifact_id=inputs_result.artifact_id,
             source_commit=inputs_result.source_git_ref,
         )
+        require_production_promotion_backup(
+            record_store=record_store,
+            product=request.product,
+            context=request.context,
+            instance=request.to_instance,
+            promotion_action=ODOO_PROMOTION_BACKUP_ACTION,
+            backup_record_id=request.infrastructure_backup_record_id,
+        )
     except (AttributeError, FileNotFoundError, ValueError, click.ClickException) as error:
         return _result_from_inputs(
             request=request,
@@ -169,6 +184,7 @@ def execute_odoo_prod_promotion_run(
             artifact_id=inputs_result.artifact_id,
             backup_record_id=inputs_result.backup_record_id,
             source_git_ref=inputs_result.source_git_ref,
+            infrastructure_backup_record_id=request.infrastructure_backup_record_id,
             wait=request.wait,
             timeout_seconds=request.promotion_timeout_seconds,
             verify_health=request.verify_health,
@@ -232,6 +248,7 @@ def _result_from_inputs(
         artifact_id=inputs_result.artifact_id,
         source_git_ref=inputs_result.source_git_ref,
         backup_record_id=inputs_result.backup_record_id,
+        infrastructure_backup_record_id=request.infrastructure_backup_record_id,
         promotion_record_id=(
             promotion_result.promotion_record_id if promotion_result is not None else ""
         ),

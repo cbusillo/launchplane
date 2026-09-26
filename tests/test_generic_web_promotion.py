@@ -1,8 +1,12 @@
 import unittest
+from contextlib import nullcontext
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, cast
-from unittest.mock import patch
+from unittest.mock import Mock, patch
+from tests.support.promotion_backup import stub_verified_promotion_backup
+from control_plane.workflows.production_promotion_backup import ProductionPromotionBackupGuard
 
 import click
 from pydantic import ValidationError
@@ -144,6 +148,8 @@ def _request(**overrides: object) -> GenericWebProdPromotionRequest:
         "source_git_ref": "abc123",
     }
     payload.update(overrides)
+    if not payload.get("dry_run"):
+        payload.setdefault("backup_record_id", "infrastructure-example")
     return GenericWebProdPromotionRequest.model_validate(payload)
 
 
@@ -242,6 +248,41 @@ def _deploy_result(*, deploy_status: Literal["pass", "fail"] = "pass") -> Generi
 
 
 class GenericWebProdPromotionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        stub_verified_promotion_backup(self, "control_plane.workflows.generic_web_promotion")
+
+    def test_backup_refusal_precedes_provider_effect_recording(self) -> None:
+        store = _GenericWebPromotionStore(_profile())
+        store.write_environment_inventory(_testing_inventory())
+        effect_checkpoint = Mock()
+        backup_checkpoint = Mock(side_effect=click.ClickException("backup refused"))
+
+        def deploy(**kwargs: object) -> GenericWebDeployResult:
+            checkpoint = cast(Callable[[str], None], kwargs["provider_effect_checkpoint"])
+            checkpoint("target_update")
+            raise AssertionError("refused backup must prevent provider mutation")
+
+        with (
+            patch(
+                "control_plane.workflows.generic_web_promotion.execute_generic_web_deploy",
+                side_effect=deploy,
+            ),
+            patch(
+                "control_plane.workflows.generic_web_promotion.production_promotion_backup_guard",
+                side_effect=lambda **_kwargs: nullcontext(
+                    ProductionPromotionBackupGuard(backup_checkpoint, {})
+                ),
+            ),
+            self.assertRaisesRegex(click.ClickException, "backup refused"),
+        ):
+            execute_generic_web_prod_promotion(
+                control_plane_root=Path("."),
+                record_store=store,
+                request=_request(verify_health=False),
+                provider_effect_checkpoint=effect_checkpoint,
+            )
+        effect_checkpoint.assert_not_called()
+
     def test_execute_accepts_based_driver_product_profile(self) -> None:
         store = _GenericWebPromotionStore(_profile(driver_id="odoo"))
         store.write_environment_inventory(_testing_inventory())
@@ -281,7 +322,7 @@ class GenericWebProdPromotionTests(unittest.TestCase):
         store = _GenericWebPromotionStore(_profile())
         store.write_environment_inventory(_testing_inventory())
 
-        def fake_deploy(**kwargs: object) -> GenericWebDeployResult:
+        def fake_deploy(**_kwargs: object) -> GenericWebDeployResult:
             store.write_deployment_record(_deployment_record())
             return _deploy_result()
 
@@ -317,7 +358,7 @@ class GenericWebProdPromotionTests(unittest.TestCase):
         self.assertFalse(hasattr(result, "target_type"))
         self.assertEqual(len(store.promotions), 1)
         promotion = next(iter(store.promotions.values()))
-        self.assertEqual(promotion.backup_gate.status, "skipped")
+        self.assertEqual(promotion.backup_gate.status, "pass")
         self.assertEqual(promotion.source_health.status, "pass")
         self.assertEqual(promotion.destination_health.status, "pass")
         deployment = store.deployments["deployment-syo-prod"]
@@ -419,7 +460,7 @@ class GenericWebProdPromotionTests(unittest.TestCase):
         store.write_environment_inventory(_testing_inventory())
         github_requests: list[tuple[str, str, dict[str, object] | None]] = []
 
-        def fake_deploy(**kwargs: object) -> GenericWebDeployResult:
+        def fake_deploy(**_kwargs: object) -> GenericWebDeployResult:
             store.write_deployment_record(_deployment_record())
             return _deploy_result()
 
@@ -724,7 +765,7 @@ class GenericWebProdPromotionTests(unittest.TestCase):
         store = _GenericWebPromotionStore(_profile())
         store.write_environment_inventory(_testing_inventory())
 
-        def fake_deploy(**kwargs: object) -> GenericWebDeployResult:
+        def fake_deploy(**_kwargs: object) -> GenericWebDeployResult:
             store.write_deployment_record(_deployment_record())
             return _deploy_result()
 
@@ -749,7 +790,7 @@ class GenericWebProdPromotionTests(unittest.TestCase):
         )
         store.write_environment_inventory(_testing_inventory())
 
-        def fake_deploy(**kwargs: object) -> GenericWebDeployResult:
+        def fake_deploy(**_kwargs: object) -> GenericWebDeployResult:
             store.write_deployment_record(_deployment_record())
             return _deploy_result()
 
@@ -850,7 +891,7 @@ class GenericWebProdPromotionTests(unittest.TestCase):
         store = _GenericWebPromotionStore(_profile())
         store.write_environment_inventory(_testing_inventory())
 
-        def fake_deploy(**kwargs: object) -> GenericWebDeployResult:
+        def fake_deploy(**_kwargs: object) -> GenericWebDeployResult:
             store.write_deployment_record(_deployment_record())
             return _deploy_result()
 
@@ -895,7 +936,7 @@ class GenericWebProdPromotionTests(unittest.TestCase):
             source_git_ref="abc123",
         )
 
-        def fake_deploy(**kwargs: object) -> GenericWebDeployResult:
+        def fake_deploy(**_kwargs: object) -> GenericWebDeployResult:
             store.write_deployment_record(_deployment_record())
             return _deploy_result()
 

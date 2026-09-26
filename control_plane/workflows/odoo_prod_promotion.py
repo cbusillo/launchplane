@@ -31,6 +31,11 @@ from control_plane.workflows.odoo_stable_target_replacement import (
 from control_plane.workflows.odoo_prod_backup_gate import BACKUP_GATE_SOURCE
 from control_plane.workflows.ship import utc_now_timestamp
 from control_plane.workflows.inventory import build_environment_inventory
+from control_plane.workflows.production_promotion_backup import (
+    ODOO_PROMOTION_BACKUP_ACTION,
+    production_promotion_backup_guard,
+    require_production_promotion_backup,
+)
 
 
 class OdooProdPromotionStore(OdooStableTargetReplacementStore, Protocol):
@@ -61,6 +66,7 @@ class OdooProdPromotionRequest(BaseModel):
     product: str = ""
     artifact_id: str
     backup_record_id: str
+    infrastructure_backup_record_id: str = ""
     source_git_ref: str = ""
     wait: bool = True
     timeout_seconds: int | None = Field(default=None, ge=1)
@@ -76,6 +82,7 @@ class OdooProdPromotionRequest(BaseModel):
         self.product = self.product.strip()
         self.artifact_id = self.artifact_id.strip()
         self.backup_record_id = self.backup_record_id.strip()
+        self.infrastructure_backup_record_id = self.infrastructure_backup_record_id.strip()
         self.source_git_ref = self.source_git_ref.strip()
         if not self.context:
             raise ValueError("Odoo prod promotion requires context.")
@@ -102,6 +109,7 @@ class OdooProdPromotionResult(BaseModel):
     to_instance: str
     artifact_id: str
     backup_record_id: str
+    infrastructure_backup_record_id: str = ""
     promotion_record_id: str = ""
     deployment_record_id: str = ""
     release_tuple_id: str = ""
@@ -134,8 +142,18 @@ def execute_odoo_prod_promotion(
         from_instance=request.from_instance,
         to_instance=request.to_instance,
     )
-    source_tuple: ReleaseTupleRecord | None = None
+    backup_gate = None
+    infrastructure_backup = None
+    backup_checkpoint = None
     try:
+        infrastructure_backup = require_production_promotion_backup(
+            record_store=record_store,
+            product=product,
+            context=request.context,
+            instance=request.to_instance,
+            promotion_action=ODOO_PROMOTION_BACKUP_ACTION,
+            backup_record_id=request.infrastructure_backup_record_id,
+        )
         artifact_manifest = record_store.read_artifact_manifest(request.artifact_id)
         source_tuple = _read_source_tuple(record_store=record_store, request=request)
         backup_gate = record_store.read_backup_gate_record(request.backup_record_id)
@@ -155,27 +173,36 @@ def execute_odoo_prod_promotion(
             deployment_record=None,
             deployment_status="pending",
             backup_gate=backup_gate,
+            infrastructure_backup=infrastructure_backup,
         )
-        record_store.write_promotion_record(pending_record)
-
-        replacement_result = execute_odoo_stable_target_replacement_apply(
-            control_plane_root=control_plane_root,
+        with production_promotion_backup_guard(
             record_store=record_store,
-            request=OdooStableTargetReplacementApplyRequest(
-                product=product,
-                instance=request.to_instance,
-                artifact_id=request.artifact_id,
-                source_git_ref=request.source_git_ref or artifact_manifest.source_commit,
-                allow_empty_data=True,
-                data_source_mode="existing",
-                verify_health=request.verify_health,
-                verify_canonical=request.verify_health,
-                verify_logo=request.verify_health,
-                timeout_seconds=request.timeout_seconds,
-                health_timeout_seconds=request.health_timeout_seconds,
-                no_cache=request.no_cache,
-            ),
-        )
+            product=product,
+            context=request.context,
+            instance=request.to_instance,
+            promotion_action=ODOO_PROMOTION_BACKUP_ACTION,
+            backup_record_id=request.infrastructure_backup_record_id,
+            pending_promotion=pending_record,
+        ) as backup_checkpoint:
+            replacement_result = execute_odoo_stable_target_replacement_apply(
+                control_plane_root=control_plane_root,
+                record_store=record_store,
+                request=OdooStableTargetReplacementApplyRequest(
+                    product=product,
+                    instance=request.to_instance,
+                    artifact_id=request.artifact_id,
+                    source_git_ref=request.source_git_ref or artifact_manifest.source_commit,
+                    allow_empty_data=True,
+                    verify_health=request.verify_health,
+                    verify_canonical=request.verify_health,
+                    verify_logo=request.verify_health,
+                    timeout_seconds=request.timeout_seconds,
+                    health_timeout_seconds=request.health_timeout_seconds,
+                    no_cache=request.no_cache,
+                ),
+                provider_effect_checkpoint=backup_checkpoint,
+            )
+        infrastructure_backup.evidence.update(backup_checkpoint.evidence)
         deployment_record = _read_deployment_record_if_present(
             record_store=record_store,
             deployment_record_id=replacement_result.deployment_record_id,
@@ -187,6 +214,7 @@ def execute_odoo_prod_promotion(
             deployment_record=deployment_record,
             deployment_status=deploy_status,
             backup_gate=backup_gate,
+            infrastructure_backup=infrastructure_backup,
             post_deploy_status=replacement_result.post_deploy_status,
             destination_health_status=replacement_result.health_status,
         )
@@ -213,11 +241,15 @@ def execute_odoo_prod_promotion(
             error_message=replacement_result.error_message,
         )
     except click.ClickException as error:
+        if infrastructure_backup is not None and backup_checkpoint is not None:
+            infrastructure_backup.evidence.update(backup_checkpoint.evidence)
         failed_record = _build_promotion_record(
             record_id=promotion_record_id,
             request=request,
             deployment_record=None,
             deployment_status="fail",
+            backup_gate=backup_gate,
+            infrastructure_backup=infrastructure_backup,
         )
         record_store.write_promotion_record(failed_record)
         return _result_from_record(
@@ -272,13 +304,24 @@ def _read_deployment_record_if_present(
     return record_store.read_deployment_record(deployment_record_id)
 
 
-def _backup_gate_evidence(backup_gate: BackupGateRecord | None) -> BackupGateEvidence:
+def _backup_gate_evidence(
+    backup_gate: BackupGateRecord | None,
+    infrastructure_backup: BackupGateEvidence | None,
+) -> BackupGateEvidence:
     if backup_gate is None:
-        return BackupGateEvidence(status="pending")
+        return BackupGateEvidence()
     return BackupGateEvidence(
         required=backup_gate.required,
         status=backup_gate.status,
-        evidence=dict(backup_gate.evidence),
+        evidence={
+            **backup_gate.evidence,
+            **{
+                f"infrastructure_{key}": value
+                for key, value in (
+                    infrastructure_backup.evidence.items() if infrastructure_backup else ()
+                )
+            },
+        },
     )
 
 
@@ -289,6 +332,7 @@ def _build_promotion_record(
     deployment_record: DeploymentRecord | None,
     deployment_status: Literal["pending", "pass", "fail"],
     backup_gate: BackupGateRecord | None = None,
+    infrastructure_backup: BackupGateEvidence | None = None,
     post_deploy_status: Literal["pending", "pass", "fail", "skipped"] = "skipped",
     destination_health_status: Literal["pending", "pass", "fail", "skipped"] = "skipped",
 ) -> PromotionRecord:
@@ -307,7 +351,7 @@ def _build_promotion_record(
         context=request.context,
         from_instance=request.from_instance,
         to_instance=request.to_instance,
-        backup_gate=_backup_gate_evidence(backup_gate),
+        backup_gate=_backup_gate_evidence(backup_gate, infrastructure_backup),
         deploy=DeploymentEvidence(
             target_name=target_name,
             target_type="compose",
@@ -376,6 +420,9 @@ def _result_from_record(
         to_instance=record.to_instance,
         artifact_id=record.artifact_identity.artifact_id,
         backup_record_id=record.backup_record_id,
+        infrastructure_backup_record_id=record.backup_gate.evidence.get(
+            "infrastructure_backup_record_id", ""
+        ),
         promotion_record_id=record.record_id,
         deployment_record_id=record.deployment_record_id,
         release_tuple_id=release_tuple_id,
