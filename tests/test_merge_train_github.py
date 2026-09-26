@@ -2,6 +2,7 @@ import unittest
 from types import SimpleNamespace
 from typing import cast
 from email.message import Message
+from http.client import IncompleteRead
 from unittest.mock import patch
 from urllib.error import HTTPError
 
@@ -101,6 +102,7 @@ class _PermissiveMergeAdmissionGuard:
         self.admit_calls: list[dict[str, object]] = []
         self.landed_calls: list[dict[str, object]] = []
         self.reconcile_required_calls: list[dict[str, object]] = []
+        self.no_effect_reconciliations = 0
 
     def admit(self, **kwargs: object) -> object:
         self.admit_calls.append(kwargs)
@@ -119,7 +121,7 @@ class _PermissiveMergeAdmissionGuard:
         return None
 
     def reconcile_existing_no_effect(self, **_: object) -> None:
-        return None
+        self.no_effect_reconciliations += 1
 
     def update_landing_plan(self, _: MergeTrainBatchLandingPlan) -> None:
         return None
@@ -269,6 +271,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
             [],
             {"head": []},
             MergeTrainGitHubError("read failed", status_code=503),
+            IncompleteRead(b"private response fragment"),
         )
         for observation in observations:
             with self.subTest(observation=observation):
@@ -1580,6 +1583,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
             )
         self.assertEqual(blocked.exception.reason_code, "pull_request_head_behind_base")
         self.assertEqual(len(guard.admit_calls), 2)
+        self.assertEqual(guard.no_effect_reconciliations, 3)
         self.assertTrue(all(request.method == "GET" for request in resumed.requests))
 
     def test_land_batch_candidate_merges_original_prs_in_order(self) -> None:

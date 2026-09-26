@@ -848,7 +848,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                     "Pull request head tree moved outside the batch landing plan.",
                     status_code=409,
                 )
-            self._validate_open_landing_pull_request(
+            head_behind_base = self._validate_open_landing_pull_request(
                 repository_path=repository_path,
                 entry=entry,
                 expected_base_ref=landing_plan.base_branch,
@@ -864,6 +864,12 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 observed_pull_request_state="open",
                 observed_at=recorded_at,
             )
+            if head_behind_base:
+                raise MergeAdmissionDeniedError(
+                    f"PR #{entry.pull_request_number} is behind its base; refresh the branch and "
+                    "wait for fresh checks before submitting it to the train again.",
+                    reason_code="pull_request_head_behind_base",
+                )
             if checkpoint is not None:
                 checkpoint(
                     _validated_model_update(
@@ -1326,7 +1332,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         expected_base_ref: str,
         expected_base_sha: str,
         expected_base_tree_sha: str,
-    ) -> None:
+    ) -> bool:
         pull_request = _json_object(
             self.transport.request(
                 method="GET",
@@ -1372,12 +1378,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 raise MergeTrainGitHubStaleHeadError(
                     "Target base branch moved outside the batch landing plan.", status_code=409
                 )
-        if pull_request.get("mergeable_state") == "behind":
-            raise MergeAdmissionDeniedError(
-                f"PR #{entry.pull_request_number} is behind its base; refresh the branch and "
-                "wait for fresh checks before submitting it to the train again.",
-                reason_code="pull_request_head_behind_base",
-            )
+        return pull_request.get("mergeable_state") == "behind"
 
     def add_pull_request_label(
         self, *, repository: str, pull_request_number: int, label: str
@@ -1429,7 +1430,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                     method="GET",
                     path=f"/repos/{repository_path}/pulls/{pull_request_number}",
                 )
-            except MergeTrainGitHubError:
+            except Exception:  # noqa: BLE001 - diagnosis cannot erase the confirmed merge refusal
                 observed = None
             if isinstance(observed, dict):
                 head = observed.get("head")

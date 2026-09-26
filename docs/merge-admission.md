@@ -82,7 +82,8 @@ requirements. Raw provider response bodies are not copied into this diagnosis.
 The refusal returns HTTP 409 `github_merge_rejected`, not an upstream-outage
 retry instruction; no second merge is attempted by the diagnostic read.
 Before each subsequent merge, the existing PR read also blocks an observed
-`behind` head before admission or provider mutation. This includes resumed
+`behind` head before new admission or provider mutation, after reconciling an
+earlier unresolved attempt from that same unchanged open-head/base proof. This includes resumed
 partial batches: the first landed entry stays recorded, and the behind entry
 does not accumulate repeated admissions and rejected merge calls while GitHub
 continues to report that condition. Unknown mergeability alone does not prove
