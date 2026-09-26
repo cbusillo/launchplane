@@ -502,6 +502,9 @@ class ProductionPromotionBackupTests(unittest.TestCase):
             with self.subTest(start_effects=start_effects):
                 store = self.capture()
                 pending = self.pending(store)
+                interrupted_provider = Mock(
+                    side_effect=click.ClickException("provider interrupted")
+                )
                 with self.assertRaisesRegex(click.ClickException, "provider interrupted"):
                     with production_promotion_backup_guard(
                         record_store=store,
@@ -514,7 +517,7 @@ class ProductionPromotionBackupTests(unittest.TestCase):
                     ) as checkpoint:
                         if start_effects:
                             checkpoint("target_update")
-                        raise click.ClickException("provider interrupted")
+                        interrupted_provider()
                 recorded = store.read_promotion_record(pending.record_id)
                 self.assertEqual(recorded.deploy.status, "fail")
                 self.assertEqual(recorded.backup_gate.status, "pass")
