@@ -1,7 +1,10 @@
 import json
+from contextlib import contextmanager
+import os
 from pathlib import Path
 import subprocess
-from typing import Callable
+from tempfile import TemporaryDirectory
+from typing import Callable, Iterator
 import unittest
 from unittest.mock import patch
 
@@ -12,6 +15,7 @@ from control_plane.contracts.production_backup_gate import (
 from control_plane.workflows.production_backup_provider import (
     ProductionBackupProviderError,
     execute_production_backup_provider,
+    ssh_memory_files,
 )
 from tests.test_production_backup_authority import _destination_target, _policy, _source_target
 
@@ -29,6 +33,27 @@ def _binding() -> ProductionBackupGateWorkerRequest:
         source_target=_source_target(),
         destination_target=_destination_target(),
     )
+
+
+def setup_memory_files(test_case: unittest.TestCase) -> None:
+    if hasattr(os, "memfd_create"):
+        return
+
+    @contextmanager
+    def simulated_memory_files(*_args: object) -> Iterator[tuple[str, str]]:
+        with TemporaryDirectory() as directory:
+            paths = [Path(directory) / name for name in ("identity", "hosts")]
+            for path in paths:
+                path.write_text("synthetic fixture", encoding="utf-8")
+                path.chmod(0o600)
+            yield str(paths[0]), str(paths[1])
+
+    replacement = patch(
+        "control_plane.workflows.production_backup_provider.ssh_memory_files",
+        simulated_memory_files,
+    )
+    replacement.start()
+    test_case.addCleanup(replacement.stop)
 
 
 class BackupHost:
@@ -79,6 +104,39 @@ class BackupHost:
 
 
 class ProductionBackupProviderTests(unittest.TestCase):
+    def setUp(self) -> None:
+        setup_memory_files(self)
+
+    @unittest.skipUnless(
+        hasattr(os, "memfd_create"), "Linux memfd proof runs on production-compatible workers"
+    )
+    def test_openssh_reads_memory_identity_and_cleanup_closes_files(self) -> None:
+        with TemporaryDirectory() as directory:
+            key_path = Path(directory) / "synthetic-key"
+            subprocess.run(
+                ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(key_path)],
+                check=True,
+                capture_output=True,
+            )
+            public_key = key_path.with_suffix(".pub").read_text().split()[:2]
+            with ssh_memory_files(
+                key_path.read_text(), "example.invalid " + " ".join(public_key)
+            ) as paths:
+                self.assertTrue(all("/proc/" in path for path in paths))
+                self.assertEqual(Path(paths[0]).stat().st_mode & 0o777, 0o600)
+                loaded = subprocess.run(
+                    ["ssh-keygen", "-y", "-f", paths[0]], check=True, text=True, capture_output=True
+                )
+                self.assertEqual(loaded.stdout.split()[:2], public_key)
+                known = subprocess.run(
+                    ["ssh-keygen", "-F", "example.invalid", "-f", paths[1]],
+                    check=True,
+                    text=True,
+                    capture_output=True,
+                )
+                self.assertIn("example.invalid", known.stdout)
+            self.assertTrue(all(not Path(path).exists() for path in paths))
+
     def test_capture_rejects_restore_capability_and_invalid_snapshot_prefixes(self) -> None:
         boundary = {
             "schema_version": 1,

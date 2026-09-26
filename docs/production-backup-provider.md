@@ -51,15 +51,20 @@ automatically retried because its effect may be unknown.
 A database advisory lock covers capture and retention for the configured host,
 guest kind and guest ID, across backup record IDs and worker replicas. A second
 capture fails with `backup_source_busy` before host effects. After the first
-operation is reconciled, a new capture uses a new backup record ID.
+operation is reconciled, a new capture uses a new backup record ID. The worker
+checks the lock connection before effects and before completion; losing it fails
+closed. Policies for one physical guest must use the same canonical host endpoint;
+the lock does not resolve different IP/name aliases into physical identity.
 
 ## Host and credential prerequisites
 
 The exact production instance needs managed runtime secret bindings for
 `PRODUCTION_BACKUP_SSH_PRIVATE_KEY` and `PRODUCTION_BACKUP_SSH_KNOWN_HOSTS` under
 the runtime key-safety policy. The worker ignores workstation keys and ambient
-SSH configuration. Temporary key files live in a private directory and are
-removed when the operation returns. Strict host-key checking stays enabled.
+SSH configuration. The Linux worker keeps key material in anonymous memory-backed
+files with mode 0600, exposes them to SSH through its own procfs descriptors, and
+closes them on completion. It never writes the material to disk. A runtime
+without Linux memfd support fails closed. Strict host-key checking stays enabled.
 
 An operator must install the reviewed `scripts/proxmox-prod-gate-filter.sh` on
 the bound host and pin its forced-command environment to one guest, storage and
@@ -67,7 +72,9 @@ snapshot prefix. `PROD_GATE_GUEST_KIND` selects `lxc` or `qemu`; the existing
 `PROD_GATE_ALLOWED_CTID` variable carries the exact guest ID for either kind.
 Existing snapshot-style settings remain supported.
 
-New filters default to capture-only access: `PROD_GATE_ALLOW_RESTORE=false`.
+Every filter installation must explicitly set `PROD_GATE_ALLOW_RESTORE`:
+capture keys use `false`. If the setting is missing, all commands are refused,
+so an incomplete upgrade fails during its initial probe.
 The shared provider requires that capability in the boundary read and refuses a
 key that also permits rollback or start. A separately approved legacy restore
 key may set `PROD_GATE_ALLOW_RESTORE=true`; installing a new filter must preserve
@@ -82,8 +89,9 @@ these reads fail closed and need a separately approved host update.
 Snapshot prefixes are checked before SSH against the
 [Proxmox snapshot-name format](https://github.com/proxmox/pve-common/blob/master/src/PVE/JSONSchema.pm):
 a leading letter, letters/digits/underscore/hyphen thereafter, and enough room
-for the timestamp/hash suffix within 40 characters. SSH warnings on stderr do
-not become metadata input.
+for the timestamp/hash suffix within 40 characters. An unusable prefix makes the
+authority read model invalid. Boundary and storage metadata use stdout only;
+vzdump's archive identity may come from its stderr log.
 
 The filter permits storage status for its bound destination and backup listing
 for its bound guest. Other storage, guest, content type, shell commands and

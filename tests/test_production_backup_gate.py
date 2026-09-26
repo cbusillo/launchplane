@@ -9,6 +9,7 @@ import unittest
 from unittest.mock import patch
 
 from sqlalchemy import create_engine, text
+from sqlalchemy.exc import SQLAlchemyError
 import click
 
 from control_plane.contracts.backup_gate_record import BackupGateRecord
@@ -29,13 +30,14 @@ from tests.support.durable_operations import (
     durable_operation_authorization_payload,
     durable_operation_policy_record,
 )
-from tests.test_production_backup_provider import BackupHost, _binding
+from tests.test_production_backup_provider import BackupHost, _binding, setup_memory_files
 from tests.test_production_backup_authority import _source_target
 from tests.test_postgres_integration import _store_for_fresh_head_database
 
 
 class ProductionBackupGateTests(unittest.TestCase):
     def setUp(self) -> None:
+        setup_memory_files(self)
         self.directory = TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
@@ -302,6 +304,31 @@ class ProductionBackupGateTests(unittest.TestCase):
     os.environ.get("LAUNCHPLANE_TEST_POSTGRES_URL"), "Real PostgreSQL test URL is required"
 )
 class ProductionBackupGatePostgresTests(unittest.TestCase):
+    def test_source_lock_checkpoint_detects_connection_loss(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            engine = create_engine(store.database_url)
+            try:
+                with store.production_backup_source_lock("connection-loss-test") as check_lock:
+                    assert check_lock is not None
+                    check_lock()
+                    with engine.begin() as connection:
+                        holders = connection.scalars(
+                            text(
+                                "select distinct pid from pg_locks where locktype = 'advisory' "
+                                "and database = (select oid from pg_database where datname = current_database())"
+                            )
+                        ).all()
+                        self.assertEqual(len(holders), 1)
+                        self.assertTrue(
+                            connection.scalar(
+                                text("select pg_terminate_backend(:pid)"), {"pid": holders[0]}
+                            )
+                        )
+                    with self.assertRaises(SQLAlchemyError):
+                        check_lock()
+            finally:
+                engine.dispose()
+
     def test_same_source_is_fenced_before_host_effects_and_other_sources_are_independent(
         self,
     ) -> None:

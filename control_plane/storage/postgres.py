@@ -10608,7 +10608,7 @@ class PostgresRecordStore(HumanSessionStore):
         return tuple(affected_operation_ids)
 
     @contextmanager
-    def production_backup_source_lock(self, source_key: str) -> Iterator[bool]:
+    def production_backup_source_lock(self, source_key: str) -> Iterator[Callable[[], None] | None]:
         """Fence shared capture and retention for one configured provider guest."""
         with self._session_factory() as session:
             acquired = self.database_url.startswith("sqlite") or bool(
@@ -10617,7 +10617,11 @@ class PostgresRecordStore(HumanSessionStore):
                     {"lock_name": f"launchplane:backup-source:{source_key}"},
                 )
             )
-            yield acquired
+
+            def check_connection() -> None:
+                session.execute(text("select 1"))
+
+            yield check_connection if acquired else None
 
     def write_verireel_prod_backup_gate_operation_record(
         self, record: VeriReelProdBackupGateOperationRecord

@@ -2,16 +2,17 @@ from __future__ import annotations
 
 import hashlib
 import json
-from pathlib import Path
+from contextlib import contextmanager
+import os
 import re
 import subprocess
-from tempfile import TemporaryDirectory
 import time
-from typing import Callable
+from typing import Callable, Iterator
 
 from control_plane.contracts.production_backup_authority import (
     ProxmoxGuestBackupDestinationReference,
     ProxmoxStorageBackupDestinationReference,
+    production_backup_snapshot_prefix_valid,
 )
 from control_plane.contracts.production_backup_gate import (
     ProductionBackupGateWorkerRequest,
@@ -22,6 +23,30 @@ from control_plane.workflows.ship import utc_now_timestamp
 
 class ProductionBackupProviderError(ValueError):
     """A bounded provider failure code, without SSH output or secret material."""
+
+
+@contextmanager
+def ssh_memory_files(private_key: str, known_hosts: str) -> Iterator[tuple[str, str]]:
+    """Provide SSH's seekable files in anonymous RAM, never filesystem storage."""
+    create_memory_file = getattr(os, "memfd_create", None)
+    if create_memory_file is None:
+        raise ProductionBackupProviderError("backup_ssh_memory_files_unavailable")
+    descriptors: list[int] = []
+    try:
+        for name, value in (("backup-identity", private_key), ("backup-hosts", known_hosts)):
+            descriptor = create_memory_file(name, flags=getattr(os, "MFD_CLOEXEC", 1))
+            descriptors.append(descriptor)
+            os.fchmod(descriptor, 0o600)
+            content = (value.rstrip() + "\n").encode("utf-8")
+            if os.write(descriptor, content) != len(content):
+                raise ProductionBackupProviderError("backup_ssh_memory_write_failed")
+            os.lseek(descriptor, 0, os.SEEK_SET)
+        # ssh closes inherited descriptors; it reads our still-open memfds via procfs.
+        descriptor_path = f"/proc/{os.getpid()}/fd"
+        yield f"{descriptor_path}/{descriptors[0]}", f"{descriptor_path}/{descriptors[1]}"
+    finally:
+        for descriptor in descriptors:
+            os.close(descriptor)
 
 
 def _snapshot_names(output: str, prefix: str) -> list[str]:
@@ -98,7 +123,7 @@ def execute_production_backup_provider(
         ):
             raise ProductionBackupProviderError("backup_endpoint_invalid")
         prefix = policy.fast_snapshot.snapshot_prefix
-        if re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,16}", prefix) is None:
+        if not production_backup_snapshot_prefix_valid(prefix):
             raise ProductionBackupProviderError("snapshot_prefix_invalid")
         suffix = hashlib.sha256(binding.request.backup_record_id.encode()).hexdigest()[:6]
         snapshot = f"{prefix}-{time.strftime('%Y%m%d-%H%M%S', time.gmtime())}-{suffix}"
@@ -108,14 +133,10 @@ def execute_production_backup_provider(
         archive_kind = "ct" if source.guest_kind == "lxc" else "vm"
         storage = destination.storage_id
 
-        with TemporaryDirectory(prefix="launchplane-production-backup-") as directory:
-            material_dir = Path(directory)
-            identity_file = material_dir / "identity"
-            known_hosts_file = material_dir / "known_hosts"
-            identity_file.write_text(f"{ssh_private_key.rstrip()}\n", encoding="utf-8")
-            identity_file.chmod(0o600)
-            known_hosts_file.write_text(f"{ssh_known_hosts.rstrip()}\n", encoding="utf-8")
-            known_hosts_file.chmod(0o600)
+        with ssh_memory_files(ssh_private_key, ssh_known_hosts) as (
+            identity_file,
+            known_hosts_file,
+        ):
             ssh_command = [
                 "ssh",
                 "-F",
@@ -129,7 +150,7 @@ def execute_production_backup_provider(
                 "-o",
                 f"UserKnownHostsFile={known_hosts_file}",
                 "-i",
-                str(identity_file),
+                identity_file,
                 "--",
                 f"{source.username}@{source.host}",
             ]
@@ -227,6 +248,8 @@ def execute_production_backup_provider(
             except (OSError, ValueError, subprocess.TimeoutExpired) as error:
                 evidence["retention_status"] = "fail"
                 evidence["retention_error_code"] = _failure_code(error, stage)
+            if checkpoint is not None:
+                checkpoint("backup_complete")
     except (OSError, ValueError, subprocess.TimeoutExpired) as error:
         return ProductionBackupGateWorkerResult(
             status="fail",

@@ -140,14 +140,22 @@ def execute_shared_production_backup(
     source = binding.source_target.destination
     assert isinstance(source, ProxmoxGuestBackupDestinationReference)
     source_key = json.dumps([source.host.lower(), source.guest_kind, source.guest_id])
-    with record_store.production_backup_source_lock(source_key) as acquired:
-        if not acquired:
+    with record_store.production_backup_source_lock(source_key) as check_source_lock:
+        if check_source_lock is None:
             raise ProductionBackupProviderError("backup_source_busy")
+
+        def check_locked_effect(phase: str) -> None:
+            try:
+                check_source_lock()
+            except Exception as error:
+                raise ProductionBackupProviderError("backup_source_lock_lost") from error
+            checkpoint(phase)
+
         return _execute_shared_production_backup(
             record_store=record_store,
             binding=binding,
             control_plane_root=control_plane_root,
-            checkpoint=checkpoint,
+            checkpoint=check_locked_effect,
             record_progress=record_progress,
         )
 

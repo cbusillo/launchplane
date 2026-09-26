@@ -145,6 +145,32 @@ def _profile() -> LaunchplaneProductProfileRecord:
 
 
 class ProductionBackupAuthorityContractTests(unittest.TestCase):
+    def test_unusable_snapshot_prefix_is_not_reported_ready(self) -> None:
+        for prefix in ("2026-predeploy", "example.prod", "a" * 18):
+            with self.subTest(prefix=prefix), TemporaryDirectory() as directory:
+                store = FilesystemRecordStore(Path(directory))
+                store.write_production_backup_target_record(_source_target())
+                store.write_production_backup_target_record(_destination_target())
+                payload = _policy().model_dump(mode="json")
+                payload["record_id"] = ""
+                payload["policy_digest"] = ""
+                payload["fast_snapshot"]["snapshot_prefix"] = prefix
+                store.write_production_backup_policy_record(
+                    ProductionBackupPolicyRecord.model_validate(payload)
+                )
+                result = resolve_production_backup_authority(
+                    record_store=store,
+                    product="example-product",
+                    context="example-product",
+                    instance="prod",
+                    promotion_action="verireel_prod_promotion.execute",
+                    generated_at="2026-09-03T00:00:00Z",
+                )
+                self.assertFalse(result.ready)
+                self.assertEqual(
+                    result.reason_codes, ("production_backup_snapshot_prefix_invalid",)
+                )
+
     def test_target_contract_rejects_secret_material(self) -> None:
         with self.assertRaises(ValidationError):
             ProxmoxGuestBackupDestinationReference.model_validate(

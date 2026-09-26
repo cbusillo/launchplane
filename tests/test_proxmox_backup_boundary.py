@@ -21,6 +21,12 @@ class ProxmoxBackupBoundaryTests(unittest.TestCase):
             ["bash", str(script)], env=environment, text=True, capture_output=True
         )
         self.assertEqual(binding.returncode, 0, binding.stderr)
+        missing_mode = dict(environment)
+        missing_mode.pop("PROD_GATE_ALLOW_RESTORE")
+        denied_mode = subprocess.run(
+            ["bash", str(script)], env=missing_mode, text=True, capture_output=True
+        )
+        self.assertEqual(denied_mode.returncode, 126)
         self.assertEqual(
             json.loads(binding.stdout),
             {
