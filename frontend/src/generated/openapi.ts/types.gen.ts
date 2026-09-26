@@ -3328,6 +3328,7 @@ export type ProductReviewDecisionEnvelope = {
 export type ProductReviewDecisionRecord = {
     decided_at: string;
     decision: 'accepted' | 'changes_requested';
+    feedback_url: string;
     head_sha: string;
     owner_github_id: string;
     owner_github_login: string;
@@ -4539,6 +4540,7 @@ export type ReadProductReviewData = {
     query: {
         repository: string;
         pull_request: number;
+        decision_id?: string;
     };
     url: '/v1/product-review';
 };
@@ -4546,6 +4548,7 @@ export type ReadProductReviewData = {
 export type ReadProductReviewErrors = {
     401: LaunchplaneErrorResponse;
     403: LaunchplaneErrorResponse;
+    404: LaunchplaneErrorResponse;
     409: LaunchplaneErrorResponse;
     503: LaunchplaneErrorResponse;
 };

@@ -153,7 +153,7 @@ test.describe("operator journeys", () => {
     );
     await card.getByRole("button", { name: "Accept" }).click();
     await expect(card.getByText("Decision recorded.")).toBeVisible();
-    await expect(card.getByLabel("Latest decision")).toContainText("Accepted by @example-owner");
+    await expect(card.getByLabel("Recorded decision")).toContainText("Accepted by @example-owner");
     expect(requestedPaths).not.toContain("/v1/products");
     expect(requestedPaths).not.toContain("/v1/owner-acceptance/current-items");
     expect(requestedPaths).not.toContain("/v1/owner-acceptance/queue");
@@ -174,8 +174,8 @@ test.describe("operator journeys", () => {
     await expect(requestChanges).toBeDisabled();
     await card.getByRole("textbox").fill("Please adjust the checkout flow.");
     await requestChanges.click();
-    await expect(card.getByLabel("Latest decision")).toContainText("Changes requested");
-    await expect(card.getByLabel("Latest decision")).toContainText(
+    await expect(card.getByLabel("Recorded decision")).toContainText("Changes requested");
+    await expect(card.getByLabel("Recorded decision")).toContainText(
       "Please adjust the checkout flow.",
     );
     await expect(card.getByRole("textbox")).toHaveValue("");
@@ -191,7 +191,7 @@ test.describe("operator journeys", () => {
     );
 
     const card = page.locator('[data-product="example-site"]');
-    await expect(card.getByLabel("Latest decision")).toContainText("Changes requested");
+    await expect(card.getByLabel("Recorded decision")).toContainText("Changes requested");
     await expect(card.getByText("You are not this product's Owner", { exact: false })).toBeVisible();
     await expect(card.getByRole("button", { name: "Accept" })).toHaveCount(0);
     await expect(card.getByRole("button", { name: "Request changes" })).toHaveCount(0);

@@ -8,6 +8,16 @@ import {
 
 const originalFetch = globalThis.fetch;
 
+test("a decision link requests the selected saved review", async () => {
+  let requested;
+  globalThis.fetch = async (input) => {
+    requested = String(input);
+    return new Response(JSON.stringify({ status: "ok" }), { headers: { "Content-Type": "application/json" } });
+  };
+  await readProductReview("example/tenant-site", 42, undefined, "review:old");
+  assert.equal(requested, "/v1/product-review?repository=example%2Ftenant-site&pull_request=42&decision_id=review%3Aold");
+});
+
 afterEach(() => {
   globalThis.fetch = originalFetch;
 });

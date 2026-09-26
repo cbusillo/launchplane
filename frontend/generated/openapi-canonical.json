@@ -33126,6 +33126,11 @@
             "title": "Decision",
             "type": "string"
           },
+          "feedback_url": {
+            "default": "",
+            "title": "Feedback Url",
+            "type": "string"
+          },
           "head_sha": {
             "default": "",
             "title": "Head Sha",
@@ -77749,6 +77754,17 @@
             }
           },
           {
+            "in": "query",
+            "name": "decision_id",
+            "required": false,
+            "schema": {
+              "default": "",
+              "maxLength": 512,
+              "title": "Decision Id",
+              "type": "string"
+            }
+          },
+          {
             "in": "header",
             "name": "Authorization",
             "required": false,
@@ -77799,6 +77815,16 @@
               }
             },
             "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
           },
           "409": {
             "content": {

@@ -178,19 +178,40 @@ def register_product_review_routes(
         pull_request: Annotated[int, Query(ge=1)],
         identity: Annotated[LaunchplaneIdentity, Depends(common.read_identity)],
         record_store: Annotated[object, Depends(common.get_record_store)],
+        decision_id: Annotated[str, Query(max_length=512)] = "",
     ) -> ProductReviewResponse:
         trace_id = common.next_trace_id()
         store = review_store(record_store, trace_id)
         profile = visible_profile(
             store=store, repository=repository, identity=identity, trace_id=trace_id
         )
-        return build_response(
+        response = build_response(
             store=store,
             profile=profile,
             identity=identity,
             pull_request_number=pull_request,
             trace_id=trace_id,
         )
+        if not decision_id:
+            return response
+        decision = next(
+            (
+                record
+                for record in store.list_product_review_decision_records(
+                    repository=profile.repository, pull_request_number=pull_request
+                )
+                if record.record_id == decision_id
+            ),
+            None,
+        )
+        if decision is None:
+            raise common.http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="product_review_decision_not_found",
+                message="This saved review decision was not found.",
+            )
+        return response.model_copy(update={"latest_decision": decision})
 
     def write_product_review_decision(
         envelope: ProductReviewDecisionEnvelope,
@@ -250,7 +271,9 @@ def register_product_review_routes(
         tags=["product-review"],
         operation_id="read_product_review",
         summary="Read the Owner review page for one pull request",
-        responses={status: {"model": common.error_response_model} for status in (401, 403, 503)},
+        responses={
+            status: {"model": common.error_response_model} for status in (401, 403, 404, 503)
+        },
     )
     app.add_api_route(
         PRODUCT_REVIEW_DECISIONS_ROUTE,

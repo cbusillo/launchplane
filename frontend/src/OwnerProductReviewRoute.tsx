@@ -128,6 +128,7 @@ function OwnerPreviewReviewRoute({
 }) {
   const searchParams = useAppSearchParams();
   const lookup = productReviewLookupFromSearch(searchParams.toString());
+  const decisionId = searchParams.get("decision_id") || undefined;
   const [review, setReview] = useState<ProductReviewResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -149,6 +150,7 @@ function OwnerPreviewReviewRoute({
               lookup.repository,
               Number(lookup.pullRequest),
               signal,
+              decisionId,
             );
         if (requestRef.current !== requestId || signal?.aborted) return;
         setReview(response);
@@ -166,7 +168,7 @@ function OwnerPreviewReviewRoute({
         if (requestRef.current === requestId && !signal?.aborted) setLoading(false);
       }
     },
-    [fixtureMode, lookup.pullRequest, lookup.repository, lookup.valid],
+    [decisionId, fixtureMode, lookup.pullRequest, lookup.repository, lookup.valid],
   );
 
   useEffect(() => {
@@ -272,7 +274,7 @@ function ProductReviewCard({
         </p>
       ) : null}
       {review.latest_decision ? (
-        <LatestDecision decision={review.latest_decision} />
+        <LatestDecision decision={review.latest_decision} currentHead={review.head_sha} />
       ) : null}
       {review.can_decide && previewUrl ? (
         <ProductReviewDecisionForm
@@ -297,16 +299,27 @@ function cannotDecideMessage(review: ProductReviewResponse): string {
   return "No preview yet. Come back when the pull request says the preview is ready.";
 }
 
-function LatestDecision({ decision }: { decision: ProductReviewDecisionRecord }) {
+function LatestDecision({ decision, currentHead }: { decision: ProductReviewDecisionRecord; currentHead: string }) {
   return (
-    <section className="owner-review-latest" aria-label="Latest decision">
+    <section className="owner-review-latest" aria-label="Recorded decision">
       <p>
         <strong>
           {decision.decision === "accepted" ? "Accepted" : "Changes requested"}
         </strong>{" "}
         by @{decision.owner_github_login} · {formatTime(decision.decided_at)}
       </p>
+      <p>
+        {decision.head_sha === currentHead ? "Reviewed preview version" : "Earlier preview version"}{" "}
+        {decision.head_sha.slice(0, 7)}
+        {decision.head_sha !== currentHead ? ". This decision does not apply to the current preview." : ""}
+      </p>
       {decision.reason ? <blockquote>{decision.reason}</blockquote> : null}
+      {!decision.feedback_url ? (
+        <OwnerReviewState tone="error">
+          Your decision is saved, but delivery to the agent is pending. You can retry
+          the same decision; Launchplane also retries when the preview refreshes.
+        </OwnerReviewState>
+      ) : null}
     </section>
   );
 }
@@ -344,7 +357,7 @@ function ProductReviewDecisionForm({
             decision,
             reason: decisionReason,
           });
-      setReason("");
+      setReason(response.latest_decision?.feedback_url ? "" : decisionReason);
       setRecorded(true);
       onDecided(response);
     } catch (writeError) {

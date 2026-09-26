@@ -646,11 +646,13 @@ export function readProductReview(
   repository: string,
   pullRequest: number,
   signal?: AbortSignal,
+  decisionId?: string,
 ): Promise<ProductReviewResponse> {
   const params = new URLSearchParams({
     repository,
     pull_request: String(pullRequest),
   });
+  if (decisionId) params.set("decision_id", decisionId);
   return requestJson<ProductReviewResponse>(
     `/v1/product-review?${params.toString()}`,
     "GET",

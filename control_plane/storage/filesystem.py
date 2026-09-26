@@ -7140,6 +7140,13 @@ class FilesystemRecordStore:
         records.sort(key=lambda record: (record.decided_at, record.record_id), reverse=True)
         return tuple(records if limit is None else records[:limit])
 
+    @contextmanager
+    def product_review_lock(self, *, repository: str, pull_request_number: int) -> Iterator[None]:
+        with self._exclusive_record_lock(
+            "product-review", f"{repository.casefold()}#{pull_request_number}"
+        ):
+            yield
+
     def write_product_review_decision_record(self, record: ProductReviewDecisionRecord) -> Path:
         return self._write_model("launchplane_product_review_decisions", record.record_id, record)
 

@@ -5,6 +5,7 @@ product record? A decision is a recorded opinion and never merges or deploys.
 """
 
 from dataclasses import dataclass
+from contextlib import AbstractContextManager
 from datetime import datetime, timezone
 from typing import Protocol, cast
 from uuid import uuid4
@@ -20,6 +21,10 @@ from control_plane.service_auth import GitHubHumanIdentity, LaunchplaneIdentity
 
 
 class ProductReviewStore(Protocol):
+    def product_review_lock(
+        self, *, repository: str, pull_request_number: int
+    ) -> AbstractContextManager[None]: ...
+
     def list_product_profile_records(
         self, *, driver_id: str = ""
     ) -> tuple[LaunchplaneProductProfileRecord, ...]: ...
@@ -49,6 +54,7 @@ class ProductReviewStore(Protocol):
 
 
 _REQUIRED_STORE_METHODS = (
+    "product_review_lock",
     "list_product_profile_records",
     "list_preview_records",
     "read_preview_generation_record",
@@ -158,6 +164,42 @@ def latest_product_review_decision(
 
 
 def record_product_review_decision(
+    *,
+    store: ProductReviewStore,
+    profile: LaunchplaneProductProfileRecord,
+    pull_request_number: int,
+    preview: ProductReviewPreview,
+    decision: ProductReviewDecision,
+    reason: str,
+    identity: GitHubHumanIdentity,
+) -> ProductReviewDecisionRecord:
+    with store.product_review_lock(
+        repository=profile.repository, pull_request_number=pull_request_number
+    ):
+        previous = latest_product_review_decision(
+            store=store, profile=profile, pull_request_number=pull_request_number
+        )
+        if (
+            previous is not None
+            and previous.head_sha == preview.head_sha
+            and previous.preview_url == preview.preview_url
+            and previous.owner_github_id == str(identity.github_id)
+            and previous.decision == decision
+            and previous.reason == reason.strip()
+        ):
+            return previous
+        return _append_product_review_decision(
+            store=store,
+            profile=profile,
+            pull_request_number=pull_request_number,
+            preview=preview,
+            decision=decision,
+            reason=reason,
+            identity=identity,
+        )
+
+
+def _append_product_review_decision(
     *,
     store: ProductReviewStore,
     profile: LaunchplaneProductProfileRecord,

@@ -1865,6 +1865,17 @@
             }
           },
           {
+            "in": "query",
+            "name": "decision_id",
+            "required": false,
+            "schema": {
+              "default": "",
+              "maxLength": 512,
+              "title": "Decision Id",
+              "type": "string"
+            }
+          },
+          {
             "in": "header",
             "name": "Authorization",
             "required": false,
@@ -1915,6 +1926,16 @@
               }
             },
             "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
           },
           "409": {
             "content": {
@@ -25726,6 +25747,11 @@
             "title": "Decision",
             "type": "string"
           },
+          "feedback_url": {
+            "default": "",
+            "title": "Feedback Url",
+            "type": "string"
+          },
           "head_sha": {
             "default": "",
             "title": "Head Sha",
@@ -25777,6 +25803,7 @@
         "required": [
           "decided_at",
           "decision",
+          "feedback_url",
           "head_sha",
           "owner_github_id",
           "owner_github_login",

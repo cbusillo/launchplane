@@ -1,4 +1,6 @@
+import json
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -58,15 +60,20 @@ class _GitHub:
         self.head_sha = head_sha
         self.statuses: list[dict[str, object]] = []
         self.check_runs: list[dict[str, object]] = []
+        self.comments: list[dict[str, object]] = []
         self.writes: list[tuple[str, str, dict[str, object]]] = []
         self.fail_writes = False
         self.revoked_app_tokens = 0
+        self.lose_comment_response = False
+        self.fail_comment_reads = False
 
     def __call__(self, **kwargs: object) -> object:
         path = str(kwargs["path"])
         method = str(kwargs.get("method") or "GET")
         body = kwargs.get("body")
         repository_path = f"/repos/{self.repository}"
+        if path == "/user":
+            return {"id": 99, "login": "fixture-service"}
         if path == "/installation/token" and method == "DELETE":
             self.revoked_app_tokens += 1
             return None
@@ -85,6 +92,24 @@ class _GitHub:
             assert isinstance(body, dict)
             self.statuses.insert(0, dict(body))
             return dict(body)
+        if path.startswith(f"{repository_path}/issues/{_PULL_REQUEST}/comments?"):
+            if self.fail_comment_reads:
+                raise click.ClickException("Comment read unavailable.")
+            return list(self.comments)
+        if path == f"{repository_path}/issues/{_PULL_REQUEST}/comments" and method == "POST":
+            assert isinstance(body, dict)
+            comment = {
+                "id": len(self.comments) + 1,
+                "body": body["body"],
+                "user": {"login": "fixture-service", "id": 99},
+                "performed_via_github_app": None,
+                "created_at": "2026-09-26T12:00:00Z",
+            }
+            self.comments.append(comment)
+            if self.lose_comment_response:
+                self.lose_comment_response = False
+                raise click.ClickException("Comment response was lost.")
+            return comment
         if path == f"{repository_path}/commits/{self.head_sha}/statuses?per_page=100":
             return list(self.statuses)
         if path.startswith(f"{repository_path}/commits/{self.head_sha}/check-runs?"):
@@ -319,6 +344,73 @@ class OwnerReviewStatusTests(unittest.TestCase):
 
         self.assertEqual(github.writes, [])
 
+    def test_full_feedback_survives_publication_and_replay(self) -> None:
+        github = _GitHub()
+        reason = "Fix the price.\n\nKeep `USB-C`, ``` examples, @mentions, and --> intact.\nCafé."
+        decision = _decision(decision="changes_requested", decided_at="2026-09-26T12:00:00Z")
+        decision = decision.model_copy(update={"reason": reason})
+        self.store.write_product_review_decision_record(decision)
+
+        self._publish(github)
+        self._publish(github)
+
+        self.assertEqual(len(github.comments), 1)
+        body = str(github.comments[0]["body"])
+        metadata = json.loads(
+            body.splitlines()[1].removeprefix("<!-- launchplane:owner-review ").removesuffix(" -->")
+        )
+        self.assertEqual(metadata["reason"], reason)
+        self.assertEqual(metadata["head_sha"], _HEAD_SHA)
+        self.assertEqual(metadata["owner_github_id"], str(_OWNER_GITHUB_ID))
+        self.assertIn("decision_id=", metadata["review_url"])
+        saved = self.store.list_product_review_decision_records(
+            repository=_REPOSITORY, pull_request_number=_PULL_REQUEST
+        )[0]
+        self.assertEqual(
+            saved.feedback_url, f"https://github.com/{_REPOSITORY}/pull/42#issuecomment-1"
+        )
+
+    def test_lost_create_response_recovers_the_existing_comment(self) -> None:
+        github = _GitHub()
+        github.lose_comment_response = True
+        self.store.write_product_review_decision_record(
+            _decision(decision="accepted", decided_at="2026-09-26T12:00:00Z")
+        )
+
+        self._publish(github)
+        self.assertEqual(github.statuses[0]["state"], "pending")
+        self._publish(github)
+
+        self.assertEqual(len(github.comments), 1)
+        self.assertEqual(github.statuses[0]["state"], "success")
+
+    def test_failed_comment_read_does_not_create_or_claim_delivery(self) -> None:
+        github = _GitHub()
+        github.fail_comment_reads = True
+        self.store.write_product_review_decision_record(
+            _decision(decision="accepted", decided_at="2026-09-26T12:00:00Z")
+        )
+
+        self._publish(github)
+
+        self.assertEqual(github.comments, [])
+        self.assertEqual(github.statuses[0]["state"], "pending")
+        github.fail_comment_reads = False
+        self._publish(github)
+        self.assertEqual(len(github.comments), 1)
+        self.assertEqual(github.statuses[0]["state"], "success")
+
+    def test_competing_publishers_create_one_comment(self) -> None:
+        github = _GitHub()
+        self.store.write_product_review_decision_record(
+            _decision(decision="accepted", decided_at="2026-09-26T12:00:00Z")
+        )
+        with ThreadPoolExecutor(max_workers=2) as workers:
+            futures = [workers.submit(self._publish, github) for _ in range(2)]
+            for future in futures:
+                future.result()
+        self.assertEqual(len(github.comments), 1)
+
 
 class OwnerReviewStatusHttpTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
@@ -389,6 +481,17 @@ class OwnerReviewStatusHttpTests(unittest.IsolatedAsyncioTestCase):
             repository=_REPOSITORY, pull_request_number=_PULL_REQUEST
         )
         self.assertEqual([record.decision for record in decisions], ["changes_requested"])
+        self.assertEqual(decisions[0].feedback_url, "")
+
+        github.fail_writes = False
+        self.assertEqual(await self._record_changes_requested(github), 200)
+        saved = self.store.list_product_review_decision_records(
+            repository=_REPOSITORY, pull_request_number=_PULL_REQUEST
+        )
+        self.assertEqual(len(saved), 1)
+        self.assertEqual(saved[0].record_id, decisions[0].record_id)
+        self.assertTrue(saved[0].feedback_url)
+        self.assertEqual(len(github.comments), 1)
 
     async def test_ready_preview_feedback_writes_the_status_and_retires_leftovers(self) -> None:
         github = _GitHub(repository="every/verireel")

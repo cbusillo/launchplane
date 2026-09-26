@@ -19823,6 +19823,14 @@ class PostgresRecordStore(HumanSessionStore):
             limit=limit,
         )
 
+    @contextmanager
+    def product_review_lock(self, *, repository: str, pull_request_number: int) -> Iterator[None]:
+        with self._session_factory() as session, session.begin():
+            self._lock_landing_authority(
+                session, f"product-review:{repository.casefold()}#{pull_request_number}"
+            )
+            yield
+
     def write_product_review_decision_record(self, record: ProductReviewDecisionRecord) -> None:
         self._write_row(
             LaunchplaneProductReviewDecisionRow(
