@@ -1,8 +1,9 @@
 import unittest
+from contextlib import nullcontext
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, cast
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from tests.support.promotion_backup import stub_verified_promotion_backup
 
 import click
@@ -247,6 +248,37 @@ def _deploy_result(*, deploy_status: Literal["pass", "fail"] = "pass") -> Generi
 class GenericWebProdPromotionTests(unittest.TestCase):
     def setUp(self) -> None:
         stub_verified_promotion_backup(self, "control_plane.workflows.generic_web_promotion")
+
+    def test_backup_refusal_precedes_provider_effect_recording(self) -> None:
+        store = _GenericWebPromotionStore(_profile())
+        store.write_environment_inventory(_testing_inventory())
+        effect_checkpoint = Mock()
+        backup_checkpoint = Mock(side_effect=click.ClickException("backup refused"))
+
+        def deploy(**kwargs: object) -> GenericWebDeployResult:
+            checkpoint = kwargs["provider_effect_checkpoint"]
+            assert callable(checkpoint)
+            checkpoint("target_update")
+            raise AssertionError("refused backup must prevent provider mutation")
+
+        with (
+            patch(
+                "control_plane.workflows.generic_web_promotion.execute_generic_web_deploy",
+                side_effect=deploy,
+            ),
+            patch(
+                "control_plane.workflows.generic_web_promotion.production_promotion_backup_guard",
+                side_effect=lambda **_kwargs: nullcontext(backup_checkpoint),
+            ),
+            self.assertRaisesRegex(click.ClickException, "backup refused"),
+        ):
+            execute_generic_web_prod_promotion(
+                control_plane_root=Path("."),
+                record_store=store,
+                request=_request(verify_health=False),
+                provider_effect_checkpoint=effect_checkpoint,
+            )
+        effect_checkpoint.assert_not_called()
 
     def test_execute_accepts_based_driver_product_profile(self) -> None:
         store = _GenericWebPromotionStore(_profile(driver_id="odoo"))

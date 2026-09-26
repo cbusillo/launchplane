@@ -337,9 +337,9 @@ def execute_generic_web_prod_promotion(
     ) as backup_checkpoint:
 
         def promotion_checkpoint(phase: str) -> None:
+            backup_checkpoint(phase)
             if provider_effect_checkpoint is not None:
                 provider_effect_checkpoint(phase)
-            backup_checkpoint(phase)
 
         deploy_result = execute_generic_web_deploy(
             control_plane_root=control_plane_root,

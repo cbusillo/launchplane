@@ -324,6 +324,94 @@ class ProductionPromotionBackupTests(unittest.TestCase):
                 check.side_effect = RuntimeError("lost connection")
                 with self.assertRaisesRegex(click.ClickException, "lock was lost"):
                     checkpoint("next_effect")
+                check.side_effect = None
+
+    def test_admitted_promotion_finishes_after_policy_change_and_refused_capture(self) -> None:
+        store = self.capture()
+        original = store.list_verireel_prod_backup_gate_operation_records()[0]
+        assert original.binding is not None and original.result is not None
+        with production_promotion_backup_guard(
+            record_store=store,
+            product="example-product",
+            context="example-product",
+            instance="prod",
+            promotion_action=ODOO_PROMOTION_BACKUP_ACTION,
+            backup_record_id="backup-example",
+        ) as checkpoint:
+            checkpoint("target_update")
+            request = original.binding.request.model_copy(
+                update={"backup_record_id": "refused-backup"}
+            )
+            refused = original.model_copy(
+                update={
+                    "operation_id": "refused-operation",
+                    "backup_record_id": "refused-backup",
+                    "request": request,
+                    "binding": original.binding.model_copy(update={"request": request}),
+                    "status": "fail",
+                    "error_code": "backup_source_busy",
+                    "error_message": "busy",
+                    "progress_evidence": {},
+                    "result": original.result.model_copy(
+                        update={"backup_status": "fail", "evidence": {}}
+                    ),
+                }
+            )
+            store.write_verireel_prod_backup_gate_operation_record(refused)
+            self.require(store)
+            policy = original.binding.policy
+            store.write_production_backup_policy_record(
+                ProductionBackupPolicyRecord.model_validate(
+                    {
+                        **policy.model_dump(),
+                        "record_id": "",
+                        "policy_revision": 2,
+                        "policy_digest": "",
+                        "supersedes_record_id": policy.record_id,
+                    }
+                )
+            )
+            checkpoint("odoo_module_update")
+        with self.assertRaisesRegex(click.ClickException, "changed"):
+            self.require(store)
+
+    def test_guard_rechecks_evidence_immediately_before_first_effect(self) -> None:
+        store = self.capture()
+        with production_promotion_backup_guard(
+            record_store=store,
+            product="example-product",
+            context="example-product",
+            instance="prod",
+            promotion_action=ODOO_PROMOTION_BACKUP_ACTION,
+            backup_record_id="backup-example",
+        ) as checkpoint:
+            record = store.read_backup_gate_record("backup-example")
+            store.write_backup_gate_record(record.model_copy(update={"status": "fail"}))
+            with self.assertRaisesRegex(click.ClickException, "incomplete or mismatched"):
+                checkpoint("target_update")
+
+    def test_guard_detects_lock_loss_before_reporting_completion(self) -> None:
+        store = self.capture()
+        check = Mock()
+
+        @contextmanager
+        def lock(_key: str) -> Iterator[Mock]:
+            yield check
+
+        with (
+            patch.object(store, "production_backup_source_lock", side_effect=lock),
+            self.assertRaisesRegex(click.ClickException, "lock was lost"),
+        ):
+            with production_promotion_backup_guard(
+                record_store=store,
+                product="example-product",
+                context="example-product",
+                instance="prod",
+                promotion_action=ODOO_PROMOTION_BACKUP_ACTION,
+                backup_record_id="backup-example",
+            ) as checkpoint:
+                checkpoint("target_update")
+                check.side_effect = RuntimeError("lost connection")
 
     def test_generic_web_cannot_opt_out(self) -> None:
         with self.assertRaises(ValidationError):

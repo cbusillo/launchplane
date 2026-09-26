@@ -191,6 +191,33 @@ jobs:
               "$run_scope"
           } >>"$GITHUB_OUTPUT"
 
+      - name: Read release approval before backup
+        if: ${{ !inputs.dry_run }}
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@052db9d452f05381a3b43a82dfddfeefb34a8b72 # launchplane-request
+        with:
+          launchplane-url: >-
+            ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
+          audience: ${{ inputs.launchplane_audience }}
+          method: GET
+          route-path: /v1/release-review?product=${{ steps.request.outputs.product }}
+          response-output-file: .launchplane/promotion-release-review.json
+          log-response-body: "false"
+
+      - name: Require accepted release before backup
+        id: release_approval
+        if: ${{ !inputs.dry_run }}
+        env:
+          PRODUCT: ${{ steps.request.outputs.product }}
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs = require('node:fs');
+          const response = JSON.parse(fs.readFileSync('.launchplane/promotion-release-review.json', 'utf8'));
+          if (response.product !== process.env.PRODUCT || response.review?.approved !== true) {
+            throw new Error('The current release must be approved before its production backup.');
+          }
+          NODE
+
       - name: Read production lane from Launchplane
         if: ${{ !inputs.dry_run }}
         uses: cbusillo/launchplane/.github/actions/launchplane-request@052db9d452f05381a3b43a82dfddfeefb34a8b72 # launchplane-request

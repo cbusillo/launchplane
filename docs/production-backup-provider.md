@@ -122,8 +122,10 @@ remain separate rollout steps. Product repositories pass no provider topology.
 
 ## Promotion enforcement
 
-The Launchplane reusable Odoo and generic-web promotion workflows first enqueue
-the shared capture and poll the same idempotent request until it completes.
+The Launchplane reusable Odoo and generic-web promotion workflows first require
+current release approval, then enqueue the shared capture and poll the same
+idempotent request until it completes. The service checks release approval again
+before deployment.
 Failure or cancellation stops the workflow before promotion. Generic-web reads
 the production context from the current product profile. Odoo's thin workflow
 then sends `run.infrastructure_backup_record_id`; Launchplane resolves the
@@ -148,12 +150,18 @@ refuses deployment. Promotion records retain the infrastructure backup and
 operation IDs plus exact policy/target evidence. Odoo keeps its logical evidence
 in the same record and prefixes the additional infrastructure evidence keys.
 
-Deployment holds the same canonical guest lock as capture and retention. Each
-provider checkpoint rechecks the lock, current authority and evidence age.
-A later capture can invalidate an earlier snapshot through retention, so an
-earlier capture cannot authorize another deployment after a subsequent capture
-has started. Other host/name aliases and legacy commands remain outside this
-lock, as described above.
+Deployment holds the same canonical guest lock as capture and retention. Current
+authority, evidence age and capture supersession are checked under that lock
+before the first provider effect. Subsequent checkpoints verify the lock;
+the admitted evidence remains bound for the rest of that promotion, including
+Odoo module updates. An elapsed freshness limit or a later policy edit must not
+interrupt a promotion after its image has changed. Existing execution-authorization
+and operation-lease checks remain independent.
+A subsequent verified capture can have pruned an earlier snapshot, so earlier
+evidence cannot authorize a new promotion. A capture refused before verification,
+including a source-lock refusal during promotion, cannot prune the selected
+snapshot and does not invalidate the in-flight promotion. Other host/name aliases
+and legacy commands remain outside this lock, as described above.
 
 A generic-web dry run creates no backup. Without a supplied capture it reports
 backup status `pending` with `required=true`; a successful dry run never provides
@@ -161,8 +169,9 @@ production backup proof. Live calls cannot use dry-run evidence to bypass the
 gate.
 
 Roll out the new reusable workflow revision and explicitly grant its caller
-`production_backup_gate.execute` for the exact production scope. Generic-web's
-workflow also needs the existing product-profile read capability. No grants are
+`production_backup_gate.execute` for the exact production scope and
+`release_review.read` for the product. Generic-web's workflow also needs the
+existing product-profile read capability. No grants are
 created by deployment. Older workflow pins or missing policies/evidence fail
 closed; enforcement applies to every Odoo and generic-web testing-to-production
 promotion, including products awaiting their own activation.

@@ -119,6 +119,13 @@ def require_production_promotion_backup(
             other.operation_id != operation.operation_id
             and other.binding is not None
             and _source_key(other) == _source_key(operation)
+            and (
+                other.progress_evidence.get("capture_status") == "verified"
+                or (
+                    other.result is not None
+                    and other.result.evidence.get("capture_status") == "verified"
+                )
+            )
             and other.started_at
             and other.started_at >= operation.started_at
         ):
@@ -146,7 +153,7 @@ def production_promotion_backup_guard(
     promotion_action: str,
     backup_record_id: str,
 ) -> Iterator[Callable[[str], None]]:
-    """Hold the capture lock through deployment and recheck before each effect."""
+    """Validate before effects; retain the backup lock through the promotion."""
     operation = _read_operation(
         record_store, product, context, instance, promotion_action, backup_record_id
     )
@@ -156,13 +163,17 @@ def production_promotion_backup_guard(
         if check_lock is None:
             raise click.ClickException("Production backup source is busy.")
 
-        def checkpoint(_phase: str) -> None:
+        effects_started = False
+
+        def require_lock() -> None:
             try:
                 check_lock()
             except Exception as error:
                 raise click.ClickException(
                     "Production promotion backup source lock was lost."
                 ) from error
+
+        def require_evidence() -> None:
             require_production_promotion_backup(
                 record_store=record_store,
                 product=product,
@@ -172,8 +183,17 @@ def production_promotion_backup_guard(
                 backup_record_id=backup_record_id,
             )
 
-        checkpoint("promotion_preflight")
+        def checkpoint(_phase: str) -> None:
+            nonlocal effects_started
+            require_lock()
+            if not effects_started:
+                require_evidence()
+                effects_started = True
+
+        require_lock()
+        require_evidence()
         yield checkpoint
+        require_lock()
 
 
 def _read_operation(

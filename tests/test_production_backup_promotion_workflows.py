@@ -21,6 +21,8 @@ class ProductionBackupPromotionWorkflowTests(unittest.TestCase):
                 workflow = load_workflow(ROOT / ".github/workflows" / filename)
                 steps = {step.data.get("id"): step for step in workflow.steps("prod-promotion")}
                 capture = steps["infrastructure_backup"]
+                self.assertLess(steps["release_approval"].index, capture.index)
+                self.assertEqual(steps["release_approval"].data["if"], capture.data["if"])
                 self.assertLess(capture.index, steps[promotion_step_id].index)
                 self.assertEqual(capture.with_values["route-path"], "/v1/production-backup-gates")
                 self.assertEqual(capture.with_values["poll-result-path"], "operation_status")
@@ -35,6 +37,34 @@ class ProductionBackupPromotionWorkflowTests(unittest.TestCase):
             "run.infrastructure_backup_record_id=${{ steps.infrastructure_backup.outputs.backup_record_id }}",
             str(step.with_values["payload-fields"]),
         )
+
+    def test_unapproved_or_missing_release_stops_before_capture(self) -> None:
+        for filename in (
+            "reusable-product-driver-prod-promotion.yml",
+            "reusable-generic-web-prod-promotion.yml",
+        ):
+            workflow = load_workflow(ROOT / ".github/workflows" / filename)
+            step = workflow.step_named("prod-promotion", "Require accepted release before backup")
+            assert step is not None
+            with TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / ".launchplane").mkdir()
+                for review, expected_success in (
+                    ({}, False),
+                    ({"approved": False}, False),
+                    ({"approved": True}, True),
+                ):
+                    with self.subTest(workflow=filename, review=review):
+                        (root / ".launchplane/promotion-release-review.json").write_text(
+                            json.dumps({"product": "example", "review": review})
+                        )
+                        result = subprocess.run(
+                            ["bash", "-c", step.run],
+                            cwd=root,
+                            env={**os.environ, "PRODUCT": "example"},
+                            capture_output=True,
+                        )
+                        self.assertEqual(result.returncode == 0, expected_success)
 
     def test_generic_web_resolves_stored_context_and_passes_capture_identity(self) -> None:
         workflow = load_workflow(ROOT / ".github/workflows/reusable-generic-web-prod-promotion.yml")
