@@ -10607,6 +10607,18 @@ class PostgresRecordStore(HumanSessionStore):
             session.commit()
         return tuple(affected_operation_ids)
 
+    @contextmanager
+    def production_backup_source_lock(self, source_key: str) -> Iterator[bool]:
+        """Fence shared capture and retention for one configured provider guest."""
+        with self._session_factory() as session:
+            acquired = self.database_url.startswith("sqlite") or bool(
+                session.scalar(
+                    text("select pg_try_advisory_xact_lock(hashtextextended(:lock_name, 0))"),
+                    {"lock_name": f"launchplane:backup-source:{source_key}"},
+                )
+            )
+            yield acquired
+
     def write_verireel_prod_backup_gate_operation_record(
         self, record: VeriReelProdBackupGateOperationRecord
     ) -> None:

@@ -98,6 +98,8 @@ def execute_production_backup_provider(
         ):
             raise ProductionBackupProviderError("backup_endpoint_invalid")
         prefix = policy.fast_snapshot.snapshot_prefix
+        if re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,16}", prefix) is None:
+            raise ProductionBackupProviderError("snapshot_prefix_invalid")
         suffix = hashlib.sha256(binding.request.backup_record_id.encode()).hexdigest()[:6]
         snapshot = f"{prefix}-{time.strftime('%Y%m%d-%H%M%S', time.gmtime())}-{suffix}"
         if len(snapshot) > 40:
@@ -132,7 +134,7 @@ def execute_production_backup_provider(
                 f"{source.username}@{source.host}",
             ]
 
-            def run(command: list[str]) -> str:
+            def run(command: list[str], *, include_stderr: bool = False) -> str:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise ProductionBackupProviderError("backup_timeout")
@@ -144,7 +146,7 @@ def execute_production_backup_provider(
                 )
                 if result.returncode != 0:
                     raise ProductionBackupProviderError(f"{stage}_command_failed")
-                return f"{result.stdout}\n{result.stderr}"
+                return f"{result.stdout}\n{result.stderr}" if include_stderr else result.stdout
 
             try:
                 boundary = json.loads(run(["launchplane-backup-boundary"]))
@@ -156,6 +158,7 @@ def execute_production_backup_provider(
                 "guest_id": source.guest_id,
                 "storage_id": storage,
                 "snapshot_prefix": prefix,
+                "restore_allowed": False,
             }:
                 raise ProductionBackupProviderError("backup_host_binding_mismatch")
             storage_rows = [
@@ -187,7 +190,8 @@ def execute_production_backup_provider(
             if checkpoint is not None:
                 checkpoint(stage)
             backup_output = run(
-                ["vzdump", source.guest_id, "--mode", "snapshot", "--storage", storage]
+                ["vzdump", source.guest_id, "--mode", "snapshot", "--storage", storage],
+                include_stderr=True,
             )
             archives = set(
                 re.findall(

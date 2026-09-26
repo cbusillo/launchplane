@@ -7,6 +7,7 @@ ALLOWED_STORAGE="${PROD_GATE_ALLOWED_STORAGE:-}"
 SNAPSHOT_PREFIX="${PROD_GATE_SNAPSHOT_PREFIX:-}"
 LEGACY_SNAPSHOT_PREFIX="${PROD_GATE_LEGACY_SNAPSHOT_PREFIX:-}"
 SNAPSHOT_STYLE="${PROD_GATE_SNAPSHOT_STYLE:-timestamp_entropy_optional_tag}"
+ALLOW_RESTORE="${PROD_GATE_ALLOW_RESTORE:-false}"
 
 forbidden() {
 	echo "forbidden" >&2
@@ -62,6 +63,7 @@ snapshot_name_allowed() {
 [[ "${ALLOWED_CTID}" =~ ^[0-9]+$ ]] || forbidden
 [[ "${SNAPSHOT_PREFIX}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || forbidden
 [[ -z "${ALLOWED_STORAGE}" || "${ALLOWED_STORAGE}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || forbidden
+[[ "${ALLOW_RESTORE}" == "true" || "${ALLOW_RESTORE}" == "false" ]] || forbidden
 case "${GUEST_KIND}" in
 lxc) GUEST_COMMAND="pct" ;;
 qemu) GUEST_COMMAND="qm" ;;
@@ -76,8 +78,8 @@ read -r -a args <<<"${raw_command}"
 
 # Reveal only the exact forced-command binding, without widening shell access.
 if [[ ${#args[@]} -eq 1 && "${args[0]}" == "launchplane-backup-boundary" && -n "${ALLOWED_STORAGE}" ]]; then
-	printf '{"schema_version":1,"guest_kind":"%s","guest_id":"%s","storage_id":"%s","snapshot_prefix":"%s"}\n' \
-		"${GUEST_KIND}" "${ALLOWED_CTID}" "${ALLOWED_STORAGE}" "${SNAPSHOT_PREFIX}"
+	printf '{"schema_version":1,"guest_kind":"%s","guest_id":"%s","storage_id":"%s","snapshot_prefix":"%s","restore_allowed":%s}\n' \
+		"${GUEST_KIND}" "${ALLOWED_CTID}" "${ALLOWED_STORAGE}" "${SNAPSHOT_PREFIX}" "${ALLOW_RESTORE}"
 	exit 0
 fi
 
@@ -109,14 +111,14 @@ if [[ ${#args[@]} -eq 4 && "${args[0]}" == "${GUEST_COMMAND}" && "${args[1]}" ==
 fi
 
 # pct rollback <ctid> <snapshot_name>
-if [[ ${#args[@]} -eq 4 && "${args[0]}" == "${GUEST_COMMAND}" && "${args[1]}" == "rollback" && "${args[2]}" == "${ALLOWED_CTID}" ]]; then
+if [[ "${ALLOW_RESTORE}" == "true" && ${#args[@]} -eq 4 && "${args[0]}" == "${GUEST_COMMAND}" && "${args[1]}" == "rollback" && "${args[2]}" == "${ALLOWED_CTID}" ]]; then
 	if snapshot_name_allowed "${args[3]}"; then
 		exec "/usr/sbin/${GUEST_COMMAND}" rollback "${ALLOWED_CTID}" "${args[3]}"
 	fi
 fi
 
 # pct start <ctid>
-if [[ ${#args[@]} -eq 3 && "${args[0]}" == "${GUEST_COMMAND}" && "${args[1]}" == "start" && "${args[2]}" == "${ALLOWED_CTID}" ]]; then
+if [[ "${ALLOW_RESTORE}" == "true" && ${#args[@]} -eq 3 && "${args[0]}" == "${GUEST_COMMAND}" && "${args[1]}" == "start" && "${args[2]}" == "${ALLOWED_CTID}" ]]; then
 	exec "/usr/sbin/${GUEST_COMMAND}" start "${ALLOWED_CTID}"
 fi
 

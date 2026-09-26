@@ -24,7 +24,8 @@ product/context/instance as query parameters and requires
 `production_backup_authority.read`. It returns status and bounded evidence,
 without host coordinates, SSH material or raw provider output. Passing evidence
 includes policy revision/digest, target record IDs/digests, snapshot identity,
-PBS archive identity, and timestamps. Storage coordinates are not exposed.
+PBS archive identity (including guest kind/ID), and timestamps. Host and storage
+coordinates are not exposed.
 Partial captures fail and retain the evidence already collected, with a bounded
 error code. The worker persists capture intent and verified progress as it goes;
 lease-expiry recovery retains that evidence and reports an unknown effect rather
@@ -47,6 +48,11 @@ and the exact policy/target binding. Missing, stale, retired or changed authorit
 blocks execution. An expired operation that entered the provider phase is not
 automatically retried because its effect may be unknown.
 
+A database advisory lock covers capture and retention for the configured host,
+guest kind and guest ID, across backup record IDs and worker replicas. A second
+capture fails with `backup_source_busy` before host effects. After the first
+operation is reconciled, a new capture uses a new backup record ID.
+
 ## Host and credential prerequisites
 
 The exact production instance needs managed runtime secret bindings for
@@ -61,10 +67,23 @@ snapshot prefix. `PROD_GATE_GUEST_KIND` selects `lxc` or `qemu`; the existing
 `PROD_GATE_ALLOWED_CTID` variable carries the exact guest ID for either kind.
 Existing snapshot-style settings remain supported.
 
+New filters default to capture-only access: `PROD_GATE_ALLOW_RESTORE=false`.
+The shared provider requires that capability in the boundary read and refuses a
+key that also permits rollback or start. A separately approved legacy restore
+key may set `PROD_GATE_ALLOW_RESTORE=true`; installing a new filter must preserve
+that explicit setting when legacy restore access is intended. The shared capture
+key must remain separate from such a restore key.
+
 The worker first compares `launchplane-backup-boundary` with the Launchplane
 binding, then requires the exact storage to report `pbs` and `active`. A storage
 rename on only one side fails before capture. Older installed filters without
 these reads fail closed and need a separately approved host update.
+
+Snapshot prefixes are checked before SSH against the
+[Proxmox snapshot-name format](https://github.com/proxmox/pve-common/blob/master/src/PVE/JSONSchema.pm):
+a leading letter, letters/digits/underscore/hyphen thereafter, and enough room
+for the timestamp/hash suffix within 40 characters. SSH warnings on stderr do
+not become metadata input.
 
 The filter permits storage status for its bound destination and backup listing
 for its bound guest. Other storage, guest, content type, shell commands and
@@ -84,10 +103,19 @@ matching this provider's configured prefix and timestamp/hash format, preserves
 the just-created snapshot, and retains at least one snapshot even when retention
 is zero. Existing snapshots outside that format are kept. Retention failure is
 recorded separately with a bounded error code and does not invalidate a verified
-capture; authority or lease loss stops further deletion.
+capture when the worker can commit its result; authority or lease loss stops
+further deletion. A worker crash or expired lease still fails closed, including
+during retention. Saved verified-capture evidence remains available for operator
+reconciliation; recovery does not automatically authorize a promotion.
 
 Deploying this code does not install host filters, grant access, create secret
 bindings, activate a backup policy, or change the legacy promotion gates. The
 Odoo/generic-web promotion integration and each product's activation/proof are
 separate rollout steps. Product repositories continue passing no provider
 topology.
+
+Deploy the worker and API together, and confirm the worker runs the new revision
+before granting or using shared capture. An old worker cannot read schema-v3
+operations and must never receive them. Do not run the legacy and shared backup
+flows for the same guest during migration; the shared source lock does not
+control legacy host commands.

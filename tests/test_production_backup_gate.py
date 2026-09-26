@@ -1,6 +1,7 @@
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from datetime import datetime, timedelta, timezone
 import os
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Event
@@ -15,7 +16,11 @@ from control_plane.contracts.durable_operation_authorization import DurableOpera
 from control_plane.contracts.production_backup_gate import ProductionBackupGateWorkerResult
 from control_plane.contracts.verireel_prod_backup_gate import VeriReelProdBackupGateRequest
 from control_plane.storage.postgres import PostgresRecordStore
-from control_plane.workflows.production_backup_gate import enqueue_production_backup_gate
+from control_plane.workflows.production_backup_gate import (
+    enqueue_production_backup_gate,
+    execute_shared_production_backup,
+)
+from control_plane.workflows.production_backup_provider import ProductionBackupProviderError
 from control_plane.workflows.verireel_prod_backup_gate import enqueue_verireel_prod_backup_gate
 from control_plane.workflows.verireel_prod_backup_gate_operation_worker import (
     run_verireel_prod_backup_gate_operation_worker_once,
@@ -297,6 +302,36 @@ class ProductionBackupGateTests(unittest.TestCase):
     os.environ.get("LAUNCHPLANE_TEST_POSTGRES_URL"), "Real PostgreSQL test URL is required"
 )
 class ProductionBackupGatePostgresTests(unittest.TestCase):
+    def test_same_source_is_fenced_before_host_effects_and_other_sources_are_independent(
+        self,
+    ) -> None:
+        binding = _binding()
+        source = binding.source_target.destination
+        source_key = json.dumps([source.host.lower(), "lxc", "101"])
+        with _store_for_fresh_head_database() as store:
+            with store.production_backup_source_lock(source_key) as acquired:
+                self.assertTrue(acquired)
+                with patch(
+                    "control_plane.workflows.production_backup_gate.enforce_worker_runtime_key_safety"
+                ) as runtime:
+                    with self.assertRaisesRegex(
+                        ProductionBackupProviderError, "backup_source_busy"
+                    ):
+                        execute_shared_production_backup(
+                            record_store=store,
+                            binding=binding,
+                            control_plane_root=Path("."),
+                            checkpoint=lambda _phase: None,
+                            record_progress=lambda _evidence: None,
+                        )
+                runtime.assert_not_called()
+                with store.production_backup_source_lock(
+                    json.dumps([source.host.lower(), "lxc", "102"])
+                ) as other:
+                    self.assertTrue(other)
+            with store.production_backup_source_lock(source_key) as acquired_after_completion:
+                self.assertTrue(acquired_after_completion)
+
     def test_competing_record_id_cannot_overwrite_capture_finishing_during_enqueue(self) -> None:
         with _store_for_fresh_head_database() as store:
             binding = _binding()

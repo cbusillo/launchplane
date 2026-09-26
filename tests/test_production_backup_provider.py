@@ -50,6 +50,7 @@ class BackupHost:
                     "guest_id": "101",
                     "storage_id": "pbs-production",
                     "snapshot_prefix": "example-predeploy",
+                    "restore_allowed": False,
                 }
             )
         elif args == ["pvesm", "status", "--storage", "pbs-production"]:
@@ -74,10 +75,41 @@ class BackupHost:
             output = ""
         else:
             raise AssertionError(f"Unexpected provider command: {args}")
-        return subprocess.CompletedProcess(command, 0, stdout=output, stderr="")
+        return subprocess.CompletedProcess(command, 0, stdout=output, stderr="SSH warning banner")
 
 
 class ProductionBackupProviderTests(unittest.TestCase):
+    def test_capture_rejects_restore_capability_and_invalid_snapshot_prefixes(self) -> None:
+        boundary = {
+            "schema_version": 1,
+            "guest_kind": "lxc",
+            "guest_id": "101",
+            "storage_id": "pbs-production",
+            "snapshot_prefix": "example-predeploy",
+            "restore_allowed": True,
+        }
+        with patch(
+            "control_plane.workflows.production_backup_provider.subprocess.run",
+            return_value=subprocess.CompletedProcess([], 0, stdout=json.dumps(boundary), stderr=""),
+        ) as run:
+            result = execute_production_backup_provider(
+                _binding(), ssh_private_key="key", ssh_known_hosts="hosts"
+            )
+        self.assertEqual(result.error_code, "backup_host_binding_mismatch")
+        self.assertEqual(run.call_count, 1)
+        for prefix in ("9example", "example.dot", "a" * 18):
+            with self.subTest(prefix=prefix):
+                binding = _binding()
+                binding.policy.fast_snapshot.snapshot_prefix = prefix
+                with patch(
+                    "control_plane.workflows.production_backup_provider.subprocess.run"
+                ) as run:
+                    result = execute_production_backup_provider(
+                        binding, ssh_private_key="key", ssh_known_hosts="hosts"
+                    )
+                self.assertEqual(result.error_code, "snapshot_prefix_invalid")
+                run.assert_not_called()
+
     def test_retention_failure_keeps_verified_capture(self) -> None:
         host = BackupHost()
         host.old_snapshots = [f"example-predeploy-2026090{i}-100000-abcdef" for i in range(1, 7)]
@@ -143,6 +175,7 @@ class ProductionBackupProviderTests(unittest.TestCase):
                         "guest_id": "101",
                         "storage_id": "pbs-production",
                         "snapshot_prefix": "example-predeploy",
+                        "restore_allowed": False,
                     }
                 )
             elif args == ["pvesm", "status", "--storage", "pbs-production"]:
@@ -203,6 +236,7 @@ class ProductionBackupProviderTests(unittest.TestCase):
                         "guest_id": "101",
                         "storage_id": "renamed-destination",
                         "snapshot_prefix": "example-predeploy",
+                        "restore_allowed": False,
                     }
                 ),
                 stderr="",

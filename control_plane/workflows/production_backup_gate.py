@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 from typing import Callable
 
 from control_plane import runtime_environments
 from control_plane.contracts.durable_operation_authorization import DurableOperationAuthorization
+from control_plane.contracts.production_backup_authority import (
+    ProxmoxGuestBackupDestinationReference,
+)
 from control_plane.contracts.production_backup_gate import (
     ProductionBackupGateRequest,
     ProductionBackupGateWorkerRequest,
@@ -124,6 +128,31 @@ def enqueue_production_backup_gate(
 
 
 def execute_shared_production_backup(
+    *,
+    record_store: object,
+    binding: ProductionBackupGateWorkerRequest,
+    control_plane_root: Path,
+    checkpoint: Callable[[str], None],
+    record_progress: Callable[[dict[str, str]], None],
+) -> VeriReelProdBackupGateWorkerResult:
+    if not isinstance(record_store, PostgresRecordStore):
+        raise ProductionBackupProviderError("backup_operation_store_unavailable")
+    source = binding.source_target.destination
+    assert isinstance(source, ProxmoxGuestBackupDestinationReference)
+    source_key = json.dumps([source.host.lower(), source.guest_kind, source.guest_id])
+    with record_store.production_backup_source_lock(source_key) as acquired:
+        if not acquired:
+            raise ProductionBackupProviderError("backup_source_busy")
+        return _execute_shared_production_backup(
+            record_store=record_store,
+            binding=binding,
+            control_plane_root=control_plane_root,
+            checkpoint=checkpoint,
+            record_progress=record_progress,
+        )
+
+
+def _execute_shared_production_backup(
     *,
     record_store: object,
     binding: ProductionBackupGateWorkerRequest,

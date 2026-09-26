@@ -14,6 +14,7 @@ class ProxmoxBackupBoundaryTests(unittest.TestCase):
             "PROD_GATE_ALLOWED_STORAGE": "pbs-example",
             "PROD_GATE_SNAPSHOT_PREFIX": "example-predeploy",
             "PROD_GATE_GUEST_KIND": "lxc",
+            "PROD_GATE_ALLOW_RESTORE": "false",
             "SSH_ORIGINAL_COMMAND": "launchplane-backup-boundary",
         }
         binding = subprocess.run(
@@ -28,11 +29,14 @@ class ProxmoxBackupBoundaryTests(unittest.TestCase):
                 "guest_id": "101",
                 "storage_id": "pbs-example",
                 "snapshot_prefix": "example-predeploy",
+                "restore_allowed": False,
             },
         )
         for command in (
             "bash",
             "pct listsnapshot 102",
+            "pct rollback 101 example-predeploy-20260926-100000-abcdef",
+            "pct start 101",
             "qm listsnapshot 101",
             "pvesm status",
             "pvesm status --storage other",
