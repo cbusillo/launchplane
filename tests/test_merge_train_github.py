@@ -582,103 +582,44 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
 
         self.assertEqual(merge_commit_sha, "parent-after-child")
 
-    def test_build_batch_candidate_creates_ref_and_merges_heads_in_order(self) -> None:
+    def test_build_batch_candidate_publishes_only_after_all_heads_are_merged(self) -> None:
         candidate = _batch_candidate()
         transport = RecordingMergeTrainGitHubTransport(
-            responses=(
-                {"ref": candidate.candidate_ref, "object": {"sha": "base-main"}},
-                _git_commit("base-main", "tree-base"),
-                _git_commit("head-1", "tree-head-1"),
-                _git_commit("head-2", "tree-head-2"),
-                _merge_commit("candidate-after-1", "tree-candidate-1"),
-                _github_branch(sha="candidate-after-1", tree_sha="tree-candidate-1"),
-                _git_commit(
-                    "candidate-after-1",
-                    "tree-candidate-1",
-                    parents=("base-main", "head-1"),
-                ),
-                _merge_commit("candidate-after-2", "tree-candidate-2"),
-                _github_branch(sha="candidate-after-2", tree_sha="tree-candidate-2"),
-                _git_commit(
-                    "candidate-after-2",
-                    "tree-candidate-2",
-                    parents=("candidate-after-1", "head-2"),
-                ),
-            )
+            responses=(*_candidate_build_responses(), {}, _published_candidate_branch(), None)
         )
-
-        built_candidate = GitHubMergeTrainClient(transport=transport).build_batch_candidate(
+        built = GitHubMergeTrainClient(transport=transport).build_batch_candidate(
             candidate=candidate
         )
 
-        self.assertEqual(built_candidate.status, "ready_for_checks")
-        self.assertEqual(built_candidate.candidate_sha, "candidate-after-2")
+        self.assertEqual(built.status, "ready_for_checks")
+        self.assertEqual(built.candidate_sha, "candidate-after-2")
+        first_body = transport.requests[0].body
+        assert first_body is not None
+        construction_ref = str(first_body["ref"])
+        self.assertTrue(construction_ref.startswith("refs/heads/launchplane/construct/"))
+        merges = [request for request in transport.requests if request.path.endswith("/merges")]
         self.assertEqual(
-            [(request.method, request.path, request.body) for request in transport.requests],
-            [
-                (
-                    "POST",
-                    "/repos/example/merge-train-repo/git/refs",
-                    {"ref": candidate.candidate_ref, "sha": "base-main"},
-                ),
-                (
-                    "GET",
-                    "/repos/example/merge-train-repo/git/commits/base-main",
-                    None,
-                ),
-                (
-                    "GET",
-                    "/repos/example/merge-train-repo/git/commits/head-1",
-                    None,
-                ),
-                (
-                    "GET",
-                    "/repos/example/merge-train-repo/git/commits/head-2",
-                    None,
-                ),
-                (
-                    "POST",
-                    "/repos/example/merge-train-repo/merges",
-                    {
-                        "base": "launchplane/train/example/merge-train-repo/main/"
-                        f"{candidate.batch_id}",
-                        "head": "head-1",
-                        "commit_message": f"Launchplane merge train {candidate.batch_id}: merge PR #1",
-                    },
-                ),
-                (
-                    "GET",
-                    "/repos/example/merge-train-repo/branches/launchplane%2Ftrain%2Fexample%2Fmerge-train-repo%2Fmain%2F"
-                    f"{candidate.batch_id}",
-                    None,
-                ),
-                (
-                    "GET",
-                    "/repos/example/merge-train-repo/git/commits/candidate-after-1",
-                    None,
-                ),
-                (
-                    "POST",
-                    "/repos/example/merge-train-repo/merges",
-                    {
-                        "base": "launchplane/train/example/merge-train-repo/main/"
-                        f"{candidate.batch_id}",
-                        "head": "head-2",
-                        "commit_message": f"Launchplane merge train {candidate.batch_id}: merge PR #2",
-                    },
-                ),
-                (
-                    "GET",
-                    "/repos/example/merge-train-repo/branches/launchplane%2Ftrain%2Fexample%2Fmerge-train-repo%2Fmain%2F"
-                    f"{candidate.batch_id}",
-                    None,
-                ),
-                (
-                    "GET",
-                    "/repos/example/merge-train-repo/git/commits/candidate-after-2",
-                    None,
-                ),
-            ],
+            [request.body["head"] for request in merges if request.body], ["head-1", "head-2"]
+        )
+        self.assertEqual(
+            {request.body["base"] for request in merges if request.body},
+            {construction_ref.removeprefix("refs/heads/")},
+        )
+        publications = [
+            request
+            for request in transport.requests
+            if request.body and request.body.get("ref") == candidate.candidate_ref
+        ]
+        self.assertEqual(len(publications), 1)
+        self.assertEqual(
+            publications[0].body, {"ref": candidate.candidate_ref, "sha": built.candidate_sha}
+        )
+        self.assertLess(
+            transport.requests.index(merges[-1]), transport.requests.index(publications[0])
+        )
+        self.assertEqual(transport.requests[-1].method, "DELETE")
+        self.assertTrue(
+            transport.requests[-1].path.endswith(construction_ref.removeprefix("refs/"))
         )
 
     def test_build_batch_candidate_routes_writes_through_injected_semantic_executor(
@@ -705,6 +646,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                     "tree-candidate-2",
                     parents=("candidate-after-1", "head-2"),
                 ),
+                _github_branch(sha="candidate-after-2", tree_sha="tree-candidate-2"),
             )
         )
 
@@ -718,7 +660,13 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
         self.assertTrue(all(request.method == "GET" for request in transport.requests))
         self.assertEqual(
             [type(effect) for effect in executor.effects],
-            [CandidateRefPrepareEffect, CandidateHeadMergeEffect, CandidateHeadMergeEffect],
+            [
+                CandidateRefPrepareEffect,
+                CandidateHeadMergeEffect,
+                CandidateHeadMergeEffect,
+                CandidateRefPrepareEffect,
+                CandidateRefDeleteEffect,
+            ],
         )
         first_merge = executor.effects[1]
         assert isinstance(first_merge, CandidateHeadMergeEffect)
@@ -728,6 +676,15 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
         second_merge = executor.effects[2]
         assert isinstance(second_merge, CandidateHeadMergeEffect)
         self.assertEqual(second_merge.rolling_parent_sha, "candidate-after-1")
+        publication = executor.effects[3]
+        assert isinstance(publication, CandidateRefPrepareEffect)
+        self.assertEqual(publication.candidate_ref, candidate.candidate_ref)
+        self.assertEqual(publication.base_sha, built.candidate_sha)
+        self.assertNotEqual(first_merge.candidate_ref, publication.candidate_ref)
+        cleanup = executor.effects[4]
+        assert isinstance(cleanup, CandidateRefDeleteEffect)
+        self.assertEqual(cleanup.candidate_ref, first_merge.candidate_ref)
+        self.assertEqual(cleanup.expected_ref_sha, built.candidate_sha)
 
     def test_build_batch_candidate_resets_existing_ref(self) -> None:
         candidate = _batch_candidate()
@@ -754,6 +711,9 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                             "tree-candidate-2",
                             parents=("candidate-after-1", "head-2"),
                         ),
+                        {},  # Publish only the completed candidate.
+                        _github_branch(sha="candidate-after-2", tree_sha="tree-candidate-2"),
+                        None,  # Delete the construction ref.
                     )
                 )
 
@@ -764,8 +724,8 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                 self.assertEqual(transport.requests[1].method, "PATCH")
                 self.assertEqual(
                     transport.requests[1].path,
-                    "/repos/example/merge-train-repo/git/refs/heads/launchplane/train/example/merge-train-repo/main/"
-                    f"{candidate.batch_id}",
+                    "/repos/example/merge-train-repo/git/refs/"
+                    + str((transport.requests[0].body or {})["ref"]).removeprefix("refs/"),
                 )
                 self.assertEqual(transport.requests[1].body, {"sha": "base-main", "force": True})
 
@@ -790,6 +750,9 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                     "tree-candidate-2",
                     parents=("candidate-after-1", "head-2"),
                 ),
+                {},  # Publish only the completed candidate.
+                _github_branch(sha="candidate-after-2", tree_sha="tree-candidate-2"),
+                None,  # Delete the construction ref.
             )
         )
 
@@ -803,7 +766,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
         sleep_mock.assert_called_once_with(0.25)
         self.assertEqual(
             [request.method for request in transport.requests].count("POST"),
-            3,
+            4,
         )
 
     def test_build_batch_candidate_accepts_expected_sha_on_final_ref_read(self) -> None:
@@ -832,6 +795,9 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                     "tree-candidate-2",
                     parents=("candidate-after-1", "head-2"),
                 ),
+                {},  # Publish only the completed candidate.
+                _github_branch(sha="candidate-after-2", tree_sha="tree-candidate-2"),
+                None,  # Delete the construction ref.
             )
         )
 
@@ -927,6 +893,12 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
             [request.method for request in transport.requests],
             ["POST", "GET", "GET", "GET", "POST", "GET", "GET", "POST"],
         )
+        self.assertFalse(
+            any(
+                request.body and request.body.get("ref") == candidate.candidate_ref
+                for request in transport.requests
+            )
+        )
 
     def test_build_batch_candidate_records_github_204_as_no_op_step(self) -> None:
         candidate = _batch_candidate()
@@ -947,6 +919,9 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                     "tree-candidate-2",
                     parents=("base-main", "head-2"),
                 ),
+                {},  # Publish only the completed candidate.
+                _github_branch(sha="candidate-after-2", tree_sha="tree-candidate-2"),
+                None,  # Delete the construction ref.
             )
         )
 
@@ -981,6 +956,159 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
 
         with self.assertRaisesRegex(MergeTrainGitHubStaleHeadError, "parents"):
             GitHubMergeTrainClient(transport=transport).build_batch_candidate(candidate=candidate)
+
+    def test_all_no_op_entries_publish_the_base_after_construction_reads(self) -> None:
+        candidate = _batch_candidate()
+        no_op = (
+            None,
+            _github_branch(sha="base-main", tree_sha="tree-base"),
+            _git_commit("base-main", "tree-base"),
+            {"status": "ahead"},
+        )
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                {},
+                _git_commit("base-main", "tree-base"),
+                _git_commit("head-1", "tree-head-1"),
+                _git_commit("head-2", "tree-head-2"),
+                *no_op,
+                *no_op,
+                {},
+                _github_branch(sha="base-main", tree_sha="tree-base"),
+                None,
+            )
+        )
+        built = GitHubMergeTrainClient(transport=transport).build_batch_candidate(
+            candidate=candidate
+        )
+
+        self.assertEqual(built.candidate_sha, "base-main")
+        self.assertEqual(built.status, "ready_for_checks")
+        assert built.structural_provenance is not None
+        self.assertTrue(
+            all(
+                step.kind == "no_op_already_contained" for step in built.structural_provenance.steps
+            )
+        )
+        containment_reads = [r for r in transport.requests if "/compare/" in r.path]
+        self.assertEqual(len(containment_reads), 2)
+        self.assertTrue(all("launchplane%2Fconstruct%2F" in r.path for r in containment_reads))
+        self.assertEqual(
+            [
+                r.body
+                for r in transport.requests
+                if r.body and r.body.get("ref") == candidate.candidate_ref
+            ],
+            [{"ref": candidate.candidate_ref, "sha": "base-main"}],
+        )
+
+    def test_publication_replaces_an_existing_ref_only_with_the_completed_sha(self) -> None:
+        candidate = _batch_candidate()
+        for status_code in (409, 422):
+            with self.subTest(status_code=status_code):
+                transport = RecordingMergeTrainGitHubTransport(
+                    responses=(
+                        *_candidate_build_responses(),
+                        MergeTrainGitHubError("reference exists", status_code=status_code),
+                        {},
+                        _published_candidate_branch(),
+                        None,
+                    )
+                )
+                built = GitHubMergeTrainClient(transport=transport).build_batch_candidate(
+                    candidate=candidate
+                )
+                updates = [r for r in transport.requests if r.method == "PATCH"]
+                self.assertEqual(len(updates), 1)
+                self.assertTrue(
+                    updates[0].path.endswith(candidate.candidate_ref.removeprefix("refs/"))
+                )
+                self.assertEqual(updates[0].body, {"sha": built.candidate_sha, "force": True})
+
+    def test_publication_waits_for_a_new_or_stale_branch_read(self) -> None:
+        for stale_read in (
+            MergeTrainGitHubError("not found", status_code=404),
+            _github_branch(sha="old-partial-build", tree_sha="old-tree"),
+        ):
+            with self.subTest(stale_read=stale_read):
+                transport = RecordingMergeTrainGitHubTransport(
+                    responses=(
+                        *_candidate_build_responses(),
+                        {},
+                        stale_read,
+                        _published_candidate_branch(),
+                        None,
+                    )
+                )
+                with patch("control_plane.merge_train_github.sleep") as wait:
+                    built = GitHubMergeTrainClient(transport=transport).build_batch_candidate(
+                        candidate=_batch_candidate()
+                    )
+                self.assertEqual(built.status, "ready_for_checks")
+                wait.assert_called_once_with(0.25)
+
+    def test_unverified_publication_retains_construction_and_fails_closed(self) -> None:
+        for read in (
+            MergeTrainGitHubError("not found", status_code=404),
+            _github_branch(sha="wrong-sha", tree_sha="wrong-tree"),
+        ):
+            with self.subTest(read=read):
+                transport = RecordingMergeTrainGitHubTransport(
+                    responses=(*_candidate_build_responses(), {}, *(read for _ in range(6)))
+                )
+                with patch("control_plane.merge_train_github.sleep"):
+                    with self.assertRaisesRegex(
+                        MergeTrainGitHubStaleHeadError, "published candidate"
+                    ):
+                        GitHubMergeTrainClient(transport=transport).build_batch_candidate(
+                            candidate=_batch_candidate()
+                        )
+                self.assertFalse(any(r.method == "DELETE" for r in transport.requests))
+
+    def test_failed_publication_keeps_construction_for_recovery(self) -> None:
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                *_candidate_build_responses(),
+                MergeTrainGitHubError("provider unavailable", status_code=503),
+            )
+        )
+        with self.assertRaisesRegex(MergeTrainGitHubError, "provider unavailable"):
+            GitHubMergeTrainClient(transport=transport).build_batch_candidate(
+                candidate=_batch_candidate()
+            )
+        self.assertFalse(any(r.method == "DELETE" for r in transport.requests))
+
+    def test_cleanup_failure_does_not_replace_a_verified_candidate(self) -> None:
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                *_candidate_build_responses(),
+                {},
+                _published_candidate_branch(),
+                MergeTrainGitHubError("provider unavailable", status_code=503),
+            )
+        )
+        with self.assertLogs("control_plane.merge_train_github", level="WARNING") as logs:
+            built = GitHubMergeTrainClient(transport=transport).build_batch_candidate(
+                candidate=_batch_candidate()
+            )
+        self.assertEqual(built.status, "ready_for_checks")
+        self.assertEqual(built.candidate_sha, "candidate-after-2")
+        self.assertIn("construction ref cleanup failed", logs.output[0])
+        self.assertEqual(transport.requests[-1].method, "DELETE")
+
+    def test_missing_construction_ref_is_already_clean(self) -> None:
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                *_candidate_build_responses(),
+                {},
+                _published_candidate_branch(),
+                MergeTrainGitHubError("not found", status_code=404),
+            )
+        )
+        built = GitHubMergeTrainClient(transport=transport).build_batch_candidate(
+            candidate=_batch_candidate()
+        )
+        self.assertEqual(built.status, "ready_for_checks")
 
     def test_observe_batch_candidate_checks_marks_passed_candidate(self) -> None:
         candidate = _batch_candidate().model_copy(
@@ -1761,6 +1889,9 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                     "tree-candidate-2",
                     parents=("candidate-after-1", "head-2"),
                 ),
+                {},  # Publish only the completed candidate.
+                _github_branch(sha="candidate-after-2", tree_sha="tree-candidate-2"),
+                None,  # Delete the construction ref.
             )
         )
         built = GitHubMergeTrainClient(transport=build_transport).build_batch_candidate(
@@ -2831,6 +2962,27 @@ def _protected_branch_with_checks(
             {"context": context, "app_id": app_id} for context in resolved_contexts
         ]
     return {"protected": True, "protection": {"required_status_checks": payload}}
+
+
+def _candidate_build_responses() -> tuple[object, ...]:
+    return (
+        {},
+        _git_commit("base-main", "tree-base"),
+        _git_commit("head-1", "tree-head-1"),
+        _git_commit("head-2", "tree-head-2"),
+        _merge_commit("candidate-after-1", "tree-candidate-1"),
+        _github_branch(sha="candidate-after-1", tree_sha="tree-candidate-1"),
+        _git_commit("candidate-after-1", "tree-candidate-1", parents=("base-main", "head-1")),
+        _merge_commit("candidate-after-2", "tree-candidate-2"),
+        _published_candidate_branch(),
+        _git_commit(
+            "candidate-after-2", "tree-candidate-2", parents=("candidate-after-1", "head-2")
+        ),
+    )
+
+
+def _published_candidate_branch() -> dict[str, object]:
+    return _github_branch(sha="candidate-after-2", tree_sha="tree-candidate-2")
 
 
 def _batch_candidate() -> MergeTrainBatchCandidate:

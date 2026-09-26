@@ -1,4 +1,6 @@
 import json
+from hashlib import sha256
+import logging
 from time import sleep
 from typing import TYPE_CHECKING, Callable, Literal, Protocol, TypeVar
 from urllib.error import HTTPError, URLError
@@ -49,6 +51,8 @@ from control_plane.merge_train import MergeTrainMergeableState
 from control_plane.merge_train import MergeTrainPullRequestSnapshot
 from control_plane.merge_train import MergeTrainPullRequestState
 from control_plane.merge_admission import GuardedMergeAdmission, MergeAdmissionDeniedError
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from control_plane.tenant_admission_controller import TenantAdmissionTechnicalChecks
@@ -361,9 +365,13 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
     ) -> MergeTrainBatchCandidate:
         resolved_effect_executor = effect_executor or self.semantic_effect_executor
         repository_path = _repository_path(candidate.repository)
-        candidate_branch = _branch_name_from_ref(candidate.candidate_ref)
+        construction_ref = (
+            "refs/heads/launchplane/construct/"
+            + sha256(candidate.candidate_ref.encode("utf-8")).hexdigest()
+        )
+        candidate_branch = _branch_name_from_ref(construction_ref)
         if checkpoint is not None:
-            checkpoint(candidate, None, "reset_candidate_ref")
+            checkpoint(candidate, None, "reset_construction_ref")
         resolved_effect_executor.prepare_candidate_ref(
             CandidateRefPrepareEffect(
                 lineage=MergeTrainEffectLineage(
@@ -371,12 +379,12 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                     base_branch=candidate.base_branch,
                     batch_id=candidate.batch_id,
                 ),
-                candidate_ref=candidate.candidate_ref,
+                candidate_ref=construction_ref,
                 base_sha=candidate.base_sha,
             )
         )
         if checkpoint is not None:
-            checkpoint(candidate, None, "candidate_ref_ready")
+            checkpoint(candidate, None, "construction_ref_ready")
         base_identity = _git_commit_identity(
             transport=self.transport,
             repository_path=repository_path,
@@ -408,7 +416,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                         base_branch=candidate.base_branch,
                         batch_id=candidate.batch_id,
                     ),
-                    candidate_ref=candidate.candidate_ref,
+                    candidate_ref=construction_ref,
                     rolling_parent_sha=parent_sha,
                     pull_request_number=entry.pull_request_number,
                     head_sha=entry.head_sha,
@@ -512,6 +520,48 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                     f"candidate_entry_merged:{entry_index}",
                 )
             candidate = progress_candidate
+        if checkpoint is not None:
+            checkpoint(candidate, None, "publish_candidate_ref")
+        resolved_effect_executor.prepare_candidate_ref(
+            CandidateRefPrepareEffect(
+                lineage=MergeTrainEffectLineage(
+                    repository=candidate.repository,
+                    base_branch=candidate.base_branch,
+                    batch_id=candidate.batch_id,
+                ),
+                candidate_ref=candidate.candidate_ref,
+                # Publication points at the completed candidate, never an intermediate base.
+                base_sha=candidate_sha,
+            )
+        )
+        _verify_candidate_publication(
+            transport=self.transport,
+            repository_path=repository_path,
+            candidate_ref=candidate.candidate_ref,
+            expected_sha=candidate_sha,
+        )
+        if checkpoint is not None:
+            checkpoint(candidate, None, "candidate_ref_published")
+        try:
+            resolved_effect_executor.delete_candidate_ref(
+                CandidateRefDeleteEffect(
+                    lineage=MergeTrainEffectLineage(
+                        repository=candidate.repository,
+                        base_branch=candidate.base_branch,
+                        batch_id=candidate.batch_id,
+                    ),
+                    candidate_ref=construction_ref,
+                    expected_ref_sha=candidate_sha,
+                )
+            )
+        except MergeTrainGitHubError as error:
+            # Rebuilding here would replace a verified publication and start duplicate CI.
+            logger.warning(
+                "Published candidate retained; construction ref cleanup failed for %s "
+                "(GitHub status %s).",
+                construction_ref,
+                error.status_code,
+            )
         return _validated_model_update(candidate, status="ready_for_checks")
 
     def observe_batch_candidate_checks(
@@ -2267,6 +2317,34 @@ def _base_branch_sha(
     )
     commit = _json_object(branch.get("commit"), "GitHub branch commit")
     return _required_text(commit.get("sha"), "GitHub branch commit requires sha.")
+
+
+def _verify_candidate_publication(
+    *,
+    transport: MergeTrainGitHubTransport,
+    repository_path: str,
+    candidate_ref: str,
+    expected_sha: str,
+) -> None:
+    for delay_seconds in (0.0, *MERGE_REF_READ_DELAYS_SECONDS):
+        if delay_seconds:
+            sleep(delay_seconds)
+        try:
+            observed_sha = _base_branch_sha(
+                transport=transport,
+                repository_path=repository_path,
+                base_branch=_branch_name_from_ref(candidate_ref),
+            )
+        except MergeTrainGitHubError as error:
+            if error.status_code != 404:
+                raise
+            continue
+        if observed_sha == expected_sha:
+            return
+    raise MergeTrainGitHubStaleHeadError(
+        "GitHub published candidate ref did not resolve to the completed candidate.",
+        status_code=409,
+    )
 
 
 def _wait_for_branch_sha(

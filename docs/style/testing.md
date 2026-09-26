@@ -80,16 +80,20 @@ For pushes to `main` and `launchplane/train/**`, the `verified-tree` job can
 reuse a completed, successful GitHub Actions `ci-gate` on the exact pushed
 commit. Its check suite must identify that same commit on main without a PR
 merge context; conflicting pending or failed gates veto reuse. This avoids full
-work on already-tested train base creation/reset without trusting a fork or
-retargeted PR's merge-ref checks. New candidate commits still run full CI.
+work when an all-no-op batch publishes the already-tested base, without trusting
+a fork or retargeted PR's merge-ref checks. Native construction uses
+`launchplane/construct/**`, outside the required workflows' push filters, and
+publishes the canonical train ref only after every entry is verified. New
+completed candidate commits still run full CI.
 
 Main retains its existing PR-tree reuse, tightened to require that the base is
 an ancestor of the PR head as well as matching trees and a successful gate.
 The train does not extend that shortcut: a historical PR gate alone cannot
 identify the merge-ref tree tested before a retarget. PR events, unrelated
-branches, and missing API evidence run the full suite. Candidate construction,
-concurrency and required checks are unchanged, and every final candidate SHA
-still receives its own gate.
+branches, and missing API evidence run the full suite. Construction branches
+must remain outside required workflow triggers. Concurrency and required checks
+are unchanged, and every published final candidate SHA still receives its own
+gate.
 
 Same-repo CI currently uses 12 unittest shards with a 20-test/30-second split
 threshold to keep large app and service targets under the tool wall-clock
