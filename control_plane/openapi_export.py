@@ -241,6 +241,7 @@ UI_OPENAPI_WRITE_OPERATIONS: dict[str, str] = {
         "dispatch_product_promotion_workflow"
     ),
     "/v1/product-review/decisions": "write_product_review_decision",
+    "/v1/product-review/feedback/retry": "retry_product_review_feedback",
     "/v1/owner-secret-inputs/submit": "submit_owner_secret_input",
     "/v1/release-review/decisions": "write_release_review_decision",
     "/v1/privileged-operations/plans/{operation_id}/approve": (

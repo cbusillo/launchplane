@@ -1,4 +1,6 @@
+import json
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -11,6 +13,7 @@ from control_plane.contracts.product_review import (
 )
 from control_plane.github_app_identity import GitHubAppInstallationToken
 from control_plane.http_app import create_launchplane_fastapi_app
+from control_plane.product_review import ProductReviewPreview, record_product_review_decision
 from control_plane.product_review_status import (
     OwnerReviewStatusPublisher,
     owner_review_reference_url,
@@ -58,15 +61,21 @@ class _GitHub:
         self.head_sha = head_sha
         self.statuses: list[dict[str, object]] = []
         self.check_runs: list[dict[str, object]] = []
+        self.comments: list[dict[str, object]] = []
         self.writes: list[tuple[str, str, dict[str, object]]] = []
         self.fail_writes = False
         self.revoked_app_tokens = 0
+        self.lose_comment_response = False
+        self.fail_comment_reads = False
+        self.fail_comment_repairs = False
 
     def __call__(self, **kwargs: object) -> object:
         path = str(kwargs["path"])
         method = str(kwargs.get("method") or "GET")
         body = kwargs.get("body")
         repository_path = f"/repos/{self.repository}"
+        if path == "/user":
+            return {"id": 99, "login": "fixture-service"}
         if path == "/installation/token" and method == "DELETE":
             self.revoked_app_tokens += 1
             return None
@@ -85,6 +94,33 @@ class _GitHub:
             assert isinstance(body, dict)
             self.statuses.insert(0, dict(body))
             return dict(body)
+        if path.startswith(f"{repository_path}/issues/{_PULL_REQUEST}/comments?"):
+            if self.fail_comment_reads:
+                raise click.ClickException("Comment read unavailable.")
+            return list(self.comments)
+        if path.startswith(f"{repository_path}/issues/comments/") and method == "PATCH":
+            if self.fail_comment_repairs:
+                raise click.ClickException("Comment repair unavailable.")
+            assert isinstance(body, dict)
+            comment = next(
+                item for item in self.comments if item["id"] == int(path.rsplit("/", 1)[1])
+            )
+            comment.update(body)
+            return comment
+        if path == f"{repository_path}/issues/{_PULL_REQUEST}/comments" and method == "POST":
+            assert isinstance(body, dict)
+            comment = {
+                "id": len(self.comments) + 1,
+                "body": body["body"],
+                "user": {"login": "fixture-service", "id": 99},
+                "performed_via_github_app": None,
+                "created_at": "2026-09-26T12:00:00Z",
+            }
+            self.comments.append(comment)
+            if self.lose_comment_response:
+                self.lose_comment_response = False
+                raise click.ClickException("Comment response was lost.")
+            return comment
         if path == f"{repository_path}/commits/{self.head_sha}/statuses?per_page=100":
             return list(self.statuses)
         if path.startswith(f"{repository_path}/commits/{self.head_sha}/check-runs?"):
@@ -139,6 +175,7 @@ def _decision(
 ) -> ProductReviewDecisionRecord:
     return ProductReviewDecisionRecord(
         record_id=f"decision-{decided_at}",
+        feedback_requested=True,
         product="example-site",
         repository=_REPOSITORY,
         pull_request_number=_PULL_REQUEST,
@@ -319,6 +356,161 @@ class OwnerReviewStatusTests(unittest.TestCase):
 
         self.assertEqual(github.writes, [])
 
+    def test_full_feedback_survives_publication_and_replay(self) -> None:
+        github = _GitHub()
+        reason = "Fix the price.\n\nKeep `USB-C`, ``` examples, @mentions, and --> intact.\nCafé."
+        decision = _decision(decision="changes_requested", decided_at="2026-09-26T12:00:00Z")
+        decision = decision.model_copy(update={"reason": reason})
+        self.store.write_product_review_decision_record(decision)
+
+        self._publish(github)
+        self._publish(github)
+
+        self.assertEqual(len(github.comments), 1)
+        body = str(github.comments[0]["body"])
+        metadata = json.loads(
+            body.splitlines()[1].removeprefix("<!-- launchplane:owner-review ").removesuffix(" -->")
+        )
+        self.assertEqual(metadata["reason"], reason)
+        self.assertEqual(metadata["head_sha"], _HEAD_SHA)
+        self.assertEqual(metadata["owner_github_id"], str(_OWNER_GITHUB_ID))
+        self.assertIn("decision_id=", metadata["review_url"])
+        saved = self.store.list_product_review_decision_records(
+            repository=_REPOSITORY, pull_request_number=_PULL_REQUEST
+        )[0]
+        self.assertEqual(
+            saved.feedback_url, f"https://github.com/{_REPOSITORY}/pull/42#issuecomment-1"
+        )
+
+    def test_lost_create_response_recovers_the_existing_comment(self) -> None:
+        github = _GitHub()
+        github.lose_comment_response = True
+        self.store.write_product_review_decision_record(
+            _decision(decision="accepted", decided_at="2026-09-26T12:00:00Z")
+        )
+
+        self._publish(github)
+        self.assertEqual(github.statuses[0]["state"], "pending")
+        self._publish(github)
+
+        self.assertEqual(len(github.comments), 1)
+        self.assertEqual(github.statuses[0]["state"], "success")
+
+    def test_failed_comment_read_does_not_create_or_claim_delivery(self) -> None:
+        github = _GitHub()
+        github.fail_comment_reads = True
+        self.store.write_product_review_decision_record(
+            _decision(decision="accepted", decided_at="2026-09-26T12:00:00Z")
+        )
+
+        self._publish(github)
+
+        self.assertEqual(github.comments, [])
+        self.assertEqual(github.statuses[0]["state"], "pending")
+        github.fail_comment_reads = False
+        self._publish(github)
+        self.assertEqual(len(github.comments), 1)
+        self.assertEqual(github.statuses[0]["state"], "success")
+
+    def test_failed_old_comment_repair_does_not_block_later_decisions(self) -> None:
+        github = _GitHub()
+        github.lose_comment_response = True
+        older = _decision(
+            decision="changes_requested",
+            head_sha=_OLDER_HEAD_SHA,
+            decided_at="2026-09-25T12:00:00Z",
+        )
+        self.store.write_product_review_decision_record(older)
+        self._publish(github)
+        github.comments[0]["body"] = str(github.comments[0]["body"]).replace(
+            "The price is wrong.", "Edited after publication."
+        )
+        github.fail_comment_repairs = True
+        newer = _decision(decision="accepted", decided_at="2026-09-26T12:00:00Z")
+        self.store.write_product_review_decision_record(newer)
+
+        self._publish(github)
+
+        saved = self.store.list_product_review_decision_records(
+            repository=_REPOSITORY, pull_request_number=_PULL_REQUEST
+        )
+        self.assertEqual(len(github.comments), 2)
+        self.assertTrue(saved[0].feedback_url)
+        self.assertFalse(saved[1].feedback_url)
+        self.assertEqual(github.statuses[0]["state"], "success")
+        github.fail_comment_repairs = False
+        self._publish(github)
+        self.assertEqual(len(github.comments), 2)
+        self.assertIn("The price is wrong.", str(github.comments[0]["body"]))
+        self.assertTrue(
+            all(
+                record.feedback_url
+                for record in self.store.list_product_review_decision_records(
+                    repository=_REPOSITORY, pull_request_number=_PULL_REQUEST
+                )
+            )
+        )
+
+    def test_competing_publishers_create_one_comment(self) -> None:
+        github = _GitHub()
+        self.store.write_product_review_decision_record(
+            _decision(decision="accepted", decided_at="2026-09-26T12:00:00Z")
+        )
+        with ThreadPoolExecutor(max_workers=2) as workers:
+            futures = [workers.submit(self._publish, github) for _ in range(2)]
+            for future in futures:
+                future.result()
+        self.assertEqual(len(github.comments), 1)
+
+    def test_legacy_decision_is_not_automatically_posted_or_downgraded(self) -> None:
+        github = _GitHub()
+        original = _decision(decision="accepted", decided_at="2026-09-25T12:00:00Z").model_copy(
+            update={"feedback_requested": False}
+        )
+        self.store.write_product_review_decision_record(original)
+        self._publish(github)
+        self.assertEqual(github.comments, [])
+        self.assertEqual(github.statuses[0]["state"], "success")
+        self.assertEqual(
+            self.store.list_product_review_decision_records(
+                repository=_REPOSITORY, pull_request_number=_PULL_REQUEST
+            ),
+            (original,),
+        )
+
+    def test_owner_decision_persists_while_feedback_delivery_is_locked(self) -> None:
+        owner = GitHubHumanIdentity(
+            login="site-owner",
+            github_id=_OWNER_GITHUB_ID,
+            name="site-owner",
+            email="",
+            organizations=frozenset(),
+            teams=frozenset(),
+            role="read_only",
+        )
+        with ThreadPoolExecutor(max_workers=1) as workers:
+            with self.store.product_review_lock(
+                repository=_REPOSITORY, pull_request_number=_PULL_REQUEST, purpose="feedback"
+            ):
+                written = workers.submit(
+                    record_product_review_decision,
+                    store=self.store,
+                    profile=_profile(),
+                    pull_request_number=_PULL_REQUEST,
+                    preview=ProductReviewPreview(
+                        preview_url="https://pr-42.example.invalid", head_sha=_HEAD_SHA
+                    ),
+                    decision="changes_requested",
+                    reason="Keep this feedback.",
+                    identity=owner,
+                ).result(timeout=2)
+                self.assertEqual(
+                    self.store.list_product_review_decision_records(
+                        repository=_REPOSITORY, pull_request_number=_PULL_REQUEST
+                    ),
+                    (written,),
+                )
+
 
 class OwnerReviewStatusHttpTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
@@ -389,6 +581,167 @@ class OwnerReviewStatusHttpTests(unittest.IsolatedAsyncioTestCase):
             repository=_REPOSITORY, pull_request_number=_PULL_REQUEST
         )
         self.assertEqual([record.decision for record in decisions], ["changes_requested"])
+        self.assertEqual(decisions[0].feedback_url, "")
+
+        github.fail_writes = False
+        self.assertEqual(await self._record_changes_requested(github), 200)
+        saved = self.store.list_product_review_decision_records(
+            repository=_REPOSITORY, pull_request_number=_PULL_REQUEST
+        )
+        self.assertEqual(len(saved), 1)
+        self.assertEqual(saved[0].record_id, decisions[0].record_id)
+        self.assertTrue(saved[0].feedback_url)
+        self.assertEqual(len(github.comments), 1)
+
+    async def test_retry_saved_feedback_without_preview_preserves_the_decision(self) -> None:
+        github = _GitHub()
+        self.store.write_product_profile_record(_profile())
+        original = _decision(
+            decision="accepted", head_sha=_OLDER_HEAD_SHA, decided_at="2026-09-25T12:00:00Z"
+        ).model_copy(update={"feedback_requested": False})
+        self.store.write_product_review_decision_record(original)
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=LaunchplaneAuthzPolicy.model_validate({}),
+            record_store_factory=lambda: self.store,
+            human_session_manager=self.session_manager,
+            owner_review_status_publisher=_publisher(github),
+        )
+        for _ in range(2):
+            session = self.session_manager.issue(
+                GitHubHumanIdentity(
+                    login="site-owner",
+                    github_id=_OWNER_GITHUB_ID,
+                    name="site-owner",
+                    email="",
+                    organizations=frozenset(),
+                    teams=frozenset(),
+                    role="read_only",
+                )
+            )
+            response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/product-review/feedback/retry",
+                headers=_browser_mutation_headers(self.session_manager, session),
+                payload={
+                    "repository": _REPOSITORY,
+                    "pull_request": _PULL_REQUEST,
+                    "decision_id": original.record_id,
+                },
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertFalse(response.json()["can_decide"])
+            self.assertTrue(response.json()["latest_decision"]["feedback_url"])
+        saved = self.store.list_product_review_decision_records(
+            repository=_REPOSITORY, pull_request_number=_PULL_REQUEST
+        )
+        self.assertEqual(len(saved), 1)
+        self.assertEqual(
+            saved[0].model_dump(exclude={"feedback_url", "feedback_requested"}),
+            original.model_dump(exclude={"feedback_url", "feedback_requested"}),
+        )
+        self.assertTrue(saved[0].feedback_requested)
+        self.assertEqual(len(github.comments), 1)
+        self.assertEqual(github.statuses[0]["state"], "pending")
+
+    async def test_feedback_retry_requires_owner_session_and_a_matching_saved_decision(
+        self,
+    ) -> None:
+        github = _GitHub()
+        self.store.write_product_profile_record(_profile())
+        original = _decision(decision="accepted", decided_at="2026-09-25T12:00:00Z")
+        self.store.write_product_review_decision_record(original)
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=LaunchplaneAuthzPolicy.model_validate({}),
+            record_store_factory=lambda: self.store,
+            human_session_manager=self.session_manager,
+            owner_review_status_publisher=_publisher(github),
+        )
+        for github_id, csrf, pull_request, decision_id, expected in (
+            (123, True, _PULL_REQUEST, original.record_id, 403),
+            (_OWNER_GITHUB_ID, False, _PULL_REQUEST, original.record_id, 403),
+            (_OWNER_GITHUB_ID, True, 43, original.record_id, 404),
+            (_OWNER_GITHUB_ID, True, _PULL_REQUEST, "missing", 404),
+        ):
+            with self.subTest(
+                github_id=github_id, csrf=csrf, pull_request=pull_request, decision_id=decision_id
+            ):
+                session = self.session_manager.issue(
+                    GitHubHumanIdentity(
+                        login="site-owner",
+                        github_id=github_id,
+                        name="site-owner",
+                        email="",
+                        organizations=frozenset(),
+                        teams=frozenset(),
+                        role="read_only",
+                    )
+                )
+                headers = (
+                    _browser_mutation_headers(self.session_manager, session)
+                    if csrf
+                    else {"Cookie": self.session_manager.session_cookie_header(session)}
+                )
+                response = await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/product-review/feedback/retry",
+                    headers=headers,
+                    payload={
+                        "repository": _REPOSITORY,
+                        "pull_request": pull_request,
+                        "decision_id": decision_id,
+                    },
+                )
+                self.assertEqual(response.status_code, expected)
+        self.assertEqual(github.comments, [])
+
+    async def test_retry_refuses_legacy_decision_without_a_reviewed_commit(self) -> None:
+        github = _GitHub()
+        self.store.write_product_profile_record(_profile())
+        original = _decision(
+            decision="accepted", head_sha="", decided_at="2026-09-25T12:00:00Z"
+        ).model_copy(update={"feedback_requested": False})
+        self.store.write_product_review_decision_record(original)
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=LaunchplaneAuthzPolicy.model_validate({}),
+            record_store_factory=lambda: self.store,
+            human_session_manager=self.session_manager,
+            owner_review_status_publisher=_publisher(github),
+        )
+        session = self.session_manager.issue(
+            GitHubHumanIdentity(
+                login="site-owner",
+                github_id=_OWNER_GITHUB_ID,
+                name="site-owner",
+                email="",
+                organizations=frozenset(),
+                teams=frozenset(),
+                role="read_only",
+            )
+        )
+        response = await _asgi_request(
+            app,
+            "POST",
+            "/v1/product-review/feedback/retry",
+            headers=_browser_mutation_headers(self.session_manager, session),
+            payload={
+                "repository": _REPOSITORY,
+                "pull_request": _PULL_REQUEST,
+                "decision_id": original.record_id,
+            },
+        )
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(
+            self.store.list_product_review_decision_records(
+                repository=_REPOSITORY, pull_request_number=_PULL_REQUEST
+            ),
+            (original,),
+        )
+        self.assertEqual(github.comments, [])
 
     async def test_ready_preview_feedback_writes_the_status_and_retires_leftovers(self) -> None:
         github = _GitHub(repository="every/verireel")

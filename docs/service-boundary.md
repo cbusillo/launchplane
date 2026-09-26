@@ -3927,6 +3927,12 @@ product display name, the pull request URL, the preview URL of the one active
 preview serving a ready generation for that pull request (empty when there is
 none), the head revision that preview serves, the latest decision, and
 `owner_set`, `viewer_is_owner`, `can_decide`, and a plain `cannot_decide_reason`.
+Optional `decision_id` selects a saved decision from this same visible PR in
+`latest_decision`, returning 404 when absent. This supports historical decision
+links without making their acceptance apply to the currently served preview.
+Decisions include `feedback_url`, empty until GitHub comment delivery is confirmed.
+`feedback_requested` is true for new submissions and explicit delivery requests;
+it defaults to false on older records, which are not automatically published.
 The caller must be the browser-authenticated GitHub Owner or an authenticated
 identity allowed `product_profile.read` for that product in the Launchplane
 context. A scoped operator or agent can inspect the preview and latest decision;
@@ -3945,7 +3951,22 @@ is involved. A product without an Owner returns `409 product_owner_not_set`
 ("No Owner set for this product"); no serving preview returns
 `409 product_review_preview_unavailable`. Everyone else gets one closed
 `403 product_review_unavailable` that does not reveal whether the product or
-pull request exists. A decision merges and deploys nothing.
+pull request exists. Repeating the latest identical decision for the same served
+preview reuses its record and retries pending feedback publication. A decision
+merges and deploys nothing. See [Owner feedback delivery](owner-acceptance.md).
+
+`POST /v1/product-review/feedback/retry` takes `{repository, pull_request,
+decision_id}` using the same Owner browser mutation identity and CSRF boundary.
+It requires a saved decision on that visible PR (404 otherwise), reconciles pending
+feedback (explicitly enabling publication of that record if it predates delivery),
+and returns that selected decision and its delivery receipt. It needs
+no serving preview and records no new decision. Operators and bearer identities
+cannot use this Owner action. A still-empty receipt means delivery remains pending;
+the saved decision is unchanged. Historical review links also provide a link back
+to the latest review.
+An older record without a valid reviewed commit or identifier returns
+`409 product_review_feedback_unavailable` without changing its publication flag;
+the Owner can open the latest review and record a new decision.
 
 ## Retired Owner Acceptance API
 

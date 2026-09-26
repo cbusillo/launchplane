@@ -3182,6 +3182,42 @@ def _owner_control_shadow_envelope(
 
 
 class RealPostgresStorageConcurrencyTests(unittest.TestCase):
+    def test_owner_feedback_publishers_serialize_and_recover_one_receipt(self) -> None:
+        from tests.test_product_review_status import _GitHub, _decision, _profile, _publisher
+
+        with _isolated_postgres_database() as database_url:
+            _upgrade_empty_database_to_head(database_url)
+            stores = [PostgresRecordStore(database_url=database_url) for _ in range(2)]
+            try:
+                decision = _decision(
+                    decision="changes_requested", decided_at="2026-09-26T12:00:00Z"
+                )
+                stores[0].write_product_review_decision_record(decision)
+                github = _GitHub()
+                with ThreadPoolExecutor(max_workers=2) as workers:
+                    futures = [
+                        workers.submit(
+                            _publisher(github).publish,
+                            store=store,
+                            profile=_profile(),
+                            pull_request_number=decision.pull_request_number,
+                        )
+                        for store in stores
+                    ]
+                    for future in futures:
+                        future.result(timeout=10)
+                self.assertEqual(len(github.comments), 1)
+                for store in stores:
+                    saved = store.list_product_review_decision_records(
+                        repository=decision.repository,
+                        pull_request_number=decision.pull_request_number,
+                    )
+                    self.assertEqual(len(saved), 1)
+                    self.assertTrue(saved[0].feedback_url)
+            finally:
+                for store in stores:
+                    store.close()
+
     def test_delivery_administration_removal_and_activation_install_serialize_both_orders(
         self,
     ) -> None:
