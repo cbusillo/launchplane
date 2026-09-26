@@ -72,6 +72,22 @@ outcome is also effect-unknown. Neither state permits another provider attempt.
 Reconciliation observes GitHub first and appends a successor outcome; it never
 rewrites history or repeats an ambiguous mutation.
 
+A GitHub merge-endpoint HTTP 405 remains a conclusive rejected outcome. The
+adapter makes one read of the same PR to diagnose whether its unchanged, open
+head is now behind its base. The operator response retains the attempt's trace,
+PR number, and provider status, with a branch-refresh instruction only when that
+read proves the condition. A failed, malformed, closed, or changed-head read
+leaves the diagnosis unconfirmed and asks the operator to reread merge
+requirements. Raw provider response bodies are not copied into this diagnosis.
+The refusal returns HTTP 409 `github_merge_rejected`, not an upstream-outage
+retry instruction; no second merge is attempted by the diagnostic read.
+Before each subsequent merge, the existing PR read also blocks an observed
+`behind` head before admission or provider mutation. This includes resumed
+partial batches: the first landed entry stays recorded, and the behind entry
+does not accumulate repeated admissions and rejected merge calls while GitHub
+continues to report that condition. Unknown mergeability alone does not prove
+the refusal's cause.
+
 The `already_contained_no_provider_effect` landed reason is a successful no-op,
 not evidence of a merge request. It records `provider_effect_attempted=false`,
 the observed PR lifecycle and exact unchanged base/head identities, with no
