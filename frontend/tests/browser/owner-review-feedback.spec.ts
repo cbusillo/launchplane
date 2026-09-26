@@ -26,12 +26,13 @@ test("an earlier accepted decision cannot look like approval of the current prev
 test("delivery of a historical saved decision can be retried without a preview", async ({ page }, testInfo) => {
   await page.goto("/ui/owner-review?fixture=products&repository=example%2Fcontrol-plane&pull_request=308&scenario=pending-without-preview&decision_id=saved");
   const decision = page.getByLabel("Recorded decision");
-  await expect(decision).toContainText("Earlier preview version bbbbbbb");
+  await expect(decision).toContainText("Reviewed preview version bbbbbbb");
+  await expect(decision).toContainText("No preview is currently ready for comparison.");
   await expect(page.getByRole("button", { name: "Accept", exact: true })).toHaveCount(0);
   await expect(page.getByRole("link", { name: "View latest review" })).toBeVisible();
   await page.getByRole("button", { name: "Retry delivery", exact: true }).click();
   await expect(decision).not.toContainText("delivery to the agent is pending");
-  await expect(decision).toContainText("Earlier preview version bbbbbbb");
+  await expect(decision).toContainText("Reviewed preview version bbbbbbb");
   await expect(decision).toContainText("Accepted");
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await page.screenshot({ path: testInfo.outputPath("owner-feedback-retried.png"), fullPage: true });

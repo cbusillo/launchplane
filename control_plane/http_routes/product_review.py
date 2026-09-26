@@ -27,6 +27,7 @@ from control_plane.product_review import (
     viewer_is_product_owner,
 )
 from control_plane.service_auth import GitHubHumanIdentity, LaunchplaneIdentity
+from control_plane.product_review_feedback import validate_owner_feedback_decision
 
 
 PRODUCT_REVIEW_ROUTE = "/v1/product-review"
@@ -248,6 +249,15 @@ def register_product_review_routes(
             decision = saved_decision(
                 store, profile, envelope.pull_request, envelope.decision_id, trace_id
             )
+            try:
+                validate_owner_feedback_decision(decision)
+            except ValueError as error:
+                raise common.http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="product_review_feedback_unavailable",
+                    message="This saved decision cannot be delivered. Open the latest review to record a new decision.",
+                ) from error
             if not decision.feedback_requested:
                 store.write_product_review_decision_record(
                     decision.model_copy(update={"feedback_requested": True})
@@ -334,7 +344,7 @@ def register_product_review_routes(
         operation_id="retry_product_review_feedback",
         summary="Retry delivery of a saved Owner decision without recording a new decision",
         responses={
-            status: {"model": common.error_response_model} for status in (401, 403, 404, 503)
+            status: {"model": common.error_response_model} for status in (401, 403, 404, 409, 503)
         },
     )
     app.add_api_route(

@@ -338,8 +338,9 @@ function LatestDecision({ decision, review, fixtureMode, onDecided }: {
       if (!response.latest_decision?.feedback_url) {
         setFailure("Delivery is still pending. Your saved decision has not changed.");
       }
-    } catch {
-      setFailure("Delivery could not be retried. Your saved decision has not changed.");
+    } catch (retryError) {
+      const apiError = retryError as LaunchplaneApiError;
+      setFailure(apiError.statusCode === 409 ? apiError.message : "Delivery could not be retried. Your saved decision has not changed.");
     } finally {
       setBusy(false);
     }
@@ -354,9 +355,11 @@ function LatestDecision({ decision, review, fixtureMode, onDecided }: {
         by @{decision.owner_github_login} · {formatTime(decision.decided_at)}
       </p>
       <p>
-        {decision.head_sha === currentHead ? "Reviewed preview version" : "Earlier preview version"}{" "}
-        {decision.head_sha.slice(0, 7)}
-        {decision.head_sha !== currentHead ? ". This decision does not apply to the current preview." : ""}
+        {!decision.head_sha ? "The reviewed version was not recorded." : <>
+          {currentHead && decision.head_sha !== currentHead ? "Earlier preview version" : "Reviewed preview version"}{" "}
+          {decision.head_sha.slice(0, 7)}
+          {!currentHead ? ". No preview is currently ready for comparison." : decision.head_sha !== currentHead ? ". This decision does not apply to the current preview." : ""}
+        </>}
       </p>
       {decision.reason ? <blockquote>{decision.reason}</blockquote> : null}
       {!decision.feedback_url ? (

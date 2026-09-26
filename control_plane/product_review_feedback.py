@@ -6,16 +6,21 @@ import re
 from urllib.parse import quote
 
 from control_plane.contracts.product_review import ProductReviewDecisionRecord
+from control_plane.github_payload import required_positive_int
 
 
-def owner_feedback_comment(decision: ProductReviewDecisionRecord, *, review_url: str) -> str:
+def validate_owner_feedback_decision(decision: ProductReviewDecisionRecord) -> None:
     if not re.fullmatch(r"[a-zA-Z0-9_.:-]+", decision.record_id):
         raise ValueError("Owner feedback requires a safe decision identifier.")
     if not re.fullmatch(r"[0-9a-fA-F]{40}", decision.head_sha):
         raise ValueError("Owner feedback requires the reviewed commit.")
+
+
+def owner_feedback_comment(decision: ProductReviewDecisionRecord, *, review_url: str) -> str:
+    validate_owner_feedback_decision(decision)
     metadata = decision.model_dump(mode="json", exclude={"feedback_url", "schema_version"})
     metadata.update(schema_version=1, review_url=review_url)
-    encoded = json.dumps(metadata, sort_keys=True, ensure_ascii=True)
+    encoded = json.dumps(metadata, sort_keys=True)
     # Owner prose is data, even when it contains HTML comment terminators or mentions.
     encoded = encoded.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
     reason = decision.reason or "No additional notes."
@@ -54,7 +59,7 @@ def publish_owner_feedback(
     """Reconcile one comment while the caller holds the stored PR's review lock."""
     body = owner_feedback_comment(decision, review_url=review_url)
     marker = body.splitlines()[0]
-    path = f"/repos/{quote(decision.repository, safe='/')}/issues/{decision.pull_request_number}/comments"
+    path = f"/repos/{quote(decision.repository)}/issues/{decision.pull_request_number}/comments"
     matches: list[dict[str, object]] = []
     for page in range(1, 11):
         comments = api_request(path=f"{path}?per_page=100&page={page}", token=token)
@@ -82,15 +87,17 @@ def publish_owner_feedback(
         if matches
         else api_request(path=path, token=token, method="POST", body={"body": body})
     )
-    comment_id = comment.get("id") if isinstance(comment, dict) else None
-    if not isinstance(comment_id, int) or isinstance(comment_id, bool) or comment_id < 1:
-        raise ValueError("Owner feedback delivery was not confirmed.")
+    comment_id = required_positive_int(
+        comment.get("id") if isinstance(comment, dict) else None,
+        "Owner feedback delivery was not confirmed.",
+        error_type=ValueError,
+    )
     if matches and matches[0].get("body") != body:
         # Repair our own unique receipt from the authoritative saved record. A
         # changed public origin or an edited comment must not strand a decision
         # after a successful POST whose response/receipt write was lost.
         updated = api_request(
-            path=f"/repos/{quote(decision.repository, safe='/')}/issues/comments/{comment_id}",
+            path=f"/repos/{quote(decision.repository)}/issues/comments/{comment_id}",
             token=token,
             method="PATCH",
             body={"body": body},

@@ -35,10 +35,12 @@ do not backfill their prose or downgrade their existing acceptance status.
 The Owner can explicitly send that saved feedback or resubmit their decision.
 The form explains that new decisions and feedback are shared on the pull request.
 
-The maintained `codex-skills` agent watcher uses the configured publishing identity
-to find candidates, then verifies the complete decision and exact comment receipt
-against Launchplane through its configured private read route. It retains full Owner feedback in
-every snapshot, including after restart. Agents read and summarize that feedback
+The maintained `codex-skills` agent watcher recognizes the Owner feedback marker
+from any publisher, then verifies the complete decision and exact comment receipt
+against Launchplane through its configured private read route. It retains full
+Owner feedback in every snapshot, including after restart, and checks the latest
+saved decision once that Owner channel is known, including a newer decision whose
+comment delivery is still pending. Agents read and summarize that feedback
 before changing the product. The GitHub copy conveys feedback, not authority to
 approve a newer commit, merge, or deploy.
 

@@ -698,6 +698,51 @@ class OwnerReviewStatusHttpTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(response.status_code, expected)
         self.assertEqual(github.comments, [])
 
+    async def test_retry_refuses_legacy_decision_without_a_reviewed_commit(self) -> None:
+        github = _GitHub()
+        self.store.write_product_profile_record(_profile())
+        original = _decision(
+            decision="accepted", head_sha="", decided_at="2026-09-25T12:00:00Z"
+        ).model_copy(update={"feedback_requested": False})
+        self.store.write_product_review_decision_record(original)
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=LaunchplaneAuthzPolicy.model_validate({}),
+            record_store_factory=lambda: self.store,
+            human_session_manager=self.session_manager,
+            owner_review_status_publisher=_publisher(github),
+        )
+        session = self.session_manager.issue(
+            GitHubHumanIdentity(
+                login="site-owner",
+                github_id=_OWNER_GITHUB_ID,
+                name="site-owner",
+                email="",
+                organizations=frozenset(),
+                teams=frozenset(),
+                role="read_only",
+            )
+        )
+        response = await _asgi_request(
+            app,
+            "POST",
+            "/v1/product-review/feedback/retry",
+            headers=_browser_mutation_headers(self.session_manager, session),
+            payload={
+                "repository": _REPOSITORY,
+                "pull_request": _PULL_REQUEST,
+                "decision_id": original.record_id,
+            },
+        )
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(
+            self.store.list_product_review_decision_records(
+                repository=_REPOSITORY, pull_request_number=_PULL_REQUEST
+            ),
+            (original,),
+        )
+        self.assertEqual(github.comments, [])
+
     async def test_ready_preview_feedback_writes_the_status_and_retires_leftovers(self) -> None:
         github = _GitHub(repository="every/verireel")
         github.statuses = [

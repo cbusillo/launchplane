@@ -3964,6 +3964,9 @@ no serving preview and records no new decision. Operators and bearer identities
 cannot use this Owner action. A still-empty receipt means delivery remains pending;
 the saved decision is unchanged. Historical review links also provide a link back
 to the latest review.
+An older record without a valid reviewed commit or identifier returns
+`409 product_review_feedback_unavailable` without changing its publication flag;
+the Owner can open the latest review and record a new decision.
 
 ## Retired Owner Acceptance API
 
