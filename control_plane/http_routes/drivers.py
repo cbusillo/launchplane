@@ -834,16 +834,25 @@ def register_dokploy_target_inspect_read_routes(
         expected_image: Annotated[str, Query()] = "",
     ) -> DokployTargetInspectResponse:
         trace_id = common.next_trace_id()
-        inspect_allowed = common.authorization_allows(
-            identity=identity,
-            action="dokploy_target.inspect",
-            product="launchplane",
-            context=LAUNCHPLANE_SERVICE_CONTEXT,
-        )
-        if not inspect_allowed and isinstance(identity, LocalOperatorIdentity):
+        inspect_allowed = False
+        if (
+            isinstance(identity, LocalOperatorIdentity)
+            and context.strip()
+            and instance.strip()
+            and not target_type.strip()
+            and not target_id.strip()
+        ):
             inspect_allowed = common.authorization_allows(
                 identity=identity,
                 action="driver.read",
+                product="launchplane",
+                context=context.strip(),
+                target=AuthorizationTarget(scope="instance", instances=(instance.strip(),)),
+            )
+        if not inspect_allowed:
+            inspect_allowed = common.authorization_allows(
+                identity=identity,
+                action="dokploy_target.inspect",
                 product="launchplane",
                 context=LAUNCHPLANE_SERVICE_CONTEXT,
             )
