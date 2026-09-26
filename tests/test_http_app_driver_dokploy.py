@@ -792,12 +792,10 @@ class FastApiDokployTargetInspectReadTests(unittest.IsolatedAsyncioTestCase):
         ) as read_config:
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(_identity()),
-                authz_policy=_record_read_policy(action="driver.read", context="launchplane"),
+                authz_policy=_record_read_policy(action="driver.read", context="cm_website"),
                 record_store_factory=lambda: _MissingProductReadStore(),
             )
-            response = await _get_dokploy_target_inspect(
-                app, target_type="compose", target_id="compose-123"
-            )
+            response = await _get_dokploy_target_inspect(app, context="cm_website", instance="prod")
         self.assertEqual(response.status_code, 403)
         self.assertEqual(response.json()["error"]["code"], "authorization_denied")
         read_config.assert_not_called()
