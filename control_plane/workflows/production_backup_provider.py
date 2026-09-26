@@ -109,8 +109,10 @@ def execute_production_backup_provider(
         if record_progress is not None:
             try:
                 record_progress(dict(evidence))
-            except Exception as error:
-                raise ProductionBackupProviderError("backup_progress_unavailable") from error
+            except Exception as progress_error:
+                raise ProductionBackupProviderError(
+                    "backup_progress_unavailable"
+                ) from progress_error
 
     try:
         save_progress()

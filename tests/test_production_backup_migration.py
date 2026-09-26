@@ -67,7 +67,9 @@ class ProductionBackupMigrationTests(unittest.TestCase):
                 "source_target_id",
                 "destination_target_id",
             ):
-                payload[key] = f" {str(payload[key]).upper()} "
+                value = payload[key]
+                assert isinstance(value, str)
+                payload[key] = f" {value.upper()} "
             envelope = build_legacy_production_backup_authority_envelope(
                 record_store=store,
                 request=LegacyProductionBackupMigrationRequest.model_validate(payload),

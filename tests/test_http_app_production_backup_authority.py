@@ -179,7 +179,6 @@ class ProductionBackupAuthorityHttpTests(unittest.IsolatedAsyncioTestCase):
             job_workflow_ref=_JOB_WORKFLOW_REF,
             event_name="workflow_dispatch",
             environment="prod",
-            repository_id="1001",
             repository_owner_id="1000",
         )
         payload = _dry_run_envelope().model_dump(mode="json") | {

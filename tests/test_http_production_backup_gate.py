@@ -119,7 +119,6 @@ class ProductionBackupGatePostgresHttpTests(unittest.IsolatedAsyncioTestCase):
                 workflow_ref=_WORKFLOW_REF,
                 job_workflow_ref=_JOB_WORKFLOW_REF,
                 event_name="workflow_dispatch",
-                repository_id="1001",
                 repository_owner_id="1000",
             )
             app = create_launchplane_fastapi_app(

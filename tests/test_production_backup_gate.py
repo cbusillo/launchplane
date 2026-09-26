@@ -393,7 +393,6 @@ class ProductionBackupGatePostgresTests(unittest.TestCase):
                 instance=operation.instance,
                 created_at=now.isoformat(),
                 source="launchplane-production-backup-gate",
-                required=True,
                 status="fail",
                 evidence={"snapshot_name": "original-snapshot"},
             )
