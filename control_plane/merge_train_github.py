@@ -365,10 +365,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
     ) -> MergeTrainBatchCandidate:
         resolved_effect_executor = effect_executor or self.semantic_effect_executor
         repository_path = _repository_path(candidate.repository)
-        construction_ref = (
-            "refs/heads/launchplane/construct/"
-            + sha256(candidate.candidate_ref.encode("utf-8")).hexdigest()
-        )
+        construction_ref = merge_train_construction_ref(candidate.candidate_ref)
         candidate_branch = _branch_name_from_ref(construction_ref)
         if checkpoint is not None:
             checkpoint(candidate, None, "reset_construction_ref")
@@ -551,7 +548,6 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                         batch_id=candidate.batch_id,
                     ),
                     candidate_ref=construction_ref,
-                    expected_ref_sha=candidate_sha,
                 )
             )
         except MergeTrainGitHubError as error:
@@ -2317,6 +2313,11 @@ def _base_branch_sha(
     )
     commit = _json_object(branch.get("commit"), "GitHub branch commit")
     return _required_text(commit.get("sha"), "GitHub branch commit requires sha.")
+
+
+def merge_train_construction_ref(candidate_ref: str) -> str:
+    """Locate native construction evidence from the canonical candidate identity."""
+    return "refs/heads/launchplane/construct/" + sha256(candidate_ref.encode("utf-8")).hexdigest()
 
 
 def _verify_candidate_publication(

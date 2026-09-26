@@ -65,6 +65,7 @@ from control_plane.merge_train_github import (
     MergeTrainGitHubStaleHeadError,
     MergeTrainGitHubTransport,
     UrllibMergeTrainGitHubTransport,
+    merge_train_construction_ref,
 )
 from control_plane.merge_train_stack_collapse import (
     MergeTrainStackCollapsePlanRecordStore,
@@ -1706,6 +1707,15 @@ def _advance_active_candidate_record(
         return reflow_result
 
     candidate_build_error: MergeTrainGitHubStaleHeadError | None = None
+    construction_evidence = (
+        {
+            "construction_ref": merge_train_construction_ref(
+                active_candidate_record.candidate.candidate_ref
+            )
+        }
+        if active_candidate_record.ordinary_job_binding is None
+        else {}
+    )
     if active_candidate_record.candidate.status in {"planned", "building"}:
         controller_action = "build_candidate"
         if request.mutate:
@@ -1738,6 +1748,7 @@ def _advance_active_candidate_record(
                     "candidate_ref": progress_candidate.candidate_ref,
                     "candidate_sha": progress_candidate.candidate_sha,
                     "completed_entry_count": (int(phase.split(":", 1)[1]) if ":" in phase else 0),
+                    **construction_evidence,
                 },
             )
 
@@ -1795,6 +1806,7 @@ def _advance_active_candidate_record(
         result["details"] = {
             "github_status_code": candidate_build_error.status_code,
             "failed_pull_request_number": lease.record.active_pull_request_number,
+            **construction_evidence,
         }
     if request.mutate:
         updated_candidate_record = build_merge_train_batch_candidate_record(
@@ -1815,6 +1827,7 @@ def _advance_active_candidate_record(
                 "candidate_ref": candidate.candidate_ref,
                 "candidate_sha": candidate.candidate_sha,
                 "candidate_status": candidate.status,
+                **construction_evidence,
             },
         )
     result["candidate"] = candidate.model_dump(mode="json")

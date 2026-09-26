@@ -684,7 +684,6 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
         cleanup = executor.effects[4]
         assert isinstance(cleanup, CandidateRefDeleteEffect)
         self.assertEqual(cleanup.candidate_ref, first_merge.candidate_ref)
-        self.assertEqual(cleanup.expected_ref_sha, built.candidate_sha)
 
     def test_build_batch_candidate_resets_existing_ref(self) -> None:
         candidate = _batch_candidate()

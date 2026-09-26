@@ -29,6 +29,7 @@ from control_plane.merge_admission import (
 )
 from control_plane.merge_train import MergeTrainDryRunSnapshot
 from control_plane.merge_train_controller_run_once import MERGE_TRAIN_CONTROLLER_ACTIVE_ACTION
+from control_plane.merge_train_github import merge_train_construction_ref
 from control_plane.service_auth import (
     BearerIdentityConfig,
     LaunchplaneAuthzPolicy,
@@ -2847,7 +2848,13 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             failed_payload["result"]["details"],
-            {"failed_pull_request_number": 1, "github_status_code": 409},
+            {
+                "failed_pull_request_number": 1,
+                "github_status_code": 409,
+                "construction_ref": merge_train_construction_ref(
+                    failed_payload["result"]["candidate"]["candidate_ref"]
+                ),
+            },
         )
         self.assertEqual(reflow_response.status_code, 202)
         self.assertEqual(reflow_payload["result"]["controller_action"], "plan_candidate")
@@ -3629,6 +3636,8 @@ class FastApiMergeTrainMutationFenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 202)
         self.assertIn("merge_candidate_entry", observed_phases)
         self.assertIn("candidate_entry_merged", observed_phases)
+        self.assertIn("publish_candidate_ref", observed_phases)
+        self.assertIn("candidate_ref_published", observed_phases)
         self.assertEqual(idempotency_controller_statuses, ["running"])
         self.assertEqual(final_state.status, "idle")
 

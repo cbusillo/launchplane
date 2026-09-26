@@ -305,6 +305,9 @@ the semantic effect executor. An already missing ref is clean. Other cleanup
 failures are logged with the ref and HTTP status without discarding the verified
 candidate or restarting its CI; the retained ref has no landing authority.
 Failed or interrupted builds retain their construction ref as recovery evidence.
+The native controller checkpoint records its exact `construction_ref`, and a
+failed build returns that locator with the provider status. A ref locator is
+not proof that the ref still exists.
 Ref naming is an implementation detail, not mutable repository policy.
 
 After GitHub creates a candidate merge commit, Launchplane performs a bounded
@@ -440,6 +443,10 @@ persists that candidate as `failed`, reports the exact pull request reached by t
 releases the controller lease without replaying the rejected merge. The same
 queue-change rule then governs replacement planning; an unchanged queue remains
 stopped for operator attention.
+
+An exhausted final-publication readback also fails closed, with no individual
+failed pull request: its checkpoint identifies the publication phase and the
+retained construction ref.
 
 ## Example Policy Entries
 
