@@ -55,6 +55,31 @@ def _request(*, mode: str = "dry_run", reviewed_digest: str = "") -> dict[str, o
 
 
 class ProductionBackupMigrationTests(unittest.TestCase):
+    def test_mixed_case_identifiers_use_the_exact_normalized_stream(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(Path(directory))
+            store.write_runtime_environment_record(_runtime_record())
+            payload = _request()
+            for key in (
+                "product",
+                "context",
+                "instance",
+                "source_target_id",
+                "destination_target_id",
+            ):
+                value = payload[key]
+                assert isinstance(value, str)
+                payload[key] = f" {value.upper()} "
+            envelope = build_legacy_production_backup_authority_envelope(
+                record_store=store,
+                request=LegacyProductionBackupMigrationRequest.model_validate(payload),
+            )
+            self.assertEqual(envelope.policy.context, "example-product")
+            self.assertEqual(envelope.policy.instance, "prod")
+            self.assertEqual(
+                envelope.policy.fast_snapshot.source_target_id, envelope.targets[0].target_id
+            )
+
     def test_migration_builds_redacted_dual_backup_authority_and_preserves_legacy_gate(
         self,
     ) -> None:

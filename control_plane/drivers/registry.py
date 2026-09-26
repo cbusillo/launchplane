@@ -1567,17 +1567,18 @@ def _production_backup_authorities(
     promotion_actions = tuple(
         action
         for action in effective_driver_actions(descriptor)
-        if action.requires_production_backup_policy
-        and action.authz_action
-        and action_allowed is not None
-        and action_allowed(
+        if action.requires_production_backup_policy and action.authz_action
+    )
+    if (
+        not promotion_actions
+        or action_allowed is None
+        or not action_allowed(
             "production_backup_authority.read",
             profile.product,
             context_name,
             (instance_name,),
         )
-    )
-    if not promotion_actions:
+    ):
         return ()
     generated_at = (
         datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")

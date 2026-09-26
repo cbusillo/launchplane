@@ -14,6 +14,7 @@ from control_plane.contracts.production_backup_authority import (
     ProductionBackupPolicySummary,
     ProductionBackupTargetRecord,
     ProductionBackupTargetSummary,
+    production_backup_snapshot_prefix_valid,
 )
 
 
@@ -481,6 +482,19 @@ def resolve_production_backup_authority(
             state="stale",
             summary="The exact production backup policy requires operator review.",
             reason_codes=("production_backup_policy_stale",),
+            policy=policy_summary,
+            generated_at=generated_at,
+        )
+
+    if not production_backup_snapshot_prefix_valid(current_policy.fast_snapshot.snapshot_prefix):
+        return _read_model(
+            product=normalized_product,
+            context=normalized_context,
+            instance=normalized_instance,
+            promotion_action=normalized_action,
+            state="invalid",
+            summary="The snapshot prefix cannot produce a valid provider snapshot name.",
+            reason_codes=("production_backup_snapshot_prefix_invalid",),
             policy=policy_summary,
             generated_at=generated_at,
         )

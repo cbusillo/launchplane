@@ -81,6 +81,8 @@ not describe runtime authority until it is implemented, deployed, and activated.
   affected-product, Owner-impact, and engineering-review classification
   contract.
 - [operations.md](operations.md) — operator workflows and runtime boundary rules.
+- [production-backup-provider.md](production-backup-provider.md) — typed
+  Proxmox/PBS capture, host boundary, evidence and rollout prerequisites.
 - [records.md](records.md) — persisted record formats and storage policy.
 - [public-readiness.md](public-readiness.md) — current public-repository posture,
   remaining blockers, and safe-public exit criteria.

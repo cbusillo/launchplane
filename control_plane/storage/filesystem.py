@@ -6391,7 +6391,10 @@ class FilesystemRecordStore:
         )
 
     def create_verireel_prod_backup_gate_operation_record_if_no_active_record(
-        self, record: VeriReelProdBackupGateOperationRecord
+        self,
+        record: VeriReelProdBackupGateOperationRecord,
+        *,
+        pending_backup_record: BackupGateRecord | None = None,
     ) -> tuple[VeriReelProdBackupGateOperationRecord, bool]:
         try:
             return self.read_verireel_prod_backup_gate_operation_record(record.operation_id), False
@@ -6405,6 +6408,11 @@ class FilesystemRecordStore:
         if active_records:
             return active_records[0], False
         self.write_verireel_prod_backup_gate_operation_record(record)
+        if pending_backup_record is not None:
+            try:
+                self.read_backup_gate_record(record.backup_record_id)
+            except FileNotFoundError:
+                self.write_backup_gate_record(pending_backup_record)
         return record, True
 
     def read_verireel_prod_backup_gate_operation_record(
@@ -6552,6 +6560,7 @@ class FilesystemRecordStore:
         lease_owner: str,
         phase: str,
         updated_at: str,
+        progress_evidence: dict[str, str] | None = None,
     ) -> VeriReelProdBackupGateOperationRecord | None:
         record = self.read_verireel_prod_backup_gate_operation_record(operation_id)
         if (
@@ -6565,6 +6574,9 @@ class FilesystemRecordStore:
             update={
                 "phase": phase.strip(),
                 "updated_at": updated_at.strip(),
+                "progress_evidence": dict(progress_evidence)
+                if progress_evidence is not None
+                else record.progress_evidence,
             }
         )
         self.write_verireel_prod_backup_gate_operation_record(updated_record)
@@ -6635,7 +6647,7 @@ class FilesystemRecordStore:
                 )
             else:
                 error_message = (
-                    "VeriReel prod backup gate operation lease expired in "
+                    "Production backup gate operation lease expired in "
                     f"phase {record.phase!r}; unsafe to retry automatically."
                 )
                 recovered_record = record.model_copy(
@@ -6647,6 +6659,9 @@ class FilesystemRecordStore:
                         "lease_owner": "",
                         "lease_expires_at": "",
                         "heartbeat_at": "",
+                        "error_code": "backup_effect_outcome_unknown"
+                        if record.binding is not None
+                        else "",
                         "error_message": error_message,
                     }
                 )
@@ -6656,10 +6671,12 @@ class FilesystemRecordStore:
                         context=record.context,
                         instance=record.instance,
                         created_at=now,
-                        source="launchplane-verireel-prod-backup-gate",
+                        source="launchplane-production-backup-gate"
+                        if record.binding is not None
+                        else "launchplane-verireel-prod-backup-gate",
                         required=True,
                         status="fail",
-                        evidence={"error_message": error_message},
+                        evidence={**record.progress_evidence, "error_message": error_message},
                     )
                 )
             self.write_verireel_prod_backup_gate_operation_record(recovered_record)

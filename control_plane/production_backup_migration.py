@@ -88,6 +88,14 @@ class LegacyProductionBackupMigrationRequest(BaseModel):
             if not value:
                 raise ValueError(f"legacy production backup migration requires {field_name}")
             setattr(self, field_name, value)
+        for field_name in (
+            "product",
+            "context",
+            "instance",
+            "source_target_id",
+            "destination_target_id",
+        ):
+            setattr(self, field_name, str(getattr(self, field_name)).lower())
         self.reviewed_authority_digest = self.reviewed_authority_digest.strip().lower()
         if self.mode == "apply" and not self.reviewed_authority_digest:
             raise ValueError(

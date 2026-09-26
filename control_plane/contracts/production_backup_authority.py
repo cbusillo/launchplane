@@ -22,6 +22,11 @@ _PROVIDER_IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 
+def production_backup_snapshot_prefix_valid(value: str) -> bool:
+    # The timestamp/hash suffix uses 23 of Proxmox's 40 snapshot-name characters.
+    return re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,16}", value) is not None
+
+
 class ProxmoxGuestBackupDestinationReference(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

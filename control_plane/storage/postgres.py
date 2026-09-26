@@ -6905,7 +6905,9 @@ class PostgresRecordStore(HumanSessionStore):
                 target_plans=plan.target_plans,
                 policy_plan=plan.policy_plan,
             )
-            applied_result = plan.result.model_copy(update={"status": "applied"})
+            applied_result = plan.result.model_copy(
+                update={"status": "replayed" if plan.result.status == "replayed" else "applied"}
+            )
             completed_at = self._database_mutation_timestamp(session)
             completion = complete_launchplane_mutation_reservation(
                 reservation,
@@ -10605,6 +10607,22 @@ class PostgresRecordStore(HumanSessionStore):
             session.commit()
         return tuple(affected_operation_ids)
 
+    @contextmanager
+    def production_backup_source_lock(self, source_key: str) -> Iterator[Callable[[], None] | None]:
+        """Fence shared capture and retention for one configured provider guest."""
+        with self._session_factory() as session:
+            acquired = self.database_url.startswith("sqlite") or bool(
+                session.scalar(
+                    text("select pg_try_advisory_xact_lock(hashtextextended(:lock_name, 0))"),
+                    {"lock_name": f"launchplane:backup-source:{source_key}"},
+                )
+            )
+
+            def check_connection() -> None:
+                session.execute(text("select 1"))
+
+            yield check_connection if acquired else None
+
     def write_verireel_prod_backup_gate_operation_record(
         self, record: VeriReelProdBackupGateOperationRecord
     ) -> None:
@@ -10647,13 +10665,43 @@ class PostgresRecordStore(HumanSessionStore):
         row.payload = self._payload_dict(record)
 
     def create_verireel_prod_backup_gate_operation_record_if_no_active_record(
-        self, record: VeriReelProdBackupGateOperationRecord
+        self,
+        record: VeriReelProdBackupGateOperationRecord,
+        *,
+        pending_backup_record: BackupGateRecord | None = None,
     ) -> tuple[VeriReelProdBackupGateOperationRecord, bool]:
-        try:
-            return self.read_verireel_prod_backup_gate_operation_record(record.operation_id), False
-        except FileNotFoundError:
-            pass
         with self._session_factory() as session:
+            if not self.database_url.startswith("sqlite"):
+                session.execute(
+                    text("select pg_advisory_xact_lock(hashtextextended(:lock_name, 0))"),
+                    {"lock_name": f"launchplane:backup-record:{record.backup_record_id}"},
+                )
+            rows = session.scalars(
+                select(LaunchplaneVeriReelProdBackupGateOperationRow).where(
+                    (
+                        LaunchplaneVeriReelProdBackupGateOperationRow.operation_id
+                        == record.operation_id
+                    )
+                    | (
+                        LaunchplaneVeriReelProdBackupGateOperationRow.backup_record_id
+                        == record.backup_record_id
+                    )
+                )
+            ).all()
+            for row in rows:
+                existing = self._read_payload(
+                    model_type=VeriReelProdBackupGateOperationRecord, payload=row.payload
+                )
+                if (
+                    existing.operation_id == record.operation_id
+                    or existing.binding is not None
+                    or record.binding is not None
+                    or existing.status in {"pending", "running"}
+                ):
+                    return existing, False
+            existing_backup_row = session.get(LaunchplaneBackupGateRow, record.backup_record_id)
+            if record.binding is not None and existing_backup_row is not None:
+                raise ValueError("Production backup record ID conflicts with existing evidence.")
             session.add(
                 LaunchplaneVeriReelProdBackupGateOperationRow(
                     operation_id=record.operation_id,
@@ -10672,6 +10720,17 @@ class PostgresRecordStore(HumanSessionStore):
                     payload=self._payload_dict(record),
                 )
             )
+            if pending_backup_record is not None and existing_backup_row is None:
+                session.add(
+                    LaunchplaneBackupGateRow(
+                        record_id=record.backup_record_id,
+                        context=record.context,
+                        instance=record.instance,
+                        created_at=pending_backup_record.created_at,
+                        status=pending_backup_record.status,
+                        payload=self._payload_dict(pending_backup_record),
+                    )
+                )
             try:
                 session.commit()
             except IntegrityError:
@@ -10684,7 +10743,7 @@ class PostgresRecordStore(HumanSessionStore):
                 if active_records:
                     return active_records[0], False
                 return self.create_verireel_prod_backup_gate_operation_record_if_no_active_record(
-                    record
+                    record, pending_backup_record=pending_backup_record
                 )
         return record, True
 
@@ -10868,6 +10927,7 @@ class PostgresRecordStore(HumanSessionStore):
         lease_owner: str,
         phase: str,
         updated_at: str,
+        progress_evidence: dict[str, str] | None = None,
     ) -> VeriReelProdBackupGateOperationRecord | None:
         with self._session_factory() as session:
             statement = (
@@ -10895,6 +10955,9 @@ class PostgresRecordStore(HumanSessionStore):
                 update={
                     "phase": phase.strip(),
                     "updated_at": updated_at.strip(),
+                    "progress_evidence": dict(progress_evidence)
+                    if progress_evidence is not None
+                    else record.progress_evidence,
                 }
             )
             self._sync_verireel_prod_backup_gate_operation_row(row, updated_record)
@@ -11023,7 +11086,7 @@ class PostgresRecordStore(HumanSessionStore):
                     )
                 else:
                     error_message = (
-                        "VeriReel prod backup gate operation lease expired in "
+                        "Production backup gate operation lease expired in "
                         f"phase {record.phase!r}; unsafe to retry automatically."
                     )
                     recovered_record = record.model_copy(
@@ -11035,6 +11098,9 @@ class PostgresRecordStore(HumanSessionStore):
                             "lease_owner": "",
                             "lease_expires_at": "",
                             "heartbeat_at": "",
+                            "error_code": "backup_effect_outcome_unknown"
+                            if record.binding is not None
+                            else "",
                             "error_message": error_message,
                         }
                     )
@@ -11051,10 +11117,15 @@ class PostgresRecordStore(HumanSessionStore):
                                     context=record.context,
                                     instance=record.instance,
                                     created_at=now,
-                                    source="launchplane-verireel-prod-backup-gate",
+                                    source="launchplane-production-backup-gate"
+                                    if record.binding is not None
+                                    else "launchplane-verireel-prod-backup-gate",
                                     required=True,
                                     status="fail",
-                                    evidence={"error_message": error_message},
+                                    evidence={
+                                        **record.progress_evidence,
+                                        "error_message": error_message,
+                                    },
                                 )
                             ),
                         )

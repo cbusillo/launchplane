@@ -14,6 +14,11 @@ from control_plane.contracts.verireel_prod_backup_gate import (
     VeriReelProdBackupGateRequest,
     VeriReelProdBackupGateResult,
 )
+from control_plane.contracts.production_backup_gate import (
+    PRODUCTION_BACKUP_GATE_EXECUTE_ACTION,
+    ProductionBackupGateRequest,
+    ProductionBackupGateWorkerRequest,
+)
 
 VeriReelProdBackupGateOperationStatus = Literal["pending", "running", "pass", "fail", "cancelled"]
 VeriReelProdBackupGateOperationPhase = Literal[
@@ -45,7 +50,8 @@ class VeriReelProdBackupGateOperationRecord(BaseModel):
     instance: str
     backup_record_id: str
     request_fingerprint: str
-    request: VeriReelProdBackupGateRequest
+    request: VeriReelProdBackupGateRequest | ProductionBackupGateRequest
+    binding: ProductionBackupGateWorkerRequest | None = None
     authorization: DurableOperationAuthorization | None = None
     status: VeriReelProdBackupGateOperationStatus = "pending"
     phase: VeriReelProdBackupGateOperationPhase = "created"
@@ -58,6 +64,7 @@ class VeriReelProdBackupGateOperationRecord(BaseModel):
     heartbeat_at: str = ""
     attempt: int = Field(default=0, ge=0)
     result: VeriReelProdBackupGateResult | None = None
+    progress_evidence: dict[str, str] = Field(default_factory=dict)
     cancellation: DurableOperationCancellation | None = None
     error_code: str = ""
     error_message: str = ""
@@ -65,7 +72,7 @@ class VeriReelProdBackupGateOperationRecord(BaseModel):
 
     @model_validator(mode="after")
     def _validate_record(self) -> "VeriReelProdBackupGateOperationRecord":
-        if self.schema_version not in {1, 2}:
+        if self.schema_version not in {1, 2, 3}:
             raise ValueError("Unsupported VeriReel prod backup gate operation schema version.")
         self.operation_id = _normalize_required(
             self.operation_id, "VeriReel prod backup gate operation requires operation_id."
@@ -101,7 +108,15 @@ class VeriReelProdBackupGateOperationRecord(BaseModel):
         self.error_code = self.error_code.strip()
         self.error_message = self.error_message.strip()
         self.runner_trace_id = self.runner_trace_id.strip()
-        if self.product != "verireel":
+        shared_request = isinstance(self.request, ProductionBackupGateRequest)
+        if shared_request:
+            if self.schema_version != 3 or self.binding is None:
+                raise ValueError("Shared production backup operations require a typed binding.")
+            if self.binding.request != self.request or self.request.product != self.product:
+                raise ValueError("Shared production backup operation scope must match its binding.")
+        elif self.schema_version == 3 or self.binding is not None:
+            raise ValueError("Legacy backup requests cannot carry shared backup authority.")
+        elif self.product != "verireel":
             raise ValueError("VeriReel prod backup gate operation product must be verireel.")
         if self.context != self.request.context:
             raise ValueError("VeriReel prod backup gate operation context must match request.")
@@ -111,16 +126,21 @@ class VeriReelProdBackupGateOperationRecord(BaseModel):
             raise ValueError(
                 "VeriReel prod backup gate operation backup_record_id must match request."
             )
-        if self.schema_version == 2 and self.authorization is None:
+        if self.schema_version in {2, 3} and self.authorization is None:
             raise ValueError(
                 "Schema-v2 VeriReel prod backup gate operation requires authorization provenance."
             )
         if self.authorization is not None:
-            if self.schema_version != 2:
+            if self.schema_version not in {2, 3}:
                 raise ValueError(
                     "VeriReel backup gate authorization provenance requires schema version 2."
                 )
-            if self.authorization.action != "verireel_prod_backup_gate.execute":
+            expected_action = (
+                PRODUCTION_BACKUP_GATE_EXECUTE_ACTION
+                if shared_request
+                else "verireel_prod_backup_gate.execute"
+            )
+            if self.authorization.action != expected_action:
                 raise ValueError(
                     "VeriReel backup gate authorization action must match the operation."
                 )
@@ -191,7 +211,9 @@ def build_cancelled_verireel_prod_backup_gate_record(
         context=operation.context,
         instance=operation.instance,
         created_at=operation.cancellation.cancelled_at,
-        source="launchplane-verireel-prod-backup-gate-cancellation",
+        source="launchplane-production-backup-gate-cancellation"
+        if operation.binding is not None
+        else "launchplane-verireel-prod-backup-gate-cancellation",
         required=True,
         status="fail",
         evidence={

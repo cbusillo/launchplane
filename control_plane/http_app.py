@@ -220,6 +220,10 @@ from control_plane.http_routes import (
     request_fingerprint as build_request_fingerprint,
     require_product_profile_read_store,
 )
+from control_plane.http_routes.production_backup_gate import (
+    ProductionBackupGateRouteDependencies,
+    register_production_backup_gate_routes,
+)
 from control_plane.http_routes.ordinary_agent_management import (
     OrdinaryAgentManagementDependencies,
     register_ordinary_agent_management_routes,
@@ -8242,6 +8246,17 @@ def create_launchplane_fastapi_app(
                 code="not_found",
                 message="Durable operation was not found.",
             ) from error
+        if (
+            read_method_name == "read_verireel_prod_backup_gate_operation_record"
+            and operation.binding is not None
+            and action != "production_backup_gate.execute"
+        ):
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message="Operation is not supported by this cancellation route.",
+            )
         if not resolved_authz_policy_runtime.policy.allows(
             identity=identity,
             action=action,
@@ -24229,6 +24244,14 @@ def create_launchplane_fastapi_app(
     register_production_backup_authority_read_routes(
         app,
         dependencies=read_route_dependencies,
+    )
+    register_production_backup_gate_routes(
+        app,
+        dependencies=ProductionBackupGateRouteDependencies(
+            common=read_route_dependencies,
+            read_write_identity=read_write_identity,
+            cancel_pending_operation=cancel_pending_durable_operation,
+        ),
     )
 
     app.add_api_route(

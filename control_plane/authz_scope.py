@@ -19,6 +19,7 @@ _NON_DESCRIPTOR_INSTANCE_SCOPED_AUTHZ_ACTIONS = frozenset(
         "product_retirement.plan",
         "production_backup_authority.read",
         "production_backup_authority.write",
+        "production_backup_gate.execute",
         "promotion.write",
         "promotion.read",
         "route_binding.external.apply",
