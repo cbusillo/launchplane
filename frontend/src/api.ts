@@ -72,6 +72,7 @@ import type {
   OwnerSecretInputResponse,
   SubmitOwnerSecretInputData,
   WriteProductReviewDecisionData,
+  RetryProductReviewFeedbackData,
   ReleaseReviewResponse,
   ReleaseReviewDecisionEnvelope,
 } from "./generated/openapi.ts";
@@ -646,11 +647,13 @@ export function readProductReview(
   repository: string,
   pullRequest: number,
   signal?: AbortSignal,
+  decisionId?: string,
 ): Promise<ProductReviewResponse> {
   const params = new URLSearchParams({
     repository,
     pull_request: String(pullRequest),
   });
+  if (decisionId) params.set("decision_id", decisionId);
   return requestJson<ProductReviewResponse>(
     `/v1/product-review?${params.toString()}`,
     "GET",
@@ -688,6 +691,14 @@ export function writeProductReviewDecision(
     "POST",
     request.body,
     signal,
+  );
+}
+
+export function retryProductReviewFeedback(
+  payload: RetryProductReviewFeedbackData["body"],
+): Promise<ProductReviewResponse> {
+  return requestJson<ProductReviewResponse>(
+    BROWSER_WRITE_ROUTES.productReviewFeedbackRetry, "POST", payload,
   );
 }
 

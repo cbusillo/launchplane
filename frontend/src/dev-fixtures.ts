@@ -2826,7 +2826,7 @@ export function productReviewForFixture(
   const ownerSet = scenario !== "no-owner";
   const viewerIsOwner = ownerSet && params.get("viewer") !== "non-owner";
   const previewUrl =
-    scenario === "missing-preview" ? "" : "https://site.preview.example.invalid/";
+    ["missing-preview", "pending-without-preview"].includes(scenario) ? "" : "https://site.preview.example.invalid/";
   const cannotDecideReason = !ownerSet
     ? "No Owner set for this product"
     : !viewerIsOwner
@@ -2850,8 +2850,17 @@ export function productReviewForFixture(
     can_decide: !cannotDecideReason,
     cannot_decide_reason: cannotDecideReason,
     latest_decision:
-      latestDecision ??
-      (scenario === "decided"
+      (latestDecision ? {
+        ...latestDecision,
+        feedback_url: scenario === "delivery-pending" ? "" : latestDecision.feedback_url,
+      } : null) ??
+      (scenario === "legacy-decision"
+        ? { ...productReviewDecisionForFixture("accepted", ""), feedback_requested: false, feedback_url: "" }
+        : scenario === "pending-without-preview"
+        ? { ...productReviewDecisionForFixture("accepted", ""), feedback_url: "", head_sha: "b".repeat(40) }
+        : scenario === "earlier-decision"
+        ? { ...productReviewDecisionForFixture("accepted", ""), head_sha: "b".repeat(40) }
+        : scenario === "decided"
         ? productReviewDecisionForFixture("changes_requested", "Please adjust the checkout flow.")
         : null),
   };
@@ -2864,6 +2873,8 @@ export function productReviewDecisionForFixture(
   return {
     schema_version: 1,
     record_id: `fixture-product-review-${decision}`,
+    feedback_requested: true,
+    feedback_url: "https://github.com/example/control-plane/pull/308#issuecomment-1",
     product: "example-site",
     repository: "example/control-plane",
     pull_request_number: 308,

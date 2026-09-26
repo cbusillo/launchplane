@@ -10,6 +10,7 @@ import {
 import {
   LaunchplaneApiError,
   readProductReview,
+  retryProductReviewFeedback,
   writeProductReviewDecision,
 } from "./api";
 import type { DevFixtureMode } from "./dev-fixture-loader";
@@ -128,6 +129,7 @@ function OwnerPreviewReviewRoute({
 }) {
   const searchParams = useAppSearchParams();
   const lookup = productReviewLookupFromSearch(searchParams.toString());
+  const decisionId = searchParams.get("decision_id") || undefined;
   const [review, setReview] = useState<ProductReviewResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -149,6 +151,7 @@ function OwnerPreviewReviewRoute({
               lookup.repository,
               Number(lookup.pullRequest),
               signal,
+              decisionId,
             );
         if (requestRef.current !== requestId || signal?.aborted) return;
         setReview(response);
@@ -166,7 +169,7 @@ function OwnerPreviewReviewRoute({
         if (requestRef.current === requestId && !signal?.aborted) setLoading(false);
       }
     },
-    [fixtureMode, lookup.pullRequest, lookup.repository, lookup.valid],
+    [decisionId, fixtureMode, lookup.pullRequest, lookup.repository, lookup.valid],
   );
 
   useEffect(() => {
@@ -185,7 +188,8 @@ function OwnerPreviewReviewRoute({
         <h1 data-route-heading tabIndex={-1}>Review this change</h1>
         <p>
           Open the preview and look at the change. Then accept it, or say what
-          should change. Your decision does not publish anything.
+          should change. Your decision does not publish the site.
+          Your decision and feedback are shared on the pull request for the agent to read.
         </p>
       </div>
       {!lookup.valid ? (
@@ -199,6 +203,7 @@ function OwnerPreviewReviewRoute({
         <OwnerReviewState tone="error">{error}</OwnerReviewState>
       ) : review ? (
         <ProductReviewCard
+          historical={Boolean(decisionId)}
           fixtureMode={fixtureMode}
           review={review}
           onDecided={setReview}
@@ -227,10 +232,12 @@ function OwnerReviewState({
 }
 
 function ProductReviewCard({
+  historical,
   fixtureMode,
   onDecided,
   review,
 }: {
+  historical: boolean;
   fixtureMode: DevFixtureMode;
   onDecided: (review: ProductReviewResponse) => void;
   review: ProductReviewResponse;
@@ -272,14 +279,25 @@ function ProductReviewCard({
         </p>
       ) : null}
       {review.latest_decision ? (
-        <LatestDecision decision={review.latest_decision} />
+        <LatestDecision
+          key={review.latest_decision.record_id}
+          decision={review.latest_decision}
+          review={review}
+          fixtureMode={fixtureMode}
+          onDecided={onDecided}
+        />
       ) : null}
-      {review.can_decide && previewUrl ? (
+      {historical ? (
+        <p><a href={`?repository=${encodeURIComponent(review.repository)}&pull_request=${review.pull_request_number}`}>View latest review</a></p>
+      ) : null}
+      {!historical && review.can_decide && previewUrl ? (
         <ProductReviewDecisionForm
           fixtureMode={fixtureMode}
           review={review}
           onDecided={onDecided}
         />
+      ) : historical ? (
+        <OwnerReviewState>Open the latest review to record a new decision.</OwnerReviewState>
       ) : (
         <OwnerReviewState>{cannotDecideMessage(review)}</OwnerReviewState>
       )}
@@ -297,16 +315,68 @@ function cannotDecideMessage(review: ProductReviewResponse): string {
   return "No preview yet. Come back when the pull request says the preview is ready.";
 }
 
-function LatestDecision({ decision }: { decision: ProductReviewDecisionRecord }) {
+function LatestDecision({ decision, review, fixtureMode, onDecided }: {
+  decision: ProductReviewDecisionRecord;
+  review: ProductReviewResponse;
+  fixtureMode: DevFixtureMode;
+  onDecided: (review: ProductReviewResponse) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [failure, setFailure] = useState("");
+  const retry = async () => {
+    setBusy(true);
+    setFailure("");
+    try {
+      const response = fixtureMode
+        ? { ...review, latest_decision: { ...decision, feedback_requested: true, feedback_url: `${review.pull_request_url}#issuecomment-1` } }
+        : await retryProductReviewFeedback({
+            repository: review.repository,
+            pull_request: review.pull_request_number,
+            decision_id: decision.record_id,
+          });
+      onDecided(response);
+      if (!response.latest_decision?.feedback_url) {
+        setFailure("Delivery is still pending. Your saved decision has not changed.");
+      }
+    } catch (retryError) {
+      const apiError = retryError as LaunchplaneApiError;
+      setFailure(apiError.statusCode === 409 ? apiError.message : "Delivery could not be retried. Your saved decision has not changed.");
+    } finally {
+      setBusy(false);
+    }
+  };
+  const currentHead = review.head_sha;
   return (
-    <section className="owner-review-latest" aria-label="Latest decision">
+    <section className="owner-review-latest" aria-label="Recorded decision">
       <p>
         <strong>
           {decision.decision === "accepted" ? "Accepted" : "Changes requested"}
         </strong>{" "}
         by @{decision.owner_github_login} · {formatTime(decision.decided_at)}
       </p>
+      <p>
+        {!decision.head_sha ? "The reviewed version was not recorded." : <>
+          {currentHead && decision.head_sha !== currentHead ? "Earlier preview version" : "Reviewed preview version"}{" "}
+          {decision.head_sha.slice(0, 7)}
+          {!currentHead ? ". No preview is currently ready for comparison." : decision.head_sha !== currentHead ? ". This decision does not apply to the current preview." : ""}
+        </>}
+      </p>
       {decision.reason ? <blockquote>{decision.reason}</blockquote> : null}
+      {!decision.feedback_url ? (
+        <>
+          <OwnerReviewState tone={decision.feedback_requested ? "error" : "neutral"}>
+            {decision.feedback_requested
+              ? "Your decision is saved, but delivery to the agent is pending."
+              : "This saved decision has not been shared on the pull request."}
+          </OwnerReviewState>
+          {review.viewer_is_owner ? (
+            <button className="button" type="button" disabled={busy} onClick={() => void retry()}>
+              {busy ? "Sending feedback…" : decision.feedback_requested ? "Retry delivery" : "Send feedback to the agent"}
+            </button>
+          ) : null}
+        </>
+      ) : null}
+      {failure ? <OwnerReviewState tone="error">{failure}</OwnerReviewState> : null}
     </section>
   );
 }
@@ -344,7 +414,7 @@ function ProductReviewDecisionForm({
             decision,
             reason: decisionReason,
           });
-      setReason("");
+      setReason(response.latest_decision?.feedback_url ? "" : decisionReason);
       setRecorded(true);
       onDecided(response);
     } catch (writeError) {

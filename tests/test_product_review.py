@@ -242,6 +242,38 @@ class ProductReviewHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["latest_decision"]["decision"], "accepted")
 
+    async def test_saved_decision_link_reads_history_only_for_the_visible_pull_request(
+        self,
+    ) -> None:
+        self._write_product()
+        older = _decision(record_id="decision-old", decided_at="2026-09-20T10:00:00Z")
+        newer = _decision(record_id="decision-new", decided_at="2026-09-21T10:00:00Z")
+        self.store.write_product_review_decision_record(older)
+        self.store.write_product_review_decision_record(newer)
+        self.store.write_product_review_decision_record(
+            _decision(
+                record_id="decision-other-pr",
+                decided_at="2026-09-22T10:00:00Z",
+                pull_request_number=43,
+            )
+        )
+        app = self._app()
+        session = self.session_manager.issue(_human(login="site-owner", github_id=_OWNER_GITHUB_ID))
+        headers = {"Cookie": self.session_manager.session_cookie_header(session)}
+
+        historical = await _asgi_get(
+            app, f"{_REVIEW_PATH}&decision_id=decision-old", headers=headers
+        )
+        missing = await _asgi_get(
+            app, f"{_REVIEW_PATH}&decision_id=decision-other-pr", headers=headers
+        )
+        latest = await _asgi_get(app, _REVIEW_PATH, headers=headers)
+
+        self.assertEqual(historical.status_code, 200)
+        self.assertEqual(historical.json()["latest_decision"]["record_id"], older.record_id)
+        self.assertEqual(latest.json()["latest_decision"]["record_id"], newer.record_id)
+        self.assertEqual(missing.status_code, 404)
+
     async def test_other_signed_in_human_gets_the_same_closed_answer_for_any_repository(
         self,
     ) -> None:
