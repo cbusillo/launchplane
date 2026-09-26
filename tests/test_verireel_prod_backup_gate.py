@@ -573,7 +573,8 @@ class VeriReelProdBackupGateWorkflowTests(unittest.TestCase):
             )
 
             def _return_raced_operation(
-                operation: VeriReelProdBackupGateOperationRecord,
+                _operation: VeriReelProdBackupGateOperationRecord,
+                **_kwargs: object,
             ) -> tuple[VeriReelProdBackupGateOperationRecord, bool]:
                 return existing_operation, False
 
@@ -589,6 +590,8 @@ class VeriReelProdBackupGateWorkflowTests(unittest.TestCase):
                         authorization=self._operation_authorization(),
                         now="2026-04-25T00:01:00Z",
                     )
+            with self.assertRaises(FileNotFoundError):
+                record_store.read_backup_gate_record(request.backup_record_id)
 
     def test_enqueue_verireel_prod_backup_gate_materializes_failed_terminal_operation(
         self,
