@@ -303,7 +303,7 @@ class ProductionPromotionBackupTests(unittest.TestCase):
         with self.assertRaisesRegex(click.ClickException, "superseded"):
             self.require(store)
 
-    def test_guard_rechecks_authority_and_detects_lost_lock(self) -> None:
+    def test_guard_refuses_lock_loss_before_first_effect(self) -> None:
         store = self.capture()
         check = Mock()
 
@@ -320,10 +320,9 @@ class ProductionPromotionBackupTests(unittest.TestCase):
                 promotion_action=ODOO_PROMOTION_BACKUP_ACTION,
                 backup_record_id="backup-example",
             ) as checkpoint:
-                checkpoint("first_effect")
                 check.side_effect = RuntimeError("lost connection")
                 with self.assertRaisesRegex(click.ClickException, "lock was lost"):
-                    checkpoint("next_effect")
+                    checkpoint("first_effect")
                 check.side_effect = None
 
     def test_admitted_promotion_finishes_after_policy_change_and_refused_capture(self) -> None:
@@ -390,7 +389,7 @@ class ProductionPromotionBackupTests(unittest.TestCase):
             with self.assertRaisesRegex(click.ClickException, "incomplete or mismatched"):
                 checkpoint("target_update")
 
-    def test_guard_detects_lock_loss_before_reporting_completion(self) -> None:
+    def test_guard_records_lock_loss_without_interrupting_admitted_deployment(self) -> None:
         store = self.capture()
         check = Mock()
 
@@ -400,7 +399,7 @@ class ProductionPromotionBackupTests(unittest.TestCase):
 
         with (
             patch.object(store, "production_backup_source_lock", side_effect=lock),
-            self.assertRaisesRegex(click.ClickException, "lock was lost"),
+            self.assertLogs(level="WARNING"),
         ):
             with production_promotion_backup_guard(
                 record_store=store,
@@ -412,6 +411,26 @@ class ProductionPromotionBackupTests(unittest.TestCase):
             ) as checkpoint:
                 checkpoint("target_update")
                 check.side_effect = RuntimeError("lost connection")
+                checkpoint("post_deploy")
+        self.assertEqual(checkpoint.evidence["source_lock_status"], "lost_after_effect")
+        self.assertIn("source_lock_lost_at", checkpoint.evidence)
+
+        check.side_effect = None
+        with (
+            patch.object(store, "production_backup_source_lock", side_effect=lock),
+            self.assertLogs(level="WARNING"),
+        ):
+            with production_promotion_backup_guard(
+                record_store=store,
+                product="example-product",
+                context="example-product",
+                instance="prod",
+                promotion_action=ODOO_PROMOTION_BACKUP_ACTION,
+                backup_record_id="backup-example",
+            ) as completed:
+                completed("target_update")
+                check.side_effect = RuntimeError("lost connection on completion")
+        self.assertEqual(completed.evidence["source_lock_status"], "lost_after_effect")
 
     def test_generic_web_cannot_opt_out(self) -> None:
         with self.assertRaises(ValidationError):

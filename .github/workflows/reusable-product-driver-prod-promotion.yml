@@ -190,6 +190,7 @@ jobs:
           TO_INSTANCE: ${{ inputs.to_instance }}
         run: |
           set -euo pipefail
+          mkdir -p .launchplane
           DRIVER="${DRIVER,,}"
           if [ "$DRIVER" = "verireel" ]; then
             if [ -z "$PRODUCT" ]; then

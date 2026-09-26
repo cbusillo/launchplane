@@ -1,7 +1,9 @@
 import unittest
+from contextlib import nullcontext
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from tests.support.profiles import product_profile_payload
 from tests.support.promotion_backup import stub_verified_promotion_backup
+from control_plane.workflows.production_promotion_backup import ProductionPromotionBackupGuard
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -170,6 +172,14 @@ class OdooProdPromotionWorkflowTests(unittest.TestCase):
 
         with (
             patch(
+                "control_plane.workflows.odoo_prod_promotion.production_promotion_backup_guard",
+                side_effect=lambda **_kwargs: nullcontext(
+                    ProductionPromotionBackupGuard(
+                        lambda _phase: None, {"source_lock_status": "lost_after_effect"}
+                    )
+                ),
+            ),
+            patch(
                 "control_plane.workflows.promote.generate_promotion_record_id",
                 return_value="promotion-cm-testing-to-prod",
             ),
@@ -200,6 +210,11 @@ class OdooProdPromotionWorkflowTests(unittest.TestCase):
         self.assertEqual(result.deployment_record_id, "deployment-cm-prod")
         self.assertEqual(result.release_tuple_id, "cm-prod-artifact-cm-new")
         self.assertEqual(record_store.write_promotion_record.call_count, 2)
+        recorded = record_store.write_promotion_record.call_args.args[0]
+        self.assertEqual(recorded.deploy.status, "pass")
+        self.assertEqual(
+            recorded.backup_gate.evidence["infrastructure_source_lock_status"], "lost_after_effect"
+        )
         record_store.write_environment_inventory.assert_called_once()
         record_store.write_release_tuple_record.assert_called_once()
         replacement_request = apply_mock.call_args.kwargs["request"]

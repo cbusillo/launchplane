@@ -168,6 +168,7 @@ jobs:
           TO_INSTANCE: ${{ inputs.to_instance }}
         run: |
           set -euo pipefail
+          mkdir -p .launchplane
           if [ -z "$PRODUCT" ]; then
             PRODUCT="${GITHUB_REPOSITORY#*/}"
           fi

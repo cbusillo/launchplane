@@ -361,6 +361,7 @@ def execute_generic_web_prod_promotion(
             deployment_record_id=deployment_record_id,
             provider_effect_checkpoint=promotion_checkpoint,
         )
+    backup_gate.evidence.update(backup_checkpoint.evidence)
     deployment_record = _read_deployment_record(
         record_store=record_store,
         deployment_record_id=deploy_result.deployment_record_id,

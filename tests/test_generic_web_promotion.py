@@ -1,10 +1,12 @@
 import unittest
 from contextlib import nullcontext
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, cast
 from unittest.mock import Mock, patch
 from tests.support.promotion_backup import stub_verified_promotion_backup
+from control_plane.workflows.production_promotion_backup import ProductionPromotionBackupGuard
 
 import click
 from pydantic import ValidationError
@@ -256,8 +258,7 @@ class GenericWebProdPromotionTests(unittest.TestCase):
         backup_checkpoint = Mock(side_effect=click.ClickException("backup refused"))
 
         def deploy(**kwargs: object) -> GenericWebDeployResult:
-            checkpoint = kwargs["provider_effect_checkpoint"]
-            assert callable(checkpoint)
+            checkpoint = cast(Callable[[str], None], kwargs["provider_effect_checkpoint"])
             checkpoint("target_update")
             raise AssertionError("refused backup must prevent provider mutation")
 
@@ -268,7 +269,9 @@ class GenericWebProdPromotionTests(unittest.TestCase):
             ),
             patch(
                 "control_plane.workflows.generic_web_promotion.production_promotion_backup_guard",
-                side_effect=lambda **_kwargs: nullcontext(backup_checkpoint),
+                side_effect=lambda **_kwargs: nullcontext(
+                    ProductionPromotionBackupGuard(backup_checkpoint, {})
+                ),
             ),
             self.assertRaisesRegex(click.ClickException, "backup refused"),
         ):

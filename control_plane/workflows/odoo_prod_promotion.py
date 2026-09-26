@@ -142,7 +142,6 @@ def execute_odoo_prod_promotion(
         from_instance=request.from_instance,
         to_instance=request.to_instance,
     )
-    source_tuple: ReleaseTupleRecord | None = None
     try:
         infrastructure_backup = require_production_promotion_backup(
             record_store=record_store,
@@ -202,6 +201,7 @@ def execute_odoo_prod_promotion(
                 ),
                 provider_effect_checkpoint=backup_checkpoint,
             )
+        infrastructure_backup.evidence.update(backup_checkpoint.evidence)
         deployment_record = _read_deployment_record_if_present(
             record_store=record_store,
             deployment_record_id=replacement_result.deployment_record_id,

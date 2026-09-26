@@ -156,7 +156,13 @@ before the first provider effect. Subsequent checkpoints verify the lock;
 the admitted evidence remains bound for the rest of that promotion, including
 Odoo module updates. An elapsed freshness limit or a later policy edit must not
 interrupt a promotion after its image has changed. Existing execution-authorization
-and operation-lease checks remain independent.
+and operation-lease checks remain independent. Lock loss before the first effect
+refuses deployment. If the lock connection is lost after effects start, the
+admitted deployment finishes and retains its actual deployment, health, inventory
+and release-tuple results. A warning and promotion evidence record
+`source_lock_status=lost_after_effect` with the observation time; this is not a
+claim that lock protection remained intact. A new promotion still needs a fresh
+admission check.
 A subsequent verified capture can have pruned an earlier snapshot, so earlier
 evidence cannot authorize a new promotion. A capture refused before verification,
 including a source-lock refusal during promotion, cannot prune the selected
@@ -169,9 +175,11 @@ production backup proof. Live calls cannot use dry-run evidence to bypass the
 gate.
 
 Roll out the new reusable workflow revision and explicitly grant its caller
-`production_backup_gate.execute` for the exact production scope and
-`release_review.read` for the product. Generic-web's workflow also needs the
-existing product-profile read capability. No grants are
+`production_backup_gate.execute` for the exact production scope. Release-review
+reads use an existing promotion grant covering both testing and prod in the
+lane's context, or `product_profile.read` for the product in the Launchplane
+context. Generic-web's workflow also uses that product-profile read capability
+to resolve its lane. No grants are
 created by deployment. Older workflow pins or missing policies/evidence fail
 closed; enforcement applies to every Odoo and generic-web testing-to-production
 promotion, including products awaiting their own activation.

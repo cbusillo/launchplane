@@ -3,6 +3,7 @@ import unittest
 from unittest.mock import patch
 
 from control_plane.contracts.promotion_record import BackupGateEvidence
+from control_plane.workflows.production_promotion_backup import ProductionPromotionBackupGuard
 
 
 def stub_verified_promotion_backup(test: unittest.TestCase, module: str) -> None:
@@ -18,6 +19,8 @@ def stub_verified_promotion_backup(test: unittest.TestCase, module: str) -> None
     test.enterContext(
         patch(
             f"{module}.production_promotion_backup_guard",
-            side_effect=lambda **_kwargs: nullcontext(lambda _phase: None),
+            side_effect=lambda **_kwargs: nullcontext(
+                ProductionPromotionBackupGuard(lambda _phase: None, {"source_lock_status": "held"})
+            ),
         )
     )

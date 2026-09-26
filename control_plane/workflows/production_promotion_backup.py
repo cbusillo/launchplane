@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
 import json
+import logging
 from typing import Protocol, cast
 
 import click
@@ -22,6 +24,15 @@ from control_plane.workflows.production_backup_gate import resolve_production_ba
 
 ODOO_PROMOTION_BACKUP_ACTION = "odoo_prod_promotion_run.execute"
 GENERIC_WEB_PROMOTION_BACKUP_ACTION = "generic_web_prod_promotion.execute"
+
+
+@dataclass(frozen=True, slots=True)
+class ProductionPromotionBackupGuard:
+    checkpoint: Callable[[str], None]
+    evidence: dict[str, str]
+
+    def __call__(self, phase: str) -> None:
+        self.checkpoint(phase)
 
 
 class ProductionPromotionBackupStore(Protocol):
@@ -152,7 +163,7 @@ def production_promotion_backup_guard(
     instance: str,
     promotion_action: str,
     backup_record_id: str,
-) -> Iterator[Callable[[str], None]]:
+) -> Iterator[ProductionPromotionBackupGuard]:
     """Validate before effects; retain the backup lock through the promotion."""
     operation = _read_operation(
         record_store, product, context, instance, promotion_action, backup_record_id
@@ -164,14 +175,28 @@ def production_promotion_backup_guard(
             raise click.ClickException("Production backup source is busy.")
 
         effects_started = False
+        protection_evidence = {"source_lock_status": "held"}
 
         def require_lock() -> None:
+            if protection_evidence["source_lock_status"] == "lost_after_effect":
+                return
             try:
                 check_lock()
             except Exception as error:
-                raise click.ClickException(
-                    "Production promotion backup source lock was lost."
-                ) from error
+                if not effects_started:
+                    raise click.ClickException(
+                        "Production promotion backup source lock was lost."
+                    ) from error
+                protection_evidence.update(
+                    {
+                        "source_lock_status": "lost_after_effect",
+                        "source_lock_lost_at": datetime.now(UTC).isoformat(),
+                    }
+                )
+                logging.warning(
+                    "Production promotion lost its backup source lock after effects started; "
+                    "finishing the admitted deployment and preserving protection evidence."
+                )
 
         def require_evidence() -> None:
             require_production_promotion_backup(
@@ -192,7 +217,7 @@ def production_promotion_backup_guard(
 
         require_lock()
         require_evidence()
-        yield checkpoint
+        yield ProductionPromotionBackupGuard(checkpoint, protection_evidence)
         require_lock()
 
 
