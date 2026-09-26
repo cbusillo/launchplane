@@ -1,0 +1,216 @@
+from __future__ import annotations
+
+import hashlib
+import json
+from pathlib import Path
+import re
+import subprocess
+from tempfile import TemporaryDirectory
+import time
+from typing import Callable
+
+from control_plane.contracts.production_backup_authority import (
+    ProxmoxGuestBackupDestinationReference,
+    ProxmoxStorageBackupDestinationReference,
+)
+from control_plane.contracts.production_backup_gate import (
+    ProductionBackupGateWorkerRequest,
+    ProductionBackupGateWorkerResult,
+)
+from control_plane.workflows.ship import utc_now_timestamp
+
+
+class ProductionBackupProviderError(ValueError):
+    """A bounded provider failure code, without SSH output or secret material."""
+
+
+def _snapshot_names(output: str, prefix: str) -> list[str]:
+    pattern = re.compile(rf"(?:^|\s)({re.escape(prefix)}-\d{{8}}-\d{{6}}-[a-f0-9]{{6}})(?=\s|$)")
+    return sorted(set(pattern.findall(output)))
+
+
+def _backup_volume(output: str, *, storage: str, archive: str) -> str:
+    matches = {
+        fields[0]
+        for line in output.splitlines()
+        if (fields := line.split())
+        and fields[0].startswith(f"{storage}:backup/")
+        and fields[0].endswith(f"/{archive}")
+    }
+    if len(matches) != 1:
+        raise ProductionBackupProviderError("independent_backup_not_found")
+    return matches.pop()
+
+
+def execute_production_backup_provider(
+    binding: ProductionBackupGateWorkerRequest,
+    *,
+    ssh_private_key: str,
+    ssh_known_hosts: str,
+    checkpoint: Callable[[str], None] | None = None,
+) -> ProductionBackupGateWorkerResult:
+    """Capture both policy operations through one exact forced-command boundary."""
+    started_at = utc_now_timestamp()
+    policy = binding.policy
+    source = binding.source_target.destination
+    destination = binding.destination_target.destination
+    assert isinstance(source, ProxmoxGuestBackupDestinationReference)
+    assert isinstance(destination, ProxmoxStorageBackupDestinationReference)
+    evidence = {
+        "provider": "proxmox",
+        "product": policy.product,
+        "context": policy.context,
+        "instance": policy.instance,
+        "promotion_action": policy.promotion_action,
+        "policy_record_id": policy.record_id,
+        "policy_revision": str(policy.policy_revision),
+        "policy_digest": policy.policy_digest,
+        "source_target_record_id": binding.source_target.record_id,
+        "source_target_digest": binding.source_target.target_digest,
+        "destination_target_record_id": binding.destination_target.record_id,
+        "destination_target_digest": binding.destination_target.target_digest,
+    }
+    stage = "preflight"
+    deadline = time.monotonic() + binding.request.timeout_seconds
+    try:
+        if not ssh_private_key.strip() or not ssh_known_hosts.strip():
+            raise ProductionBackupProviderError("backup_ssh_material_missing")
+        if (
+            re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.:%_-]*", source.host) is None
+            or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]*", source.username) is None
+            or re.fullmatch(r"[0-9]+", source.guest_id) is None
+        ):
+            raise ProductionBackupProviderError("backup_endpoint_invalid")
+        prefix = policy.fast_snapshot.snapshot_prefix
+        suffix = hashlib.sha256(binding.request.backup_record_id.encode()).hexdigest()[:6]
+        snapshot = f"{prefix}-{time.strftime('%Y%m%d-%H%M%S', time.gmtime())}-{suffix}"
+        if len(snapshot) > 40:
+            raise ProductionBackupProviderError("snapshot_name_too_long")
+        guest_command = "pct" if source.guest_kind == "lxc" else "qm"
+        archive_kind = "ct" if source.guest_kind == "lxc" else "vm"
+        storage = destination.storage_id
+
+        with TemporaryDirectory(prefix="launchplane-production-backup-") as directory:
+            material_dir = Path(directory)
+            identity_file = material_dir / "identity"
+            known_hosts_file = material_dir / "known_hosts"
+            identity_file.write_text(f"{ssh_private_key.rstrip()}\n", encoding="utf-8")
+            identity_file.chmod(0o600)
+            known_hosts_file.write_text(f"{ssh_known_hosts.rstrip()}\n", encoding="utf-8")
+            known_hosts_file.chmod(0o600)
+            ssh_command = [
+                "ssh",
+                "-F",
+                "/dev/null",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "IdentitiesOnly=yes",
+                "-o",
+                "StrictHostKeyChecking=yes",
+                "-o",
+                f"UserKnownHostsFile={known_hosts_file}",
+                "-i",
+                str(identity_file),
+                "--",
+                f"{source.username}@{source.host}",
+            ]
+
+            def run(command: list[str]) -> str:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ProductionBackupProviderError("backup_timeout")
+                result = subprocess.run(
+                    [*ssh_command, *command],
+                    capture_output=True,
+                    text=True,
+                    timeout=remaining,
+                    check=False,
+                )
+                if result.returncode != 0:
+                    raise ProductionBackupProviderError(f"{stage}_command_failed")
+                return f"{result.stdout}\n{result.stderr}"
+
+            boundary = json.loads(run(["launchplane-backup-boundary"]))
+            if boundary != {
+                "schema_version": 1,
+                "guest_kind": source.guest_kind,
+                "guest_id": source.guest_id,
+                "storage_id": storage,
+                "snapshot_prefix": prefix,
+            }:
+                raise ProductionBackupProviderError("backup_host_binding_mismatch")
+            storage_rows = [
+                fields
+                for line in run(["pvesm", "status", "--storage", storage]).splitlines()
+                if (fields := line.split()) and fields[0] == storage
+            ]
+            if len(storage_rows) != 1 or storage_rows[0][1:3] != ["pbs", "active"]:
+                raise ProductionBackupProviderError("backup_storage_not_active_pbs")
+
+            stage = "snapshot"
+            if checkpoint is not None:
+                checkpoint(stage)
+            evidence["snapshot_started_at"] = utc_now_timestamp()
+            run([guest_command, "snapshot", source.guest_id, snapshot])
+            evidence["snapshot_name"] = snapshot
+            if snapshot not in _snapshot_names(
+                run([guest_command, "listsnapshot", source.guest_id]), prefix
+            ):
+                raise ProductionBackupProviderError("snapshot_not_found")
+            evidence["snapshot_finished_at"] = utc_now_timestamp()
+
+            stage = "independent_backup"
+            if checkpoint is not None:
+                checkpoint(stage)
+            evidence["independent_backup_started_at"] = utc_now_timestamp()
+            backup_output = run(
+                ["vzdump", source.guest_id, "--mode", "snapshot", "--storage", storage]
+            )
+            archives = set(
+                re.findall(
+                    rf"'{archive_kind}/{re.escape(source.guest_id)}/[0-9TZ:-]+'", backup_output
+                )
+            )
+            if len(archives) != 1:
+                raise ProductionBackupProviderError("independent_backup_identity_missing")
+            archive = archives.pop().strip("'")
+            evidence["independent_backup_id"] = archive
+            evidence["independent_backup_volume_id"] = _backup_volume(
+                run(["pvesm", "list", storage, "--vmid", source.guest_id, "--content", "backup"]),
+                storage=storage,
+                archive=archive,
+            )
+            evidence["independent_backup_finished_at"] = utc_now_timestamp()
+
+            stage = "snapshot_retention"
+            snapshots = _snapshot_names(
+                run([guest_command, "listsnapshot", source.guest_id]), prefix
+            )
+            delete_count = max(len(snapshots) - max(1, policy.fast_snapshot.retention_count), 0)
+            for name in [name for name in snapshots if name != snapshot][:delete_count]:
+                if checkpoint is not None:
+                    checkpoint(stage)
+                run([guest_command, "delsnapshot", source.guest_id, name])
+    except ProductionBackupProviderError as error:
+        return ProductionBackupGateWorkerResult(
+            status="fail",
+            started_at=started_at,
+            finished_at=utc_now_timestamp(),
+            evidence=evidence,
+            error_code=str(error),
+        )
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return ProductionBackupGateWorkerResult(
+            status="fail",
+            started_at=started_at,
+            finished_at=utc_now_timestamp(),
+            evidence=evidence,
+            error_code=f"{stage}_unavailable",
+        )
+    return ProductionBackupGateWorkerResult(
+        status="pass",
+        started_at=started_at,
+        finished_at=utc_now_timestamp(),
+        evidence=evidence,
+    )

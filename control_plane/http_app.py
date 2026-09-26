@@ -220,6 +220,10 @@ from control_plane.http_routes import (
     request_fingerprint as build_request_fingerprint,
     require_product_profile_read_store,
 )
+from control_plane.http_routes.production_backup_gate import (
+    ProductionBackupGateRouteDependencies,
+    register_production_backup_gate_routes,
+)
 from control_plane.http_routes.ordinary_agent_management import (
     OrdinaryAgentManagementDependencies,
     register_ordinary_agent_management_routes,
@@ -24229,6 +24233,13 @@ def create_launchplane_fastapi_app(
     register_production_backup_authority_read_routes(
         app,
         dependencies=read_route_dependencies,
+    )
+    register_production_backup_gate_routes(
+        app,
+        dependencies=ProductionBackupGateRouteDependencies(
+            common=read_route_dependencies,
+            read_write_identity=read_write_identity,
+        ),
     )
 
     app.add_api_route(

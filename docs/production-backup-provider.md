@@ -1,0 +1,81 @@
+---
+title: Shared Production Backup Provider
+---
+
+The shared provider captures a Proxmox guest snapshot and an independent PBS
+backup from an exact production backup policy. Host, guest, storage, snapshot
+prefix and retention come from revisioned Launchplane target/policy records.
+Requests cannot override topology or skip either operation.
+
+## Service contract
+
+`POST /v1/production-backup-gates` accepts product, context, instance, promotion
+action, backup record ID and timeout. It requires
+`production_backup_gate.execute` for that exact scope, PostgreSQL, a managed
+authorization rule with durable provenance, and `Idempotency-Key`. The service
+resolves current typed authority and stores the exact binding in a durable
+operation. The same caller/key reuses that operation; changed requests or
+bindings conflict. Backup record IDs cannot be reused for another capture.
+
+`GET /v1/production-backup-gates/operations/{operation_id}` takes the same
+product/context/instance as query parameters and requires
+`production_backup_authority.read`. It returns status and bounded evidence,
+without host coordinates, SSH material or raw provider output. Passing evidence
+includes policy revision/digest, target record IDs/digests, snapshot identity,
+PBS archive/volume identity, and timestamps. Partial captures fail and retain
+the evidence already collected.
+
+The shared operation uses schema version 3 of the existing backup-operation
+record. It reuses the database queue, claims, heartbeats, authorization checks,
+and atomic operation/evidence completion. Historical versions 1 and 2 retain
+the legacy request contract. The existing `launchplane-verireel-workers`
+service consumes both forms; its name, table and compatibility entrypoints stay
+unchanged during rollout. No new worker service is needed.
+
+Before each provider mutation, the worker rechecks authorization, lease loss,
+and the exact policy/target binding. Missing, stale, retired or changed authority
+blocks execution. An expired operation that entered the provider phase is not
+automatically retried because its effect may be unknown.
+
+## Host and credential prerequisites
+
+The exact production instance needs managed runtime secret bindings for
+`PRODUCTION_BACKUP_SSH_PRIVATE_KEY` and `PRODUCTION_BACKUP_SSH_KNOWN_HOSTS` under
+the runtime key-safety policy. The worker ignores workstation keys and ambient
+SSH configuration. Temporary key files live in a private directory and are
+removed when the operation returns. Strict host-key checking stays enabled.
+
+An operator must install the reviewed `scripts/proxmox-prod-gate-filter.sh` on
+the bound host and pin its forced-command environment to one guest, storage and
+snapshot prefix. `PROD_GATE_GUEST_KIND` selects `lxc` or `qemu`; the existing
+`PROD_GATE_ALLOWED_CTID` variable carries the exact guest ID for either kind.
+Existing snapshot-style settings remain supported.
+
+The worker first compares `launchplane-backup-boundary` with the Launchplane
+binding, then requires the exact storage to report `pbs` and `active`. A storage
+rename on only one side fails before capture. Older installed filters without
+these reads fail closed and need a separately approved host update.
+
+The filter permits storage status for its bound destination and backup listing
+for its bound guest. Other storage, guest, content type, shell commands and
+multiline commands remain denied. Storage commands follow the
+[Proxmox CLI contract](https://github.com/proxmox/pve-docs/blob/master/generated/pvesm.1-synopsis.adoc).
+
+## Evidence and rollout
+
+Capture creates and reads back the named snapshot, then requires successful
+`vzdump` completion and the exact reported archive in the bound storage's backup
+listing. This proves capture and presence; it is not a full restore test or a
+PBS datastore-wide verification job. Driver-specific logical backup verification
+and recovery exercises remain separate evidence.
+
+Snapshot pruning runs only after both captures pass. It removes only names
+matching this provider's configured prefix and timestamp/hash format, preserves
+the just-created snapshot, and retains at least one snapshot even when retention
+is zero. Existing snapshots outside that format are kept.
+
+Deploying this code does not install host filters, grant access, create secret
+bindings, activate a backup policy, or change the legacy promotion gates. The
+Odoo/generic-web promotion integration and each product's activation/proof are
+separate rollout steps. Product repositories continue passing no provider
+topology.

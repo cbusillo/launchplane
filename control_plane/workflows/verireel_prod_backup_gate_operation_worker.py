@@ -25,6 +25,7 @@ from control_plane.workflows.verireel_prod_backup_gate import (
     _failed_backup_gate_record,
     _run_delegated_worker,
 )
+from control_plane.workflows.production_backup_gate import execute_shared_production_backup
 
 DEFAULT_VERIREEL_BACKUP_GATE_WORKER_LEASE_SECONDS = 300
 DEFAULT_VERIREEL_BACKUP_GATE_WORKER_HEARTBEAT_SECONDS = 60
@@ -379,15 +380,31 @@ def _execute_operation(
             )
             return False
         authorization_guard.checkpoint_provider_effect("backup_gate")
-        worker_result = _run_delegated_worker(
-            control_plane_root=control_plane_root_path,
-            request=VeriReelProdBackupGateWorkerRequest(
-                context=running_operation.context,
-                instance=running_operation.instance,
-                backup_record_id=running_operation.backup_record_id,
-                timeout_seconds=running_operation.request.timeout_seconds,
-            ),
-        )
+        if running_operation.binding is not None:
+
+            def checkpoint(phase: str) -> None:
+                if heartbeat_lost_event.is_set():
+                    raise ValueError(
+                        "Production backup worker lost its lease before provider effect."
+                    )
+                authorization_guard.checkpoint_provider_effect(phase)
+
+            worker_result = execute_shared_production_backup(
+                record_store=record_store,
+                binding=running_operation.binding,
+                control_plane_root=control_plane_root_path,
+                checkpoint=checkpoint,
+            )
+        else:
+            worker_result = _run_delegated_worker(
+                control_plane_root=control_plane_root_path,
+                request=VeriReelProdBackupGateWorkerRequest(
+                    context=running_operation.context,
+                    instance=running_operation.instance,
+                    backup_record_id=running_operation.backup_record_id,
+                    timeout_seconds=running_operation.request.timeout_seconds,
+                ),
+            )
         backup_gate_record = _build_backup_gate_record(
             request=running_operation.request,
             worker_result=worker_result,
@@ -399,6 +416,7 @@ def _execute_operation(
             backup_finished_at=worker_result.finished_at or backup_gate_record.created_at,
             snapshot_name=worker_result.snapshot_name,
             error_message="" if backup_gate_record.status == "pass" else worker_result.detail,
+            evidence=dict(worker_result.evidence),
         )
         terminal_operation = _terminal_operation(
             operation=running_operation,

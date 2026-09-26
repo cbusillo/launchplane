@@ -6905,7 +6905,9 @@ class PostgresRecordStore(HumanSessionStore):
                 target_plans=plan.target_plans,
                 policy_plan=plan.policy_plan,
             )
-            applied_result = plan.result.model_copy(update={"status": "applied"})
+            applied_result = plan.result.model_copy(
+                update={"status": "replayed" if plan.result.status == "replayed" else "applied"}
+            )
             completed_at = self._database_mutation_timestamp(session)
             completion = complete_launchplane_mutation_reservation(
                 reservation,

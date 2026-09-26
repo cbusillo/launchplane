@@ -10,6 +10,7 @@ from typing import Literal, Protocol
 import click
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane.contracts.backup_gate_record import BackupGateRecord
+from control_plane.contracts.production_backup_gate import ProductionBackupGateRequest
 from control_plane.contracts.durable_operation_authorization import (
     DurableOperationAuthorization,
 )
@@ -182,7 +183,7 @@ def _run_delegated_worker(
 
 def _build_backup_gate_record(
     *,
-    request: VeriReelProdBackupGateRequest,
+    request: VeriReelProdBackupGateRequest | ProductionBackupGateRequest,
     worker_result: VeriReelProdBackupGateWorkerResult,
 ) -> BackupGateRecord:
     evidence = dict(worker_result.evidence)
@@ -195,7 +196,9 @@ def _build_backup_gate_record(
         context=request.context,
         instance=request.instance,
         created_at=worker_result.finished_at or utc_now_timestamp(),
-        source=ASYNC_SOURCE,
+        source="launchplane-production-backup-gate"
+        if isinstance(request, ProductionBackupGateRequest)
+        else ASYNC_SOURCE,
         required=True,
         status="pass" if worker_result.status == "pass" else "fail",
         evidence=evidence,
@@ -217,7 +220,7 @@ def _pending_backup_gate_record(*, request: VeriReelProdBackupGateRequest) -> Ba
 
 def _failed_backup_gate_record(
     *,
-    request: VeriReelProdBackupGateRequest,
+    request: VeriReelProdBackupGateRequest | ProductionBackupGateRequest,
     error_message: str,
 ) -> BackupGateRecord:
     return BackupGateRecord(
@@ -234,7 +237,7 @@ def _failed_backup_gate_record(
 
 def _result_from_backup_gate_record(
     *,
-    request: VeriReelProdBackupGateRequest,
+    request: VeriReelProdBackupGateRequest | ProductionBackupGateRequest,
     record: BackupGateRecord,
 ) -> VeriReelProdBackupGateResult:
     evidence = dict(record.evidence)
@@ -374,7 +377,7 @@ def _backup_gate_record_from_terminal_operation(
         status = "fail"
     else:
         raise ValueError("Terminal VeriReel backup gate operation result must pass or fail.")
-    evidence: dict[str, str] = {}
+    evidence: dict[str, str] = dict(operation.result.evidence)
     if operation.result.snapshot_name:
         evidence["snapshot_name"] = operation.result.snapshot_name
     if operation.result.error_message:

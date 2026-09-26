@@ -4,6 +4,9 @@ title: Launchplane Service Boundary
 
 ## Purpose
 
+The [shared production backup provider](production-backup-provider.md) defines
+the typed capture and operation-status routes alongside backup authority.
+
 This document defines the first explicit Launchplane service boundary: the initial
 HTTP ingress, the GitHub Actions OIDC trust model, the claim-to-permission
 mapping, and the first stable API payloads Launchplane should accept.

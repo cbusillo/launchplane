@@ -56,3 +56,4 @@ class VeriReelProdBackupGateResult(BaseModel):
     backup_finished_at: str = ""
     snapshot_name: str = ""
     error_message: str = ""
+    evidence: dict[str, str] = Field(default_factory=dict)
