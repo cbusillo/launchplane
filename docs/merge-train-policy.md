@@ -285,12 +285,30 @@ A batch candidate represents:
 base branch + queued PR #1 + queued PR #2 + ... + queued PR #N
 ```
 
-The candidate is built in deterministic queue order. If any pull request cannot
-be applied cleanly, candidate construction stops at that pull request and the
-worker records a blocker. The first implementation should use an explicit
-temporary candidate ref or branch so GitHub Actions can run checks against a
-real commit SHA. The exact ref naming and cleanup policy are part of the batch
-train implementation, not the repository policy TOML.
+The candidate is built in deterministic queue order on a temporary
+`launchplane/construct/<digest>` branch. The digest is the SHA-256 of the
+canonical candidate ref, so retries use the same construction branch. Only
+after every entry's rolling commit and tree are verified does the native
+GitHub adapter publish `launchplane/train/**` at the completed candidate SHA.
+Base and intermediate construction pushes therefore do not start required
+workflows. The canonical candidate ref, persisted candidate identity, and
+rolling provenance remain the inputs to checks and landing.
+
+Publication has a bounded exact-SHA readback, including temporary 404s while a
+new branch becomes visible. A failed or interrupted publication never returns
+`ready_for_checks`. Retrying a build resets the construction branch and
+reconstructs the candidate; a crash after publication but before persistence
+can still require a new publication and checks.
+
+After verified publication, the adapter deletes the construction ref through
+the semantic effect executor. An already missing ref is clean. Other cleanup
+failures are logged with the ref and HTTP status without discarding the verified
+candidate or restarting its CI; the retained ref has no landing authority.
+Failed or interrupted builds retain their construction ref as recovery evidence.
+The native controller checkpoint records its exact `construction_ref`, and a
+failed build returns that locator with the provider status. A ref locator is
+not proof that the ref still exists.
+Ref naming is an implementation detail, not mutable repository policy.
 
 After GitHub creates a candidate merge commit, Launchplane performs a bounded
 read-after-write convergence check before declaring the candidate ref stale.
@@ -306,8 +324,11 @@ Launchplane must fail closed when candidate check evidence is missing, pending,
 failed, stale, or attached to a different commit SHA.
 
 Repositories using batch candidates must run their required workflows for
-pushes to `launchplane/train/**`. Aggregate required-check jobs must also run on
-those push events and treat the candidate as same-repository work when no pull
+pushes to `launchplane/train/**` and exclude `launchplane/construct/**` from
+those triggers. A workflow matching every branch would still run intermediate
+checks and could supply check evidence before the final train push registers.
+Aggregate required-check jobs must also run on those push events and treat the
+candidate as same-repository work when no pull
 request payload exists. Otherwise the candidate has no exact-SHA check evidence
 and remains fail-closed in `ready_for_checks`.
 
@@ -334,11 +355,12 @@ structural proof still blocks. This does not claim to observe GitHub's strict
 setting and does not grant, change, or bypass provider protection; GitHub's
 guarded merge endpoint continues to enforce its own policy.
 
-Candidate-ref workflow concurrency must keep create/force-reset pushes separate
-from normal construction pushes. Normal intermediate pushes cancel each other
-for the same ref, while the reset run retains its own SHA-keyed group so a
-cancelled duplicate does not replace the protected base commit's successful
-required-check evidence. Candidate-specific cancellation must not broaden a
+Candidate-ref workflow concurrency keeps create/force-reset pushes separate
+from ordinary ref updates. Native construction now publishes only the completed
+candidate; existing concurrency rules remain for publication retries and
+previously created refs. Create/reset runs retain their SHA-keyed group so a
+cancelled duplicate cannot replace the protected base commit's successful
+required-check evidence. Candidate-specific cancellation does not broaden a
 workflow's cancellation policy for ordinary base-branch pushes.
 
 ### PR-Native Landing
@@ -467,11 +489,16 @@ the failed candidate batch lineage and plan a replacement candidate from the
 fresh snapshot.
 
 Candidate construction can fail before required checks run when GitHub rejects
-one rolling merge entry as stale or conflicting. The controller persists that
-candidate as `failed`, reports the exact pull request reached by the build, and
+one rolling merge entry as stale or conflicting. Its partial state is retained
+on the construction ref; no new canonical train ref is published. The controller
+persists that candidate as `failed`, reports the exact pull request reached by the build, and
 releases the controller lease without replaying the rejected merge. The same
 queue-change rule then governs replacement planning; an unchanged queue remains
 stopped for operator attention.
+
+An exhausted final-publication readback also fails closed, with no individual
+failed pull request: its checkpoint identifies the publication phase and the
+retained construction ref.
 
 ## Example Policy Entries
 

@@ -111,8 +111,8 @@ class _FakeMergeTrainGitHubClient:
         ) = None,
     ) -> MergeTrainBatchCandidate:
         if checkpoint is not None:
-            checkpoint(candidate, None, "reset_candidate_ref")
-            checkpoint(candidate, None, "candidate_ref_ready")
+            checkpoint(candidate, None, "reset_construction_ref")
+            checkpoint(candidate, None, "construction_ref_ready")
             for entry_index, entry in enumerate(candidate.entries, start=1):
                 checkpoint(candidate, entry, "merge_candidate_entry")
                 checkpoint(
@@ -120,6 +120,8 @@ class _FakeMergeTrainGitHubClient:
                     entry,
                     f"candidate_entry_merged:{entry_index}",
                 )
+            checkpoint(candidate, None, "publish_candidate_ref")
+            checkpoint(candidate, None, "candidate_ref_published")
         return candidate.model_copy(
             update={"candidate_sha": "candidate-built", "status": "ready_for_checks"}
         )
@@ -280,8 +282,8 @@ class _StaleCandidateMergeTrainGitHubClient(_FakeMergeTrainGitHubClient):
         ) = None,
     ) -> MergeTrainBatchCandidate:
         if checkpoint is not None:
-            checkpoint(candidate, None, "reset_candidate_ref")
-            checkpoint(candidate, None, "candidate_ref_ready")
+            checkpoint(candidate, None, "reset_construction_ref")
+            checkpoint(candidate, None, "construction_ref_ready")
             checkpoint(candidate, candidate.entries[0], "merge_candidate_entry")
         raise MergeTrainGitHubStaleHeadError(
             "Candidate entry conflicts with the rolling merge base.", status_code=409

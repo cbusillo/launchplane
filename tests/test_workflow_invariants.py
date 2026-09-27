@@ -1,3 +1,4 @@
+from fnmatch import fnmatchcase
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -27,6 +28,13 @@ class WorkflowInvariantCheckerTests(unittest.TestCase):
                 self.assertIsInstance(branches, list)
                 assert isinstance(branches, list)
                 self.assertIn("launchplane/train/**", branches)
+                self.assertFalse(
+                    any(
+                        fnmatchcase("launchplane/construct/example-batch", str(pattern))
+                        for pattern in branches
+                    ),
+                    f"{workflow_path} must not run required checks on construction refs",
+                )
 
         for workflow_path in (
             ".github/workflows/ci.yml",
