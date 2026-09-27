@@ -2748,9 +2748,13 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn("manifest_base64", workflow_text)
         self.assertIn("APPLY PRODUCT ONBOARDING", workflow_text)
         self.assertIn("stable-lane-repair", workflow_text)
-        self.assertIn("APPLY PRODUCT STABLE LANE REPAIR", workflow_text)
         self.assertIn("reviewed_plan_sha256", workflow_text)
-        self.assertIn("/v1/product-profiles/stable-lane-repair/apply", workflow_text)
+        self.assertRegex(
+            workflow_text,
+            r"uses: cbusillo/launchplane/\.github/workflows/reusable-stable-lane-repair\.yml"
+            r"@[0-9a-f]{40} # main",
+        )
+        self.assertNotIn("/v1/product-profiles/stable-lane-repair/apply", workflow_text)
         self.assertIn("environment: launchplane-authz-admin", workflow_text)
         self.assertIn("/v1/product-onboarding/apply", workflow_text)
         self.assertNotIn("/v1/authz-policies/managed-rule-sets/reconcile", workflow_text)

@@ -262,6 +262,7 @@ PROTECTED_WORKFLOWS = (
     },
     {
         "workflow_file": ".github/workflows/product-onboarding-manifest.yml",
+        "reusable_workflow_file": ".github/workflows/reusable-stable-lane-repair.yml",
         "route": "/v1/product-profiles/stable-lane-repair/apply",
     },
 )
