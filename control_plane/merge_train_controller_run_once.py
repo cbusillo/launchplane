@@ -1057,12 +1057,35 @@ def _advance_active_landing_record(
         progress_plan: MergeTrainBatchLandingPlan,
         entry: MergeTrainBatchLandingEntry,
     ) -> None:
+        batch_attempt: dict[str, object] = {}
+        if progress_plan.candidate_pull_request_number is not None:
+            records = admission_store.list_merge_admission_records(
+                repository=progress_plan.repository,
+                base_branch=progress_plan.base_branch,
+                landing_plan_id=progress_plan.plan_id,
+            )
+            attempt_records = [
+                record
+                for record in records
+                if record.source == f"service:merge-admission:{trace_id}"
+            ]
+            if len(attempt_records) != len(progress_plan.entries) or {
+                record.pull_request_number for record in attempt_records
+            } != {member.pull_request_number for member in progress_plan.entries}:
+                raise MergeTrainControllerRequestError(
+                    "Batch dispatch requires every constituent admission from this pass."
+                )
+            batch_attempt = {
+                "provider_pull_request_number": progress_plan.candidate_pull_request_number,
+                "batch_admission_ids": sorted(record.admission_id for record in attempt_records),
+            }
         lease.checkpoint(
             active_action="land_batch",
             active_phase="merge_pull_request",
             active_record_id=active_landing_record.record_id,
             active_pull_request_number=entry.pull_request_number,
             step_payload={
+                **batch_attempt,
                 "landing_plan_record_id": active_landing_record.record_id,
                 "landing_plan_id": progress_plan.plan_id,
                 "batch_id": progress_plan.batch_id,
@@ -1770,6 +1793,14 @@ def _advance_active_candidate_record(
                     "candidate_sha": active_candidate_record.candidate.candidate_sha,
                 },
             )
+            if (
+                lease.record.ordinary_job_binding is None
+                and len(active_candidate_record.candidate.entries) > 1
+                and repository_policy.merge_method == "merge"
+            ):
+                lease.checkpoint(active_phase="ensure_batch_pull_request")
+                github_client.ensure_batch_pull_request(candidate=active_candidate_record.candidate)
+                lease.checkpoint(active_phase="observe_required_checks")
         candidate = (
             github_client.observe_batch_candidate_checks(
                 candidate=active_candidate_record.candidate
@@ -1986,10 +2017,20 @@ def _advance_passed_candidate_record(
             "candidate_sha": passed_candidate_record.candidate.candidate_sha,
         },
     )
+    batch_pull_request_number = None
+    if (
+        lease.record.ordinary_job_binding is None
+        and len(passed_candidate_record.candidate.entries) > 1
+        and repository_policy.merge_method == "merge"
+    ):
+        batch_pull_request_number = github_client.ensure_batch_pull_request(
+            candidate=passed_candidate_record.candidate
+        )
     landing_plan = build_merge_train_batch_landing_plan(
         candidate=passed_candidate_record.candidate,
         merge_method=repository_policy.merge_method,
         created_at=recorded_at,
+        candidate_pull_request_number=batch_pull_request_number,
     )
     landing_record = build_merge_train_batch_landing_plan_record(
         ordinary_job_binding=lease.record.ordinary_job_binding,

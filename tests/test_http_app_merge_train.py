@@ -1918,6 +1918,58 @@ class FastApiMergeTrainRunOnceTests(unittest.IsolatedAsyncioTestCase):
 
 
 class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_protected_batch_pr_is_prepared_before_checks_and_bound_to_the_plan(self) -> None:
+        calls: list[str] = []
+
+        class BatchPlanningClient(_FakeMergeTrainGitHubClient):
+            def ensure_batch_pull_request(self, **_: Any) -> int:
+                calls.append("batch_pr")
+                return 99
+
+            def observe_batch_candidate_checks(self, **kwargs: Any) -> Any:
+                calls.append("checks")
+                return super().observe_batch_candidate_checks(**kwargs)
+
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            with (
+                patch(
+                    "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
+                    _FakeExpandedMergeTrainSnapshotReader,
+                ),
+                patch(
+                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                    BatchPlanningClient,
+                ),
+            ):
+                responses = [
+                    await _post_merge_train_controller_run_once(
+                        app,
+                        {
+                            "schema_version": 1,
+                            "repository": "cbusillo/sellyouroutboard",
+                            "base_branch": "main",
+                            "mutate": True,
+                        },
+                    )
+                    for _ in range(4)
+                ]
+        self.assertTrue(all(response.status_code == 202 for response in responses))
+        plan = responses[-1].json()["result"]["landing_plan"]
+        self.assertEqual(plan["candidate_pull_request_number"], 99)
+        self.assertEqual([entry["pull_request_number"] for entry in plan["entries"]], [1, 2])
+        self.assertEqual(calls, ["batch_pr", "checks", "batch_pr"])
+
     async def test_controller_uses_only_the_declared_managed_token_source(self) -> None:
         for managed_token, expected_status in (
             ("managed-test-token", 202),
@@ -2338,7 +2390,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
                 "refusal_diagnosis": "head_behind_base",
             },
         )
-        self.assertIn("refresh the branch", payload["error"]["message"])
+        self.assertIn("inspect the refusal diagnosis", payload["error"]["message"])
         self.assertIn(payload["trace_id"], progress_record.source)
         self.assertEqual(
             [

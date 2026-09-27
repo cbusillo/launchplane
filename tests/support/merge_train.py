@@ -129,6 +129,10 @@ class _FakeMergeTrainGitHubClient:
     ) -> MergeTrainBatchCandidate:
         return candidate.model_copy(update={"required_checks_status": "pass", "status": "passed"})
 
+    def ensure_batch_pull_request(self, *, candidate: MergeTrainBatchCandidate) -> int | None:
+        # Existing controller fixtures model legacy PR-by-PR landing records.
+        return None
+
     def land_batch_candidate(
         self,
         *,

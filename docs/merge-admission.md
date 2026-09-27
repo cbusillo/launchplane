@@ -82,7 +82,8 @@ requirements. Raw provider response bodies are not copied into this diagnosis.
 The refusal returns HTTP 409 `github_merge_rejected`, not an upstream-outage
 retry instruction; no second merge is attempted by the diagnostic read.
 Before each subsequent merge, the existing PR read also blocks an observed
-`behind` head before admission or provider mutation. This includes resumed
+`behind` head before new admission or provider mutation, after reconciling an
+earlier unresolved attempt from that same unchanged open-head/base proof. This includes resumed
 partial batches: the first landed entry stays recorded, and the behind entry
 does not accumulate repeated admissions and rejected merge calls while GitHub
 continues to report that condition. Unknown mergeability alone does not prove
@@ -107,9 +108,28 @@ successor.
 
 The controller and direct batch-landing endpoint share the same guarded
 boundary. Each constituent PR receives independent evidence and fresh
-revalidation against the actual rolling base. Queue, head, policy,
+revalidation. Original-PR landing uses the actual rolling base. Protected batch
+PR landing admits every member against the same initial base, persists all
+admissions before its one provider effect, and binds the provider PR in the
+landing plan's digest. Queue, head, policy,
 technical-check, structural, lease, or expected-SHA drift refuses the next
 admission before mutation.
+
+If a batch stops after admitting only a prefix but before dispatch, those
+admissions receive `rejected / batch_not_dispatched` outcomes with
+`provider_effect_attempted=false`. After an interrupted provider attempt,
+recovery reads the batch PR and candidate containment first. An unmerged batch
+PR whose exact candidate head is absent from the protected base proves
+`batch_reconciliation_confirmed_no_effect`; typed `batch_no_effect` evidence
+records that provider target without claiming that changed constituent heads
+were observed unchanged. This resolves prior uncertainty before stale-member,
+closed-batch, or pending-check handling. A merged batch is reconciled from its
+Git identity and every original PR's completion, with no new provider attempt.
+
+These are additive record fields. Historical plans and outcomes without batch
+fields retain their original digests. A rollback after batch records have been
+written requires a reader that understands those fields; an older strict reader
+must not be assumed compatible.
 
 Landing progress records retain one stable `landing_plan_id` while each
 persisted checkpoint receives its own record ID. Admissions bind both values,

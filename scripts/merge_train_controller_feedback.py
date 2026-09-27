@@ -233,6 +233,9 @@ def _feedback_message(
     controller_record_id: str,
 ) -> str:
     if event == "completed":
+        batch_pr = _as_dict(result.get("landing_plan")).get("candidate_pull_request_number")
+        if type(batch_pr) is int and batch_pr > 0:
+            return f"Launchplane landed this pull request through protected batch PR #{batch_pr}."
         return "Launchplane finished the merge-train step for this pull request."
     if event == "stale_policy":
         return "Launchplane stopped using this train record because its stored evidence is stale."

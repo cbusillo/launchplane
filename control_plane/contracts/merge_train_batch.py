@@ -251,6 +251,12 @@ class MergeTrainBatchLandingPlan(BaseModel):
     entries: tuple[MergeTrainBatchLandingEntry, ...]
     created_at: str
     landing_plan_sha256: str = ""
+    candidate_pull_request_number: int | None = Field(
+        default=None,
+        gt=0,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
 
     @model_validator(mode="after")
     def _validate_plan(self) -> "MergeTrainBatchLandingPlan":
@@ -288,6 +294,17 @@ class MergeTrainBatchLandingPlan(BaseModel):
         positions = [entry.position for entry in self.entries]
         if positions != list(range(1, len(positions) + 1)):
             raise ValueError("merge train batch landing plan positions must be contiguous")
+        if self.candidate_pull_request_number is not None:
+            if len(self.entries) < 2 or any(
+                entry.merge_method != "merge" for entry in self.entries
+            ):
+                raise ValueError(
+                    "protected batch PR landing requires multiple merge-method entries"
+                )
+            if self.candidate_pull_request_number in {
+                entry.pull_request_number for entry in self.entries
+            }:
+                raise ValueError("batch PR must be distinct from its constituent pull requests")
         expected_digest = merge_train_batch_landing_plan_sha256(self)
         if self.landing_plan_sha256:
             normalized_digest = self.landing_plan_sha256.strip().lower()
@@ -557,6 +574,8 @@ def build_merge_train_batch_landing_plan_record_id(
         digest_payload.pop("historical_completion", None)
     if record.ordinary_job_binding is None:
         digest_payload.pop("ordinary_job_binding")
+    if record.landing_plan.candidate_pull_request_number is None:
+        digest_payload["landing_plan"].pop("candidate_pull_request_number", None)
     digest = hashlib.sha256(
         json.dumps(digest_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()[:16]
@@ -607,6 +626,7 @@ def build_merge_train_batch_landing_plan(
     candidate: MergeTrainBatchCandidate,
     merge_method: MergeTrainMergeMethod,
     created_at: str,
+    candidate_pull_request_number: int | None = None,
 ) -> MergeTrainBatchLandingPlan:
     if candidate.status != "passed":
         raise ValueError("merge train batch landing plan requires passed candidate")
@@ -657,6 +677,7 @@ def build_merge_train_batch_landing_plan(
         policy_sha256=candidate.policy_sha256,
         entries=entries,
         created_at=created_at,
+        candidate_pull_request_number=candidate_pull_request_number,
     )
     return MergeTrainBatchLandingPlan.model_validate(
         {
@@ -668,6 +689,8 @@ def build_merge_train_batch_landing_plan(
 
 def build_merge_train_batch_landing_plan_id(plan: MergeTrainBatchLandingPlan) -> str:
     digest_payload = plan.model_dump(mode="json", exclude={"plan_id"})
+    if plan.candidate_pull_request_number is None:
+        digest_payload.pop("candidate_pull_request_number", None)
     digest = hashlib.sha256(
         json.dumps(digest_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()[:16]
@@ -679,6 +702,8 @@ def merge_train_batch_landing_plan_sha256(plan: MergeTrainBatchLandingPlan) -> s
         mode="json",
         exclude={"plan_id", "created_at", "landing_plan_sha256"},
     )
+    if plan.candidate_pull_request_number is None:
+        payload.pop("candidate_pull_request_number", None)
     entries = payload.get("entries")
     if isinstance(entries, list):
         for entry in entries:

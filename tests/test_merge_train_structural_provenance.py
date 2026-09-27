@@ -34,6 +34,28 @@ from control_plane.merge_train_structural_provenance import (
 
 
 class MergeTrainStructuralProvenanceTests(unittest.TestCase):
+    def test_protected_batch_admits_each_member_against_the_same_exact_base(self) -> None:
+        candidate, legacy = _records((_entry(1, 1), _entry(2, 2)))
+        plan = build_merge_train_batch_landing_plan(
+            candidate=candidate.candidate,
+            merge_method="merge",
+            created_at=candidate.updated_at,
+            candidate_pull_request_number=99,
+        )
+        batch = legacy.model_copy(update={"landing_plan": plan})
+        for position in (1, 2):
+            with self.subTest(position=position):
+                self.assertEqual(
+                    _evaluate(candidate, batch, target_position=position).status, "exact"
+                )
+                self.assertEqual(
+                    _evaluate(
+                        candidate, batch, target_position=position, base_sha="new-base"
+                    ).status,
+                    "mismatch",
+                )
+        self.assertNotEqual(_evaluate(candidate, legacy, target_position=2).status, "exact")
+
     def test_superseded_candidate_is_evidence_only_for_its_exact_ordinary_landing(self) -> None:
         candidate_record, landing_record = _ordinary_records((_entry(1, 1),))
 

@@ -157,6 +157,7 @@ class RollingCandidateCheckTests(unittest.TestCase):
         after_first_landing: bool,
         base_tree: str | None = None,
         conclusion: str = "success",
+        target_position: int | None = None,
     ) -> MergeAdmissionEvaluation:
         plan = self.plan
         if after_first_landing:
@@ -176,7 +177,9 @@ class RollingCandidateCheckTests(unittest.TestCase):
             plan = MergeTrainBatchLandingPlan.model_validate(
                 {**plan.model_dump(mode="json"), "entries": (landed, plan.entries[1])}
             )
-        entry = plan.entries[int(after_first_landing)]
+        entry = plan.entries[
+            target_position - 1 if target_position is not None else int(after_first_landing)
+        ]
         observed_base = LANDED_FIRST_SHA if after_first_landing else BASE_SHA
         observed_tree = base_tree or entry.recorded_candidate_parent_tree_sha
         queue = tuple(
@@ -245,6 +248,22 @@ class RollingCandidateCheckTests(unittest.TestCase):
         self.assertEqual(second.structural_result.status, "recorded_rolling")
         self.assertEqual(second.readiness.state, "ready")
         self.assertEqual(second.readiness.target.base_sha, LANDED_FIRST_SHA)
+
+    def test_protected_batch_admits_the_second_member_before_the_shared_effect(self) -> None:
+        self.plan = build_merge_train_batch_landing_plan(
+            candidate=self.candidate_record.candidate,
+            merge_method="merge",
+            created_at=self.candidate_record.updated_at,
+            candidate_pull_request_number=9000,
+        )
+        second = self._evaluate(
+            after_first_landing=False,
+            target_position=2,
+            base_tree=self.plan.entries[0].recorded_candidate_parent_tree_sha,
+        )
+        self.assertEqual(second.structural_result.status, "exact")
+        self.assertEqual(second.readiness.state, "ready")
+        self.assertEqual(second.readiness.target.base_sha, BASE_SHA)
 
     def test_recorded_rolling_base_cannot_hide_failed_candidate_checks_or_tree_drift(self) -> None:
         failed_checks = self._evaluate(after_first_landing=True, conclusion="failure")

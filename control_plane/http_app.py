@@ -5755,7 +5755,10 @@ def create_launchplane_fastapi_app(
                 content={
                     "status": "rejected",
                     "trace_id": trace_id,
-                    "error": {"code": "github_merge_rejected", "message": str(error)},
+                    "error": {
+                        "code": "github_merge_rejected",
+                        "message": "GitHub refused the guarded pull-request merge; inspect the refusal diagnosis before retrying.",
+                    },
                     "details": {
                         "github_status_code": error.status_code,
                         "pull_request_number": error.pull_request_number,
