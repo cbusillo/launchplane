@@ -2755,6 +2755,21 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn("/v1/product-onboarding/apply", workflow_text)
         self.assertNotIn("/v1/authz-policies/managed-rule-sets/reconcile", workflow_text)
 
+    def test_stable_lane_repair_worker_is_protected_and_single_purpose(self) -> None:
+        workflow_text = Path(".github/workflows/reusable-stable-lane-repair.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("workflow_call:", workflow_text)
+        self.assertIn("environment: launchplane-authz-admin", workflow_text)
+        self.assertIn("APPLY PRODUCT STABLE LANE REPAIR", workflow_text)
+        self.assertIn("reviewed_plan_sha256", workflow_text)
+        self.assertIn("route-path: /v1/product-profiles/stable-lane-repair/apply", workflow_text)
+        self.assertNotIn("workflow_dispatch", workflow_text)
+        self.assertNotIn("/v1/product-onboarding/apply", workflow_text)
+        self.assertNotIn("/v1/authz-policies/managed-rule-sets/reconcile", workflow_text)
+        self.assertNotIn("concurrency:", workflow_text)
+
     def test_work_graph_snapshot_validate_uses_shared_launchplane_request(self) -> None:
         workflow_text = Path(".github/workflows/work-graph-snapshot-validate.yml").read_text(
             encoding="utf-8"
