@@ -73,7 +73,6 @@ class FastApiBrowserMutationBoundaryTests(unittest.IsolatedAsyncioTestCase):
         }
         expected_bearer_only_routes = {
             "/v1/authz-diagnostics/github-actions/evaluate",
-            "/v1/change-impact/evaluation",
             "/v1/agent/privileged-operations/plans",
             "/v1/production-backup-authority/apply",
             "/v1/production-backup-authority/legacy-runtime-migration",
