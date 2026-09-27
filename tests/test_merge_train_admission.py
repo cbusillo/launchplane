@@ -805,6 +805,56 @@ class MergeTrainAdmissionTests(unittest.TestCase):
                 self.assertEqual(store.admission_requests[0]["landing_plan_id"], plan.plan_id)
                 self.assertNotIn("landing_plan_record_id", store.admission_requests[0])
 
+    def test_controller_status_diagnoses_every_member_of_a_shared_effect(self) -> None:
+        landing_record, state = _fenced_landing_record()
+        original = landing_record.landing_plan
+        first = original.entries[0].model_dump(mode="json")
+        plan = MergeTrainBatchLandingPlan.model_validate(
+            {
+                **original.model_dump(mode="json"),
+                "landing_plan_sha256": "",
+                "candidate_pull_request_number": 99,
+                "entries": [
+                    first,
+                    {
+                        **first,
+                        "position": 2,
+                        "pull_request_number": 43,
+                        "expected_head_sha": "head-43",
+                    },
+                ],
+            }
+        )
+        record = build_merge_train_batch_landing_plan_record(
+            landing_plan=plan, source="test:batch-diagnostics", updated_at=landing_record.updated_at
+        )
+        state = state.model_copy(
+            update={
+                "active_record_id": record.record_id,
+                "active_pull_request_number": 43,
+                "step_payload": {**state.step_payload, "landing_plan_record_id": record.record_id},
+            }
+        )
+        result = build_merge_train_controller_status_read_model(
+            store=_RunHistoryStore(
+                None, landing_plan_records=(record,), controller_state_records=(state,)
+            ),
+            repository=plan.repository,
+            base_branch=plan.base_branch,
+            generated_at="2026-05-09T02:12:00Z",
+            current_policy_key=plan.policy_key,
+            current_policy_sha256=plan.policy_sha256,
+        )
+        self.assertEqual(
+            [d.pull_request_number for d in result.reconciliation_diagnostics], [42, 43]
+        )
+        self.assertTrue(
+            all(
+                d.classification == "missing_preceding_admission"
+                for d in result.reconciliation_diagnostics
+            )
+        )
+
     def test_controller_status_diagnostic_rejects_stale_admission_binding(self) -> None:
         landing_record, controller_state = _fenced_landing_record()
         plan = landing_record.landing_plan

@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from typing import Protocol, cast
 
 from control_plane.contracts.merge_admission_record import (
+    MergeBatchNoEffectEvidence,
     MergeAdmissionFenceRejectedError,
     MergeAdmissionRecord,
     MergeAdmissionProposal,
@@ -464,6 +465,82 @@ class GuardedMergeAdmission:
         )
         return self.record_store.create_merge_landing_outcome_record_if_absent(outcome)[0]
 
+    def reconcile_batch_no_effect(
+        self,
+        *,
+        evidence: MergeBatchNoEffectEvidence,
+        observed_base_sha: str,
+        observed_base_tree_sha: str,
+        observed_at: str,
+    ) -> None:
+        plan = self.landing_plan_record.landing_plan
+        if (evidence.pull_request_number, evidence.head_sha) != (
+            plan.candidate_pull_request_number,
+            plan.candidate_sha,
+        ):
+            raise MergeAdmissionReconciliationRequiredError(
+                "Batch no-effect proof has a different provider target."
+            )
+        for entry in plan.entries:
+            admissions = self.record_store.list_merge_admission_records(
+                repository=plan.repository,
+                base_branch=plan.base_branch,
+                pull_request_number=entry.pull_request_number,
+                landing_plan_id=plan.plan_id,
+            )
+            if not admissions:
+                continue
+            admission = max(admissions, key=lambda item: item.attempt_sequence)
+            if admission.landing_plan_sha256 != plan.landing_plan_sha256:
+                raise MergeAdmissionReconciliationRequiredError(
+                    "Batch admission binds a different landing plan."
+                )
+            outcomes = self.record_store.list_merge_landing_outcome_records(
+                admission_id=admission.admission_id, limit=1
+            )
+            if outcomes and outcomes[0].status == "landed":
+                raise MergeAdmissionReconciliationRequiredError(
+                    "Unmerged batch PR contradicts recorded landing evidence."
+                )
+            if outcomes and outcomes[0].status == "rejected":
+                continue
+            if not outcomes:
+                self.record_reconcile_required(
+                    admission=admission,
+                    reason="process_interrupted",
+                    message="Batch attempt was interrupted before its outcome was recorded.",
+                    observed_at=observed_at,
+                )
+            outcome = self._outcome(
+                admission=admission,
+                status="rejected",
+                reason="batch_reconciliation_confirmed_no_effect",
+                provider_effect_attempted=True,
+                observed_base_sha=observed_base_sha,
+                observed_base_tree_sha=observed_base_tree_sha,
+                batch_no_effect=evidence,
+                observed_at=observed_at,
+            )
+            self.record_store.create_merge_landing_outcome_record_if_absent(outcome)
+
+    def record_not_dispatched(
+        self, *, admission: MergeAdmissionRecord, observed_at: str
+    ) -> MergeLandingOutcomeRecord:
+        plan = self.landing_plan_record.landing_plan
+        if (
+            plan.candidate_pull_request_number is None
+            or admission.landing_plan_sha256 != plan.landing_plan_sha256
+        ):
+            raise ValueError("Batch non-dispatch evidence requires a protected batch landing plan.")
+        outcome = self._outcome(
+            admission=admission,
+            status="rejected",
+            reason="batch_not_dispatched",
+            provider_effect_attempted=False,
+            observed_at=observed_at,
+        )
+        return self.record_store.create_merge_landing_outcome_record_if_absent(outcome)[0]
+
     def record_provider_failure(
         self,
         *,
@@ -522,6 +599,7 @@ class GuardedMergeAdmission:
         provider_effect_attempted: bool,
         observed_at: str,
         provider_conclusive_rejection: bool = False,
+        batch_no_effect: MergeBatchNoEffectEvidence | None = None,
         provider_status_code: int | None = None,
         provider_message: str = "",
         observed_pull_request_state: str = "",
@@ -555,6 +633,7 @@ class GuardedMergeAdmission:
                 "provider_conclusive_rejection": provider_conclusive_rejection,
                 "provider_status_code": provider_status_code,
                 "provider_message": provider_message,
+                "batch_no_effect": batch_no_effect,
                 "observed_pull_request_state": observed_pull_request_state,
                 "observed_pull_request_head_sha": observed_pull_request_head_sha,
                 "observed_pull_request_head_tree_sha": observed_pull_request_head_tree_sha,

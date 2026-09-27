@@ -62,6 +62,7 @@ from control_plane.merge_train_batch_landing import (
 from control_plane.merge_train_github import (
     GitHubMergeTrainClient,
     MergeTrainGitHubError,
+    MergeTrainGitHubMergeRejectedError,
     MergeTrainGitHubStaleHeadError,
     MergeTrainGitHubTransport,
     UrllibMergeTrainGitHubTransport,
@@ -1056,12 +1057,35 @@ def _advance_active_landing_record(
         progress_plan: MergeTrainBatchLandingPlan,
         entry: MergeTrainBatchLandingEntry,
     ) -> None:
+        batch_attempt: dict[str, object] = {}
+        if progress_plan.candidate_pull_request_number is not None:
+            records = admission_store.list_merge_admission_records(
+                repository=progress_plan.repository,
+                base_branch=progress_plan.base_branch,
+                landing_plan_id=progress_plan.plan_id,
+            )
+            attempt_records = [
+                record
+                for record in records
+                if record.source == f"service:merge-admission:{trace_id}"
+            ]
+            if len(attempt_records) != len(progress_plan.entries) or {
+                record.pull_request_number for record in attempt_records
+            } != {member.pull_request_number for member in progress_plan.entries}:
+                raise MergeTrainControllerRequestError(
+                    "Batch dispatch requires every constituent admission from this pass."
+                )
+            batch_attempt = {
+                "provider_pull_request_number": progress_plan.candidate_pull_request_number,
+                "batch_admission_ids": sorted(record.admission_id for record in attempt_records),
+            }
         lease.checkpoint(
             active_action="land_batch",
             active_phase="merge_pull_request",
             active_record_id=active_landing_record.record_id,
             active_pull_request_number=entry.pull_request_number,
             step_payload={
+                **batch_attempt,
                 "landing_plan_record_id": active_landing_record.record_id,
                 "landing_plan_id": progress_plan.plan_id,
                 "batch_id": progress_plan.batch_id,
@@ -1152,6 +1176,15 @@ def _advance_active_landing_record(
                     "github_status_code": error.status_code,
                 },
             }
+        if active_landing_record.landing_plan.candidate_pull_request_number is not None:
+            _fail_service_batch_candidate(
+                github_client=github_client,
+                candidate_store=candidate_store,
+                candidate_record=admission_guard.candidate_record,
+                lease=lease,
+                trace_id=trace_id,
+                recorded_at=recorded_at,
+            )
         stale_plan = stale_merge_train_landing_plan(
             admission_guard.landing_plan_record.landing_plan
         )
@@ -1315,6 +1348,10 @@ def _retire_changed_policy_landing(
             "expected_effect_sha": plan.candidate_sha,
         },
     )
+    if plan.candidate_pull_request_number is not None:
+        _close_service_batch_pull_request(
+            github_client=github_client, candidate_record=candidate_record, lease=lease
+        )
     retired_record = build_merge_train_batch_landing_plan_record(
         landing_plan=stale_merge_train_landing_plan(plan),
         source=f"service:controller:policy-changed-landing:{trace_id}",
@@ -1568,6 +1605,43 @@ def _advance_without_active_landing(
             repository=request.repository,
             base_branch=request.base_branch,
         )
+    candidate_record = active_candidate_record or passed_candidate_record
+    if (
+        candidate_record is not None
+        and candidate_record.ordinary_job_binding is None
+        and candidate_record.candidate.policy_key == repository_policy.policy_key
+        and candidate_record.candidate.policy_sha256 != policy_sha256
+    ):
+        if request.mutate:
+            lease.checkpoint(
+                active_action="reflow_candidate",
+                active_phase="retire_changed_policy_candidate",
+                active_record_id=candidate_record.record_id,
+                active_pull_request_number=None,
+            )
+            _close_service_batch_pull_request(
+                github_client=github_client, candidate_record=candidate_record, lease=lease
+            )
+            _supersede_active_merge_train_batch_candidate_records(
+                record_store=candidate_store,
+                repository=request.repository,
+                base_branch=request.base_branch,
+                batch_id=candidate_record.candidate.batch_id,
+                replacement_record_id=None,
+            )
+        return _advance_without_candidate_record(
+            request=request,
+            policy=policy,
+            policy_sha256=policy_sha256,
+            repository_policy=repository_policy,
+            transport=transport,
+            github_client=github_client,
+            trace_id=trace_id,
+            recorded_at=recorded_at,
+            candidate_store=candidate_store,
+            stack_collapse_store=stack_collapse_store,
+            lease=lease,
+        )
     if active_candidate_record is not None:
         return _advance_active_candidate_record(
             request=request,
@@ -1614,6 +1688,47 @@ def _advance_without_active_landing(
     )
 
 
+def _close_service_batch_pull_request(
+    *,
+    github_client: GitHubMergeTrainClient,
+    candidate_record: MergeTrainBatchCandidateRecord,
+    lease: MergeTrainControllerLeaseContext,
+) -> None:
+    candidate = candidate_record.candidate
+    if (
+        candidate_record.ordinary_job_binding is None
+        and len(candidate.entries) > 1
+        and candidate.candidate_sha
+    ):
+        lease.checkpoint(active_phase="close_batch_pull_request")
+        github_client.close_batch_pull_request(candidate=candidate)
+
+
+def _fail_service_batch_candidate(
+    *,
+    github_client: GitHubMergeTrainClient,
+    candidate_store: MergeTrainBatchCandidateRecordStore,
+    candidate_record: MergeTrainBatchCandidateRecord,
+    lease: MergeTrainControllerLeaseContext,
+    trace_id: str,
+    recorded_at: str,
+) -> MergeTrainBatchCandidateRecord:
+    _close_service_batch_pull_request(
+        github_client=github_client,
+        candidate_record=candidate_record,
+        lease=lease,
+    )
+    failed_record = build_merge_train_batch_candidate_record(
+        candidate=candidate_record.candidate.model_copy(
+            update={"status": "failed", "updated_at": recorded_at}
+        ),
+        source=f"service:controller:batch-candidate-failed:{trace_id}",
+        updated_at=recorded_at,
+    )
+    candidate_store.write_merge_train_batch_candidate_record(failed_record)
+    return failed_record
+
+
 def _advance_active_candidate_record(
     *,
     request: MergeTrainControllerRunOnceEnvelope,
@@ -1639,6 +1754,11 @@ def _advance_active_candidate_record(
         raise MergeTrainControllerRequestError(str(error)) from error
     if active_candidate_record.candidate.status == "failed":
         if request.mutate:
+            _close_service_batch_pull_request(
+                github_client=github_client,
+                candidate_record=active_candidate_record,
+                lease=lease,
+            )
             lease.checkpoint(
                 active_action="reflow_candidate",
                 active_phase="read_queue_and_plan_replacement",
@@ -1769,13 +1889,29 @@ def _advance_active_candidate_record(
                     "candidate_sha": active_candidate_record.candidate.candidate_sha,
                 },
             )
-        candidate = (
-            github_client.observe_batch_candidate_checks(
-                candidate=active_candidate_record.candidate
+        try:
+            if (
+                request.mutate
+                and lease.record.ordinary_job_binding is None
+                and len(active_candidate_record.candidate.entries) > 1
+                and repository_policy.merge_method == "merge"
+            ):
+                lease.checkpoint(active_phase="ensure_batch_pull_request")
+                github_client.ensure_batch_pull_request(candidate=active_candidate_record.candidate)
+                lease.checkpoint(active_phase="observe_required_checks")
+            candidate = (
+                github_client.observe_batch_candidate_checks(
+                    candidate=active_candidate_record.candidate
+                )
+                if request.mutate
+                else active_candidate_record.candidate
             )
-            if request.mutate
-            else active_candidate_record.candidate
-        )
+        except MergeTrainGitHubStaleHeadError as error:
+            controller_action = "candidate_failed"
+            candidate_build_error = error
+            candidate = active_candidate_record.candidate.model_copy(
+                update={"status": "failed", "updated_at": recorded_at}
+            )
     result: dict[str, object] = {
         "repository": request.repository,
         "base_branch": request.base_branch,
@@ -1797,6 +1933,12 @@ def _advance_active_candidate_record(
             "failed_pull_request_number": lease.record.active_pull_request_number,
         }
     if request.mutate:
+        if candidate.status == "failed":
+            _close_service_batch_pull_request(
+                github_client=github_client,
+                candidate_record=active_candidate_record,
+                lease=lease,
+            )
         updated_candidate_record = build_merge_train_batch_candidate_record(
             ordinary_job_binding=lease.record.ordinary_job_binding,
             candidate=candidate,
@@ -1873,6 +2015,11 @@ def _reflow_stale_candidate_record(
                     "candidate_record_id": candidate_record.record_id,
                     "batch_id": candidate_record.candidate.batch_id,
                 },
+            )
+            _close_service_batch_pull_request(
+                github_client=github_client,
+                candidate_record=candidate_record,
+                lease=lease,
             )
             _supersede_active_merge_train_batch_candidate_records(
                 record_store=candidate_store,
@@ -1985,10 +2132,43 @@ def _advance_passed_candidate_record(
             "candidate_sha": passed_candidate_record.candidate.candidate_sha,
         },
     )
+    batch_pull_request_number = None
+    if (
+        lease.record.ordinary_job_binding is None
+        and len(passed_candidate_record.candidate.entries) > 1
+        and repository_policy.merge_method == "merge"
+    ):
+        try:
+            batch_pull_request_number = github_client.ensure_batch_pull_request(
+                candidate=passed_candidate_record.candidate
+            )
+        except MergeTrainGitHubStaleHeadError as error:
+            failed_record = _fail_service_batch_candidate(
+                github_client=github_client,
+                candidate_store=candidate_store,
+                candidate_record=passed_candidate_record,
+                lease=lease,
+                trace_id=trace_id,
+                recorded_at=recorded_at,
+            )
+            return {
+                "repository": request.repository,
+                "base_branch": request.base_branch,
+                "mode": "candidate_failed",
+                "controller_action": "candidate_failed",
+                "merge_train_batch_candidate_record_id": failed_record.record_id,
+                "candidate": failed_record.candidate.model_dump(mode="json"),
+                "error": {
+                    "code": "merge_train_github_stale_state",
+                    "message": "The recorded batch PR changed; this candidate was retired.",
+                },
+                "details": {"github_status_code": error.status_code},
+            }
     landing_plan = build_merge_train_batch_landing_plan(
         candidate=passed_candidate_record.candidate,
         merge_method=repository_policy.merge_method,
         created_at=recorded_at,
+        candidate_pull_request_number=batch_pull_request_number,
     )
     landing_record = build_merge_train_batch_landing_plan_record(
         ordinary_job_binding=lease.record.ordinary_job_binding,
@@ -2833,6 +3013,12 @@ def _controller_result_reconciliation_detail(
 
 
 def _controller_exception_reconciliation_detail(error: Exception) -> str:
+    if isinstance(error, MergeTrainGitHubMergeRejectedError):
+        return (
+            "operator_required:pull_request_head_behind_base"
+            if error.refusal_diagnosis == "head_behind_base"
+            else "operator_required:github_merge_rejected"
+        )
     if isinstance(error, MergeTrainGitHubError):
         if error.status_code is None or error.status_code >= 500:
             return "retryable:github_request_failed"

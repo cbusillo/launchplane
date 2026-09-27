@@ -29,6 +29,8 @@ from control_plane.merge_admission import (
 )
 from control_plane.merge_train import MergeTrainDryRunSnapshot
 from control_plane.merge_train_controller_run_once import MERGE_TRAIN_CONTROLLER_ACTIVE_ACTION
+from control_plane.merge_train_github import MergeTrainGitHubMergeRejectedError
+from control_plane.merge_train_github import MergeTrainGitHubStaleHeadError
 from control_plane.service_auth import (
     BearerIdentityConfig,
     LaunchplaneAuthzPolicy,
@@ -1917,6 +1919,159 @@ class FastApiMergeTrainRunOnceTests(unittest.IsolatedAsyncioTestCase):
 
 
 class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_invalid_batch_pr_retires_and_changed_members_reflow_without_a_fence(
+        self,
+    ) -> None:
+        for phase, steps in (
+            ("observe", 2),
+            ("checks", 2),
+            ("plan", 3),
+            ("land", 4),
+            ("reflow", 3),
+        ):
+            with (
+                self.subTest(phase=phase),
+                TemporaryDirectory() as directory,
+                patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+            ):
+                closed: list[str] = []
+                fail = False
+
+                class BatchClient(_FakeMergeTrainGitHubClient):
+                    def ensure_batch_pull_request(self, **_: Any) -> int:
+                        if fail and phase in {"observe", "plan"}:
+                            raise MergeTrainGitHubStaleHeadError("Batch PR closed", status_code=409)
+                        return 99
+
+                    def observe_batch_candidate_checks(self, **kwargs: Any) -> Any:
+                        candidate = super().observe_batch_candidate_checks(**kwargs)
+                        return (
+                            candidate.model_copy(update={"status": "failed"})
+                            if fail and phase == "checks"
+                            else candidate
+                        )
+
+                    def close_batch_pull_request(self, *, candidate: Any) -> None:
+                        closed.append(candidate.batch_id)
+
+                    def land_batch_candidate(self, **_: Any) -> Any:
+                        raise MergeTrainGitHubStaleHeadError("Batch checks failed", status_code=409)
+
+                class ChangedMember(_FakeExpandedMergeTrainSnapshotReader):
+                    def read_merge_train_snapshot(self, **kwargs: Any) -> Any:
+                        snapshot = super().read_merge_train_snapshot(**kwargs)
+                        first, *others = snapshot.pull_requests
+                        return snapshot.model_copy(
+                            update={
+                                "pull_requests": (
+                                    first.model_copy(update={"head_sha": "head-1-updated"}),
+                                    *others,
+                                )
+                            }
+                        )
+
+                state_dir = Path(directory) / "state"
+                _seed_merge_train_policy(state_dir)
+                store = FilesystemRecordStore(state_dir=state_dir)
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(_merge_train_service_identity()),
+                    authz_policy=_merge_train_service_policy(),
+                    record_store_factory=lambda: store,
+                )
+                payload = {
+                    "repository": "cbusillo/sellyouroutboard",
+                    "base_branch": "main",
+                    "mutate": True,
+                }
+                with patch(
+                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                    BatchClient,
+                ):
+                    with patch(
+                        "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
+                        _FakeExpandedMergeTrainSnapshotReader,
+                    ):
+                        for _ in range(steps):
+                            response = await _post_merge_train_controller_run_once(app, payload)
+                            self.assertEqual(response.status_code, 202, response.text)
+                        if phase != "reflow":
+                            fail = True
+                            response = await _post_merge_train_controller_run_once(app, payload)
+                            self.assertEqual(response.status_code, 202, response.text)
+                            self.assertIn(
+                                response.json()["result"]["mode"],
+                                {"candidate_failed", "observe_candidate", "stale_landing"},
+                            )
+                            self.assertTrue(closed)
+                    fail = False
+                    with patch(
+                        "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
+                        ChangedMember,
+                    ):
+                        response = await _post_merge_train_controller_run_once(app, payload)
+                self.assertEqual(response.status_code, 202, response.text)
+                self.assertEqual(response.json()["result"]["controller_action"], "plan_candidate")
+                self.assertEqual(
+                    response.json()["result"]["candidate"]["entries"][0]["head_sha"],
+                    "head-1-updated",
+                )
+                self.assertTrue(closed)
+                self.assertEqual(
+                    store.list_merge_train_controller_state_records(limit=1)[0].status, "idle"
+                )
+
+    async def test_protected_batch_pr_is_prepared_before_checks_and_bound_to_the_plan(self) -> None:
+        calls: list[str] = []
+
+        class BatchPlanningClient(_FakeMergeTrainGitHubClient):
+            def ensure_batch_pull_request(self, **_: Any) -> int:
+                calls.append("batch_pr")
+                return 99
+
+            def observe_batch_candidate_checks(self, **kwargs: Any) -> Any:
+                calls.append("checks")
+                return super().observe_batch_candidate_checks(**kwargs)
+
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            with (
+                patch(
+                    "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
+                    _FakeExpandedMergeTrainSnapshotReader,
+                ),
+                patch(
+                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                    BatchPlanningClient,
+                ),
+            ):
+                responses = [
+                    await _post_merge_train_controller_run_once(
+                        app,
+                        {
+                            "schema_version": 1,
+                            "repository": "cbusillo/sellyouroutboard",
+                            "base_branch": "main",
+                            "mutate": True,
+                        },
+                    )
+                    for _ in range(4)
+                ]
+        self.assertTrue(all(response.status_code == 202 for response in responses))
+        plan = responses[-1].json()["result"]["landing_plan"]
+        self.assertEqual(plan["candidate_pull_request_number"], 99)
+        self.assertEqual([entry["pull_request_number"] for entry in plan["entries"]], [1, 2])
+        self.assertEqual(calls, ["batch_pr", "checks", "batch_pr"])
+
     async def test_controller_uses_only_the_declared_managed_token_source(self) -> None:
         for managed_token, expected_status in (
             ("managed-test-token", 202),
@@ -2258,6 +2413,97 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stale_record.landing_plan.entries[0].status, "merged")
         self.assertEqual(stale_record.landing_plan.entries[0].merge_commit_sha, "d" * 40)
         self.assertTrue(stale_record.source.startswith("service:controller:stale-landing:"))
+
+    async def test_later_merge_refusal_exposes_diagnosis_and_preserves_first_landing(self) -> None:
+        class PartialLandingThenRefused(_FakeMergeTrainGitHubClient):
+            def land_batch_candidate(self, **kwargs: Any) -> Any:
+                plan = kwargs["landing_plan"]
+                first, second = plan.entries
+                merged = first.model_copy(
+                    update={
+                        "status": "merged",
+                        "merge_commit_sha": "d" * 40,
+                        "merge_commit_tree_sha": "e" * 40,
+                    }
+                )
+                progress = plan.model_copy(update={"entries": (merged, second)})
+                record = kwargs["checkpoint"](progress, merged, "entry_merged")
+                kwargs["admission_guard"].update_landing_plan_record(record)
+                kwargs["provider_checkpoint"](progress, second)
+                raise MergeTrainGitHubMergeRejectedError(
+                    pull_request_number=second.pull_request_number, head_behind_base=True
+                )
+
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            request_payload = {
+                "schema_version": 1,
+                "repository": "cbusillo/sellyouroutboard",
+                "base_branch": "main",
+                "mutate": True,
+            }
+            with (
+                patch(
+                    "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
+                    _FakeExpandedMergeTrainSnapshotReader,
+                ),
+                patch(
+                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                    _FakeMergeTrainGitHubClient,
+                ),
+            ):
+                for _ in range(4):
+                    await _post_merge_train_controller_run_once(app, request_payload)
+            with patch(
+                "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                PartialLandingThenRefused,
+            ):
+                response = await _post_merge_train_controller_run_once(app, request_payload)
+            state = store.list_merge_train_controller_state_records(
+                repository="cbusillo/sellyouroutboard", base_branch="main", limit=1
+            )[0]
+            progress_record = next(
+                record
+                for record in store.list_merge_train_batch_landing_plan_records(
+                    repository="cbusillo/sellyouroutboard", base_branch="main"
+                )
+                if record.source
+                == f"service:controller:landing-progress:{response.json()['trace_id']}"
+            )
+
+        self.assertEqual(response.status_code, 409)
+        payload = response.json()
+        self.assertEqual(payload["error"]["code"], "github_merge_rejected")
+        self.assertEqual(
+            payload["details"],
+            {
+                "github_status_code": 405,
+                "pull_request_number": 2,
+                "refusal_diagnosis": "head_behind_base",
+            },
+        )
+        self.assertIn("inspect the refusal diagnosis", payload["error"]["message"])
+        self.assertIn(payload["trace_id"], progress_record.source)
+        self.assertEqual(
+            [
+                (entry.status, entry.merge_commit_sha)
+                for entry in progress_record.landing_plan.entries
+            ],
+            [("merged", "d" * 40), ("planned", "")],
+        )
+        self.assertEqual(
+            state.reconciliation_detail, "operator_required:pull_request_head_behind_base"
+        )
 
     async def test_admission_block_recovers_stuck_pre_provider_reconciliation(self) -> None:
         with (
