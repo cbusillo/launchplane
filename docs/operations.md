@@ -2304,6 +2304,14 @@ context only, and `context_instance` has both context and instance.
   and re-provision derived Odoo service-user API keys. Full database
   sanitization such as disabling mail servers and cron remains tied to explicit
   restore/bootstrap workflows, not ordinary prod image deploys.
+- Post-deploy diagnosis checks maintenance module completion before a requested
+  website sender. A provider schedule marked `done` does not establish that the
+  module update succeeded. Module or sender readback failures retain bounded
+  schedule and deployment IDs plus allowlisted boolean/numeric markers in
+  `post_deploy_readback_*` evidence (or preview module-update evidence). Use those
+  exact IDs for a scoped provider diagnostic read. Raw logs, SQL rows, provider
+  credentials, and sender values are not copied into the failure record; runtime
+  startup markers do not substitute for the maintenance schedule's proof.
 - Reusable Odoo GitHub workflows resolve the Launchplane product before calling
   driver routes. Callers may pass `product` explicitly; otherwise the default is
   `odoo-tenant-${context}` after normalizing underscores to dashes, so context
