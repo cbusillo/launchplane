@@ -116,6 +116,28 @@ class MergeTrainControllerFeedbackTests(TestCase):
         self.assertEqual({"stale_policy"}, {payload["event"] for payload in payloads})
         self.assertIn("stale", payloads[0]["message"])
 
+    def test_completed_batch_feedback_links_every_original_to_the_shared_pr(self) -> None:
+        payloads = feedback.build_feedback_payloads(
+            response={
+                "result": {
+                    "repository": "example/repo",
+                    "base_branch": "main",
+                    "controller_action": "land_batch",
+                    "landing_plan": {
+                        "candidate_pull_request_number": 99,
+                        "entries": [
+                            {"pull_request_number": 7, "status": "merged"},
+                            {"pull_request_number": 8, "status": "merged"},
+                        ],
+                    },
+                },
+                "records": {"merge_train_batch_landing_plan_record_id": "batch-landing"},
+            }
+        )
+        self.assertEqual([payload["pull_request_number"] for payload in payloads], [7, 8])
+        self.assertTrue(all(payload["event"] == "completed" for payload in payloads))
+        self.assertTrue(all("protected batch PR #99" in payload["message"] for payload in payloads))
+
     def test_build_feedback_payloads_reports_admission_block_detail(self) -> None:
         response: dict[str, Any] = {
             "result": {

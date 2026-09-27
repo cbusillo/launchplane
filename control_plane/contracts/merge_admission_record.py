@@ -25,6 +25,8 @@ MergeLandingOutcomeReason = Literal[
     "already_contained_no_provider_effect",
     "provider_rejected",
     "dispatch_not_attempted",
+    "batch_not_dispatched",
+    "batch_reconciliation_confirmed_no_effect",
     "reconciliation_confirmed_no_effect",
     "provider_transport_ambiguous",
     "process_interrupted",
@@ -250,6 +252,21 @@ class MergeAdmissionProposal(BaseModel):
     record: MergeAdmissionRecord
 
 
+class MergeBatchNoEffectEvidence(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    pull_request_number: int = Field(gt=0)
+    head_sha: str
+    state: Literal["open", "closed"]
+    merged: Literal[False]
+    base_contains_head: Literal[False]
+
+    @model_validator(mode="after")
+    def _validate_head(self) -> "MergeBatchNoEffectEvidence":
+        object.__setattr__(self, "head_sha", _normalize_git_sha(self.head_sha, "head_sha"))
+        return self
+
+
 class MergeLandingOutcomeRecord(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -282,6 +299,11 @@ class MergeLandingOutcomeRecord(BaseModel):
     base_contains_merge_commit: bool | None = None
     exact_landing_confirmed: bool = False
     observed_at: str
+    batch_no_effect: MergeBatchNoEffectEvidence | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
 
     @model_validator(mode="after")
     def _validate_record(self) -> "MergeLandingOutcomeRecord":
@@ -321,6 +343,11 @@ class MergeLandingOutcomeRecord(BaseModel):
             raise ValueError("first landing outcome cannot reference a prior outcome")
         if self.observation_sequence > 1 and not self.prior_outcome_id:
             raise ValueError("reconciled landing outcome requires a prior outcome")
+        if (
+            self.batch_no_effect is not None
+            and self.reason != "batch_reconciliation_confirmed_no_effect"
+        ):
+            raise ValueError("batch no-effect proof requires its reconciliation reason")
         if self.status == "landed":
             if self.provider_conclusive_rejection:
                 raise ValueError("landed outcome cannot carry provider rejection")
@@ -379,7 +406,22 @@ class MergeLandingOutcomeRecord(BaseModel):
                     raise ValueError(
                         "no-effect reconciliation requires exact open PR and base evidence"
                     )
-            elif self.reason == "dispatch_not_attempted":
+            elif self.reason == "batch_reconciliation_confirmed_no_effect":
+                if (
+                    not self.provider_effect_attempted
+                    or self.provider_conclusive_rejection
+                    or self.provider_status_code is not None
+                    or self.batch_no_effect is None
+                    or not self.observed_base_sha
+                    or not self.observed_base_tree_sha
+                    or self.observed_pull_request_state
+                    or self.observed_pull_request_head_sha
+                    or self.observed_pull_request_head_tree_sha
+                ):
+                    raise ValueError(
+                        "batch no-effect reconciliation requires provider PR and base evidence"
+                    )
+            elif self.reason in {"dispatch_not_attempted", "batch_not_dispatched"}:
                 if (
                     self.observation_sequence != 1
                     or self.provider_effect_attempted
@@ -409,6 +451,8 @@ class MergeLandingOutcomeRecord(BaseModel):
                 "already_contained_no_provider_effect",
                 "provider_rejected",
                 "dispatch_not_attempted",
+                "batch_not_dispatched",
+                "batch_reconciliation_confirmed_no_effect",
             }:
                 raise ValueError("reconcile-required outcome requires an ambiguity reason")
         expected_binding = merge_landing_outcome_binding_sha256(self)
@@ -462,12 +506,13 @@ def merge_admission_binding_sha256(record: MergeAdmissionRecord) -> str:
 
 
 def merge_landing_outcome_binding_sha256(record: MergeLandingOutcomeRecord) -> str:
-    return _canonical_sha256(
-        record.model_dump(
-            mode="json",
-            exclude={"outcome_id", "outcome_binding_sha256"},
-        )
+    payload = record.model_dump(
+        mode="json",
+        exclude={"outcome_id", "outcome_binding_sha256"},
     )
+    if record.batch_no_effect is None:
+        payload.pop("batch_no_effect", None)
+    return _canonical_sha256(payload)
 
 
 def validate_merge_landing_outcome_for_admission(
@@ -499,6 +544,12 @@ def validate_merge_landing_outcome_for_admission(
             or outcome.observed_base_tree_sha != admission.effective_base_tree_sha
         ):
             raise ValueError("no-effect reconciliation evidence does not match admission")
+    if outcome.reason == "batch_reconciliation_confirmed_no_effect":
+        if outcome.batch_no_effect is None or (
+            outcome.batch_no_effect.head_sha != admission.candidate_sha
+            or outcome.batch_no_effect.pull_request_number == admission.pull_request_number
+        ):
+            raise ValueError("batch no-effect proof does not match the admitted candidate")
     if outcome.reason == "already_contained_no_provider_effect":
         if (
             outcome.status != "landed"

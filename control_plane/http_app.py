@@ -370,6 +370,7 @@ from control_plane.merge_train_controller_run_once import (
 from control_plane.merge_train_github import (
     GitHubMergeTrainClient,
     MergeTrainGitHubError,
+    MergeTrainGitHubMergeRejectedError,
     MergeTrainGitHubStaleHeadError,
     UrllibMergeTrainGitHubTransport,
 )
@@ -5748,6 +5749,23 @@ def create_launchplane_fastapi_app(
     def merge_train_github_request_failed_response(
         *, trace_id: str, error: MergeTrainGitHubError
     ) -> JSONResponse:
+        if isinstance(error, MergeTrainGitHubMergeRejectedError):
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "status": "rejected",
+                    "trace_id": trace_id,
+                    "error": {
+                        "code": "github_merge_rejected",
+                        "message": "GitHub refused the guarded pull-request merge; inspect the refusal diagnosis before retrying.",
+                    },
+                    "details": {
+                        "github_status_code": error.status_code,
+                        "pull_request_number": error.pull_request_number,
+                        "refusal_diagnosis": error.refusal_diagnosis,
+                    },
+                },
+            )
         return JSONResponse(
             status_code=502,
             content={
