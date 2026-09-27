@@ -8,6 +8,7 @@ import subprocess
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import re
+from typing import Any, cast
 import unittest
 import zipfile
 
@@ -21,7 +22,8 @@ DOWNLOAD_ENTRYPOINT = Path(
 ACTION_METADATA = Path(".github/actions/generic-web-deploy-recovery-dry-run/action.yml")
 REUSABLE_WORKFLOW = Path(".github/workflows/reusable-generic-web-stable-deploy.yml")
 REQUEST_ACTION_ENTRYPOINT = Path(".github/actions/launchplane-request/dist/index.js")
-WORKFLOW_EXPRESSION = re.compile(r"\$\{\{\s*(inputs|steps\.request\.outputs)\.([a-z_]+)\s*\}\}")
+WORKFLOW_EXPRESSION = re.compile(r"\$\{\{\s*(inputs|steps\.request\.outputs)\.([a-z_]+)\s*}}")
+
 
 def _resolve_workflow_expressions(
     value: str, *, inputs: dict[str, str], outputs: dict[str, str]
@@ -45,7 +47,7 @@ def _read_github_outputs(path: Path) -> dict[str, str]:
     return outputs
 
 
-def _capture_request_action_call(env: dict[str, str], entrypoint: Path) -> dict[str, object]:
+def _capture_request_action_call(env: dict[str, str], entrypoint: Path) -> dict[str, Any]:
     script = f"""
 const calls = [];
 global.fetch = async (url, init) => {{
@@ -67,21 +69,25 @@ await import('./{entrypoint.as_posix()}');
     if result.returncode != 0:
         raise AssertionError(result.stderr)
     calls = json.loads(result.stderr.splitlines()[-1])
-    return calls[-1]
+    return cast(dict[str, Any], calls[-1])
 
 
 def _stable_deploy_request_call(
     *, inputs: dict[str, str], run_id: str, temporary_directory: Path
-) -> dict[str, object]:
+) -> dict[str, Any]:
     """Run the reusable stable-deploy request steps exactly as the workflow defines them."""
     workflow = load_workflow(REUSABLE_WORKFLOW)
     resolve_step = workflow.step_named("stable-deploy", "Resolve Launchplane deploy request")
-    request_step = workflow.step_named("stable-deploy", "Request Launchplane generic-web stable deploy")
+    request_step = workflow.step_named(
+        "stable-deploy", "Request Launchplane generic-web stable deploy"
+    )
     assert resolve_step is not None and request_step is not None
     output_path = temporary_directory / "deploy-request-output.txt"
+    raw_env = resolve_step.data["env"]
+    assert isinstance(raw_env, dict)
     step_env = {
         name: _resolve_workflow_expressions(str(value), inputs=inputs, outputs={})
-        for name, value in dict(resolve_step.data["env"]).items()
+        for name, value in raw_env.items()
     }
     result = subprocess.run(
         ["bash", "-c", resolve_step.run],
@@ -930,15 +936,12 @@ console.log(JSON.stringify({{
             "RECOVERY_ARTIFACT_RUN_ID: ${{ github.event.workflow_run.id }}",
             "Recovery request artifact must contain exactly one file.",
             "Recovery request artifact exceeds the size limit.",
-            "name: Resolve provider evidence request",
             "name: Inspect exact provider evidence",
-            "route-path: /v1/admin/generic-web/deploy-recovery/provider-evidence",
-            "provider_evidence=provider_evidence",
-            "provider_read_error_class=provider_read_error_class",
+            "mode: provider-evidence",
             "continue-on-error: true",
             "name: Request Launchplane recovery dry run",
             "uses: cbusillo/launchplane/.github/actions/"
-            "generic-web-deploy-recovery-dry-run@b2055d2944626234664390d6fcd96975ded38511",
+            "generic-web-deploy-recovery-dry-run@6bac61a1967c6adce8bdfd32cfbcdae362134a34",
             "request-json: ${{ steps.request.outputs.request }}",
             "Recovery digest:",
             "Proposed action:",

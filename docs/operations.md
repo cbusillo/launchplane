@@ -495,12 +495,22 @@ original payloads, target URLs, and provider payloads are never returned.
 Product repositories that need an OIDC-authenticated inspection should use the
 Launchplane-owned
 `.github/actions/generic-web-deploy-recovery-dry-run` action. Its single request
-object accepts only the exact legacy deploy coordinates, original GitHub Actions
-run ID and attempt, operator reason, and optional connector-only
-`launchplane_url`. The action strips the connector URL before constructing the
-service payload, reconstructs the legacy idempotency key internally, calls only
-the dry-run route through the shared request action, suppresses the raw response
+object accepts only the exact original deploy coordinates, optional
+`deploy_reference`, original GitHub Actions run ID and attempt, operator reason,
+optional `deploy_key_format`, and optional connector-only `launchplane_url`. The
+action strips the connector URL before constructing the service payload,
+reconstructs the original idempotency key and payload internally, calls only the
+dry-run route through the shared request action, suppresses the raw response
 body, and exposes only the seven bounded recovery fields documented above.
+The default `artifact_scoped` format matches the current stable-deploy key
+`generic-web-stable-deploy:{product}:{instance}:{artifact_id}:{deploy_reference}:{run_id}:{attempt}`
+and sends `deploy_reference` (empty when omitted) in the original payload.
+Since 2026-08-16 the stable deploy always uses attempt `1`, so recover a rerun
+deploy with `original_run_attempt` `1`. Reservations made before 2026-08-05 use
+`deploy_key_format` `run_scoped`, which rebuilds
+`generic-web-stable-deploy:{product}:{instance}:{run_id}:{attempt}` without
+`deploy_reference`. Either format is one exact key and payload fingerprint; a
+wrong format or coordinate returns `reservation_not_found` and changes nothing.
 Product repositories whose authz grant is bound to the stable-deploy reusable
 workflow may pass that request object through the optional
 `recovery_request_json` input on
@@ -523,7 +533,8 @@ request through the same bounded dry-run action. This mode also skips stable
 deploy and exposes no apply path.
 
 The same protected recovery job performs an advisory exact-provider evidence
-read before the authoritative dry-run. It calls
+read before the authoritative dry-run. It runs the same action with
+`mode: provider-evidence`, which calls
 `POST /v1/admin/generic-web/deploy-recovery/provider-evidence` with the identical
 request and original `Idempotency-Key`. The route derives provider operation and
 target identity only from the exact stored reservation and reconciliation
