@@ -552,6 +552,7 @@
         "workflow_file": ".github/workflows/authz-policy-reconcile.yml"
       },
       {
+        "reusable_workflow_file": ".github/workflows/reusable-stable-lane-repair.yml",
         "route": "/v1/product-profiles/stable-lane-repair/apply",
         "workflow_file": ".github/workflows/product-onboarding-manifest.yml"
       }
@@ -559,8 +560,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "af13626023b4937ee3dda0b2c6249186383aca33"
+    "source_commit_sha": "1fae6fda68dd5994f34df227e66b7275b3a9cacb"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "e51c35801697fef784121a41b032d9d6872d03917e2b09b221709c72a62f68e8"
+  "semantic_digest_sha256": "87a6fda6b69aa159fef7f16aff3aa1c90a4911b5576c14d47d9376ff778048d8"
 }

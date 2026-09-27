@@ -111,6 +111,9 @@ PINNED_SELF_REUSABLE_WORKFLOWS: Mapping[Path, frozenset[str]] = {
     Path(".github/workflows/detached-application-retirement.yml"): frozenset(
         {"cbusillo/launchplane/.github/workflows/reusable-detached-application-retirement.yml"}
     ),
+    Path(".github/workflows/product-onboarding-manifest.yml"): frozenset(
+        {"cbusillo/launchplane/.github/workflows/reusable-stable-lane-repair.yml"}
+    ),
 }
 
 
@@ -291,6 +294,12 @@ APPROVED_REMOTE_ACTIONS: Mapping[str, ActionClassification] = {
         ActionClassification(
             "First-party same-repository",
             "protected immutable detached application retirement",
+        )
+    ),
+    "cbusillo/launchplane/.github/workflows/reusable-stable-lane-repair.yml": (
+        ActionClassification(
+            "First-party same-repository",
+            "protected immutable stable-lane profile repair",
         )
     ),
     "docker/build-push-action": ActionClassification(
