@@ -160,7 +160,10 @@ def evaluate_merge_train_structural_candidate(
             landing_plan_record,
             stack_reason,
         )
-    if evaluation.target_queue_position == 1:
+    if (
+        evaluation.target_queue_position == 1
+        or landing_plan.candidate_pull_request_number is not None
+    ):
         if evaluation.observed_base_sha != candidate.base_sha:
             return _bound_result(
                 evaluation,

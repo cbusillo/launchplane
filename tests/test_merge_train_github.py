@@ -1,6 +1,8 @@
 import unittest
 from types import SimpleNamespace
+from typing import cast
 from email.message import Message
+from http.client import IncompleteRead
 from unittest.mock import patch
 from urllib.error import HTTPError
 
@@ -32,9 +34,11 @@ from control_plane.contracts.merge_train_structural_provenance import (
 from control_plane.merge_train_github import GitHubMergeTrainClient
 from control_plane.merge_train_github import GitHubMergeTrainSnapshotReader
 from control_plane.merge_train_github import MergeTrainGitHubError
+from control_plane.merge_train_github import MergeTrainGitHubMergeRejectedError
 from control_plane.merge_train_github import MergeTrainGitHubStaleHeadError
 from control_plane.merge_train_github import RecordingMergeTrainGitHubTransport
 from control_plane.merge_train_github import UrllibMergeTrainGitHubTransport
+from control_plane.merge_admission import GuardedMergeAdmission, MergeAdmissionDeniedError
 from control_plane.merge_train_structural_provenance import (
     evaluate_merge_train_structural_candidate,
 )
@@ -98,6 +102,7 @@ class _PermissiveMergeAdmissionGuard:
         self.admit_calls: list[dict[str, object]] = []
         self.landed_calls: list[dict[str, object]] = []
         self.reconcile_required_calls: list[dict[str, object]] = []
+        self.no_effect_reconciliations = 0
 
     def admit(self, **kwargs: object) -> object:
         self.admit_calls.append(kwargs)
@@ -116,7 +121,7 @@ class _PermissiveMergeAdmissionGuard:
         return None
 
     def reconcile_existing_no_effect(self, **_: object) -> None:
-        return None
+        self.no_effect_reconciliations += 1
 
     def update_landing_plan(self, _: MergeTrainBatchLandingPlan) -> None:
         return None
@@ -217,6 +222,87 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                 head_sha="head-42",
                 merge_method="merge",
             )
+
+    def test_merge_refusal_diagnoses_only_the_same_open_head_without_retry(self) -> None:
+        observed = {
+            "number": 42,
+            "state": "open",
+            "head": {"sha": "head-42"},
+            "mergeable_state": "behind",
+        }
+        for changes, diagnosis in (
+            ({}, "head_behind_base"),
+            ({"head": {"sha": "new-head"}}, "unconfirmed"),
+            ({"state": "closed"}, "unconfirmed"),
+            ({"number": 43}, "unconfirmed"),
+            ({"mergeable_state": "blocked"}, "unconfirmed"),
+        ):
+            with self.subTest(changes=changes):
+                transport = RecordingMergeTrainGitHubTransport(
+                    responses=(
+                        MergeTrainGitHubError("private provider detail", status_code=405),
+                        observed | changes,
+                    )
+                )
+                client = GitHubMergeTrainClient(transport=transport)
+
+                with self.assertRaises(MergeTrainGitHubMergeRejectedError) as caught:
+                    client.merge_pull_request(
+                        repository="example/train-repo",
+                        pull_request_number=42,
+                        head_sha="head-42",
+                        merge_method="merge",
+                    )
+
+                self.assertEqual(caught.exception.status_code, 405)
+                self.assertEqual(caught.exception.refusal_diagnosis, diagnosis)
+                self.assertNotIn("private provider detail", str(caught.exception))
+                self.assertEqual(
+                    [(request.method, request.path) for request in transport.requests],
+                    [
+                        ("PUT", "/repos/example/train-repo/pulls/42/merge"),
+                        ("GET", "/repos/example/train-repo/pulls/42"),
+                    ],
+                )
+
+    def test_merge_refusal_read_failure_does_not_erase_conclusive_rejection(self) -> None:
+        observations: tuple[object, ...] = (
+            None,
+            [],
+            {"head": []},
+            MergeTrainGitHubError("read failed", status_code=503),
+            IncompleteRead(b"private response fragment"),
+        )
+        for observation in observations:
+            with self.subTest(observation=observation):
+                transport = RecordingMergeTrainGitHubTransport(
+                    responses=(MergeTrainGitHubError("refused", status_code=405), observation)
+                )
+                with self.assertRaises(MergeTrainGitHubMergeRejectedError) as caught:
+                    GitHubMergeTrainClient(transport=transport).merge_pull_request(
+                        repository="example/train-repo",
+                        pull_request_number=42,
+                        head_sha="head-42",
+                        merge_method="merge",
+                    )
+
+                self.assertEqual(caught.exception.status_code, 405)
+                self.assertEqual(caught.exception.refusal_diagnosis, "unconfirmed")
+                self.assertEqual(len(transport.requests), 2)
+
+    def test_merge_transport_ambiguity_is_not_diagnosed_as_a_refusal(self) -> None:
+        error = MergeTrainGitHubError("unavailable", status_code=503)
+        transport = RecordingMergeTrainGitHubTransport(responses=(error,))
+        with self.assertRaises(MergeTrainGitHubError) as caught:
+            GitHubMergeTrainClient(transport=transport).merge_pull_request(
+                repository="example/train-repo",
+                pull_request_number=42,
+                head_sha="head-42",
+                merge_method="merge",
+            )
+
+        self.assertIs(caught.exception, error)
+        self.assertEqual(len(transport.requests), 1)
 
     def test_comment_pull_request_posts_issue_comment(self) -> None:
         transport = RecordingMergeTrainGitHubTransport(
@@ -1582,6 +1668,50 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                 )
                 self.assertEqual(progress[-1].entries[0].status, "merged")
                 self.assertEqual(progress[-1].entries[0].merge_commit_sha, "merge-sha-1")
+
+    def test_later_refusal_is_not_retried_when_resumed_head_is_behind(self) -> None:
+        progress: list[MergeTrainBatchLandingPlan] = []
+        guard = _PermissiveMergeAdmissionGuard()
+        behind = _landing_pull_request(2, base_sha="merge-sha-1") | {"mergeable_state": "behind"}
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                _github_branch(sha="base-main"),
+                *_normal_landing_responses(1, "base-main", "merge-sha-1"),
+                _github_branch(sha="merge-sha-1"),
+                _git_commit("head-2", "tree-head-2"),
+                _landing_pull_request(2, base_sha="merge-sha-1") | {"mergeable_state": "unknown"},
+                MergeTrainGitHubError("provider detail", status_code=405),
+                behind,
+            )
+        )
+        with self.assertRaises(MergeTrainGitHubMergeRejectedError) as refused:
+            GitHubMergeTrainClient(transport=transport).land_batch_candidate(
+                landing_plan=_landing_plan(),
+                admission_guard=cast(GuardedMergeAdmission, guard),
+                checkpoint=lambda plan, _entry, _phase: progress.append(plan),
+            )
+        self.assertEqual(refused.exception.pull_request_number, 2)
+        self.assertEqual(refused.exception.refusal_diagnosis, "head_behind_base")
+        self.assertEqual(len(guard.admit_calls), 2)
+        self.assertEqual(progress[-1].entries[0].merge_commit_sha, "merge-sha-1")
+
+        resumed = RecordingMergeTrainGitHubTransport(
+            responses=(
+                _github_branch(sha="merge-sha-1"),
+                *_already_merged_responses(1, "base-main", "merge-sha-1", "identical"),
+                _github_branch(sha="merge-sha-1"),
+                _git_commit("head-2", "tree-head-2"),
+                behind,
+            )
+        )
+        with self.assertRaises(MergeAdmissionDeniedError) as blocked:
+            GitHubMergeTrainClient(transport=resumed).land_batch_candidate(
+                landing_plan=progress[-1], admission_guard=cast(GuardedMergeAdmission, guard)
+            )
+        self.assertEqual(blocked.exception.reason_code, "pull_request_head_behind_base")
+        self.assertEqual(len(guard.admit_calls), 2)
+        self.assertEqual(guard.no_effect_reconciliations, 3)
+        self.assertTrue(all(request.method == "GET" for request in resumed.requests))
 
     def test_land_batch_candidate_merges_original_prs_in_order(self) -> None:
         landing_plan = _landing_plan()

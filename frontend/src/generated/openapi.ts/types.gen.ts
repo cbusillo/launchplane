@@ -977,12 +977,21 @@ export type MergeAdmissionRecord = {
     structural_result: MergeTrainStructuralCandidateResult;
 };
 
+export type MergeBatchNoEffectEvidence = {
+    base_contains_head: false;
+    head_sha: string;
+    merged: false;
+    pull_request_number: number;
+    state: 'open' | 'closed';
+};
+
 export type MergeLandingOutcomeRecord = {
     admission_binding_sha256: string;
     admission_id: string;
     attempt_id: string;
     base_branch: string;
     base_contains_merge_commit: boolean | null;
+    batch_no_effect?: MergeBatchNoEffectEvidence | null;
     exact_landing_confirmed: boolean;
     merge_commit_sha: string;
     merge_commit_tree_sha: string;
@@ -1002,7 +1011,7 @@ export type MergeLandingOutcomeRecord = {
     provider_request_id: string;
     provider_status_code: number | null;
     pull_request_number: number;
-    reason: 'provider_and_git_confirmed' | 'already_contained_no_provider_effect' | 'provider_rejected' | 'dispatch_not_attempted' | 'reconciliation_confirmed_no_effect' | 'provider_transport_ambiguous' | 'process_interrupted' | 'lease_lost_after_admission' | 'landing_evidence_incomplete' | 'landing_evidence_contradicted';
+    reason: 'provider_and_git_confirmed' | 'already_contained_no_provider_effect' | 'provider_rejected' | 'dispatch_not_attempted' | 'batch_not_dispatched' | 'batch_reconciliation_confirmed_no_effect' | 'reconciliation_confirmed_no_effect' | 'provider_transport_ambiguous' | 'process_interrupted' | 'lease_lost_after_admission' | 'landing_evidence_incomplete' | 'landing_evidence_contradicted';
     repository: string;
     schema_version: 1;
     source: string;

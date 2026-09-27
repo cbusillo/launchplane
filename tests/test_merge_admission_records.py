@@ -6,6 +6,7 @@ import unittest
 from unittest.mock import patch
 
 from control_plane.contracts.merge_admission_record import (
+    MergeBatchNoEffectEvidence,
     MergeLandingObservedPullRequestState,
     MergeLandingOutcomeRecord,
     validate_merge_landing_outcome_for_admission,
@@ -41,6 +42,7 @@ from control_plane.merge_admission import (
     MergeAdmissionReconciliationRequiredError,
 )
 from control_plane.merge_train_admission import build_merge_train_controller_status_read_model
+from control_plane.merge_train_github import MergeTrainGitHubMergeRejectedError
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.test_merge_readiness import (
@@ -146,6 +148,16 @@ def _already_contained_outcome(
 
 
 class MergeLandingOutcomeContractTests(unittest.TestCase):
+    def test_legacy_outcome_binding_survives_optional_batch_evidence(self) -> None:
+        outcome = _ambiguous_outcome()
+        # Captured before batch evidence was added: persisted outcomes must
+        # remain readable without rewriting their immutable binding.
+        self.assertEqual(
+            outcome.outcome_binding_sha256,
+            "f3ae69a2c220c077fc8e91274591c73269200046196c5f8cac8d91f239966237",
+        )
+        self.assertNotIn("batch_no_effect", outcome.model_dump(mode="json"))
+
     def test_dispatch_not_attempted_is_a_terminal_zero_evidence_outcome(self) -> None:
         admission = _merge_admission()
         outcome = MergeLandingOutcomeRecord(
@@ -512,6 +524,64 @@ class MergeAdmissionStoreContract:
             ),
             ("reconcile_required", "landed"),
         )
+
+    def test_batch_provider_no_effect_evidence_survives_member_drift(self) -> None:
+        test_case = cast(unittest.TestCase, self)
+        admission = _merge_admission()
+        self.store.create_merge_admission_record_if_absent(admission)
+        uncertain = _ambiguous_outcome()
+        self.store.create_merge_landing_outcome_record_if_absent(uncertain)
+        proof = MergeBatchNoEffectEvidence(
+            pull_request_number=9000,
+            head_sha=admission.candidate_sha,
+            state="open",
+            merged=False,
+            base_contains_head=False,
+        )
+        reconciled = MergeLandingOutcomeRecord.model_validate(
+            {
+                **uncertain.model_dump(mode="json"),
+                "outcome_id": "",
+                "outcome_binding_sha256": "",
+                "observation_sequence": 2,
+                "prior_outcome_id": uncertain.outcome_id,
+                "status": "rejected",
+                "reason": "batch_reconciliation_confirmed_no_effect",
+                "provider_message": "",
+                "observed_base_sha": OTHER_SHA,
+                "observed_base_tree_sha": TREE_SHA,
+                "batch_no_effect": proof,
+            }
+        )
+
+        stored, created = self.store.create_merge_landing_outcome_record_if_absent(reconciled)
+
+        test_case.assertTrue(created)
+        test_case.assertEqual(stored.batch_no_effect, proof)
+        test_case.assertEqual(stored.observed_pull_request_head_sha, "")
+        test_case.assertEqual(self.store.list_unresolved_merge_admission_records(), ())
+
+    def test_batch_aborted_before_dispatch_persists_zero_effect(self) -> None:
+        test_case = cast(unittest.TestCase, self)
+        admission = _merge_admission()
+        self.store.create_merge_admission_record_if_absent(admission)
+        not_dispatched = MergeLandingOutcomeRecord.model_validate(
+            {
+                **_ambiguous_outcome().model_dump(mode="json"),
+                "outcome_id": "",
+                "outcome_binding_sha256": "",
+                "status": "rejected",
+                "reason": "batch_not_dispatched",
+                "provider_effect_attempted": False,
+                "provider_message": "",
+            }
+        )
+
+        stored, created = self.store.create_merge_landing_outcome_record_if_absent(not_dispatched)
+
+        test_case.assertTrue(created)
+        test_case.assertFalse(stored.provider_effect_attempted)
+        test_case.assertEqual(self.store.list_unresolved_merge_admission_records(), ())
 
 
 class FilesystemMergeAdmissionStoreTests(MergeAdmissionStoreContract, unittest.TestCase):
@@ -937,6 +1007,29 @@ class GuardedMergeAdmissionScenarioTests(unittest.TestCase):
         self.assertEqual(rejected.status, "rejected")
         self.assertNotEqual(first.admission_id, second.admission_id)
         self.assertEqual(second.attempt_sequence, 2)
+
+    def test_diagnosed_refusal_preserves_provider_rejection_and_attempt_trace(self) -> None:
+        guard = self._guard()
+        admission = self._admit(guard)
+        error = MergeTrainGitHubMergeRejectedError(
+            pull_request_number=admission.pull_request_number, head_behind_base=True
+        )
+
+        outcome = guard.record_provider_failure(
+            admission=admission, error=error, observed_at="2026-08-11T03:02:00Z"
+        )
+        stored = self.store.list_merge_landing_outcome_records(admission_id=admission.admission_id)[
+            0
+        ]
+
+        self.assertEqual(stored, outcome)
+        self.assertEqual(stored.status, "rejected")
+        self.assertEqual(stored.provider_status_code, 405)
+        self.assertTrue(stored.provider_effect_attempted)
+        self.assertTrue(stored.provider_conclusive_rejection)
+        self.assertTrue(admission.source.endswith(guard.trace_id))
+        self.assertTrue(stored.source.endswith(guard.trace_id))
+        self.assertIn("behind its base", stored.provider_message)
 
 
 if __name__ == "__main__":

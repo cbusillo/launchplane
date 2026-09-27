@@ -4,6 +4,7 @@ export type DevFixtureMode =
   | "error"
   | "missing"
   | "denied"
+  | "operator"
   | "";
 
 type DevFixturesModule = typeof import("./dev-fixtures");
@@ -17,7 +18,8 @@ export function readDevFixtureMode(): DevFixtureMode {
     fixture === "empty" ||
     fixture === "error" ||
     fixture === "missing" ||
-    fixture === "denied"
+    fixture === "denied" ||
+    fixture === "operator"
     ? fixture
     : "";
 }

@@ -1684,6 +1684,8 @@ def _execute_refresh(
         )
     except click.ClickException as exc:
         rollback_errors: tuple[str, ...] = ()
+        if isinstance(exc, dokploy_post_deploy.OdooPostDeployReadbackFailure):
+            module_install_update_evidence = exc.evidence
         if not deploy_triggered:
             if created_compose_id and provider_effect_checkpoint is not None:
                 provider_effect_checkpoint("rollback_started")
