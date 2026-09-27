@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
+import hashlib
+import json
+import os
 from pathlib import Path
 from typing import Literal, Protocol, cast
 
@@ -25,10 +29,14 @@ from control_plane.workflows.ship import utc_now_timestamp
 from control_plane.workflows.launchplane import (
     github_api_request,
     resolve_launchplane_github_token,
+    verify_github_webhook_signature,
 )
 
 
 TRUSTED_MAINTENANCE_GITHUB_WEBHOOK_SOURCE = "github-webhook"
+# Preserve the configured transport and bootstrap secret for signed maintenance
+# deliveries. This receiver no longer accepts manager approval commands.
+TRUSTED_MAINTENANCE_WEBHOOK_ROUTE = "/v1/manager-preview-approval/github-webhook"
 
 TrustedMaintenanceWebhookStatus = Literal[
     "captured",
@@ -58,6 +66,10 @@ class _GitHubApiRequest(Protocol):
 class TrustedMaintenanceGitHubWebhookDependencies:
     github_token: _GitHubTokenResolver = resolve_launchplane_github_token
     github_api: _GitHubApiRequest = github_api_request
+    webhook_secret: Callable[[], str] = lambda: os.environ.get(
+        "LAUNCHPLANE_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET", ""
+    ).strip()
+    verify_signature: Callable[..., None] = verify_github_webhook_signature
 
 
 @dataclass(frozen=True)
@@ -65,6 +77,77 @@ class TrustedMaintenanceGitHubWebhookResult:
     status: TrustedMaintenanceWebhookStatus
     reason: str = ""
     evidence_status: Literal["written", "replayed", ""] = ""
+
+
+def handle_trusted_maintenance_github_webhook_request(
+    payload_bytes: bytes,
+    event_name: str,
+    delivery_id: str,
+    signature_header: str,
+    record_store: object,
+    control_plane_root: Path,
+    trace_id: str,
+    *,
+    dependencies: TrustedMaintenanceGitHubWebhookDependencies | None = None,
+) -> tuple[int, dict[str, object]]:
+    dependencies = dependencies or TrustedMaintenanceGitHubWebhookDependencies()
+
+    def error(status: int, code: str, message: str) -> tuple[int, dict[str, object]]:
+        return status, {
+            "status": "error",
+            "trace_id": trace_id,
+            "error": {"code": code, "message": message},
+        }
+
+    if not delivery_id.strip():
+        return error(400, "invalid_payload", "GitHub delivery id is required.")
+    try:
+        dependencies.verify_signature(
+            payload_bytes=payload_bytes,
+            signature_header=signature_header,
+            secret=dependencies.webhook_secret(),
+        )
+    except click.ClickException:
+        return error(401, "invalid_signature", "GitHub webhook signature is invalid.")
+    try:
+        payload = json.loads(payload_bytes.decode())
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return error(400, "invalid_payload", "GitHub webhook body is invalid JSON.")
+    if not isinstance(payload, dict):
+        return error(400, "invalid_payload", "GitHub webhook body must be an object.")
+    result = handle_trusted_maintenance_github_webhook(
+        event_name=event_name,
+        delivery_id=delivery_id,
+        signed_payload_sha256=hashlib.sha256(payload_bytes).hexdigest(),
+        payload=payload,
+        record_store=record_store,
+        control_plane_root=control_plane_root,
+        dependencies=dependencies,
+    )
+    if result.status == "conflict":
+        return error(
+            409,
+            "trusted_maintenance_evidence_conflict",
+            "Signed delivery conflicts with existing maintenance evidence.",
+        )
+    if result.status == "retryable_error":
+        return error(
+            503,
+            "trusted_maintenance_unavailable",
+            "Trusted-maintenance evidence capture is temporarily unavailable.",
+        )
+    return 202, {
+        "status": "accepted",
+        "trace_id": trace_id,
+        "result": {
+            "skipped": result.status == "skipped",
+            "reason": result.reason,
+            "trusted_maintenance": {
+                "status": result.status,
+                "evidence_status": result.evidence_status,
+            },
+        },
+    }
 
 
 def handle_trusted_maintenance_github_webhook(

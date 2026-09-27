@@ -7,7 +7,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from control_plane.contracts.change_impact_binding import (
+from control_plane.contracts.retired_change_impact_binding import (
     ChangeImpactBindingHashVersion,
     change_impact_bound_payload,
     validate_change_impact_binding,
@@ -16,11 +16,13 @@ from control_plane.contracts.change_impact_binding import (
 from control_plane.contracts.advisory_check_projection import (
     ENGINEERING_REVIEW_CHECK_NAME,
 )
-from control_plane.contracts.change_impact import (
+from control_plane.contracts.retired_change_impact import (
     ChangeImpactDecisionStatus,
     ChangeImpactReviewTier,
-    ChangeImpactTarget,
-    ChangeImpactTargetReference,
+)
+from control_plane.contracts.repository_evidence import (
+    RepositoryTarget,
+    RepositoryTargetReference,
 )
 
 
@@ -40,7 +42,7 @@ class EngineeringReviewDecisionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     schema_version: int = Field(default=1, ge=1)
-    target: ChangeImpactTargetReference
+    target: RepositoryTargetReference
     work_request_id: str = Field(min_length=1, max_length=128)
 
     @model_validator(mode="after")
@@ -63,16 +65,16 @@ class EngineeringReviewDecisionRecord(BaseModel):
     enforcement_effect: Literal["none"] = "none"
     status: EngineeringReviewDecisionStatus
     reason_code: str
-    target: ChangeImpactTarget
+    target: RepositoryTarget
     work_request_id: str
     work_request_lifecycle_id: str
-    change_impact_status: ChangeImpactDecisionStatus
+    change_impact_status: ChangeImpactDecisionStatus | None = None
     change_impact_policy_record_id: str = ""
     change_impact_policy_revision: int | None = Field(default=None, ge=1)
     change_impact_policy_digest: str = ""
     binding_hash_version: ChangeImpactBindingHashVersion | None = None
     change_impact_decision_digest: str | None = None
-    engineering_review_tier: ChangeImpactReviewTier
+    engineering_review_tier: ChangeImpactReviewTier | None = None
     required_review_count: Literal[1, 2]
     authority_id: str = ""
     authority_digest: str = ""
@@ -83,8 +85,24 @@ class EngineeringReviewDecisionRecord(BaseModel):
 
     @model_validator(mode="after")
     def _validate_record(self) -> "EngineeringReviewDecisionRecord":
-        if self.schema_version != 1:
+        if self.schema_version not in {1, 2}:
             raise ValueError("Unsupported engineering review decision schema version.")
+        if self.schema_version == 1:
+            if self.change_impact_status is None or self.engineering_review_tier is None:
+                raise ValueError("Historical engineering decisions require their classification.")
+        elif (
+            self.change_impact_status is not None
+            or self.engineering_review_tier is not None
+            or self.change_impact_policy_record_id
+            or self.change_impact_policy_revision is not None
+            or self.change_impact_policy_digest
+            or self.binding_hash_version is not None
+            or self.change_impact_decision_digest is not None
+            or self.required_review_count != 2
+        ):
+            raise ValueError(
+                "Current engineering decisions require two reviews without retired classification."
+            )
         if not self.reason_code or self.reason_code.strip() != self.reason_code:
             raise ValueError("Engineering review decision requires canonical reason_code.")
         if not self.work_request_id or self.work_request_id.strip() != self.work_request_id:

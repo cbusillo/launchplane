@@ -320,61 +320,6 @@
         ]
       },
       {
-        "idempotency": "none",
-        "identity_dependencies": [
-          "read_write_identity"
-        ],
-        "method": "POST",
-        "modes": [
-          "dry-run",
-          "apply"
-        ],
-        "operation_id": "apply_change_impact_policy",
-        "path": "/v1/change-impact/policies/apply",
-        "purpose": "Dry-run or apply a reviewed change-impact policy revision.",
-        "response_statuses": [
-          "202",
-          "403",
-          "409",
-          "503"
-        ],
-        "reviewed_evidence": [
-          "reviewed_dry_run",
-          "expected_policy_digest"
-        ],
-        "schema_fingerprint_sha256": "92ffceffe42ea64c829e71e69eb405fa452fb34fb7e54f469c6d5606c8eb458a",
-        "supported_surfaces": [
-          "agent_helper",
-          "operator_ui",
-          "service_api"
-        ]
-      },
-      {
-        "idempotency": "none",
-        "identity_dependencies": [
-          "read_identity"
-        ],
-        "method": "GET",
-        "modes": [
-          "read"
-        ],
-        "operation_id": "read_change_impact_policy",
-        "path": "/v1/change-impact/policy",
-        "purpose": "Read active change-impact policy revision evidence.",
-        "response_statuses": [
-          "200",
-          "403",
-          "409",
-          "503"
-        ],
-        "reviewed_evidence": [],
-        "schema_fingerprint_sha256": "7626b4b974ffe0b822553785fed15acfd2acff2c89bddb7d27c2788e6336b0c7",
-        "supported_surfaces": [
-          "agent_helper",
-          "read_only_service"
-        ]
-      },
-      {
         "idempotency": "mutate",
         "identity_dependencies": [
           "read_write_identity"
@@ -614,8 +559,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "b4772244da64efd7b3864db35a6c40e1cecc7340"
+    "source_commit_sha": "af13626023b4937ee3dda0b2c6249186383aca33"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "5e609c581e439dae63c22ef8ee2727cb717e8f9cd97ded25d03a2fa4550cbfb6"
+  "semantic_digest_sha256": "e51c35801697fef784121a41b032d9d6872d03917e2b09b221709c72a62f68e8"
 }

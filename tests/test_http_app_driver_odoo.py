@@ -31,7 +31,6 @@ from control_plane.contracts.runtime_identity import parse_runtime_identity_payl
 from control_plane.dokploy import DokploySourceOfTruth, DokployTargetDefinition
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.http_app import create_launchplane_fastapi_app, idempotency_scope
-from control_plane.manager_preview_approval import build_current_manager_preview_approval_binding
 from control_plane.odoo_instance_overrides import (
     LAUNCHPLANE_INSTANCE_OVERRIDES_REQUIRED_ENV_KEY,
     LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY,
@@ -2261,20 +2260,12 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
                 "domain_host": "pr-42.cm-preview.example.test",
                 "compose_name": "cm-odoo-preview-pr-42",
             }
-            destroy_callback_states: list[str] = []
-
-            def before_destroy() -> dict[str, object]:
-                current_preview = store.read_preview_record(str(first_records["preview_id"]))
-                destroy_callback_states.append(current_preview.state)
-                return {"manager_preview_invalidation_event_status": "written"}
-
             destroy_records = apply_odoo_preview_lifecycle_evidence(
                 control_plane_root_path=root,
                 record_store=store,
                 profile=profile,
                 issued_plan=destroy_plan,
                 driver_result=destroy_result,
-                before_destroy=before_destroy,
             )
 
             delayed_replay = apply_odoo_preview_lifecycle_evidence(
@@ -2295,8 +2286,7 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         self.assertEqual(delayed_replay["lifecycle_evidence_status"], "stale")
-        self.assertEqual(destroy_callback_states, ["active"])
-        self.assertEqual(destroy_records["manager_preview_invalidation_event_status"], "written")
+        self.assertEqual(destroy_records["lifecycle_evidence_status"], "applied")
         self.assertEqual(preview.state, "destroyed")
         self.assertEqual(preview.serving_generation_id, "")
         self.assertEqual(error_context.exception.code, "odoo_preview_operation_superseded")
@@ -2739,10 +2729,6 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
                         compose_name="cm-odoo-preview-pr-42",
                     ),
                 ) as apply_driver,
-                patch(
-                    "control_plane.http_app.record_manager_preview_approval_invalidation_for_pr",
-                    return_value={"required": True, "event_status": "written"},
-                ) as record_manager_invalidation,
             ):
                 response = await _post_odoo_preview_apply(
                     app,
@@ -2782,24 +2768,6 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
         applied_request = apply_driver.call_args.kwargs["request"]
         self.assertEqual(applied_request.dry_run_plan.operation, "destroy")
         self.assertEqual(applied_request.image_reference, "")
-        record_manager_invalidation.assert_called_once()
-        invalidation_call = record_manager_invalidation.call_args.kwargs
-        self.assertEqual(invalidation_call["repository"], "cbusillo/odoo-tenant-cm")
-        self.assertEqual(invalidation_call["pr_number"], 42)
-        self.assertEqual(invalidation_call["source_event_kind"], "preview_destroy")
-        self.assertEqual(
-            invalidation_call["source_event_id"],
-            f"odoo-preview-destroy:{plan_id}",
-        )
-        self.assertTrue(invalidation_call["occurred_at"])
-        self.assertEqual(
-            response.json()["records"]["manager_preview_invalidation_event_status"],
-            "written",
-        )
-        self.assertEqual(
-            replayed_response.json()["records"]["manager_preview_invalidation_event_status"],
-            "written",
-        )
 
     async def test_odoo_preview_recovers_abandoned_refresh_only_after_grace(
         self,
@@ -3090,10 +3058,6 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
                         "compose_name": "cm-odoo-preview-pr-42",
                     },
                 ) as apply_driver,
-                patch(
-                    "control_plane.manager_preview_approval_github_webhook"
-                    ".write_manager_preview_approval_projection"
-                ) as write_manager_status,
             ):
                 first_response = await _post_odoo_preview_apply(
                     app,
@@ -3119,7 +3083,6 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(conflict_response.status_code, 409)
         self.assertEqual(conflict_response.json()["error"]["code"], "odoo_preview_plan_mismatch")
         apply_driver.assert_called_once()
-        write_manager_status.assert_not_called()
         previews = store.list_preview_records(
             context_name="cm",
             anchor_repo="odoo-tenant-cm",
@@ -3150,14 +3113,6 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
             generation.runtime_identity.image_reference,
             f"ghcr.io/cbusillo/odoo-tenant-cm@sha256:{image_digest}",
         )
-        binding = build_current_manager_preview_approval_binding(
-            product="odoo-tenant-cm",
-            preview=preview,
-            generation=generation,
-        )
-        self.assertEqual(binding.head_sha, head_sha)
-        self.assertEqual(binding.preview_url, "https://pr-42.cm-preview.example.test")
-        self.assertEqual(binding.artifact_image_digest, f"sha256:{image_digest}")
 
     async def test_odoo_preview_apply_handler_file_miss_is_not_found(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

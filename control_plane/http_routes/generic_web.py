@@ -115,9 +115,7 @@ from control_plane.http_routes.support import (
     AuthorizationAllows,
     HttpErrorFactory,
 )
-from control_plane.manager_preview_approval_github_webhook import (
-    invalidate_manager_preview_approval_for_pr_best_effort,
-)
+
 from control_plane.product_promotion_http import (
     build_product_promotion_status,
     product_promotion_intent_matches,
@@ -151,7 +149,6 @@ from control_plane.workflows.generic_web_deploy_provider import (
 from control_plane.workflows.generic_web_preview import (
     GenericWebPreviewProfileStore,
     discover_generic_web_preview_desired_state,
-    preview_pr_number_from_slug,
     resolve_generic_web_preview_slug,
 )
 from control_plane.workflows.ship import utc_now_timestamp
@@ -367,19 +364,6 @@ def build_generic_web_write_route_handlers(
             idempotency_request_fingerprint=dependencies.idempotency_request_fingerprint,
         )
     )
-
-    def manager_preview_pr_number(
-        *,
-        profile: LaunchplaneProductProfileRecord,
-        anchor_pr_number: int | None,
-        preview_slug: str,
-    ) -> int | None:
-        if anchor_pr_number is not None:
-            return anchor_pr_number
-        return preview_pr_number_from_slug(
-            preview_slug=preview_slug,
-            slug_template=profile.preview.slug_template,
-        )
 
     def require_product_promotion_intent(
         *,
@@ -1229,24 +1213,7 @@ def build_generic_web_write_route_handlers(
                 code="invalid_request",
                 message="Request could not be completed.",
             ) from error
-        pr_number = manager_preview_pr_number(
-            profile=profile,
-            anchor_pr_number=destroy_request.destroy.anchor_pr_number,
-            preview_slug=destroy_request.destroy.preview_slug,
-        )
-        if pr_number is not None and result.get("destroy_status") == "pass":
-            invalidate_manager_preview_approval_for_pr_best_effort(
-                repository=profile.repository,
-                pr_number=pr_number,
-                reason="The serving preview was destroyed.",
-                source_event_kind="preview_destroy",
-                source_event_id=(
-                    f"{profile.product}:{profile.preview.context}:{pr_number}:"
-                    f"{str(result.get('destroy_finished_at') or '').strip()}"
-                ),
-                record_store=record_store,
-                control_plane_root=dependencies.control_plane_root,
-            )
+
         response = accepted_evidence_response(
             trace_id=trace_id,
             records=records,

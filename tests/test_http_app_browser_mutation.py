@@ -45,7 +45,6 @@ class FastApiBrowserMutationBoundaryTests(unittest.IsolatedAsyncioTestCase):
             "/v1/drivers/generic-web/prod-promotion",
             "/v1/drivers/generic-web/prod-promotion-workflow",
             "/v1/merge-train/policies/import",
-            "/v1/manager-preview-approval/reconcile",
             "/v1/product-config/apply",
             "/v1/product-profiles/{product}/owner",
             "/v1/product-review/decisions",
@@ -74,7 +73,6 @@ class FastApiBrowserMutationBoundaryTests(unittest.IsolatedAsyncioTestCase):
         }
         expected_bearer_only_routes = {
             "/v1/authz-diagnostics/github-actions/evaluate",
-            "/v1/change-impact/evaluation",
             "/v1/agent/privileged-operations/plans",
             "/v1/production-backup-authority/apply",
             "/v1/production-backup-authority/legacy-runtime-migration",

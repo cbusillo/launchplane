@@ -6,22 +6,22 @@ from urllib.parse import quote
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from control_plane.contracts.change_impact import (
-    ChangeImpactAuthorshipEvidence,
-    ChangeImpactBaseEvidence,
-    ChangeImpactChangeKind,
-    ChangeImpactChangedFileEvidence,
-    ChangeImpactRepositoryEvidence,
-    ChangeImpactTarget,
-    ChangeImpactTargetReference,
+from control_plane.contracts.repository_evidence import (
+    RepositoryAuthorshipEvidence,
+    RepositoryBaseEvidence,
+    RepositoryChangeKind,
+    RepositoryChangedFileEvidence,
+    RepositoryEvidence,
+    RepositoryTarget,
+    RepositoryTargetReference,
 )
 
 
-class ChangeImpactRepositoryEvidenceError(RuntimeError):
+class RepositoryEvidenceError(RuntimeError):
     """Raised when authoritative repository evidence cannot be resolved."""
 
 
-class ChangeImpactRepositoryEvidenceStaleError(ChangeImpactRepositoryEvidenceError):
+class RepositoryEvidenceStaleError(RepositoryEvidenceError):
     """Raised when the pull request changes while evidence is being resolved."""
 
 
@@ -45,7 +45,7 @@ class GitHubOpenPullRequest(BaseModel):
         return self
 
 
-class GitHubChangeImpactRepositoryEvidenceProvider:
+class GitHubRepositoryEvidenceProvider:
     def __init__(
         self,
         *,
@@ -57,9 +57,9 @@ class GitHubChangeImpactRepositoryEvidenceProvider:
         max_commit_pages: int = 10,
     ) -> None:
         if max_file_pages < 1:
-            raise ValueError("change-impact GitHub provider requires at least one file page")
+            raise ValueError("GitHub evidence provider requires at least one file page")
         if max_commit_pages < 1:
-            raise ValueError("change-impact GitHub provider requires at least one commit page")
+            raise ValueError("GitHub evidence provider requires at least one commit page")
         self._control_plane_root = control_plane_root
         self._github_token = github_token
         self._github_api = github_api
@@ -67,7 +67,7 @@ class GitHubChangeImpactRepositoryEvidenceProvider:
         self._max_file_pages = max_file_pages
         self._max_commit_pages = max_commit_pages
         if not self._token_context:
-            raise ValueError("change-impact GitHub provider requires a token context")
+            raise ValueError("GitHub evidence provider requires a token context")
 
     def list_open_pull_requests(
         self,
@@ -76,7 +76,7 @@ class GitHubChangeImpactRepositoryEvidenceProvider:
         limit: int,
     ) -> tuple[GitHubOpenPullRequest, ...]:
         if limit < 1 or limit > 100:
-            raise ValueError("change-impact GitHub open pull request limit must be 1 through 100")
+            raise ValueError("GitHub open pull request limit must be 1 through 100")
         try:
             token = self._token()
             repository_path = _repository_path(repository)
@@ -100,31 +100,31 @@ class GitHubChangeImpactRepositoryEvidenceProvider:
                 )
                 for pull_request in pull_requests
             )
-        except ChangeImpactRepositoryEvidenceError:
+        except RepositoryEvidenceError:
             raise
         except Exception as error:
-            raise ChangeImpactRepositoryEvidenceError(
+            raise RepositoryEvidenceError(
                 "Launchplane could not enumerate GitHub open pull requests."
             ) from error
 
     def resolve(
         self,
-        target: ChangeImpactTargetReference,
-    ) -> ChangeImpactRepositoryEvidence:
+        target: RepositoryTargetReference,
+    ) -> RepositoryEvidence:
         return self._resolve(target, max_file_pages=self._max_file_pages)
 
     def resolve_current_item(
         self,
-        target: ChangeImpactTargetReference,
-    ) -> ChangeImpactRepositoryEvidence:
+        target: RepositoryTargetReference,
+    ) -> RepositoryEvidence:
         return self._resolve(target, max_file_pages=min(self._max_file_pages, 5))
 
     def _resolve(
         self,
-        target: ChangeImpactTargetReference,
+        target: RepositoryTargetReference,
         *,
         max_file_pages: int,
-    ) -> ChangeImpactRepositoryEvidence:
+    ) -> RepositoryEvidence:
         try:
             token = self._token()
             repository_path = _repository_path(target.repository)
@@ -134,7 +134,7 @@ class GitHubChangeImpactRepositoryEvidenceProvider:
             )
             canonical_repository = _required_string(repository, "full_name").lower()
             if canonical_repository != target.repository:
-                raise ChangeImpactRepositoryEvidenceError(
+                raise RepositoryEvidenceError(
                     "GitHub repository identity does not match the requested target."
                 )
             repository_id = _positive_decimal(repository, "id")
@@ -189,12 +189,12 @@ class GitHubChangeImpactRepositoryEvidenceProvider:
                 or confirmed_merge_commit_sha != merge_commit_sha
                 or confirmed_updated_at != updated_at
             ):
-                raise ChangeImpactRepositoryEvidenceStaleError(
+                raise RepositoryEvidenceStaleError(
                     "GitHub pull request changed while resolving repository evidence."
                 )
 
-            return ChangeImpactRepositoryEvidence(
-                target=ChangeImpactTarget(
+            return RepositoryEvidence(
+                target=RepositoryTarget(
                     repository_id=repository_id,
                     repository_owner_id=repository_owner_id,
                     repository=canonical_repository,
@@ -204,13 +204,13 @@ class GitHubChangeImpactRepositoryEvidenceProvider:
                 ),
                 merge_commit_sha=merge_commit_sha,
                 changed_files=changed_files,
-                base=ChangeImpactBaseEvidence(base_ref=base_ref, base_sha=base_sha),
+                base=RepositoryBaseEvidence(base_ref=base_ref, base_sha=base_sha),
                 authorship=authorship,
             )
-        except ChangeImpactRepositoryEvidenceError:
+        except RepositoryEvidenceError:
             raise
         except Exception as error:
-            raise ChangeImpactRepositoryEvidenceError(
+            raise RepositoryEvidenceError(
                 "Launchplane could not resolve authoritative GitHub repository evidence."
             ) from error
 
@@ -220,7 +220,7 @@ class GitHubChangeImpactRepositoryEvidenceProvider:
             context_name=self._token_context,
         ).strip()
         if not token:
-            raise ChangeImpactRepositoryEvidenceError(
+            raise RepositoryEvidenceError(
                 "Launchplane GitHub repository evidence credentials are unavailable."
             )
         return token
@@ -232,7 +232,7 @@ class GitHubChangeImpactRepositoryEvidenceProvider:
         pull_request: dict[str, object],
         pull_request_number: int,
         token: str,
-    ) -> ChangeImpactAuthorshipEvidence:
+    ) -> RepositoryAuthorshipEvidence:
         return read_github_authorship(
             request=lambda path: self._github_api(path=path, token=token),
             repository_path=repository_path,
@@ -248,7 +248,7 @@ class GitHubChangeImpactRepositoryEvidenceProvider:
         pull_request_number: int,
         token: str,
         max_file_pages: int,
-    ) -> tuple[ChangeImpactChangedFileEvidence, ...]:
+    ) -> tuple[RepositoryChangedFileEvidence, ...]:
         return read_github_changed_files(
             request=lambda path: self._github_api(path=path, token=token),
             repository_path=repository_path,
@@ -264,13 +264,13 @@ def _repository_path(repository: str) -> str:
 
 def _object_payload(payload: object, label: str) -> dict[str, object]:
     if not isinstance(payload, dict):
-        raise ChangeImpactRepositoryEvidenceError(f"{label} response must be an object.")
+        raise RepositoryEvidenceError(f"{label} response must be an object.")
     return {str(key): value for key, value in payload.items()}
 
 
 def _list_payload(payload: object, label: str) -> tuple[dict[str, object], ...]:
     if not isinstance(payload, list) or not all(isinstance(item, dict) for item in payload):
-        raise ChangeImpactRepositoryEvidenceError(f"{label} response must be a list of objects.")
+        raise RepositoryEvidenceError(f"{label} response must be a list of objects.")
     return tuple({str(key): value for key, value in item.items()} for item in payload)
 
 
@@ -281,18 +281,14 @@ def _object_field(payload: dict[str, object], field_name: str) -> dict[str, obje
 def _required_string(payload: dict[str, object], field_name: str) -> str:
     value = str(payload.get(field_name, "")).strip()
     if not value:
-        raise ChangeImpactRepositoryEvidenceError(
-            f"GitHub response is missing required {field_name}."
-        )
+        raise RepositoryEvidenceError(f"GitHub response is missing required {field_name}.")
     return value
 
 
 def _positive_decimal(payload: dict[str, object], field_name: str) -> str:
     value = str(payload.get(field_name, "")).strip()
     if not value.isdecimal() or int(value) < 1:
-        raise ChangeImpactRepositoryEvidenceError(
-            f"GitHub response is missing positive numeric {field_name}."
-        )
+        raise RepositoryEvidenceError(f"GitHub response is missing positive numeric {field_name}.")
     return str(int(value))
 
 
@@ -305,11 +301,11 @@ def _validate_pull_request_repository(
     base = _object_field(pull_request, "base")
     base_repository = _object_field(base, "repo")
     if _required_string(base_repository, "full_name").lower() != repository:
-        raise ChangeImpactRepositoryEvidenceError(
+        raise RepositoryEvidenceError(
             "GitHub pull request base repository does not match the requested target."
         )
     if _positive_decimal(base_repository, "id") != repository_id:
-        raise ChangeImpactRepositoryEvidenceError(
+        raise RepositoryEvidenceError(
             "GitHub pull request base repository identity is inconsistent."
         )
 
@@ -331,16 +327,14 @@ def _pull_request_merge_commit_sha(pull_request: dict[str, object]) -> str:
     if value is None:
         return ""
     if not isinstance(value, str):
-        raise ChangeImpactRepositoryEvidenceError(
+        raise RepositoryEvidenceError(
             "GitHub pull request merge_commit_sha must be a string or null."
         )
     normalized = value.strip().lower()
     if normalized and (
         len(normalized) != 40 or any(ch not in "0123456789abcdef" for ch in normalized)
     ):
-        raise ChangeImpactRepositoryEvidenceError(
-            "GitHub pull request merge_commit_sha must be a Git SHA."
-        )
+        raise RepositoryEvidenceError("GitHub pull request merge_commit_sha must be a Git SHA.")
     return normalized
 
 
@@ -349,7 +343,7 @@ def _git_commit_tree_sha(payload: object) -> str:
     return _required_string(_object_field(commit, "tree"), "sha").lower()
 
 
-def _change_kind(status: str) -> ChangeImpactChangeKind:
+def _change_kind(status: str) -> RepositoryChangeKind:
     if status == "added":
         return "added"
     if status == "modified":
@@ -368,7 +362,7 @@ def read_github_authorship(
     pull_request: dict[str, object],
     pull_request_number: int,
     max_commit_pages: int,
-) -> ChangeImpactAuthorshipEvidence:
+) -> RepositoryAuthorshipEvidence:
     """Resolve numeric GitHub contributing identities over the reviewed range.
 
     Bot or agent work pushed under a human GitHub identity resolves to that
@@ -399,7 +393,7 @@ def read_github_authorship(
         return True
 
     if not record(pull_request.get("user"), "pull request author"):
-        return ChangeImpactAuthorshipEvidence(
+        return RepositoryAuthorshipEvidence(
             resolution="unresolved",
             reason="pull request author has no linked numeric GitHub identity",
         )
@@ -419,7 +413,7 @@ def read_github_authorship(
             linked = record(commit.get("author"), f"commit {commit_sha} author")
             linked = record(commit.get("committer"), f"commit {commit_sha} committer") or linked
             if not linked:
-                return ChangeImpactAuthorshipEvidence(
+                return RepositoryAuthorshipEvidence(
                     resolution="unresolved",
                     commit_count=commit_count,
                     reason=f"commit {commit_sha} has no linked numeric GitHub identity",
@@ -427,29 +421,29 @@ def read_github_authorship(
         if len(commits) < 100:
             break
     else:
-        return ChangeImpactAuthorshipEvidence(
+        return RepositoryAuthorshipEvidence(
             resolution="unresolved",
             commit_count=commit_count,
             reason="reviewed commit range exceeded the provider page bound",
         )
     if conflicts:
-        return ChangeImpactAuthorshipEvidence(
+        return RepositoryAuthorshipEvidence(
             resolution="conflicting",
             commit_count=commit_count,
             reason="; ".join(sorted(set(conflicts)))[:500],
         )
     if not commit_count:
-        return ChangeImpactAuthorshipEvidence(
+        return RepositoryAuthorshipEvidence(
             resolution="unresolved",
             reason="pull request returned no commit authorship evidence",
         )
     if not contributor_ids:
-        return ChangeImpactAuthorshipEvidence(
+        return RepositoryAuthorshipEvidence(
             resolution="unresolved",
             commit_count=commit_count,
             reason="reviewed range has no human GitHub contributing identity",
         )
-    return ChangeImpactAuthorshipEvidence(
+    return RepositoryAuthorshipEvidence(
         resolution="resolved",
         contributor_github_ids=tuple(sorted(contributor_ids)),
         commit_count=commit_count,
@@ -462,8 +456,8 @@ def read_github_changed_files(
     repository_path: str,
     pull_request_number: int,
     max_file_pages: int,
-) -> tuple[ChangeImpactChangedFileEvidence, ...]:
-    evidence_by_path: dict[str, ChangeImpactChangedFileEvidence] = {}
+) -> tuple[RepositoryChangedFileEvidence, ...]:
+    evidence_by_path: dict[str, RepositoryChangedFileEvidence] = {}
     for page in range(1, max_file_pages + 1):
         payload = request(
             f"/repos/{repository_path}/pulls/{pull_request_number}/files?per_page=100&page={page}"
@@ -477,33 +471,31 @@ def read_github_changed_files(
             if status == "renamed":
                 origin = file_payload.get("previous_filename")
                 if not isinstance(origin, str) or not origin.strip():
-                    raise ChangeImpactRepositoryEvidenceError(
+                    raise RepositoryEvidenceError(
                         "GitHub renamed file is missing a valid previous_filename: "
                         + filename[:256]
                     )
                 previous_filename = origin.strip()
-            evidence = ChangeImpactChangedFileEvidence(
+            evidence = RepositoryChangedFileEvidence(
                 path=filename, change_kind=change_kind, previous_path=previous_filename
             )
             if evidence.path in evidence_by_path:
-                raise ChangeImpactRepositoryEvidenceError(
+                raise RepositoryEvidenceError(
                     "GitHub changed-file evidence repeats a path: " + evidence.path[:256]
                 )
             evidence_by_path[evidence.path] = evidence
         if len(files) < 100:
             break
     else:
-        raise ChangeImpactRepositoryEvidenceError(
+        raise RepositoryEvidenceError(
             "GitHub pull request file evidence exceeded the complete provider page bound."
         )
     if not evidence_by_path:
-        raise ChangeImpactRepositoryEvidenceError(
-            "GitHub pull request did not return changed-file evidence."
-        )
+        raise RepositoryEvidenceError("GitHub pull request did not return changed-file evidence.")
     # Real entries retain their change kind when a rename recreates or swaps a path.
     for evidence in tuple(evidence_by_path.values()):
         if evidence.previous_path is not None and evidence.previous_path not in evidence_by_path:
-            evidence_by_path[evidence.previous_path] = ChangeImpactChangedFileEvidence(
+            evidence_by_path[evidence.previous_path] = RepositoryChangedFileEvidence(
                 path=evidence.previous_path, change_kind="removed"
             )
     return tuple(evidence_by_path.values())

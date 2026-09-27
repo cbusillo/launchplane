@@ -794,3 +794,27 @@ def product_owner_scoped_policy_fingerprint(
             "payload": payload,
         }
     )
+
+
+class ProductOwnerPolicyConflictError(ValueError):
+    """Raised on an Owner policy write race or conflicting immutable replay."""
+
+
+class ProductOwnerPolicySequenceError(ValueError):
+    """Raised when Owner policy revision history is stale or non-linear."""
+
+
+class ProductOwnerRequirementConflictError(ValueError):
+    """Raised on an Owner requirement write race or conflicting immutable replay."""
+
+
+class ProductOwnerRequirementSequenceError(ValueError):
+    """Raised when Owner requirement revision history is stale or non-linear."""
+
+
+class ProductOwnerRoutingConflictError(ValueError):
+    """Raised on an Owner routing write race or conflicting immutable replay."""
+
+
+class ProductOwnerRoutingSequenceError(ValueError):
+    """Raised when Owner routing revision history is stale or non-linear."""

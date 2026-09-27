@@ -4,9 +4,9 @@ import unittest
 from unittest.mock import patch
 
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
-from control_plane.contracts.change_impact import (
-    ChangeImpactRepositoryEvidence,
-    ChangeImpactTargetReference,
+from control_plane.contracts.repository_evidence import (
+    RepositoryEvidence,
+    RepositoryTargetReference,
 )
 from control_plane.contracts.merge_train_batch import (
     MergeTrainBatchCandidateRecord,
@@ -74,8 +74,8 @@ class _StaticSnapshotReader:
 class _UnusedRepositoryEvidenceProvider:
     def resolve(
         self,
-        target: ChangeImpactTargetReference,
-    ) -> ChangeImpactRepositoryEvidence:
+        target: RepositoryTargetReference,
+    ) -> RepositoryEvidence:
         raise AssertionError(f"queue drift should fail before repository evidence: {target}")
 
 
@@ -244,7 +244,7 @@ def _owner_repository_evidence(
     *,
     head_sha: str = OWNER_HEAD_SHA,
     tree_sha: str = OWNER_TREE_SHA,
-) -> ChangeImpactRepositoryEvidence:
+) -> RepositoryEvidence:
     evidence = _repository_evidence(head=head_sha)
     return evidence.model_copy(
         update={
@@ -257,7 +257,7 @@ def _evaluate_live(
     *,
     store: FilesystemRecordStore,
     provider: _EvidenceProvider,
-    evidence: ChangeImpactRepositoryEvidence,
+    evidence: RepositoryEvidence,
 ) -> MergeAdmissionEvaluation:
     policy_record = build_test_merge_train_policy_record(repository=OWNER_REPOSITORY)
     candidate_record, landing_record, controller_state, _ = _guard_records(

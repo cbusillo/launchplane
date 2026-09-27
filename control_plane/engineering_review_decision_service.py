@@ -3,15 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Literal, Protocol, cast
 
-from control_plane.change_impact_service import (
-    ChangeImpactRepositoryEvidenceProvider,
-    evaluate_change_impact,
-    load_change_impact_stored_evidence,
-)
-from control_plane.contracts.change_impact import (
-    ChangeImpactEvaluation,
-    ChangeImpactPolicyRecord,
-)
+from control_plane.contracts.repository_evidence import RepositoryEvidenceProvider, RepositoryTarget
 from control_plane.contracts.engineering_review_decision import (
     EngineeringReviewDecisionRecord,
     EngineeringReviewDecisionRequest,
@@ -30,15 +22,6 @@ class EngineeringReviewDecisionStore(Protocol):
     def read_every_code_work_request_record(
         self, request_id: str
     ) -> EveryCodeWorkRequestRecord: ...
-
-    def list_change_impact_policy_records(
-        self,
-        *,
-        repository_id: str = "",
-        repository: str = "",
-        status: str = "",
-        limit: int | None = None,
-    ) -> tuple[ChangeImpactPolicyRecord, ...]: ...
 
     def list_engineering_review_run_records(
         self,
@@ -86,7 +69,6 @@ def require_engineering_review_decision_store(
 ) -> EngineeringReviewDecisionStore:
     required = (
         "read_every_code_work_request_record",
-        "list_change_impact_policy_records",
         "list_engineering_review_run_records",
         "list_engineering_review_authority_records",
         "write_engineering_review_decision_record_if_absent",
@@ -105,7 +87,7 @@ def evaluate_engineering_review_decision(
     *,
     store: EngineeringReviewDecisionStore,
     request: EngineeringReviewDecisionRequest,
-    repository_evidence_provider: ChangeImpactRepositoryEvidenceProvider,
+    repository_evidence_provider: RepositoryEvidenceProvider,
     evaluated_at: str = "",
 ) -> tuple[EngineeringReviewDecisionRecord, bool]:
     work_request = store.read_every_code_work_request_record(request.work_request_id)
@@ -138,14 +120,6 @@ def evaluate_engineering_review_decision(
         raise EngineeringReviewDecisionConflictError(
             "Server-resolved engineering review target does not match the stored work request."
         )
-    policies = store.list_change_impact_policy_records(repository_id=target.repository_id)
-    stored_evidence = load_change_impact_stored_evidence(store=store, target=target)
-    impact = evaluate_change_impact(
-        repository_evidence=repository_evidence,
-        policies=policies,
-        stored_evidence=stored_evidence,
-        evaluated_at=evaluated_at,
-    )
     runs = store.list_engineering_review_run_records(
         repository=target.repository,
         pr_number=target.pull_request_number,
@@ -160,7 +134,7 @@ def evaluate_engineering_review_decision(
     )
     record = _decision_record(
         work_request=work_request,
-        impact=impact,
+        target=target,
         runs=runs,
         active_authority=(active_authorities[0] if len(active_authorities) == 1 else None),
         evaluated_at=evaluated_at.strip() or _decision_timestamp(),
@@ -171,12 +145,11 @@ def evaluate_engineering_review_decision(
 def _decision_record(
     *,
     work_request: EveryCodeWorkRequestRecord,
-    impact: ChangeImpactEvaluation,
+    target: RepositoryTarget,
     runs: tuple[EngineeringReviewRunRecord, ...],
     active_authority: EngineeringReviewAuthorityRecord | None,
     evaluated_at: str,
 ) -> EngineeringReviewDecisionRecord:
-    target = impact.target
     exact_runs = tuple(
         run
         for run in runs
@@ -199,17 +172,13 @@ def _decision_record(
     approved = tuple(run for run in completed if run.decision == "approved")
     requested = tuple(run for run in completed if run.decision == "changes_requested")
     blocked = tuple(run for run in completed if run.decision == "blocked")
-    required = impact.required_engineering_review_count
+    required: Literal[2] = 2
     qualifying = _distinct_slots(approved)
     families = tuple(sorted({run.model_family for run in qualifying}))
 
     status: Literal["approved", "changes_requested", "blocked", "pending", "unknown", "stale"]
     reason_code: str
-    if impact.status in {"stale_head", "stale_policy"}:
-        status, reason_code = "stale", f"change_impact_{impact.status}"
-    elif impact.status != "success":
-        status, reason_code = "unknown", "change_impact_unknown"
-    elif active_authority is None:
+    if active_authority is None:
         status, reason_code = "unknown", "review_authority_unavailable"
     elif exact_runs and not authority_runs:
         status, reason_code = "stale", "review_authority_stale"
@@ -233,13 +202,7 @@ def _decision_record(
         target=target,
         work_request_id=work_request.request_id,
         work_request_lifecycle_id=work_request.lifecycle_id,
-        change_impact_status=impact.status,
-        change_impact_policy_record_id=impact.policy_record_id,
-        change_impact_policy_revision=impact.policy_revision,
-        change_impact_policy_digest=impact.policy_digest,
-        binding_hash_version=impact.binding_hash_version,
-        change_impact_decision_digest=impact.change_impact_decision_digest,
-        engineering_review_tier=impact.engineering_review_tier,
+        schema_version=2,
         required_review_count=required,
         authority_id=authority_id,
         authority_digest=authority_digest,

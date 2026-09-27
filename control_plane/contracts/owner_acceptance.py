@@ -9,8 +9,10 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from control_plane.contracts.change_impact import ChangeImpactCoverage
-from control_plane.contracts.change_impact_binding import (
+from control_plane.contracts.retired_change_impact import (
+    ChangeImpactCoverage,
+)
+from control_plane.contracts.retired_change_impact_binding import (
     ChangeImpactBindingHashVersion,
     change_impact_bound_payload,
     validate_change_impact_binding,

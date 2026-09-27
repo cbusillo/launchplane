@@ -425,7 +425,6 @@ def apply_odoo_preview_lifecycle_evidence(
     issued_plan: OdooPreviewApplyInputsResult,
     driver_result: dict[str, object],
     runtime_identity: RuntimeIdentity | None = None,
-    before_destroy: Callable[[], dict[str, object]] | None = None,
 ) -> dict[str, object]:
     result = OdooPreviewDokployApplyResult.model_validate(driver_result)
     if result.status != "pass":
@@ -479,7 +478,6 @@ def apply_odoo_preview_lifecycle_evidence(
                 status="stale",
                 transition=existing_preview.state,
             )
-        destroy_records = before_destroy() if before_destroy is not None else {}
         preview_request = PreviewMutationRequest(
             context=profile.preview.context,
             anchor_repo=anchor_repo,
@@ -503,7 +501,6 @@ def apply_odoo_preview_lifecycle_evidence(
         )
         preview_path = typed_record_store.write_preview_record(transitioned_preview)
         return {
-            **destroy_records,
             **_odoo_preview_lifecycle_records(
                 preview=transitioned_preview,
                 status="applied",

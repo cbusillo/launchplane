@@ -4,7 +4,9 @@ import unittest
 
 from pydantic import ValidationError
 
-from control_plane.contracts.change_impact import ChangeImpactTarget
+from control_plane.contracts.repository_evidence import (
+    RepositoryTarget,
+)
 from control_plane.contracts.engineering_review_decision import EngineeringReviewDecisionRecord
 from control_plane.contracts.engineering_review_run import EngineeringReviewRunRecord
 from control_plane.contracts.merge_admission_record import (
@@ -178,7 +180,7 @@ def _engineering_decision(
                 "unknown": "review_authority_unavailable",
                 "stale": "review_authority_stale",
             }[status],
-            "target": ChangeImpactTarget(
+            "target": RepositoryTarget(
                 repository_id="101",
                 repository_owner_id="202",
                 repository=REPOSITORY,

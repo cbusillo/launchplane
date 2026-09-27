@@ -141,8 +141,10 @@ if TYPE_CHECKING:
     from control_plane.provider_delivery_inspection_profile import (
         ResolvedProviderDeliveryInspectionProfile,
     )
-from control_plane.contracts.change_impact import ChangeImpactPolicyRecord
-from control_plane.contracts.change_impact_audit import (
+from control_plane.contracts.retired_change_impact import (
+    ChangeImpactPolicyRecord,
+)
+from control_plane.contracts.retired_change_impact_audit import (
     ChangeImpactPolicyAuditRecord,
     ChangeImpactPolicyAuditedWriteResult,
 )
@@ -234,7 +236,7 @@ from control_plane.contracts.ordinary_agent_lifecycle import (
 from control_plane.contracts.ingress_canary_route_record import IngressCanaryRouteRecord
 from control_plane.contracts.ingress_route_audit_record import IngressRouteAuditRecord
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
-from control_plane.contracts.manager_preview_approval import (
+from control_plane.contracts.retired_manager_preview_approval import (
     ManagerPreviewApprovalEventRecord,
     ManagerPreviewApprovalEventWriteStatus,
 )
@@ -402,7 +404,9 @@ from control_plane.contracts.private_health_endpoint_record import (
     PrivateHealthEndpointRecord,
     private_health_endpoint_record_sha256,
 )
-from control_plane.manager_preview_approval import ManagerPreviewApprovalEventConflictError
+from control_plane.contracts.retired_manager_preview_approval import (
+    ManagerPreviewApprovalEventConflictError,
+)
 from control_plane.contracts.route_binding_record import (
     EnvironmentRouteBindingRecord,
     route_binding_record_sha256,
@@ -631,7 +635,7 @@ from control_plane.trusted_maintenance import (
     plan_trusted_maintenance_policy_append,
     trusted_maintenance_current_authority,
 )
-from control_plane.product_owner_service import (
+from control_plane.contracts.product_owner import (
     ProductOwnerPolicyConflictError,
     ProductOwnerPolicySequenceError,
     ProductOwnerRequirementConflictError,
@@ -639,7 +643,7 @@ from control_plane.product_owner_service import (
     ProductOwnerRoutingConflictError,
     ProductOwnerRoutingSequenceError,
 )
-from control_plane.change_impact_service import (
+from control_plane.contracts.retired_change_impact import (
     ChangeImpactPolicyConflictError,
     ChangeImpactPolicySequenceError,
 )

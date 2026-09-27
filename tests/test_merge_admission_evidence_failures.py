@@ -3,10 +3,10 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from control_plane.change_impact_github import (
-    ChangeImpactRepositoryEvidenceError,
-    ChangeImpactRepositoryEvidenceStaleError,
-    GitHubChangeImpactRepositoryEvidenceProvider,
+from control_plane.repository_evidence import (
+    RepositoryEvidenceError,
+    RepositoryEvidenceStaleError,
+    GitHubRepositoryEvidenceProvider,
 )
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.merge_admission import MergeAdmissionDeniedError
@@ -23,7 +23,10 @@ from tests.support.merge_train import (
     _merge_train_service_policy,
     _seed_merge_train_policy,
 )
-from tests.test_change_impact_github import _commit_payload, _pull_request_payload
+from tests.test_repository_evidence import (
+    _commit_payload,
+    _pull_request_payload,
+)
 from tests.test_merge_admission_live import (
     _queued_pull_request,
     _StaticSnapshotReader,
@@ -62,8 +65,8 @@ class _EvidenceApi:
             return payload
         return {"id": 1001, "full_name": repository, "owner": {"id": 2001}}
 
-    def provider(self) -> GitHubChangeImpactRepositoryEvidenceProvider:
-        return GitHubChangeImpactRepositoryEvidenceProvider(
+    def provider(self) -> GitHubRepositoryEvidenceProvider:
+        return GitHubRepositoryEvidenceProvider(
             control_plane_root=Path("."),
             github_token=lambda **_: "test-token",
             github_api=self,
@@ -74,7 +77,7 @@ class _EvidenceApi:
 class MergeAdmissionEvidenceFailureTests(unittest.TestCase):
     def test_live_evaluator_denies_malformed_or_stale_real_provider_evidence(self) -> None:
         cases: tuple[
-            tuple[list[dict[str, object]], bool, str, type[ChangeImpactRepositoryEvidenceError]],
+            tuple[list[dict[str, object]], bool, str, type[RepositoryEvidenceError]],
             ...,
         ] = (
             (
@@ -84,19 +87,19 @@ class MergeAdmissionEvidenceFailureTests(unittest.TestCase):
                 ],
                 False,
                 "repository_evidence_unavailable",
-                ChangeImpactRepositoryEvidenceError,
+                RepositoryEvidenceError,
             ),
             (
                 [{"filename": "private/path.py", "status": "renamed"}],
                 False,
                 "repository_evidence_unavailable",
-                ChangeImpactRepositoryEvidenceError,
+                RepositoryEvidenceError,
             ),
             (
                 [{"filename": "private/path.py", "status": "modified"}],
                 True,
                 "repository_evidence_stale",
-                ChangeImpactRepositoryEvidenceStaleError,
+                RepositoryEvidenceStaleError,
             ),
         )
         candidate, landing, controller, _ = _guard_records()
@@ -170,7 +173,7 @@ class MergeAdmissionEvidenceFailureHttpTests(unittest.IsolatedAsyncioTestCase):
                 verifier=_StubVerifier(_merge_train_service_identity()),
                 authz_policy=_merge_train_service_policy(),
                 record_store_factory=lambda: store,
-                change_impact_repository_evidence_provider=api.provider(),
+                repository_evidence_provider=api.provider(),
             )
             with (
                 patch(

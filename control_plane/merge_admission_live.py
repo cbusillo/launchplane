@@ -6,15 +6,15 @@ import hashlib
 import json
 from typing import Protocol
 
-from control_plane.change_impact_github import (
-    ChangeImpactRepositoryEvidenceError,
-    ChangeImpactRepositoryEvidenceStaleError,
+from control_plane.repository_evidence import (
+    RepositoryEvidenceError,
+    RepositoryEvidenceStaleError,
 )
-from control_plane.change_impact_service import (
-    ChangeImpactRepositoryEvidenceProvider,
+from control_plane.contracts.repository_evidence import (
+    RepositoryEvidenceProvider,
 )
-from control_plane.contracts.change_impact import (
-    ChangeImpactTargetReference,
+from control_plane.contracts.repository_evidence import (
+    RepositoryTargetReference,
 )
 from control_plane.contracts.merge_readiness import (
     MERGE_READINESS_POLICY_DIMENSIONS,
@@ -195,7 +195,7 @@ def _ordinary_no_op_lifecycle_queue_matches(
 @dataclass(frozen=True)
 class LiveMergeAdmissionEvaluator:
     store: object
-    repository_evidence_provider: ChangeImpactRepositoryEvidenceProvider
+    repository_evidence_provider: RepositoryEvidenceProvider
     technical_check_client: MergeAdmissionTechnicalCheckReader
     policy_record_provider: Callable[[], MergeTrainPolicyRecord] | None = None
     snapshot_reader: MergeTrainSnapshotReader | None = None
@@ -293,8 +293,8 @@ class LiveMergeAdmissionEvaluator:
                 )
                 for candidate_entry in candidate_record.candidate.entries
             )
-        except ChangeImpactRepositoryEvidenceError as error:
-            if isinstance(error, ChangeImpactRepositoryEvidenceStaleError):
+        except RepositoryEvidenceError as error:
+            if isinstance(error, RepositoryEvidenceStaleError):
                 message = "Authoritative repository evidence changed during merge admission."
                 reason_code = "repository_evidence_stale"
             else:
@@ -395,7 +395,7 @@ class LiveMergeAdmissionEvaluator:
         pull_request_number: int,
         position: int,
     ) -> MergeTrainStructuralEntryObservation:
-        target_reference = ChangeImpactTargetReference(
+        target_reference = RepositoryTargetReference(
             repository=repository,
             pull_request_number=pull_request_number,
         )

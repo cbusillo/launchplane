@@ -3,12 +3,14 @@ from __future__ import annotations
 from pathlib import Path
 import unittest
 
-from control_plane.change_impact_github import (
-    ChangeImpactRepositoryEvidenceError,
-    ChangeImpactRepositoryEvidenceStaleError,
-    GitHubChangeImpactRepositoryEvidenceProvider,
+from control_plane.repository_evidence import (
+    RepositoryEvidenceError,
+    RepositoryEvidenceStaleError,
+    GitHubRepositoryEvidenceProvider,
 )
-from control_plane.contracts.change_impact import ChangeImpactTargetReference
+from control_plane.contracts.repository_evidence import (
+    RepositoryTargetReference,
+)
 
 
 REPOSITORY = "example/shared-addons"
@@ -147,7 +149,7 @@ class _GitHubApi:
 class ChangeImpactGitHubEvidenceProviderTests(unittest.TestCase):
     def test_lists_bounded_open_pull_requests(self) -> None:
         github_api = _GitHubApi()
-        provider = GitHubChangeImpactRepositoryEvidenceProvider(
+        provider = GitHubRepositoryEvidenceProvider(
             control_plane_root=Path("."),
             github_token=lambda **_: "server-token",
             github_api=github_api,
@@ -164,7 +166,7 @@ class ChangeImpactGitHubEvidenceProviderTests(unittest.TestCase):
 
     def test_resolves_repository_head_tree_and_complete_changed_paths(self) -> None:
         github_api = _GitHubApi()
-        provider = GitHubChangeImpactRepositoryEvidenceProvider(
+        provider = GitHubRepositoryEvidenceProvider(
             control_plane_root=Path("."),
             github_token=lambda **_: "server-token",
             github_api=github_api,
@@ -172,7 +174,7 @@ class ChangeImpactGitHubEvidenceProviderTests(unittest.TestCase):
         )
 
         evidence = provider.resolve(
-            ChangeImpactTargetReference(
+            RepositoryTargetReference(
                 repository=REPOSITORY,
                 pull_request_number=2000,
             )
@@ -209,7 +211,7 @@ class ChangeImpactGitHubEvidenceProviderTests(unittest.TestCase):
                 ),
             )
         )
-        provider = GitHubChangeImpactRepositoryEvidenceProvider(
+        provider = GitHubRepositoryEvidenceProvider(
             control_plane_root=Path("."),
             github_token=lambda **_: "server-token",
             github_api=github_api,
@@ -217,7 +219,7 @@ class ChangeImpactGitHubEvidenceProviderTests(unittest.TestCase):
         )
 
         evidence = provider.resolve(
-            ChangeImpactTargetReference(
+            RepositoryTargetReference(
                 repository=REPOSITORY,
                 pull_request_number=2000,
             )
@@ -228,7 +230,7 @@ class ChangeImpactGitHubEvidenceProviderTests(unittest.TestCase):
         self.assertEqual(evidence.authorship.contributor_github_ids, ())
 
     def test_non_human_pull_request_author_keeps_authorship_unresolved(self) -> None:
-        provider = GitHubChangeImpactRepositoryEvidenceProvider(
+        provider = GitHubRepositoryEvidenceProvider(
             control_plane_root=Path("."),
             github_token=lambda **_: "server-token",
             github_api=_GitHubApi(pull_request_author_type="Bot"),
@@ -236,7 +238,7 @@ class ChangeImpactGitHubEvidenceProviderTests(unittest.TestCase):
         )
 
         evidence = provider.resolve(
-            ChangeImpactTargetReference(
+            RepositoryTargetReference(
                 repository=REPOSITORY,
                 pull_request_number=2000,
             )
@@ -247,7 +249,7 @@ class ChangeImpactGitHubEvidenceProviderTests(unittest.TestCase):
         self.assertEqual(evidence.authorship.contributor_github_ids, ())
 
     def test_bot_authored_commit_pushed_by_human_resolves_to_human(self) -> None:
-        provider = GitHubChangeImpactRepositoryEvidenceProvider(
+        provider = GitHubRepositoryEvidenceProvider(
             control_plane_root=Path("."),
             github_token=lambda **_: "server-token",
             github_api=_GitHubApi(
@@ -264,7 +266,7 @@ class ChangeImpactGitHubEvidenceProviderTests(unittest.TestCase):
         )
 
         evidence = provider.resolve(
-            ChangeImpactTargetReference(
+            RepositoryTargetReference(
                 repository=REPOSITORY,
                 pull_request_number=2000,
             )
@@ -278,48 +280,48 @@ class ChangeImpactGitHubEvidenceProviderTests(unittest.TestCase):
         )
 
     def test_head_change_during_resolution_is_stale(self) -> None:
-        provider = GitHubChangeImpactRepositoryEvidenceProvider(
+        provider = GitHubRepositoryEvidenceProvider(
             control_plane_root=Path("."),
             github_token=lambda **_: "server-token",
             github_api=_GitHubApi(confirmed_head_sha="c" * 40),
             token_context="launchplane",
         )
 
-        with self.assertRaises(ChangeImpactRepositoryEvidenceStaleError):
+        with self.assertRaises(RepositoryEvidenceStaleError):
             provider.resolve(
-                ChangeImpactTargetReference(
+                RepositoryTargetReference(
                     repository=REPOSITORY,
                     pull_request_number=2000,
                 )
             )
 
     def test_pull_request_update_during_resolution_is_stale(self) -> None:
-        provider = GitHubChangeImpactRepositoryEvidenceProvider(
+        provider = GitHubRepositoryEvidenceProvider(
             control_plane_root=Path("."),
             github_token=lambda **_: "server-token",
             github_api=_GitHubApi(confirmed_updated_at="2026-08-06T01:00:01Z"),
             token_context="launchplane",
         )
 
-        with self.assertRaises(ChangeImpactRepositoryEvidenceStaleError):
+        with self.assertRaises(RepositoryEvidenceStaleError):
             provider.resolve(
-                ChangeImpactTargetReference(
+                RepositoryTargetReference(
                     repository=REPOSITORY,
                     pull_request_number=2000,
                 )
             )
 
     def test_missing_server_credentials_fail_closed(self) -> None:
-        provider = GitHubChangeImpactRepositoryEvidenceProvider(
+        provider = GitHubRepositoryEvidenceProvider(
             control_plane_root=Path("."),
             github_token=lambda **_: "",
             github_api=_GitHubApi(),
             token_context="launchplane",
         )
 
-        with self.assertRaises(ChangeImpactRepositoryEvidenceError):
+        with self.assertRaises(RepositoryEvidenceError):
             provider.resolve(
-                ChangeImpactTargetReference(
+                RepositoryTargetReference(
                     repository=REPOSITORY,
                     pull_request_number=2000,
                 )
@@ -335,7 +337,7 @@ class ChangeImpactGitHubEvidenceProviderTests(unittest.TestCase):
                     ]
                 return super().__call__(path=path, token=token)
 
-        provider = GitHubChangeImpactRepositoryEvidenceProvider(
+        provider = GitHubRepositoryEvidenceProvider(
             control_plane_root=Path("."),
             github_token=lambda **_: "server-token",
             github_api=FullPagesGitHubApi(),
@@ -343,9 +345,9 @@ class ChangeImpactGitHubEvidenceProviderTests(unittest.TestCase):
             max_file_pages=1,
         )
 
-        with self.assertRaises(ChangeImpactRepositoryEvidenceError):
+        with self.assertRaises(RepositoryEvidenceError):
             provider.resolve(
-                ChangeImpactTargetReference(
+                RepositoryTargetReference(
                     repository=REPOSITORY,
                     pull_request_number=2000,
                 )
@@ -364,7 +366,7 @@ class ChangeImpactGitHubEvidenceProviderTests(unittest.TestCase):
                 return super().__call__(path=path, token=token)
 
         github_api = FullPagesGitHubApi()
-        provider = GitHubChangeImpactRepositoryEvidenceProvider(
+        provider = GitHubRepositoryEvidenceProvider(
             control_plane_root=Path("."),
             github_token=lambda **_: "server-token",
             github_api=github_api,
@@ -372,9 +374,9 @@ class ChangeImpactGitHubEvidenceProviderTests(unittest.TestCase):
             max_file_pages=30,
         )
 
-        with self.assertRaises(ChangeImpactRepositoryEvidenceError):
+        with self.assertRaises(RepositoryEvidenceError):
             provider.resolve_current_item(
-                ChangeImpactTargetReference(
+                RepositoryTargetReference(
                     repository=REPOSITORY,
                     pull_request_number=2000,
                 )

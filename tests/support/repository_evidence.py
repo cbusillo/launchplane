@@ -1,13 +1,15 @@
 from pathlib import Path
 
-from control_plane.change_impact_service import ChangeImpactRepositoryEvidenceProvider
-from control_plane.contracts.change_impact import (
-    ChangeImpactAuthorshipEvidence,
-    ChangeImpactBaseEvidence,
-    ChangeImpactChangedFileEvidence,
-    ChangeImpactRepositoryEvidence,
-    ChangeImpactTarget,
-    ChangeImpactTargetReference,
+from control_plane.contracts.repository_evidence import (
+    RepositoryEvidenceProvider,
+)
+from control_plane.contracts.repository_evidence import (
+    RepositoryAuthorshipEvidence,
+    RepositoryBaseEvidence,
+    RepositoryChangedFileEvidence,
+    RepositoryEvidence,
+    RepositoryTarget,
+    RepositoryTargetReference,
 )
 from control_plane.service_auth import GitHubHumanIdentity
 from control_plane.storage.filesystem import FilesystemRecordStore
@@ -23,11 +25,11 @@ BASE_SHA = "e" * 40
 BASE_REF = "main"
 
 
-class _EvidenceProvider(ChangeImpactRepositoryEvidenceProvider):
-    def __init__(self, evidence: ChangeImpactRepositoryEvidence) -> None:
+class _EvidenceProvider(RepositoryEvidenceProvider):
+    def __init__(self, evidence: RepositoryEvidence) -> None:
         self.evidence = evidence
 
-    def resolve(self, target: ChangeImpactTargetReference) -> ChangeImpactRepositoryEvidence:
+    def resolve(self, target: RepositoryTargetReference) -> RepositoryEvidence:
         return self.evidence
 
 
@@ -56,10 +58,10 @@ def _repository_evidence(
     path: str = "src/runtime/app.py",
     head: str = HEAD_SHA,
     base_sha: str = BASE_SHA,
-    authorship: ChangeImpactAuthorshipEvidence | None = None,
-) -> ChangeImpactRepositoryEvidence:
-    return ChangeImpactRepositoryEvidence(
-        target=ChangeImpactTarget(
+    authorship: RepositoryAuthorshipEvidence | None = None,
+) -> RepositoryEvidence:
+    return RepositoryEvidence(
+        target=RepositoryTarget(
             repository_id=REPOSITORY_ID,
             repository_owner_id=REPOSITORY_OWNER_ID,
             repository=REPOSITORY,
@@ -67,10 +69,10 @@ def _repository_evidence(
             head_sha=head,
             tree_sha=TREE_SHA,
         ),
-        changed_files=(ChangeImpactChangedFileEvidence(path=path),),
-        base=ChangeImpactBaseEvidence(base_ref=BASE_REF, base_sha=base_sha),
+        changed_files=(RepositoryChangedFileEvidence(path=path),),
+        base=RepositoryBaseEvidence(base_ref=BASE_REF, base_sha=base_sha),
         authorship=authorship
-        or ChangeImpactAuthorshipEvidence(
+        or RepositoryAuthorshipEvidence(
             resolution="resolved",
             contributor_github_ids=(CONTRIBUTOR_GITHUB_ID,),
             commit_count=1,

@@ -67,8 +67,8 @@ not describe runtime authority until it is implemented, deployed, and activated.
   run records, dispatch binding, credential boundary, and worker lifecycle.
 - [engineering-review-decisions.md](engineering-review-decisions.md) — exact-head
   classification plus independent-run evaluation and shadow GitHub projection.
-- [product-owner-policy.md](product-owner-policy.md) — authoritative
-  product/system Owner membership, requirement, routing, and evaluation contract.
+- [product-owner-policy.md](product-owner-policy.md) — retired Owner policy
+  history and the current product-profile Owner boundary.
 - [owner-acceptance.md](owner-acceptance.md) — current Owner review and the
   compatibility boundary for retired acceptance history.
 - [release-review.md](release-review.md) — Owner checklist decisions for production
@@ -77,9 +77,8 @@ not describe runtime authority until it is implemented, deployed, and activated.
   challenge payloads, cross-host conformance artifact, and deferred runtime boundary.
 - [privileged-operations.md](privileged-operations.md) — typed human-governed
   planning, managed-rule authorization, redaction, and future execution boundary.
-- [change-impact-policy.md](change-impact-policy.md) — authoritative
-  affected-product, Owner-impact, and engineering-review classification
-  contract.
+- [change-impact-policy.md](change-impact-policy.md) — retired classifier history and the
+  independent repository-evidence boundary.
 - [operations.md](operations.md) — operator workflows and runtime boundary rules.
 - [production-backup-provider.md](production-backup-provider.md) — typed
   Proxmox/PBS capture, host boundary, evidence and rollout prerequisites.

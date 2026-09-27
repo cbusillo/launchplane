@@ -1,3 +1,5 @@
+"""Historical record compatibility; this module makes no approval decision."""
+
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -8,15 +10,6 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from control_plane.contracts.change_impact_binding import (
-    ChangeImpactBindingHashVersion,
-    validate_change_impact_binding,
-)
-
-
-CHANGE_IMPACT_POLICY_READ_ACTION = "change_impact_policy.read"
-CHANGE_IMPACT_POLICY_WRITE_ACTION = "change_impact_policy.write"
-CHANGE_IMPACT_EVALUATION_READ_ACTION = "change_impact_evaluation.read"
 
 ChangeImpactPolicyStatus = Literal["active", "superseded"]
 ChangeImpactReviewTier = Literal["routine", "sensitive"]
@@ -26,9 +19,9 @@ ChangeImpactEvidenceSource = Literal[
     "launchplane_dependency",
     "launchplane_reviewer",
 ]
-ChangeImpactChangeKind = Literal["added", "modified", "removed", "renamed", "unknown"]
+RepositoryChangeKind = Literal["added", "modified", "removed", "renamed", "unknown"]
 ChangeImpactStoredEvidenceKind = Literal["dependency", "reviewer"]
-ChangeImpactAuthorshipResolution = Literal["resolved", "unresolved", "conflicting"]
+RepositoryAuthorshipResolution = Literal["resolved", "unresolved", "conflicting"]
 
 _GIT_SHA_PATTERN = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
@@ -290,63 +283,6 @@ class ChangeImpactPolicyRecord(BaseModel):
         return self
 
 
-class ChangeImpactTarget(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    schema_version: int = Field(default=1, ge=1)
-    repository_id: str
-    repository_owner_id: str
-    repository: str
-    pull_request_number: int = Field(ge=1)
-    head_sha: str
-    tree_sha: str
-
-    @model_validator(mode="after")
-    def _validate_target(self) -> "ChangeImpactTarget":
-        if self.schema_version != 1:
-            raise ValueError("Unsupported change-impact target schema version.")
-        object.__setattr__(
-            self,
-            "repository_id",
-            _normalize_decimal_id(self.repository_id, "repository_id"),
-        )
-        object.__setattr__(
-            self,
-            "repository_owner_id",
-            _normalize_decimal_id(self.repository_owner_id, "repository_owner_id"),
-        )
-        object.__setattr__(
-            self,
-            "repository",
-            _normalize_repository(self.repository, "repository"),
-        )
-        object.__setattr__(self, "head_sha", _normalize_git_sha(self.head_sha, "head_sha"))
-        object.__setattr__(self, "tree_sha", _normalize_git_sha(self.tree_sha, "tree_sha"))
-        return self
-
-
-class ChangeImpactChangedFileEvidence(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    schema_version: int = Field(default=1, ge=1)
-    path: str
-    change_kind: ChangeImpactChangeKind = "unknown"
-    previous_path: str | None = None
-    source: Literal["server_diff"] = "server_diff"
-
-    @model_validator(mode="after")
-    def _validate_file(self) -> "ChangeImpactChangedFileEvidence":
-        if self.schema_version != 1:
-            raise ValueError("Unsupported change-impact file evidence schema version.")
-        object.__setattr__(self, "path", _normalize_path(self.path, "path"))
-        if self.previous_path is not None:
-            previous_path = _normalize_path(self.previous_path, "previous_path")
-            if self.change_kind != "renamed" or previous_path == self.path:
-                raise ValueError("previous_path requires a rename from a distinct path")
-            object.__setattr__(self, "previous_path", previous_path)
-        return self
-
-
 class ChangeImpactStoredEvidence(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -373,173 +309,6 @@ class ChangeImpactStoredEvidence(BaseModel):
         return self
 
 
-class ChangeImpactTargetReference(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    schema_version: int = Field(default=1, ge=1)
-    repository: str
-    pull_request_number: int = Field(ge=1)
-
-    @model_validator(mode="after")
-    def _validate_reference(self) -> "ChangeImpactTargetReference":
-        if self.schema_version != 1:
-            raise ValueError("Unsupported change-impact target reference schema version.")
-        object.__setattr__(
-            self,
-            "repository",
-            _normalize_repository(self.repository, "repository"),
-        )
-        return self
-
-
-class ChangeImpactEvaluationMetadata(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    schema_version: int = Field(default=1, ge=1)
-    request_id: str = Field(default="", max_length=200)
-    reason: str = Field(default="", max_length=1000)
-
-    @model_validator(mode="after")
-    def _validate_metadata(self) -> "ChangeImpactEvaluationMetadata":
-        if self.schema_version != 1:
-            raise ValueError("Unsupported change-impact evaluation metadata schema version.")
-        object.__setattr__(self, "request_id", self.request_id.strip())
-        object.__setattr__(self, "reason", self.reason.strip())
-        return self
-
-
-class ChangeImpactEvaluationRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    schema_version: int = Field(default=1, ge=1)
-    target: ChangeImpactTargetReference
-    metadata: ChangeImpactEvaluationMetadata = Field(default_factory=ChangeImpactEvaluationMetadata)
-
-    @model_validator(mode="after")
-    def _validate_request(self) -> "ChangeImpactEvaluationRequest":
-        if self.schema_version != 1:
-            raise ValueError("Unsupported change-impact evaluation request schema version.")
-        return self
-
-
-class ChangeImpactBaseEvidence(BaseModel):
-    """Server-resolved base ref and SHA the reviewed change was compared against."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    schema_version: int = Field(default=1, ge=1)
-    base_ref: str
-    base_sha: str
-
-    @model_validator(mode="after")
-    def _validate_base(self) -> "ChangeImpactBaseEvidence":
-        if self.schema_version != 1:
-            raise ValueError("Unsupported change-impact base evidence schema version.")
-        normalized_ref = _required_token(self.base_ref, "base_ref")
-        if _GIT_REF_PATTERN.fullmatch(normalized_ref) is None:
-            raise ValueError("base_ref must be a canonical Git ref name")
-        object.__setattr__(self, "base_ref", normalized_ref)
-        object.__setattr__(self, "base_sha", _normalize_git_sha(self.base_sha, "base_sha"))
-        return self
-
-
-class ChangeImpactAuthorshipEvidence(BaseModel):
-    """Server-resolved numeric GitHub contributing identities over the reviewed range.
-
-    ``resolution`` is ``resolved`` only when every reviewed commit and the pull
-    request itself carry a consistent GitHub-linked numeric identity. Missing,
-    incomplete, or contradictory identity evidence is never repaired here; it is
-    reported so downstream Owner-review admissibility can fail closed.
-    """
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    schema_version: int = Field(default=1, ge=1)
-    resolution: ChangeImpactAuthorshipResolution
-    contributor_github_ids: tuple[int, ...] = ()
-    commit_count: int = Field(default=0, ge=0)
-    reason: str = Field(default="", max_length=500)
-
-    @model_validator(mode="after")
-    def _validate_authorship(self) -> "ChangeImpactAuthorshipEvidence":
-        if self.schema_version != 1:
-            raise ValueError("Unsupported change-impact authorship evidence schema version.")
-        for github_id in self.contributor_github_ids:
-            if github_id < 1:
-                raise ValueError("contributor_github_ids must be positive numeric GitHub IDs")
-        object.__setattr__(
-            self,
-            "contributor_github_ids",
-            tuple(sorted(set(self.contributor_github_ids))),
-        )
-        object.__setattr__(self, "reason", self.reason.strip())
-        if self.resolution == "resolved" and not self.contributor_github_ids:
-            raise ValueError("resolved change-impact authorship requires contributing identities")
-        if self.resolution != "resolved" and not self.reason:
-            raise ValueError("unresolved change-impact authorship requires a reason")
-        return self
-
-
-class ChangeImpactRepositoryEvidence(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    schema_version: int = Field(default=1, ge=1)
-    target: ChangeImpactTarget
-    merge_commit_sha: str = ""
-    changed_files: tuple[ChangeImpactChangedFileEvidence, ...]
-    base: ChangeImpactBaseEvidence | None = None
-    authorship: ChangeImpactAuthorshipEvidence | None = None
-
-    @model_validator(mode="after")
-    def _validate_evidence(self) -> "ChangeImpactRepositoryEvidence":
-        if self.schema_version != 1:
-            raise ValueError("Unsupported change-impact repository evidence schema version.")
-        if self.merge_commit_sha:
-            object.__setattr__(
-                self,
-                "merge_commit_sha",
-                _normalize_git_sha(self.merge_commit_sha, "merge_commit_sha"),
-            )
-        if not self.changed_files:
-            raise ValueError("change-impact repository evidence requires changed files")
-        paths = tuple(file.path for file in self.changed_files)
-        if len(paths) != len(set(paths)):
-            raise ValueError("change-impact repository evidence paths must be unique")
-        object.__setattr__(
-            self,
-            "changed_files",
-            tuple(sorted(self.changed_files, key=lambda changed_file: changed_file.path)),
-        )
-        return self
-
-
-class ChangeImpactMatchedEvidence(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    schema_version: int = Field(default=1, ge=1)
-    source: ChangeImpactEvidenceSource
-    path: str = ""
-    component: str = ""
-    rule_id: str = ""
-    review_tier: ChangeImpactReviewTier | None = None
-    production_affecting: bool | None = None
-    affected_products: tuple[ChangeImpactProductScope, ...] = ()
-    review_floor_only: bool = False
-    governance_impact: bool | None = None
-    reason: str
-
-
-class ChangeImpactAffectedProduct(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    schema_version: int = Field(default=1, ge=1)
-    product: str
-    system: str
-    owner_action: str
-    owner_environment: str
-    owner_acceptance_required: Literal[True] = True
-
-
 class ChangeImpactCoverage(BaseModel):
     """Bounded path-coverage diagnostics, independent of classification authority."""
 
@@ -551,37 +320,6 @@ class ChangeImpactCoverage(BaseModel):
         default=(), max_length=20
     )
     truncated: bool = False
-
-
-class ChangeImpactEvaluation(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    schema_version: int = Field(default=1, ge=1)
-    status: ChangeImpactDecisionStatus
-    reason_code: str
-    target: ChangeImpactTarget
-    policy_record_id: str = ""
-    policy_revision: int | None = Field(default=None, ge=1)
-    policy_digest: str = ""
-    engineering_review_tier: ChangeImpactReviewTier = "sensitive"
-    required_engineering_review_count: Literal[1, 2] = 2
-    owner_impact: Literal["required", "not_required", "unknown"] = "unknown"
-    affected_products: tuple[ChangeImpactAffectedProduct, ...] = ()
-    production_affecting_products: tuple[ChangeImpactProductScope, ...] = ()
-    matched_evidence: tuple[ChangeImpactMatchedEvidence, ...] = ()
-    unknown_evidence: tuple[str, ...] = ()
-    coverage: ChangeImpactCoverage | None = None
-    classification_model: Literal["v2"] | None = None
-    governance_impact: bool | None = None
-    binding_hash_version: ChangeImpactBindingHashVersion | None = None
-    change_impact_decision_digest: str | None = None
-
-    @model_validator(mode="after")
-    def _validate_binding_identity(self) -> "ChangeImpactEvaluation":
-        validate_change_impact_binding(
-            self.binding_hash_version, self.change_impact_decision_digest
-        )
-        return self
 
 
 def build_change_impact_component_rule_id(rule: ChangeImpactComponentRule) -> str:
@@ -612,3 +350,11 @@ def change_impact_policy_digest(record: ChangeImpactPolicyRecord) -> str:
 
 def _product_scope_key(scope: ChangeImpactProductScope) -> tuple[str, str, str, str]:
     return scope.product, scope.system, scope.owner_action, scope.owner_environment
+
+
+class ChangeImpactPolicyConflictError(ValueError):
+    """Raised on a change-impact policy write race or conflicting replay."""
+
+
+class ChangeImpactPolicySequenceError(ValueError):
+    """Raised when change-impact policy revision history is stale or non-linear."""

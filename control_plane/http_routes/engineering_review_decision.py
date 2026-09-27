@@ -5,8 +5,12 @@ from typing import Annotated, Literal
 from fastapi import Depends, Path
 from pydantic import BaseModel, ConfigDict
 
-from control_plane.change_impact_service import ChangeImpactRepositoryEvidenceProvider
-from control_plane.contracts.change_impact import ChangeImpactTargetReference
+from control_plane.contracts.repository_evidence import (
+    RepositoryEvidenceProvider,
+)
+from control_plane.contracts.repository_evidence import (
+    RepositoryTargetReference,
+)
 from control_plane.contracts.engineering_review_decision import (
     ENGINEERING_REVIEW_DECISION_CREATE_ACTION,
     ENGINEERING_REVIEW_DECISION_PROJECT_ACTION,
@@ -57,7 +61,7 @@ class EngineeringReviewDecisionRouteDependencies:
     authorization_allows: Callable[..., bool]
     http_error: Callable[..., Exception]
     error_response_model: type[BaseModel]
-    repository_evidence_provider: ChangeImpactRepositoryEvidenceProvider
+    repository_evidence_provider: RepositoryEvidenceProvider
     github_app_token: Callable[[str, str], GitHubAppInstallationToken]
     github_api: Callable[..., object]
 
@@ -173,7 +177,7 @@ def register_engineering_review_decision_routes(
                     "Engineering review projection requires the latest persisted decision."
                 )
             current_evidence = write_dependencies.repository_evidence_provider.resolve(
-                ChangeImpactTargetReference(
+                RepositoryTargetReference(
                     repository=decision.target.repository,
                     pull_request_number=decision.target.pull_request_number,
                 )

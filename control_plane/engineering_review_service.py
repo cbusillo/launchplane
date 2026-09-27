@@ -6,14 +6,11 @@ from typing import Literal, Protocol, cast
 from pydantic import BaseModel, ConfigDict, Field
 
 from control_plane import secrets as control_plane_secrets
-from control_plane.change_impact_service import (
-    ChangeImpactRepositoryEvidenceProvider,
-    evaluate_change_impact,
-    load_change_impact_stored_evidence,
+from control_plane.contracts.repository_evidence import (
+    RepositoryEvidenceProvider,
 )
-from control_plane.contracts.change_impact import (
-    ChangeImpactPolicyRecord,
-    ChangeImpactTargetReference,
+from control_plane.contracts.repository_evidence import (
+    RepositoryTargetReference,
 )
 from control_plane.contracts.engineering_review_run import (
     EngineeringReviewAuthorityRecord,
@@ -67,15 +64,6 @@ class EngineeringReviewRunCreateStore(Protocol):
         limit: int | None = None,
     ) -> tuple[EngineeringReviewAuthorityRecord, ...]: ...
 
-    def list_change_impact_policy_records(
-        self,
-        *,
-        repository_id: str = "",
-        repository: str = "",
-        status: str = "",
-        limit: int | None = None,
-    ) -> tuple[ChangeImpactPolicyRecord, ...]: ...
-
     def create_engineering_review_run_records_if_absent(
         self,
         records: tuple[EngineeringReviewRunRecord, ...],
@@ -114,7 +102,6 @@ def require_engineering_review_authority_store(
 ) -> EngineeringReviewAuthorityStore:
     required = (
         "list_engineering_review_authority_records",
-        "list_change_impact_policy_records",
         "compare_and_write_engineering_review_authority_record",
     )
     missing = [name for name in required if not callable(getattr(record_store, name, None))]
@@ -178,7 +165,7 @@ def create_engineering_review_runs(
     store: EngineeringReviewRunCreateStore,
     work_request_id: str,
     target_resolver: EngineeringReviewTargetResolver,
-    repository_evidence_provider: ChangeImpactRepositoryEvidenceProvider,
+    repository_evidence_provider: RepositoryEvidenceProvider,
     created_at: str = "",
 ) -> EngineeringReviewRunCreateResult:
     work_request = store.read_every_code_work_request_record(work_request_id)
@@ -202,7 +189,7 @@ def create_engineering_review_runs(
             "Linked pull request repository does not match the stored work request."
         )
     repository_evidence = repository_evidence_provider.resolve(
-        ChangeImpactTargetReference(
+        RepositoryTargetReference(
             repository=target.repository,
             pull_request_number=target.pr_number,
         )
@@ -212,22 +199,11 @@ def create_engineering_review_runs(
         or repository_evidence.target.tree_sha != target.tree_sha
     ):
         raise EngineeringReviewConflictError(
-            "Engineering review target changed during server-side classification."
+            "Engineering review target changed during repository evidence resolution."
         )
-    impact = evaluate_change_impact(
-        repository_evidence=repository_evidence,
-        policies=store.list_change_impact_policy_records(
-            repository_id=repository_evidence.target.repository_id
-        ),
-        stored_evidence=load_change_impact_stored_evidence(
-            store=store,
-            target=repository_evidence.target,
-        ),
-    )
-    required_review_count = (
-        impact.required_engineering_review_count if impact.status == "success" else 2
-    )
-    review_slots = _default_review_slots(authority, required_review_count)
+    # Engineering review uses the existing independent authority slots. Retired
+    # file-path classification no longer guesses which approval is required.
+    review_slots = _default_review_slots(authority)
     timestamp = created_at.strip() or utc_now_timestamp()
     records: list[EngineeringReviewRunRecord] = []
     for model_slot in review_slots:
@@ -350,17 +326,8 @@ def resolve_engineering_review_pull_request_target(
 
 def _default_review_slots(
     authority: EngineeringReviewAuthorityRecord,
-    required_review_count: int = 2,
 ) -> tuple[EngineeringReviewModelSlot, ...]:
-    if required_review_count not in {1, 2}:
-        raise EngineeringReviewUnavailableError(
-            "Server-derived review classification returned an invalid review count."
-        )
-    if len(authority.model_slots) < required_review_count:
-        raise EngineeringReviewUnavailableError(
-            "Engineering review authority lacks the server-required model slots."
-        )
-    return authority.model_slots[:required_review_count]
+    return authority.model_slots[:2]
 
 
 def _validate_authority_append(

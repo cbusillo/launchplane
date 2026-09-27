@@ -15,7 +15,7 @@ from control_plane.contracts.authz_policy_record import (
     authz_policy_sha256,
     build_authz_policy_record_id,
 )
-from control_plane.contracts.change_impact import (
+from control_plane.contracts.retired_change_impact import (
     ChangeImpactComponentRule,
     ChangeImpactPolicyRecord,
 )

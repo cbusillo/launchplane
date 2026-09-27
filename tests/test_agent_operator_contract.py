@@ -58,8 +58,6 @@ class AgentOperatorContractTests(unittest.TestCase):
             ("GET", "/v1/agent/context"): "read_agent_context",
             ("POST", "/v1/agent/write-intents/evaluate"): "evaluate_agent_write_intent",
             ("POST", "/v1/product-config/apply"): "apply_product_config",
-            ("POST", "/v1/change-impact/policies/apply"): "apply_change_impact_policy",
-            ("GET", "/v1/change-impact/policy"): "read_change_impact_policy",
             (
                 "POST",
                 "/v1/work-graph/merge-train/controller/run-once",
@@ -89,8 +87,6 @@ class AgentOperatorContractTests(unittest.TestCase):
             "read_agent_context": ["read_identity"],
             "evaluate_agent_write_intent": ["read_browser_mutation_identity"],
             "apply_product_config": ["read_browser_mutation_identity"],
-            "apply_change_impact_policy": ["read_write_identity"],
-            "read_change_impact_policy": ["read_identity"],
             "write_merge_train_controller_run_once": ["read_write_identity"],
             "remediate_preview_pr_feedback": ["read_write_identity"],
             "execute_product_retirement": ["read_write_identity"],
@@ -107,17 +103,6 @@ class AgentOperatorContractTests(unittest.TestCase):
                 expected_dependencies[operation["operation_id"]],
             )
             self.assertRegex(operation["schema_fingerprint_sha256"], r"^[0-9a-f]{64}$")
-
-        change_impact = next(
-            operation
-            for operation in operations
-            if operation["path"] == "/v1/change-impact/policies/apply"
-        )
-        self.assertEqual(change_impact["idempotency"], "none")
-        self.assertEqual(
-            change_impact["reviewed_evidence"],
-            ["reviewed_dry_run", "expected_policy_digest"],
-        )
 
         self.assertEqual(artifact["contract"]["protected_workflows"], list(PROTECTED_WORKFLOWS))
         self.assertEqual(artifact["contract"]["invariants"], INVARIANTS)
@@ -208,8 +193,8 @@ class AgentOperatorContractTests(unittest.TestCase):
             build_agent_operator_contract(openapi_document=missing_header)
 
         unexpected_header = copy.deepcopy(document)
-        change_impact = unexpected_header["paths"]["/v1/change-impact/policies/apply"]["post"]
-        change_impact.setdefault("parameters", []).append(
+        context = unexpected_header["paths"]["/v1/agent/context"]["get"]
+        context.setdefault("parameters", []).append(
             {
                 "in": "header",
                 "name": "Idempotency-Key",

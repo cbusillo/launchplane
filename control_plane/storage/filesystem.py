@@ -26,7 +26,9 @@ from control_plane.contracts.administrator_enrollment import (
 )
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.contracts.backup_gate_record import BackupGateRecord
-from control_plane.contracts.change_impact import ChangeImpactPolicyRecord
+from control_plane.contracts.retired_change_impact import (
+    ChangeImpactPolicyRecord,
+)
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.durable_operation_authorization import DurableOperationAuthorization
 from control_plane.contracts.edge_endpoint_record import EdgeEndpointRecord
@@ -51,7 +53,7 @@ from control_plane.contracts.generic_web_rollback import GenericWebRollbackPlanR
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.ingress_canary_route_record import IngressCanaryRouteRecord
 from control_plane.contracts.ingress_route_audit_record import IngressRouteAuditRecord
-from control_plane.contracts.manager_preview_approval import (
+from control_plane.contracts.retired_manager_preview_approval import (
     ManagerPreviewApprovalEventRecord,
     ManagerPreviewApprovalEventWriteStatus,
 )
@@ -199,7 +201,9 @@ from control_plane.contracts.public_ingress_monitoring import PublicIngressObser
 from control_plane.contracts.promotion_record import PromotionRecord
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.contracts.deploy_target import ProviderTargetRecord
-from control_plane.manager_preview_approval import ManagerPreviewApprovalEventConflictError
+from control_plane.contracts.retired_manager_preview_approval import (
+    ManagerPreviewApprovalEventConflictError,
+)
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.runtime_environment_record import (
@@ -254,7 +258,7 @@ from control_plane.repository_human_admission import (
     plan_repository_human_role_policy_append,
     plan_tenant_technical_human_waiver_event_append,
 )
-from control_plane.product_owner_service import (
+from control_plane.contracts.product_owner import (
     ProductOwnerPolicyConflictError,
     ProductOwnerPolicySequenceError,
     ProductOwnerRequirementConflictError,
@@ -262,7 +266,7 @@ from control_plane.product_owner_service import (
     ProductOwnerRoutingConflictError,
     ProductOwnerRoutingSequenceError,
 )
-from control_plane.change_impact_service import (
+from control_plane.contracts.retired_change_impact import (
     ChangeImpactPolicyConflictError,
     ChangeImpactPolicySequenceError,
 )

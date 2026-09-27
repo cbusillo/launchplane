@@ -6,7 +6,11 @@ import unittest
 from unittest.mock import Mock
 
 from control_plane.contracts.merge_train_policy import MergeTrainGitHubTokenSource
-from control_plane.contracts.change_impact import ChangeImpactTargetReference
+from control_plane.contracts.repository_evidence import (
+    RepositoryEvidence,
+    RepositoryEvidenceProvider,
+    RepositoryTargetReference,
+)
 from control_plane.contracts.governance_projection import GovernanceMergeReadinessFacet
 from control_plane.contracts.merge_train_structural_provenance import (
     MergeTrainStackCollapseRootProof,
@@ -25,7 +29,7 @@ from tests.support.repository_evidence import (
 )
 
 
-TARGET = ChangeImpactTargetReference(repository=REPOSITORY, pull_request_number=2022)
+TARGET = RepositoryTargetReference(repository=REPOSITORY, pull_request_number=2022)
 NOW = "2026-08-12T05:00:00Z"
 
 
@@ -418,11 +422,11 @@ class GovernanceProjectionTests(unittest.TestCase):
             self.assertEqual(result.availability, "not_active")
 
     def test_projection_reuses_one_repository_evidence_snapshot(self) -> None:
-        class _ChangingProvider:
+        class _ChangingProvider(RepositoryEvidenceProvider):
             def __init__(self) -> None:
                 self.calls = 0
 
-            def resolve(self, target: ChangeImpactTargetReference) -> object:
+            def resolve(self, target: RepositoryTargetReference) -> RepositoryEvidence:
                 self.calls += 1
                 if self.calls > 1:
                     return _repository_evidence(head="c" * 40)
@@ -434,7 +438,7 @@ class GovernanceProjectionTests(unittest.TestCase):
 
             projection = build_governance_projection(
                 store=store,
-                repository_evidence_provider=provider,  # type: ignore[arg-type]
+                repository_evidence_provider=provider,
                 current_readiness_provider=_not_active_readiness,
                 target=TARGET,
                 base_branch="main",

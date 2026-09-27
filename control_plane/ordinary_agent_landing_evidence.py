@@ -5,9 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
-from control_plane.contracts.change_impact import (
-    ChangeImpactRepositoryEvidence,
-    ChangeImpactTargetReference,
+from control_plane.contracts.repository_evidence import (
+    RepositoryEvidence,
+    RepositoryTargetReference,
 )
 from control_plane.contracts.ordinary_agent_snapshot import OrdinaryAgentLandingEvidence
 from control_plane.contracts.ordinary_agent_effect import LANDING_EVIDENCE_MAX_AGE_SECONDS
@@ -38,7 +38,7 @@ class OrdinaryAgentLandingSnapshotReader:
 class OrdinaryAgentLandingRepositoryEvidenceProvider:
     evidence: OrdinaryAgentLandingEvidence
 
-    def resolve(self, target: ChangeImpactTargetReference) -> ChangeImpactRepositoryEvidence:
+    def resolve(self, target: RepositoryTargetReference) -> RepositoryEvidence:
         if target.repository == self.evidence.repository:
             for entry in self.evidence.candidate_entry_evidence:
                 if entry.target.pull_request_number == target.pull_request_number:
