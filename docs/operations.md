@@ -2344,9 +2344,12 @@ mark-apply` require `--allow-direct-db-mutation` before they persist local DB
   declarations against both live key names and DB-backed runtime/target records.
   Upstream-restore plans also require declarations for local/upstream filestore
   and source settings and any configured `OPENUPGRADE_*` options, so filtering
-  cannot silently disable a requested migration. Planning does not decrypt
-  managed secrets or prove their values: execution rechecks declarations,
-  required values, secret safety, and provider-only entries before its first
+  cannot silently disable a requested migration. Planning also checks the
+  non-secret upstream source values with the post-deploy validator and reports
+  invalid deploy-phase overrides without echoing record values. Planning does
+  not decrypt managed secrets or prove their values: execution rechecks
+  declarations, required compose/upstream values, secret safety, and provider-only
+  entries before its first
   provider write. Discarded provider entries are counted without recording
   potentially sensitive malformed key names. Product-scoped runtime sync uses
   the same key selection for incoming values but merges into the provider env;

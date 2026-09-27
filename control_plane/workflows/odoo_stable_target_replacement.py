@@ -122,26 +122,22 @@ ODOO_REPLACEMENT_DRIVER_ENV_KEYS = {
 }
 
 
-def _runtime_declaration_blockers(
+def _runtime_configuration_blockers(
     *,
     compose_file: str,
-    current_env_keys: set[str],
-    resolved_runtime_keys: set[str],
+    current_env: dict[str, str],
+    resolved_runtime_values: dict[str, str],
     application_runtime_keys: set[str],
     data_source_mode: str,
 ) -> tuple[str, ...]:
-    configured_keys = current_env_keys | resolved_runtime_keys
+    configured_keys = current_env.keys() | resolved_runtime_values.keys()
     compose_keys = set(re.findall(r"\$\{([A-Z][A-Z0-9_]*)", compose_file))
     required_declarations = compose_keys & configured_keys
     if data_source_mode == "upstream_restore":
         required_declarations.update(
             {
                 "ODOO_FILESTORE_PATH",
-                "ODOO_UPSTREAM_HOST",
-                "ODOO_UPSTREAM_USER",
-                "ODOO_UPSTREAM_DB_NAME",
-                "ODOO_UPSTREAM_DB_USER",
-                "ODOO_UPSTREAM_FILESTORE_PATH",
+                *dokploy_post_deploy.ODOO_UPSTREAM_RESTORE_WORKFLOW_ENV_KEYS,
             }
         )
         # Preserve explicitly configured migration mode/options even when a
@@ -165,6 +161,19 @@ def _runtime_declaration_blockers(
             + ", ".join(undeclared_keys)
             + ". Repair the lane's expected configuration before replacement."
         )
+    if data_source_mode == "upstream_restore":
+        application_env = {
+            key: value
+            for key, value in (current_env | resolved_runtime_values).items()
+            if key in application_runtime_keys
+        }
+        try:
+            dokploy_post_deploy._resolve_upstream_restore_workflow_environment(
+                desired_env_map=application_env
+            )
+        except click.ClickException as error:
+            # This validator reports fixed schema keys only, never their values.
+            blockers.append(str(error))
     return tuple(blockers)
 
 
@@ -910,7 +919,7 @@ def _snapshot_current_target(
     target_record: DokployTargetRecord,
     target_id_record: DokployTargetIdRecord,
     request: DokployRequest,
-) -> OdooStableTargetRuntimeSnapshot:
+) -> tuple[OdooStableTargetRuntimeSnapshot, dict[str, str]]:
     target_payload = dokploy_api.fetch_dokploy_target_payload(
         host=host,
         token=token,
@@ -935,7 +944,7 @@ def _snapshot_current_target(
     )
     runtime_identity = _runtime_identity_map(env_map)
     compose_file = str(target_payload.get("composeFile") or "")
-    return OdooStableTargetRuntimeSnapshot(
+    snapshot = OdooStableTargetRuntimeSnapshot(
         target_type=target_record.target_type,
         target_id=target_id_record.target_id,
         target_name=target_record.target_name or str(target_payload.get("name") or "").strip(),
@@ -967,6 +976,8 @@ def _snapshot_current_target(
         runtime_identity_present=bool(runtime_identity),
         runtime_identity_deployment_record_id=runtime_identity.get("deployment_record_id", ""),
     )
+
+    return snapshot, env_map
 
 
 def _build_steps(
@@ -1092,7 +1103,7 @@ def build_odoo_stable_target_replacement_plan(
                 "Launchplane could not resolve DB-backed Odoo volume authority for this lane."
             )
         host, token = resolved_dokploy_config_reader(control_plane_root=control_plane_root)
-        current_target = _snapshot_current_target(
+        current_target, live_runtime_values = _snapshot_current_target(
             host=host,
             token=token,
             target_record=target_record,
@@ -1154,20 +1165,25 @@ def build_odoo_stable_target_replacement_plan(
                     override.payload.required_container_environment_keys
                 )
             blockers.extend(
-                _runtime_declaration_blockers(
+                _runtime_configuration_blockers(
                     compose_file=dokploy_compose.render_odoo_raw_compose_file(
                         image_reference=profile.image.repository,
                         domain_hosts=current_target.domain_hosts,
                         runtime_port=profile.runtime_port,
                     ),
-                    current_env_keys=set(current_target.env_keys),
-                    resolved_runtime_keys=set(recorded_runtime_values),
+                    current_env=live_runtime_values,
+                    resolved_runtime_values=recorded_runtime_values,
                     application_runtime_keys=application_runtime_keys,
                     data_source_mode=request.data_source_mode,
                 )
             )
         except control_plane_live_target_runtime.LiveTargetRuntimeError as error:
             blockers.append(str(error))
+        except click.ClickException:
+            blockers.append(
+                "Launchplane could not render the lane's Odoo instance override payload. "
+                "Review its deploy-phase overrides before replacement."
+            )
     elif isinstance(target_record, DokployTargetRecord):
         try:
             approval_issue_url = _assert_prelaunch_rebuild_policy_allows_request(
@@ -1489,7 +1505,7 @@ def execute_odoo_stable_target_replacement_apply(
                 instance_name=plan.instance,
             )
         )
-        resolved_runtime_keys = set(runtime_environment_values)
+        unfiltered_runtime_values = dict(runtime_environment_values)
         try:
             application_runtime_keys = (
                 control_plane_live_target_runtime.require_product_profile_runtime_keys(
@@ -1571,15 +1587,15 @@ def execute_odoo_stable_target_replacement_apply(
                 "Odoo target replacement requires application env key(s): "
                 + ", ".join(missing_compose_keys)
             )
-        declaration_blockers = _runtime_declaration_blockers(
+        configuration_blockers = _runtime_configuration_blockers(
             compose_file=compose_file,
-            current_env_keys=set(current_env_map),
-            resolved_runtime_keys=resolved_runtime_keys,
+            current_env=current_env_map,
+            resolved_runtime_values=unfiltered_runtime_values,
             application_runtime_keys=application_runtime_keys,
             data_source_mode=request.data_source_mode,
         )
-        if declaration_blockers:
-            raise click.ClickException("; ".join(declaration_blockers))
+        if configuration_blockers:
+            raise click.ClickException("; ".join(configuration_blockers))
         undeclared_provider_keys = {
             key
             for key in current_env_map.keys()
