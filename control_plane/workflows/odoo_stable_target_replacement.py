@@ -134,17 +134,13 @@ def _runtime_configuration_blockers(
     compose_keys = set(re.findall(r"\$\{([A-Z][A-Z0-9_]*)", compose_file))
     required_declarations = compose_keys & configured_keys
     if data_source_mode == "upstream_restore":
-        required_declarations.update(
-            {
-                "ODOO_FILESTORE_PATH",
-                *dokploy_post_deploy.ODOO_UPSTREAM_RESTORE_WORKFLOW_ENV_KEYS,
-            }
-        )
+        required_declarations.update(dokploy_post_deploy.ODOO_UPSTREAM_RESTORE_WORKFLOW_ENV_KEYS)
         # Preserve explicitly configured migration mode/options even when a
         # shared runtime record, rather than provider state, supplied them.
         required_declarations.update(
             configured_keys
             & {
+                "ODOO_FILESTORE_PATH",
                 "OPENUPGRADE_ENABLED",
                 "OPENUPGRADE_TARGET_VERSION",
                 "OPENUPGRADE_SCRIPTS_PATH",
@@ -1181,8 +1177,8 @@ def build_odoo_stable_target_replacement_plan(
             blockers.append(str(error))
         except click.ClickException:
             blockers.append(
-                "Launchplane could not render the lane's Odoo instance override payload. "
-                "Review its deploy-phase overrides before replacement."
+                "Launchplane could not render the replacement compose or Odoo instance override payload. "
+                "Review the image, domains and deploy-phase overrides before replacement."
             )
     elif isinstance(target_record, DokployTargetRecord):
         try:

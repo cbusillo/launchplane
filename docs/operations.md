@@ -2342,8 +2342,8 @@ mark-apply` require `--allow-direct-db-mutation` before they persist local DB
   undeclared provider-only environment settings, preventing silent loss of
   application configuration. Read-only replacement planning checks compose
   declarations against both live key names and DB-backed runtime/target records.
-  Upstream-restore plans also require declarations for local/upstream filestore
-  and source settings and any configured `OPENUPGRADE_*` options, so filtering
+  Upstream-restore plans also require declarations for upstream source settings
+  and any configured local filestore path or `OPENUPGRADE_*` options, so filtering
   cannot silently disable a requested migration. Planning also checks the
   non-secret upstream source values with the post-deploy validator and reports
   invalid deploy-phase overrides without echoing record values. Planning does

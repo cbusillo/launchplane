@@ -729,16 +729,17 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         )
 
     def test_restore_plan_requires_lane_declarations_for_recorded_migration_settings(self) -> None:
-        for omitted_key, missing_value in (
-            ("OPENUPGRADE_ENABLED", False),
-            ("ODOO_UPSTREAM_HOST", False),
-            ("ODOO_FILESTORE_PATH", False),
-            ("ODOO_UPSTREAM_HOST", True),
-            ("", False),
+        for omitted_key, problem in (
+            ("OPENUPGRADE_ENABLED", "declaration"),
+            ("ODOO_UPSTREAM_HOST", "declaration"),
+            ("ODOO_FILESTORE_PATH", "declaration"),
+            ("ODOO_UPSTREAM_HOST", "value"),
+            ("ODOO_FILESTORE_PATH", "use_default"),
+            ("", "complete"),
         ):
-            with self.subTest(omitted_key=omitted_key, missing_value=missing_value):
+            with self.subTest(omitted_key=omitted_key, problem=problem):
                 profile = _opw_profile_with_prelaunch_policy(enabled=True)
-                if omitted_key and not missing_value:
+                if problem in {"declaration", "use_default"}:
                     profile = profile.model_copy(
                         update={
                             "expected_config": ProductExpectedConfigProfile(
@@ -760,9 +761,18 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                     target_record=_opw_target_record(),
                     target_id_record=_opw_target_id_record(),
                 )
-                if missing_value:
+                if problem == "value":
                     store.runtime_environment_records = tuple(
                         record.model_copy(update={"env": record.env | {omitted_key: ""}})
+                        for record in store.runtime_environment_records
+                    )
+                elif problem == "use_default":
+                    store.runtime_environment_records = tuple(
+                        record.model_copy(
+                            update={
+                                "env": {k: v for k, v in record.env.items() if k != omitted_key}
+                            }
+                        )
                         for record in store.runtime_environment_records
                     )
                 with (
@@ -794,8 +804,11 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                         ),
                         dokploy_request=cast(DokployRequest, _request),
                     )
-                self.assertEqual(plan.plan_status, "blocked" if omitted_key else "ready")
-                if omitted_key:
+                self.assertEqual(
+                    plan.plan_status,
+                    "blocked" if problem in {"declaration", "value"} else "ready",
+                )
+                if problem in {"declaration", "value"}:
                     self.assertIn(omitted_key, "; ".join(plan.blockers))
                 self.assertEqual(store.deployment_records, [])
                 self.assertEqual(store.environment_inventories, [])
