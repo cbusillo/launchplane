@@ -5,6 +5,8 @@ from typing import Any
 from unittest.mock import patch
 
 from control_plane.contracts.repository_evidence import (
+    RepositoryEvidence,
+    RepositoryEvidenceProvider,
     RepositoryTargetReference,
 )
 from control_plane.contracts.engineering_review_decision import (
@@ -35,11 +37,11 @@ from tests.test_engineering_review_run import _pending_record
 from tests.test_engineering_review_run import _authority
 
 
-class _Provider:
+class _Provider(RepositoryEvidenceProvider):
     def __init__(self, *paths: str) -> None:
         self.evidence = _repository_evidence(*paths)
 
-    def resolve(self, _target: RepositoryTargetReference):  # type: ignore[no-untyped-def]
+    def resolve(self, target: RepositoryTargetReference) -> RepositoryEvidence:
         return self.evidence
 
 

@@ -110,7 +110,7 @@ def handle_trusted_maintenance_github_webhook_request(
     except click.ClickException:
         return error(401, "invalid_signature", "GitHub webhook signature is invalid.")
     try:
-        payload = json.loads(payload_bytes.decode("utf-8"))
+        payload = json.loads(payload_bytes.decode())
     except (UnicodeDecodeError, json.JSONDecodeError):
         return error(400, "invalid_payload", "GitHub webhook body is invalid JSON.")
     if not isinstance(payload, dict):

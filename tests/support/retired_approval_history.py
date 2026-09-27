@@ -45,14 +45,12 @@ def _policy(
                 component="generic-web-runtime",
                 path_prefixes=("src/runtime",),
                 affected_products=(_product("generic-web-a"),),
-                review_tier="routine",
                 reason="Runtime code reaches one generic web product.",
             ),
             ChangeImpactComponentRule(
                 component="odoo-shared-addon",
                 path_prefixes=("addons/shared",),
                 affected_products=(_product("cm-odoo"), _product("opw-odoo")),
-                review_tier="routine",
                 reason="Shared addon reaches multiple Odoo products.",
             ),
             ChangeImpactComponentRule(
@@ -66,7 +64,6 @@ def _policy(
                 component="engineering-ci",
                 path_prefixes=(".github/workflows",),
                 affected_products=(),
-                review_tier="routine",
                 reason="CI-only engineering change has no product runtime effect.",
             ),
         ),

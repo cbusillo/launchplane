@@ -9795,7 +9795,7 @@ def create_launchplane_fastapi_app(
                     admission_store=admission_store,
                     admission_evaluator=LiveMergeAdmissionEvaluator(
                         store=record_store,
-                        repository_evidence_provider=(resolved_repository_evidence_provider),
+                        repository_evidence_provider=resolved_repository_evidence_provider,
                         technical_check_client=GitHubMergeTrainClient(
                             transport=UrllibMergeTrainGitHubTransport(
                                 token=token,

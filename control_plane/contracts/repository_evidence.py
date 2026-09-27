@@ -195,7 +195,7 @@ class RepositoryEvidence(BaseModel):
     @model_validator(mode="after")
     def _validate_evidence(self) -> "RepositoryEvidence":
         if self.schema_version != 1:
-            raise ValueError("Unsupported repository repository evidence schema version.")
+            raise ValueError("Unsupported repository evidence schema version.")
         if self.merge_commit_sha:
             object.__setattr__(
                 self,
@@ -203,10 +203,10 @@ class RepositoryEvidence(BaseModel):
                 _normalize_git_sha(self.merge_commit_sha, "merge_commit_sha"),
             )
         if not self.changed_files:
-            raise ValueError("repository repository evidence requires changed files")
+            raise ValueError("repository evidence requires changed files")
         paths = tuple(file.path for file in self.changed_files)
         if len(paths) != len(set(paths)):
-            raise ValueError("repository repository evidence paths must be unique")
+            raise ValueError("repository evidence paths must be unique")
         object.__setattr__(
             self,
             "changed_files",
