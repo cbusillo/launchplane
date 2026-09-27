@@ -251,6 +251,8 @@ def execute_odoo_post_deploy(
             post_deploy_readback_markers
         )
     except click.ClickException as error:
+        if isinstance(error, dokploy_post_deploy.OdooPostDeployReadbackFailure):
+            post_deploy_readback_markers = error.evidence
         if odoo_override_record is not None and override_should_apply:
             _write_odoo_instance_override_apply_result(
                 record_store=typed_record_store,

@@ -240,6 +240,33 @@ def _bounded_dokploy_evidence_id(value: str) -> str:
     return normalized_value
 
 
+class OdooPostDeployReadbackFailure(click.ClickException):
+    """Keep safe schedule evidence when maintenance readback refuses success."""
+
+    def __init__(self, message: str, *, evidence: Mapping[str, str]) -> None:
+        super().__init__(message)
+        self.evidence = {
+            key: value
+            for key, value in evidence.items()
+            if _safe_odoo_post_deploy_marker(key, value)
+        }
+        for key in ("schedule_id", "schedule_deployment_key", "schedule_deployment_id"):
+            value = _bounded_dokploy_evidence_id(evidence.get(key, ""))
+            if value:
+                self.evidence[key] = value
+
+
+def _safe_odoo_post_deploy_marker(key: str, value: str) -> bool:
+    if key in ODOO_POST_DEPLOY_BOOLEAN_READBACK_MARKERS:
+        return value in {"true", "false"}
+    return (
+        key in ODOO_POST_DEPLOY_NUMERIC_READBACK_MARKERS
+        and value.isascii()
+        and value.isdigit()
+        and len(value) <= 20
+    )
+
+
 def _retained_volume_inspection_provider_id(
     value: str,
     *,
@@ -582,10 +609,13 @@ def run_compose_post_deploy_update(
         deployment_id=completed_schedule_deployment_key,
         deployment=completed_schedule_deployment,
     )
-    if require_company_email and evidence.get("website_bootstrap_company_email_matches") != "true":
-        raise click.ClickException(
-            "Odoo post-deploy did not prove the requested website company sender was saved."
-        )
+    if require_company_email:
+        require_odoo_module_update_readback_evidence(evidence)
+        if evidence.get("website_bootstrap_company_email_matches") != "true":
+            raise OdooPostDeployReadbackFailure(
+                "Odoo post-deploy did not prove the requested website company sender was saved.",
+                evidence=evidence,
+            )
     return evidence
 
 
@@ -2018,17 +2048,7 @@ def extract_odoo_post_deploy_readback_markers(deployment: api.JsonObject | None)
             continue
         normalized_key = key.strip()
         normalized_value = raw_value.strip().lower()
-        if normalized_key not in ODOO_POST_DEPLOY_READBACK_MARKERS:
-            continue
-        if normalized_key in ODOO_POST_DEPLOY_BOOLEAN_READBACK_MARKERS and normalized_value not in {
-            "true",
-            "false",
-        }:
-            continue
-        if (
-            normalized_key in ODOO_POST_DEPLOY_NUMERIC_READBACK_MARKERS
-            and not normalized_value.isdigit()
-        ):
+        if not _safe_odoo_post_deploy_marker(normalized_key, normalized_value):
             continue
         markers[normalized_key] = normalized_value
     return markers
@@ -2036,8 +2056,9 @@ def extract_odoo_post_deploy_readback_markers(deployment: api.JsonObject | None)
 
 def require_odoo_module_update_readback_evidence(evidence: Mapping[str, str]) -> None:
     if evidence.get("log_available") != "true":
-        raise click.ClickException(
-            "Odoo module install/update evidence is unavailable from the provider schedule logs."
+        raise OdooPostDeployReadbackFailure(
+            "Odoo module install/update evidence is unavailable from the provider schedule logs.",
+            evidence=evidence,
         )
     missing_markers = tuple(
         marker
@@ -2045,9 +2066,10 @@ def require_odoo_module_update_readback_evidence(evidence: Mapping[str, str]) ->
         if evidence.get(marker) != "true"
     )
     if missing_markers:
-        raise click.ClickException(
+        raise OdooPostDeployReadbackFailure(
             "Odoo module install/update evidence did not prove the current runtime update: "
-            + ", ".join(missing_markers)
+            + ", ".join(missing_markers),
+            evidence=evidence,
         )
 
 

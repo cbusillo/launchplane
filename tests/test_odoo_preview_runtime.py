@@ -4,7 +4,7 @@ from email.message import Message
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import Iterator, Literal, cast
-from unittest.mock import ANY, patch
+from unittest.mock import ANY, Mock, patch
 from urllib.error import HTTPError, URLError
 
 import click
@@ -2306,6 +2306,65 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         self.assertNotIn("smoke_check", [step.name for step in result.steps])
         delete_domain.assert_not_called()
         delete_compose.assert_not_called()
+
+    def test_apply_preserves_failed_maintenance_evidence_without_running_smoke(self) -> None:
+        dry_run = build_odoo_preview_dokploy_dry_run(
+            request=OdooPreviewDokployDryRunRequest(
+                runtime_plan=_runtime_plan(target=_target()),
+                endpoint_spec=_endpoint_spec(),
+            )
+        )
+        failure = dokploy_post_deploy.OdooPostDeployReadbackFailure(
+            "Odoo module update did not complete.",
+            evidence={
+                "schedule_id": "schedule-example",
+                "schedule_deployment_id": "failed-update",
+                "log_available": "true",
+            },
+        )
+        with (
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.dokploy_source.read_dokploy_config",
+                return_value=("https://dokploy.example.test", "token"),
+            ),
+            patch.multiple(
+                dokploy_api,
+                fetch_dokploy_target_payload=Mock(
+                    return_value={
+                        "composeId": "compose-cm-pr-45",
+                        "environmentId": "env-cm-preview",
+                        "serverId": "server-nonprod",
+                    }
+                ),
+                update_dokploy_target_env=Mock(),
+                latest_deployment_for_target=Mock(return_value={"deploymentId": "before"}),
+                trigger_deployment=Mock(),
+                wait_for_target_deployment=Mock(),
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.dokploy_compose.sync_dokploy_compose_raw_source"
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.dokploy_compose.ensure_compose_web_domain_route",
+                return_value="domain-cm-pr-45",
+            ),
+            patch.object(
+                dokploy_post_deploy, "run_compose_post_deploy_update", side_effect=failure
+            ),
+            patch("control_plane.workflows.odoo_preview_runtime._wait_for_smoke_check") as smoke,
+        ):
+            result = execute_odoo_preview_dokploy_apply(
+                control_plane_root=Path("."),
+                request=OdooPreviewDokployApplyRequest(
+                    dry_run_plan=dry_run,
+                    image_reference="ghcr.io/example/site@sha256:abc123",
+                    environment_values=_environment_values(),
+                ),
+            )
+        self.assertEqual(result.status, "fail")
+        self.assertEqual(result.module_install_update_status, "fail")
+        self.assertEqual(result.module_install_update_evidence, failure.evidence)
+        smoke.assert_not_called()
 
     def test_apply_refresh_blocks_create_without_template_server_id(self) -> None:
         dry_run = build_odoo_preview_dokploy_dry_run(
