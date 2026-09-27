@@ -7,7 +7,9 @@ import unittest
 
 from fastapi import FastAPI, HTTPException
 
-from control_plane.change_impact_github import ChangeImpactRepositoryEvidenceError
+from control_plane.repository_evidence import (
+    RepositoryEvidenceError,
+)
 from control_plane.contracts.merge_train_policy import MERGE_TRAIN_POLICY_TARGETS_READ_ACTION
 from control_plane.contracts.governance_projection import GovernanceMergeReadinessFacet
 from control_plane.http_routes.governance_projection import (
@@ -230,7 +232,7 @@ class GovernanceProjectionHttpTests(unittest.IsolatedAsyncioTestCase):
     async def test_returns_503_when_repository_evidence_is_unavailable(self) -> None:
         class _UnavailableProvider:
             def resolve(self, target: object) -> object:
-                raise ChangeImpactRepositoryEvidenceError(f"unavailable: {target}")
+                raise RepositoryEvidenceError(f"unavailable: {target}")
 
         with TemporaryDirectory() as directory:
             store = _configured_store(directory)

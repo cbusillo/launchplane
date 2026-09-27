@@ -6,7 +6,9 @@ import unittest
 from unittest.mock import Mock
 
 from control_plane.contracts.merge_train_policy import MergeTrainGitHubTokenSource
-from control_plane.contracts.change_impact import ChangeImpactTargetReference
+from control_plane.contracts.repository_evidence import (
+    RepositoryTargetReference,
+)
 from control_plane.contracts.governance_projection import GovernanceMergeReadinessFacet
 from control_plane.contracts.merge_train_structural_provenance import (
     MergeTrainStackCollapseRootProof,
@@ -25,7 +27,7 @@ from tests.support.repository_evidence import (
 )
 
 
-TARGET = ChangeImpactTargetReference(repository=REPOSITORY, pull_request_number=2022)
+TARGET = RepositoryTargetReference(repository=REPOSITORY, pull_request_number=2022)
 NOW = "2026-08-12T05:00:00Z"
 
 
@@ -422,7 +424,7 @@ class GovernanceProjectionTests(unittest.TestCase):
             def __init__(self) -> None:
                 self.calls = 0
 
-            def resolve(self, target: ChangeImpactTargetReference) -> object:
+            def resolve(self, target: RepositoryTargetReference) -> object:
                 self.calls += 1
                 if self.calls > 1:
                     return _repository_evidence(head="c" * 40)

@@ -1,3 +1,5 @@
+"""Historical record compatibility; this module makes no approval decision."""
+
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -27,31 +29,6 @@ ManagerPreviewApprovalAction = Literal[
     "revoked",
     "superseded",
     "invalidated",
-]
-ManagerPreviewApprovalDecisionStatus = Literal[
-    "pending",
-    "approved",
-    "changes_requested",
-    "revoked",
-    "stale",
-    "unavailable",
-]
-ManagerPreviewApprovalReasonCode = Literal[
-    "approval_missing",
-    "approval_valid",
-    "changes_requested",
-    "approval_revoked",
-    "approval_stale",
-    "preview_inactive",
-    "serving_generation_missing",
-    "serving_generation_mismatch",
-    "generation_not_ready",
-    "generation_verification_failed",
-    "preview_identity_mismatch",
-    "artifact_identity_missing",
-    "runtime_identity_missing",
-    "runtime_identity_mismatch",
-    "policy_unavailable",
 ]
 ManagerPreviewApprovalEventWriteStatus = Literal["written", "replayed"]
 
@@ -285,36 +262,6 @@ class ManagerPreviewApprovalEventRecord(BaseModel):
         return self.authorization.policy_sha256 if self.authorization is not None else ""
 
 
-class ManagerPreviewApprovalDecision(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    schema_version: int = Field(default=1, ge=1)
-    status: ManagerPreviewApprovalDecisionStatus
-    reason_code: ManagerPreviewApprovalReasonCode
-    reason: str
-    current_binding_sha256: str = ""
-    event_id: str = ""
-    approval_id: str = ""
-    manager_github_id: int = Field(default=0, ge=0)
-    manager_login: str = ""
-    evaluated_at: str
-
-    @model_validator(mode="after")
-    def _validate_decision(self) -> "ManagerPreviewApprovalDecision":
-        if self.schema_version != 1:
-            raise ValueError("Unsupported manager preview approval decision schema version.")
-        self.reason = _required_token(self.reason, "reason")
-        self.evaluated_at = _normalize_utc_timestamp(self.evaluated_at, "evaluated_at")
-        for field_name in ("current_binding_sha256", "event_id", "approval_id", "manager_login"):
-            setattr(self, field_name, str(getattr(self, field_name)).strip())
-        if (
-            self.current_binding_sha256
-            and _SHA256_PATTERN.fullmatch(self.current_binding_sha256) is None
-        ):
-            raise ValueError("manager preview approval decision has invalid binding SHA-256")
-        return self
-
-
 def runtime_identity_sha256(identity: RuntimeIdentity) -> str:
     return _canonical_sha256(identity.model_dump(mode="json", exclude_none=True))
 
@@ -402,3 +349,7 @@ def _normalize_utc_timestamp(value: str, label: str) -> str:
 def _canonical_sha256(payload: object) -> str:
     canonical_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
+
+
+class ManagerPreviewApprovalEventConflictError(RuntimeError):
+    pass

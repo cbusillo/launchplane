@@ -15,11 +15,11 @@ from control_plane.contracts.ordinary_agent_snapshot import (
     OrdinaryAgentProviderRequestCounts,
     OrdinaryAgentRequiredCheck,
 )
-from control_plane.contracts.change_impact import (
-    ChangeImpactRepositoryEvidence,
-    ChangeImpactTarget,
-    ChangeImpactBaseEvidence,
-    ChangeImpactChangedFileEvidence,
+from control_plane.contracts.repository_evidence import (
+    RepositoryEvidence,
+    RepositoryTarget,
+    RepositoryBaseEvidence,
+    RepositoryChangedFileEvidence,
 )
 from control_plane.tenant_admission_controller import (
     TenantAdmissionTechnicalChecks,
@@ -279,8 +279,8 @@ class OrdinaryAgentLandingStorageTests(unittest.TestCase):
             ),
             evaluated_at=datetime.fromtimestamp(now - check_age_seconds, timezone.utc).isoformat(),
         )
-        repository = ChangeImpactRepositoryEvidence(
-            target=ChangeImpactTarget(
+        repository = RepositoryEvidence(
+            target=RepositoryTarget(
                 repository_id=str(preparation.target.repository_id),
                 repository_owner_id="202",
                 repository=preparation.target.repository,
@@ -288,8 +288,8 @@ class OrdinaryAgentLandingStorageTests(unittest.TestCase):
                 head_sha=preparation.entry.expected_head_sha,
                 tree_sha=preparation.entry.expected_head_tree_sha,
             ),
-            base=ChangeImpactBaseEvidence(base_ref="main", base_sha=preparation.expected_base_sha),
-            changed_files=(ChangeImpactChangedFileEvidence(path="control_plane/example.py"),),
+            base=RepositoryBaseEvidence(base_ref="main", base_sha=preparation.expected_base_sha),
+            changed_files=(RepositoryChangedFileEvidence(path="control_plane/example.py"),),
         )
         evidence = OrdinaryAgentLandingEvidence(
             repository_id=preparation.target.repository_id,

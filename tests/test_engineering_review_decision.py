@@ -4,7 +4,9 @@ import unittest
 from typing import Any
 from unittest.mock import patch
 
-from control_plane.contracts.change_impact import ChangeImpactTargetReference
+from control_plane.contracts.repository_evidence import (
+    RepositoryTargetReference,
+)
 from control_plane.contracts.engineering_review_decision import (
     EngineeringReviewDecisionRecord,
     EngineeringReviewDecisionRequest,
@@ -23,11 +25,10 @@ from control_plane.engineering_review_decision_service import (
     evaluate_engineering_review_decision,
 )
 from control_plane.engineering_review_service import create_engineering_review_runs
-from tests.test_change_impact import (
+from tests.support.retired_approval_history import (
     HEAD_SHA,
     REPOSITORY,
     TREE_SHA,
-    _policy,
     _repository_evidence,
 )
 from tests.test_engineering_review_run import _pending_record
@@ -38,7 +39,7 @@ class _Provider:
     def __init__(self, *paths: str) -> None:
         self.evidence = _repository_evidence(*paths)
 
-    def resolve(self, _target: ChangeImpactTargetReference):  # type: ignore[no-untyped-def]
+    def resolve(self, _target: RepositoryTargetReference):  # type: ignore[no-untyped-def]
         return self.evidence
 
 
@@ -81,7 +82,7 @@ class _Store:
         return self.work_request
 
     def list_change_impact_policy_records(self, **_filters):  # type: ignore[no-untyped-def]
-        return (_policy(),)
+        raise AssertionError("Retired approval policy must not influence engineering review.")
 
     def list_change_impact_stored_evidence(self, **_filters):  # type: ignore[no-untyped-def]
         return ()
@@ -145,7 +146,7 @@ def _completed_run(
 
 def _request() -> EngineeringReviewDecisionRequest:
     return EngineeringReviewDecisionRequest(
-        target=ChangeImpactTargetReference(repository=REPOSITORY, pull_request_number=20),
+        target=RepositoryTargetReference(repository=REPOSITORY, pull_request_number=20),
         work_request_id="work-request-20",
     )
 
@@ -182,7 +183,7 @@ class EngineeringReviewDecisionTests(unittest.TestCase):
                 repository_evidence_provider=_Provider(".github/workflows/ci.yml"),
             )
 
-    def test_routine_classification_schedules_only_one_review_run(self) -> None:
+    def test_review_schedules_independent_slots_without_path_classification(self) -> None:
         store = _Store()
         target = EngineeringReviewPullRequestTarget(
             repository=REPOSITORY,
@@ -203,10 +204,10 @@ class EngineeringReviewDecisionTests(unittest.TestCase):
                 created_at="2026-08-06T00:05:00Z",
             )
 
-        self.assertEqual(len(result.runs), 1)
+        self.assertEqual(len(result.runs), 2)
         self.assertEqual(result.runs[0].review_slot, 1)
 
-    def test_routine_change_requires_one_exact_approved_run(self) -> None:
+    def test_single_review_cannot_bypass_independent_review(self) -> None:
         store = _Store((_completed_run(slot=1, family="openai"),))
 
         record, created = evaluate_engineering_review_decision(
@@ -217,11 +218,13 @@ class EngineeringReviewDecisionTests(unittest.TestCase):
         )
 
         self.assertTrue(created)
-        self.assertEqual(record.status, "approved")
-        self.assertEqual(record.required_review_count, 1)
+        self.assertEqual(record.status, "pending")
+        self.assertEqual(record.required_review_count, 2)
+        self.assertEqual(record.schema_version, 2)
+        self.assertIsNone(record.change_impact_status)
         self.assertEqual(record.qualifying_run_ids, ("review-run-1-openai",))
 
-    def test_sensitive_change_requires_two_model_families(self) -> None:
+    def test_two_current_model_families_approve_without_retired_policy(self) -> None:
         store = _Store((_completed_run(slot=1, family="openai"),))
 
         record, _created = evaluate_engineering_review_decision(
@@ -257,6 +260,34 @@ class EngineeringReviewDecisionTests(unittest.TestCase):
 
         self.assertEqual(record.status, "blocked")
         self.assertEqual(record.qualifying_run_ids, ())
+
+    def test_current_decision_round_trip_rejects_retired_classification(self) -> None:
+        store = _Store(
+            (
+                _completed_run(slot=1, family="openai"),
+                _completed_run(slot=2, family="anthropic"),
+            )
+        )
+        record, _ = evaluate_engineering_review_decision(
+            store=store,
+            request=_request(),
+            repository_evidence_provider=_Provider("src/runtime/app.py"),
+        )
+        self.assertEqual(record.status, "approved")
+        self.assertEqual(
+            EngineeringReviewDecisionRecord.model_validate_json(record.model_dump_json()), record
+        )
+        payload = record.model_dump(exclude={"decision_id", "decision_binding_sha256"})
+        for changes in (
+            {"change_impact_status": "success"},
+            {"change_impact_policy_digest": "a" * 64},
+            {"required_review_count": 1},
+        ):
+            with (
+                self.subTest(changes=changes),
+                self.assertRaisesRegex(ValueError, "without retired classification"),
+            ):
+                EngineeringReviewDecisionRecord.model_validate(payload | changes)
 
     def test_identical_evidence_replays_despite_new_evaluation_time(self) -> None:
         store = _Store((_completed_run(slot=1, family="openai"),))

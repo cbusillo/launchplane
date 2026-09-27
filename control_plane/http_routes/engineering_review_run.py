@@ -35,7 +35,9 @@ from control_plane.engineering_review_service import (
     require_engineering_review_authority_store,
     require_engineering_review_run_create_store,
 )
-from control_plane.change_impact_service import ChangeImpactRepositoryEvidenceProvider
+from control_plane.contracts.repository_evidence import (
+    RepositoryEvidenceProvider,
+)
 from control_plane.http_routes.support import ApiRouteRegistrar, ReadRouteDependencies
 from control_plane.service_auth import LaunchplaneIdentity
 
@@ -170,7 +172,7 @@ class EngineeringReviewWriteRouteDependencies:
     http_error: Callable[..., Exception]
     error_response_model: type[BaseModel]
     target_resolver: EngineeringReviewTargetResolver
-    repository_evidence_provider: ChangeImpactRepositoryEvidenceProvider
+    repository_evidence_provider: RepositoryEvidenceProvider
 
 
 def _store(record_store: object) -> EngineeringReviewStore:

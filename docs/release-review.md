@@ -109,6 +109,6 @@ live activation. The CM baseline must be verified from deployed service records.
 
 Release decisions are persisted in `launchplane_release_review_decisions`, with
 file storage reserved for tests and rehearsal. Deployments must migrate the
-database before serving the new routes. This change does not retire the remaining
-merge-admission Owner/change-impact machinery; that is the following slice of
-the Owner-approval replacement.
+database before serving the new routes. The retired change-impact, product-Owner-policy, and manager-preview evaluators
+and administration routes are deleted. Their historical records remain readable
+and cannot satisfy this release gate.

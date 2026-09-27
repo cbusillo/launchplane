@@ -21,7 +21,7 @@ from control_plane.contracts.deployment_record import ResolvedTargetEvidence
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
-from control_plane.contracts.manager_preview_approval import (
+from control_plane.contracts.retired_manager_preview_approval import (
     MANAGER_PREVIEW_APPROVAL_READ_ACTION,
     MANAGER_PREVIEW_APPROVAL_WRITE_ACTION,
     ManagerPreviewApprovalEventRecord,
@@ -46,10 +46,8 @@ from control_plane.contracts.promotion_record import (
 )
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.contracts.ship_request import ShipRequest
-from control_plane.manager_preview_approval import record_manager_preview_approval_event
 from control_plane.service_auth import (
     GitHubActionsIdentity,
-    GitHubHumanIdentity,
     GitHubHumanPolicyRule,
     LaunchplaneAuthzPolicy,
 )
@@ -448,27 +446,12 @@ def _manager_generation() -> PreviewGenerationRecord:
 
 
 def _approve_manager_preview(store: _ManagerPromotionStore) -> None:
-    assert store.policy is not None
-    record_manager_preview_approval_event(
-        record_store=store,
-        identity=GitHubHumanIdentity(
-            login="manager",
-            github_id=101,
-            name="Example Manager",
-            email="",
-            organizations=frozenset(),
-            teams=frozenset(),
-            role="read_only",
-        ),
-        policy_record=store.policy,
-        product="atlas-commerce",
-        preview=store.preview,
-        generation=store.generation,
-        action="approved",
-        occurred_at="2026-07-15T08:56:00Z",
-        source_event_kind="github_issue_comment",
-        source_event_id="comment-approval-17",
+    # Serialized by the pre-retirement implementation; a historical approval
+    # must never satisfy the release gate.
+    record = ManagerPreviewApprovalEventRecord.model_validate_json(
+        (Path(__file__).parent / "fixtures/retired-approval/manager-event.json").read_text()
     )
+    store.write_manager_preview_approval_event_record(record)
 
 
 class ProductPromotionStatusTests(unittest.TestCase):

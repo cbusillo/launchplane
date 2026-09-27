@@ -334,39 +334,15 @@ operation or reconciliation key before invoking the provider, and complete only
 after durable local evidence is ready. A crash or timeout after key binding is
 an unknown outcome, not permission to retry the provider mutation.
 
-## Product Owner Policy Records
+## Retired Product Owner Policy Records
 
-Product/system Owner state is split across three independently revisioned
-records:
+Historical product/system Owner grants, requirements, and routing remain in
+`launchplane_product_owner_policies`, `launchplane_product_owner_requirements`,
+and `launchplane_product_owner_routing`. Their immutable payloads, digests,
+migrations, and archived authority-cutover rows remain readable. The retired
+evaluators and service routes are removed; these records cannot decide a merge
+or release. Current Owner identity comes from the product profile.
 
-- `ProductOwnerPolicyRecord` stores one or more human Owner grants. Each grant
-  binds an immutable provider subject identity to explicit repository and
-  environment sets. The only Owner class is `owner`, and quorum is one.
-- `ProductOwnerRequirementRecord` stores explicit action, repository, and
-  environment requirements. An Owner grant never implies that an action is
-  required.
-- `ProductOwnerRoutingRecord` stores preferred immutable identity IDs. The
-  record carries `authoritative=false`; preferred routing cannot grant or deny
-  Owner authority.
-
-All three streams use deterministic record IDs, canonical SHA-256 payload
-digests, active/superseded history, exact-next revision sequencing, predecessor
-links, and compare-and-swap expected-tip writes. Authority evaluation reports the
-current policy, requirement, and routing provenance. Matching requirements govern
-the exact Owner acceptance binding; preferred routing never grants authority.
-
-The authority-cutover migration archives exact pre-cutover requirement rows in
-`launchplane_product_owner_requirement_authority_migrations`. Runtime readers
-and writers do not consume that table. Each migrated scope receives an empty
-revision-1 baseline, intentionally resetting the executable revision stream
-while preserving the prior chain in the archive. The next supported write can
-append revision 2, so Owner actions cannot govern a repository until an operator
-supplies an explicit authoritative requirement.
-
-The PostgreSQL tables are `launchplane_product_owner_policies`,
-`launchplane_product_owner_requirements`, and
-`launchplane_product_owner_routing`. Migration `c1d2e3f4a5b6` creates these
-tables without inserting or inferring any owner data.
 
 ## Retired Owner Acceptance Event Records
 
@@ -382,30 +358,14 @@ indexes. No row, event id, binding digest, replay digest, or sequence is rewritt
 or deleted. Filesystem-to-PostgreSQL import rejects archives containing retired
 Owner events before writing anything. See [owner-acceptance.md](owner-acceptance.md).
 
-## Change Impact Policy Records
+## Retired Change Impact Policy Records
 
-`ChangeImpactPolicyRecord` stores repository-scoped component/path impact rules
-for authoritative pull-request classification. Each active revision binds the exact
-numeric GitHub repository ID, numeric owner ID, owner/name, component rules,
-affected product/system scopes, engineering review tier, source, reason,
-effective timestamp, predecessor, and canonical policy digest.
+Historical repository-scoped impact policies and audits retain their exact
+payloads and digests in `launchplane_change_impact_policies` and its audit store.
+Record contracts and storage compatibility remain; the classifier and policy
+service endpoints are deleted. Active merge admission reads Git identities
+independently and current engineering decisions use two authority-bound reviews.
 
-Evaluations are derived responses, not durable authority records in this slice.
-They bind the exact repository, pull request number, head SHA, tree SHA, policy
-revision, and policy digest. Unknown paths, missing dependency evidence,
-ambiguous stored evidence, stale provider or OIDC head binding, provider
-failure, or invalid policy history fail closed to non-success output with the
-stricter two-review engineering requirement. The active component policy may
-declare affected products directly. Additional dependency and reviewer evidence
-is read only from exact-target Launchplane records, and reviewer product claims
-require trusted same-component dependency evidence; missing extension evidence
-cannot be replaced by a caller assertion.
-
-Filesystem rehearsal records live under `launchplane_change_impact_policies/`.
-PostgreSQL uses `launchplane_change_impact_policies` with one active policy per
-repository, unique repository/revision history, and JSONB payload storage.
-Migration `d2e4f6a8b0c2` creates the empty table and indexes without inferring
-runtime product inventory from checked-in repository files.
 
 ## Transactional Outbox
 
@@ -2334,70 +2294,21 @@ run` is the foreground loop intended for an external process supervisor, and
   Launchplane API payloads, not as the final integration boundary external
   products are expected to couple to forever.
 
-## Manager Preview Approval Event Record
+## Retired Manager Preview Approval Event Record
 
-These records describe current compatibility behavior and must remain readable
-as historical evidence through migration and rollback. The reconciled target in
-issue `#2240` uses authoritative Owner-acceptance evidence from the trusted
-Launchplane Owner surface. New delivery admission must consume that Owner
-evidence through a separately authorized Launchplane job; a manager event cannot
-confer merge, deploy, configuration, secret, or policy authority. Retire current
-manager admission only after replacement coverage is proved, without deleting
-the append-only ledger.
+Historical manager events remain append-only in their existing filesystem and
+PostgreSQL stores. Payloads, event IDs, binding digests, and migrations are
+unchanged. Their evaluator, command parser, reconcile endpoint, and projection
+writer are deleted. Preview refresh/destroy no longer creates manager events.
+Current approval uses product review and the release checklist; manager history
+cannot satisfy either gate.
 
-- One append-only event per manager decision or lifecycle invalidation for an
-  exact rendered preview identity. Events use deterministic ids derived from
-  the exact binding, action, and source event so delivery retries replay without
-  overwriting history; a conflicting replay is rejected.
-- The binding captures product, context, repository, pull request, head SHA,
-  preview and serving-generation ids, artifact id and immutable image digest,
-  resolved manifest fingerprint, preview URL, and the full checked runtime
-  identity plus canonical runtime/binding digests.
-- Manager-authored `approved`, `changes_requested`, and `revoked` events require
-  a stable GitHub numeric identity and exactly one schema-v2 managed
-  authorization rule granting `manager_preview_approval.write` for the product
-  and context. The event stores the display login only as audit presentation and
-  records the managed rule ids plus authorization policy record id, revision,
-  source, and digest.
-- Lifecycle-authored `superseded` and `invalidated` events preserve teardown,
-  PR-close, generation-replacement, and related history without impersonating a
-  manager. Preview destroy and cleanup remain available independently of
-  approval and never consult approval as an admission gate.
-- The decision projection is computed from the append-only ledger and current
-  preview/generation/policy evidence. It returns `pending`, `approved`,
-  `changes_requested`, `revoked`, `stale`, or `unavailable` with a public-safe
-  reason. Any head, serving generation, artifact digest, manifest, runtime
-  identity, verification, preview state, or policy mismatch fails closed.
-- People-based manager resolution is private agent routing for communication and
-  planning only. It is not persisted in this record and is never runtime
-  authorization. Launchplane's active managed policy is the authority; GitHub
-  interaction and promotion-check projection are separate downstream adapters,
-  and tenant repositories own only their thin workflow integration.
-- Signed `issue_comment.created` delivery is the manager interaction adapter.
-  Launchplane re-fetches the comment actor and current pull-request head, then
-  accepts only an exact `/preview approve|changes|revoke <binding_sha256>`
-  command. Delivery replay returns the existing append-only event, while actor,
-  head, fingerprint, serving-generation, and policy mismatches write nothing.
-- `manager-preview-approval` is a GitHub status projection of this record, not
-  authority. Only the explicit operator reconcile route still writes it; preview
-  lifecycle routes and the webhook do not. That route updates only a marker
-  comment owned by the authenticated Launchplane credential and projects
-  `pending`, `success`, `failure`, or `error` on the current head. GitHub write failure never rewrites or deletes
-  approval evidence.
-- Preview refresh and verification routes reconcile the projection after their
-  durable record changes. Pull-request synchronize, reopen, close, preview-label
-  removal, isolated destroy, and managed-policy updates also re-project current
-  evidence. Destroy and cleanup proceed even when GitHub is unavailable; an
-  authenticated reconciliation request can retry the projection later.
-- Policy-scoped live promotion joins the testing artifact digest and source SHA
-  to exactly one active serving preview, includes the approval decision in the
-  promotion evidence fingerprint, and denies before provider mutation unless
-  the decision is `approved`. Removing the managed approval rule disables this
-  admission requirement without deleting event history.
+The configured `/v1/manager-preview-approval/github-webhook` URL and its existing
+bootstrap secret remain solely as a transport compatibility boundary for signed
+trusted-maintenance evidence. The receiver verifies the signature and ignores
+`issue_comment` commands; it cannot record approval or merge. No webhook,
+credential, runtime grant, or stored record is changed by this code retirement.
 
-The preceding promotion join is a current-runtime fact, not the target contract.
-Its replacement must bind the full accepted delivery evidence conservatively and
-use current Owner acceptance plus independent delivery authority.
 
 ## Launchplane Preview Enablement Record
 

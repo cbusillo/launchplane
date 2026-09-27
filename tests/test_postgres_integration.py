@@ -33,9 +33,11 @@ from control_plane.authz_candidate_preparation import (
     ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_SET_ID,
 )
 from control_plane.contracts.canonical_json import canonical_json_sha256
-from tests.test_change_impact import _policy as _change_impact_policy
-from tests.test_change_impact_policy_audit import _audit as _change_impact_audit
-from control_plane.contracts.change_impact_audit import ChangeImpactPolicyAuditedWriteResult
+from tests.support.retired_approval_history import _policy as _change_impact_policy
+from tests.support.retired_approval_history import _audit as _change_impact_audit
+from control_plane.contracts.retired_change_impact_audit import (
+    ChangeImpactPolicyAuditedWriteResult,
+)
 from control_plane.contracts.idempotency_record import (
     LaunchplaneIdempotencyRecord,
     build_launchplane_idempotency_record_id,
@@ -69,7 +71,7 @@ from tests.test_merge_train_historical_completion import (
     _provider_responses as _historical_provider_responses,
     seed_crowded_scoped_history,
 )
-from control_plane.contracts.manager_preview_approval import (
+from control_plane.contracts.retired_manager_preview_approval import (
     ManagerPreviewApprovalAuthorization,
     ManagerPreviewApprovalBinding,
     ManagerPreviewApprovalEventRecord,
@@ -175,7 +177,9 @@ from control_plane.contracts.repository_human_admission import (
     TenantTechnicalHumanWaiverBinding,
     TenantTechnicalHumanWaiverEventRecord,
 )
-from control_plane.manager_preview_approval import ManagerPreviewApprovalEventConflictError
+from control_plane.contracts.retired_manager_preview_approval import (
+    ManagerPreviewApprovalEventConflictError,
+)
 from control_plane.contracts.product_owner import (
     PRODUCT_OWNER_ROUTINE_REVIEW_MAX_AGE_SECONDS,
 )

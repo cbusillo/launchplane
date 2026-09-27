@@ -81,8 +81,12 @@ from control_plane import (
 from control_plane import secrets as control_plane_secrets
 from control_plane import service_status as control_plane_service_status
 from control_plane import live_target_runtime as control_plane_live_target_runtime
-from control_plane.change_impact_github import GitHubChangeImpactRepositoryEvidenceProvider
-from control_plane.change_impact_service import ChangeImpactRepositoryEvidenceProvider
+from control_plane.repository_evidence import (
+    GitHubRepositoryEvidenceProvider,
+)
+from control_plane.contracts.repository_evidence import (
+    RepositoryEvidenceProvider,
+)
 from control_plane.contracts.generic_web_deploy_recovery import (
     GenericWebDeployRecoveryProviderEvidenceResponse,
 )
@@ -141,16 +145,8 @@ from control_plane.http_routes import (
     EngineeringReviewWorkerIdentity,
     EngineeringReviewWriteRouteDependencies,
     GenericWebWriteRouteDependencies,
-    ChangeImpactReadRouteDependencies,
-    ChangeImpactWriteRouteDependencies,
-    CHANGE_IMPACT_EVALUATION_ROUTE,
-    CHANGE_IMPACT_POLICY_APPLY_ROUTE,
     PRIVILEGED_OPERATION_AGENT_PLANS_ROUTE,
     PRIVILEGED_OPERATION_PLANS_ROUTE,
-    PRODUCT_OWNER_POLICY_APPLY_ROUTE,
-    PRODUCT_OWNER_REQUIREMENT_APPLY_ROUTE,
-    PRODUCT_OWNER_ROUTING_APPLY_ROUTE,
-    ProductOwnerWriteRouteDependencies,
     ProductReviewRouteDependencies,
     PrivilegedOperationRouteDependencies,
     GovernanceProjectionRouteDependencies,
@@ -163,8 +159,6 @@ from control_plane.http_routes import (
     idempotency_scope as idempotency_scope,
     provider_operation_response_payload as _provider_operation_response_payload,
     register_agent_context_read_routes,
-    register_change_impact_read_routes,
-    register_change_impact_write_routes,
     register_deployment_promotion_read_routes,
     register_dokploy_target_inspect_read_routes,
     register_driver_descriptor_read_routes,
@@ -188,8 +182,6 @@ from control_plane.http_routes import (
     register_preview_notification_attempt_read_routes,
     register_preview_readiness_read_routes,
     register_preview_record_read_routes,
-    register_product_owner_read_routes,
-    register_product_owner_write_routes,
     register_product_config_status_read_routes,
     register_product_environment_read_routes,
     register_product_promotion_status_read_routes,
@@ -288,7 +280,6 @@ from control_plane.contracts.idempotency_record import (
     build_launchplane_idempotency_record_id,
     build_launchplane_mutation_reservation_id,
     complete_launchplane_mutation_reservation,
-    format_launchplane_mutation_timestamp,
 )
 from control_plane.http_routes.release_review import (
     ReleaseReviewRouteDependencies,
@@ -296,18 +287,7 @@ from control_plane.http_routes.release_review import (
 )
 from control_plane.release_review import current_release_review
 from control_plane.release_review_record import publish_release_decision
-from control_plane.contracts.manager_preview_approval import (
-    MANAGER_PREVIEW_APPROVAL_READ_ACTION,
-)
-from control_plane.contracts.manager_preview_approval_projection import (
-    ManagerPreviewApprovalReconcileEnvelope,
-)
-from control_plane.manager_preview_approval_github_webhook import (
-    MANAGER_PREVIEW_APPROVAL_RECONCILE_ROUTE,
-    MANAGER_PREVIEW_APPROVAL_WEBHOOK_ROUTE,
-    record_manager_preview_approval_invalidation_for_pr,
-    reconcile_manager_preview_approval_for_pr,
-)
+from control_plane.trusted_maintenance_github_webhook import TRUSTED_MAINTENANCE_WEBHOOK_ROUTE
 from control_plane.provider_operations import (
     DurableProviderMutationAdapter,
     DurableProviderOperationResult,
@@ -883,7 +863,7 @@ from control_plane.work_graph_service import (
 EveryCodeGitHubWebhookHandler = Callable[
     [bytes, str, str, str, object, FilePath, str], tuple[int, dict[str, object]]
 ]
-ManagerPreviewApprovalGitHubWebhookHandler = Callable[
+TrustedMaintenanceGitHubWebhookHandler = Callable[
     [bytes, str, str, str, object, FilePath, str], tuple[int, dict[str, object]]
 ]
 
@@ -974,16 +954,10 @@ _BOUNDED_REQUEST_BODY_CONTRACTS: dict[str, tuple[str, int, bool, bool]] = {
         False,
         True,
     ),
-    MANAGER_PREVIEW_APPROVAL_WEBHOOK_ROUTE: (
-        "Manager preview approval GitHub webhook",
+    TRUSTED_MAINTENANCE_WEBHOOK_ROUTE: (
+        "Trusted-maintenance GitHub webhook",
         _GITHUB_WEBHOOK_MAX_BODY_BYTES,
         False,
-        True,
-    ),
-    MANAGER_PREVIEW_APPROVAL_RECONCILE_ROUTE: (
-        "Manager preview approval reconciliation",
-        _PRODUCT_HEALTH_MONITORING_MAX_BODY_BYTES,
-        True,
         True,
     ),
     _PRODUCT_CONFIG_APPLY_ROUTE: (
@@ -1091,36 +1065,6 @@ _BOUNDED_REQUEST_BODY_CONTRACTS: dict[str, tuple[str, int, bool, bool]] = {
     TRUSTED_MAINTENANCE_POLICY_APPLY_ROUTE: (
         "Trusted-maintenance policy",
         _TRUSTED_MAINTENANCE_POLICY_MAX_BODY_BYTES,
-        True,
-        True,
-    ),
-    CHANGE_IMPACT_EVALUATION_ROUTE: (
-        "Change impact evaluation",
-        _CHANGE_IMPACT_EVALUATION_MAX_BODY_BYTES,
-        True,
-        True,
-    ),
-    CHANGE_IMPACT_POLICY_APPLY_ROUTE: (
-        "Change impact policy",
-        _CHANGE_IMPACT_POLICY_MAX_BODY_BYTES,
-        True,
-        True,
-    ),
-    PRODUCT_OWNER_POLICY_APPLY_ROUTE: (
-        "Product Owner policy",
-        _PRODUCT_OWNER_POLICY_MAX_BODY_BYTES,
-        True,
-        True,
-    ),
-    PRODUCT_OWNER_REQUIREMENT_APPLY_ROUTE: (
-        "Product Owner requirement",
-        _PRODUCT_OWNER_POLICY_MAX_BODY_BYTES,
-        True,
-        True,
-    ),
-    PRODUCT_OWNER_ROUTING_APPLY_ROUTE: (
-        "Product Owner routing",
-        _PRODUCT_OWNER_POLICY_MAX_BODY_BYTES,
         True,
         True,
     ),
@@ -1923,26 +1867,6 @@ class _OdooPreviewProviderMutationAdapter:
         reconciliation_key = self.reconciliation_key()
         return f"dokploy-provider-target:{hashlib.sha256(reconciliation_key.encode()).hexdigest()}"
 
-    def _destroy_invalidation_records(self) -> dict[str, object]:
-        provenance = self._issued_plan.plan_provenance
-        if provenance is None:
-            raise ValueError("Odoo preview destroy requires issued plan provenance.")
-        result = record_manager_preview_approval_invalidation_for_pr(
-            repository=self._profile.repository,
-            pr_number=self._issued_plan.plan_request.pr_number,
-            reason="The serving preview was destroyed.",
-            source_event_kind="preview_destroy",
-            source_event_id=f"odoo-preview-destroy:{provenance.plan_id}",
-            record_store=cast(Any, self._record_store),
-            occurred_at=format_launchplane_mutation_timestamp(provenance.issued_at),
-        )
-        return {
-            "manager_preview_approval_required": bool(result.get("required")),
-            "manager_preview_invalidation_event_status": string_value(
-                result.get("event_status") or ""
-            ),
-        }
-
     def _finalize_successful_result(
         self,
         driver_result: dict[str, object],
@@ -1954,11 +1878,6 @@ class _OdooPreviewProviderMutationAdapter:
             issued_plan=self._issued_plan,
             driver_result=driver_result,
             runtime_identity=self._runtime_identity,
-            before_destroy=(
-                self._destroy_invalidation_records
-                if self._issued_plan.operation == "destroy"
-                else None
-            ),
         )
         lifecycle_status = string_value(
             lifecycle_records.get("lifecycle_evidence_status") or ""
@@ -4004,16 +3923,14 @@ def create_launchplane_fastapi_app(
     work_graph_planning_facts_provider: WorkGraphPlanningFactsProvider | None = None,
     work_graph_issue_inbox_provider: WorkGraphIssueInboxProvider | None = None,
     work_graph_issue_inbox_reconcile_provider: WorkGraphIssueInboxReconcileProvider | None = None,
-    change_impact_repository_evidence_provider: (
-        ChangeImpactRepositoryEvidenceProvider | None
-    ) = None,
+    repository_evidence_provider: (RepositoryEvidenceProvider | None) = None,
     every_code_discord_sender: Callable[[str, dict[str, object]], object] = post_discord_webhook,
     preview_pr_feedback_discord_sender: Callable[
         [str, dict[str, object]], object
     ] = post_discord_webhook,
     every_code_github_webhook_handler: EveryCodeGitHubWebhookHandler | None = None,
-    manager_preview_approval_github_webhook_handler: (
-        ManagerPreviewApprovalGitHubWebhookHandler | None
+    trusted_maintenance_github_webhook_handler: (
+        TrustedMaintenanceGitHubWebhookHandler | None
     ) = None,
     engineering_review_target_resolver: EngineeringReviewTargetResolver | None = None,
     owner_review_status_publisher: OwnerReviewStatusPublisher | None = None,
@@ -4022,9 +3939,9 @@ def create_launchplane_fastapi_app(
         control_plane_root_path or FilePath(__file__).resolve().parent.parent
     )
     resolved_state_dir = state_dir or resolved_control_plane_root / "state"
-    resolved_change_impact_repository_evidence_provider = (
-        change_impact_repository_evidence_provider
-        or GitHubChangeImpactRepositoryEvidenceProvider(
+    resolved_repository_evidence_provider = (
+        repository_evidence_provider
+        or GitHubRepositoryEvidenceProvider(
             control_plane_root=resolved_control_plane_root,
             github_token=resolve_launchplane_github_token,
             github_api=github_api_request,
@@ -4808,7 +4725,7 @@ def create_launchplane_fastapi_app(
         )
         return JSONResponse(status_code=status_code, content=payload)
 
-    async def handle_manager_preview_approval_github_webhook(
+    async def handle_trusted_maintenance_github_webhook(
         request: Request,
         x_github_event: Annotated[str, Header(alias="X-GitHub-Event")] = "",
         x_github_delivery: Annotated[str, Header(alias="X-GitHub-Delivery")] = "",
@@ -4816,14 +4733,14 @@ def create_launchplane_fastapi_app(
         record_store: object = Depends(get_record_store),
     ) -> JSONResponse:
         trace_id = next_trace_id()
-        if manager_preview_approval_github_webhook_handler is None:
+        if trusted_maintenance_github_webhook_handler is None:
             raise _launchplane_http_error(
                 status_code=404,
                 trace_id=trace_id,
                 code="not_found",
-                message=f"No Launchplane route for {MANAGER_PREVIEW_APPROVAL_WEBHOOK_ROUTE}.",
+                message=f"No Launchplane route for {TRUSTED_MAINTENANCE_WEBHOOK_ROUTE}.",
             )
-        status_code, payload = manager_preview_approval_github_webhook_handler(
+        status_code, payload = trusted_maintenance_github_webhook_handler(
             await request.body(),
             x_github_event,
             x_github_delivery,
@@ -4833,68 +4750,6 @@ def create_launchplane_fastapi_app(
             trace_id,
         )
         return JSONResponse(status_code=status_code, content=payload)
-
-    async def reconcile_manager_preview_approval(
-        reconcile_request: ManagerPreviewApprovalReconcileEnvelope,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_browser_mutation_identity)],
-        record_store: Annotated[object, Depends(get_record_store)],
-    ) -> dict[str, object]:
-        trace_id = next_trace_id()
-        list_profiles = optional_callable_attribute(record_store, "list_product_profile_records")
-        if list_profiles is None:
-            raise _launchplane_http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="record_storage_unavailable",
-                message="Manager preview approval reconciliation requires product profile storage.",
-            )
-        profiles = tuple(
-            profile
-            for profile in list_profiles()
-            if profile.repository.strip().casefold() == reconcile_request.repository.casefold()
-        )
-        if len(profiles) != 1:
-            raise _launchplane_http_error(
-                status_code=404,
-                trace_id=trace_id,
-                code="not_found",
-                message="Manager preview approval product profile was not found.",
-            )
-        profile = profiles[0]
-        if not resolved_authz_policy_runtime.policy.allows(
-            identity=identity,
-            action=MANAGER_PREVIEW_APPROVAL_READ_ACTION,
-            product=profile.product,
-            context=profile.preview.context,
-            target=AuthorizationTarget(scope="context"),
-        ):
-            raise _launchplane_http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="authorization_denied",
-                message="Caller cannot reconcile manager preview approval for this product.",
-            )
-        try:
-            result = reconcile_manager_preview_approval_for_pr(
-                repository=reconcile_request.repository,
-                pr_number=reconcile_request.pr_number,
-                record_store=cast(Any, record_store),
-                control_plane_root=resolved_control_plane_root,
-            )
-        except (
-            click.ClickException,
-            FileNotFoundError,
-            LookupError,
-            TypeError,
-            ValueError,
-        ) as error:
-            raise _launchplane_http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="manager_preview_approval_unavailable",
-                message="Manager preview approval reconciliation could not complete.",
-            ) from error
-        return {"status": "ok", "trace_id": trace_id, "result": result}
 
     def read_every_code_work_request_worker_write_identity(
         authorization: Annotated[str, Header(alias="Authorization")] = "",
@@ -4956,22 +4811,7 @@ def create_launchplane_fastapi_app(
             bearer_identity_config or BearerIdentityConfig()
         ),
     )
-    product_owner_write_route_dependencies = ProductOwnerWriteRouteDependencies(
-        read_write_identity=read_write_identity,
-        get_record_store=get_record_store,
-        next_trace_id=next_trace_id,
-        authorization_allows=resolved_authz_policy_runtime.allows,
-        http_error=_launchplane_http_error,
-        error_response_model=LaunchplaneErrorResponse,
-    )
-    change_impact_write_route_dependencies = ChangeImpactWriteRouteDependencies(
-        read_write_identity=read_write_identity,
-        get_record_store=get_record_store,
-        next_trace_id=next_trace_id,
-        authorization_allows=resolved_authz_policy_runtime.allows,
-        http_error=_launchplane_http_error,
-        error_response_model=LaunchplaneErrorResponse,
-    )
+
     engineering_review_write_route_dependencies = EngineeringReviewWriteRouteDependencies(
         read_write_identity=read_write_identity,
         read_worker_identity=read_engineering_review_worker_identity,
@@ -4981,7 +4821,7 @@ def create_launchplane_fastapi_app(
         http_error=_launchplane_http_error,
         error_response_model=LaunchplaneErrorResponse,
         target_resolver=resolved_engineering_review_target_resolver,
-        repository_evidence_provider=resolved_change_impact_repository_evidence_provider,
+        repository_evidence_provider=resolved_repository_evidence_provider,
     )
     engineering_review_decision_route_dependencies = EngineeringReviewDecisionRouteDependencies(
         read_write_identity=read_write_identity,
@@ -4990,7 +4830,7 @@ def create_launchplane_fastapi_app(
         authorization_allows=resolved_authz_policy_runtime.allows,
         http_error=_launchplane_http_error,
         error_response_model=LaunchplaneErrorResponse,
-        repository_evidence_provider=resolved_change_impact_repository_evidence_provider,
+        repository_evidence_provider=resolved_repository_evidence_provider,
         github_app_token=lambda repository, repository_id: mint_repository_installation_token(
             identity=resolve_advisory_github_app_identity(
                 control_plane_root=resolved_control_plane_root
@@ -6134,7 +5974,7 @@ def create_launchplane_fastapi_app(
 
             admission_evaluator = LiveMergeAdmissionEvaluator(
                 store=record_store,
-                repository_evidence_provider=resolved_change_impact_repository_evidence_provider,
+                repository_evidence_provider=resolved_repository_evidence_provider,
                 technical_check_client=GitHubMergeTrainClient(
                     transport=UrllibMergeTrainGitHubTransport(
                         token=token,
@@ -9955,9 +9795,7 @@ def create_launchplane_fastapi_app(
                     admission_store=admission_store,
                     admission_evaluator=LiveMergeAdmissionEvaluator(
                         store=record_store,
-                        repository_evidence_provider=(
-                            resolved_change_impact_repository_evidence_provider
-                        ),
+                        repository_evidence_provider=(resolved_repository_evidence_provider),
                         technical_check_client=GitHubMergeTrainClient(
                             transport=UrllibMergeTrainGitHubTransport(
                                 token=token,
@@ -24103,12 +23941,12 @@ def create_launchplane_fastapi_app(
         },
     )
     app.add_api_route(
-        MANAGER_PREVIEW_APPROVAL_WEBHOOK_ROUTE,
-        handle_manager_preview_approval_github_webhook,
+        TRUSTED_MAINTENANCE_WEBHOOK_ROUTE,
+        handle_trusted_maintenance_github_webhook,
         methods=["POST"],
         status_code=202,
-        operation_id="handle_manager_preview_approval_github_webhook",
-        summary="Handle manager preview approval GitHub webhook",
+        operation_id="handle_trusted_maintenance_github_webhook",
+        summary="Capture signed trusted-maintenance GitHub evidence",
         responses={
             400: {"model": LaunchplaneErrorResponse},
             401: {"model": LaunchplaneErrorResponse},
@@ -24117,30 +23955,7 @@ def create_launchplane_fastapi_app(
             503: {"model": LaunchplaneErrorResponse},
         },
     )
-    app.add_api_route(
-        MANAGER_PREVIEW_APPROVAL_RECONCILE_ROUTE,
-        reconcile_manager_preview_approval,
-        methods=["POST"],
-        status_code=200,
-        operation_id="reconcile_manager_preview_approval",
-        summary="Reconcile manager preview approval projection",
-        responses={
-            403: {"model": LaunchplaneErrorResponse},
-            404: {"model": LaunchplaneErrorResponse},
-            413: {"model": LaunchplaneErrorResponse},
-            503: {"model": LaunchplaneErrorResponse},
-        },
-    )
 
-    register_product_owner_read_routes(app, dependencies=read_route_dependencies)
-    register_change_impact_read_routes(
-        app,
-        dependencies=ChangeImpactReadRouteDependencies(
-            common=read_route_dependencies,
-            read_evaluation_identity=read_bearer_identity,
-            repository_evidence_provider=resolved_change_impact_repository_evidence_provider,
-        ),
-    )
     register_release_review_routes(
         app,
         dependencies=ReleaseReviewRouteDependencies(
@@ -24201,7 +24016,7 @@ def create_launchplane_fastapi_app(
         app,
         dependencies=GovernanceProjectionRouteDependencies(
             common=read_route_dependencies,
-            repository_evidence_provider=resolved_change_impact_repository_evidence_provider,
+            repository_evidence_provider=resolved_repository_evidence_provider,
             current_readiness_provider=LiveGovernanceCurrentReadinessProvider(
                 github_token=lambda source, repository: resolve_merge_train_github_token(
                     source=source,
@@ -25521,14 +25336,6 @@ def create_launchplane_fastapi_app(
             http_error=_launchplane_http_error,
             error_response_model=LaunchplaneErrorResponse,
         ),
-    )
-    register_product_owner_write_routes(
-        app,
-        dependencies=product_owner_write_route_dependencies,
-    )
-    register_change_impact_write_routes(
-        app,
-        dependencies=change_impact_write_route_dependencies,
     )
 
     register_odoo_runtime_read_routes(

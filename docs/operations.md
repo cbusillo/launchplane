@@ -38,72 +38,18 @@ provider effect was attempted for the blocked entry and the controller lease is
 released cleanly. Earlier entries in a multi-PR batch may already be merged; the
 returned landing plan identifies their persisted status.
 
-## Change-Impact Policy Recovery
+## Retired Approval Policies
 
-Use the deployed service's `GET /v1/change-impact/policy` and existing
-`POST /v1/change-impact/policies/apply` policy-administrator operation; do not repair
-shared records through a local checkout or by first landing the blocked
-repository change. Fresh evaluation requires an effective active policy and
-never revives a superseded revision. A null `current_policy` with a nonzero
-`policy_history_count` signals unavailable current authority; it can also
-reflect invalid multiple-active history or no active record effective at the
-evaluation timestamp. Inspect the reason and timestamp before choosing a repair;
-passing an earlier evaluation time does not reconstruct historical authority.
-Normal apply rejects future-effective incoming records. The correction performs
-no backfill.
+Change-impact and product-Owner policy endpoints are removed. Do not repair
+retired policies to unblock delivery. Merge admission reads current Git and
+technical evidence; Owner approval belongs to the product review and release
+checklist. Historical policy/audit readers retain old payloads without making
+approval decisions. See [retired impact records](change-impact-policy.md).
 
-For a valid replacement, use the active tip's record ID and full digest as CAS
-preconditions in both dry-run and apply. Only an initial revision for a
-repository without history uses empty expected-tip fields. Existing history
-without a valid active tip needs a reviewed repair investigation; do not guess
-a superseded tip or treat it as a new repository. Dry-run validates the same
-preconditions without writing or activating anything. A stale precondition
-requires a fresh read and reviewed replacement, not an unconditional overwrite. The
-existing service authorization is required independently of repository CI or
-merge readiness; an authorization denial is not permission to add a grant.
-Follow [authorization authority](authorization-authority.md).
-
-The audited database write records the authenticated original writer in the
-same transaction as the policy CAS. The request body cannot supply that actor.
-Replay returns the original attribution; it does not credit a later caller.
-Superseding a revision preserves its original audit, and pre-existing records
-remain `legacy_unattributed` instead of receiving invented provenance. Policy
-content digests remain unchanged by the separate audit record. See
-[change-impact policy](change-impact-policy.md) for the audit and read contracts.
-Audited apply requires database storage. `attribution_unavailable` means a read
-cannot supply audit evidence; it is distinct from a database-backed historical
-record known to be `legacy_unattributed`.
-
-The shared Codex Launchplane helper exposes only the audit's record ID, digest,
-actor kind and timestamp. It omits writer subjects, workflow identity and the
-audit trace ID; its displayed timestamp is normalized to whole-second UTC without
-altering the stored original. See the maintained
-[helper response contract](https://github.com/cbusillo/codex-skills/blob/main/launchplane/references/write-action-helper-contract.md).
-When these API responses change, update the helper's explicit projection and
-response fixtures in the same workstream. Unknown response fields fail closed,
-including newly added optional fields; they are not silently passed through.
-
-`policy_coverage_incomplete` identifies pure unmatched-path gaps. Contradictory
-evidence retains `ambiguous_or_missing_evidence` even when coverage gaps also
-exist; the separate coverage data still reports those gaps. Samples are bounded
-and may be truncated by count or by shortening individual paths. Use the total
-count and truncation marker, and never copy a shortened sample as a rule prefix.
-Missing coverage means evaluation stopped before coverage was known,
-not that every path matched. Inspect the actual changed paths, selected rules
-and generator boundaries before proposing a policy revision; do not add a broad
-repository default merely to clear a diagnostic. Artifact drift checks remain
-independent of generated-component attribution.
-
-V2 classification remains unavailable for live apply while rollout
-qualification is pending. Dry-run validation and landed compatibility code do
-not migrate policies, upgrade historical reviews, or resume Owner-governance
-lifecycle work. Milestone 2 is owner-paused in
-[#2164](https://github.com/cbusillo/launchplane/issues/2164); resuming requires a
-new dated owner decision and the existing compatibility prerequisites. Lifecycle
-work in [#2162](https://github.com/cbusillo/launchplane/issues/2162) remains blocked
-by that pause. Required product reviews need fresh v2 human acceptance when that
-version is deliberately activated; engineering-only changes need no synthetic
-Owner action.
+The legacy manager webhook URL remains a signed trusted-maintenance transport.
+Manager commands and the manager reconcile endpoint are removed. No manager
+event authorizes a release, and preview destruction no longer writes such an
+event. Runtime grant contraction is separate from this code deletion.
 
 ## Repository Inventory
 
@@ -941,19 +887,11 @@ Owner identity directly. Do not introduce new GitHub-secret/workflow grants;
 use the native reviewed policy path for any separately authorized contraction.
 See [owner-acceptance.md](owner-acceptance.md).
 
-The manager-preview set above is current compatibility authority, not the issue
-`#2240` target. Preserve it only until Owner-acceptance replacement coverage and
-rollback are proved; do not extend it for the delegated-delivery pilot or treat
-it as merge, deploy, configuration, secret, or policy authority.
+The manager-preview and Product Owner policy-admin grant sets are retained
+runtime history, not active approval paths: their service evaluators and routes
+are removed. This code retirement creates no grant and performs no runtime
+contraction. Do not extend these sets or use them as delivery authority.
 
-`LAUNCHPLANE_AUTHZ_PRODUCT_OWNER_POLICY_ADMIN_MANAGED_SET_JSON` owns the
-dedicated local-operator policy administration boundary and must declare the
-exact `operator.product-owner-policy-admin` managed-set identity. Each rule
-binds one exact operator subject and token label to one exact product/system
-scope and exactly the Product Owner policy and requirement read/write actions.
-It cannot grant routing, deployment, production, secret, or unrelated policy
-authority. Use this set only to apply DB-backed Owner membership and requirement
-records through the deployed service with dry-run and compare-and-swap evidence.
 Generic-web preview caller
 grants are no longer sourced from a per-product repository secret. The
 typed product-onboarding planner derives repository identity, caller workflow

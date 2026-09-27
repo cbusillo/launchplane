@@ -16,7 +16,9 @@ after the effect boundary.
 New admissions record algorithm `merge-admission-v2`, which removes retired
 Owner/change-impact merge gates. Existing v1 admissions and landing outcomes
 remain immutable and readable. Site Owner review is recorded separately by the
-product-review and release-checklist paths.
+product-review and release-checklist paths. Repository evidence now comes from
+the independent Git evidence reader; admission never imports or calls the retired
+approval classifiers. Historical payload readers preserve prior record digests.
 
 Each batch entry is re-evaluated under the current repository/base controller
 lease immediately before its provider merge. The live adapter resolves current

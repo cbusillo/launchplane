@@ -8,16 +8,16 @@ import time
 from urllib.parse import quote
 
 from control_plane.ordinary_agent_repository_roles import OrdinaryRepositoryAdminObservation
-from control_plane.change_impact_github import (
-    ChangeImpactRepositoryEvidenceError,
+from control_plane.repository_evidence import (
+    RepositoryEvidenceError,
     read_github_authorship,
     read_github_changed_files,
 )
 from control_plane.contracts.canonical_json import canonical_json_sha256
-from control_plane.contracts.change_impact import (
-    ChangeImpactBaseEvidence,
-    ChangeImpactRepositoryEvidence,
-    ChangeImpactTarget,
+from control_plane.contracts.repository_evidence import (
+    RepositoryBaseEvidence,
+    RepositoryEvidence,
+    RepositoryTarget,
 )
 from control_plane.contracts.merge_train_batch import (
     MergeTrainBatchCandidateRecord,
@@ -155,8 +155,8 @@ def read_ordinary_agent_landing_evidence(
             )
             merge_commit = pr["mergeCommit"]
             entries.append(
-                ChangeImpactRepositoryEvidence(
-                    target=ChangeImpactTarget(
+                RepositoryEvidence(
+                    target=RepositoryTarget(
                         repository_id=str(target.repository_id),
                         repository_owner_id=str(repository_owner_id),
                         repository=candidate.repository,
@@ -169,7 +169,7 @@ def read_ordinary_agent_landing_evidence(
                     else _text(_object(merge_commit).get("oid")),
                     changed_files=changed_files,
                     authorship=authorship,
-                    base=ChangeImpactBaseEvidence(
+                    base=RepositoryBaseEvidence(
                         base_ref=_text(pr.get("baseRefName")),
                         base_sha=_text(pr.get("baseRefOid")),
                     ),
@@ -183,7 +183,7 @@ def read_ordinary_agent_landing_evidence(
                         repository_policy=repository_policy,
                     )
                 )
-    except (ChangeImpactRepositoryEvidenceError, ValueError, TypeError) as error:
+    except (RepositoryEvidenceError, ValueError, TypeError) as error:
         raise OrdinaryAgentProviderEvidenceError("landing_entry_evidence_malformed") from error
     confirm_landing_graphql(
         transport=transport,

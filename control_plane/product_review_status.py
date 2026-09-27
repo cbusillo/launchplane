@@ -13,9 +13,7 @@ from typing import Final, Literal
 from urllib.parse import quote, urlencode, urlsplit
 
 from control_plane.contracts.advisory_check_projection import OWNER_ACCEPTANCE_CHECK_NAME
-from control_plane.contracts.manager_preview_approval_projection import (
-    MANAGER_PREVIEW_APPROVAL_CHECK_NAME,
-)
+from control_plane.contracts.advisory_check_projection import MANAGER_PREVIEW_APPROVAL_CHECK_NAME
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductOwnerProfile,

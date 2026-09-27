@@ -26,9 +26,7 @@ checked-in defaults.
 Run creation accepts only `work_request_id`. Launchplane loads the stored
 `EveryCodeWorkRequestRecord`, requires its completed linked PR, resolves the
 exact current GitHub head and tree through authenticated server evidence, loads
-the one active authority, and creates deterministic pending assignments. Until
-integration issue #2001 consumes the server-derived classification foundation,
-creation always selects the first two contiguous, model-family-diverse slots.
+the one active authority, and creates deterministic pending assignments. Creation selects the first two contiguous, model-family-diverse slots.
 
 ## Worker lifecycle
 

@@ -4,9 +4,15 @@ from typing import Annotated
 
 from fastapi import Depends, Query
 
-from control_plane.change_impact_github import ChangeImpactRepositoryEvidenceError
-from control_plane.change_impact_service import ChangeImpactRepositoryEvidenceProvider
-from control_plane.contracts.change_impact import ChangeImpactTargetReference
+from control_plane.repository_evidence import (
+    RepositoryEvidenceError,
+)
+from control_plane.contracts.repository_evidence import (
+    RepositoryEvidenceProvider,
+)
+from control_plane.contracts.repository_evidence import (
+    RepositoryTargetReference,
+)
 from control_plane.contracts.engineering_review_decision import (
     ENGINEERING_REVIEW_DECISION_READ_ACTION,
 )
@@ -34,7 +40,7 @@ GOVERNANCE_PROJECTION_ROUTE = "/v1/governance/projection"
 @dataclass(frozen=True, slots=True)
 class GovernanceProjectionRouteDependencies:
     common: ReadRouteDependencies
-    repository_evidence_provider: ChangeImpactRepositoryEvidenceProvider
+    repository_evidence_provider: RepositoryEvidenceProvider
     current_readiness_provider: GovernanceCurrentReadinessProvider
     now: Callable[[], str]
 
@@ -85,7 +91,7 @@ def register_governance_projection_routes(
                 code="authorization_denied",
                 message="Caller cannot read every governance evidence facet.",
             )
-        target = ChangeImpactTargetReference(
+        target = RepositoryTargetReference(
             repository=repository,
             pull_request_number=pull_request_number,
         )
@@ -130,7 +136,7 @@ def register_governance_projection_routes(
             )
         try:
             repository_evidence = dependencies.repository_evidence_provider.resolve(target)
-        except (ChangeImpactRepositoryEvidenceError, LookupError, TypeError, ValueError):
+        except (RepositoryEvidenceError, LookupError, TypeError, ValueError):
             raise common.http_error(
                 status_code=503,
                 trace_id=trace_id,

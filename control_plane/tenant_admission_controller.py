@@ -14,9 +14,7 @@ from control_plane.contracts.advisory_check_projection import (
     OWNER_ACCEPTANCE_CHECK_NAME,
     is_launchplane_projected_check,
 )
-from control_plane.contracts.manager_preview_approval_projection import (
-    MANAGER_PREVIEW_APPROVAL_CHECK_NAME,
-)
+from control_plane.contracts.advisory_check_projection import MANAGER_PREVIEW_APPROVAL_CHECK_NAME
 from control_plane.contracts.merge_train_policy import MergeTrainMergeMethod
 from control_plane.contracts.tenant_merge_eligibility import (
     TenantMergeCandidate,

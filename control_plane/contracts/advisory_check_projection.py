@@ -94,3 +94,7 @@ class AdvisoryCheckProjectionResult(BaseModel):
 
 def is_launchplane_projected_check(name: str) -> bool:
     return name.strip().casefold() in LAUNCHPLANE_PROJECTED_CHECK_NAMES
+
+
+# Compatibility only: never an approval requirement.
+MANAGER_PREVIEW_APPROVAL_CHECK_NAME = "manager-preview-approval"

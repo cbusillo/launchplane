@@ -4,7 +4,9 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
-from control_plane.contracts.change_impact import ChangeImpactTarget
+from control_plane.contracts.repository_evidence import (
+    RepositoryTarget,
+)
 from control_plane.contracts.merge_admission_record import (
     MergeAdmissionRecord,
     MergeLandingOutcomeRecord,
@@ -177,7 +179,7 @@ class GovernanceProjection(BaseModel):
     mode: Literal["read_only_projection"] = "read_only_projection"
     authoritative: Literal[False] = False
     authorizes: tuple[str, ...] = ()
-    target: ChangeImpactTarget
+    target: RepositoryTarget
     owner_judgment: GovernanceOwnerJudgmentFacet | None = None
     merge_readiness: GovernanceMergeReadinessFacet
     merge_admission: GovernanceMergeAdmissionFacet

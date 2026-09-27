@@ -14,12 +14,9 @@ from sqlalchemy.exc import IntegrityError
 
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.contracts.product_owner import (
-    ProductOwnerActionContext,
-    ProductOwnerActorIdentity,
     ProductOwnerRequirement,
     ProductOwnerRequirementRecord,
 )
-from control_plane.product_owner_service import evaluate_product_owner_authority
 from control_plane.service_auth import LaunchplaneAuthzPolicy
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.storage.schema_adoption import (
@@ -1793,24 +1790,6 @@ class SchemaMigrationTests(unittest.TestCase):
         self.assertIsNone(current_record.supersedes_record_id)
         self.assertEqual(current_record.source, "migration:owner-authority-cutover")
         self.assertNotIn(current["requirement_digest"], {"a" * 64, "b" * 64})
-        evaluation = evaluate_product_owner_authority(
-            context=ProductOwnerActionContext(
-                product="example-site",
-                system="web",
-                repository_id="101",
-                environment="preview",
-                action="pull_request.owner_acceptance",
-            ),
-            actor=ProductOwnerActorIdentity(
-                provider="github",
-                provider_subject_id="1001",
-            ),
-            policies=(),
-            requirements=(current_record,),
-            routings=(),
-        )
-        self.assertEqual(evaluation.decision, "not_required")
-        self.assertEqual(evaluation.reason_code, "owner_action_not_required")
         self.assertEqual(successor_write, "written")
         self.assertEqual(len(active_after_write), 1)
         self.assertEqual(active_after_write[0].requirement_revision, 2)

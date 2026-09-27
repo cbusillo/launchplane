@@ -5,10 +5,12 @@ from dataclasses import dataclass
 from typing import Literal, Protocol, cast
 
 from control_plane.contracts.merge_train_policy import MergeTrainGitHubTokenSource
-from control_plane.change_impact_service import ChangeImpactRepositoryEvidenceProvider
-from control_plane.contracts.change_impact import (
-    ChangeImpactRepositoryEvidence,
-    ChangeImpactTargetReference,
+from control_plane.contracts.repository_evidence import (
+    RepositoryEvidenceProvider,
+)
+from control_plane.contracts.repository_evidence import (
+    RepositoryEvidence,
+    RepositoryTargetReference,
 )
 from control_plane.contracts.governance_projection import (
     GovernanceAdvisoryObservation,
@@ -54,7 +56,7 @@ class GovernanceCurrentReadinessProvider(Protocol):
         self,
         *,
         store: object,
-        repository_evidence: ChangeImpactRepositoryEvidence,
+        repository_evidence: RepositoryEvidence,
         base_branch: str,
         evaluated_at: str,
         github_token_source: MergeTrainGitHubTokenSource,
@@ -76,7 +78,7 @@ class GovernanceMergeTrainReadStore(Protocol):
 class LiveGovernanceCurrentReadinessProvider:
     github_token: Callable[[MergeTrainGitHubTokenSource, str], str]
     evaluator_factory: Callable[
-        [object, ChangeImpactRepositoryEvidenceProvider, str],
+        [object, RepositoryEvidenceProvider, str],
         object,
     ] = lambda store, provider, token: LiveMergeAdmissionEvaluator(
         store=store,
@@ -90,7 +92,7 @@ class LiveGovernanceCurrentReadinessProvider:
         self,
         *,
         store: object,
-        repository_evidence: ChangeImpactRepositoryEvidence,
+        repository_evidence: RepositoryEvidence,
         base_branch: str,
         evaluated_at: str,
         github_token_source: MergeTrainGitHubTokenSource,
@@ -223,12 +225,12 @@ class LiveGovernanceCurrentReadinessProvider:
 def build_governance_projection(
     *,
     store: object,
-    repository_evidence_provider: ChangeImpactRepositoryEvidenceProvider,
+    repository_evidence_provider: RepositoryEvidenceProvider,
     current_readiness_provider: GovernanceCurrentReadinessProvider,
-    target: ChangeImpactTargetReference,
+    target: RepositoryTargetReference,
     base_branch: str,
     generated_at: str,
-    repository_evidence: ChangeImpactRepositoryEvidence | None = None,
+    repository_evidence: RepositoryEvidence | None = None,
     github_token_source: MergeTrainGitHubTokenSource | None = None,
 ) -> GovernanceProjection:
     resolved_repository_evidence = repository_evidence or repository_evidence_provider.resolve(
@@ -294,9 +296,9 @@ def build_governance_projection(
 
 @dataclass(frozen=True, slots=True)
 class _ResolvedRepositoryEvidenceProvider:
-    evidence: ChangeImpactRepositoryEvidence
+    evidence: RepositoryEvidence
 
-    def resolve(self, target: ChangeImpactTargetReference) -> ChangeImpactRepositoryEvidence:
+    def resolve(self, target: RepositoryTargetReference) -> RepositoryEvidence:
         if (
             target.repository.lower() != self.evidence.target.repository.lower()
             or target.pull_request_number != self.evidence.target.pull_request_number
@@ -308,7 +310,7 @@ class _ResolvedRepositoryEvidenceProvider:
 def _admission_target_status(
     *,
     admission: MergeAdmissionRecord | None,
-    repository_evidence: ChangeImpactRepositoryEvidence,
+    repository_evidence: RepositoryEvidence,
 ) -> Literal["current", "historical", "none"]:
     if admission is None:
         return "none"

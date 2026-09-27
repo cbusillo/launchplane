@@ -298,16 +298,6 @@ export type ChangeImpactCoverage = {
     unmatched_path_samples: Array<string>;
 };
 
-export type ChangeImpactTarget = {
-    head_sha: string;
-    pull_request_number: number;
-    repository: string;
-    repository_id: string;
-    repository_owner_id: string;
-    schema_version: number;
-    tree_sha: string;
-};
-
 export type DataProvenance = {
     detail: string;
     freshness_status: 'verified' | 'recorded' | 'stale' | 'missing' | 'unsupported';
@@ -711,7 +701,7 @@ export type GovernanceProjection = {
     mode: 'read_only_projection';
     owner_judgment: GovernanceOwnerJudgmentFacet | null;
     schema_version: 1;
-    target: ChangeImpactTarget;
+    target: RepositoryTarget;
 };
 
 export type GovernanceProjectionResponse = {
@@ -3675,6 +3665,16 @@ export type RepoProductMappingResponse = {
     };
     status: 'ok';
     trace_id: string;
+};
+
+export type RepositoryTarget = {
+    head_sha: string;
+    pull_request_number: number;
+    repository: string;
+    repository_id: string;
+    repository_owner_id: string;
+    schema_version: number;
+    tree_sha: string;
 };
 
 export type ResolvedTargetEvidence = {

@@ -7,7 +7,9 @@ from typing import Literal
 from pydantic import Field, field_validator, model_validator
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
-from control_plane.contracts.change_impact import ChangeImpactRepositoryEvidence
+from control_plane.contracts.repository_evidence import (
+    RepositoryEvidence,
+)
 from control_plane.contracts.ordinary_agent import (
     OrdinaryAgentPullRequest,
     OrdinaryAgentTarget,
@@ -216,8 +218,8 @@ class OrdinaryAgentLandingEvidence(StrictFrozenModel):
     repository: str = Field(min_length=3, max_length=512)
     base_ref: str = Field(min_length=1, max_length=255)
     base_identity: OrdinaryAgentCommitIdentity
-    repository_evidence: ChangeImpactRepositoryEvidence
-    candidate_entry_evidence: tuple[ChangeImpactRepositoryEvidence, ...] = Field(
+    repository_evidence: RepositoryEvidence
+    candidate_entry_evidence: tuple[RepositoryEvidence, ...] = Field(
         min_length=1, max_length=MAX_ORDINARY_LANDING_ENTRIES
     )
     snapshot: MergeTrainDryRunSnapshot

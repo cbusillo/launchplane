@@ -15,7 +15,9 @@ from control_plane.ordinary_agent_landing_evidence import (
     OrdinaryAgentLandingRepositoryEvidenceProvider,
     OrdinaryAgentLandingEvidenceMismatch,
 )
-from control_plane.contracts.change_impact import ChangeImpactTargetReference
+from control_plane.contracts.repository_evidence import (
+    RepositoryTargetReference,
+)
 from control_plane.tenant_admission_controller import TenantAdmissionTechnicalChecks
 from control_plane.merge_train import MergeTrainDryRunSnapshot, MergeTrainPullRequestSnapshot
 from tests.support.repository_evidence import _repository_evidence
@@ -130,7 +132,7 @@ class OrdinaryAgentLandingEvidenceTests(unittest.TestCase):
         provider = OrdinaryAgentLandingRepositoryEvidenceProvider(observed)
         self.assertEqual(
             provider.resolve(
-                ChangeImpactTargetReference(
+                RepositoryTargetReference(
                     repository=previous.target.repository,
                     pull_request_number=previous.target.pull_request_number,
                 )
@@ -140,7 +142,7 @@ class OrdinaryAgentLandingEvidenceTests(unittest.TestCase):
         self.assertEqual(observed.snapshot, evidence.snapshot)
         with self.assertRaises(OrdinaryAgentLandingEvidenceMismatch):
             provider.resolve(
-                ChangeImpactTargetReference(
+                RepositoryTargetReference(
                     repository=previous.target.repository,
                     pull_request_number=previous.target.pull_request_number + 1,
                 )
