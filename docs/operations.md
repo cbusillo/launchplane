@@ -2340,7 +2340,14 @@ mark-apply` require `--allow-direct-db-mutation` before they persist local DB
   is refused. Before any provider write, replacement refuses missing required
   compose inputs or override secrets, undeclared existing compose options, and
   undeclared provider-only environment settings, preventing silent loss of
-  application configuration. Discarded provider entries are counted without recording
+  application configuration. Read-only replacement planning checks compose
+  declarations against both live key names and DB-backed runtime/target records.
+  Upstream-restore plans also require declarations for local/upstream filestore
+  and source settings and any configured `OPENUPGRADE_*` options, so filtering
+  cannot silently disable a requested migration. Planning does not decrypt
+  managed secrets or prove their values: execution rechecks declarations,
+  required values, secret safety, and provider-only entries before its first
+  provider write. Discarded provider entries are counted without recording
   potentially sensitive malformed key names. Product-scoped runtime sync uses
   the same key selection for incoming values but merges into the provider env;
   replacement rebuilds it and removes unknown entries.
