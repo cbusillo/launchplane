@@ -41,6 +41,7 @@ from control_plane.merge_admission import (
     MergeAdmissionReconciliationRequiredError,
 )
 from control_plane.merge_train_admission import build_merge_train_controller_status_read_model
+from control_plane.merge_train_github import MergeTrainGitHubMergeRejectedError
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.test_merge_readiness import (
@@ -937,6 +938,29 @@ class GuardedMergeAdmissionScenarioTests(unittest.TestCase):
         self.assertEqual(rejected.status, "rejected")
         self.assertNotEqual(first.admission_id, second.admission_id)
         self.assertEqual(second.attempt_sequence, 2)
+
+    def test_diagnosed_refusal_preserves_provider_rejection_and_attempt_trace(self) -> None:
+        guard = self._guard()
+        admission = self._admit(guard)
+        error = MergeTrainGitHubMergeRejectedError(
+            pull_request_number=admission.pull_request_number, head_behind_base=True
+        )
+
+        outcome = guard.record_provider_failure(
+            admission=admission, error=error, observed_at="2026-08-11T03:02:00Z"
+        )
+        stored = self.store.list_merge_landing_outcome_records(admission_id=admission.admission_id)[
+            0
+        ]
+
+        self.assertEqual(stored, outcome)
+        self.assertEqual(stored.status, "rejected")
+        self.assertEqual(stored.provider_status_code, 405)
+        self.assertTrue(stored.provider_effect_attempted)
+        self.assertTrue(stored.provider_conclusive_rejection)
+        self.assertTrue(admission.source.endswith(guard.trace_id))
+        self.assertTrue(stored.source.endswith(guard.trace_id))
+        self.assertIn("behind its base", stored.provider_message)
 
 
 if __name__ == "__main__":

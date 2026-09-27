@@ -64,6 +64,24 @@ class MergeTrainGitHubStaleHeadError(MergeTrainGitHubError):
     """Raised when GitHub state no longer matches guarded merge evidence."""
 
 
+class MergeTrainGitHubMergeRejectedError(MergeTrainGitHubError):
+    """A conclusive merge refusal with bounded, separately observed diagnosis."""
+
+    def __init__(self, *, pull_request_number: int, head_behind_base: bool) -> None:
+        self.pull_request_number = pull_request_number
+        self.refusal_diagnosis = "head_behind_base" if head_behind_base else "unconfirmed"
+        diagnosis = (
+            "The same PR head is behind its base; refresh the branch and wait for fresh checks "
+            "before submitting it to the train again."
+            if head_behind_base
+            else "Reread the PR's merge requirements before another attempt."
+        )
+        super().__init__(
+            f"GitHub refused to merge PR #{pull_request_number} (HTTP 405). {diagnosis}",
+            status_code=405,
+        )
+
+
 HistoricalCompletionProofStatus = Literal["unsupported", "indeterminate"]
 HistoricalCompletionProofReason = Literal[
     "plan_invalid",
@@ -830,7 +848,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                     "Pull request head tree moved outside the batch landing plan.",
                     status_code=409,
                 )
-            self._validate_open_landing_pull_request(
+            head_behind_base = self._validate_open_landing_pull_request(
                 repository_path=repository_path,
                 entry=entry,
                 expected_base_ref=landing_plan.base_branch,
@@ -846,6 +864,12 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 observed_pull_request_state="open",
                 observed_at=recorded_at,
             )
+            if head_behind_base:
+                raise MergeAdmissionDeniedError(
+                    f"PR #{entry.pull_request_number} is behind its base; refresh the branch and "
+                    "wait for fresh checks before submitting it to the train again.",
+                    reason_code="pull_request_head_behind_base",
+                )
             if checkpoint is not None:
                 checkpoint(
                     _validated_model_update(
@@ -1308,7 +1332,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         expected_base_ref: str,
         expected_base_sha: str,
         expected_base_tree_sha: str,
-    ) -> None:
+    ) -> bool:
         pull_request = _json_object(
             self.transport.request(
                 method="GET",
@@ -1354,6 +1378,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 raise MergeTrainGitHubStaleHeadError(
                     "Target base branch moved outside the batch landing plan.", status_code=409
                 )
+        return pull_request.get("mergeable_state") == "behind"
 
     def add_pull_request_label(
         self, *, repository: str, pull_request_number: int, label: str
@@ -1389,14 +1414,36 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         merge_method: MergeTrainMergeMethod,
     ) -> str:
         repository_path = _repository_path(repository)
-        payload = self.transport.request(
-            method="PUT",
-            path=f"/repos/{repository_path}/pulls/{pull_request_number}/merge",
-            body={
-                "sha": _required_value(head_sha, "Pull request head SHA is required."),
-                "merge_method": merge_method,
-            },
-        )
+        expected_head_sha = _required_value(head_sha, "Pull request head SHA is required.")
+        try:
+            payload = self.transport.request(
+                method="PUT",
+                path=f"/repos/{repository_path}/pulls/{pull_request_number}/merge",
+                body={"sha": expected_head_sha, "merge_method": merge_method},
+            )
+        except MergeTrainGitHubError as error:
+            if error.status_code != 405:
+                raise
+            head_behind_base = False
+            try:
+                observed = self.transport.request(
+                    method="GET",
+                    path=f"/repos/{repository_path}/pulls/{pull_request_number}",
+                )
+            except Exception:  # noqa: BLE001 - diagnosis cannot erase the confirmed merge refusal
+                observed = None
+            if isinstance(observed, dict):
+                head = observed.get("head")
+                head_behind_base = (
+                    observed.get("number") == pull_request_number
+                    and observed.get("state") == "open"
+                    and isinstance(head, dict)
+                    and head.get("sha") == expected_head_sha
+                    and observed.get("mergeable_state") == "behind"
+                )
+            raise MergeTrainGitHubMergeRejectedError(
+                pull_request_number=pull_request_number, head_behind_base=head_behind_base
+            ) from error
         if not isinstance(payload, dict):
             raise MergeTrainGitHubError(
                 "GitHub merge response must be a JSON object.", status_code=None
