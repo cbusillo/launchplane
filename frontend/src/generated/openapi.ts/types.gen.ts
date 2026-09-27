@@ -2469,6 +2469,7 @@ export type ProductConfigRuntimeEnvironmentRecordSummary = {
     env_keys: Array<string>;
     env_value_count: number;
     instance: string;
+    retired_provider_keys: Array<string>;
     scope: 'global' | 'context' | 'instance';
     source_label: string;
     updated_at: string;
@@ -2482,6 +2483,8 @@ export type ProductConfigRuntimeEnvironmentResult = {
     instance: string;
     keys: Array<string>;
     record?: ProductConfigRuntimeEnvironmentRecordSummary | null;
+    retired_provider_keys_after: Array<string>;
+    retired_provider_keys_before: Array<string>;
     scope: 'global' | 'context' | 'instance';
     unchanged_keys: Array<string>;
 };
@@ -3698,6 +3701,7 @@ export type RuntimeEnvironmentRecord = {
         [key: string]: string | number | number | boolean;
     };
     instance: string;
+    retired_provider_keys: Array<string>;
     schema_version: number;
     scope: 'global' | 'context' | 'instance';
     source_label: string;

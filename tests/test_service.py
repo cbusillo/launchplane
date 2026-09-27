@@ -7050,6 +7050,8 @@ class LaunchplaneServiceTests(unittest.TestCase):
                         context="sellyouroutboard",
                         instance="prod",
                         env={"GOOGLE_ANALYTICS_MEASUREMENT_ID": "G-9KRMER45KG"},
+                        schema_version=2,
+                        retired_provider_keys=("LEGACY_PASSWORD",),
                         updated_at="2026-05-06T17:00:00Z",
                         source_label="test",
                     )
@@ -7088,7 +7090,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                             ],
                             "products": ["sellyouroutboard"],
                             "contexts": ["sellyouroutboard"],
-                            "actions": ["live_target_runtime.apply"],
+                            "actions": ["live_target_runtime.plan", "live_target_runtime.apply"],
                         }
                     ]
                 }
@@ -7111,7 +7113,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             captured_env_updates: list[dict[str, object]] = []
 
             def fetch_target_payload(**_kwargs: object) -> dict[str, object]:
-                env_text = "CONTACT_EMAIL_MODE=resend\n"
+                env_text = "CONTACT_EMAIL_MODE=resend\nLEGACY_PASSWORD=never-log-this-password\n"
                 if captured_env_updates:
                     env_text = str(captured_env_updates[-1]["env_text"])
                 return {
@@ -7138,6 +7140,25 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     side_effect=lambda **kwargs: captured_env_updates.append(kwargs),
                 ),
             ):
+                review_status, review = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/live-target-runtime/apply",
+                    payload={
+                        "schema_version": 1,
+                        "mode": "dry-run",
+                        "product": "sellyouroutboard",
+                        "context": "sellyouroutboard",
+                        "instance": "prod",
+                    },
+                )
+                self.assertEqual(review_status, 202)
+                self.assertEqual(
+                    review["result"]["runtime_environment"]["retired_keys_present"],
+                    ["LEGACY_PASSWORD"],
+                )
+                self.assertEqual(captured_env_updates, [])
+                self.assertNotIn("never-log-this-password", json.dumps(review))
                 status_code, payload = _invoke_app(
                     app,
                     method="POST",
@@ -7157,6 +7178,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
         env_text = str(captured_env_updates[0]["env_text"])
         self.assertIn("GOOGLE_ANALYTICS_MEASUREMENT_ID=G-9KRMER45KG", env_text)
         self.assertNotIn("G-9KRMER45KG", json.dumps(payload))
+        self.assertNotIn("never-log-this-password", json.dumps(payload))
+        self.assertNotIn("LEGACY_PASSWORD", env_text)
+        self.assertIn("CONTACT_EMAIL_MODE=resend", env_text)
         result = payload["result"]
         self.assertEqual(result["mode"], "apply")
         self.assertTrue(result["apply"]["env_updated"])

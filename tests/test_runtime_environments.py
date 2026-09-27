@@ -289,6 +289,129 @@ class _FakeRuntimeEnvironmentStore:
 
 
 class RuntimeEnvironmentTests(unittest.TestCase):
+    def test_provider_retirement_is_reviewable_preserved_and_instance_scoped(self) -> None:
+        store = _FakeProductConfigStore()
+        testing = RuntimeEnvironmentRecord(
+            scope="instance",
+            context="sample",
+            instance="testing",
+            env={"APP_MODE": "private-setting"},
+            updated_at="2026-09-27T00:00:00Z",
+        )
+        production = testing.model_copy(update={"instance": "prod"})
+        store.write_runtime_environment_record(testing)
+        store.write_runtime_environment_record(production)
+        payload: dict[str, object] = {
+            "schema_version": 2,
+            "product": "sample",
+            "context": "sample",
+            "instance": "testing",
+            "runtime_env": {"retired_provider_keys": ["LEGACY_PASSWORD", "OLD_BUILD_REF"]},
+        }
+        review = control_plane_product_config.apply_product_config_bundle(
+            record_store=store,
+            payload=payload,
+            mode="dry-run",
+            actor="operator",
+            source_label="test",
+        )
+        summary = cast(dict[str, object], review["runtime_environment"])
+        self.assertEqual(summary["retired_provider_keys_before"], [])
+        self.assertEqual(
+            summary["retired_provider_keys_after"], ["LEGACY_PASSWORD", "OLD_BUILD_REF"]
+        )
+        self.assertNotIn("private-setting", json.dumps(review))
+        self.assertEqual(store.list_runtime_environment_records(), (testing, production))
+        control_plane_product_config.apply_product_config_bundle(
+            record_store=store,
+            payload=payload,
+            mode="apply",
+            actor="operator",
+            source_label="test",
+        )
+        self.assertEqual(
+            control_plane_runtime_environments.retired_provider_keys_from_store(
+                record_store=store,
+                context_name="sample",
+                instance_name="testing",
+            ),
+            {"LEGACY_PASSWORD", "OLD_BUILD_REF"},
+        )
+        self.assertEqual(
+            control_plane_runtime_environments.retired_provider_keys_from_store(
+                record_store=store,
+                context_name="sample",
+                instance_name="prod",
+            ),
+            set(),
+        )
+        updated_payload = {**payload, "schema_version": 1, "runtime_env": {"APP_MODE": "updated"}}
+        control_plane_product_config.apply_product_config_bundle(
+            record_store=store,
+            payload=updated_payload,
+            mode="apply",
+            actor="operator",
+            source_label="test",
+        )
+        updated = store.list_runtime_environment_records(
+            context_name="sample", instance_name="testing"
+        )[0]
+        self.assertEqual(updated.retired_provider_keys, ("LEGACY_PASSWORD", "OLD_BUILD_REF"))
+        self.assertEqual(updated.env, {"APP_MODE": "updated"})
+        control_plane_product_config.apply_product_config_bundle(
+            record_store=store,
+            payload={**payload, "runtime_env": {"retired_provider_keys": []}},
+            mode="apply",
+            actor="operator",
+            source_label="test",
+        )
+        cleared = store.list_runtime_environment_records(
+            context_name="sample", instance_name="testing"
+        )[0]
+        self.assertNotIn("retired_provider_keys", cleared.model_dump())
+        self.assertEqual(
+            store.list_runtime_environment_records(context_name="sample", instance_name="prod"),
+            (production,),
+        )
+
+    def test_provider_retirement_rejects_old_clients_conflicts_and_unbounded_scope(self) -> None:
+        store = _FakeProductConfigStore()
+        store.write_runtime_environment_record(
+            RuntimeEnvironmentRecord(
+                scope="instance",
+                context="sample",
+                instance="testing",
+                env={"APP_MODE": "testing"},
+                updated_at="2026-09-27T00:00:00Z",
+            )
+        )
+        base: dict[str, object] = {
+            "schema_version": 2,
+            "product": "sample",
+            "context": "sample",
+            "instance": "testing",
+            "runtime_env": {"retired_provider_keys": ["LEGACY_PASSWORD"]},
+        }
+        for invalid in (
+            {**base, "schema_version": 1},
+            {**base, "instance": ""},
+            {**base, "runtime_env": {"retired_provider_keys": ["APP_MODE"]}},
+            {
+                **base,
+                "runtime_env": {"retired_provider_keys": ["LEGACY_PASSWORD", "LEGACY_PASSWORD"]},
+            },
+            {**base, "runtime_env": {"retired_provider_keys": ["BAD\nSECRET_FRAGMENT"]}},
+        ):
+            with self.subTest(payload=invalid):
+                with self.assertRaises(control_plane_product_config.ProductConfigError):
+                    control_plane_product_config.apply_product_config_bundle(
+                        record_store=store,
+                        payload=invalid,
+                        mode="dry-run",
+                        actor="operator",
+                        source_label="test",
+                    )
+
     def test_environments_apply_live_target_command_is_retired(self) -> None:
         result = CliRunner().invoke(
             main,

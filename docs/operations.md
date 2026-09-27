@@ -2143,6 +2143,25 @@ return a typed blocked result rather than guessing a domain.
   product-config apply as a record mutation only until that next action has
   been dry-run and applied through `/v1/live-target-runtime/apply`; redeploying
   the same app image does not sync the live Dokploy target environment.
+- To retire obsolete provider environment keys, submit product-config
+  `schema_version: 2` with an instance-scoped
+  `runtime_env.retired_provider_keys` list. It replaces the complete retirement
+  list for that exact context/instance; omission preserves the current list and
+  `[]` clears the intent. Version 1 rejects a supplied retirement list so older
+  services cannot silently discard a destructive request. Existing runtime
+  values are preserved. Dry-run reports the before/after key names without
+  reading or returning retired secret values. The normal matching dry-run,
+  authorization, idempotency and atomic stale-write guards apply.
+  Declared application settings and protected database, volume and identity
+  keys cannot be retired. Apply changes records only. The subsequent native
+  live-target runtime sync removes exactly those names, preserves other
+  provider entries, and verifies their absence before an optional deploy.
+  Odoo target replacement honors the same reviewed intent while continuing to
+  refuse every unreviewed provider-only key. Both consumers recheck retirement
+  intent and application declarations before writing. Clearing intent does not
+  restore removed values; recovery requires a separately reviewed application
+  configuration or managed secret update. Do not roll the service back to a
+  version that cannot read nonempty version-2 runtime records.
 - `POST /v1/secrets/reencrypt` is a legacy migration boundary, not a shared or
   production root-rotation path. It always refuses `mode: "dry-run"` with
   `privileged_operation_planning_required` and `mode: "apply"` with

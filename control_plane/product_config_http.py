@@ -33,6 +33,7 @@ class ProductConfigRuntimeInput(BaseModel):
     context: str | None = None
     instance: str | None = None
     env: dict[str, ScalarValue] = Field(default_factory=dict)
+    retired_provider_keys: tuple[str, ...] | None = None
 
 
 class ProductConfigSecretInput(BaseModel):
@@ -127,6 +128,7 @@ class ProductConfigRuntimeEnvironmentRecordSummary(BaseModel):
     source_label: str
     env_keys: list[str]
     env_value_count: int = Field(ge=0)
+    retired_provider_keys: list[str] = Field(default_factory=list)
 
 
 class ProductConfigRuntimeEnvironmentResult(BaseModel):
@@ -140,6 +142,8 @@ class ProductConfigRuntimeEnvironmentResult(BaseModel):
     changed_keys: list[str]
     unchanged_keys: list[str]
     env_value_count_after: int = Field(ge=0)
+    retired_provider_keys_before: list[str] = Field(default_factory=list)
+    retired_provider_keys_after: list[str] = Field(default_factory=list)
     record: ProductConfigRuntimeEnvironmentRecordSummary | None = Field(
         default=None,
         json_schema_extra={"x-launchplane-optional-response": True},
