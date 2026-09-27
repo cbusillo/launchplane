@@ -1181,7 +1181,6 @@ def _advance_active_landing_record(
                 github_client=github_client,
                 candidate_store=candidate_store,
                 candidate_record=admission_guard.candidate_record,
-                repository_policy=repository_policy,
                 lease=lease,
                 trace_id=trace_id,
                 recorded_at=recorded_at,
@@ -1349,6 +1348,10 @@ def _retire_changed_policy_landing(
             "expected_effect_sha": plan.candidate_sha,
         },
     )
+    if plan.candidate_pull_request_number is not None:
+        _close_service_batch_pull_request(
+            github_client=github_client, candidate_record=candidate_record, lease=lease
+        )
     retired_record = build_merge_train_batch_landing_plan_record(
         landing_plan=stale_merge_train_landing_plan(plan),
         source=f"service:controller:policy-changed-landing:{trace_id}",
@@ -1602,6 +1605,43 @@ def _advance_without_active_landing(
             repository=request.repository,
             base_branch=request.base_branch,
         )
+    candidate_record = active_candidate_record or passed_candidate_record
+    if (
+        candidate_record is not None
+        and candidate_record.ordinary_job_binding is None
+        and candidate_record.candidate.policy_key == repository_policy.policy_key
+        and candidate_record.candidate.policy_sha256 != policy_sha256
+    ):
+        if request.mutate:
+            lease.checkpoint(
+                active_action="reflow_candidate",
+                active_phase="retire_changed_policy_candidate",
+                active_record_id=candidate_record.record_id,
+                active_pull_request_number=None,
+            )
+            _close_service_batch_pull_request(
+                github_client=github_client, candidate_record=candidate_record, lease=lease
+            )
+            _supersede_active_merge_train_batch_candidate_records(
+                record_store=candidate_store,
+                repository=request.repository,
+                base_branch=request.base_branch,
+                batch_id=candidate_record.candidate.batch_id,
+                replacement_record_id=None,
+            )
+        return _advance_without_candidate_record(
+            request=request,
+            policy=policy,
+            policy_sha256=policy_sha256,
+            repository_policy=repository_policy,
+            transport=transport,
+            github_client=github_client,
+            trace_id=trace_id,
+            recorded_at=recorded_at,
+            candidate_store=candidate_store,
+            stack_collapse_store=stack_collapse_store,
+            lease=lease,
+        )
     if active_candidate_record is not None:
         return _advance_active_candidate_record(
             request=request,
@@ -1652,7 +1692,6 @@ def _close_service_batch_pull_request(
     *,
     github_client: GitHubMergeTrainClient,
     candidate_record: MergeTrainBatchCandidateRecord,
-    repository_policy: MergeTrainRepositoryPolicy,
     lease: MergeTrainControllerLeaseContext,
 ) -> None:
     candidate = candidate_record.candidate
@@ -1660,7 +1699,6 @@ def _close_service_batch_pull_request(
         candidate_record.ordinary_job_binding is None
         and len(candidate.entries) > 1
         and candidate.candidate_sha
-        and repository_policy.merge_method == "merge"
     ):
         lease.checkpoint(active_phase="close_batch_pull_request")
         github_client.close_batch_pull_request(candidate=candidate)
@@ -1671,7 +1709,6 @@ def _fail_service_batch_candidate(
     github_client: GitHubMergeTrainClient,
     candidate_store: MergeTrainBatchCandidateRecordStore,
     candidate_record: MergeTrainBatchCandidateRecord,
-    repository_policy: MergeTrainRepositoryPolicy,
     lease: MergeTrainControllerLeaseContext,
     trace_id: str,
     recorded_at: str,
@@ -1679,7 +1716,6 @@ def _fail_service_batch_candidate(
     _close_service_batch_pull_request(
         github_client=github_client,
         candidate_record=candidate_record,
-        repository_policy=repository_policy,
         lease=lease,
     )
     failed_record = build_merge_train_batch_candidate_record(
@@ -1721,7 +1757,6 @@ def _advance_active_candidate_record(
             _close_service_batch_pull_request(
                 github_client=github_client,
                 candidate_record=active_candidate_record,
-                repository_policy=repository_policy,
                 lease=lease,
             )
             lease.checkpoint(
@@ -1902,7 +1937,6 @@ def _advance_active_candidate_record(
             _close_service_batch_pull_request(
                 github_client=github_client,
                 candidate_record=active_candidate_record,
-                repository_policy=repository_policy,
                 lease=lease,
             )
         updated_candidate_record = build_merge_train_batch_candidate_record(
@@ -1985,7 +2019,6 @@ def _reflow_stale_candidate_record(
             _close_service_batch_pull_request(
                 github_client=github_client,
                 candidate_record=candidate_record,
-                repository_policy=repository_policy,
                 lease=lease,
             )
             _supersede_active_merge_train_batch_candidate_records(
@@ -2114,7 +2147,6 @@ def _advance_passed_candidate_record(
                 github_client=github_client,
                 candidate_store=candidate_store,
                 candidate_record=passed_candidate_record,
-                repository_policy=repository_policy,
                 lease=lease,
                 trace_id=trace_id,
                 recorded_at=recorded_at,
@@ -2126,7 +2158,11 @@ def _advance_passed_candidate_record(
                 "controller_action": "candidate_failed",
                 "merge_train_batch_candidate_record_id": failed_record.record_id,
                 "candidate": failed_record.candidate.model_dump(mode="json"),
-                "error": {"code": "merge_train_github_stale_state", "message": str(error)},
+                "error": {
+                    "code": "merge_train_github_stale_state",
+                    "message": "The recorded batch PR changed; this candidate was retired.",
+                },
+                "details": {"github_status_code": error.status_code},
             }
     landing_plan = build_merge_train_batch_landing_plan(
         candidate=passed_candidate_record.candidate,

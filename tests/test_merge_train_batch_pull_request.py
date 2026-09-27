@@ -88,7 +88,10 @@ class _BatchProvider:
         if method == "POST" and path.endswith("/pulls"):
             assert body is not None
             assert isinstance(body["body"], str)
+            if self.created:
+                self.number += 1
             self.created = True
+            self.closed = False
             self.body = body["body"]
             return self.pull_request(self.number)
         if method == "GET" and "/pulls/" in path:
@@ -164,6 +167,10 @@ class _BatchGuard:
         for number in self.admissions:
             if self.outcomes.get(number) != "landed":
                 self.outcomes[number] = "rejected"
+
+    @staticmethod
+    def build_proposal(**_kwargs: Any) -> None:
+        pass
 
     def admit(self, **kwargs: Any) -> Any:
         number = kwargs["entry"].pull_request_number
@@ -321,6 +328,40 @@ class ProtectedBatchPullRequestTests(unittest.TestCase):
         with self.assertRaises(MergeAdmissionReconciliationRequiredError):
             self.client.close_batch_pull_request(candidate=self.provider.candidate)
         self.assertFalse(any(r[0] == "PATCH" for r in self.provider.requests))
+
+    def test_retirement_handles_mutable_batch_pr_drift(self) -> None:
+        original = self.provider.pull_request
+        for changed in ("head", "body", "draft", "base"):
+            with self.subTest(changed=changed):
+                self.provider.closed = False
+
+                def altered(number: int) -> dict[str, object]:
+                    payload = original(number)
+                    if number == self.provider.number:
+                        if changed in {"head", "base"}:
+                            nested = payload[changed]
+                            assert isinstance(nested, dict)
+                            nested["sha" if changed == "head" else "ref"] = "changed"
+                        else:
+                            payload[changed] = True if changed == "draft" else "Edited body"
+                    return payload
+
+                with patch.object(self.provider, "pull_request", side_effect=altered):
+                    with self.assertRaises(MergeTrainGitHubStaleHeadError):
+                        self.client.ensure_batch_pull_request(candidate=self.provider.candidate)
+                    self.client.close_batch_pull_request(candidate=self.provider.candidate)
+                self.assertTrue(self.provider.closed)
+        self.assertEqual(self.provider.merge_calls, [])
+
+    def test_rebuilt_candidate_does_not_reuse_an_old_closed_pr(self) -> None:
+        self.provider.closed = True
+        self.provider.body = self.provider.body.replace(
+            self.provider.candidate.candidate_sha, "older-sha"
+        )
+        number = self.client.ensure_batch_pull_request(candidate=self.provider.candidate)
+        self.assertEqual(number, 100)
+        self.assertFalse(self.provider.closed)
+        self.assertEqual(len([r for r in self.provider.requests if r[0] == "POST"]), 2)
 
     def test_pending_checks_do_not_hide_a_changed_member(self) -> None:
         self.provider.checks_pass = False

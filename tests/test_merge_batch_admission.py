@@ -2,17 +2,26 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
+from unittest.mock import patch
 
 from control_plane.contracts.merge_admission_record import MergeBatchNoEffectEvidence
 from control_plane.contracts.merge_train_batch import build_merge_train_batch_landing_plan
+from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
 from control_plane.merge_admission import (
     GuardedMergeAdmission,
+    MergeAdmissionDeniedError,
     MergeAdmissionReconciliationRequiredError,
 )
 from control_plane.merge_train_github import GitHubMergeTrainClient
+from control_plane.merge_train import MergeTrainDryRunSnapshot
+from control_plane.merge_train_controller_run_once import (
+    MergeTrainControllerRunOnceEnvelope,
+    execute_merge_train_controller_with_client,
+)
 from tests.test_merge_train_batch_pull_request import _BatchProvider
 from control_plane.storage.filesystem import FilesystemRecordStore
 from tests import test_merge_admission_rolling_checks as rolling_fixtures
+from tests.test_merge_admission_live import _queued_pull_request
 
 
 class ProtectedBatchGuardTests(unittest.TestCase):
@@ -117,6 +126,102 @@ class ProtectedBatchGuardTests(unittest.TestCase):
         )
         self.assertTrue(all(outcome.status == "landed" for outcome in outcomes))
         self.assertEqual({outcome.merge_commit_sha for outcome in outcomes}, {provider.merge_sha})
+
+    def test_unready_second_member_does_not_append_prefix_admissions_each_pass(self) -> None:
+        fixture = self.fixture
+
+        class BlockedSecond:
+            @staticmethod
+            def evaluate(**kwargs: Any) -> Any:
+                position = kwargs["entry"].position
+                return fixture._evaluate(
+                    after_first_landing=False,
+                    target_position=position,
+                    base_tree=fixture.plan.entries[0].recorded_candidate_parent_tree_sha,
+                    conclusion="failure" if position == 2 else "success",
+                )
+
+        self.guard.evaluator = BlockedSecond()
+        provider = _BatchProvider(fixture.candidate_record.candidate)
+        provider.number = 9000
+        client = GitHubMergeTrainClient(transport=provider)
+        client.ensure_batch_pull_request(candidate=provider.candidate)
+
+        def checkpoint(_plan: Any, entry: Any, _phase: str) -> None:
+            fixture.controller = fixture.controller.model_copy(
+                update={"active_pull_request_number": entry.pull_request_number}
+            )
+            self.store.write_merge_train_controller_state_record(fixture.controller)
+
+        for _ in range(2):
+            with self.assertRaises(MergeAdmissionDeniedError):
+                client.land_batch_candidate(
+                    landing_plan=fixture.plan,
+                    admission_guard=self.guard,
+                    recorded_at="2026-08-11T03:02:00Z",
+                    checkpoint=checkpoint,
+                )
+        self.assertEqual(self.store.list_merge_admission_records(), ())
+        self.assertEqual(self.store.list_merge_landing_outcome_records(), ())
+        self.assertEqual(provider.merge_calls, [])
+
+    def test_policy_change_to_squash_retires_pending_and_planned_batch_prs(self) -> None:
+        candidate = self.fixture.candidate_record.candidate
+        payload = self.fixture.policy.model_dump(mode="json")
+        payload["policy"]["policies"][0]["merge_method"] = "squash"
+        payload["policy_sha256"] = ""
+        policy = MergeTrainPolicyRecord.model_validate(payload)
+        snapshot = MergeTrainDryRunSnapshot(
+            repository=candidate.repository,
+            base_branch="main",
+            base_sha=candidate.base_sha,
+            pull_requests=tuple(
+                _queued_pull_request(
+                    number=entry.pull_request_number,
+                    head_sha=entry.head_sha,
+                    created_at="2026-08-11T01:00:00Z",
+                )
+                for entry in candidate.entries
+            ),
+        )
+        for planned in (False, True):
+            with self.subTest(planned=planned), TemporaryDirectory() as directory:
+                store = FilesystemRecordStore(Path(directory))
+                store.write_merge_train_batch_candidate_record(self.fixture.candidate_record)
+                if planned:
+                    store.write_merge_train_batch_landing_plan_record(self.fixture.landing_record)
+                provider = _BatchProvider(candidate)
+                provider.number = 9000
+                client = GitHubMergeTrainClient(transport=provider)
+                client.ensure_batch_pull_request(candidate=candidate)
+                with patch.object(client, "read_merge_train_snapshot", return_value=snapshot):
+                    result = execute_merge_train_controller_with_client(
+                        request=MergeTrainControllerRunOnceEnvelope(
+                            repository=candidate.repository, mutate=True
+                        ),
+                        policy=policy.policy,
+                        policy_sha256=policy.policy_sha256,
+                        repository_policy=policy.policy.policies[0],
+                        github_client=client,
+                        trace_id="policy-change",
+                        recorded_at="2026-08-11T03:03:00Z",
+                        candidate_store=store,
+                        landing_store=store,
+                        stack_collapse_store=store,
+                        controller_state_store=store,
+                        admission_store=store,
+                        admission_evaluator=self.guard.evaluator,
+                    )
+                self.assertEqual(
+                    result.accepted_result["controller_action"],
+                    "retire_stale_landing" if planned else "plan_candidate",
+                )
+                self.assertTrue(provider.closed)
+                self.assertEqual(provider.merge_calls, [])
+                self.assertEqual(store.list_merge_admission_records(), ())
+                self.assertEqual(
+                    store.list_merge_train_controller_state_records()[0].status, "idle"
+                )
 
     def test_both_real_admissions_persist_before_one_shared_no_effect_reconciliation(self) -> None:
         admissions = [self.admit(1), self.admit(2)]

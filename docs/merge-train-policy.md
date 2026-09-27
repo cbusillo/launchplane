@@ -361,8 +361,12 @@ normal candidate wait. Retries find the same exact ref/head binding and never
 recreate a closed batch PR as a hidden fallback.
 
 Closed, failed, or superseded candidates are terminal for that exact queue.
-Before abandoning one, the service closes only its bound, unmerged batch PR;
-source PRs and all branches remain intact. A changed member or base reflows to a
+Before abandoning one, the service closes unmerged PRs on its exact generated
+candidate ref, including PRs whose head, body, draft flag, or base was edited;
+source PRs and all branches remain intact. Historical closed PRs from another
+candidate SHA do not prevent a rebuilt candidate from getting its own PR. Policy
+changes also retire the prior batch PR, including a change to squash or rebase.
+A changed member or base reflows to a
 new candidate without retaining a reconciliation fence. Landing rechecks member
 identity before waiting on checks, so a pending or failed check cannot hide a
 new source head. A manually closed batch PR is not automatically reopened.
@@ -370,7 +374,9 @@ Change or remove the queued source entries to build a replacement; an unchanged
 failed candidate remains visibly failed rather than being rebuilt in a loop.
 
 The landing plan binds `candidate_pull_request_number` into its immutable
-digest. Every constituent receives fresh admission against the same unchanged
+digest. The controller evaluates every constituent before appending the first
+admission, so an unready later member does not grow rejected-prefix records on
+every pass. Every constituent receives fresh admission against the same unchanged
 base before one SHA-guarded provider merge of the batch PR. The controller's
 provider checkpoint records that shared PR and all constituent admission IDs.
 Afterward, it verifies the merge parents and tested tree, protected-base
@@ -414,6 +420,11 @@ cannot be established, the controller retains the fence and never retires that
 effect as unused. Current recovery requires matching provider evidence; there is
 no automatic service disposition for permanently contradictory source heads.
 Operator diagnostics cover every unresolved member of the shared effect.
+An out-of-controller merge without preceding admissions, or after conclusive
+rejection of the recorded attempt, likewise remains fenced even when Git proves
+the code landed. It does not retroactively acquire a Launchplane admission. The
+generated PR explicitly instructs operators to let the controller merge it and
+to leave its generated branch unchanged.
 
 ### Stacked Pull Requests
 

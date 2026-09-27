@@ -75,9 +75,9 @@ def _validate_batch_pull_request(
     return pull_request
 
 
-def _find_batch_pull_request(
+def _candidate_pull_requests(
     *, client: GitHubMergeTrainClient, candidate: MergeTrainBatchCandidate
-) -> object | None:
+) -> list[dict[str, object]]:
     branch = _candidate_branch(
         repository=candidate.repository,
         base_branch=candidate.base_branch,
@@ -87,11 +87,71 @@ def _find_batch_pull_request(
     owner = candidate.repository.split("/", maxsplit=1)[0]
     pulls = client.transport.request(
         method="GET",
-        path=f"/repos/{_repository_path(candidate.repository)}/pulls?state=all&head={quote(f'{owner}:{branch}', safe='')}&base={quote(candidate.base_branch, safe='')}&per_page=100",
+        path=f"/repos/{_repository_path(candidate.repository)}/pulls?state=all&head={quote(f'{owner}:{branch}', safe='')}&per_page=100",
     )
-    if not isinstance(pulls, list) or len(pulls) > 1:
-        raise MergeAdmissionDeniedError("Batch pull request discovery is unavailable or ambiguous.")
-    return pulls[0] if pulls else None
+    if not isinstance(pulls, list) or len(pulls) >= 100:
+        raise MergeAdmissionDeniedError(
+            "Batch pull request discovery is unavailable or incomplete."
+        )
+    return [_owned_batch_pull_request(payload, candidate) for payload in pulls]
+
+
+def _owned_batch_pull_request(
+    payload: object, candidate: MergeTrainBatchCandidate
+) -> dict[str, object]:
+    pull_request = _json_object(payload, "Managed batch PR")
+    head = _json_object(pull_request.get("head"), "Managed batch PR head")
+    base = _json_object(pull_request.get("base"), "Managed batch PR base")
+    branch = _candidate_branch(
+        repository=candidate.repository,
+        base_branch=candidate.base_branch,
+        batch_id=candidate.batch_id,
+        candidate_ref=candidate.candidate_ref,
+    )
+    number = pull_request.get("number")
+    if (
+        type(number) is not int
+        or number < 1
+        or head.get("ref") != branch
+        or _repository_full_name(head.get("repo"), "Managed batch PR head repo")
+        != candidate.repository
+        or _repository_full_name(base.get("repo"), "Managed batch PR base repo")
+        != candidate.repository
+    ):
+        raise MergeAdmissionDeniedError(
+            "PR is not owned by the recorded Launchplane candidate ref."
+        )
+    return pull_request
+
+
+def _find_batch_pull_request(
+    *, client: GitHubMergeTrainClient, candidate: MergeTrainBatchCandidate
+) -> object | None:
+    pulls = _candidate_pull_requests(client=client, candidate=candidate)
+    opened = [pull for pull in pulls if pull.get("state") == "open"]
+    if len(opened) > 1:
+        raise MergeTrainGitHubStaleHeadError(
+            "Generated batch ref has multiple open PRs.", status_code=409
+        )
+    if opened:
+        return opened[0]
+    marker = f"<!-- launchplane-batch:{candidate.batch_id}:{candidate.candidate_sha} -->"
+    for pull in pulls:
+        body = pull.get("body")
+        if isinstance(body, str) and marker in body:
+            return pull
+        head = _json_object(pull.get("head"), "Closed batch PR head")
+        if head.get("sha") == candidate.candidate_sha:
+            number = pull["number"]
+            assert isinstance(number, int)
+            detail = client._pull_request_detail(
+                repository=candidate.repository, pull_request_number=number
+            )
+            if detail.get("merged") is not False:
+                raise MergeAdmissionReconciliationRequiredError(
+                    "Closed batch PR effect is not confirmed absent."
+                )
+    return None
 
 
 def _bound_batch_pull_request(
@@ -113,42 +173,44 @@ def _bound_batch_pull_request(
     body = pull_request.get("body")
     marker = f"<!-- launchplane-batch:{candidate.batch_id}:{candidate.candidate_sha} -->"
     if type(number) is not int or number < 1 or not isinstance(body, str) or marker not in body:
-        raise MergeAdmissionDeniedError("Batch pull request lacks its recorded candidate binding.")
+        raise MergeTrainGitHubStaleHeadError(
+            "Batch pull request lost its recorded candidate binding.", status_code=409
+        )
     return pull_request
 
 
 def close_batch_pull_request(
     *, client: GitHubMergeTrainClient, candidate: MergeTrainBatchCandidate
 ) -> None:
-    """Retire only the exact generated PR, preserving its branch and source PRs."""
+    """Close PRs owned by this generated ref even when their mutable fields drift."""
     if not candidate.candidate_sha or len(candidate.entries) < 2:
         return
-    payload = _find_batch_pull_request(client=client, candidate=candidate)
-    if payload is None:
-        return
-    pull_request = _bound_batch_pull_request(payload, candidate)
-    number = pull_request["number"]
-    assert isinstance(number, int)
-    detail = client._pull_request_detail(
-        repository=candidate.repository, pull_request_number=number
-    )
-    pull_request = _bound_batch_pull_request(detail, candidate)
-    if pull_request.get("merged") is not False:
-        raise MergeAdmissionReconciliationRequiredError(
-            "Batch PR has a merged or unavailable effect; it cannot be retired as unused."
+    for payload in _candidate_pull_requests(client=client, candidate=candidate):
+        number = payload["number"]
+        assert isinstance(number, int)
+        detail = client._pull_request_detail(
+            repository=candidate.repository, pull_request_number=number
         )
-    if pull_request.get("state") == "closed":
-        return
-    if pull_request.get("state") != "open":
-        raise MergeAdmissionReconciliationRequiredError("Batch PR lifecycle is unavailable.")
-    response = client.transport.request(
-        method="PATCH",
-        path=f"/repos/{_repository_path(candidate.repository)}/pulls/{number}",
-        body={"state": "closed"},
-    )
-    closed = _bound_batch_pull_request(response, candidate)
-    if closed.get("state") != "closed" or closed.get("merged") is not False:
-        raise MergeAdmissionReconciliationRequiredError("Batch PR retirement is not confirmed.")
+        pull_request = _owned_batch_pull_request(detail, candidate)
+        head = _json_object(pull_request.get("head"), "Retired batch PR head")
+        if pull_request.get("merged") is True and head.get("sha") != candidate.candidate_sha:
+            continue  # Historical merged PR from an earlier candidate on this ref.
+        if pull_request.get("merged") is not False:
+            raise MergeAdmissionReconciliationRequiredError(
+                "Batch PR has a merged or unavailable effect; it cannot be retired as unused."
+            )
+        if pull_request.get("state") == "closed":
+            continue
+        if pull_request.get("state") != "open":
+            raise MergeAdmissionReconciliationRequiredError("Batch PR lifecycle is unavailable.")
+        response = client.transport.request(
+            method="PATCH",
+            path=f"/repos/{_repository_path(candidate.repository)}/pulls/{number}",
+            body={"state": "closed"},
+        )
+        closed = _owned_batch_pull_request(response, candidate)
+        if closed.get("state") != "closed" or closed.get("merged") is not False:
+            raise MergeAdmissionReconciliationRequiredError("Batch PR retirement is not confirmed.")
 
 
 def ensure_batch_pull_request(
@@ -185,7 +247,10 @@ def ensure_batch_pull_request(
                     f"{marker}\n\nThis PR lands Launchplane's tested candidate `{candidate.candidate_sha}` "
                     f"through the protected merge endpoint. Constituent PRs and reviewed heads:\n\n{members}\n\n"
                     "Launchplane revalidates every constituent and records the shared landing effect. "
-                    "Keep source PRs and branches intact. The controller confirms their completion after landing."
+                    "Keep source PRs and branches intact. Let the Launchplane controller merge this PR; "
+                    "do not merge it by hand or update its generated branch. An out-of-controller merge "
+                    "without a preceding admission remains fenced for explicit reconciliation. "
+                    "The controller confirms constituent completion after landing."
                 ),
             },
         )
@@ -405,6 +470,18 @@ def land_protected_batch(
                 reason_code="batch_pull_request_checks_not_ready",
             )
         try:
+            # Evaluate the whole batch before appending its first admission.
+            # Admission repeats the fresh evaluation before each persisted write.
+            for entry in plan.entries:
+                if checkpoint is not None:
+                    checkpoint(plan, entry, "merge_entry")
+                admission_guard.build_proposal(
+                    entry=entry,
+                    observed_base_sha=base_sha,
+                    observed_base_tree_sha=base_tree_sha,
+                    observed_head_sha=entry.expected_head_sha,
+                    observed_head_tree_sha=entry.expected_head_tree_sha,
+                )
             for entry in plan.entries:
                 head_sha, head_tree_sha = _git_commit_identity(
                     transport=client.transport,
