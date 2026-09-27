@@ -164,7 +164,7 @@ def _runtime_configuration_blockers(
             if key in application_runtime_keys
         }
         try:
-            dokploy_post_deploy._resolve_upstream_restore_workflow_environment(
+            dokploy_post_deploy.resolve_upstream_restore_workflow_environment(
                 desired_env_map=application_env
             )
         except click.ClickException as error:
@@ -1154,7 +1154,6 @@ def build_odoo_stable_target_replacement_plan(
             if override_record is not None and "deploy" in override_record.apply_on:
                 override = control_plane_odoo_instance_overrides.build_post_deploy_environment(
                     override_record,
-                    workflow_intent="deploy",
                     protected_shopify_store_keys=target_record.policies.shopify.protected_store_keys,
                 )
                 application_runtime_keys.update(

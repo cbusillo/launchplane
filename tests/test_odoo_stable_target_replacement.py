@@ -802,7 +802,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                             data_source_mode="upstream_restore",
                             confirmation="restore opw upstream",
                         ),
-                        dokploy_request=cast(DokployRequest, _request),
+                        dokploy_request=_request,
                     )
                 self.assertEqual(
                     plan.plan_status,
@@ -857,7 +857,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 request=OdooStableTargetReplacementRequest(
                     product=store.profile.product, instance="testing"
                 ),
-                dokploy_request=cast(DokployRequest, _request),
+                dokploy_request=_request,
             )
         self.assertEqual(plan.plan_status, "blocked")
         self.assertIn("Odoo instance override payload", "; ".join(plan.blockers))
@@ -909,7 +909,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 request=OdooStableTargetReplacementApplyRequest(
                     product=store.profile.product, instance="testing"
                 ),
-                dokploy_request=cast(DokployRequest, _request),
+                dokploy_request=_request,
             )
         self.assertEqual(result.deploy_status, "fail")
         self.assertIn("ODOO_WEB_HOST_PORT", result.error_message)
@@ -2658,7 +2658,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                     data_source_mode="upstream_restore",
                     confirmation="restore opw upstream",
                 ),
-                dokploy_request=cast(DokployRequest, _request),
+                dokploy_request=_request,
             )
             self.assertEqual(missing_source_result.deploy_status, "fail")
             self.assertIn("ODOO_UPSTREAM_HOST", missing_source_result.error_message)
@@ -3037,7 +3037,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                             request=OdooStableTargetReplacementApplyRequest(
                                 product=profile.product, instance="testing"
                             ),
-                            dokploy_request=cast(DokployRequest, _request),
+                            dokploy_request=_request,
                         )
                         self.assertEqual(result.deploy_status, "fail")
                         error_message = result.error_message
@@ -3050,7 +3050,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                                 request=OdooStableTargetReplacementApplyRequest(
                                     product=profile.product, instance="testing"
                                 ),
-                                dokploy_request=cast(DokployRequest, _request),
+                                dokploy_request=_request,
                             )
                         error_message = str(refusal.exception)
                         self.assertEqual(store.deployment_records, [])
