@@ -186,14 +186,63 @@
   }
 }
 .release-review-checklist {
+  margin: 0;
   padding-inline-start: 1.5rem;
 }
 
 .release-review-checklist li {
-  margin-block: 1.5rem;
+  margin-block: 0.75rem;
   overflow-wrap: anywhere;
 }
 
 .release-review-notes {
   white-space: pre-wrap;
+}
+
+.owner-review-latest {
+  overflow-wrap: anywhere;
+}
+
+.release-review-override {
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface-muted);
+  padding: 1rem;
+}
+
+.release-review-technical {
+  border-top: 1px solid var(--border-soft);
+  padding-top: 1rem;
+}
+
+.release-review-technical summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+
+.release-review-technical dl,
+.release-review-technical dl > div,
+.release-review-technical dd {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.release-review-technical dl {
+  gap: 1rem;
+  margin-top: 1rem;
+}
+
+.release-review-technical dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.release-review-technical dd span {
+  color: var(--muted);
+}
+
+@media (max-width: 600px) {
+  .owner-review-action-buttons {
+    flex-wrap: wrap;
+  }
 }

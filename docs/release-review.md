@@ -8,6 +8,20 @@ testing site and the **Owner test notes** from every merged pull request in that
 commit range at `/ui/owner-review?product=<product>`. No GitHub interaction is
 required to read the checklist, accept it, or request changes.
 
+The review leads with the product, the viewer's Owner or operator role, the
+testing-site link, and the changes to check. A collapsed **Technical details**
+section identifies the **Current production version** and **Proposed production
+version** (currently in testing). Accepting records approval for that proposed
+version to become production; requesting changes replaces earlier approval or
+an operator override. The latest decision and its written feedback appear above
+the checklist. Operators get a separate **Operator Approval Override** section
+and approval-justification field explaining that their decision supplies
+approval under their own identity and replaces an earlier
+request for changes. A saved decision whose release record has not been
+published shows that pending state beside the decision. Every decision is
+recorded without deploying; deployment remains a later operation with its own
+release and backup checks.
+
 `GET /v1/release-review?product=<product>` serves the same checklist to the Owner
 and to callers already permitted to read the product or promote it. Decisions
 use `POST /v1/release-review/decisions` and the existing GitHub human session and
