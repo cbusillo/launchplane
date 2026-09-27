@@ -1,5 +1,6 @@
 import unittest
 import hashlib
+from unittest.mock import patch
 from collections.abc import Callable
 from copy import deepcopy
 from types import SimpleNamespace
@@ -20,6 +21,7 @@ from control_plane.merge_train_github import (
     GitHubMergeTrainClient,
     MergeTrainGitHubError,
     MergeTrainGitHubMergeRejectedError,
+    MergeTrainGitHubStaleHeadError,
 )
 from tests.test_merge_train_github import (
     _combined_status,
@@ -35,13 +37,15 @@ class _BatchProvider:
         self.candidate = candidate
         self.number = 99
         self.created = False
+        self.closed = False
         self.merged = False
+        self.repository_name = candidate.repository
         self.settled = True
         self.checks_pass = True
         self.refuse = False
         self.refusal_observed = False
         self.interrupt_after_merge = False
-        self.merge_sha = "batch-merge"
+        self.merge_sha = hashlib.sha256(b"batch-merge").hexdigest()[:40]
         self.base_sha = candidate.base_sha
         self.heads = {entry.pull_request_number: entry.head_sha for entry in candidate.entries}
         self.body = ""
@@ -57,7 +61,7 @@ class _BatchProvider:
         merged = self.merged and (batch or self.settled)
         return {
             "number": number,
-            "state": "closed" if merged else "open",
+            "state": "closed" if merged or (batch and self.closed) else "open",
             "merged": merged,
             "merge_commit_sha": self.merge_sha if merged else None,
             "draft": False,
@@ -67,12 +71,12 @@ class _BatchProvider:
                 "ref": self.candidate.candidate_ref.removeprefix("refs/heads/")
                 if batch
                 else f"feature-{number}",
-                "repo": {"full_name": self.candidate.repository},
+                "repo": {"full_name": self.repository_name},
             },
             "base": {
                 "ref": "main",
                 "sha": self.base_sha,
-                "repo": {"full_name": self.candidate.repository},
+                "repo": {"full_name": self.repository_name},
             },
             "mergeable_state": "behind" if batch and self.refusal_observed else "clean",
         }
@@ -89,6 +93,10 @@ class _BatchProvider:
             return self.pull_request(self.number)
         if method == "GET" and "/pulls/" in path:
             return self.pull_request(int(path.rsplit("/", maxsplit=1)[1]))
+        if method == "PATCH" and path.endswith(f"/pulls/{self.number}"):
+            assert body == {"state": "closed"}
+            self.closed = True
+            return self.pull_request(self.number)
         if method == "GET" and path.endswith("/branches/main"):
             return {
                 **_protected_branch_with_checks("ci-gate"),
@@ -208,6 +216,9 @@ class ProtectedBatchPullRequestTests(unittest.TestCase):
         self.assertNotIn("candidate_pull_request_number", plan.model_dump(mode="json"))
 
     def setUp(self) -> None:
+        sleeper = patch("control_plane.merge_train_batch_pull_request.sleep")
+        sleeper.start()
+        self.addCleanup(sleeper.stop)
         candidate_record, landing_record = _records((_entry(1, 1), _entry(2, 2)))
 
         def git_identities(value: Any) -> Any:
@@ -284,6 +295,41 @@ class ProtectedBatchPullRequestTests(unittest.TestCase):
         self.assertEqual(len(self.provider.merge_calls), 1)
         self.assertTrue(self.provider.merge_calls[0][1].endswith("/pulls/99/merge"))
 
+    def test_repository_capitalization_does_not_change_candidate_identity(self) -> None:
+        self.provider.repository_name = self.provider.candidate.repository.upper()
+        self.assertEqual(
+            self.client.ensure_batch_pull_request(candidate=self.provider.candidate), 99
+        )
+        self.assertTrue(all(entry.status == "merged" for entry in self.land().entries))
+
+    def test_closed_batch_is_terminal_without_new_admissions(self) -> None:
+        self.provider.closed = True
+        with self.assertRaises(MergeTrainGitHubStaleHeadError):
+            self.land()
+        self.assertEqual(self.guard.admissions, {})
+        self.assertEqual(self.provider.merge_calls, [])
+
+    def test_retirement_closes_only_the_bound_batch_pr_and_is_idempotent(self) -> None:
+        self.client.close_batch_pull_request(candidate=self.provider.candidate)
+        self.client.close_batch_pull_request(candidate=self.provider.candidate)
+        self.assertTrue(self.provider.closed)
+        self.assertEqual(len([r for r in self.provider.requests if r[0] == "PATCH"]), 1)
+        self.assertTrue(all(self.provider.pull_request(n)["state"] == "open" for n in (1, 2)))
+
+    def test_retirement_does_not_dispose_of_an_unrecorded_merge(self) -> None:
+        self.provider.merged = True
+        with self.assertRaises(MergeAdmissionReconciliationRequiredError):
+            self.client.close_batch_pull_request(candidate=self.provider.candidate)
+        self.assertFalse(any(r[0] == "PATCH" for r in self.provider.requests))
+
+    def test_pending_checks_do_not_hide_a_changed_member(self) -> None:
+        self.provider.checks_pass = False
+        self.provider.heads[2] = "new-head"
+        with self.assertRaises(MergeTrainGitHubStaleHeadError):
+            self.land()
+        self.assertEqual(self.guard.admissions, {})
+        self.assertEqual(self.provider.merge_calls, [])
+
     def test_pending_candidate_checks_do_not_issue_admissions_or_merge(self) -> None:
         self.provider.checks_pass = False
         with self.assertRaises(MergeAdmissionDeniedError):
@@ -325,6 +371,16 @@ class ProtectedBatchPullRequestTests(unittest.TestCase):
         self.land()
         self.assertEqual(len(self.provider.merge_calls), 1)
         self.assertEqual(self.guard.outcomes, {1: "landed", 2: "landed"})
+
+    def test_brief_indirect_completion_lag_finishes_in_the_same_landing_pass(self) -> None:
+        self.provider.settled = False
+        with patch(
+            "control_plane.merge_train_batch_pull_request.sleep",
+            side_effect=lambda _delay: setattr(self.provider, "settled", True),
+        ):
+            landed = self.land()
+        self.assertTrue(all(entry.status == "merged" for entry in landed.entries))
+        self.assertEqual(len(self.provider.merge_calls), 1)
 
     def test_checkpoint_interruption_does_not_repeat_the_shared_effect(self) -> None:
         def interrupt(plan: Any, _entry: Any, phase: str) -> None:

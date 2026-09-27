@@ -535,7 +535,10 @@ def _reconciliation_readers(
 def _diagnostic_entries(
     *, plan: MergeTrainBatchLandingPlan, controller_state: MergeTrainControllerStateRecord
 ) -> tuple[MergeTrainBatchLandingEntry, ...]:
-    if controller_state.active_pull_request_number is None:
+    if (
+        plan.candidate_pull_request_number is not None
+        or controller_state.active_pull_request_number is None
+    ):
         return tuple(entry for entry in plan.entries if entry.status in {"planned", "merging"})
     return tuple(
         entry

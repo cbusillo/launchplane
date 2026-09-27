@@ -360,14 +360,24 @@ before observing required checks, so PR-triggered checks participate in the
 normal candidate wait. Retries find the same exact ref/head binding and never
 recreate a closed batch PR as a hidden fallback.
 
+Closed, failed, or superseded candidates are terminal for that exact queue.
+Before abandoning one, the service closes only its bound, unmerged batch PR;
+source PRs and all branches remain intact. A changed member or base reflows to a
+new candidate without retaining a reconciliation fence. Landing rechecks member
+identity before waiting on checks, so a pending or failed check cannot hide a
+new source head. A manually closed batch PR is not automatically reopened.
+Change or remove the queued source entries to build a replacement; an unchanged
+failed candidate remains visibly failed rather than being rebuilt in a loop.
+
 The landing plan binds `candidate_pull_request_number` into its immutable
 digest. Every constituent receives fresh admission against the same unchanged
 base before one SHA-guarded provider merge of the batch PR. The controller's
 provider checkpoint records that shared PR and all constituent admission IDs.
 Afterward, it verifies the merge parents and tested tree, protected-base
 containment, and each original PR's exact head, target, and merged state.
-GitHub's indirect PR completion may lag; a successful merge response alone does
-not finish the batch. A resumed pass observes the same batch PR and reconciles
+GitHub's branch readback and indirect PR completion may lag; bounded read-only
+retries absorb brief delays within the landing pass. A successful merge response
+alone does not finish the batch. A resumed pass observes the same batch PR and reconciles
 the original admissions without issuing another merge.
 
 Single-entry candidates and existing landing plans continue to land original
@@ -399,6 +409,11 @@ merge-method batch. Each constituent outcome links through its admission and
 landing-plan digest to that shared PR. Legacy partial plans are never converted
 into this mode. A member pushed after final validation is not reported as its
 new head having landed; mismatched original-PR completion requires reconciliation.
+If the provider has already merged the batch but the exact source-PR completion
+cannot be established, the controller retains the fence and never retires that
+effect as unused. Current recovery requires matching provider evidence; there is
+no automatic service disposition for permanently contradictory source heads.
+Operator diagnostics cover every unresolved member of the shared effect.
 
 ### Stacked Pull Requests
 

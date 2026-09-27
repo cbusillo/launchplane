@@ -133,6 +133,9 @@ class _FakeMergeTrainGitHubClient:
         # Existing controller fixtures model legacy PR-by-PR landing records.
         return None
 
+    def close_batch_pull_request(self, *, candidate: MergeTrainBatchCandidate) -> None:
+        pass
+
     def land_batch_candidate(
         self,
         *,

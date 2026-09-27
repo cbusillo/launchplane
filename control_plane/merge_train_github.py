@@ -71,8 +71,8 @@ class MergeTrainGitHubMergeRejectedError(MergeTrainGitHubError):
         self.pull_request_number = pull_request_number
         self.refusal_diagnosis = "head_behind_base" if head_behind_base else "unconfirmed"
         diagnosis = (
-            "The same PR head is behind its base; refresh the branch and wait for fresh checks "
-            "before submitting it to the train again."
+            "The same PR head is behind its base; refresh the source PR branches and let the "
+            "train build a fresh candidate before another attempt."
             if head_behind_base
             else "Reread the PR's merge requirements before another attempt."
         )
@@ -1405,6 +1405,15 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 "Protected batch PR creation requires the service adapter."
             )
         return ensure_batch_pull_request(client=self, candidate=candidate)
+
+    def close_batch_pull_request(self, *, candidate: MergeTrainBatchCandidate) -> None:
+        from control_plane.merge_train_batch_pull_request import close_batch_pull_request
+
+        if self._effect_executor is not None and not isinstance(
+            self._effect_executor, LegacyMergeTrainEffectExecutor
+        ):
+            raise MergeAdmissionDeniedError("Batch PR retirement requires the service adapter.")
+        close_batch_pull_request(client=self, candidate=candidate)
 
     def add_pull_request_label(
         self, *, repository: str, pull_request_number: int, label: str
