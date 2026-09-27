@@ -14782,6 +14782,47 @@
         "title": "MergeAdmissionRecord",
         "type": "object"
       },
+      "MergeBatchNoEffectEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "base_contains_head": {
+            "const": false,
+            "title": "Base Contains Head",
+            "type": "boolean"
+          },
+          "head_sha": {
+            "title": "Head Sha",
+            "type": "string"
+          },
+          "merged": {
+            "const": false,
+            "title": "Merged",
+            "type": "boolean"
+          },
+          "pull_request_number": {
+            "exclusiveMinimum": 0.0,
+            "title": "Pull Request Number",
+            "type": "integer"
+          },
+          "state": {
+            "enum": [
+              "open",
+              "closed"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "pull_request_number",
+          "head_sha",
+          "state",
+          "merged",
+          "base_contains_head"
+        ],
+        "title": "MergeBatchNoEffectEvidence",
+        "type": "object"
+      },
       "MergeLandingOutcomeRecord": {
         "additionalProperties": false,
         "properties": {
@@ -14811,6 +14852,17 @@
               }
             ],
             "title": "Base Contains Merge Commit"
+          },
+          "batch_no_effect": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MergeBatchNoEffectEvidence"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
           },
           "exact_landing_confirmed": {
             "default": false,
@@ -14925,6 +14977,8 @@
               "already_contained_no_provider_effect",
               "provider_rejected",
               "dispatch_not_attempted",
+              "batch_not_dispatched",
+              "batch_reconciliation_confirmed_no_effect",
               "reconciliation_confirmed_no_effect",
               "provider_transport_ambiguous",
               "process_interrupted",

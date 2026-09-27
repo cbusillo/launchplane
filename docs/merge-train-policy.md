@@ -347,9 +347,50 @@ This section documents the current GitHub adapter. Other source-control
 providers must implement the same Launchplane-owned landing contract behind a
 provider adapter.
 
-After a batch candidate passes, Launchplane lands the original pull requests in
-queue order using GitHub's pull request merge API and the configured
-`merge_method`. Before creating a landing plan, the controller revalidates that
+After a multi-entry candidate passes, repositories configured for `merge` use a
+Launchplane-created batch pull request whose head is that exact candidate. Its
+body identifies every constituent PR and reviewed head. The original PRs and
+source branches remain intact. GitHub enforces normal protected-PR checks,
+reviews, CodeQL, and base freshness on the batch PR; Launchplane never pushes
+the protected base ref. The batch PR has no enqueue label and is not another
+entry in its own queue.
+
+The controller creates or finds that PR once candidate construction is complete,
+before observing required checks, so PR-triggered checks participate in the
+normal candidate wait. Retries find the same exact ref/head binding and never
+recreate a closed batch PR as a hidden fallback.
+
+Closed, failed, or superseded candidates are terminal for that exact queue.
+Before abandoning one, the service closes unmerged PRs on its exact generated
+candidate ref, including PRs whose head, body, draft flag, or base was edited;
+source PRs and all branches remain intact. Historical closed PRs from another
+candidate SHA do not prevent a rebuilt candidate from getting its own PR. Policy
+changes also retire the prior batch PR, including a change to squash or rebase.
+A changed member or base reflows to a
+new candidate without retaining a reconciliation fence. Landing rechecks member
+identity before waiting on checks, so a pending or failed check cannot hide a
+new source head. A manually closed batch PR is not automatically reopened.
+Change or remove the queued source entries to build a replacement; an unchanged
+failed candidate remains visibly failed rather than being rebuilt in a loop.
+
+The landing plan binds `candidate_pull_request_number` into its immutable
+digest. The controller evaluates every constituent before appending the first
+admission, so an unready later member does not grow rejected-prefix records on
+every pass. Every constituent receives fresh admission against the same unchanged
+base before one SHA-guarded provider merge of the batch PR. The controller's
+provider checkpoint records that shared PR and all constituent admission IDs.
+Afterward, it verifies the merge parents and tested tree, protected-base
+containment, and each original PR's exact head, target, and merged state.
+GitHub's branch readback and indirect PR completion may lag; bounded read-only
+retries absorb brief delays within the landing pass. A successful merge response
+alone does not finish the batch. A resumed pass observes the same batch PR and reconciles
+the original admissions without issuing another merge.
+
+Single-entry candidates and existing landing plans continue to land original
+pull requests through the configured `merge_method`. Multi-entry squash and
+rebase policies retain that path; the service does not reinterpret their merge
+method to obtain ancestry-based batch completion. Before creating a landing
+plan, the controller revalidates that
 the passed candidate still matches the live eligible queue, PR head SHAs, and
 base SHA. Drift supersedes the active passed-candidate record and resumes normal
 planning from a fresh snapshot instead of creating a stale landing plan.
@@ -369,10 +410,21 @@ branch, policy digest, root PR, and expected root head match the landing plan.
 Older waiting stack-collapse records stay visible as status evidence, but they
 must not block or annotate an unrelated unstacked batch landing.
 
-Directly merging the candidate branch into the protected base branch is not the
-preferred first implementation because it hides the normal PR-by-PR merge UX and
-can make repository history and GitHub review state harder to inspect. It should
-remain a separate, explicit future decision if ever needed.
+The protected batch PR is the auditable provider effect for a multi-entry
+merge-method batch. Each constituent outcome links through its admission and
+landing-plan digest to that shared PR. Legacy partial plans are never converted
+into this mode. A member pushed after final validation is not reported as its
+new head having landed; mismatched original-PR completion requires reconciliation.
+If the provider has already merged the batch but the exact source-PR completion
+cannot be established, the controller retains the fence and never retires that
+effect as unused. Current recovery requires matching provider evidence; there is
+no automatic service disposition for permanently contradictory source heads.
+Operator diagnostics cover every unresolved member of the shared effect.
+An out-of-controller merge without preceding admissions, or after conclusive
+rejection of the recorded attempt, likewise remains fenced even when Git proves
+the code landed. It does not retroactively acquire a Launchplane admission. The
+generated PR explicitly instructs operators to let the controller merge it and
+to leave its generated branch unchanged.
 
 ### Stacked Pull Requests
 

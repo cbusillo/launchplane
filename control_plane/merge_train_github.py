@@ -71,8 +71,8 @@ class MergeTrainGitHubMergeRejectedError(MergeTrainGitHubError):
         self.pull_request_number = pull_request_number
         self.refusal_diagnosis = "head_behind_base" if head_behind_base else "unconfirmed"
         diagnosis = (
-            "The same PR head is behind its base; refresh the branch and wait for fresh checks "
-            "before submitting it to the train again."
+            "The same PR head is behind its base; refresh the source PR branches and let the "
+            "train build a fresh candidate before another attempt."
             if head_behind_base
             else "Reread the PR's merge requirements before another attempt."
         )
@@ -679,6 +679,21 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             )
         if not recorded_at.strip():
             raise ValueError("Batch landing admission requires recorded_at.")
+        if landing_plan.candidate_pull_request_number is not None:
+            from control_plane.merge_train_batch_pull_request import land_protected_batch
+
+            if not isinstance(resolved_effect_executor, LegacyMergeTrainEffectExecutor):
+                raise MergeAdmissionDeniedError(
+                    "Protected batch landing requires the service adapter."
+                )
+            return land_protected_batch(
+                client=self,
+                landing_plan=landing_plan,
+                admission_guard=admission_guard,
+                recorded_at=recorded_at,
+                provider_checkpoint=provider_checkpoint,
+                checkpoint=checkpoint,
+            )
         repository_path = _repository_path(landing_plan.repository)
         expected_base_sha = landing_plan.entries[0].expected_base_sha
         expected_base_tree_sha = landing_plan.entries[0].recorded_candidate_parent_tree_sha
@@ -1379,6 +1394,26 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                     "Target base branch moved outside the batch landing plan.", status_code=409
                 )
         return pull_request.get("mergeable_state") == "behind"
+
+    def ensure_batch_pull_request(self, *, candidate: MergeTrainBatchCandidate) -> int:
+        from control_plane.merge_train_batch_pull_request import ensure_batch_pull_request
+
+        if self._effect_executor is not None and not isinstance(
+            self._effect_executor, LegacyMergeTrainEffectExecutor
+        ):
+            raise MergeAdmissionDeniedError(
+                "Protected batch PR creation requires the service adapter."
+            )
+        return ensure_batch_pull_request(client=self, candidate=candidate)
+
+    def close_batch_pull_request(self, *, candidate: MergeTrainBatchCandidate) -> None:
+        from control_plane.merge_train_batch_pull_request import close_batch_pull_request
+
+        if self._effect_executor is not None and not isinstance(
+            self._effect_executor, LegacyMergeTrainEffectExecutor
+        ):
+            raise MergeAdmissionDeniedError("Batch PR retirement requires the service adapter.")
+        close_batch_pull_request(client=self, candidate=candidate)
 
     def add_pull_request_label(
         self, *, repository: str, pull_request_number: int, label: str
