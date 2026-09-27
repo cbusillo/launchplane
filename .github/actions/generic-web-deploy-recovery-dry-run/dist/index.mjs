@@ -17,18 +17,16 @@ const artifactRequestKeys = new Set([
   "schema_version",
   "source_git_ref",
 ]);
+const optionalIdentityKeys = new Set(["deploy_key_format", "deploy_reference"]);
 const requestKeys = new Set([
-  "artifact_id",
-  "expected_recovery_digest",
-  "instance",
+  ...artifactRequestKeys,
+  ...optionalIdentityKeys,
   "launchplane_url",
-  "original_run_attempt",
-  "original_run_id",
-  "product",
-  "reason",
-  "schema_version",
-  "source_git_ref",
 ]);
+// Idempotency-key layouts written by reusable-generic-web-stable-deploy.yml.
+// "artifact_scoped" is the current layout; "run_scoped" predates 2026-08-05.
+const deployKeyFormats = new Set(["artifact_scoped", "run_scoped"]);
+const recoveryModes = new Set(["", "provider-evidence"]);
 
 function environmentKey(name) {
   return `INPUT_${name.replaceAll(" ", "_").toUpperCase()}`;
@@ -159,9 +157,11 @@ async function loadRequest() {
   }
 
   const request = parseRequest(readFileSync(requestFile, "utf8"));
-  const requestKeyList = Object.keys(request).sort();
-  const expectedKeyList = [...artifactRequestKeys].sort();
-  if (JSON.stringify(requestKeyList) !== JSON.stringify(expectedKeyList)) {
+  const requestKeyList = Object.keys(request);
+  if (
+    [...artifactRequestKeys].some(key => !requestKeyList.includes(key)) ||
+    requestKeyList.some(key => !artifactRequestKeys.has(key) && !optionalIdentityKeys.has(key))
+  ) {
     throw new Error("Recovery apply artifact has an invalid schema.");
   }
 
@@ -271,23 +271,80 @@ async function waitForApplyOutputs(expectedRecoveryDigest) {
   throw new Error("Timed out waiting for Launchplane recovery apply evidence.");
 }
 
-function configureRequestAction(request) {
-  const launchplaneUrl = input("launchplane-url") || requestString(request, "launchplane_url");
+function optionalDeployReference(request) {
+  const value = request.deploy_reference;
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== "string" || value !== value.trim()) {
+    throw new Error("request-json.deploy_reference must be a string without surrounding space.");
+  }
+  return value;
+}
+
+function originalDeployIdentity(request) {
   const product = requestString(request, "product");
   const instance = requestString(request, "instance");
   const artifactId = requestString(request, "artifact_id");
   const sourceGitRef = requestString(request, "source_git_ref");
   const originalRunId = requestPositiveInteger(request, "original_run_id");
   const originalRunAttempt = requestPositiveInteger(request, "original_run_attempt");
-  const expectedRecoveryDigest = optionalRequestDigest(request);
-  const reason = requestString(request, "reason");
-  const idempotencyKey = [
-    "generic-web-stable-deploy",
+  const keyFormat = request.deploy_key_format ?? "artifact_scoped";
+  if (!deployKeyFormats.has(keyFormat)) {
+    throw new Error("request-json.deploy_key_format must be artifact_scoped or run_scoped.");
+  }
+  const deployReference = optionalDeployReference(request);
+  const deploy = {
+    schema_version: 1,
     product,
     instance,
-    originalRunId,
-    originalRunAttempt,
-  ].join(":");
+    artifact_id: artifactId,
+    source_git_ref: sourceGitRef,
+  };
+  if (keyFormat === "run_scoped") {
+    if (deployReference !== undefined) {
+      throw new Error("run_scoped deploy keys predate deploy_reference; omit it.");
+    }
+    return {
+      deploy,
+      idempotencyKey: [
+        "generic-web-stable-deploy",
+        product,
+        instance,
+        originalRunId,
+        originalRunAttempt,
+      ].join(":"),
+    };
+  }
+  deploy.deploy_reference = deployReference ?? "";
+  return {
+    deploy,
+    idempotencyKey: [
+      "generic-web-stable-deploy",
+      product,
+      instance,
+      artifactId,
+      deploy.deploy_reference,
+      originalRunId,
+      originalRunAttempt,
+    ].join(":"),
+  };
+}
+
+function configureRequestAction(request) {
+  const launchplaneUrl = input("launchplane-url") || requestString(request, "launchplane_url");
+  const mode = input("mode");
+  if (!recoveryModes.has(mode)) {
+    throw new Error("mode must be empty or provider-evidence.");
+  }
+  const product = requestString(request, "product");
+  const instance = requestString(request, "instance");
+  const { deploy, idempotencyKey } = originalDeployIdentity(request);
+  const expectedRecoveryDigest = optionalRequestDigest(request);
+  if (mode && expectedRecoveryDigest) {
+    throw new Error("Provider evidence inspection does not accept a recovery digest.");
+  }
+  const reason = requestString(request, "reason");
   const payload = {
     schema_version: 1,
     product,
@@ -295,13 +352,7 @@ function configureRequestAction(request) {
     original_deploy: {
       schema_version: 1,
       product,
-      deploy: {
-        schema_version: 1,
-        product,
-        instance,
-        artifact_id: artifactId,
-        source_git_ref: sourceGitRef,
-      },
+      deploy,
     },
     reason,
   };
@@ -310,9 +361,11 @@ function configureRequestAction(request) {
   }
 
   environment[environmentKey("launchplane-url")] = launchplaneUrl;
-  environment[environmentKey("route-path")] = expectedRecoveryDigest
-    ? "/v1/admin/generic-web/deploy-recovery/apply"
-    : "/v1/admin/generic-web/deploy-recovery/dry-run";
+  environment[environmentKey("route-path")] = mode
+    ? "/v1/admin/generic-web/deploy-recovery/provider-evidence"
+    : expectedRecoveryDigest
+      ? "/v1/admin/generic-web/deploy-recovery/apply"
+      : "/v1/admin/generic-web/deploy-recovery/dry-run";
   environment[environmentKey("payload")] = JSON.stringify(payload);
   environment[environmentKey("idempotency-key")] = idempotencyKey;
   environment[environmentKey("audience")] = input("audience");
@@ -333,6 +386,12 @@ function configureRequestAction(request) {
       "provider_outcome=provider_outcome",
       "provider_status=provider_status",
       "retry_safe=retry_safe",
+    ].join(",");
+  } else if (mode) {
+    environment[environmentKey("fail-result-paths")] = "";
+    environment[environmentKey("output-paths")] = [
+      "provider_evidence=provider_evidence",
+      "provider_read_error_class=provider_read_error_class",
     ].join(",");
   } else {
     environment[environmentKey("output-paths")] = [

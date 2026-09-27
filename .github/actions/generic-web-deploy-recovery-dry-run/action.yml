@@ -1,6 +1,6 @@
 ---
 name: Generic-web deploy recovery
-description: Inspect or apply one exact legacy generic-web deploy recovery through Launchplane.
+description: Inspect or apply one exact generic-web deploy recovery through Launchplane.
 
 inputs:
   launchplane-url:
@@ -11,9 +11,16 @@ inputs:
     default: ""
   request-json:
     description: >-
-      Optional exact legacy deploy coordinates and operator reason as JSON for
-      dry-run mode only. When omitted, the action downloads and validates the
-      approved digest-bound apply artifact for the current workflow_run event.
+      Optional exact original deploy coordinates and operator reason as JSON
+      for dry-run or provider-evidence mode only. When omitted, the action
+      downloads and validates the approved digest-bound apply artifact for the
+      current workflow_run event.
+    required: false
+    default: ""
+  mode:
+    description: >-
+      Empty for dry-run or digest-bound apply; provider-evidence for the
+      advisory exact provider evidence read.
     required: false
     default: ""
   expected-product:
@@ -66,6 +73,10 @@ outputs:
     description: Whether retrying the original operation is safe.
   observed_at:
     description: Timestamp for the dry-run observation.
+  provider_evidence:
+    description: Bounded provider evidence classification in provider-evidence mode.
+  provider_read_error_class:
+    description: Bounded provider read error class in provider-evidence mode.
 
 runs:
   using: node24

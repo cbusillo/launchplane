@@ -7,8 +7,12 @@ import shutil
 import subprocess
 from pathlib import Path
 from tempfile import TemporaryDirectory
+import re
+from typing import Any, cast
 import unittest
 import zipfile
+
+from tests.support.workflows import load_workflow
 
 
 ACTION_ENTRYPOINT = Path(".github/actions/generic-web-deploy-recovery-dry-run/dist/index.mjs")
@@ -17,6 +21,101 @@ DOWNLOAD_ENTRYPOINT = Path(
 )
 ACTION_METADATA = Path(".github/actions/generic-web-deploy-recovery-dry-run/action.yml")
 REUSABLE_WORKFLOW = Path(".github/workflows/reusable-generic-web-stable-deploy.yml")
+REQUEST_ACTION_ENTRYPOINT = Path(".github/actions/launchplane-request/dist/index.js")
+WORKFLOW_EXPRESSION = re.compile(r"\$\{\{\s*(inputs|steps\.request\.outputs)\.([a-z_]+)\s*}}")
+
+
+def _resolve_workflow_expressions(
+    value: str, *, inputs: dict[str, str], outputs: dict[str, str]
+) -> str:
+    def replace(match: re.Match[str]) -> str:
+        source = inputs if match.group(1) == "inputs" else outputs
+        return source[match.group(2)]
+
+    resolved = WORKFLOW_EXPRESSION.sub(replace, value)
+    if "${{" in resolved:
+        raise AssertionError(f"Unresolved workflow expression in {value!r}")
+    return resolved
+
+
+def _read_github_outputs(path: Path) -> dict[str, str]:
+    outputs: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        name, separator, value = line.partition("=")
+        if separator:
+            outputs[name] = value
+    return outputs
+
+
+def _capture_request_action_call(env: dict[str, str], entrypoint: Path) -> dict[str, Any]:
+    script = f"""
+const calls = [];
+global.fetch = async (url, init) => {{
+  calls.push({{url, headers: init.headers, body: init.body || ''}});
+  if (url.startsWith('https://oidc.example/token')) {{
+    return new Response(JSON.stringify({{value: 'oidc-token'}}), {{status: 200}});
+  }}
+  return new Response(JSON.stringify({{recovery_digest: 'a'.repeat(64)}}), {{status: 200}});
+}};
+process.on('beforeExit', () => console.error(JSON.stringify(calls)));
+await import('./{entrypoint.as_posix()}');
+"""
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        capture_output=True,
+        env={**os.environ, **env},
+        text=True,
+    )
+    if result.returncode != 0:
+        raise AssertionError(result.stderr)
+    calls = json.loads(result.stderr.splitlines()[-1])
+    return cast(dict[str, Any], calls[-1])
+
+
+def _stable_deploy_request_call(
+    *, inputs: dict[str, str], run_id: str, temporary_directory: Path
+) -> dict[str, Any]:
+    """Run the reusable stable-deploy request steps exactly as the workflow defines them."""
+    workflow = load_workflow(REUSABLE_WORKFLOW)
+    resolve_step = workflow.step_named("stable-deploy", "Resolve Launchplane deploy request")
+    request_step = workflow.step_named(
+        "stable-deploy", "Request Launchplane generic-web stable deploy"
+    )
+    assert resolve_step is not None and request_step is not None
+    output_path = temporary_directory / "deploy-request-output.txt"
+    raw_env = resolve_step.data["env"]
+    assert isinstance(raw_env, dict)
+    step_env = {
+        name: _resolve_workflow_expressions(str(value), inputs=inputs, outputs={})
+        for name, value in raw_env.items()
+    }
+    result = subprocess.run(
+        ["bash", "-c", resolve_step.run],
+        capture_output=True,
+        env={
+            **os.environ,
+            **step_env,
+            "GITHUB_OUTPUT": str(output_path),
+            "GITHUB_REPOSITORY": "cbusillo/example-product",
+            "GITHUB_RUN_ID": run_id,
+        },
+        text=True,
+    )
+    if result.returncode != 0:
+        raise AssertionError(result.stderr)
+    outputs = _read_github_outputs(output_path)
+    request_env = {
+        "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "request-token",
+        "ACTIONS_ID_TOKEN_REQUEST_URL": "https://oidc.example/token",
+        "GITHUB_OUTPUT": str(temporary_directory / "deploy-action-output.txt"),
+        "INPUT_LAUNCHPLANE-URL": "https://launchplane.example",
+        "INPUT_ROUTE-PATH": str(request_step.with_values["route-path"]),
+    }
+    for input_name in ("payload", "payload-fields", "idempotency-key"):
+        request_env[f"INPUT_{input_name.upper()}"] = _resolve_workflow_expressions(
+            str(request_step.with_values[input_name]), inputs=inputs, outputs=outputs
+        )
+    return _capture_request_action_call(request_env, REQUEST_ACTION_ENTRYPOINT)
 
 
 class GenericWebDeployRecoveryActionTests(unittest.TestCase):
@@ -65,6 +164,7 @@ class GenericWebDeployRecoveryActionTests(unittest.TestCase):
         archive_compression: int = zipfile.ZIP_STORED,
         archive_transform: Callable[[bytes], bytes] | None = None,
         artifact_total_count: int = 1,
+        mode: str = "",
     ) -> subprocess.CompletedProcess[str]:
         if shutil.which("node") is None:
             self.skipTest("node is required to test the recovery dry-run action")
@@ -80,6 +180,8 @@ class GenericWebDeployRecoveryActionTests(unittest.TestCase):
         )
         if launchplane_url:
             env["INPUT_LAUNCHPLANE-URL"] = launchplane_url
+        if mode:
+            env["INPUT_MODE"] = mode
         effective_request = request
         artifact_archive_data = ""
         if request_file is not None:
@@ -221,6 +323,7 @@ await import('./{ACTION_ENTRYPOINT.as_posix()}');
             "source_git_ref": "2d66fb6b2708f975b1645ac912a5b576a9282853",
             "original_run_id": "29609495343",
             "original_run_attempt": "1",
+            "deploy_key_format": "run_scoped",
             "reason": "Inspect the legacy deploy reservation.",
         }
         with TemporaryDirectory() as temporary_directory:
@@ -273,6 +376,88 @@ await import('./{ACTION_ENTRYPOINT.as_posix()}');
                 with self.subTest(output_name=output_name):
                     self.assertIn(f"{output_name}<<", outputs)
                     self.assertIn(f"\n{output_value}\n", outputs)
+
+    def test_action_reaches_reservation_created_by_current_stable_deploy(self) -> None:
+        if shutil.which("node") is None or shutil.which("bash") is None:
+            self.skipTest("node and bash are required to run the stable deploy steps")
+        artifact_id = "ghcr.io/example/product@sha256:" + "c" * 64
+        source_git_ref = "2d66fb6b2708f975b1645ac912a5b576a9282853"
+        for deploy_reference in ("", "ghcr.io/example/product:sha-2d66fb6b2708"):
+            with self.subTest(deploy_reference=deploy_reference), TemporaryDirectory() as directory:
+                temporary_directory = Path(directory)
+                deploy_call = _stable_deploy_request_call(
+                    inputs={
+                        "artifact_id": artifact_id,
+                        "deploy_reference": deploy_reference,
+                        "instance": "prod",
+                        "product": "example-product",
+                        "source_git_ref": source_git_ref,
+                    },
+                    run_id="34724620086",
+                    temporary_directory=temporary_directory,
+                )
+                request: dict[str, object] = {
+                    "schema_version": 1,
+                    "product": "example-product",
+                    "instance": "prod",
+                    "artifact_id": artifact_id,
+                    "source_git_ref": source_git_ref,
+                    "original_run_id": "34724620086",
+                    "original_run_attempt": "1",
+                    "reason": "Inspect the stuck deploy reservation.",
+                }
+                if deploy_reference:
+                    request["deploy_reference"] = deploy_reference
+                for mode, route in (
+                    ("", "dry-run"),
+                    ("provider-evidence", "provider-evidence"),
+                ):
+                    result = self.run_action(
+                        request=request,
+                        output_path=temporary_directory / f"github-output-{route}.txt",
+                        mode=mode,
+                    )
+
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    recovery_call = json.loads(result.stderr.splitlines()[-1])[-1]
+                    self.assertTrue(recovery_call["url"].endswith(f"/deploy-recovery/{route}"))
+                    self.assertEqual(
+                        recovery_call["headers"]["Idempotency-Key"],
+                        deploy_call["headers"]["Idempotency-Key"],
+                    )
+                    self.assertEqual(
+                        json.loads(recovery_call["body"])["original_deploy"],
+                        json.loads(str(deploy_call["body"])),
+                    )
+
+    def test_action_rejects_inexact_deploy_key_format_before_oidc(self) -> None:
+        base_request = {
+            "schema_version": 1,
+            "product": "repairshopr-sync",
+            "instance": "prod",
+            "artifact_id": "artifact",
+            "source_git_ref": "source",
+            "original_run_id": "29609495343",
+            "original_run_attempt": "1",
+            "reason": "Inspect the deploy reservation.",
+        }
+        for extra_fields, message in (
+            ({"deploy_key_format": "any"}, "deploy_key_format must be"),
+            (
+                {"deploy_key_format": "run_scoped", "deploy_reference": ""},
+                "predate deploy_reference",
+            ),
+            ({"deploy_reference": " tag"}, "without surrounding space"),
+        ):
+            with self.subTest(extra_fields=extra_fields), TemporaryDirectory() as directory:
+                result = self.run_action(
+                    request={**base_request, **extra_fields},
+                    output_path=Path(directory) / "github-output.txt",
+                )
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(message, result.stderr)
+                self.assertEqual(json.loads(result.stderr.splitlines()[-1]), [])
 
     def test_action_rejects_explicit_digest_bound_apply_before_oidc(self) -> None:
         request = {
@@ -751,15 +936,12 @@ console.log(JSON.stringify({{
             "RECOVERY_ARTIFACT_RUN_ID: ${{ github.event.workflow_run.id }}",
             "Recovery request artifact must contain exactly one file.",
             "Recovery request artifact exceeds the size limit.",
-            "name: Resolve provider evidence request",
             "name: Inspect exact provider evidence",
-            "route-path: /v1/admin/generic-web/deploy-recovery/provider-evidence",
-            "provider_evidence=provider_evidence",
-            "provider_read_error_class=provider_read_error_class",
+            "mode: provider-evidence",
             "continue-on-error: true",
             "name: Request Launchplane recovery dry run",
             "uses: cbusillo/launchplane/.github/actions/"
-            "generic-web-deploy-recovery-dry-run@b2055d2944626234664390d6fcd96975ded38511",
+            "generic-web-deploy-recovery-dry-run@6bac61a1967c6adce8bdfd32cfbcdae362134a34",
             "request-json: ${{ steps.request.outputs.request }}",
             "Recovery digest:",
             "Proposed action:",
