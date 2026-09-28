@@ -960,7 +960,10 @@ compare-and-writes only the product profile. Existing lanes and every unrelated
 profile field are preserved, while provider records and provider state are
 read-only. Operators use the `stable-lane-repair` operation in
 `Product Onboarding Manifest (Advanced)`; the workflow has no real product,
-context, instance, domain, or target defaults.
+context, instance, domain, or target defaults. That operation calls
+`Reusable Stable Lane Repair` by full commit SHA, so the
+`product_onboarding.apply` grant binds to that exact worker revision rather
+than to the manifest's branch identity.
 
 Odoo preview certificate-policy changes use
 `POST /v1/product-profiles/preview-tls/apply`. The route reads the current
