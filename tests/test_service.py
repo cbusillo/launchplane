@@ -7118,7 +7118,11 @@ class LaunchplaneServiceTests(unittest.TestCase):
                         scope="instance",
                         context="sellyouroutboard",
                         instance="prod",
-                        env={"GOOGLE_ANALYTICS_MEASUREMENT_ID": "G-9KRMER45KG"},
+                        env={
+                            "GOOGLE_ANALYTICS_MEASUREMENT_ID": "G-9KRMER45KG",
+                            # A plain setting must not stand in for the declared secret.
+                            "CONTEXT_API_TOKEN": "plain-setting-value",
+                        },
                         updated_at="2026-05-06T17:00:00Z",
                         source_label="test",
                     )
@@ -7201,6 +7205,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(payload["error"]["code"], "runtime_secret_values_missing")
         self.assertIn("CONTEXT_API_TOKEN", payload["error"]["message"])
         self.assertNotIn("G-9KRMER45KG", json.dumps(payload))
+        self.assertNotIn("plain-setting-value", json.dumps(payload))
 
     def test_live_target_runtime_api_apply_updates_env_and_verifies(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
