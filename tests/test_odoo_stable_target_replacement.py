@@ -2635,7 +2635,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 integration="runtime_environment",
                 binding_key="ODOO_DB_PASSWORD",
                 context="cm",
-                instance="testing",
+                instance="",
                 status="configured",
                 created_at="2026-05-05T22:45:00Z",
                 updated_at="2026-05-05T22:45:00Z",

@@ -1,6 +1,7 @@
 import unittest
 
 from control_plane.contracts.runtime_key_safety_policy import (
+    RuntimeEnvironmentClass,
     RuntimeKeySafetyPolicyRecord,
     RuntimeKeySafetyTarget,
     RuntimeSecretSafetyRule,
@@ -441,15 +442,66 @@ class RuntimeKeySafetyTests(unittest.TestCase):
                 instance_patterns=("*",),
             )
 
-    def test_unclassified_secret_fails_closed(self) -> None:
+    def test_unclassified_shared_secret_fails_closed(self) -> None:
+        for shared_binding in (
+            _binding(binding_key="SHOPIFY_ACCESS_TOKEN", instance=""),
+            _binding(binding_key="SHOPIFY_ACCESS_TOKEN", context="", instance=""),
+        ):
+            with self.subTest(context=shared_binding.context, instance=shared_binding.instance):
+                evaluation = evaluate_runtime_key_safety(
+                    target=RuntimeKeySafetyTarget(
+                        context="opw",
+                        instance="testing",
+                        environment_class="testing",
+                    ),
+                    required_binding_keys=("SHOPIFY_ACCESS_TOKEN",),
+                    secret_bindings=(shared_binding,),
+                    secret_rules=(),
+                )
+
+                self.assertEqual(evaluation.status, "fail")
+                self.assertEqual(evaluation.findings[0].code, "unclassified_binding")
+
+    def test_unclassified_secret_stored_for_the_exact_stable_lane_passes(self) -> None:
+        lanes: tuple[tuple[str, RuntimeEnvironmentClass], ...] = (
+            ("testing", "testing"),
+            ("prod", "prod"),
+        )
+        for instance, environment_class in lanes:
+            with self.subTest(instance=instance):
+                evaluation = evaluate_runtime_key_safety(
+                    target=RuntimeKeySafetyTarget(
+                        context="opw",
+                        instance=instance,
+                        environment_class=environment_class,
+                    ),
+                    required_binding_keys=("SHOPIFY_ACCESS_TOKEN",),
+                    secret_bindings=(
+                        _binding(binding_key="SHOPIFY_ACCESS_TOKEN", instance=instance),
+                    ),
+                    secret_rules=(),
+                )
+
+                self.assertEqual(evaluation.status, "pass")
+                self.assertEqual(evaluation.findings, ())
+
+    def test_unclassified_lane_secret_still_fails_for_a_preview_target(self) -> None:
+        # Preview checks retarget the template lane's bindings to the preview,
+        # so a copied lane secret looks lane-exact and must still need a rule.
         evaluation = evaluate_runtime_key_safety(
             target=RuntimeKeySafetyTarget(
-                context="opw",
-                instance="testing",
-                environment_class="testing",
+                context="opw-preview",
+                instance="pr-12",
+                environment_class="preview",
             ),
             required_binding_keys=("SHOPIFY_ACCESS_TOKEN",),
-            secret_bindings=(_binding(binding_key="SHOPIFY_ACCESS_TOKEN"),),
+            secret_bindings=(
+                _binding(
+                    binding_key="SHOPIFY_ACCESS_TOKEN",
+                    context="opw-preview",
+                    instance="pr-12",
+                ),
+            ),
             secret_rules=(),
         )
 
