@@ -127,6 +127,7 @@ class VeriReelProdBackupGateWorkflowTests(unittest.TestCase):
         *,
         secret_class: RuntimeSecretClass = "prod_only",
         classified_binding_keys: tuple[str, ...] = PROD_WORKER_SECRET_BINDING_KEYS,
+        context_shared_binding_keys: tuple[str, ...] = (),
     ) -> None:
         plaintext_values = {
             "VERIREEL_PROD_PROXMOX_SSH_KNOWN_HOSTS": "runtime-known-hosts",
@@ -137,15 +138,16 @@ class VeriReelProdBackupGateWorkflowTests(unittest.TestCase):
             {control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"},
         ):
             for binding_key, plaintext_value in plaintext_values.items():
+                context_shared = binding_key in context_shared_binding_keys
                 control_plane_secrets.write_secret_value(
                     record_store=store,
-                    scope="context_instance",
+                    scope="context" if context_shared else "context_instance",
                     integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
                     name=binding_key,
                     plaintext_value=plaintext_value,
                     binding_key=binding_key,
                     context_name="verireel",
-                    instance_name="prod",
+                    instance_name="" if context_shared else "prod",
                     actor="test",
                 )
         store.write_runtime_key_safety_policy_record(
@@ -407,9 +409,12 @@ class VeriReelProdBackupGateWorkflowTests(unittest.TestCase):
             store = PostgresRecordStore(database_url=database_url)
             store.ensure_schema()
             try:
+                # A secret stored only for this lane is classified by the lane, so
+                # the unclassified one is shared across the context.
                 self._write_prod_worker_secret_bindings(
                     store,
                     classified_binding_keys=("VERIREEL_PROD_PROXMOX_SSH_PRIVATE_KEY",),
+                    context_shared_binding_keys=("VERIREEL_PROD_PROXMOX_SSH_KNOWN_HOSTS",),
                 )
             finally:
                 store.close()

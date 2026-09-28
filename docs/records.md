@@ -2244,7 +2244,8 @@ delete provider values or deploy an application.
   a managed secret binding may be used by a target runtime class. Evaluation
   fails closed when no active policy record exists or when a required binding is
   missing, disabled, ambiguous, unclassified, or outside the allowed
-  context/instance.
+  context/instance. A binding stored for exactly a stable target lane counts as
+  classified by that lane; see [secrets](secrets.md).
 - Rules may restrict stable scope with exact `allowed_contexts` and
   `allowed_instances` values. Dynamic preview lanes should use paired
   `allowed_targets` entries with an exact context and explicit

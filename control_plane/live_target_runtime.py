@@ -289,6 +289,13 @@ def require_product_profile_runtime_keys(
             instance_name=instance_name,
         ):
             allowed_keys.add(secret_requirement.binding_key)
+    allowed_keys.update(
+        _lane_runtime_secret_binding_keys(
+            record_store=record_store,
+            context_name=context_name,
+            instance_name=instance_name,
+        )
+    )
     if not allowed_keys:
         raise LiveTargetRuntimeError(
             f"Product {product_name!r} has no expected runtime keys for {context_name}/{instance_name}.",
@@ -315,6 +322,32 @@ def _require_product_profile_runtime_secret_keys(
             context_name=context_name,
             instance_name=instance_name,
         )
+    } | _lane_runtime_secret_binding_keys(
+        record_store=record_store,
+        context_name=context_name,
+        instance_name=instance_name,
+    )
+
+
+# A managed secret stored for exactly this lane is part of the lane's expected
+# runtime, so storing it is enough to deliver it; no profile declaration is needed.
+def _lane_runtime_secret_binding_keys(
+    *,
+    record_store: LiveTargetRuntimeProfileStore,
+    context_name: str,
+    instance_name: str,
+) -> set[str]:
+    return {
+        binding.binding_key
+        for binding in record_store.list_secret_bindings(
+            integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
+            context_name=context_name,
+            instance_name=instance_name,
+            limit=None,
+        )
+        if binding.status == "configured"
+        and binding.context == context_name
+        and binding.instance == instance_name
     }
 
 
