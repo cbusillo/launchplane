@@ -5,6 +5,7 @@ from collections.abc import Callable
 from datetime import datetime, timedelta
 import hashlib
 from pathlib import Path
+import re
 from typing import Literal, Protocol, cast, runtime_checkable
 
 import click
@@ -36,6 +37,7 @@ from control_plane.workflows.dokploy_deploy import (
     execute_dokploy_artifact_deploy,
 )
 from control_plane.dokploy import api as dokploy_api
+from control_plane.dokploy import runtime_evidence as dokploy_runtime_evidence
 from control_plane.dokploy import source as dokploy_source
 
 
@@ -247,6 +249,106 @@ class GenericWebLegacyDeploymentCorrelation(BaseModel):
         return self
 
 
+class GenericWebRuntimeArtifactObservation(BaseModel):
+    """Read-only runtime facts for one exact provider target.
+
+    ``target_artifact_reference`` is the image the provider target is configured
+    to run. ``running_container_images`` lists the configured image of every
+    running container that belongs to the target.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    target_artifact_reference: str
+    running_container_images: tuple[str, ...]
+    running_container_deployment_record_ids: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def _validate_aligned_record_ids(self) -> "GenericWebRuntimeArtifactObservation":
+        if self.running_container_deployment_record_ids and len(
+            self.running_container_deployment_record_ids
+        ) != len(self.running_container_images):
+            raise ValueError("Runtime deployment record ids must align with running images.")
+        return self
+
+
+class GenericWebRuntimeCloseOutEvidence(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = 1
+    artifact_reference_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    running_container_count: int = Field(ge=1)
+    matching_container_count: int = Field(ge=1)
+
+
+_IMMUTABLE_ARTIFACT_REFERENCE_PATTERN = re.compile(r"^[^\s@]+@sha256:[a-f0-9]{64}$")
+
+
+def _image_repository(image_reference: str) -> str:
+    """Return the canonical repository of an image reference, without tag or digest."""
+
+    reference = image_reference.strip().split("@", 1)[0]
+    registry_and_path, separator, last_segment = reference.rpartition("/")
+    repository = f"{registry_and_path}{separator}{last_segment.split(':', 1)[0]}".lower()
+    first_segment, _, remainder = repository.partition("/")
+    if not remainder:
+        return f"docker.io/library/{repository}"
+    if first_segment == "index.docker.io":
+        first_segment = "docker.io"
+    elif "." not in first_segment and ":" not in first_segment and first_segment != "localhost":
+        return f"docker.io/{repository}"
+    if first_segment == "docker.io" and "/" not in remainder:
+        return f"docker.io/library/{remainder}"
+    return f"{first_segment}/{remainder}"
+
+
+def evaluate_generic_web_runtime_close_out(
+    *,
+    observation: GenericWebRuntimeArtifactObservation,
+    expected_artifact_reference: str,
+    expected_deployment_record_id: str = "",
+) -> GenericWebRuntimeCloseOutEvidence:
+    """Prove that an original deploy's exact image is configured and running.
+
+    Raises ``ValueError`` unless the target is configured for the exact
+    immutable original image, at least one running container runs it, and no
+    running container runs any other reference of the same image repository.
+    With ``expected_deployment_record_id``, every running container of that
+    repository must also carry that deployment record id, which ties the running
+    containers to the operation that set it rather than an earlier deploy of the
+    same image.
+    """
+
+    expected_reference = expected_artifact_reference.strip()
+    if not _IMMUTABLE_ARTIFACT_REFERENCE_PATTERN.fullmatch(expected_reference):
+        raise ValueError("Runtime close-out requires an immutable original artifact reference.")
+    if observation.target_artifact_reference.strip() != expected_reference:
+        raise ValueError("Runtime close-out target artifact does not match the original deploy.")
+    expected_repository = _image_repository(expected_reference)
+    running_images = tuple(image.strip() for image in observation.running_container_images)
+    repository_images = tuple(
+        image for image in running_images if _image_repository(image) == expected_repository
+    )
+    if not repository_images:
+        raise ValueError("Runtime close-out found no running container for the original image.")
+    if any(image != expected_reference for image in repository_images):
+        raise ValueError("Runtime close-out found a running container with another image.")
+    expected_record_id = expected_deployment_record_id.strip()
+    if expected_record_id:
+        record_ids = observation.running_container_deployment_record_ids
+        if len(record_ids) != len(running_images) or any(
+            record_id.strip() != expected_record_id
+            for image, record_id in zip(running_images, record_ids, strict=True)
+            if _image_repository(image) == expected_repository
+        ):
+            raise ValueError("Runtime close-out containers were not created by this deployment.")
+    return GenericWebRuntimeCloseOutEvidence(
+        artifact_reference_sha256=_legacy_correlation_sha256(expected_reference),
+        running_container_count=len(running_images),
+        matching_container_count=len(repository_images),
+    )
+
+
 class DokployGenericWebDeployStore(control_plane_secrets.SecretReadStore, Protocol):
     def read_provider_target_record(
         self, *, context_name: str, instance_name: str
@@ -294,7 +396,15 @@ class GenericWebDeployProvider(Protocol):
         deployment_title: str,
         before_provider_mutation: Callable[[str], None],
         effect_started: Callable[[], None],
-    ) -> None: ...
+    ) -> GenericWebProviderDeploymentObservation | None:
+        """Deploy and wait; return an untitled deployment observation or ``None``.
+
+        ``None`` means the deployment carrying ``deployment_title`` finished, so
+        the caller observes it by title. A returned observation is the only new
+        provider deployment, which did not carry the title; the caller must
+        prove its effect from runtime evidence before treating it as complete.
+        """
+        ...
 
     def observe_artifact_deploy(
         self,
@@ -314,6 +424,16 @@ class GenericWebDeployLegacyCorrelationProvider(Protocol):
         resolved_deploy_target: GenericWebResolvedDeployTarget,
         provider_effect_started_at: str,
     ) -> GenericWebLegacyDeploymentCorrelation: ...
+
+
+@runtime_checkable
+class GenericWebDeployRuntimeArtifactProvider(Protocol):
+    def observe_runtime_artifact(
+        self,
+        *,
+        control_plane_root: Path,
+        resolved_deploy_target: GenericWebResolvedDeployTarget,
+    ) -> GenericWebRuntimeArtifactObservation: ...
 
 
 class DokployGenericWebDeployProvider:
@@ -439,9 +559,12 @@ class DokployGenericWebDeployProvider:
         deployment_title: str,
         before_provider_mutation: Callable[[str], None],
         effect_started: Callable[[], None],
-    ) -> None:
+    ) -> GenericWebProviderDeploymentObservation | None:
         host, token = self._read_provider_config(control_plane_root=control_plane_root)
-        execute_dokploy_artifact_deploy(
+        # Dokploy compose deployments have not carried the title Launchplane
+        # sends (cbusillo/launchplane#2531), so compose deploys also accept the
+        # sole new deployment and leave proof of its effect to runtime evidence.
+        untitled_deployment = execute_dokploy_artifact_deploy(
             host=host,
             token=token,
             ship_request=resolved_deploy_target.ship_request,
@@ -451,7 +574,18 @@ class DokployGenericWebDeployProvider:
             deployment_title=deployment_title,
             before_provider_mutation=before_provider_mutation,
             effect_started=effect_started,
+            accept_sole_new_deployment=(
+                resolved_deploy_target.resolved_target.target_type == "compose"
+            ),
         )
+        if untitled_deployment is None:
+            return None
+        try:
+            return _terminal_deployment_observation(untitled_deployment)
+        except ValueError as error:
+            raise click.ClickException(
+                "Untitled Dokploy deployment has incomplete terminal evidence."
+            ) from error
 
     def observe_artifact_deploy(
         self,
@@ -544,6 +678,64 @@ class DokployGenericWebDeployProvider:
                 target_type=target.target_type,
             ),
         )
+
+    def observe_runtime_artifact(
+        self,
+        *,
+        control_plane_root: Path,
+        resolved_deploy_target: GenericWebResolvedDeployTarget,
+    ) -> GenericWebRuntimeArtifactObservation:
+        target = resolved_deploy_target.resolved_target
+        if target.target_type != "compose":
+            raise ValueError("Runtime close-out supports compose targets only.")
+        host, token = self._read_provider_config(control_plane_root=control_plane_root)
+        target_payload = dokploy_api.fetch_dokploy_target_payload(
+            host=host,
+            token=token,
+            target_type=target.target_type,
+            target_id=target.target_id,
+        )
+        if (
+            _dokploy_target_payload_id(target_payload=target_payload, target_type="compose")
+            != target.target_id.strip()
+        ):
+            raise ValueError("Runtime close-out target identity is not exact.")
+        try:
+            running_containers = dokploy_runtime_evidence.fetch_compose_running_container_runtime(
+                host=host,
+                token=token,
+                app_name=str(target_payload.get("appName") or ""),
+                server_id=str(target_payload.get("serverId") or ""),
+            )
+        except dokploy_runtime_evidence.DokployEvidenceProviderError as error:
+            raise click.ClickException("Runtime close-out provider read failed.") from error
+        return GenericWebRuntimeArtifactObservation(
+            target_artifact_reference=_dokploy_target_artifact_reference(
+                target_payload=target_payload,
+                target_type="compose",
+            ),
+            running_container_images=tuple(image for image, _ in running_containers),
+            running_container_deployment_record_ids=tuple(
+                record_id for _, record_id in running_containers
+            ),
+        )
+
+
+def _terminal_deployment_observation(
+    deployment: dokploy_api.JsonObject,
+) -> GenericWebProviderDeploymentObservation:
+    return GenericWebProviderDeploymentObservation(
+        outcome="present",
+        deployment_status=dokploy_api.deployment_status(deployment),
+        deployment_id=dokploy_api.deployment_key(deployment),
+        started_at=str(deployment.get("startedAt") or deployment.get("started_at") or "").strip(),
+        finished_at=str(
+            deployment.get("finishedAt") or deployment.get("finished_at") or ""
+        ).strip(),
+        error_message=str(
+            deployment.get("errorMessage") or deployment.get("error_message") or ""
+        ).strip(),
+    )
 
 
 def correlate_legacy_dokploy_deployment(

@@ -5,11 +5,14 @@ import time
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from contextlib import nullcontext
+from types import SimpleNamespace
 from typing import Any, Literal
 from unittest.mock import patch
 
 from click import ClickException
 
+from control_plane.contracts.release_review import ReleaseReviewStatus
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.preview_generation_record import (
@@ -1629,7 +1632,9 @@ class GenericWebHttpTests(unittest.TestCase):
         self.assertEqual(status_code, 403)
         self.assertEqual(payload["error"]["code"], "authorization_denied")
 
-    def test_generic_web_prod_promotion_live_requires_intent_or_unreviewed_grant(self) -> None:
+    def _invoke_live_promotion_without_intent_or_grant(
+        self, release_review: ReleaseReviewStatus | None = None
+    ) -> tuple[int, dict[str, Any]]:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
             state_dir = root / "state"
@@ -1669,25 +1674,66 @@ class GenericWebHttpTests(unittest.TestCase):
                 control_plane_root_path=root,
             )
 
-            status_code, payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/drivers/generic-web/prod-promotion",
-                payload={
-                    "schema_version": 1,
-                    "product": "sellyouroutboard",
-                    "promotion": {
+            profile = store.read_product_profile_record("sellyouroutboard")
+            prod_lane = next(lane for lane in profile.lanes if lane.instance == "prod")
+            review_patch = patch(
+                "control_plane.http_routes.generic_web.build_product_promotion_status",
+                return_value=(
+                    profile,
+                    prod_lane,
+                    SimpleNamespace(release_review=release_review),
+                ),
+            )
+            with review_patch if release_review is not None else nullcontext():
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/generic-web/prod-promotion",
+                    payload={
                         "schema_version": 1,
                         "product": "sellyouroutboard",
-                        "artifact_id": "ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
-                        "source_git_ref": "abc123",
+                        "promotion": {
+                            "schema_version": 1,
+                            "product": "sellyouroutboard",
+                            "artifact_id": "ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
+                            "source_git_ref": "abc123",
+                        },
                     },
-                },
-                headers={"Idempotency-Key": "generic-web-prod-promotion-reviewed-only"},
-            )
+                    headers={"Idempotency-Key": "generic-web-prod-promotion-reviewed-only"},
+                )
+
+        return status_code, payload
+
+    def test_generic_web_prod_promotion_live_requires_intent_or_unreviewed_grant(self) -> None:
+        status_code, payload = self._invoke_live_promotion_without_intent_or_grant()
 
         self.assertEqual(status_code, 403)
         self.assertEqual(payload["error"]["code"], "promotion_intent_required")
+
+    def test_generic_web_prod_promotion_live_accepts_an_approved_release_as_the_go(
+        self,
+    ) -> None:
+        status_code, payload = self._invoke_live_promotion_without_intent_or_grant(
+            ReleaseReviewStatus(required=True, approved=True)
+        )
+
+        self.assertNotEqual(status_code, 403, payload)
+        self.assertNotEqual(
+            payload.get("error", {}).get("code"), "promotion_intent_required", payload
+        )
+
+    def test_generic_web_prod_promotion_live_needs_a_recorded_approval_not_an_exemption(
+        self,
+    ) -> None:
+        for review in (
+            ReleaseReviewStatus(required=False, approved=False),
+            ReleaseReviewStatus(required=True, approved=False),
+        ):
+            with self.subTest(required=review.required):
+                status_code, payload = self._invoke_live_promotion_without_intent_or_grant(review)
+
+                self.assertEqual(status_code, 403)
+                self.assertEqual(payload["error"]["code"], "promotion_intent_required")
 
     def test_generic_web_prod_promotion_unreviewed_live_requires_database(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

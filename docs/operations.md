@@ -343,9 +343,12 @@ inputs creates a new row instead of being suppressed forever.
 The workflow input set includes `promotion_intent_id`, equal to the persisted
 outbox delivery ID. Product workflows must pass it to the raw live promotion
 route and use it as that request's `Idempotency-Key`; the service revalidates
-the current evidence and target against the intent before execution. The
-separate `generic_web_prod_promotion.execute_unreviewed` authorization action is
-the only supported escape hatch for deliberately unreviewed automation.
+the current evidence and target against the intent before execution. Without an
+intent, a recorded Owner approval or operator override of the current release
+checklist authorizes the live call, because that decision is already the human
+go-ahead for exactly that build. A release that needs no review does not count.
+The separate `generic_web_prod_promotion.execute_unreviewed` authorization action
+is the only supported escape hatch for deliberately unreviewed automation.
 
 GitHub workflow dispatch does not provide a provider idempotency token. Its
 worker therefore persists the observation window and an in-doubt marker before
@@ -430,6 +433,26 @@ mutation_in_progress`; a completed effect replays; a different request
   checkpointed post-deploy phase stays `reconcile_required` unless the exact
   provider marker can be observed; Launchplane does not synthesize terminal
   success from the target's current desired state.
+- Dokploy compose deployments have not carried the operation title in
+  practice (every RepairShopr compose deploy since July; see #2531), so the
+  titled wait never matched and each deploy ended `reconcile_required`. For
+  compose targets only, the initial deployment wait therefore also accepts the
+  sole deployment that did not exist before the trigger when none carries the
+  title, after it has stayed the only new deployment, successful, for a
+  15-second settle window. Two or more new untitled deployments, including one
+  that appears during settling, are ambiguous and still time out. That untitled
+  deployment counts as this operation only after the same runtime checks as
+  recovery close-out pass: the target is configured for exactly the original
+  immutable image, the running service containers run it with no other
+  reference of that repository, and each of those containers carries this
+  operation's `LAUNCHPLANE_DEPLOYMENT_RECORD_ID` (only that environment value is
+  read), so an earlier or unrelated deploy of the same image cannot stand in for
+  this one. A compose file that does not pass that variable to its containers
+  cannot be proven this way. Otherwise the outcome stays unknown and the
+  reservation stays `reconcile_required`. Reconciliation's time-window
+  correlation applies the same runtime proof to compose targets, so a retry
+  cannot adopt what the initial wait could not prove. Application targets keep
+  the exact titled wait unchanged.
 - Odoo compose-create recovery checks both project inventory and compose search,
   while destroy reconciliation reads the exact compose id. Generic-web recovery
   repairs the deterministic deployment record and environment inventory before
@@ -485,7 +508,8 @@ release, supersede, retry, adopt, or write deployment, inventory, idempotency,
 or provider state. The bounded response reports only reservation state and
 timestamps, hashed identifiers, provider outcome/status, retry safety, one of
 `replay_completed`, `wait_for_active_lease`, `adopt_observed`,
-`retry_original_operation`, or `hold_unknown`, and a canonical recovery digest.
+`retry_original_operation`, `close_out_observed`, or `hold_unknown`, and a
+canonical recovery digest.
 Recovery apply recomputes that evidence and rejects a stale digest. After a
 Launchplane deployment changes provider observation or reconciliation behavior,
 run a fresh dry-run and review the new bounded evidence instead of reusing a
@@ -579,6 +603,37 @@ legacy correlation is adoption-only and never enables provider retry. Where the
 product driver has a post-deploy phase, adoption records that post-deploy work
 as unobserved rather than claiming it completed.
 
+A current-format reservation (one whose reconciliation snapshot stores the
+product) can instead be closed out from runtime evidence when the exact titled
+deployment is absent after the effect started. Dry-run proposes
+`close_out_observed` only when every one of these holds; otherwise it stays
+`hold_unknown`:
+
+- the reservation is `reconcile_required` at `deploy_trigger` and the provider
+  evidence is `deployment_absent_after_effect`;
+- the product driver has no post-deploy phase;
+- the provider is Dokploy and the target is a compose target whose payload id
+  matches the stored target exactly;
+- the original deploy artifact is an immutable `repository@sha256:` reference;
+- the target's `DOCKER_IMAGE_REFERENCE` equals that reference exactly;
+- at least one running container of the exact compose app runs that reference,
+  and no running container runs any other reference (digest, tag, or both) of
+  the same image repository. Every listed container is inspected; membership
+  comes from its inspected Compose project label (the app-name prefix only when
+  the label is absent) and running state from its inspected state. Paused,
+  restarting, and one-off `compose run` containers do not count, and Docker Hub
+  repository aliases are treated as the same repository.
+
+Any provider read failure, missing image, or mismatch keeps `hold_unknown`.
+The digest adds only a hash of the artifact reference and the running and
+matching container counts, so apply reruns the same runtime read and a changed
+runtime stales the reviewed digest. Close-out never retries the deploy and never
+calls the provider's deploy path. It compare-and-sets the exact reviewed
+reservation to `completed` with a bounded `pass` result that has an empty
+deployment record id and finish time, and it writes no deployment or inventory
+record because no provider deployment was observed. The target is then free for
+the next normal deploy, which records fresh deployment evidence.
+
 The bounded provider-evidence route reports failed correlation invariants as
 `provider_status_unknown`; provider request failures remain `provider_read_failed`
 with only the existing bounded read-error class.
@@ -620,7 +675,13 @@ the durable mutation store, then uses the existing exact-match adoption or retry
 methods. `adopt_observed` stores deployment/inventory evidence from the reviewed
 inspection without re-observing the provider. `retry_original_operation` resumes
 the already-acquired reservation path and preserves `reconcile_required` for
-pre-effect rejection, lease loss, uncertain, or non-durable outcomes. Successful
+pre-effect rejection, lease loss, uncertain, or non-durable outcomes.
+`close_out_observed` settles the exact reservation from the reinspected runtime
+evidence without any provider call. The recovery action accepts an apply
+response only when it settles the reservation without retry: `adopt_observed`
+with provider outcome `present`/`done`, or `close_out_observed` with provider
+outcome `unknown` (or `not_inspected` when a lost-response retry replays the
+completed close-out) and an empty provider status. Successful
 apply preserves the original deploy response evidence and adds only bounded
 recovery metadata, `recovery_digest` and `recovery_action`, so a lost-response
 apply retry can replay safely without exposing raw scope, key, target, or

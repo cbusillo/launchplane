@@ -948,10 +948,12 @@ authority must come from managed authz reconciliation through the service or
 operator UI, not a checked-in product catalog.
 
 Missing generic-web stable lanes can be restored through
-`POST /v1/product-profiles/stable-lane-repair/apply`. The request identifies an
-existing product, a context already owned by another stable lane, the absent
-instance, and one HTTPS base URL selected from the current tracked Dokploy
-target domains. The service derives the health URL from tracked target health
+`POST /v1/product-profiles/stable-lane-repair/apply`. The same operation fills
+in the URLs of an existing lane that has no `base_url`, in the same context. It
+never overwrites a recorded `base_url` and keeps a recorded `health_url`. The
+request identifies an existing product, a context already owned by a stable
+lane, the absent or URL-less instance, and one HTTPS base URL selected from the
+current tracked Dokploy target domains. The service derives the health URL from tracked target health
 metadata, verifies the canonical provider-target projection, and binds the plan
 to the complete product profile, provider target, Dokploy target, and Dokploy
 target-id records. Dry-run returns a canonical plan SHA-256 without mutation;
