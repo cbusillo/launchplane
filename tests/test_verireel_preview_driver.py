@@ -9,12 +9,6 @@ from unittest.mock import MagicMock, patch
 import click
 
 from control_plane import dokploy as control_plane_dokploy
-from control_plane.contracts.runtime_key_safety_policy import (
-    RuntimeKeySafetyPolicyRecord,
-    RuntimeSecretClass,
-    RuntimeSecretSafetyRule,
-    RuntimeSecretSafetyTargetScope,
-)
 from control_plane.contracts.secret_record import SecretBinding
 from control_plane.dokploy import DokployTargetDefinition
 from control_plane.workflows.verireel_preview_driver import VeriReelPreviewDestroyRequest
@@ -23,9 +17,6 @@ from control_plane.workflows.verireel_preview_driver import VeriReelPreviewRefre
 from control_plane.workflows.verireel_preview_driver import VeriReelPreviewRefreshTransportError
 from control_plane.workflows.verireel_preview_driver import _build_preview_runtime_identity
 from control_plane.workflows.verireel_preview_driver import _build_preview_database_command
-from control_plane.workflows.verireel_preview_driver import (
-    _enforce_verireel_preview_runtime_key_safety,
-)
 from control_plane.workflows.verireel_preview_driver import _ensure_application
 from control_plane.workflows.verireel_preview_driver import _preview_database_admin_module_source
 from control_plane.workflows.verireel_preview_driver import _resolve_preview_secret
@@ -40,121 +31,6 @@ from control_plane.workflows.preview_resource_destroy import PreviewResourceDest
 from control_plane.workflows.verireel_billing_recovery_schedule import (
     VeriReelRecoveryScheduleSnapshot,
 )
-
-
-class _RuntimeKeySafetyStore:
-    def __init__(
-        self,
-        *,
-        policies: tuple[RuntimeKeySafetyPolicyRecord, ...] = (),
-        bindings: tuple[SecretBinding, ...] = (),
-    ) -> None:
-        self.policies = policies
-        self.bindings = bindings
-
-    def list_runtime_key_safety_policy_records(
-        self,
-        *,
-        status: str = "",
-        limit: int | None = None,
-    ) -> tuple[RuntimeKeySafetyPolicyRecord, ...]:
-        records = tuple(record for record in self.policies if not status or record.status == status)
-        if limit is not None:
-            return records[:limit]
-        return records
-
-    def list_secret_bindings(
-        self,
-        *,
-        integration: str = "",
-        context_name: str = "",
-        instance_name: str = "",
-        limit: int | None = None,
-    ) -> tuple[SecretBinding, ...]:
-        bindings = tuple(
-            binding
-            for binding in self.bindings
-            if (not integration or binding.integration == integration)
-            and (not context_name or binding.context == context_name)
-            and (not instance_name or binding.instance == instance_name)
-        )
-        if limit is not None:
-            return bindings[:limit]
-        return bindings
-
-
-def _runtime_policy(
-    *, secret_class: RuntimeSecretClass = "preview"
-) -> RuntimeKeySafetyPolicyRecord:
-    return RuntimeKeySafetyPolicyRecord(
-        record_id="runtime-key-safety-policy-test",
-        status="active",
-        source="test",
-        updated_at="2026-05-05T22:15:00Z",
-        rules=(
-            RuntimeSecretSafetyRule(
-                binding_key="DATABASE_URL",
-                secret_class=secret_class,
-                allowed_contexts=("verireel-testing",),
-            ),
-            RuntimeSecretSafetyRule(
-                binding_key="BETTER_AUTH_SECRET",
-                secret_class=secret_class,
-                allowed_contexts=("verireel-testing",),
-            ),
-        ),
-    )
-
-
-def _verireel_preview_runtime_policy() -> RuntimeKeySafetyPolicyRecord:
-    return RuntimeKeySafetyPolicyRecord(
-        record_id="runtime-key-safety-policy-verireel-preview-test",
-        status="active",
-        source="test",
-        updated_at="2026-05-05T22:15:00Z",
-        rules=(
-            RuntimeSecretSafetyRule(
-                binding_key="POSTGRES_PASSWORD",
-                secret_class="shared_safe",
-                allowed_targets=(
-                    RuntimeSecretSafetyTargetScope(
-                        context="verireel-testing",
-                        instance_patterns=("pr-*",),
-                    ),
-                ),
-            ),
-            RuntimeSecretSafetyRule(
-                binding_key="BETTER_AUTH_SECRET",
-                secret_class="shared_safe",
-                allowed_targets=(
-                    RuntimeSecretSafetyTargetScope(
-                        context="verireel-testing",
-                        instance_patterns=("pr-*",),
-                    ),
-                ),
-            ),
-            RuntimeSecretSafetyRule(
-                binding_key="VERIREEL_SECRETS_MASTER_KEY",
-                secret_class="shared_safe",
-                allowed_targets=(
-                    RuntimeSecretSafetyTargetScope(
-                        context="verireel-testing",
-                        instance_patterns=("pr-*",),
-                    ),
-                ),
-            ),
-            RuntimeSecretSafetyRule(
-                binding_key="VERIREEL_CRON_SECRET",
-                secret_class="shared_safe",
-                allowed_targets=(
-                    RuntimeSecretSafetyTargetScope(
-                        context="verireel-testing",
-                        instance_patterns=("pr-*",),
-                    ),
-                ),
-            ),
-        ),
-    )
 
 
 def _runtime_binding(binding_key: str) -> SecretBinding:
@@ -465,15 +341,6 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
             context_name="verireel-testing",
         )
 
-    def test_verireel_preview_runtime_key_safety_rejects_missing_store(self) -> None:
-        with self.assertRaisesRegex(click.ClickException, "database storage"):
-            _enforce_verireel_preview_runtime_key_safety(
-                record_store=None,
-                template_target=_template_target(),
-                template_env_map={"EXTERNAL_API_TOKEN": "api-token"},
-                request=_refresh_request(),
-            )
-
     def test_verireel_template_runtime_secret_keys_skip_rewritten_database_url(self) -> None:
         self.assertEqual(
             _verireel_template_runtime_secret_keys(
@@ -487,22 +354,6 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
                 }
             ),
             (),
-        )
-
-    def test_verireel_preview_runtime_key_safety_ignores_generated_preview_secrets(
-        self,
-    ) -> None:
-        _enforce_verireel_preview_runtime_key_safety(
-            record_store=None,
-            template_target=_template_target(),
-            template_env_map={
-                "DATABASE_URL": "postgresql://user:pass@db.example/verireel_testing",
-                "BETTER_AUTH_SECRET": "auth-secret",
-                "VERIREEL_SECRETS_MASTER_KEY": "master-key",
-                "VERIREEL_CRON_SECRET": "cron-secret",
-                "VERIREEL_SMOKE_MAINTENANCE_SECRET": "smoke-secret",
-            },
-            request=_refresh_request(),
         )
 
     def test_resolve_preview_secret_rotates_copied_template_values(self) -> None:
@@ -524,127 +375,6 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
             ),
             "preview",
         )
-
-    def test_verireel_preview_runtime_key_safety_requires_bindings_for_other_copied_secrets(
-        self,
-    ) -> None:
-        with self.assertRaisesRegex(click.ClickException, "binding_missing"):
-            _enforce_verireel_preview_runtime_key_safety(
-                record_store=_RuntimeKeySafetyStore(policies=(_runtime_policy(),)),
-                template_target=_template_target(),
-                template_env_map={"EXTERNAL_API_TOKEN": "api-token"},
-                request=_refresh_request(),
-            )
-
-    def test_verireel_preview_runtime_key_safety_blocks_prod_only_template_secret(
-        self,
-    ) -> None:
-        store = _RuntimeKeySafetyStore(
-            policies=(
-                RuntimeKeySafetyPolicyRecord(
-                    record_id="runtime-key-safety-policy-prod-only-test",
-                    status="active",
-                    source="test",
-                    updated_at="2026-05-05T22:15:00Z",
-                    rules=(
-                        RuntimeSecretSafetyRule(
-                            binding_key="EXTERNAL_API_TOKEN",
-                            secret_class="prod_only",
-                            allowed_contexts=("verireel-testing",),
-                        ),
-                    ),
-                ),
-            ),
-            bindings=(_runtime_binding("EXTERNAL_API_TOKEN"),),
-        )
-
-        with self.assertRaisesRegex(click.ClickException, "secret_class_not_allowed"):
-            _enforce_verireel_preview_runtime_key_safety(
-                record_store=store,
-                template_target=_template_target(),
-                template_env_map={"EXTERNAL_API_TOKEN": "api-token"},
-                request=_refresh_request(),
-            )
-
-    def test_verireel_preview_runtime_key_safety_allows_preview_template_secrets(
-        self,
-    ) -> None:
-        store = _RuntimeKeySafetyStore(
-            policies=(_runtime_policy(),),
-            bindings=(
-                _runtime_binding("DATABASE_URL"),
-                _runtime_binding("BETTER_AUTH_SECRET"),
-            ),
-        )
-
-        _enforce_verireel_preview_runtime_key_safety(
-            record_store=store,
-            template_target=_template_target(),
-            template_env_map={
-                "DATABASE_URL": "postgresql://user:pass@db.example/verireel_testing",
-                "BETTER_AUTH_SECRET": "auth-secret",
-                "NEXT_PUBLIC_SITE_URL": "https://testing.example",
-            },
-            request=_refresh_request(),
-        )
-
-    def test_verireel_preview_runtime_key_safety_allows_pr_pattern_for_shared_template_secrets(
-        self,
-    ) -> None:
-        store = _RuntimeKeySafetyStore(
-            policies=(_verireel_preview_runtime_policy(),),
-            bindings=(
-                _runtime_binding("POSTGRES_PASSWORD"),
-                _runtime_binding("BETTER_AUTH_SECRET"),
-                _runtime_binding("VERIREEL_SECRETS_MASTER_KEY"),
-                _runtime_binding("VERIREEL_CRON_SECRET"),
-                _runtime_binding("VERIREEL_SMOKE_MAINTENANCE_SECRET"),
-            ),
-        )
-
-        _enforce_verireel_preview_runtime_key_safety(
-            record_store=store,
-            template_target=_template_target(),
-            template_env_map={
-                "POSTGRES_PASSWORD": "database-password",
-                "BETTER_AUTH_SECRET": "auth-secret",
-                "VERIREEL_SECRETS_MASTER_KEY": "master-key",
-                "VERIREEL_CRON_SECRET": "cron-secret",
-                "VERIREEL_SMOKE_MAINTENANCE_SECRET": "smoke-maintenance-secret",
-            },
-            request=_refresh_request(),
-        )
-
-    def test_preview_refresh_blocks_before_database_bootstrap_without_key_safety_store(
-        self,
-    ) -> None:
-        with (
-            patch(
-                "control_plane.workflows.verireel_preview_driver.dokploy_source.read_dokploy_config",
-                return_value=("https://dokploy.example", "token"),
-            ),
-            patch(
-                "control_plane.workflows.verireel_preview_driver._template_application_payload",
-                return_value=(
-                    _template_target(),
-                    {
-                        "applicationId": "app-template",
-                        "env": "DATABASE_URL=postgresql://user:pass@db.example/verireel_testing\nEXTERNAL_API_TOKEN=api-token\n",
-                    },
-                ),
-            ),
-            patch(
-                "control_plane.workflows.verireel_preview_driver._run_application_command"
-            ) as run_command,
-        ):
-            with self.assertRaisesRegex(click.ClickException, "database storage"):
-                execute_verireel_preview_refresh(
-                    control_plane_root=Path("."),
-                    request=_refresh_request(),
-                    record_store=None,
-                )
-
-        run_command.assert_not_called()
 
     def test_preview_refresh_refuses_template_platform_credential(self) -> None:
         with (
@@ -670,7 +400,6 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
                 execute_verireel_preview_refresh(
                     control_plane_root=Path("."),
                     request=_refresh_request(),
-                    record_store=None,
                 )
 
         self.assertIn("GITHUB_TOKEN", refusal.exception.message)
@@ -696,7 +425,6 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
                 execute_verireel_preview_refresh(
                     control_plane_root=Path(temporary_directory_name),
                     request=_refresh_request(),
-                    record_store=None,
                 )
 
     def test_preview_refresh_maps_template_payload_fetch_failure_to_transport(self) -> None:
@@ -732,7 +460,6 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
                 execute_verireel_preview_refresh(
                     control_plane_root=Path(temporary_directory_name),
                     request=_refresh_request(),
-                    record_store=None,
                 )
 
     def test_preview_refresh_maps_existing_preview_fetch_failure_to_transport(
@@ -772,12 +499,13 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
                 execute_verireel_preview_refresh(
                     control_plane_root=Path(temporary_directory_name),
                     request=_refresh_request(),
-                    record_store=None,
                 )
 
         run_command.assert_not_called()
 
-    def test_preview_refresh_generates_preview_local_runtime_secrets(self) -> None:
+    def test_preview_refresh_generates_its_own_secrets_and_copies_none_from_testing(
+        self,
+    ) -> None:
         captured_env: dict[str, str] = {}
         template_master_key = base64.b64encode(b"template-master-key").decode("ascii")
 
@@ -804,6 +532,8 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
                             f"VERIREEL_SECRETS_MASTER_KEY={template_master_key}\n"
                             "VERIREEL_CRON_SECRET=template-cron-secret\n"
                             "VERIREEL_SMOKE_MAINTENANCE_SECRET=template-smoke-secret\n"
+                            "POSTGRES_PASSWORD=template-postgres-password\n"
+                            "NEXT_PUBLIC_SUPPORT_EMAIL=support@example.com\n"
                         ),
                     },
                 ),
@@ -844,7 +574,6 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
             result = execute_verireel_preview_refresh(
                 control_plane_root=Path(temporary_directory_name),
                 request=_refresh_request(),
-                record_store=None,
             )
 
         self.assertEqual(result.refresh_status, "pass")
@@ -860,6 +589,9 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
         )
         self.assertEqual(len(base64.b64decode(captured_env["VERIREEL_SECRETS_MASTER_KEY"])), 32)
         self.assertIn("/verireel_preview_pr_71?", captured_env["DATABASE_URL"])
+        self.assertNotIn("POSTGRES_PASSWORD", captured_env)
+        self.assertNotIn("template-postgres-password", "\n".join(captured_env.values()))
+        self.assertEqual(captured_env["NEXT_PUBLIC_SUPPORT_EMAIL"], "support@example.com")
         self.finalize_recovery_schedule.assert_called_once()
         self.assertEqual(
             self.finalize_recovery_schedule.call_args.kwargs["instance"],
@@ -897,7 +629,6 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
             result = execute_verireel_preview_refresh(
                 control_plane_root=Path(temporary_directory_name),
                 request=_refresh_request(),
-                record_store=None,
             )
 
         self.assertEqual(result.refresh_status, "fail")
@@ -984,7 +715,6 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
             result = execute_verireel_preview_refresh(
                 control_plane_root=Path(temporary_directory_name),
                 request=_refresh_request(),
-                record_store=None,
             )
 
         self.assertEqual(result.refresh_status, "pass")

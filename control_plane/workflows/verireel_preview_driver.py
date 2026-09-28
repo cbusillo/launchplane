@@ -15,19 +15,13 @@ import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane import runtime_environments as control_plane_runtime_environments
-from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.runtime_identity import (
     RuntimeIdentity,
     health_payload_runtime_identity_status,
     runtime_identity_env,
 )
-from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyTarget
-from control_plane.contracts.secret_record import SecretBinding
 from control_plane.runtime_key_safety import (
-    RuntimeKeySafetyPolicyReadStore,
-    evaluate_runtime_key_safety,
     is_secret_shaped_runtime_key,
-    latest_active_runtime_key_safety_policy,
 )
 from control_plane.workflows.preview_resource_destroy import (
     destroy_dokploy_preview_resource,
@@ -359,6 +353,8 @@ def _parse_database_url(database_url: str) -> _DatabaseParts:
 def _verireel_template_runtime_secret_keys(
     template_env_map: dict[str, str],
 ) -> tuple[str, ...]:
+    # Template secrets the preview does not generate for itself. Previews run unmerged
+    # code, so these are dropped rather than copied from the testing lane.
     required_keys: list[str] = []
     for key, value in template_env_map.items():
         normalized_key = key.strip()
@@ -369,72 +365,6 @@ def _verireel_template_runtime_secret_keys(
         if is_secret_shaped_runtime_key(normalized_key):
             required_keys.append(normalized_key)
     return tuple(dict.fromkeys(required_keys))
-
-
-def _retarget_secret_bindings_for_preview_safety(
-    *,
-    secret_bindings: tuple[SecretBinding, ...],
-    preview_context: str,
-    preview_slug: str,
-) -> tuple[SecretBinding, ...]:
-    return tuple(
-        binding.model_copy(
-            update={
-                "context": preview_context,
-                "instance": preview_slug,
-            }
-        )
-        for binding in secret_bindings
-    )
-
-
-def _enforce_verireel_preview_runtime_key_safety(
-    *,
-    record_store: RuntimeKeySafetyPolicyReadStore | None,
-    template_target: dokploy_source.DokployTargetDefinition,
-    template_env_map: dict[str, str],
-    request: VeriReelPreviewRefreshRequest,
-) -> None:
-    required_binding_keys = _verireel_template_runtime_secret_keys(template_env_map)
-    if not required_binding_keys:
-        return
-    if record_store is None:
-        raise VeriReelPreviewRefreshConfigError(
-            "VeriReel preview refresh copied runtime secrets require Launchplane database storage."
-        )
-    try:
-        policy_record = latest_active_runtime_key_safety_policy(record_store)
-    except ValueError as exc:
-        raise VeriReelPreviewRefreshConfigError(
-            "VeriReel preview refresh copied runtime secrets require an active runtime "
-            "key-safety policy."
-        ) from exc
-    evaluation = evaluate_runtime_key_safety(
-        target=RuntimeKeySafetyTarget(
-            context=request.context,
-            instance=request.preview_slug,
-            environment_class="preview",
-        ),
-        required_binding_keys=required_binding_keys,
-        secret_bindings=_retarget_secret_bindings_for_preview_safety(
-            secret_bindings=record_store.list_secret_bindings(
-                integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
-                context_name=template_target.context,
-                instance_name=template_target.instance,
-                limit=None,
-            ),
-            preview_context=request.context,
-            preview_slug=request.preview_slug,
-        ),
-        secret_rules=policy_record.rules,
-    )
-    if evaluation.status == "pass":
-        return
-    finding_codes = ", ".join(finding.code for finding in evaluation.findings)
-    checked_keys = ", ".join(evaluation.checked_binding_keys)
-    raise VeriReelPreviewRefreshConfigError(
-        f"VeriReel preview runtime key-safety gate failed for {checked_keys}: {finding_codes}."
-    )
 
 
 def _build_admin_database_url(database_url: str) -> str:
@@ -1196,7 +1126,6 @@ def execute_verireel_preview_refresh(
     *,
     control_plane_root: Path,
     request: VeriReelPreviewRefreshRequest,
-    record_store: RuntimeKeySafetyPolicyReadStore | None = None,
     preview_id: str = "",
     preview_generation_id: str = "",
 ) -> VeriReelPreviewRefreshResult:
@@ -1227,12 +1156,6 @@ def execute_verireel_preview_refresh(
         )
     except runtime_platform_credentials.PlatformCredentialRefusedError as exc:
         raise VeriReelPreviewRefreshConfigError(str(exc.message)) from exc
-    _enforce_verireel_preview_runtime_key_safety(
-        record_store=record_store,
-        template_target=template_target,
-        template_env_map=template_env_map,
-        request=request,
-    )
     template_database = _parse_database_url(template_database_url)
 
     started_at = utc_now_timestamp()
@@ -1298,6 +1221,7 @@ def execute_verireel_preview_refresh(
         )
         env_text = dokploy_api.render_dokploy_env_text_with_overrides(
             str(template_application.get("env") or ""),
+            removals=_verireel_template_runtime_secret_keys(template_env_map),
             updates={
                 "VERIREEL_APP_URL": preview_url,
                 "BETTER_AUTH_URL": preview_url,
