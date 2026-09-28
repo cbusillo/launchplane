@@ -6941,7 +6941,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertNotIn("must-not-sync", json.dumps(payload))
         self.assertNotIn("context-secret-value", json.dumps(payload))
 
-    def test_live_target_runtime_api_delivers_secrets_stored_for_the_exact_lane(self) -> None:
+    def test_live_target_runtime_api_does_not_deliver_undeclared_lane_secrets(self) -> None:
+        # Worker-only secrets such as backup SSH keys are stored for the lane too;
+        # only keys the product profile declares may reach the app runtime.
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
             database_url = _sqlite_database_url(root / "launchplane.sqlite3")
@@ -6988,9 +6990,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
                             record_store=store,
                             scope="context_instance",
                             integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
-                            name="lead-alert-webhook",
+                            name="production-backup-ssh-private-key",
                             plaintext_value=value,
-                            binding_key="LEAD_ALERT_WEBHOOK_URL",
+                            binding_key="PRODUCTION_BACKUP_SSH_PRIVATE_KEY",
                             context_name="sellyouroutboard",
                             instance_name=instance,
                             actor="test",
@@ -7074,7 +7076,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                         "context": "sellyouroutboard",
                         "instance": "prod",
                     },
-                    headers={"Idempotency-Key": "live-target-runtime:lane-secret"},
+                    headers={"Idempotency-Key": "live-target-runtime:undeclared-lane-secret"},
                 )
 
         self.assertEqual(status_code, 202, msg=json.dumps(payload, indent=2, sort_keys=True))
@@ -7082,9 +7084,12 @@ class LaunchplaneServiceTests(unittest.TestCase):
         result = payload["result"]
         self.assertEqual(
             result["runtime_environment"]["missing_keys"],
-            ["GOOGLE_ANALYTICS_MEASUREMENT_ID", "LEAD_ALERT_WEBHOOK_URL"],
+            ["GOOGLE_ANALYTICS_MEASUREMENT_ID"],
         )
-        self.assertEqual(result["runtime_key_safety"]["status"], "pass")
+        self.assertNotIn(
+            "PRODUCTION_BACKUP_SSH_PRIVATE_KEY",
+            result["runtime_environment"]["changed_keys"],
+        )
         self.assertNotIn("lane-secret-value", json.dumps(payload))
         self.assertNotIn("other-lane-value", json.dumps(payload))
 

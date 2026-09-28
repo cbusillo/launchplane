@@ -352,11 +352,12 @@ decryption key state denies the reveal or resolution.
   runtime key-safety policy before returning sanitized key/count evidence.
 - Live target runtime sync through the service API filters the resolved runtime
   payload to the product profile's expected runtime-environment keys and
-  runtime managed-secret binding keys for the selected lane, plus any runtime
-  managed secret stored for exactly that lane's context and instance. Storing a
-  lane secret is enough to deliver it; it needs no profile declaration.
-  Shared/global runtime records can provide values, but they are not synced to
-  an unrelated product target unless that product profile declares the key.
+  runtime managed-secret binding keys for the selected lane. A secret stored for
+  the lane is not delivered unless the profile declares it: worker-only secrets,
+  such as production backup SSH keys, are stored for the lane too and must stay
+  out of the app runtime. Shared/global runtime records can provide values, but
+  they are not synced to an unrelated product target unless that product
+  profile declares the key.
 - Odoo stable lanes declare their compose runtime contract in product onboarding
   seed material: `ODOO_DB_NAME`, `ODOO_DB_USER`, `ODOO_DATA_VOLUME`,
   `ODOO_LOG_VOLUME`, `ODOO_DB_VOLUME`, and managed secret bindings for

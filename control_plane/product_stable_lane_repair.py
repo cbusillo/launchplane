@@ -217,9 +217,17 @@ def build_product_stable_lane_repair_plan(
         raise ProductStableLaneRepairBoundaryError(
             "Product stable lane repair requires a generic-web based product profile."
         )
-    if any(lane.instance == request.instance for lane in profile.lanes):
+    # An existing lane is repaired only when its URLs were never recorded; a lane
+    # that already has a base_url is never overwritten.
+    existing_lane = next(
+        (lane for lane in profile.lanes if lane.instance == request.instance), None
+    )
+    if existing_lane is not None and (
+        existing_lane.base_url.strip() or existing_lane.context != request.context
+    ):
         raise ProductStableLaneRepairBoundaryError(
-            "Product stable lane repair requires the requested lane instance to be absent."
+            "Product stable lane repair requires the requested lane instance to be absent, "
+            "or present in the same context with no base_url."
         )
     if request.context in profile.historical_contexts:
         raise ProductStableLaneRepairBoundaryError(
@@ -259,20 +267,27 @@ def build_product_stable_lane_repair_plan(
     domains = _normalized_domains(dokploy_target.domains)
     base_url = _validated_base_url(request.base_url, domains=domains)
     health_url = _health_url(base_url=base_url, target=dokploy_target, profile=profile)
+    if existing_lane is None:
+        lanes: tuple[ProductLaneProfile, ...] = (
+            *profile.lanes,
+            ProductLaneProfile(
+                instance=request.instance,
+                context=request.context,
+                base_url=base_url,
+                health_url=health_url,
+            ),
+        )
+    else:
+        health_url = existing_lane.health_url.strip() or health_url
+        lanes = tuple(
+            lane.model_copy(update={"base_url": base_url, "health_url": health_url})
+            if lane.instance == request.instance
+            else lane
+            for lane in profile.lanes
+        )
     replacement_profile = LaunchplaneProductProfileRecord.model_validate(
         profile.model_copy(
-            update={
-                "lanes": (
-                    *profile.lanes,
-                    ProductLaneProfile(
-                        instance=request.instance,
-                        context=request.context,
-                        base_url=base_url,
-                        health_url=health_url,
-                    ),
-                ),
-                "source": PRODUCT_STABLE_LANE_REPAIR_SOURCE,
-            }
+            update={"lanes": lanes, "source": PRODUCT_STABLE_LANE_REPAIR_SOURCE}
         ).model_dump(mode="json")
     )
     validate_product_profile_history_transition(
@@ -302,6 +317,9 @@ def build_product_stable_lane_repair_plan(
         dokploy_target_id_sha256=canonical_record_sha256(dokploy_target_id),
     )
     profile_sha256 = product_profile_record_sha256(profile)
+    preserved_lane_instances = tuple(
+        lane.instance for lane in profile.lanes if lane.instance != request.instance
+    )
     plan_evidence = {
         "schema_version": 1,
         "product": request.product,
@@ -311,7 +329,8 @@ def build_product_stable_lane_repair_plan(
         "health_url": health_url,
         "target": target_evidence.model_dump(mode="json"),
         "profile_sha256_before": profile_sha256,
-        "preserved_lane_instances": [lane.instance for lane in profile.lanes],
+        "repair": "restore_lane" if existing_lane is None else "fill_lane_urls",
+        "preserved_lane_instances": list(preserved_lane_instances),
         "reason": request.reason,
         "source_label": PRODUCT_STABLE_LANE_REPAIR_SOURCE,
     }
@@ -327,7 +346,7 @@ def build_product_stable_lane_repair_plan(
             base_url=base_url,
             health_url=health_url,
             target=target_evidence,
-            preserved_lane_instances=tuple(lane.instance for lane in profile.lanes),
+            preserved_lane_instances=preserved_lane_instances,
             reason=request.reason,
             profile_sha256_before=profile_sha256,
             profile_updated_at_before=profile.updated_at,
