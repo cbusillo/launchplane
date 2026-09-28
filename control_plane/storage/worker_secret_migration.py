@@ -32,6 +32,8 @@ _SECRETS = sa.table(
     sa.column("context", sa.String),
     sa.column("instance", sa.String),
     sa.column("status", sa.String),
+    sa.column("current_version_id", sa.String),
+    sa.column("updated_at", sa.String),
     sa.column("payload", sa.JSON),
 )
 _BINDINGS = sa.table(
@@ -40,8 +42,10 @@ _BINDINGS = sa.table(
     sa.column("secret_id", sa.String),
     sa.column("integration", sa.String),
     sa.column("binding_key", sa.String),
+    sa.column("context", sa.String),
     sa.column("instance", sa.String),
     sa.column("status", sa.String),
+    sa.column("updated_at", sa.String),
     sa.column("payload", sa.JSON),
 )
 
@@ -183,3 +187,192 @@ def move_secrets(
             )
         )
     return len(moved_secret_ids)
+
+
+_VERSIONS = sa.table(
+    "launchplane_secret_versions",
+    sa.column("version_id", sa.String),
+    sa.column("secret_id", sa.String),
+    sa.column("created_at", sa.String),
+    sa.column("payload", sa.JSON),
+)
+_AUDIT_EVENTS = sa.table(
+    "launchplane_secret_audit_events",
+    sa.column("event_id", sa.String),
+    sa.column("secret_id", sa.String),
+    sa.column("event_type", sa.String),
+    sa.column("recorded_at", sa.String),
+    sa.column("payload", sa.JSON),
+)
+
+
+def _slug(value: str) -> str:
+    compact = "".join(
+        character.lower() if character.isalnum() else "-" for character in value.strip()
+    )
+    return "-".join(part for part in compact.split("-") if part) or "secret"
+
+
+def copy_global_secret_to_contexts(
+    connection: sa.Connection,
+    *,
+    integration: str,
+    binding_key: str,
+    contexts: tuple[str, ...],
+    recorded_at: str,
+) -> tuple[str, ...]:
+    """Copy one configured global secret into a context-scoped record for each context.
+
+    The copy reuses the current ciphertext, so no value is decrypted. A context that
+    already has its own configured copy is left alone. Returns the contexts copied to.
+    """
+    bound_ids = connection.execute(
+        sa.select(_BINDINGS.c.secret_id).where(
+            _BINDINGS.c.integration == integration,
+            _BINDINGS.c.binding_key == binding_key,
+            _BINDINGS.c.status == "configured",
+        )
+    ).all()
+    global_rows = connection.execute(
+        sa.select(_SECRETS.c.secret_id, _SECRETS.c.payload).where(
+            _SECRETS.c.secret_id.in_({row.secret_id for row in bound_ids}),
+            _SECRETS.c.integration == integration,
+            _SECRETS.c.scope == "global",
+            _SECRETS.c.status == "configured",
+        )
+    ).all()
+    if len(global_rows) != 1:
+        return ()
+    source = global_rows[0].payload
+    version: dict[str, object] = connection.execute(
+        sa.select(_VERSIONS.c.payload).where(_VERSIONS.c.version_id == source["current_version_id"])
+    ).scalar_one()
+    already = {
+        row.context
+        for row in connection.execute(
+            sa.select(_SECRETS.c.context).where(
+                _SECRETS.c.integration == integration,
+                _SECRETS.c.scope == "context",
+                _SECRETS.c.name == source["name"],
+                _SECRETS.c.context.in_(contexts),
+            )
+        )
+    }
+    copied: list[str] = []
+    for context in contexts:
+        if context in already:
+            continue
+        secret_id = "-".join(
+            _slug(part) for part in ("secret", integration, source["name"], context)
+        )
+        version_id = f"{secret_id}-version-copied-from-global"
+        binding_id = f"{secret_id}-binding-{_slug(binding_key)}"
+        secret_payload = {
+            **source,
+            "secret_id": secret_id,
+            "scope": "context",
+            "context": context,
+            "instance": "",
+            "current_version_id": version_id,
+            "created_at": recorded_at,
+            "updated_at": recorded_at,
+            "updated_by": "migration",
+        }
+        version_payload = {
+            **version,
+            "version_id": version_id,
+            "secret_id": secret_id,
+            "created_at": recorded_at,
+            "created_by": "migration",
+        }
+        binding_payload = {
+            "schema_version": 1,
+            "binding_id": binding_id,
+            "secret_id": secret_id,
+            "integration": integration,
+            "binding_type": "env",
+            "binding_key": binding_key,
+            "context": context,
+            "instance": "",
+            "status": "configured",
+            "created_at": recorded_at,
+            "updated_at": recorded_at,
+        }
+        connection.execute(
+            _SECRETS.insert().values(
+                secret_id=secret_id,
+                scope="context",
+                integration=integration,
+                name=source["name"],
+                context=context,
+                instance="",
+                status="configured",
+                current_version_id=version_id,
+                updated_at=recorded_at,
+                payload=secret_payload,
+            )
+        )
+        connection.execute(
+            _VERSIONS.insert().values(
+                version_id=version_id,
+                secret_id=secret_id,
+                created_at=recorded_at,
+                payload=version_payload,
+            )
+        )
+        connection.execute(
+            _BINDINGS.insert().values(
+                binding_id=binding_id,
+                secret_id=secret_id,
+                integration=integration,
+                binding_key=binding_key,
+                context=context,
+                instance="",
+                status="configured",
+                updated_at=recorded_at,
+                payload=binding_payload,
+            )
+        )
+        event_id = f"{secret_id}-event-imported-copied-from-global"
+        connection.execute(
+            _AUDIT_EVENTS.insert().values(
+                event_id=event_id,
+                secret_id=secret_id,
+                event_type="imported",
+                recorded_at=recorded_at,
+                payload={
+                    "schema_version": 1,
+                    "event_id": event_id,
+                    "secret_id": secret_id,
+                    "event_type": "imported",
+                    "recorded_at": recorded_at,
+                    "actor": "migration",
+                    "detail": "Copied from the global secret so the site stores its own.",
+                    "metadata": {"source_secret_id": source["secret_id"]},
+                },
+            )
+        )
+        copied.append(context)
+    return tuple(copied)
+
+
+def remove_copied_secrets(
+    connection: sa.Connection, *, integration: str, binding_key: str, contexts: tuple[str, ...]
+) -> int:
+    """Remove only the copies ``copy_global_secret_to_contexts`` created; returns count."""
+    removed = 0
+    for context in contexts:
+        secret_id = "-".join(_slug(part) for part in ("secret", integration, binding_key, context))
+        version_id = f"{secret_id}-version-copied-from-global"
+        still_the_copy = connection.execute(
+            sa.select(_SECRETS.c.secret_id).where(
+                _SECRETS.c.secret_id == secret_id,
+                _SECRETS.c.current_version_id == version_id,
+            )
+        ).first()
+        if still_the_copy is None:
+            continue
+        for table in (_AUDIT_EVENTS, _BINDINGS, _VERSIONS, _SECRETS):
+            connection.execute(table.delete().where(table.c.secret_id == secret_id))
+        removed += 1
+    return removed

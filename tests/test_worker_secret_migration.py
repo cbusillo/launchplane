@@ -14,8 +14,10 @@ from control_plane.storage.worker_secret_migration import (
     LAUNCHPLANE_WORKER_INTEGRATION,
     MISSPELLED_RUNTIME_ENVIRONMENT_INTEGRATION,
     RUNTIME_ENVIRONMENT_INTEGRATION,
+    copy_global_secret_to_contexts,
     move_service_secrets,
     move_worker_secrets,
+    remove_copied_secrets,
     set_integration_status,
 )
 from control_plane.workflows.launchplane import resolve_launchplane_github_token
@@ -333,6 +335,76 @@ class WorkerSecretMigrationTests(unittest.TestCase):
                 )
             )
         )
+
+    def copy_odoo_key(self, contexts: tuple[str, ...]) -> tuple[str, ...]:
+        engine = sa.create_engine(self.database_url)
+        try:
+            with engine.begin() as connection:
+                return copy_global_secret_to_contexts(
+                    connection,
+                    integration=RUNTIME_ENVIRONMENT_INTEGRATION,
+                    binding_key="ODOO_KEY",
+                    contexts=contexts,
+                    recorded_at="2026-09-29T00:00:00Z",
+                )
+        finally:
+            engine.dispose()
+
+    def site_secrets(self, context: str, instance: str) -> dict[str, str]:
+        return control_plane_secrets.resolve_site_secret_values(
+            context_name=context,
+            instance_name=instance,
+            include_site_shared=instance in {"prod", "testing"},
+        )
+
+    def test_a_global_secret_is_copied_to_each_site_without_decrypting(self) -> None:
+        self.write_shared(integration=RUNTIME, key="ODOO_KEY", value="shared-key", scope="global")
+        self.write_shared(
+            integration=RUNTIME, key="ODOO_KEY", value="own-key", scope="context", context="opw"
+        )
+
+        copied = self.copy_odoo_key(("cm", "cm_website", "opw"))
+
+        self.assertEqual(copied, ("cm", "cm_website"))
+        for context in ("cm", "cm_website"):
+            for instance in ("prod", "testing"):
+                self.assertEqual(self.site_secrets(context, instance)["ODOO_KEY"], "shared-key")
+            self.assertNotIn("ODOO_KEY", self.site_secrets(context, "pr-1"))
+        self.assertEqual(self.site_secrets("opw", "prod")["ODOO_KEY"], "own-key")
+        self.assertEqual(self.copy_odoo_key(("cm",)), ())
+
+    def test_a_copied_secret_can_be_rotated_in_place(self) -> None:
+        self.write_shared(integration=RUNTIME, key="ODOO_KEY", value="shared-key", scope="global")
+        self.copy_odoo_key(("cm",))
+
+        rotated = self.write_shared(
+            integration=RUNTIME, key="ODOO_KEY", value="cm-key", scope="context", context="cm"
+        )
+
+        self.assertEqual(rotated["action"], "rotated")
+        self.assertEqual(self.site_secrets("cm", "prod")["ODOO_KEY"], "cm-key")
+
+    def test_downgrade_removes_only_the_copies(self) -> None:
+        self.write_shared(integration=RUNTIME, key="ODOO_KEY", value="shared-key", scope="global")
+        self.write_shared(
+            integration=RUNTIME, key="ODOO_KEY", value="own-key", scope="context", context="opw"
+        )
+        self.copy_odoo_key(("cm", "opw"))
+        engine = sa.create_engine(self.database_url)
+        try:
+            with engine.begin() as connection:
+                removed = remove_copied_secrets(
+                    connection,
+                    integration=RUNTIME_ENVIRONMENT_INTEGRATION,
+                    binding_key="ODOO_KEY",
+                    contexts=("cm", "opw"),
+                )
+        finally:
+            engine.dispose()
+
+        self.assertEqual(removed, 1)
+        self.assertNotIn("ODOO_KEY", self.site_secrets("cm", "prod"))
+        self.assertEqual(self.site_secrets("opw", "prod")["ODOO_KEY"], "own-key")
 
 
 if __name__ == "__main__":
