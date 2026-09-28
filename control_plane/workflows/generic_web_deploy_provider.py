@@ -276,10 +276,19 @@ _IMMUTABLE_ARTIFACT_REFERENCE_PATTERN = re.compile(r"^[^\s@]+@sha256:[a-f0-9]{64
 
 
 def _image_repository(image_reference: str) -> str:
+    """Return the canonical repository of an image reference, without tag or digest."""
+
     reference = image_reference.strip().split("@", 1)[0]
     registry_and_path, separator, last_segment = reference.rpartition("/")
-    repository_name = last_segment.split(":", 1)[0]
-    return f"{registry_and_path}{separator}{repository_name}"
+    repository = f"{registry_and_path}{separator}{last_segment.split(':', 1)[0]}".lower()
+    first_segment, _, remainder = repository.partition("/")
+    if not remainder:
+        return f"docker.io/library/{repository}"
+    if first_segment == "index.docker.io":
+        first_segment = "docker.io"
+    elif "." not in first_segment and ":" not in first_segment and first_segment != "localhost":
+        return f"docker.io/{repository}"
+    return f"{first_segment}/{remainder}"
 
 
 def evaluate_generic_web_runtime_close_out(

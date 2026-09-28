@@ -194,13 +194,13 @@ def fetch_compose_running_container_images(
     app_name: str,
     server_id: str = "",
 ) -> tuple[str, ...]:
-    """Return the configured image of every running container of one compose app.
+    """Return the configured image of every running service container of one compose app.
 
     Every listed container is inspected. Membership comes from the inspected
     Compose project label, falling back to the exact app-name prefix only when
-    that label is absent, and running state comes from the inspected state, so a
-    custom container name or a container that stopped after listing cannot be
-    miscounted.
+    that label is absent. Running state comes from the inspected state and
+    excludes paused and restarting containers, and one-off ``compose run``
+    containers are skipped, so only the deployed services count.
     """
 
     normalized_app_name = app_name.strip()
@@ -231,6 +231,8 @@ def fetch_compose_running_container_images(
             app_name=normalized_app_name,
         ):
             continue
+        if _compose_container_is_one_off(config.get("Labels")):
+            continue
         if not _compose_container_is_running(container, container_config):
             continue
         configured_image = str(config.get("Image") or "").strip()
@@ -246,7 +248,11 @@ def _compose_container_is_running(
 ) -> bool:
     inspected_state = container_config.get("State")
     if isinstance(inspected_state, dict) and "Running" in inspected_state:
-        return inspected_state.get("Running") is True
+        return (
+            inspected_state.get("Running") is True
+            and inspected_state.get("Paused") is not True
+            and inspected_state.get("Restarting") is not True
+        )
     listed_state = str(container.get("state") or container.get("State") or "")
     return listed_state.strip().lower() == "running"
 
@@ -301,6 +307,16 @@ def _read_container_config(
     if container_config is None:
         raise DokployEvidenceProviderError("container-config")
     return container_config
+
+
+def _compose_container_is_one_off(inspected_labels: object) -> bool:
+    if not isinstance(inspected_labels, dict):
+        return False
+    return any(
+        str(label_key).strip().lower() == "com.docker.compose.oneoff"
+        and str(label_value or "").strip().lower() == "true"
+        for label_key, label_value in inspected_labels.items()
+    )
 
 
 def _compose_container_belongs_to_app(

@@ -597,7 +597,9 @@ deployment is absent after the effect started. Dry-run proposes
   and no running container runs any other reference (digest, tag, or both) of
   the same image repository. Every listed container is inspected; membership
   comes from its inspected Compose project label (the app-name prefix only when
-  the label is absent) and running state from its inspected state.
+  the label is absent) and running state from its inspected state. Paused,
+  restarting, and one-off `compose run` containers do not count, and Docker Hub
+  repository aliases are treated as the same repository.
 
 Any provider read failure, missing image, or mismatch keeps `hold_unknown`.
 The digest adds only a hash of the artifact reference and the running and

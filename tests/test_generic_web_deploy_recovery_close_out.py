@@ -441,6 +441,15 @@ class RuntimeCloseOutEvaluationTests(unittest.TestCase):
                 expected_artifact_reference=_ORIGINAL_IMAGE,
             )
 
+    def test_docker_hub_aliases_are_the_same_repository(self) -> None:
+        original = "docker.io/acme/web@sha256:" + "d" * 64
+        for alias in ("acme/web:old", "index.docker.io/acme/web:old", "DOCKER.IO/acme/web:old"):
+            with self.subTest(alias), self.assertRaises(ValueError):
+                evaluate_generic_web_runtime_close_out(
+                    observation=_runtime(target=original, running=(original, alias)),
+                    expected_artifact_reference=original,
+                )
+
     def test_registry_port_is_not_mistaken_for_a_tag(self) -> None:
         original = "registry.example:5000/team/app@sha256:" + "c" * 64
         with self.assertRaises(ValueError):
@@ -463,6 +472,9 @@ class DokployRuntimeArtifactReadTests(unittest.TestCase):
             {"containerId": "c4", "name": "app-x10-sync-1", "state": "running"},
             {"containerId": "c5", "name": "frontend", "state": "running"},
             {"containerId": "c6", "name": "app-x1-worker-1", "state": "running"},
+            {"containerId": "c7", "name": "app-x1-web-1", "state": "restarting"},
+            {"containerId": "c8", "name": "app-x1-cron-1", "state": "paused"},
+            {"containerId": "c9", "name": "app-x1-web-run-1a2b", "state": "running"},
         ]
         inspected = {
             "c1": ({"Image": _ORIGINAL_IMAGE}, {"Running": True}),
@@ -471,6 +483,15 @@ class DokployRuntimeArtifactReadTests(unittest.TestCase):
             "c4": ({"Image": _OTHER_DIGEST_IMAGE, "Labels": {project: "app-x10"}}, None),
             "c5": ({"Image": _OTHER_DIGEST_IMAGE, "Labels": {project: "app-x1"}}, None),
             "c6": ({"Image": _OTHER_DIGEST_IMAGE}, {"Running": False}),
+            "c7": ({"Image": _OTHER_DIGEST_IMAGE}, {"Running": True, "Restarting": True}),
+            "c8": ({"Image": _OTHER_DIGEST_IMAGE}, {"Running": True, "Paused": True}),
+            "c9": (
+                {
+                    "Image": _ORIGINAL_IMAGE,
+                    "Labels": {project: "app-x1", "com.docker.compose.oneoff": "True"},
+                },
+                {"Running": True},
+            ),
         }
 
         def fake_request(*, path: str, query: dict[str, object], **_kwargs: object) -> object:
@@ -491,7 +512,8 @@ class DokployRuntimeArtifactReadTests(unittest.TestCase):
 
         # c5 has a custom name but belongs to the app by its inspected project
         # label; c4 belongs to another app; c3 and c6 are not running when
-        # inspected, even though c6 was listed as running.
+        # inspected, even though c6 was listed as running; c7 is restarting, c8
+        # is paused, and c9 is a one-off `compose run` container.
         self.assertEqual(running, (_ORIGINAL_IMAGE, _DATABASE_IMAGE, _OTHER_DIGEST_IMAGE))
 
     def test_running_container_without_image_fails_closed(self) -> None:
