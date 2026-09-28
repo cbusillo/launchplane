@@ -2235,8 +2235,14 @@ return a typed blocked result rather than guessing a domain.
   the value. The one exception is global- and context-scope records, where
   Launchplane keeps its own operating credentials such as the preview
   PR-comment token: those named keys are withheld from the app instead of
-  refused. Record-driven writers resolve through one shared function, so they
-  also drop the lane's `retired_provider_keys`. The Dokploy env write itself
+  refused. Live-target runtime sync, ship and promotion, and Odoo previews
+  resolve through the site environment (`resolve_site_runtime_environment`):
+  no global values, the lane's `retired_provider_keys` dropped, and a key the
+  product declares for the lane but the site environment cannot supply fails
+  closed and is named. Odoo target replacement and backup restore keep a
+  transitional global-inclusive resolution under the same credential policy
+  until the remaining global Odoo values, such as `ODOO_KEY`, are stored per
+  site (#2538). The Dokploy env write itself
   refuses any platform credential it would add or change; an unchanged legacy
   value is preserved until retired. Launchplane's own service target is the
   only exempt target.

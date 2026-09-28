@@ -248,14 +248,34 @@ class ShipPathTests(unittest.TestCase):
 
     def test_retired_key_is_absent_after_ship(self) -> None:
         lane = _LaneFixture(
-            self, _instance_record({"APP_MODE": "on"}, retired=("GITHUB_TOKEN", "DOKPLOY_TOKEN"))
+            self,
+            _instance_record(
+                {"APP_MODE": "on", "APP_WEBHOOK_URL": "https://hooks.example"},
+                retired=("GITHUB_TOKEN", "DOKPLOY_TOKEN"),
+            ),
         )
         captured = self._ship(
             lane, provider_env="APP_MODE=on\nGITHUB_TOKEN=legacy\nDOKPLOY_TOKEN=legacy-deploy"
         )
 
         env_map = dokploy_api.parse_dokploy_env_text(str(captured["env_text"]))
-        self.assertEqual(env_map, {"APP_MODE": "on"})
+        self.assertEqual(env_map, {"APP_MODE": "on", "APP_WEBHOOK_URL": "https://hooks.example"})
+
+    def test_declared_key_only_in_a_global_record_fails_the_ship(self) -> None:
+        global_record = RuntimeEnvironmentRecord(
+            scope="global",
+            context="",
+            instance="",
+            env={"APP_WEBHOOK_URL": "https://global-hook.example"},
+            updated_at="2026-09-28T00:00:00Z",
+            source_label="test",
+        )
+        lane = _LaneFixture(self, global_record, _instance_record({"APP_MODE": "on"}))
+        with self.assertRaises(click.ClickException) as refusal:
+            self._ship(lane, provider_env="APP_MODE=on")
+
+        self.assertIn("APP_WEBHOOK_URL", refusal.exception.message)
+        self.assertNotIn("global-hook.example", refusal.exception.message)
 
     def test_refused_record_key_fails_the_ship(self) -> None:
         lane = _LaneFixture(

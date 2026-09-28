@@ -393,6 +393,58 @@ def _declared_runtime_keys(
     return allowed_keys
 
 
+class ProductProfileListStore(Protocol):
+    def list_product_profile_records(
+        self, *, driver_id: str = ""
+    ) -> tuple[LaunchplaneProductProfileRecord, ...]: ...
+
+
+def declared_runtime_keys(
+    *, profile: LaunchplaneProductProfileRecord, context_name: str, instance_name: str
+) -> set[str]:
+    """Runtime keys one product declares for a lane (settings and managed secrets)."""
+
+    return _declared_runtime_keys(
+        profile=profile, context_name=context_name, instance_name=instance_name
+    )
+
+
+def declared_runtime_keys_for_lane(
+    *, record_store: ProductProfileListStore, context_name: str, instance_name: str
+) -> set[str]:
+    """Runtime keys any product declares for this lane (settings and managed secrets)."""
+
+    declared_keys: set[str] = set()
+    for profile in record_store.list_product_profile_records():
+        if any(
+            lane.context == context_name and lane.instance == instance_name
+            for lane in profile.lanes
+        ):
+            declared_keys |= _declared_runtime_keys(
+                profile=profile, context_name=context_name, instance_name=instance_name
+            )
+    return declared_keys
+
+
+def require_declared_runtime_keys_present(
+    *, declared_keys: set[str], available_keys: set[str], target: str
+) -> None:
+    """Fail closed when a declared runtime key would be missing from what the app gets."""
+
+    # A declared platform-credential name can never reach the app (it is withheld
+    # or refused), so it is not a missing application key.
+    missing_keys = sorted(
+        declared_keys - available_keys - runtime_platform_credentials.PLATFORM_CREDENTIAL_KEYS
+    )
+    if missing_keys:
+        raise click.ClickException(
+            f"{target} would run without declared runtime key(s): "
+            + ", ".join(missing_keys)
+            + ". The site environment does not hold them (global values are not "
+            "delivered); store them for this site first."
+        )
+
+
 def _require_product_profile_runtime_secret_keys(
     *,
     record_store: LiveTargetRuntimeProfileStore,
@@ -539,7 +591,7 @@ def apply_live_target_runtime_environment(
         operation_name="Runtime environment live target apply",
     )
     try:
-        site_environment = control_plane_runtime_environments.resolve_site_app_runtime_environment(
+        site_environment = control_plane_runtime_environments.resolve_site_runtime_environment(
             control_plane_root=control_plane_root,
             context_name=context_name,
             instance_name=instance_name,
@@ -672,14 +724,12 @@ def apply_live_target_runtime_environment(
                     validate_provider_key_retirement(
                         retired_keys=retired_keys,
                         application_keys=control_plane_runtime_environments.site_application_keys(
-                            set(
-                                control_plane_runtime_environments.resolve_site_runtime_environment(
-                                    control_plane_root=control_plane_root,
-                                    context_name=context_name,
-                                    instance_name=instance_name,
-                                    database_url=database_url,
-                                ).values
-                            )
+                            control_plane_runtime_environments.resolve_site_runtime_environment(
+                                control_plane_root=control_plane_root,
+                                context_name=context_name,
+                                instance_name=instance_name,
+                                database_url=database_url,
+                            ).site_keys
                         )
                         | _product_lane_declared_keys(
                             record_store=postgres_store,

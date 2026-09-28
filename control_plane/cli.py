@@ -3117,13 +3117,13 @@ def _sync_artifact_image_reference_for_target(
         target_id=resolved_target.target_id,
     )
     env_map = dokploy_api.parse_dokploy_env_text(str(target_payload.get("env") or ""))
-    app_runtime_environment = control_plane_runtime_environments.resolve_app_runtime_environment(
+    site_environment = control_plane_runtime_environments.resolve_site_runtime_environment(
         control_plane_root=control_plane_root,
         context_name=context_name,
         instance_name=instance_name,
     )
-    runtime_environment_values = app_runtime_environment.values
-    retired_keys = app_runtime_environment.retired_keys
+    runtime_environment_values = site_environment.values
+    retired_keys = site_environment.retired_keys
     try:
         control_plane_live_target_runtime.validate_provider_key_retirement(
             retired_keys=set(retired_keys), application_keys=set()
@@ -3170,6 +3170,15 @@ def _sync_artifact_image_reference_for_target(
             )
         except control_plane_live_target_runtime.LiveTargetRuntimeError as error:
             raise click.ClickException(str(error)) from error
+        control_plane_live_target_runtime.require_declared_runtime_keys_present(
+            declared_keys=control_plane_live_target_runtime.declared_runtime_keys_for_lane(
+                record_store=postgres_store,
+                context_name=context_name,
+                instance_name=instance_name,
+            ),
+            available_keys=set(desired_env_map),
+            target=f"Ship to {context_name}/{instance_name}",
+        )
     finally:
         postgres_store.close()
 

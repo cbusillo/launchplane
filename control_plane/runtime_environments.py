@@ -117,8 +117,19 @@ def resolve_runtime_environment_values(
 
 @dataclass(frozen=True)
 class SiteRuntimeEnvironment:
+    """A site lane's environment after retirement and the platform-credential policy."""
+
     values: dict[str, str]
     secret_keys: frozenset[str]
+    retired_keys: frozenset[str] = frozenset()
+    site_keys: frozenset[str] = frozenset()
+    withheld_launchplane_keys: tuple[str, ...] = ()
+
+
+def _site_secret_scopes(instance_name: str) -> frozenset[SecretScope]:
+    if runtime_key_safety_environment_class(instance_name) in {"prod", "testing"}:
+        return frozenset({"context", "context_instance"})
+    return frozenset({"context_instance"})
 
 
 def resolve_site_runtime_environment(
@@ -132,6 +143,14 @@ def resolve_site_runtime_environment(
 
     Values shared by every product and Launchplane's own credentials are left out. Secrets
     shared across the site reach its testing and prod lanes, never a preview.
+
+    Every path that writes a site's app runtime from Launchplane records uses this
+    resolver, so the lane's ``retired_provider_keys`` are dropped and the
+    platform-credential policy applies the same way: named platform-credential keys
+    from a context-scope record or secret (Launchplane's own, such as the preview
+    PR-comment token) are withheld; any other platform credential, or a GitHub token
+    value under any key, refuses the render and names the key and its source.
+    ``site_keys`` holds the key names before retirement and withholding.
     """
     definition = load_runtime_environment_definition(
         control_plane_root=control_plane_root,
@@ -157,59 +176,17 @@ def resolve_site_runtime_environment(
     secret_values = control_plane_secrets.resolve_site_secret_values(
         context_name=context_name,
         instance_name=instance_name,
-        include_site_shared=runtime_key_safety_environment_class(instance_name)
-        in {"prod", "testing"},
+        include_site_shared="context" in _site_secret_scopes(instance_name),
         database_url=database_url,
     )
     values.update(secret_values)
-    return SiteRuntimeEnvironment(values=values, secret_keys=frozenset(secret_values))
-
-
-@dataclass(frozen=True)
-class SiteAppRuntimeEnvironment:
-    """A site lane's environment after retirement and the platform-credential policy."""
-
-    values: dict[str, str]
-    secret_keys: frozenset[str]
-    retired_keys: frozenset[str]
-    site_keys: frozenset[str]
-    withheld_launchplane_keys: tuple[str, ...] = ()
-
-
-def resolve_site_app_runtime_environment(
-    *,
-    control_plane_root: Path,
-    context_name: str,
-    instance_name: str,
-    database_url: str | None = None,
-) -> SiteAppRuntimeEnvironment:
-    """The site environment a live-target sync may write into the app.
-
-    Starts from ``resolve_site_runtime_environment`` and applies the same
-    provider-key retirement and platform-credential policy as
-    ``resolve_app_runtime_environment``: context-scope Launchplane credentials
-    are withheld, any other platform credential refuses the render.
-    """
-
-    site_environment = resolve_site_runtime_environment(
-        control_plane_root=control_plane_root,
-        context_name=context_name,
-        instance_name=instance_name,
-        database_url=database_url,
-    )
+    site_keys = frozenset(values)
     retired_keys = retired_provider_keys_for_lane(
         context_name=context_name, instance_name=instance_name, database_url=database_url
     )
-    values = {
-        key: value for key, value in site_environment.values.items() if key not in retired_keys
-    }
+    values = {key: value for key, value in values.items() if key not in retired_keys}
     withheld: tuple[str, ...] = ()
     if runtime_platform_credentials.find_platform_credentials(values):
-        secret_scopes: frozenset[SecretScope] = (
-            frozenset({"context", "context_instance"})
-            if runtime_key_safety_environment_class(instance_name) in {"prod", "testing"}
-            else frozenset({"context_instance"})
-        )
         try:
             sources = _runtime_value_sources(
                 control_plane_root=control_plane_root,
@@ -217,7 +194,7 @@ def resolve_site_app_runtime_environment(
                 instance_name=instance_name,
                 database_url=database_url,
                 include_global=False,
-                secret_scopes=secret_scopes,
+                secret_scopes=_site_secret_scopes(instance_name),
             )
         except click.ClickException:
             # Without attribution nothing can be withheld as Launchplane's own, so
@@ -226,11 +203,11 @@ def resolve_site_app_runtime_environment(
         values, withheld = _apply_platform_credential_policy(
             values=values, sources=sources, target=f"{context_name}/{instance_name}"
         )
-    return SiteAppRuntimeEnvironment(
+    return SiteRuntimeEnvironment(
         values=values,
-        secret_keys=frozenset(key for key in site_environment.secret_keys if key in values),
+        secret_keys=frozenset(key for key in secret_values if key in values),
         retired_keys=retired_keys,
-        site_keys=frozenset(site_environment.values),
+        site_keys=site_keys,
         withheld_launchplane_keys=withheld,
     )
 
@@ -267,7 +244,11 @@ def resolve_app_runtime_environment(
     instance_name: str,
     database_url: str | None = None,
 ) -> AppRuntimeEnvironment:
-    """Resolve the environment an application runtime may receive for one lane.
+    """Transitional: the environment Odoo target replacement may write for one lane.
+
+    Target replacement and backup restore stay on this global-inclusive resolution
+    until #2538 stores the remaining global Odoo values (``ODOO_KEY``) per site;
+    then they move to ``resolve_site_runtime_environment`` and this goes away.
 
     Paths that write an app runtime environment from Launchplane records use
     this function, so provider-key retirement and the platform-credential
