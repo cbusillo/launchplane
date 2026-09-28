@@ -28,6 +28,23 @@ class RuntimeEnvironmentRecordStore(Protocol):
     ) -> tuple[RuntimeEnvironmentRecord, ...]: ...
 
 
+def retired_provider_keys_from_store(
+    *, record_store: RuntimeEnvironmentRecordStore, context_name: str, instance_name: str
+) -> set[str]:
+    records = tuple(
+        record
+        for record in record_store.list_runtime_environment_records(
+            context_name=context_name, instance_name=instance_name
+        )
+        if record.scope == "instance"
+        and record.context == context_name
+        and record.instance == instance_name
+    )
+    if len(records) > 1:
+        raise click.ClickException("Ambiguous instance runtime environment records.")
+    return set(records[0].retired_provider_keys) if records else set()
+
+
 @dataclass(frozen=True)
 class RuntimeEnvironmentInstanceDefinition:
     env: ScalarMap

@@ -1201,6 +1201,8 @@ export async function applyProductEnvironmentConfigForFixture(
         changed_keys: runtimeKeys,
         unchanged_keys: [],
         env_value_count_after: runtimeKeys.length,
+        retired_provider_keys_before: [],
+        retired_provider_keys_after: [],
       },
       runtime_key_safety: {
         required: secretInputs.length > 0,
