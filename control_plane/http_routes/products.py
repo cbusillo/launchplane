@@ -1564,6 +1564,7 @@ def register_product_promotion_status_read_routes(
                 destination_environment=lane.instance,
                 action_allowed=action_allowed,
                 workflow_credentials_ready=dependencies.workflow_credentials_ready,
+                trace_id=trace_id,
             )
         except (AttributeError, FileNotFoundError) as error:
             raise common.http_error(

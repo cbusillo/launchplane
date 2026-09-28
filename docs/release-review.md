@@ -40,7 +40,15 @@ The server resolves Odoo revisions from release tuples and artifact manifests;
 image-based products use deployed inventory runtime identities. GitHub compare
 and commit-associated pull-request reads are paginated. Divergent history,
 incomplete responses, unavailable source control, and missing lane evidence
-fail closed. Missing test notes and commits without a merged pull request are
+fail closed. Every successful production promotion writes production's
+environment record from the deployment it made, so the next review starts from
+the version actually running. When the checklist cannot be compiled, the
+response carries one fixed `unavailable_reason` code, shown on the review page
+with the trace ID and logged with it: `testing_lane_missing`,
+`source_control_access_unavailable`, `production_identity_missing`,
+`candidate_identity_missing`, `release_record_missing`, or `github_read_failed`.
+Provider error text is never returned or logged, because it can contain private
+URLs. Missing test notes and commits without a merged pull request are
 visible checklist blockers. `Nothing for the owner to test` is valid test notes.
 Previous preview acceptance is an annotation, never release approval.
 Changes to shared Odoo addon sources or selections are also bound into the

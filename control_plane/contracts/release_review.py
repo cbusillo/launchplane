@@ -67,6 +67,18 @@ class ReleaseReviewDecisionRecord(BaseModel):
         return self
 
 
+# Why the release checklist could not be compiled. Fixed codes only: the
+# underlying errors can carry private URLs, so they never reach a response.
+ReleaseEvidenceReason = Literal[
+    "testing_lane_missing",
+    "source_control_access_unavailable",
+    "production_identity_missing",
+    "candidate_identity_missing",
+    "release_record_missing",
+    "github_read_failed",
+]
+
+
 class ReleaseReviewStatus(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -76,3 +88,4 @@ class ReleaseReviewStatus(BaseModel):
     checklist_digest: str = ""
     blockers: tuple[str, ...] = ()
     latest_decision: ReleaseReviewDecisionRecord | None = None
+    unavailable_reason: ReleaseEvidenceReason | None = None
