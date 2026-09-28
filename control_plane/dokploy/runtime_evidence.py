@@ -194,20 +194,42 @@ def fetch_compose_running_container_images(
     app_name: str,
     server_id: str = "",
 ) -> tuple[str, ...]:
-    """Return the configured image of every running service container of one compose app.
+    """Return the configured image of every running service container of one compose app."""
+
+    return tuple(
+        image
+        for image, _deployment_record_id in fetch_compose_running_container_runtime(
+            host=host,
+            token=token,
+            app_name=app_name,
+            server_id=server_id,
+        )
+    )
+
+
+def fetch_compose_running_container_runtime(
+    *,
+    host: str,
+    token: str,
+    app_name: str,
+    server_id: str = "",
+) -> tuple[tuple[str, str], ...]:
+    """Return ``(image, deployment_record_id)`` for every running service container.
 
     Every listed container is inspected. Membership comes from the inspected
     Compose project label, falling back to the exact app-name prefix only when
     that label is absent. Running state comes from the inspected state and
     excludes paused and restarting containers, and one-off ``compose run``
-    containers are skipped, so only the deployed services count.
+    containers are skipped, so only the deployed services count. The deployment
+    record id is the container's ``LAUNCHPLANE_DEPLOYMENT_RECORD_ID`` environment
+    value, or empty; no other environment value is read or returned.
     """
 
     normalized_app_name = app_name.strip()
     if not normalized_app_name:
         raise DokployEvidenceProviderError("target-inspect")
     normalized_server_id = server_id.strip()
-    running_images: list[str] = []
+    running_containers: list[tuple[str, str]] = []
     for container in _list_compose_containers(
         host=host,
         token=token,
@@ -238,8 +260,27 @@ def fetch_compose_running_container_images(
         configured_image = str(config.get("Image") or "").strip()
         if not configured_image:
             raise DokployEvidenceProviderError("image-identity")
-        running_images.append(configured_image[:_MAX_RUNTIME_TEXT_LENGTH])
-    return tuple(running_images)
+        running_containers.append(
+            (
+                configured_image[:_MAX_RUNTIME_TEXT_LENGTH],
+                _container_deployment_record_id(config.get("Env")),
+            )
+        )
+    return tuple(running_containers)
+
+
+_DEPLOYMENT_RECORD_ID_ENV_PREFIX = "LAUNCHPLANE_DEPLOYMENT_RECORD_ID="
+
+
+def _container_deployment_record_id(raw_env: object) -> str:
+    if not isinstance(raw_env, list):
+        return ""
+    values = [
+        entry[len(_DEPLOYMENT_RECORD_ID_ENV_PREFIX) :].strip()
+        for entry in raw_env
+        if isinstance(entry, str) and entry.startswith(_DEPLOYMENT_RECORD_ID_ENV_PREFIX)
+    ]
+    return values[0][:_MAX_RUNTIME_TEXT_LENGTH] if len(values) == 1 else ""
 
 
 def _compose_container_is_running(

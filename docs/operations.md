@@ -433,6 +433,26 @@ mutation_in_progress`; a completed effect replays; a different request
   checkpointed post-deploy phase stays `reconcile_required` unless the exact
   provider marker can be observed; Launchplane does not synthesize terminal
   success from the target's current desired state.
+- Dokploy compose deployments have not carried the operation title in
+  practice (every RepairShopr compose deploy since July; see #2531), so the
+  titled wait never matched and each deploy ended `reconcile_required`. For
+  compose targets only, the initial deployment wait therefore also accepts the
+  sole deployment that did not exist before the trigger when none carries the
+  title, after it has stayed the only new deployment, successful, for a
+  15-second settle window. Two or more new untitled deployments, including one
+  that appears during settling, are ambiguous and still time out. That untitled
+  deployment counts as this operation only after the same runtime checks as
+  recovery close-out pass: the target is configured for exactly the original
+  immutable image, the running service containers run it with no other
+  reference of that repository, and each of those containers carries this
+  operation's `LAUNCHPLANE_DEPLOYMENT_RECORD_ID` (only that environment value is
+  read), so an earlier or unrelated deploy of the same image cannot stand in for
+  this one. A compose file that does not pass that variable to its containers
+  cannot be proven this way. Otherwise the outcome stays unknown and the
+  reservation stays `reconcile_required`. Reconciliation's time-window
+  correlation applies the same runtime proof to compose targets, so a retry
+  cannot adopt what the initial wait could not prove. Application targets keep
+  the exact titled wait unchanged.
 - Odoo compose-create recovery checks both project inventory and compose search,
   while destroy reconciliation reads the exact compose id. Generic-web recovery
   repairs the deterministic deployment record and environment inventory before

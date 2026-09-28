@@ -241,6 +241,25 @@ class GenericWebDeployProviderMutationAdapter:
                         provider_evidence=legacy_provider_evidence,
                         provider_read_error_class=legacy_read_error_class,
                     )
+                if (
+                    resolved_target is not None
+                    and resolved_target.resolved_target.target_type == "compose"
+                    and self._runtime_close_out_evidence(
+                        resolved_target,
+                        expected_deployment_record_id=self._deployment_record_id(
+                            provider_operation_key
+                        ),
+                    )
+                    is None
+                ):
+                    # A compose deployment matched only by time and target is
+                    # adopted only when the original image provably runs, the
+                    # same proof the initial deploy wait requires (#2531).
+                    return _GenericWebDeployProviderInspection(
+                        observation=GenericWebProviderDeploymentObservation(outcome="unknown"),
+                        resolved_deploy_target=resolved_target,
+                        provider_evidence="provider_status_unknown",
+                    )
                 observation = legacy_correlation.observation
                 evidence = _GenericWebDeployProviderInspection(
                     observation=observation,
@@ -345,6 +364,14 @@ class GenericWebDeployProviderMutationAdapter:
 
         if generic_web_post_deploy_executor_for_driver_id(self._profile.driver_id) is not None:
             return None
+        return self._runtime_close_out_evidence(resolved_deploy_target)
+
+    def _runtime_close_out_evidence(
+        self,
+        resolved_deploy_target: GenericWebResolvedDeployTarget,
+        *,
+        expected_deployment_record_id: str = "",
+    ) -> GenericWebRuntimeCloseOutEvidence | None:
         if not isinstance(self._deploy_provider, GenericWebDeployRuntimeArtifactProvider):
             return None
         try:
@@ -355,6 +382,7 @@ class GenericWebDeployProviderMutationAdapter:
             return evaluate_generic_web_runtime_close_out(
                 observation=observation,
                 expected_artifact_reference=resolved_deploy_target.ship_request.artifact_id,
+                expected_deployment_record_id=expected_deployment_record_id,
             )
         except (FileNotFoundError, ValueError, click.ClickException):
             return None
