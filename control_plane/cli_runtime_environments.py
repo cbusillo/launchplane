@@ -616,6 +616,8 @@ def _build_runtime_environment_record_for_put(
     for raw_assignment in assignments:
         key_name, value = _parse_runtime_environment_assignment(raw_assignment)
         env_values[key_name] = value
+    if set(retired_provider_keys) & env_values.keys():
+        raise click.ClickException("A provider key cannot be both configured and retired.")
 
     return RuntimeEnvironmentRecord(
         schema_version=2 if retired_provider_keys else 1,

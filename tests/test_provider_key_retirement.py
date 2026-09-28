@@ -2,9 +2,11 @@ import unittest
 from contextlib import closing
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import cast
 from unittest.mock import Mock, patch
 
 from click.testing import CliRunner
+from click import Command
 
 from control_plane.cli import main
 from control_plane.contracts.product_onboarding_manifest import ProductOnboardingManifest
@@ -23,6 +25,8 @@ from tests.http_app_test_support import _post_product_config_apply, _RejectingVe
 from tests.support.auth import _local_operator_policy
 from tests.support.profiles import _generic_site_profile_payload
 from tests.support.stores import _seed_tracked_target_records, _sqlite_database_url
+
+CLI_MAIN = cast(Command, main)
 
 
 def _profile() -> LaunchplaneProductProfileRecord:
@@ -278,7 +282,7 @@ class ProviderKeyRetirementLiveSyncTests(unittest.TestCase):
                 ):
                     with self.subTest(command=command):
                         result = CliRunner().invoke(
-                            main,
+                            CLI_MAIN,
                             [
                                 "environments",
                                 command,

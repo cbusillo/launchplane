@@ -28,7 +28,11 @@ class RuntimeEnvironmentRecord(BaseModel):
     context: str = ""
     instance: str = ""
     env: dict[str, ScalarValue]
-    retired_provider_keys: tuple[str, ...] = Field(default=(), exclude_if=lambda value: not value)
+    retired_provider_keys: tuple[str, ...] = Field(
+        default=(),
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     updated_at: str
     source_label: str = ""
 

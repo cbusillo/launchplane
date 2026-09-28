@@ -27953,7 +27953,8 @@
               "type": "string"
             },
             "title": "Retired Provider Keys",
-            "type": "array"
+            "type": "array",
+            "x-launchplane-optional-response": true
           },
           "schema_version": {
             "default": 1,
@@ -27984,7 +27985,6 @@
           "context",
           "env",
           "instance",
-          "retired_provider_keys",
           "schema_version",
           "scope",
           "source_label",

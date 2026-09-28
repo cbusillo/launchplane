@@ -305,6 +305,8 @@ def build_runtime_environment_records(
         retired_provider_keys = (
             existing_record.retired_provider_keys if existing_record is not None else ()
         )
+        if set(retired_provider_keys) & merged_env.keys():
+            raise ValueError("A provider key cannot be both configured and retired.")
         runtime_environment_records.append(
             RuntimeEnvironmentRecord(
                 schema_version=2 if retired_provider_keys else 1,

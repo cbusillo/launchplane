@@ -454,7 +454,7 @@ def apply_live_target_runtime_environment(
         postgres_store = PostgresRecordStore(database_url=database_url)
         try:
             postgres_store.ensure_schema()
-            application_keys = require_product_profile_runtime_keys(
+            allowed_keys = require_product_profile_runtime_keys(
                 record_store=postgres_store,
                 product_name=product_name.strip(),
                 context_name=context_name,
@@ -466,10 +466,11 @@ def apply_live_target_runtime_environment(
                 instance_name=instance_name,
             )
             validate_provider_key_retirement(
-                retired_keys=retired_keys, application_keys=application_keys
+                retired_keys=retired_keys,
+                application_keys=allowed_keys,
             )
             desired_env_map = _filter_runtime_environment_to_product_keys(
-                desired_env_map=desired_env_map, allowed_keys=application_keys
+                desired_env_map=desired_env_map, allowed_keys=allowed_keys
             )
             runtime_secret_binding_keys = _require_product_profile_runtime_secret_keys(
                 record_store=postgres_store,

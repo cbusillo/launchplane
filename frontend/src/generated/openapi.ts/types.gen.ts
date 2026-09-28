@@ -3701,7 +3701,7 @@ export type RuntimeEnvironmentRecord = {
         [key: string]: string | number | number | boolean;
     };
     instance: string;
-    retired_provider_keys: Array<string>;
+    retired_provider_keys?: Array<string>;
     schema_version: number;
     scope: 'global' | 'context' | 'instance';
     source_label: string;
