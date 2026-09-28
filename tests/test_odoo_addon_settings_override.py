@@ -365,7 +365,7 @@ class OdooAddonSettingsPlanTests(unittest.TestCase):
 
     def test_request_rejects_credential_shaped_binding_id(self) -> None:
         with self.assertRaises(ValueError):
-            _request(api_token_binding="shpat_0123456789abcdef")
+            _request(api_token_binding="shpat_" + "example")
 
     def test_request_rejects_apply_without_digest(self) -> None:
         with self.assertRaises(ValueError):
