@@ -241,6 +241,19 @@ class GenericWebDeployProviderMutationAdapter:
                         provider_evidence=legacy_provider_evidence,
                         provider_read_error_class=legacy_read_error_class,
                     )
+                if (
+                    resolved_target is not None
+                    and resolved_target.resolved_target.target_type == "compose"
+                    and self._runtime_close_out_evidence(resolved_target) is None
+                ):
+                    # A compose deployment matched only by time and target is
+                    # adopted only when the original image provably runs, the
+                    # same proof the initial deploy wait requires (#2531).
+                    return _GenericWebDeployProviderInspection(
+                        observation=GenericWebProviderDeploymentObservation(outcome="unknown"),
+                        resolved_deploy_target=resolved_target,
+                        provider_evidence="provider_status_unknown",
+                    )
                 observation = legacy_correlation.observation
                 evidence = _GenericWebDeployProviderInspection(
                     observation=observation,
@@ -345,6 +358,12 @@ class GenericWebDeployProviderMutationAdapter:
 
         if generic_web_post_deploy_executor_for_driver_id(self._profile.driver_id) is not None:
             return None
+        return self._runtime_close_out_evidence(resolved_deploy_target)
+
+    def _runtime_close_out_evidence(
+        self,
+        resolved_deploy_target: GenericWebResolvedDeployTarget,
+    ) -> GenericWebRuntimeCloseOutEvidence | None:
         if not isinstance(self._deploy_provider, GenericWebDeployRuntimeArtifactProvider):
             return None
         try:

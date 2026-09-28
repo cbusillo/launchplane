@@ -861,14 +861,18 @@ def wait_for_titled_or_sole_new_target_deployment(
     known_deployment_keys: frozenset[str],
     deployment_title: str,
     timeout_seconds: int,
+    untitled_settle_seconds: int = 15,
 ) -> JsonObject:
     """Wait for the deployment this caller triggered and return it once it succeeds.
 
     The deployment carrying ``deployment_title`` is preferred. When no deployment
     carries that title, the only deployment absent from ``known_deployment_keys``
-    (the keys listed before the trigger) is used instead. Several new untitled
-    deployments are ambiguous and are never chosen; the wait then times out.
-    A failed terminal status raises ``DokployDeploymentFailed``.
+    (the keys listed before the trigger) is used instead, but only after it has
+    stayed the sole new deployment, successful, for ``untitled_settle_seconds``.
+    A later new deployment (for example this caller's own queued job appearing
+    after an unrelated one) makes the choice ambiguous, and an ambiguous wait
+    never chooses; it times out. A failed terminal status raises
+    ``DokployDeploymentFailed``.
     """
 
     normalized_title = deployment_title.strip()
@@ -880,7 +884,9 @@ def wait_for_titled_or_sole_new_target_deployment(
         else "Dokploy deployment failed"
     )
     start_time = time.monotonic()
-    while time.monotonic() - start_time <= timeout_seconds:
+    settled_untitled_key = ""
+    settled_since = 0.0
+    while (now := time.monotonic()) - start_time <= timeout_seconds:
         deployments = list_deployments_for_target(
             host=host,
             token=token,
@@ -906,13 +912,23 @@ def wait_for_titled_or_sole_new_target_deployment(
         if candidate is not None:
             candidate_status = _deployment_status(candidate)
             if candidate_status in _DEPLOYMENT_SUCCESS_STATUSES:
-                return candidate
+                if titled:
+                    return candidate
+                candidate_key = deployment_key(candidate)
+                if candidate_key != settled_untitled_key:
+                    settled_untitled_key = candidate_key
+                    settled_since = now
+                if now - settled_since >= untitled_settle_seconds:
+                    return candidate
+                time.sleep(3)
+                continue
             if candidate_status in _DEPLOYMENT_FAILURE_STATUSES:
                 raise DokployDeploymentFailed(
                     deployment_id=deployment_key(candidate),
                     deployment_status=candidate_status,
                     message_prefix=failure_message_prefix,
                 )
+        settled_untitled_key = ""
         time.sleep(3)
 
     raise click.ClickException("Timed out waiting for Dokploy deployment status.")

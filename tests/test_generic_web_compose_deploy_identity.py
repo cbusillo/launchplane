@@ -87,11 +87,27 @@ class TitledOrSoleNewDeploymentWaitTests(unittest.TestCase):
     def test_untitled_sole_new_deployment_is_accepted_once_it_succeeds(self) -> None:
         old = [_deployment("old-1"), _deployment("old-2")]
 
-        matched = _wait(
-            [old, [*old, _deployment("new", status="running")], [*old, _deployment("new")]]
-        )
+        done = [*old, _deployment("new")]
+
+        matched = _wait([old, [*old, _deployment("new", status="running")], *[done] * 4])
 
         self.assertEqual(matched["deploymentId"], "new")
+
+    def test_untitled_success_is_not_accepted_before_it_settles(self) -> None:
+        old = [_deployment("old-1"), _deployment("old-2")]
+        done = [*old, _deployment("new")]
+
+        with self.assertRaisesRegex(click.ClickException, "Timed out"):
+            _wait([done, done, done])
+
+    def test_a_later_new_deployment_during_settling_is_ambiguous(self) -> None:
+        old = [_deployment("old-1"), _deployment("old-2")]
+        unrelated_done = [*old, _deployment("unrelated")]
+        ours_appears = [*unrelated_done, _deployment("ours", status="running")]
+        ours_done = [*unrelated_done, _deployment("ours")]
+
+        with self.assertRaisesRegex(click.ClickException, "Timed out"):
+            _wait([unrelated_done, unrelated_done, ours_appears, *[ours_done] * 5])
 
     def test_titled_deployment_is_preferred_over_an_untitled_new_one(self) -> None:
         old = [_deployment("old-1")]
@@ -370,6 +386,61 @@ class DurableOperationOutcomeTests(unittest.TestCase):
     def test_unproven_untitled_deploy_stays_unknown(self) -> None:
         with self.assertRaises(ProviderMutationUnknownError):
             self._apply(_UntitledComposeProvider(_runtime(target=_OTHER_ARTIFACT)))
+
+
+class _ComposeLegacyProvider(generic_web_deploy_tests._LegacyFakeGenericWebDeployProvider):
+    """A compose target whose deployment is matched only by time, with runtime state."""
+
+    def __init__(self, runtime: GenericWebRuntimeArtifactObservation) -> None:
+        super().__init__()
+        self.runtime = runtime
+        self.runtime_calls = 0
+
+    def resolve_deploy_target(self, **kwargs: object) -> GenericWebResolvedDeployTarget:
+        resolved = super().resolve_deploy_target(**kwargs)  # type: ignore[arg-type]
+        return resolved.model_copy(
+            update={
+                "ship_request": resolved.ship_request.model_copy(update={"target_type": "compose"}),
+                "resolved_target": resolved.resolved_target.model_copy(
+                    update={"target_type": "compose"}
+                ),
+            }
+        )
+
+    def observe_runtime_artifact(self, **_kwargs: object) -> GenericWebRuntimeArtifactObservation:
+        self.runtime_calls += 1
+        return self.runtime
+
+
+class ComposeReconciliationProofTests(unittest.TestCase):
+    """A same-key retry must not adopt a compose deploy the initial wait could not prove."""
+
+    @staticmethod
+    def _observe(provider: _ComposeLegacyProvider) -> str:
+        profile = _profile()
+        adapter = generic_web_deploy_tests.GenericWebDeployTests._provider_mutation_adapter(
+            profile=profile,
+            store=_GenericWebDeployStore(profile),
+            provider=provider,
+            deploy_request=_request(),
+        )
+        return adapter.observe_with_effect_started_at(
+            "provider-operation:compose-retry",
+            "deploy_trigger",
+            adapter.reconciliation_key(),
+            "2026-08-15T12:00:00Z",
+        ).outcome
+
+    def test_time_matched_compose_deployment_is_adopted_when_runtime_proves_it(self) -> None:
+        provider = _ComposeLegacyProvider(_runtime())
+
+        self.assertEqual(self._observe(provider), "present")
+        self.assertEqual(provider.runtime_calls, 1)
+
+    def test_time_matched_compose_deployment_is_held_when_another_image_runs(self) -> None:
+        provider = _ComposeLegacyProvider(_runtime(running=(_ARTIFACT, _OTHER_ARTIFACT)))
+
+        self.assertEqual(self._observe(provider), "unknown")
 
 
 class DokployProviderIdentityTests(unittest.TestCase):
