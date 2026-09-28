@@ -33,6 +33,9 @@ LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR = "LAUNCHPLANE_MASTER_ENCRYPTION_KEY"
 LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VARS = (LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR,)
 DOKPLOY_SECRET_INTEGRATION = "dokploy"
 RUNTIME_ENVIRONMENT_SECRET_INTEGRATION = "runtime_environment"
+# Credentials Launchplane's own jobs use for one lane, such as backup SSH keys.
+# They are never part of a lane's runtime environment, so no app receives them.
+LAUNCHPLANE_WORKER_SECRET_INTEGRATION = "launchplane_worker"
 SECRET_STATUS_CONFIGURED = "configured"
 LEGACY_SECRET_KEY_ID = "launchplane-master-key"
 _KEY_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
@@ -451,12 +454,14 @@ def resolve_secret_values_for_integration_from_store(
     integration: str,
     context_name: str = "",
     instance_name: str = "",
+    exact_lane_only: bool = False,
 ) -> dict[str, str]:
     candidate_records = [
         record
         for record in record_store.list_secret_records(integration=integration)
         if record.status == SECRET_STATUS_CONFIGURED
         and _scope_matches_record(record, context_name=context_name, instance_name=instance_name)
+        and (not exact_lane_only or record.scope == "context_instance")
     ]
     candidate_records.sort(
         key=lambda record: (_scope_rank(record.scope), record.updated_at, record.secret_id)
@@ -477,6 +482,30 @@ def resolve_secret_values_for_integration_from_store(
             version.ciphertext, version.key_id
         )
     return resolved_values
+
+
+def resolve_lane_worker_secret_values(
+    *,
+    context_name: str,
+    instance_name: str,
+    database_url: str | None = None,
+) -> dict[str, str]:
+    """Resolve worker credentials stored for exactly this lane, never inherited ones."""
+    if not context_name.strip() or not instance_name.strip():
+        return {}
+    store = _open_secret_store(database_url)
+    if store is None:
+        return {}
+    try:
+        return resolve_secret_values_for_integration_from_store(
+            record_store=store,
+            integration=LAUNCHPLANE_WORKER_SECRET_INTEGRATION,
+            context_name=context_name,
+            instance_name=instance_name,
+            exact_lane_only=True,
+        )
+    finally:
+        store.close()
 
 
 def overlay_dokploy_environment_values(
