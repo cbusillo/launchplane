@@ -24,6 +24,10 @@ from control_plane.contracts.product_profile_record import (
 )
 from control_plane.contracts.release_review import ReleaseReviewStatus
 from control_plane.drivers import native_routes
+from control_plane.workflows.generic_web_promotion import (
+    GenericWebPromotionStore,
+    resolve_generic_web_promotion_inputs,
+)
 from control_plane.generic_web_deploy_http import (
     GENERIC_WEB_DEPLOY_ROUTE as _GENERIC_WEB_DEPLOY_ROUTE,
     GenericWebDeployEnvelope,
@@ -204,7 +208,13 @@ class _GenericWebProdPromotionProviderMutationAdapter:
 
     def resolve_deploy_target(self) -> GenericWebResolvedDeployTarget:
         if self._resolved_deploy_target is None:
-            promotion = self._promotion_request.promotion
+            # A workflow may leave the artifact to Launchplane; resolve it from
+            # testing inventory exactly as the promotion itself does, so the
+            # target is resolved for the build that will be deployed.
+            promotion = resolve_generic_web_promotion_inputs(
+                record_store=cast(GenericWebPromotionStore, self._record_store),
+                request=self._promotion_request.promotion,
+            )
             self._resolved_deploy_target = self._deploy_provider.resolve_deploy_target(
                 control_plane_root=self._control_plane_root,
                 request_artifact_id=promotion.artifact_id,
