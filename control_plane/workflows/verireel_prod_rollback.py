@@ -13,6 +13,7 @@ import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane import runtime_environments as control_plane_runtime_environments
+from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.promotion_record import (
     HealthcheckEvidence,
@@ -320,7 +321,14 @@ def _resolve_worker_runtime_environment(
             instance_name=request.instance,
         )
     except click.ClickException:
-        return {}
+        resolved_values = {}
+    # Keys still stored in the lane's runtime environment are read until they move (#2538).
+    resolved_values.update(
+        control_plane_secrets.resolve_lane_worker_secret_values(
+            context_name=request.context,
+            instance_name=request.instance,
+        )
+    )
     return {
         key: value
         for key, value in resolved_values.items()
