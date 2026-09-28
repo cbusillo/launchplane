@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from typing import Callable
 
-from control_plane import runtime_environments
+from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.durable_operation_authorization import DurableOperationAuthorization
 from control_plane.contracts.production_backup_authority import (
     ProxmoxGuestBackupDestinationReference,
@@ -29,7 +29,6 @@ from control_plane.workflows.production_backup_provider import (
     execute_production_backup_provider,
 )
 from control_plane.workflows.ship import utc_now_timestamp
-from control_plane.workflows.worker_runtime_key_safety import enforce_worker_runtime_key_safety
 
 
 SSH_PRIVATE_KEY = "PRODUCTION_BACKUP_SSH_PRIVATE_KEY"
@@ -181,14 +180,7 @@ def _execute_shared_production_backup(
             raise ProductionBackupProviderError(error.code) from error
 
     check_effect("backup_preflight")
-    enforce_worker_runtime_key_safety(
-        context_name=binding.request.context,
-        instance_name=binding.request.instance,
-        allowed_worker_keys=(SSH_PRIVATE_KEY, SSH_KNOWN_HOSTS),
-        operation_name="Production backup provider",
-    )
-    values = runtime_environments.resolve_runtime_environment_values(
-        control_plane_root=control_plane_root,
+    values = control_plane_secrets.resolve_lane_worker_secret_values(
         context_name=binding.request.context,
         instance_name=binding.request.instance,
     )

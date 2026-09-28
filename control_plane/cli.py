@@ -367,6 +367,7 @@ def _sync_launchplane_bootstrap_policy(
             target_id=target_id,
             target_payload=target_payload,
             env_text=dokploy_api.serialize_dokploy_env_text(env_map),
+            launchplane_service_target=True,
         )
     current_policy_sha256 = ""
     if current_policy_b64:
@@ -3116,15 +3117,24 @@ def _sync_artifact_image_reference_for_target(
         target_id=resolved_target.target_id,
     )
     env_map = dokploy_api.parse_dokploy_env_text(str(target_payload.get("env") or ""))
-    runtime_environment_values = (
-        control_plane_runtime_environments.resolve_runtime_environment_values(
-            control_plane_root=control_plane_root,
-            context_name=context_name,
-            instance_name=instance_name,
-        )
+    site_environment = control_plane_runtime_environments.resolve_site_runtime_environment(
+        control_plane_root=control_plane_root,
+        context_name=context_name,
+        instance_name=instance_name,
     )
-    desired_env_map = dict(env_map)
-    desired_env_map.update(runtime_environment_values)
+    runtime_environment_values = site_environment.values
+    retired_keys = site_environment.retired_keys
+    try:
+        control_plane_live_target_runtime.validate_provider_key_retirement(
+            retired_keys=set(retired_keys), application_keys=set()
+        )
+    except control_plane_live_target_runtime.LiveTargetRuntimeError as error:
+        raise click.ClickException(str(error)) from error
+    desired_env_map = control_plane_runtime_environments.merge_provider_environment(
+        current_env_map=env_map,
+        desired_env_map=runtime_environment_values,
+        retired_keys=retired_keys,
+    )
 
     desired_image_reference = ""
     if artifact_manifest is not None:
@@ -3160,6 +3170,15 @@ def _sync_artifact_image_reference_for_target(
             )
         except control_plane_live_target_runtime.LiveTargetRuntimeError as error:
             raise click.ClickException(str(error)) from error
+        control_plane_live_target_runtime.require_declared_runtime_keys_present(
+            declared_keys=control_plane_live_target_runtime.declared_runtime_keys_for_lane(
+                record_store=postgres_store,
+                context_name=context_name,
+                instance_name=instance_name,
+            ),
+            available_keys=set(desired_env_map),
+            target=f"Ship to {context_name}/{instance_name}",
+        )
     finally:
         postgres_store.close()
 
@@ -3228,6 +3247,14 @@ def _sync_artifact_image_reference_for_target(
             "Dokploy target env did not persist Launchplane DB-backed runtime key(s): "
             + ", ".join(missing_or_mismatched_keys)
         )
+    retired_keys_present = sorted(retired_keys & refreshed_env_map.keys())
+    if retired_keys_present:
+        raise click.ClickException(
+            "Dokploy target env still holds retired provider key(s): "
+            + ", ".join(retired_keys_present)
+        )
+    if retired_keys:
+        runtime_source_evidence["retired_provider_keys"] = ",".join(sorted(retired_keys))
     runtime_source_evidence["runtime_env_verified"] = "true"
     return runtime_source_evidence
 

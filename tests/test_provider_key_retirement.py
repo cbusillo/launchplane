@@ -328,7 +328,12 @@ class ProviderKeyRetirementLiveSyncTests(unittest.TestCase):
             self.assertEqual(records[0].env["APP_MODE"], "updated")
 
     def test_changed_authority_or_failed_removal_prevents_deployment(self) -> None:
-        for failure in ("retirement_changed", "application_changed", "provider_retained_key"):
+        for failure in (
+            "retirement_changed",
+            "application_changed",
+            "declaration_changed",
+            "provider_retained_key",
+        ):
             with self.subTest(failure=failure), TemporaryDirectory() as temporary_directory:
                 root = Path(temporary_directory)
                 database_url = _sqlite_database_url(root / "records.sqlite3")
@@ -357,6 +362,16 @@ class ProviderKeyRetirementLiveSyncTests(unittest.TestCase):
                         if failure == "retirement_changed":
                             store.write_runtime_environment_record(_runtime_record())
                         elif failure == "application_changed":
+                            store.write_runtime_environment_record(
+                                RuntimeEnvironmentRecord(
+                                    scope="context",
+                                    context="example-site",
+                                    env={"LEGACY_PASSWORD": "now-an-app-setting"},
+                                    updated_at="2026-09-27T00:00:00Z",
+                                    source_label="test",
+                                )
+                            )
+                        elif failure == "declaration_changed":
                             profile = _profile().model_dump(mode="json")
                             profile["expected_config"]["runtime_environment_keys"].append(
                                 {
@@ -404,6 +419,7 @@ class ProviderKeyRetirementLiveSyncTests(unittest.TestCase):
                 expected_code = {
                     "retirement_changed": "runtime_retirement_changed",
                     "application_changed": "runtime_retirement_conflict",
+                    "declaration_changed": "runtime_retirement_conflict",
                     "provider_retained_key": "dokploy_target_verification_failed",
                 }[failure]
                 self.assertEqual(refusal.exception.code, expected_code)

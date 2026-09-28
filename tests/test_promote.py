@@ -50,6 +50,11 @@ from control_plane.workflows.promote import build_executed_promotion_record
 from control_plane.workflows.promotion_ship_resolution import (
     resolve_ship_request_for_promotion,
 )
+from control_plane.runtime_environments import SiteRuntimeEnvironment
+
+
+def _site_environment(values: dict[str, str]) -> SiteRuntimeEnvironment:
+    return SiteRuntimeEnvironment(values=dict(values), secret_keys=frozenset())
 
 
 def _dokploy_ship_request(**overrides: Any) -> ShipRequest:
@@ -936,8 +941,10 @@ class ArtifactImageOverrideTests(unittest.TestCase):
                     return_value=("https://dokploy.example.com", "token-123"),
                 ),
                 patch(
-                    "control_plane.runtime_environments.resolve_runtime_environment_values",
-                    return_value={"ODOO_ADDONS_PATH": "/odoo/addons,/opt/project/addons/shared"},
+                    "control_plane.runtime_environments.resolve_site_runtime_environment",
+                    return_value=_site_environment(
+                        {"ODOO_ADDONS_PATH": "/odoo/addons,/opt/project/addons/shared"}
+                    ),
                 ),
                 patch(
                     "control_plane.dokploy.api.fetch_dokploy_target_payload",
@@ -1027,8 +1034,10 @@ class ArtifactImageOverrideTests(unittest.TestCase):
                 return_value=("https://dokploy.example.com", "token-123"),
             ),
             patch(
-                "control_plane.runtime_environments.resolve_runtime_environment_values",
-                return_value={"ODOO_ADDONS_PATH": "/odoo/addons,/opt/project/addons/shared"},
+                "control_plane.runtime_environments.resolve_site_runtime_environment",
+                return_value=_site_environment(
+                    {"ODOO_ADDONS_PATH": "/odoo/addons,/opt/project/addons/shared"}
+                ),
             ),
             patch(
                 "control_plane.dokploy.api.fetch_dokploy_target_payload",
@@ -1181,8 +1190,8 @@ class ArtifactImageOverrideTests(unittest.TestCase):
                     return_value=("https://dokploy.example.com", "token-123"),
                 ),
                 patch(
-                    "control_plane.runtime_environments.resolve_runtime_environment_values",
-                    return_value={"SMTP_PASSWORD": "managed-secret-value"},
+                    "control_plane.runtime_environments.resolve_site_runtime_environment",
+                    return_value=_site_environment({"SMTP_PASSWORD": "managed-secret-value"}),
                 ),
                 patch(
                     "control_plane.dokploy.api.fetch_dokploy_target_payload",
@@ -1228,8 +1237,8 @@ class ArtifactImageOverrideTests(unittest.TestCase):
                 return_value=("https://dokploy.example.com", "token-123"),
             ),
             patch(
-                "control_plane.runtime_environments.resolve_runtime_environment_values",
-                return_value={},
+                "control_plane.runtime_environments.resolve_site_runtime_environment",
+                return_value=_site_environment({}),
             ),
             patch(
                 "control_plane.dokploy.api.fetch_dokploy_target_payload",
@@ -1275,8 +1284,8 @@ class ArtifactImageOverrideTests(unittest.TestCase):
                 return_value=("https://dokploy.example.com", "token-123"),
             ),
             patch(
-                "control_plane.runtime_environments.resolve_runtime_environment_values",
-                return_value={},
+                "control_plane.runtime_environments.resolve_site_runtime_environment",
+                return_value=_site_environment({}),
             ),
             patch(
                 "control_plane.dokploy.api.fetch_dokploy_target_payload",
@@ -1321,8 +1330,8 @@ class ArtifactImageOverrideTests(unittest.TestCase):
                     return_value=("https://dokploy.example.com", "token-123"),
                 ),
                 patch(
-                    "control_plane.runtime_environments.resolve_runtime_environment_values",
-                    return_value={},
+                    "control_plane.runtime_environments.resolve_site_runtime_environment",
+                    return_value=_site_environment({}),
                 ),
                 patch(
                     "control_plane.dokploy.api.fetch_dokploy_target_payload",

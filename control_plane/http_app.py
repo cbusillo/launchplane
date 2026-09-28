@@ -17643,7 +17643,6 @@ def create_launchplane_fastapi_app(
         except control_plane_live_target_runtime.LiveTargetRuntimeError as error:
             status_code = 400
             if error.code in {
-                "runtime_key_safety_unavailable",
                 "runtime_environment_unavailable",
                 "dokploy_target_read_failed",
             }:

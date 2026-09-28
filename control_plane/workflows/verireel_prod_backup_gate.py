@@ -9,6 +9,7 @@ from typing import Literal, Protocol
 
 import click
 from control_plane import runtime_environments as control_plane_runtime_environments
+from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.production_backup_gate import ProductionBackupGateRequest
 from control_plane.contracts.durable_operation_authorization import (
@@ -27,12 +28,14 @@ from control_plane.contracts.verireel_prod_backup_gate_operation import (
     build_verireel_prod_backup_gate_operation_id,
 )
 from control_plane.workflows.ship import utc_now_timestamp
-from control_plane.workflows.worker_runtime_key_safety import enforce_worker_runtime_key_safety
 
 
 DEFAULT_TIMEOUT_SECONDS = DEFAULT_VERIREEL_PROD_BACKUP_GATE_TIMEOUT_SECONDS
 WORKER_COMMAND_ENV_VAR = "LAUNCHPLANE_VERIREEL_PROD_BACKUP_GATE_WORKER_COMMAND"
 ASYNC_SOURCE = "launchplane-verireel-prod-backup-gate"
+WORKER_SSH_KEYS = frozenset(
+    {"VERIREEL_PROD_PROXMOX_SSH_PRIVATE_KEY", "VERIREEL_PROD_PROXMOX_SSH_KNOWN_HOSTS"}
+)
 WORKER_RUNTIME_ENV_KEYS = (
     WORKER_COMMAND_ENV_VAR,
     "VERIREEL_PROD_PROXMOX_HOST",
@@ -89,7 +92,18 @@ def _resolve_worker_runtime_environment(
             instance_name=request.instance,
         )
     except click.ClickException:
-        return {}
+        resolved_values = {}
+    # Worker settings come from the lane's runtime environment; its SSH keys only from the
+    # worker store, never an inherited runtime secret.
+    resolved_values = {
+        key: value for key, value in resolved_values.items() if key not in WORKER_SSH_KEYS
+    }
+    resolved_values.update(
+        control_plane_secrets.resolve_lane_worker_secret_values(
+            context_name=request.context,
+            instance_name=request.instance,
+        )
+    )
     return {
         key: value
         for key, value in resolved_values.items()
@@ -102,12 +116,6 @@ def _worker_environment(
     control_plane_root: Path,
     request: VeriReelProdBackupGateWorkerRequest,
 ) -> dict[str, str]:
-    enforce_worker_runtime_key_safety(
-        context_name=request.context,
-        instance_name=request.instance,
-        allowed_worker_keys=WORKER_RUNTIME_ENV_KEYS,
-        operation_name="VeriReel prod backup gate worker",
-    )
     environment = {
         key: value for key, value in os.environ.items() if key not in WORKER_RUNTIME_ENV_KEYS
     }

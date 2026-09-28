@@ -156,6 +156,11 @@ not part of this input flow.
   env. Missing managed bindings are a hard error.
 - Secret status surfaces return metadata only. Launchplane does not expose
   routine plaintext read commands or service endpoints.
+- Credentials that only Launchplane's own jobs use for one lane, such as the
+  production backup and VeriReel Proxmox SSH keys, live in the
+  `launchplane_worker` integration, stored for exactly that lane. They are not
+  part of the lane's runtime environment, so no deploy or sync can deliver them
+  to an app. Store new worker credentials there with `context_instance` scope.
 
 ## Managed Secret Model
 
@@ -348,16 +353,16 @@ decryption key state denies the reveal or resolution.
   deployed runtime resolves DB-backed target authority and records sanitized
   audit evidence.
 - Live target runtime sync uses `POST /v1/live-target-runtime/apply` or the
-  `live-target-runtime.yml` workflow wrapper. Dry-run and apply both evaluate
-  runtime key-safety policy before returning sanitized key/count evidence.
-- Live target runtime sync through the service API filters the resolved runtime
-  payload to the product profile's expected runtime-environment keys and
-  runtime managed-secret binding keys for the selected lane. A secret stored for
-  the lane is not delivered unless the profile declares it: worker-only secrets,
-  such as production backup SSH keys, are stored for the lane too and must stay
-  out of the app runtime. Shared/global runtime records can provide values, but
-  they are not synced to an unrelated product target unless that product
-  profile declares the key.
+  `live-target-runtime.yml` workflow wrapper. Dry-run and apply both return
+  sanitized key/count evidence.
+- Live target runtime sync delivers the site's own environment for the lane:
+  the site's context and lane settings, the tracked target's settings, secrets
+  stored for exactly that lane, and, for testing and prod lanes only, secrets
+  shared across the site. Global settings and secrets, other sites' values, and
+  worker credentials (the `launchplane_worker` store) are never delivered.
+  Previews and lanes with unrecognized names get only secrets stored for them.
+  No declaration is needed to deliver a key; a managed secret the product
+  profile does declare must be present, or the sync is refused.
 - Odoo stable lanes declare their compose runtime contract in product onboarding
   seed material: `ODOO_DB_NAME`, `ODOO_DB_USER`, `ODOO_DATA_VOLUME`,
   `ODOO_LOG_VOLUME`, `ODOO_DB_VOLUME`, and managed secret bindings for
@@ -407,18 +412,9 @@ decryption key state denies the reveal or resolution.
   `BETTER_AUTH_SECRET`, `VERIREEL_SECRETS_MASTER_KEY`,
   `VERIREEL_CRON_SECRET`, and `VERIREEL_SMOKE_MAINTENANCE_SECRET`, are not
   copied template secrets.
-- Delegated worker workflows that overlay managed runtime secrets into
-  subprocess environments, such as VeriReel prod backup and rollback workers,
-  must evaluate the managed bindings for the worker target before the worker
-  process starts. The worker receives plaintext only after the metadata gate has
-  confirmed the active policy allows those bindings for that runtime class.
-- Worker gates must evaluate every effective managed binding scope accepted by
-  runtime secret resolution: global, context, and context-instance. A narrower
-  binding query must not let an inherited managed secret bypass classification.
-- A denied worker gate may report non-secret binding keys plus the active policy
-  record id and policy digest so operators can repair the classification without
-  exposing secret values. Validate the repaired metadata with a read-only target
-  dry run or scoped write-intent preflight before retrying the side effect.
+- Delegated backup and rollback workers read their SSH credentials from the
+  `launchplane_worker` store for exactly their lane. That store is never part of
+  an app's environment, so no policy gate is needed before the worker starts.
 - Product-specific workflows that sync resolved runtime environment values into
   live Dokploy targets, such as Odoo prod rollback target env updates, must
   evaluate managed runtime secret bindings before writing the live env payload.

@@ -311,6 +311,157 @@ class LaunchplaneSecretsTests(unittest.TestCase):
                 )
             store.close()
 
+    def test_worker_secrets_reach_only_their_lane_and_never_the_app(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(control_plane_root / "launchplane.sqlite3")
+            _seed_runtime_environment_records(
+                database_url=database_url,
+                definition=runtime_environments.RuntimeEnvironmentDefinition(
+                    schema_version=1,
+                    shared_env={},
+                    contexts={
+                        "site": runtime_environments.RuntimeEnvironmentContextDefinition(
+                            shared_env={},
+                            instances={
+                                "prod": runtime_environments.RuntimeEnvironmentInstanceDefinition(
+                                    env={"SITE_MODE": "live"}
+                                )
+                            },
+                        )
+                    },
+                ),
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            with patch.dict(
+                os.environ,
+                {
+                    control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key",
+                    "LAUNCHPLANE_DATABASE_URL": database_url,
+                },
+                clear=True,
+            ):
+                control_plane_secrets.write_secret_value(
+                    record_store=store,
+                    scope="context_instance",
+                    integration=control_plane_secrets.LAUNCHPLANE_WORKER_SECRET_INTEGRATION,
+                    name="PRODUCTION_BACKUP_SSH_PRIVATE_KEY",
+                    plaintext_value="lane-backup-key",
+                    binding_key="PRODUCTION_BACKUP_SSH_PRIVATE_KEY",
+                    context_name="site",
+                    instance_name="prod",
+                    actor="test",
+                )
+                control_plane_secrets.write_secret_value(
+                    record_store=store,
+                    scope="context",
+                    integration=control_plane_secrets.LAUNCHPLANE_WORKER_SECRET_INTEGRATION,
+                    name="PRODUCTION_BACKUP_SSH_KNOWN_HOSTS",
+                    plaintext_value="shared-hosts",
+                    binding_key="PRODUCTION_BACKUP_SSH_KNOWN_HOSTS",
+                    context_name="site",
+                    actor="test",
+                )
+
+                self.assertEqual(
+                    control_plane_secrets.resolve_lane_worker_secret_values(
+                        context_name="site", instance_name="prod"
+                    ),
+                    {"PRODUCTION_BACKUP_SSH_PRIVATE_KEY": "lane-backup-key"},
+                )
+                self.assertEqual(
+                    control_plane_secrets.resolve_lane_worker_secret_values(
+                        context_name="site", instance_name="testing"
+                    ),
+                    {},
+                )
+                app_values = runtime_environments.resolve_runtime_environment_values(
+                    control_plane_root=control_plane_root,
+                    context_name="site",
+                    instance_name="prod",
+                )
+                self.assertEqual(app_values["SITE_MODE"], "live")
+                self.assertNotIn("PRODUCTION_BACKUP_SSH_PRIVATE_KEY", app_values)
+                self.assertNotIn("PRODUCTION_BACKUP_SSH_KNOWN_HOSTS", app_values)
+            store.close()
+
+    def test_site_environment_shares_only_within_the_site_and_never_with_previews(self) -> None:
+        lanes = ("prod", "testing", "pr-12", "sandbox")
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(control_plane_root / "launchplane.sqlite3")
+            _seed_runtime_environment_records(
+                database_url=database_url,
+                definition=runtime_environments.RuntimeEnvironmentDefinition(
+                    schema_version=1,
+                    shared_env={"EVERY_PRODUCT_SETTING": "global"},
+                    contexts={
+                        "site": runtime_environments.RuntimeEnvironmentContextDefinition(
+                            shared_env={"SITE_SETTING": "site"},
+                            instances={
+                                lane: runtime_environments.RuntimeEnvironmentInstanceDefinition(
+                                    env={"LANE_SETTING": lane}
+                                )
+                                for lane in lanes
+                            },
+                        ),
+                        "other-site": runtime_environments.RuntimeEnvironmentContextDefinition(
+                            shared_env={}, instances={}
+                        ),
+                    },
+                ),
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            with patch.dict(
+                os.environ,
+                {
+                    control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key",
+                    "LAUNCHPLANE_DATABASE_URL": database_url,
+                },
+                clear=True,
+            ):
+                for scope, key, context_name, instance_name in (
+                    ("global", "EVERY_PRODUCT_TOKEN", "", ""),
+                    ("context", "SITE_SHARED_TOKEN", "site", ""),
+                    ("context", "OTHER_SITE_TOKEN", "other-site", ""),
+                    ("context_instance", "PREVIEW_TOKEN", "site", "pr-12"),
+                ):
+                    control_plane_secrets.write_secret_value(
+                        record_store=store,
+                        scope=scope,  # type: ignore[arg-type]
+                        integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
+                        name=key.lower(),
+                        plaintext_value=f"{key.lower()}-value",
+                        binding_key=key,
+                        context_name=context_name,
+                        instance_name=instance_name,
+                        actor="test",
+                    )
+
+                environments = {
+                    lane: runtime_environments.resolve_site_runtime_environment(
+                        control_plane_root=control_plane_root,
+                        context_name="site",
+                        instance_name=lane,
+                    )
+                    for lane in lanes
+                }
+            store.close()
+
+        for lane, environment in environments.items():
+            with self.subTest(lane=lane):
+                self.assertEqual(environment.values["SITE_SETTING"], "site")
+                self.assertEqual(environment.values["LANE_SETTING"], lane)
+                self.assertNotIn("EVERY_PRODUCT_SETTING", environment.values)
+                self.assertNotIn("EVERY_PRODUCT_TOKEN", environment.values)
+                self.assertNotIn("OTHER_SITE_TOKEN", environment.values)
+        for lane in ("prod", "testing"):
+            self.assertEqual(environments[lane].secret_keys, {"SITE_SHARED_TOKEN"})
+        self.assertEqual(environments["pr-12"].secret_keys, {"PREVIEW_TOKEN"})
+        self.assertEqual(environments["sandbox"].secret_keys, frozenset())
+
     def test_json_encryption_keys_are_exact_and_fail_closed(self) -> None:
         key1 = _test_fernet_key(0)
         key2 = _test_fernet_key(32)

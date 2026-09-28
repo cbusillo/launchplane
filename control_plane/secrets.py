@@ -33,6 +33,9 @@ LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR = "LAUNCHPLANE_MASTER_ENCRYPTION_KEY"
 LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VARS = (LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR,)
 DOKPLOY_SECRET_INTEGRATION = "dokploy"
 RUNTIME_ENVIRONMENT_SECRET_INTEGRATION = "runtime_environment"
+# Credentials Launchplane's own jobs use for one lane, such as backup SSH keys.
+# They are never part of a lane's runtime environment, so no app receives them.
+LAUNCHPLANE_WORKER_SECRET_INTEGRATION = "launchplane_worker"
 SECRET_STATUS_CONFIGURED = "configured"
 LEGACY_SECRET_KEY_ID = "launchplane-master-key"
 _KEY_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
@@ -451,17 +454,41 @@ def resolve_secret_values_for_integration_from_store(
     integration: str,
     context_name: str = "",
     instance_name: str = "",
+    scopes: frozenset[SecretScope] | None = None,
 ) -> dict[str, str]:
+    return {
+        binding_key: value
+        for binding_key, (value, _scope) in resolve_scoped_secret_values_for_integration_from_store(
+            record_store=record_store,
+            integration=integration,
+            context_name=context_name,
+            instance_name=instance_name,
+            scopes=scopes,
+        ).items()
+    }
+
+
+def resolve_scoped_secret_values_for_integration_from_store(
+    *,
+    record_store: SecretReadStore,
+    integration: str,
+    context_name: str = "",
+    instance_name: str = "",
+    scopes: frozenset[SecretScope] | None = None,
+) -> dict[str, tuple[str, SecretScope]]:
+    """Return each effective binding value with the scope of the record that supplied it."""
+
     candidate_records = [
         record
         for record in record_store.list_secret_records(integration=integration)
         if record.status == SECRET_STATUS_CONFIGURED
         and _scope_matches_record(record, context_name=context_name, instance_name=instance_name)
+        and (scopes is None or record.scope in scopes)
     ]
     candidate_records.sort(
         key=lambda record: (_scope_rank(record.scope), record.updated_at, record.secret_id)
     )
-    resolved_values: dict[str, str] = {}
+    resolved_values: dict[str, tuple[str, SecretScope]] = {}
     for record in candidate_records:
         binding = _binding_for_secret(
             record_store,
@@ -473,10 +500,69 @@ def resolve_secret_values_for_integration_from_store(
         if binding is None:
             continue
         version = record_store.read_secret_version(record.current_version_id)
-        resolved_values[binding.binding_key] = _decrypt_secret_value(
-            version.ciphertext, version.key_id
+        resolved_values[binding.binding_key] = (
+            _decrypt_secret_value(version.ciphertext, version.key_id),
+            record.scope,
         )
     return resolved_values
+
+
+def resolve_lane_worker_secret_values(
+    *,
+    context_name: str,
+    instance_name: str,
+    database_url: str | None = None,
+) -> dict[str, str]:
+    """Resolve worker credentials stored for exactly this lane, never inherited ones."""
+    if not context_name.strip() or not instance_name.strip():
+        return {}
+    store = _open_secret_store(database_url)
+    if store is None:
+        return {}
+    try:
+        return resolve_secret_values_for_integration_from_store(
+            record_store=store,
+            integration=LAUNCHPLANE_WORKER_SECRET_INTEGRATION,
+            context_name=context_name,
+            instance_name=instance_name,
+            scopes=frozenset({"context_instance"}),
+        )
+    finally:
+        store.close()
+
+
+def resolve_site_secret_values(
+    *,
+    context_name: str,
+    instance_name: str,
+    include_site_shared: bool,
+    database_url: str | None = None,
+) -> dict[str, str]:
+    """Resolve a site lane's own runtime secrets, never global or another site's.
+
+    Secrets shared across the site are included only when the caller says the lane may
+    receive them; previews run unmerged code and get only secrets stored for them.
+    """
+    if not context_name.strip() or not instance_name.strip():
+        return {}
+    store = _open_secret_store(database_url)
+    if store is None:
+        return {}
+    scopes: frozenset[SecretScope] = (
+        frozenset({"context", "context_instance"})
+        if include_site_shared
+        else frozenset({"context_instance"})
+    )
+    try:
+        return resolve_secret_values_for_integration_from_store(
+            record_store=store,
+            integration=RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
+            context_name=context_name,
+            instance_name=instance_name,
+            scopes=scopes,
+        )
+    finally:
+        store.close()
 
 
 def overlay_dokploy_environment_values(

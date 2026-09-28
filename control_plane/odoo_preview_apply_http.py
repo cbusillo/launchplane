@@ -9,7 +9,9 @@ import click
 from pydantic import Field, model_validator
 
 from control_plane import odoo_instance_overrides as control_plane_odoo_instance_overrides
+from control_plane import live_target_runtime as control_plane_live_target_runtime
 from control_plane import runtime_environments as control_plane_runtime_environments
+from control_plane import runtime_platform_credentials
 from control_plane.contracts.artifact_dependency_provenance import (
     normalize_artifact_git_commit,
     normalize_artifact_sha256_digest,
@@ -897,11 +899,21 @@ def _odoo_preview_service_environment_values(
         return {}
     preview_profile = profile.preview
     template_instance = preview_profile.template_instance.strip()
-    environment_values = control_plane_runtime_environments.resolve_runtime_environment_values(
-        control_plane_root=control_plane_root_path,
-        context_name=preview_profile.context,
-        instance_name=template_instance,
-        database_url=database_url,
+    # The preview runs unmerged code, so it gets only the template lane's site
+    # environment: no global values, Launchplane's own context credentials (such as
+    # the preview PR-comment token) withheld, other platform credentials refused.
+    environment_values = dict(
+        control_plane_runtime_environments.resolve_site_runtime_environment(
+            control_plane_root=control_plane_root_path,
+            context_name=preview_profile.context,
+            instance_name=template_instance,
+            database_url=database_url,
+        ).values
+    )
+    runtime_platform_credentials.refuse_platform_credentials(
+        preview_profile.override_env,
+        target=f"{profile.product} preview {plan.compose_name}",
+        source="the product profile preview override_env",
     )
     environment_values.update(preview_profile.override_env)
     try:
@@ -935,8 +947,26 @@ def _odoo_preview_service_environment_values(
         environment_values[key] = plan.preview_url
     for key in preview_profile.preview_domain_env_keys:
         environment_values[key] = plan.domain_host
+    # A declared key the site environment no longer supplies (for example one that
+    # only exists as a global value) fails closed instead of silently dropping out.
+    declared_keys = control_plane_live_target_runtime.declared_runtime_keys(
+        profile=profile,
+        context_name=preview_profile.context,
+        instance_name=template_instance,
+    )
     missing_env_keys = tuple(
-        key for key in ODOO_PREVIEW_REQUIRED_ENV_KEYS if not environment_values.get(key, "").strip()
+        sorted(
+            {
+                key
+                for key in ODOO_PREVIEW_REQUIRED_ENV_KEYS
+                if not environment_values.get(key, "").strip()
+            }
+            | (
+                declared_keys
+                - environment_values.keys()
+                - runtime_platform_credentials.PLATFORM_CREDENTIAL_KEYS
+            )
+        )
     )
     if missing_env_keys:
         raise OdooPreviewApplyConfigError(
