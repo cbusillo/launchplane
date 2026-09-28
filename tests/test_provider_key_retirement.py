@@ -171,6 +171,34 @@ class ProviderKeyRetirementApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 400, response.text)
         self.assertEqual(self.store.list_runtime_environment_records(), (_runtime_record(),))
 
+    async def test_lane_without_declarations_can_retire_a_platform_credential(self) -> None:
+        undeclared_profile = _profile().model_copy(
+            update={
+                "expected_config": _profile().expected_config.model_copy(
+                    update={"runtime_environment_keys": ()}
+                )
+            }
+        )
+        self.store.write_product_profile_record(undeclared_profile)
+
+        review = await _post_product_config_apply(
+            self.app,
+            self._payload(key="GITHUB_TOKEN"),
+            authorization="Bearer local-operator-token",
+        )
+        self.assertEqual(review.status_code, 202, review.text)
+        self.assertEqual(
+            review.json()["result"]["runtime_environment"]["retired_provider_keys_after"],
+            ["GITHUB_TOKEN"],
+        )
+        driver_key = await _post_product_config_apply(
+            self.app,
+            self._payload(key="ODOO_DB_PASSWORD"),
+            authorization="Bearer local-operator-token",
+        )
+        self.assertEqual(driver_key.status_code, 400, driver_key.text)
+        self.assertEqual(driver_key.json()["error"]["code"], "runtime_retirement_conflict")
+
     async def test_concurrent_retirement_edit_is_not_lost(self) -> None:
         review = await _post_product_config_apply(
             self.app,
