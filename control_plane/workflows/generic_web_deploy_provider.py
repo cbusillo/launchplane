@@ -5,6 +5,7 @@ from collections.abc import Callable
 from datetime import datetime, timedelta
 import hashlib
 from pathlib import Path
+import re
 from typing import Literal, Protocol, cast, runtime_checkable
 
 import click
@@ -36,6 +37,7 @@ from control_plane.workflows.dokploy_deploy import (
     execute_dokploy_artifact_deploy,
 )
 from control_plane.dokploy import api as dokploy_api
+from control_plane.dokploy import runtime_evidence as dokploy_runtime_evidence
 from control_plane.dokploy import source as dokploy_source
 
 
@@ -247,6 +249,74 @@ class GenericWebLegacyDeploymentCorrelation(BaseModel):
         return self
 
 
+class GenericWebRuntimeArtifactObservation(BaseModel):
+    """Read-only runtime facts for one exact provider target.
+
+    ``target_artifact_reference`` is the image the provider target is configured
+    to run. ``running_container_images`` lists the configured image of every
+    running container that belongs to the target.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    target_artifact_reference: str
+    running_container_images: tuple[str, ...]
+
+
+class GenericWebRuntimeCloseOutEvidence(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = 1
+    artifact_reference_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    running_container_count: int = Field(ge=1)
+    matching_container_count: int = Field(ge=1)
+
+
+_IMMUTABLE_ARTIFACT_REFERENCE_PATTERN = re.compile(r"^[^\s@]+@sha256:[a-f0-9]{64}$")
+
+
+def _image_repository(image_reference: str) -> str:
+    reference = image_reference.strip()
+    if "@" in reference:
+        return reference.split("@", 1)[0]
+    registry_and_path, separator, last_segment = reference.rpartition("/")
+    repository_name = last_segment.split(":", 1)[0]
+    return f"{registry_and_path}{separator}{repository_name}"
+
+
+def evaluate_generic_web_runtime_close_out(
+    *,
+    observation: GenericWebRuntimeArtifactObservation,
+    expected_artifact_reference: str,
+) -> GenericWebRuntimeCloseOutEvidence:
+    """Prove that an original deploy's exact image is configured and running.
+
+    Raises ``ValueError`` unless the target is configured for the exact
+    immutable original image, at least one running container runs it, and no
+    running container runs any other reference of the same image repository.
+    """
+
+    expected_reference = expected_artifact_reference.strip()
+    if not _IMMUTABLE_ARTIFACT_REFERENCE_PATTERN.fullmatch(expected_reference):
+        raise ValueError("Runtime close-out requires an immutable original artifact reference.")
+    if observation.target_artifact_reference.strip() != expected_reference:
+        raise ValueError("Runtime close-out target artifact does not match the original deploy.")
+    expected_repository = _image_repository(expected_reference)
+    running_images = tuple(image.strip() for image in observation.running_container_images)
+    repository_images = tuple(
+        image for image in running_images if _image_repository(image) == expected_repository
+    )
+    if not repository_images:
+        raise ValueError("Runtime close-out found no running container for the original image.")
+    if any(image != expected_reference for image in repository_images):
+        raise ValueError("Runtime close-out found a running container with another image.")
+    return GenericWebRuntimeCloseOutEvidence(
+        artifact_reference_sha256=_legacy_correlation_sha256(expected_reference),
+        running_container_count=len(running_images),
+        matching_container_count=len(repository_images),
+    )
+
+
 class DokployGenericWebDeployStore(control_plane_secrets.SecretReadStore, Protocol):
     def read_provider_target_record(
         self, *, context_name: str, instance_name: str
@@ -314,6 +384,16 @@ class GenericWebDeployLegacyCorrelationProvider(Protocol):
         resolved_deploy_target: GenericWebResolvedDeployTarget,
         provider_effect_started_at: str,
     ) -> GenericWebLegacyDeploymentCorrelation: ...
+
+
+@runtime_checkable
+class GenericWebDeployRuntimeArtifactProvider(Protocol):
+    def observe_runtime_artifact(
+        self,
+        *,
+        control_plane_root: Path,
+        resolved_deploy_target: GenericWebResolvedDeployTarget,
+    ) -> GenericWebRuntimeArtifactObservation: ...
 
 
 class DokployGenericWebDeployProvider:
@@ -543,6 +623,44 @@ class DokployGenericWebDeployProvider:
                 ship_request=resolved_deploy_target.ship_request,
                 target_type=target.target_type,
             ),
+        )
+
+    def observe_runtime_artifact(
+        self,
+        *,
+        control_plane_root: Path,
+        resolved_deploy_target: GenericWebResolvedDeployTarget,
+    ) -> GenericWebRuntimeArtifactObservation:
+        target = resolved_deploy_target.resolved_target
+        if target.target_type != "compose":
+            raise ValueError("Runtime close-out supports compose targets only.")
+        host, token = self._read_provider_config(control_plane_root=control_plane_root)
+        target_payload = dokploy_api.fetch_dokploy_target_payload(
+            host=host,
+            token=token,
+            target_type=target.target_type,
+            target_id=target.target_id,
+        )
+        if (
+            _dokploy_target_payload_id(target_payload=target_payload, target_type="compose")
+            != target.target_id.strip()
+        ):
+            raise ValueError("Runtime close-out target identity is not exact.")
+        try:
+            running_images = dokploy_runtime_evidence.fetch_compose_running_container_images(
+                host=host,
+                token=token,
+                app_name=str(target_payload.get("appName") or ""),
+                server_id=str(target_payload.get("serverId") or ""),
+            )
+        except dokploy_runtime_evidence.DokployEvidenceProviderError as error:
+            raise click.ClickException("Runtime close-out provider read failed.") from error
+        return GenericWebRuntimeArtifactObservation(
+            target_artifact_reference=_dokploy_target_artifact_reference(
+                target_payload=target_payload,
+                target_type="compose",
+            ),
+            running_container_images=running_images,
         )
 
 

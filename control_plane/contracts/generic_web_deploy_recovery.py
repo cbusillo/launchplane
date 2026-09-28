@@ -14,6 +14,7 @@ GenericWebDeployRecoveryAction = Literal[
     "wait_for_active_lease",
     "adopt_observed",
     "retry_original_operation",
+    "close_out_observed",
     "hold_unknown",
 ]
 GenericWebDeployRecoveryProviderOutcome = Literal[

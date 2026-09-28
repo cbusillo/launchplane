@@ -217,17 +217,26 @@ function readGitHubOutputs() {
   return outputs;
 }
 
+// Apply may only settle a reservation without retrying the provider effect:
+// adopt an observed provider deployment, or close out a deploy whose exact
+// original image the service proved is configured and running.
+const applyEvidenceByAction = new Map([
+  ["adopt_observed", { providerOutcome: "present", providerStatus: "done" }],
+  ["close_out_observed", { providerOutcome: "unknown", providerStatus: "" }],
+]);
+
 function verifyApplyOutputs(outputs, expectedRecoveryDigest) {
   const reservationAttempt = outputs.get("reservation_attempt") ?? "";
   const traceId = outputs.get("trace_id") ?? "";
+  const expectedEvidence = applyEvidenceByAction.get(outputs.get("recovery_action") ?? "");
   if (
+    expectedEvidence === undefined ||
     outputs.get("status") !== "accepted" ||
     outputs.get("mode") !== "apply" ||
     outputs.get("reservation_state") !== "completed" ||
-    outputs.get("recovery_action") !== "adopt_observed" ||
     outputs.get("recovery_digest") !== expectedRecoveryDigest ||
-    outputs.get("provider_outcome") !== "present" ||
-    outputs.get("provider_status") !== "done" ||
+    outputs.get("provider_outcome") !== expectedEvidence.providerOutcome ||
+    outputs.get("provider_status") !== expectedEvidence.providerStatus ||
     outputs.get("retry_safe") !== "false" ||
     !/^[1-9][0-9]*$/.test(reservationAttempt) ||
     !traceId.trim()

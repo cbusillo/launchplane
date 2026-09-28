@@ -541,6 +541,45 @@ await import('./{ACTION_ENTRYPOINT.as_posix()}');
 
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_action_accepts_only_exact_close_out_evidence(self) -> None:
+        close_out: dict[str, object] = {
+            "recovery_action": "close_out_observed",
+            "provider_outcome": "unknown",
+            "provider_status": "",
+        }
+        cases: dict[str, tuple[dict[str, object], bool]] = {
+            "close-out evidence": (close_out, True),
+            "close-out claiming a provider deployment": (
+                {**close_out, "provider_outcome": "present", "provider_status": "done"},
+                False,
+            ),
+            "close-out allowing provider retry": ({**close_out, "retry_safe": True}, False),
+            "close-out leaving the reservation open": (
+                {**close_out, "reservation_state": "reconcile_required"},
+                False,
+            ),
+            "unsettling action": ({"recovery_action": "hold_unknown"}, False),
+        }
+        request, workflow_run = self.apply_request_and_workflow_run()
+        for name, (overrides, accepted) in cases.items():
+            with self.subTest(name), TemporaryDirectory() as temporary_directory:
+                root = Path(temporary_directory)
+                request_file = root / "request.json"
+                request_file.write_text(json.dumps(request), encoding="utf-8")
+                result = self.run_action(
+                    request=None,
+                    request_file=request_file,
+                    workflow_run=workflow_run,
+                    output_path=root / "github-output.txt",
+                    response_overrides=overrides,
+                )
+
+                if accepted:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                else:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("did not return adoption-only evidence", result.stderr)
+
     def test_action_accepts_signed_zip_data_descriptor(self) -> None:
         request, workflow_run = self.apply_request_and_workflow_run()
 
