@@ -526,6 +526,7 @@ from control_plane.odoo_post_deploy_http import (
     write_odoo_config_parameter_override_result,
     write_odoo_website_bootstrap_override_result,
 )
+from control_plane import odoo_addon_settings_override as control_plane_odoo_addon_settings
 from control_plane.odoo_app_maintenance_http import (
     ODOO_APP_MAINTENANCE_ROUTE as _ODOO_APP_MAINTENANCE_ROUTE,
     OdooAppMaintenanceEnvelope,
@@ -908,6 +909,7 @@ _PRODUCT_CONFIG_MAX_BODY_BYTES = 2 * 1024 * 1024
 _PRODUCT_HEALTH_MONITORING_MAX_BODY_BYTES = 64 * 1024
 _PRODUCT_PRELAUNCH_REBUILD_POLICY_MAX_BODY_BYTES = 64 * 1024
 _PRODUCT_STABLE_LANE_REPAIR_MAX_BODY_BYTES = 64 * 1024
+_ODOO_ADDON_SETTINGS_MAX_BODY_BYTES = 16 * 1024
 _PRODUCT_OWNER_SETTING_MAX_BODY_BYTES = 16 * 1024
 _SECRET_REENCRYPT_MAX_BODY_BYTES = 64 * 1024
 _TENANT_REPOSITORY_CLASSIFICATION_MAX_BODY_BYTES = 64 * 1024
@@ -981,6 +983,12 @@ _BOUNDED_REQUEST_BODY_CONTRACTS: dict[str, tuple[str, int, bool, bool]] = {
     _PRODUCT_STABLE_LANE_REPAIR_APPLY_ROUTE: (
         "Product stable lane repair",
         _PRODUCT_STABLE_LANE_REPAIR_MAX_BODY_BYTES,
+        True,
+        True,
+    ),
+    control_plane_odoo_addon_settings.ODOO_ADDON_SETTINGS_APPLY_ROUTE: (
+        "Odoo addon settings",
+        _ODOO_ADDON_SETTINGS_MAX_BODY_BYTES,
         True,
         True,
     ),
@@ -7355,6 +7363,181 @@ def create_launchplane_fastapi_app(
         )
         return response
 
+    async def apply_odoo_addon_settings(
+        request: Request,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        route_path = control_plane_odoo_addon_settings.ODOO_ADDON_SETTINGS_APPLY_ROUTE
+        trace_id = next_trace_id()
+        try:
+            raw_payload = await request.json()
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Odoo addon settings request failed validation.",
+            ) from error
+        if not isinstance(raw_payload, dict):
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Odoo addon settings request failed validation.",
+            )
+        try:
+            settings_request = (
+                control_plane_odoo_addon_settings.OdooAddonSettingsApplyRequest.model_validate(
+                    raw_payload
+                )
+            )
+        except ValidationError as error:
+            # Never echo pydantic input: a misplaced credential would be reflected back.
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Odoo addon settings request failed validation.",
+            ) from error
+        if isinstance(identity, TerminalAgentIdentity):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Terminal agent credentials can only read redacted Launchplane context.",
+            )
+        action = (
+            "product_config.apply" if settings_request.mode == "apply" else "product_config.plan"
+        )
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action=action,
+            product=settings_request.product,
+            context=settings_request.context,
+            target=AuthorizationTarget(scope="instance", instances=(settings_request.instance,)),
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message=(
+                    "Workflow cannot plan or apply Odoo addon settings for the requested"
+                    " product/context."
+                ),
+            )
+        try:
+            resolve_odoo_post_deploy_product_route(
+                record_store=record_store,
+                product=settings_request.product,
+                context=settings_request.context,
+                instance=settings_request.instance,
+            )
+        except OdooPostDeployRouteDependencyError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message="Odoo product lane was not found for the requested addon settings.",
+            ) from error
+        except OdooPostDeployProductMismatchError as error:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="product_driver_mismatch",
+                message="Product is not configured for the requested driver route.",
+            ) from error
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            ) from error
+        typed_store = cast(control_plane_odoo_addon_settings.OdooAddonSettingsStore, record_store)
+        records = {
+            "product_profile": settings_request.product,
+            "context": settings_request.context,
+            "instance": settings_request.instance,
+        }
+        if settings_request.mode == "dry-run":
+            try:
+                plan, _existing, _replacement = (
+                    control_plane_odoo_addon_settings.build_odoo_addon_settings_plan(
+                        record_store=typed_store, request=settings_request
+                    )
+                )
+            except control_plane_odoo_addon_settings.OdooAddonSettingsRefusal as error:
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code=f"addon_settings_{error.code}",
+                    message=str(error),
+                ) from error
+            return accepted_evidence_response(
+                trace_id=trace_id,
+                records=records,
+                result=plan.model_dump(mode="json"),
+            )
+
+        if not idempotency_key.strip():
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="idempotency_key_required",
+                message="Odoo addon settings apply requires an Idempotency-Key header.",
+            )
+        (
+            normalized_idempotency_key,
+            payload_fingerprint,
+            replay_response,
+        ) = await replay_apply_idempotency(
+            request=request,
+            record_store=record_store,
+            identity=identity,
+            route_path=route_path,
+            idempotency_key=idempotency_key,
+            trace_id=trace_id,
+            check_replay=True,
+            request_payload=raw_payload,
+        )
+        if replay_response is not None:
+            return replay_response
+        try:
+            applied_plan = control_plane_odoo_addon_settings.apply_odoo_addon_settings_plan(
+                record_store=typed_store, request=settings_request
+            )
+        except control_plane_odoo_addon_settings.OdooAddonSettingsRefusal as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code=f"addon_settings_{error.code}",
+                message=str(error),
+            ) from error
+        except control_plane_odoo_addon_settings.OdooAddonSettingsStale as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="stale",
+                message=str(error),
+            ) from error
+        response = accepted_evidence_response(
+            trace_id=trace_id,
+            records=records,
+            result=applied_plan.model_dump(mode="json"),
+        )
+        store_apply_idempotency(
+            record_store=record_store,
+            identity=identity,
+            route_path=route_path,
+            idempotency_key=normalized_idempotency_key,
+            request_fingerprint_value=payload_fingerprint,
+            trace_id=trace_id,
+            response=response,
+        )
+        return response
+
     async def write_odoo_prod_backup_gate(
         request: Request,
         identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
@@ -13638,13 +13821,13 @@ def create_launchplane_fastapi_app(
                 retirement_profile = database_store.read_product_profile_record(
                     product_config_request.product
                 )
-                application_keys = (
-                    control_plane_live_target_runtime.require_product_profile_runtime_keys(
-                        record_store=database_store,
-                        product_name=product_config_request.product,
-                        context_name=product_config_request.context,
-                        instance_name=product_config_request.instance,
-                    )
+                # A site lane needs no declaration (#2568); an empty declaration
+                # still protects driver keys, and the sync rechecks site values.
+                application_keys = control_plane_live_target_runtime.product_lane_declared_keys(
+                    record_store=database_store,
+                    product_name=product_config_request.product,
+                    context_name=product_config_request.context,
+                    instance_name=product_config_request.instance,
                 )
                 control_plane_live_target_runtime.validate_provider_key_retirement(
                     retired_keys=set(retired_provider_keys), application_keys=application_keys
@@ -23856,6 +24039,37 @@ def create_launchplane_fastapi_app(
             404: {"model": LaunchplaneErrorResponse},
             409: {"model": LaunchplaneErrorResponse},
             503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        control_plane_odoo_addon_settings.ODOO_ADDON_SETTINGS_APPLY_ROUTE,
+        apply_odoo_addon_settings,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": _openapi_model_schema(
+                            control_plane_odoo_addon_settings.OdooAddonSettingsApplyRequest
+                        )
+                    }
+                },
+            }
+        },
+        operation_id="apply_odoo_addon_settings",
+        summary="Dry-run or apply Odoo instance-override addon settings",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            413: {"model": LaunchplaneErrorResponse},
         },
     )
 

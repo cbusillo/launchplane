@@ -510,7 +510,7 @@ def _expected_config_route_matches(
     return True
 
 
-def _product_lane_declared_keys(
+def product_lane_declared_keys(
     *,
     record_store: LiveTargetRuntimeProfileStore,
     product_name: str,
@@ -618,7 +618,7 @@ def apply_live_target_runtime_environment(
         postgres_store = PostgresRecordStore(database_url=database_url)
         try:
             postgres_store.ensure_schema()
-            declared_keys = _product_lane_declared_keys(
+            declared_keys = product_lane_declared_keys(
                 record_store=postgres_store,
                 product_name=product_name.strip(),
                 context_name=context_name,
@@ -706,7 +706,7 @@ def apply_live_target_runtime_environment(
                                 database_url=database_url,
                             ).site_keys
                         )
-                        | _product_lane_declared_keys(
+                        | product_lane_declared_keys(
                             record_store=postgres_store,
                             product_name=product_name.strip(),
                             context_name=context_name,

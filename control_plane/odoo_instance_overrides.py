@@ -11,6 +11,7 @@ from control_plane.contracts.odoo_post_deploy_payload import OdooPostDeployPaylo
 from control_plane.contracts.odoo_post_deploy_payload import OdooPostDeployRenderedValue
 from control_plane.contracts.odoo_post_deploy_payload import OdooPostDeployWorkflowIntent
 from control_plane.contracts.runtime_environment_record import ScalarValue
+from control_plane.runtime_key_safety import runtime_key_safety_environment_class
 
 ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY = "ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64"
 LAUNCHPLANE_INSTANCE_OVERRIDES_REQUIRED_ENV_KEY = "LAUNCHPLANE_INSTANCE_OVERRIDES_REQUIRED"
@@ -67,16 +68,57 @@ def _render_literal_payload_override(*, value: ScalarValue) -> OdooPostDeployRen
     return OdooPostDeployRenderedValue(source="literal", value=value)
 
 
+def shopify_store_handle(raw_key: str) -> str:
+    """Reduce a store key, myshopify domain or admin URL to its bare store handle."""
+
+    handle = raw_key.strip().lower()
+    if "://" in handle:
+        handle = handle.split("://", 1)[1]
+    handle = handle.split("/", 1)[0].rstrip(".")
+    if handle.endswith(".myshopify.com"):
+        handle = handle[: -len(".myshopify.com")]
+    return handle
+
+
+def shopify_store_key_is_protected(
+    shop_url_key: str, protected_shopify_store_keys: tuple[str, ...]
+) -> bool:
+    protected_handles = {
+        shopify_store_handle(raw_key) for raw_key in protected_shopify_store_keys if raw_key.strip()
+    }
+    return shopify_store_handle(shop_url_key) in protected_handles
+
+
+def odoo_instance_is_production(instance_name: str) -> bool:
+    return runtime_key_safety_environment_class(instance_name) == "prod"
+
+
+def _shopify_clear_payload_settings() -> list[OdooPostDeployAddonSetting]:
+    return [
+        OdooPostDeployAddonSetting(
+            addon=SHOPIFY_ADDON_NAME,
+            setting=SHOPIFY_ACTION_SETTING,
+            value=_render_literal_payload_override(value=SHOPIFY_ACTION_CLEAR),
+        )
+    ]
+
+
 def _resolve_shopify_payload_settings(
     *,
     record: OdooInstanceOverrideRecord,
     protected_shopify_store_keys: tuple[str, ...] = (),
+    clear_undeclared_shopify: bool = True,
 ) -> list[OdooPostDeployAddonSetting]:
     shopify_overrides = [
         override for override in record.addon_settings if override.addon == SHOPIFY_ADDON_NAME
     ]
     if not shopify_overrides:
-        return []
+        # A restored production copy carries production Shopify credentials. A lane that
+        # is not production and declares no dev-store settings must clear them explicitly
+        # instead of sending nothing. Production keeps its configured store untouched.
+        if not clear_undeclared_shopify or odoo_instance_is_production(record.instance):
+            return []
+        return _shopify_clear_payload_settings()
 
     overrides_by_setting = {override.setting: override for override in shopify_overrides}
     configured_required_settings = [
@@ -85,13 +127,7 @@ def _resolve_shopify_payload_settings(
         if setting_name in overrides_by_setting
     ]
     if len(configured_required_settings) != len(SHOPIFY_REQUIRED_SETTINGS):
-        return [
-            OdooPostDeployAddonSetting(
-                addon=SHOPIFY_ADDON_NAME,
-                setting=SHOPIFY_ACTION_SETTING,
-                value=_render_literal_payload_override(value=SHOPIFY_ACTION_CLEAR),
-            )
-        ]
+        return _shopify_clear_payload_settings()
 
     shop_url_key = _shopify_override_value_text(
         override_value=overrides_by_setting["shop_url_key"].value,
@@ -101,7 +137,7 @@ def _resolve_shopify_payload_settings(
     normalized_protected_keys = {
         raw_key.strip().lower() for raw_key in protected_shopify_store_keys if raw_key.strip()
     }
-    if normalized_shop_url_key in normalized_protected_keys:
+    if shopify_store_key_is_protected(shop_url_key, protected_shopify_store_keys):
         protected_list = ", ".join(sorted(normalized_protected_keys))
         raise click.ClickException(
             "Shopify shop_url_key is protected for this Launchplane target. "
@@ -186,6 +222,7 @@ def render_post_deploy_payload(
     *,
     workflow_intent: PostDeployWorkflowIntent = "deploy",
     protected_shopify_store_keys: tuple[str, ...] = (),
+    clear_undeclared_shopify: bool = True,
 ) -> OdooPostDeployPayload:
     config_parameters: list[OdooPostDeployConfigParameter] = []
     for config_parameter_override in record.config_parameters:
@@ -203,6 +240,7 @@ def render_post_deploy_payload(
         _resolve_shopify_payload_settings(
             record=record,
             protected_shopify_store_keys=protected_shopify_store_keys,
+            clear_undeclared_shopify=clear_undeclared_shopify,
         )
     )
     for addon_setting_override in record.addon_settings:
@@ -267,11 +305,13 @@ def build_post_deploy_environment(
     *,
     workflow_intent: PostDeployWorkflowIntent = "deploy",
     protected_shopify_store_keys: tuple[str, ...] = (),
+    clear_undeclared_shopify: bool = True,
 ) -> PostDeployOverrideEnvironment:
     payload = render_post_deploy_payload(
         record,
         workflow_intent=workflow_intent,
         protected_shopify_store_keys=protected_shopify_store_keys,
+        clear_undeclared_shopify=clear_undeclared_shopify,
     )
     inline_environment: dict[str, str] = {
         ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY: _encode_post_deploy_payload(payload),
@@ -306,7 +346,9 @@ def build_preview_website_bootstrap_environment(
             ),
         }
     )
-    return build_post_deploy_environment(preview_record, workflow_intent="deploy")
+    # Preview website bootstrap carries only bootstrap intent. Preview integration-key
+    # enforcement is tracked separately and is not decided by this payload.
+    return build_post_deploy_environment(preview_record, clear_undeclared_shopify=False)
 
 
 def render_post_deploy_environment(

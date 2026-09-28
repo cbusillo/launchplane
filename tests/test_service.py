@@ -9,7 +9,7 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, Literal, cast
-from unittest.mock import ANY, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 from click import ClickException, Command
 from click.testing import CliRunner
@@ -10932,7 +10932,6 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
             execute_mock.assert_called_once_with(
                 control_plane_root=root,
-                record_store=ANY,
                 request=VeriReelPreviewRefreshRequest.model_validate(refresh_payload["refresh"]),
                 preview_id="preview-verireel-testing-verireel-pr-123",
                 preview_generation_id=("preview-verireel-testing-verireel-pr-123-generation-0001"),

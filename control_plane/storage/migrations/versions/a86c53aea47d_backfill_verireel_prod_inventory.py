@@ -1,7 +1,7 @@
 """Rebuild VeriReel's production environment record from its last promotion.
 
 Revision ID: a86c53aea47d
-Revises: e2b4d6f8a1c3
+Revises: f4c6e8a0b2d5
 """
 
 from collections.abc import Sequence
@@ -14,7 +14,7 @@ from control_plane.storage.verireel_prod_inventory_backfill import (
 )
 
 revision: str = "a86c53aea47d"
-down_revision: str | None = "e2b4d6f8a1c3"
+down_revision: str | None = "f4c6e8a0b2d5"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
