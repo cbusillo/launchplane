@@ -602,6 +602,7 @@ def _build_runtime_environment_record_for_put(
     )
 
     env_values: dict[str, ScalarValue] = {}
+    retired_provider_keys: tuple[str, ...] = ()
     for record in existing_records:
         if _runtime_environment_record_matches(
             record,
@@ -610,16 +611,19 @@ def _build_runtime_environment_record_for_put(
             instance_name=instance_name,
         ):
             env_values.update(record.env)
+            retired_provider_keys = record.retired_provider_keys
             break
     for raw_assignment in assignments:
         key_name, value = _parse_runtime_environment_assignment(raw_assignment)
         env_values[key_name] = value
 
     return RuntimeEnvironmentRecord(
+        schema_version=2 if retired_provider_keys else 1,
         scope=normalized_scope,
         context=context_name,
         instance=instance_name,
         env=env_values,
+        retired_provider_keys=retired_provider_keys,
         updated_at=utc_now_timestamp(),
         source_label=source_label.strip() or "cli",
     )
@@ -690,10 +694,12 @@ def _build_runtime_environment_record_for_unset(
 
     return (
         RuntimeEnvironmentRecord(
+            schema_version=target_record.schema_version,
             scope=target_record.scope,
             context=target_record.context,
             instance=target_record.instance,
             env=env_values,
+            retired_provider_keys=target_record.retired_provider_keys,
             updated_at=utc_now_timestamp(),
             source_label=source_label.strip() or "cli",
         ),
@@ -726,10 +732,12 @@ def _build_runtime_environment_record_for_relabel(
             "Missing DB-backed runtime environment record for the requested scope."
         )
     return RuntimeEnvironmentRecord(
+        schema_version=target_record.schema_version,
         scope=target_record.scope,
         context=target_record.context,
         instance=target_record.instance,
         env=dict(target_record.env),
+        retired_provider_keys=target_record.retired_provider_keys,
         updated_at=utc_now_timestamp(),
         source_label=source_label.strip() or "cli",
     )

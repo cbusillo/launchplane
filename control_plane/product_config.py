@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from json import JSONDecodeError
 from pathlib import Path
-from typing import Literal, Protocol, TypedDict, cast
+from typing import Literal, NotRequired, Protocol, TypedDict, cast
 
 import click
 
@@ -61,6 +61,14 @@ class _SecretBindingLookupKwargs(TypedDict, total=False):
     context_name: str
     instance_name: str
     limit: int | None
+
+
+class _ProductConfigRuntimeInput(TypedDict):
+    scope: str
+    context: str
+    instance: str
+    env: dict[str, object]
+    retired_provider_keys: NotRequired[tuple[str, ...] | None]
 
 
 class _ProductConfigSecretWritePlan(TypedDict):
@@ -203,7 +211,7 @@ def plan_product_config_authority_bundle(
     product = str(normalized_payload["product"])
     context_name = str(normalized_payload["context"])
     instance_name = str(normalized_payload["instance"])
-    runtime_input = cast(dict[str, object], normalized_payload["runtime_env"])
+    runtime_input = cast(_ProductConfigRuntimeInput, normalized_payload["runtime_env"])
     runtime_env = cast(dict[str, ScalarValue], runtime_input["env"])
     secrets = tuple(cast(list[dict[str, object]], normalized_payload["secrets"]))
     _require_product_config_master_key_if_needed(secrets)
@@ -215,9 +223,7 @@ def plan_product_config_authority_bundle(
         context_name=str(runtime_input["context"]),
         instance_name=str(runtime_input["instance"]),
         env=runtime_env,
-        retired_provider_keys=cast(
-            tuple[str, ...] | None, runtime_input.get("retired_provider_keys")
-        ),
+        retired_provider_keys=runtime_input.get("retired_provider_keys"),
         source_label=source_label,
     )
     secret_summaries: list[dict[str, object]] = []
@@ -348,7 +354,7 @@ def _default_secret_scope(*, context_name: str, instance_name: str) -> str:
 
 def _product_config_runtime_input(
     payload: dict[str, object], *, context_name: str, instance_name: str
-) -> dict[str, object]:
+) -> _ProductConfigRuntimeInput:
     runtime_payload = payload.get("runtime_env", payload.get("runtime_environment", {}))
     if runtime_payload is None:
         return {
@@ -356,6 +362,7 @@ def _product_config_runtime_input(
             "context": context_name,
             "instance": instance_name,
             "env": {},
+            "retired_provider_keys": None,
         }
     if not isinstance(runtime_payload, dict):
         raise ProductConfigError("Product config runtime_env must be a JSON object.")

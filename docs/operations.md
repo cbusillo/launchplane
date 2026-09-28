@@ -2158,7 +2158,9 @@ return a typed blocked result rather than guessing a domain.
   provider entries, and verifies their absence before an optional deploy.
   Odoo target replacement honors the same reviewed intent while continuing to
   refuse every unreviewed provider-only key. Both consumers recheck retirement
-  intent and application declarations before writing. Clearing intent does not
+  intent and application declarations before writing. Execution uses the current
+  approved configuration; an earlier replacement plan does not freeze it.
+  Clearing intent does not
   restore removed values; recovery requires a separately reviewed application
   configuration or managed secret update. Do not roll the service back to a
   version that cannot read nonempty version-2 runtime records.

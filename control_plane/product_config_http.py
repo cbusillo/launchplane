@@ -310,7 +310,7 @@ def _runtime_input_payload(
     value: dict[str, ScalarValue] | ProductConfigRuntimeInput,
 ) -> dict[str, object]:
     if isinstance(value, ProductConfigRuntimeInput):
-        return value.model_dump(exclude_none=True)
+        return value.model_dump(exclude_none=True, exclude_unset=True)
     return dict(value)
 
 

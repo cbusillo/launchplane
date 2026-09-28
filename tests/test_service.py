@@ -7113,13 +7113,15 @@ class LaunchplaneServiceTests(unittest.TestCase):
             captured_env_updates: list[dict[str, object]] = []
 
             def fetch_target_payload(**_kwargs: object) -> dict[str, object]:
-                env_text = "CONTACT_EMAIL_MODE=resend\nLEGACY_PASSWORD=never-log-this-password\n"
+                provider_env_text = (
+                    "CONTACT_EMAIL_MODE=resend\nLEGACY_PASSWORD=never-log-this-password\n"
+                )
                 if captured_env_updates:
-                    env_text = str(captured_env_updates[-1]["env_text"])
+                    provider_env_text = str(captured_env_updates[-1]["env_text"])
                 return {
                     "applicationId": "application-syo-prod",
                     "name": "syo-prod-app",
-                    "env": env_text,
+                    "env": provider_env_text,
                 }
 
             with (

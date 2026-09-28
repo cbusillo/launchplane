@@ -4,6 +4,10 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import Mock, patch
 
+from click.testing import CliRunner
+
+from control_plane.cli import main
+from control_plane.contracts.product_onboarding_manifest import ProductOnboardingManifest
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.http_app import create_launchplane_fastapi_app
@@ -14,6 +18,7 @@ from control_plane.live_target_runtime import (
 from control_plane.service_auth import BearerIdentityConfig
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.storage.product_authority_bundle import ProductAuthorityBundle
+from control_plane.workflows.product_onboarding import build_runtime_environment_records
 from tests.http_app_test_support import _post_product_config_apply, _RejectingVerifier
 from tests.support.auth import _local_operator_policy
 from tests.support.profiles import _generic_site_profile_payload
@@ -61,7 +66,6 @@ class ProviderKeyRetirementApiTests(unittest.IsolatedAsyncioTestCase):
                 actions=("product_config.plan", "product_config.apply"),
                 products=("example-site",),
                 contexts=("example-site",),
-                token_label="local-owner-write",
             ),
             record_store_factory=lambda: self.store,
             bearer_identity_config=BearerIdentityConfig(
@@ -132,7 +136,16 @@ class ProviderKeyRetirementApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("private-mode-value", review.text + applied.text + replay.text)
 
     async def test_retirement_rejects_application_driver_and_wrong_lane_keys(self) -> None:
-        for key in ("APP_MODE", "ODOO_DB_PASSWORD", "ODOO_DATA_VOLUME", "PLATFORM_INSTANCE"):
+        for key in (
+            "APP_MODE",
+            "ODOO_DB_PASSWORD",
+            "ODOO_DATA_VOLUME",
+            "PLATFORM_INSTANCE",
+            "ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64",
+            "LAUNCHPLANE_INSTANCE_OVERRIDES_REQUIRED",
+            "LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED",
+            "ODOO_OVERRIDE_SECRET__ADDON__SHOPIFY__API_TOKEN",
+        ):
             with self.subTest(key=key):
                 response = await _post_product_config_apply(
                     self.app,
@@ -181,8 +194,135 @@ class ProviderKeyRetirementApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(applied.json()["error"]["code"], "runtime_environment_conflict")
         self.assertEqual(self.store.list_runtime_environment_records(), (competing_record,))
 
+    async def test_concurrent_profile_change_returns_conflict_without_writing_retirement(
+        self,
+    ) -> None:
+        review = await _post_product_config_apply(
+            self.app,
+            self._payload(),
+            authorization="Bearer local-operator-token",
+        )
+        self.assertEqual(review.status_code, 202, review.text)
+        original_write = self.store.write_product_authority_bundle
+
+        def concurrent_write(bundle: ProductAuthorityBundle) -> None:
+            self.store.write_product_profile_record(
+                _profile().model_copy(update={"display_name": "Changed profile"})
+            )
+            original_write(bundle)
+
+        with patch.object(
+            self.store, "write_product_authority_bundle", side_effect=concurrent_write
+        ):
+            applied = await _post_product_config_apply(
+                self.app,
+                self._payload(mode="apply"),
+                authorization="Bearer local-operator-token",
+                idempotency_key="profile-race",
+            )
+        self.assertEqual(applied.status_code, 409, applied.text)
+        self.assertEqual(applied.json()["error"]["code"], "product_profile_conflict")
+        self.assertEqual(self.store.list_runtime_environment_records(), (_runtime_record(),))
+
+    async def test_flat_values_are_preserved_with_retirement_and_conflicts_are_rejected(
+        self,
+    ) -> None:
+        payload = self._payload()
+        payload["runtime_env"] = {
+            "APP_MODE": "new-private-mode",
+            "retired_provider_keys": ["LEGACY_PASSWORD"],
+        }
+        review = await _post_product_config_apply(
+            self.app,
+            payload,
+            authorization="Bearer local-operator-token",
+        )
+        self.assertEqual(review.status_code, 202, review.text)
+        self.assertIn("APP_MODE", review.json()["result"]["runtime_environment"]["changed_keys"])
+        payload["mode"] = "apply"
+        applied = await _post_product_config_apply(
+            self.app,
+            payload,
+            authorization="Bearer local-operator-token",
+            idempotency_key="flat-retire",
+        )
+        self.assertEqual(applied.status_code, 202, applied.text)
+        self.assertEqual(
+            self.store.list_runtime_environment_records()[0].env["APP_MODE"], "new-private-mode"
+        )
+        self.assertNotIn("new-private-mode", review.text + applied.text)
+        conflict = self._payload()
+        conflict["runtime_env"] = {
+            "LEGACY_PASSWORD": "conflicting-value",
+            "retired_provider_keys": ["LEGACY_PASSWORD"],
+        }
+        response = await _post_product_config_apply(
+            self.app, conflict, authorization="Bearer local-operator-token"
+        )
+        self.assertEqual(response.status_code, 400, response.text)
+
 
 class ProviderKeyRetirementLiveSyncTests(unittest.TestCase):
+    def test_existing_record_maintenance_preserves_retirement(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            database_url = _sqlite_database_url(Path(temporary_directory) / "records.sqlite3")
+            with closing(PostgresRecordStore(database_url=database_url)) as store:
+                store.ensure_schema()
+                store.write_runtime_environment_record(
+                    _runtime_record(retired=("LEGACY_PASSWORD",))
+                )
+                for command, arguments in (
+                    ("put", ["--set", "APP_EXTRA=temporary"]),
+                    ("unset", ["--key", "APP_EXTRA"]),
+                    ("relabel", ["--source-label", "operator-maintenance"]),
+                ):
+                    with self.subTest(command=command):
+                        result = CliRunner().invoke(
+                            main,
+                            [
+                                "environments",
+                                command,
+                                "--database-url",
+                                database_url,
+                                "--scope",
+                                "instance",
+                                "--context",
+                                "example-site",
+                                "--instance",
+                                "testing",
+                                "--allow-direct-db-mutation",
+                                *arguments,
+                            ],
+                        )
+                        self.assertEqual(result.exit_code, 0, result.output)
+                        self.assertEqual(
+                            store.list_runtime_environment_records()[0].retired_provider_keys,
+                            ("LEGACY_PASSWORD",),
+                        )
+                existing = store.list_runtime_environment_records()
+            manifest = ProductOnboardingManifest.model_validate(
+                {
+                    "product": "example-site",
+                    "display_name": "Example",
+                    "repository": "example/site",
+                    "image_repository": "ghcr.io/example/site",
+                    "lanes": [{"context": "example-site", "instance": "testing"}],
+                    "runtime_environments": [
+                        {
+                            "scope": "instance",
+                            "context": "example-site",
+                            "instance": "testing",
+                            "env": {"APP_MODE": "updated"},
+                        }
+                    ],
+                }
+            )
+            records = build_runtime_environment_records(
+                manifest=manifest, updated_at="2026-09-27T01:00:00Z", existing_records=existing
+            )
+            self.assertEqual(records[0].retired_provider_keys, ("LEGACY_PASSWORD",))
+            self.assertEqual(records[0].env["APP_MODE"], "updated")
+
     def test_changed_authority_or_failed_removal_prevents_deployment(self) -> None:
         for failure in ("retirement_changed", "application_changed", "provider_retained_key"):
             with self.subTest(failure=failure), TemporaryDirectory() as temporary_directory:
@@ -266,7 +406,9 @@ class ProviderKeyRetirementLiveSyncTests(unittest.TestCase):
                 self.assertNotIn("private-old-secret", str(refusal.exception))
                 if failure == "provider_retained_key":
                     self.assertEqual(len(updates), 1)
-                    self.assertNotIn("LEGACY_PASSWORD", str(updates[0]["env_text"]))
+                    updated_text = updates[0]["env_text"]
+                    assert isinstance(updated_text, str)
+                    self.assertNotIn("LEGACY_PASSWORD", updated_text)
                 else:
                     self.assertEqual(updates, [])
                 deploy.assert_not_called()

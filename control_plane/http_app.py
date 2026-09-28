@@ -13677,6 +13677,13 @@ def create_launchplane_fastapi_app(
                 route_path=_PRODUCT_CONFIG_APPLY_ROUTE,
                 product_config_request=product_config_request,
             )
+        except ProductProfileConflictError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="product_profile_conflict",
+                message="The product configuration changed. Refresh and run a new dry-run.",
+            ) from error
         except RuntimeEnvironmentConflictError as error:
             raise runtime_environment_conflict_http_error(trace_id=trace_id, error=error) from error
 

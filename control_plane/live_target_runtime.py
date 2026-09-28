@@ -12,6 +12,12 @@ from control_plane.contracts.product_profile_record import LaunchplaneProductPro
 from control_plane.contracts.runtime_key_safety_policy import (
     RuntimeKeySafetyTarget,
 )
+from control_plane.odoo_instance_overrides import (
+    LAUNCHPLANE_INSTANCE_OVERRIDES_REQUIRED_ENV_KEY,
+    LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY,
+    ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY,
+    ODOO_OVERRIDE_SECRET_ENV_PREFIX,
+)
 from control_plane.runtime_key_safety import (
     RuntimeKeySafetyPolicyReadStore,
     evaluate_runtime_key_safety,
@@ -115,8 +121,13 @@ def validate_provider_key_retirement(*, retired_keys: set[str], application_keys
         "ODOO_DB_PASSWORD",
         "ODOO_ADDONS_PATH",
         "ODOO_INSTALL_MODULES",
+        ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY,
+        LAUNCHPLANE_INSTANCE_OVERRIDES_REQUIRED_ENV_KEY,
+        LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY,
     }
-    if retired_keys & (application_keys | protected_keys):
+    if retired_keys & (application_keys | protected_keys) or any(
+        key.startswith(ODOO_OVERRIDE_SECRET_ENV_PREFIX) for key in retired_keys
+    ):
         raise LiveTargetRuntimeError(
             "Provider key retirement conflicts with declared application or driver settings.",
             code="runtime_retirement_conflict",
@@ -540,7 +551,7 @@ def apply_live_target_runtime_environment(
                 )
                 if current_retired_keys != retired_keys:
                     raise LiveTargetRuntimeError(
-                        "Provider key retirement changed before apply; review a fresh dry run.",
+                        "Provider key retirement changed during execution; review current configuration.",
                         code="runtime_retirement_changed",
                     )
                 validate_provider_key_retirement(
@@ -603,7 +614,7 @@ def apply_live_target_runtime_environment(
             verification["retired_keys_still_present"] = verification_delta["retired_keys_present"]
         if verification["status"] != "pass":
             raise LiveTargetRuntimeError(
-                "Dokploy target env did not persist all Launchplane runtime environment keys.",
+                "Dokploy target env did not persist the requested values and retired-key absence.",
                 code="dokploy_target_verification_failed",
             )
 

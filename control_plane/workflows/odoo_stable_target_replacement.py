@@ -1545,7 +1545,7 @@ def execute_odoo_stable_target_replacement_apply(
             )
             if retired_provider_keys != set(plan.retired_provider_keys):
                 raise click.ClickException(
-                    "Provider key retirement changed after planning; review a fresh plan."
+                    "Provider key retirement changed during execution; review current configuration."
                 )
             control_plane_live_target_runtime.validate_provider_key_retirement(
                 retired_keys=retired_provider_keys,
