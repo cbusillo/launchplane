@@ -43,7 +43,6 @@ from control_plane.launchplane_mutations import (
     resolve_launchplane_preview_id,
     resolve_next_launchplane_preview_generation_identity,
 )
-from control_plane.runtime_key_safety import RuntimeKeySafetyPolicyReadStore
 from control_plane.workflows.evidence_ingestion import (
     EvidenceIngestionStore,
     apply_deployment_evidence,
@@ -396,7 +395,6 @@ def apply_verireel_preview_refresh_result(
         try:
             driver_result = execute_verireel_preview_refresh(
                 control_plane_root=control_plane_root,
-                record_store=_runtime_key_safety_store_or_none(record_store),
                 request=request.refresh,
                 preview_id=generation_identity.preview_id,
                 preview_generation_id=generation_identity.generation_id,
@@ -639,14 +637,6 @@ def apply_verireel_testing_verification_records(
     result["deployment_health_status"] = destination_health_status
     result["post_deploy_status"] = request.migration_status
     return result
-
-
-def _runtime_key_safety_store_or_none(
-    record_store: object,
-) -> RuntimeKeySafetyPolicyReadStore | None:
-    if hasattr(record_store, "list_runtime_key_safety_policy_records"):
-        return cast(RuntimeKeySafetyPolicyReadStore, record_store)
-    return None
 
 
 def _verireel_preview_manifest_fingerprint(request: VeriReelPreviewRefreshRequest) -> str:
