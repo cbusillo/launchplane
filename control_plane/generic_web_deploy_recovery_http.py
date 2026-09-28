@@ -41,11 +41,14 @@ from control_plane.provider_operations import (
 )
 from control_plane.service_auth import AuthorizationTarget, LaunchplaneIdentity
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.provider_operations import provider_operation_response_payload
 from control_plane.workflows.generic_web_deploy import (
     GenericWebDeployResult,
+    build_generic_web_runtime_close_out_result,
     normalize_generic_web_artifact_id,
 )
 from control_plane.workflows.generic_web_deploy_provider import (
+    GenericWebRuntimeCloseOutEvidence,
     build_generic_web_provider_target_key,
     decode_generic_web_provider_reconciliation_target,
     resolve_generic_web_provider_reconciliation_target,
@@ -127,6 +130,7 @@ class _GenericWebDeployRecoveryInspection:
     proposed_action: GenericWebDeployRecoveryAction
     provider_observation_payload: dict[str, object]
     legacy_correlation_digest_evidence: dict[str, object] | None = None
+    runtime_close_out_evidence: GenericWebRuntimeCloseOutEvidence | None = None
     adapter: GenericWebDeployProviderMutationAdapter | None = None
     provider_inspection: Any | None = None
 
@@ -152,6 +156,8 @@ class _GenericWebDeployRecoveryInspection:
         }
         if self.legacy_correlation_digest_evidence is not None:
             payload["legacy_correlation"] = self.legacy_correlation_digest_evidence
+        if self.runtime_close_out_evidence is not None:
+            payload["runtime_close_out"] = self.runtime_close_out_evidence.model_dump(mode="json")
         return payload
 
     def dry_run_response(self) -> GenericWebDeployRecoveryDryRunResponse:
@@ -258,6 +264,7 @@ def _stored_recovery_metadata(
             | "wait_for_active_lease"
             | "adopt_observed"
             | "retry_original_operation"
+            | "close_out_observed"
             | "hold_unknown"
         ):
             return digest, action
@@ -329,6 +336,64 @@ def _apply_replay_response(
     )
 
 
+def _apply_runtime_close_out(
+    *,
+    trace_id: str,
+    inspection: _GenericWebDeployRecoveryInspection,
+    store: PostgresRecordStore,
+    recovery_metadata: dict[str, object],
+    dependencies: GenericWebDeployRecoveryDependencies,
+) -> GenericWebDeployRecoveryApplyResponse:
+    """Mark the exact reviewed reservation completed without any provider effect."""
+
+    provider_inspection = inspection.provider_inspection
+    resolved_target = (
+        provider_inspection.resolved_deploy_target if provider_inspection is not None else None
+    )
+    if (
+        inspection.runtime_close_out_evidence is None
+        or inspection.reservation.state != "reconcile_required"
+        or inspection.adapter is None
+        or resolved_target is None
+    ):
+        raise dependencies.http_error(
+            status_code=409,
+            trace_id=trace_id,
+            code="recovery_not_actionable",
+            message="Generic web deploy recovery runtime evidence is not closable.",
+        )
+    result = build_generic_web_runtime_close_out_result(
+        profile=inspection.adapter.profile,
+        lane=inspection.adapter.lane,
+        resolved_deploy_target=resolved_target,
+        provider_effect_started_at=inspection.reservation.provider_effect_started_at,
+    )
+    response_payload = provider_operation_response_payload(
+        trace_id=trace_id,
+        records={},
+        result=result,
+    )
+    response_payload["recovery"] = recovery_metadata
+    close_out = store.adopt_reconciled_mutation(
+        reservation=inspection.reservation,
+        response_status_code=202,
+        response_trace_id=trace_id,
+        response_payload=response_payload,
+    )
+    if close_out.status == "replayed" and close_out.record is not None:
+        return _apply_response(
+            trace_id=trace_id, inspection=inspection, reservation=close_out.record
+        )
+    if close_out.status != "adopted" or close_out.record is None:
+        raise dependencies.http_error(
+            status_code=409,
+            trace_id=trace_id,
+            code="reservation_changed",
+            message="Generic web deploy recovery reservation changed before close-out.",
+        )
+    return _apply_response(trace_id=trace_id, inspection=inspection, reservation=close_out.record)
+
+
 def _transition_expired_running_recovery(
     *,
     inspection: _GenericWebDeployRecoveryInspection,
@@ -364,6 +429,8 @@ def _transition_expired_running_recovery(
         retry_safe=inspection.retry_safe,
         proposed_action=inspection.proposed_action,
         provider_observation_payload=inspection.provider_observation_payload,
+        legacy_correlation_digest_evidence=inspection.legacy_correlation_digest_evidence,
+        runtime_close_out_evidence=inspection.runtime_close_out_evidence,
         adapter=inspection.adapter,
         provider_inspection=inspection.provider_inspection,
     )
@@ -509,6 +576,8 @@ async def _inspect_generic_web_deploy_recovery(
     operation_instance = recovery_request.original_deploy.deploy.instance.strip()
     authoritative_lane = lane
     legacy_provider_effect_started_at = ""
+    legacy_snapshot_without_product = False
+    runtime_close_out_evidence: GenericWebRuntimeCloseOutEvidence | None = None
 
     if reservation.state == "completed":
         stored_result = reservation.response_payload.get("result")
@@ -725,6 +794,19 @@ async def _inspect_generic_web_deploy_recovery(
                 proposed_action = "retry_original_operation"
             else:
                 proposed_action = "hold_unknown"
+            if (
+                proposed_action == "hold_unknown"
+                and reservation.state == "reconcile_required"
+                and not legacy_snapshot_without_product
+                and reservation.provider_effect_phase == "deploy_trigger"
+                and provider_inspection.provider_evidence == "deployment_absent_after_effect"
+                and provider_inspection.resolved_deploy_target is not None
+            ):
+                runtime_close_out_evidence = adapter.inspect_runtime_close_out(
+                    resolved_deploy_target=provider_inspection.resolved_deploy_target,
+                )
+                if runtime_close_out_evidence is not None:
+                    proposed_action = "close_out_observed"
 
     return _GenericWebDeployRecoveryInspection(
         request=recovery_request,
@@ -746,6 +828,7 @@ async def _inspect_generic_web_deploy_recovery(
             if provider_inspection is not None
             else None
         ),
+        runtime_close_out_evidence=runtime_close_out_evidence,
         adapter=adapter,
         provider_inspection=provider_inspection,
     )
@@ -885,7 +968,11 @@ def build_generic_web_deploy_recovery_apply_handler(
                 code="stale_recovery_digest",
                 message="Reviewed generic web deploy recovery digest no longer matches.",
             )
-        if inspection.proposed_action not in {"adopt_observed", "retry_original_operation"}:
+        if inspection.proposed_action not in {
+            "adopt_observed",
+            "retry_original_operation",
+            "close_out_observed",
+        }:
             raise dependencies.http_error(
                 status_code=409,
                 trace_id=trace_id,
@@ -901,6 +988,15 @@ def build_generic_web_deploy_recovery_apply_handler(
             trace_id=trace_id,
             dependencies=dependencies,
         )
+
+        if inspection.proposed_action == "close_out_observed":
+            return _apply_runtime_close_out(
+                trace_id=trace_id,
+                inspection=action_inspection,
+                store=record_store,
+                recovery_metadata=recovery_metadata,
+                dependencies=dependencies,
+            )
 
         if inspection.proposed_action == "adopt_observed":
             if action_inspection.provider_inspection is None:
