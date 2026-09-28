@@ -641,7 +641,20 @@ class FastApiProductEnvironmentConfigStatusTests(unittest.IsolatedAsyncioTestCas
             )
             _write_runtime_key_safety_policy(
                 database_url=database_url,
-                context_name="example-site",
+                rules=(
+                    RuntimeSecretSafetyRule(
+                        binding_key="SMTP_PASSWORD",
+                        secret_class="prod_only",
+                        allowed_contexts=("example-site",),
+                        allowed_instances=("prod",),
+                    ),
+                    RuntimeSecretSafetyRule(
+                        binding_key="RESEND_API_KEY",
+                        secret_class="prod_only",
+                        allowed_contexts=("other-site",),
+                        allowed_instances=("prod",),
+                    ),
+                ),
             )
             store = PostgresRecordStore(database_url=database_url)
             store.write_product_profile_record(

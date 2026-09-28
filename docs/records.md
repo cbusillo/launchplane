@@ -2211,6 +2211,22 @@ run` is the foreground loop intended for an external process supervisor, and
   are not supported. Preview refresh, verification, destroy, and cleanup remain
   independent from every admission path and from GitHub projection delivery.
 
+## Provider environment key retirement
+
+`RuntimeEnvironmentRecord` may carry `retired_provider_keys` for an exact
+instance-scoped context/instance record. The bounded, unique uppercase names
+are desired absence from the provider environment, not secret values or a
+wildcard policy. Nonempty lists use record schema version 2; empty lists are
+omitted from serialized records, preserving the version-1 representation.
+Product-config schema version 2 is required to edit this list. Omitted input
+preserves it, and explicit `[]` clears it. Existing runtime values, the
+retirement list, and product-profile compare-and-swap expectations are
+committed through the normal product authority bundle. A key cannot coexist in
+the same record's values and retirement list. Service consumers also reject
+retirement of declared application or protected driver keys. Lists do not
+inherit across contexts or instances. Applying the record does not itself
+delete provider values or deploy an application.
+
 ## Runtime Key-Safety Policy Record
 
 - One record per imported runtime key-safety policy version under
@@ -2228,7 +2244,8 @@ run` is the foreground loop intended for an external process supervisor, and
   a managed secret binding may be used by a target runtime class. Evaluation
   fails closed when no active policy record exists or when a required binding is
   missing, disabled, ambiguous, unclassified, or outside the allowed
-  context/instance.
+  context/instance. A binding stored for exactly a stable target lane counts as
+  classified by that lane; see [secrets](secrets.md).
 - Rules may restrict stable scope with exact `allowed_contexts` and
   `allowed_instances` values. Dynamic preview lanes should use paired
   `allowed_targets` entries with an exact context and explicit

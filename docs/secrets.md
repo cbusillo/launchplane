@@ -352,9 +352,11 @@ decryption key state denies the reveal or resolution.
   runtime key-safety policy before returning sanitized key/count evidence.
 - Live target runtime sync through the service API filters the resolved runtime
   payload to the product profile's expected runtime-environment keys and
-  runtime managed-secret binding keys for the selected lane. Shared/global
-  runtime records can provide values, but they are not synced to an unrelated
-  product target unless that product profile declares the key.
+  runtime managed-secret binding keys for the selected lane, plus any runtime
+  managed secret stored for exactly that lane's context and instance. Storing a
+  lane secret is enough to deliver it; it needs no profile declaration.
+  Shared/global runtime records can provide values, but they are not synced to
+  an unrelated product target unless that product profile declares the key.
 - Odoo stable lanes declare their compose runtime contract in product onboarding
   seed material: `ODOO_DB_NAME`, `ODOO_DB_USER`, `ODOO_DATA_VOLUME`,
   `ODOO_LOG_VOLUME`, `ODOO_DB_VOLUME`, and managed secret bindings for
@@ -364,6 +366,12 @@ decryption key state denies the reveal or resolution.
 - Gates fail closed when a required binding is missing, disabled, ambiguous,
   unclassified, or scoped outside the target context/instance. A target with an
   unknown environment class also fails closed.
+- A binding stored for exactly the target's context and instance resolves for
+  no other lane, so on a `prod`, `testing`, or `dev` target the lane is its
+  classification and it needs no policy rule. An explicit rule for the key
+  still applies when one exists. Preview targets never get this: previews copy
+  template-lane values, and their check retargets the template's bindings to
+  the preview, so a copied lane secret still needs an explicit rule.
 - `prod_only` bindings are allowed only for `prod` runtime targets. `testing`
   targets may use `testing`, `non_prod`, or `shared_safe` bindings. `preview`
   targets may use `preview`, `non_prod`, or `shared_safe` bindings.

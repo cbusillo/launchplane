@@ -1,9 +1,23 @@
 from typing import Literal
+import re
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 ScalarValue = str | int | float | bool
 RuntimeEnvironmentScope = Literal["global", "context", "instance"]
+
+
+def normalize_retired_provider_keys(value: object) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple)) or len(value) > 256:
+        raise ValueError("Retired provider keys require a bounded list of environment key names")
+    keys: list[str] = []
+    for key in value:
+        if not isinstance(key, str) or re.fullmatch(r"[A-Z_][A-Z0-9_]{0,127}", key) is None:
+            raise ValueError("Retired provider keys must be uppercase environment key names")
+        if key in keys:
+            raise ValueError("Retired provider keys must be unique")
+        keys.append(key)
+    return tuple(sorted(keys))
 
 
 class RuntimeEnvironmentRecord(BaseModel):
@@ -14,8 +28,29 @@ class RuntimeEnvironmentRecord(BaseModel):
     context: str = ""
     instance: str = ""
     env: dict[str, ScalarValue]
+    retired_provider_keys: tuple[str, ...] = Field(
+        default=(),
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     updated_at: str
     source_label: str = ""
+
+    @field_validator("retired_provider_keys", mode="before")
+    @classmethod
+    def _validate_retired_provider_keys(cls, value: object) -> tuple[str, ...]:
+        return normalize_retired_provider_keys(value)
+
+    @model_validator(mode="after")
+    def _validate_retirement_scope(self) -> "RuntimeEnvironmentRecord":
+        if self.retired_provider_keys:
+            if self.schema_version != 2:
+                raise ValueError("Provider key retirement requires runtime record schema version 2")
+            if self.scope != "instance" or not self.context.strip() or not self.instance.strip():
+                raise ValueError("Provider key retirement requires an exact context and instance")
+            if set(self.retired_provider_keys) & self.env.keys():
+                raise ValueError("A provider key cannot be both configured and retired")
+        return self
 
     @field_validator("updated_at", mode="after")
     @classmethod
