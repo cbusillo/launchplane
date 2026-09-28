@@ -7,7 +7,11 @@ from pydantic import ValidationError
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
-from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.product_profile_record import (
+    LaunchplaneProductProfileRecord,
+    ProductLaneHealthCheck,
+    ProductLaneHealthMonitoringPolicy,
+)
 from control_plane.product_stable_lane_repair import (
     ProductStableLaneRepairBoundaryError,
     ProductStableLaneRepairRequest,
@@ -196,6 +200,33 @@ class ProductStableLaneRepairTests(unittest.TestCase):
             }
         )
         with self.assertRaisesRegex(ProductStableLaneRepairBoundaryError, "absent"):
+            build_product_stable_lane_repair_plan(
+                record_store=_Store(profile=profile), request=_request()
+            )
+
+    def test_rejects_profile_that_would_fail_write_validation(self) -> None:
+        existing = _profile()
+        testing_lane = existing.lanes[0].model_copy(
+            update={
+                "base_url": "",
+                "health_url": "",
+                "health_monitoring": ProductLaneHealthMonitoringPolicy(
+                    monitoring_intent="public",
+                    checks=(
+                        ProductLaneHealthCheck(
+                            name="public-ingress",
+                            kind="public_http",
+                            enabled=True,
+                        ),
+                    ),
+                ),
+            }
+        )
+        profile = existing.model_copy(update={"lanes": (testing_lane,)})
+        with self.assertRaisesRegex(
+            ProductStableLaneRepairBoundaryError,
+            "public HTTP health check requires base_url or explicit health_url",
+        ):
             build_product_stable_lane_repair_plan(
                 record_store=_Store(profile=profile), request=_request()
             )
