@@ -279,6 +279,14 @@ def build_product_stable_lane_repair_plan(
         existing_profile=profile,
         replacement_profile=replacement_profile,
     )
+    # Apply writes through validate_write_contract(); run it here too so a dry
+    # run surfaces the same refusal instead of apply failing unexpectedly.
+    try:
+        replacement_profile.validate_write_contract()
+    except ValueError as error:
+        raise ProductStableLaneRepairBoundaryError(
+            f"The repaired product profile would fail validation: {error}"
+        ) from error
     target_evidence = ProductStableLaneRepairTargetEvidence(
         context=provider_target.context,
         instance=provider_target.instance,
