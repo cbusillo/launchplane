@@ -204,6 +204,53 @@ class ProductStableLaneRepairTests(unittest.TestCase):
                 record_store=_Store(profile=profile), request=_request()
             )
 
+    def test_fills_missing_urls_of_an_existing_lane_in_place(self) -> None:
+        existing = _profile()
+        blank_prod = existing.lanes[0].model_copy(
+            update={"instance": "prod", "base_url": "", "health_url": ""}
+        )
+        profile = existing.model_copy(update={"lanes": (blank_prod, *existing.lanes)})
+
+        plan, _, replacement, *_ = build_product_stable_lane_repair_plan(
+            record_store=_Store(profile=profile), request=_request()
+        )
+
+        self.assertEqual(plan.preserved_lane_instances, ("testing",))
+        self.assertEqual([lane.instance for lane in replacement.lanes], ["prod", "testing"])
+        self.assertEqual(replacement.lanes[0].base_url, "https://www.example.com")
+        self.assertEqual(replacement.lanes[0].health_url, "https://www.example.com/api/health")
+        self.assertEqual(replacement.lanes[1], existing.lanes[0])
+
+    def test_filling_an_existing_lane_keeps_its_recorded_health_url(self) -> None:
+        existing = _profile()
+        prod = existing.lanes[0].model_copy(
+            update={
+                "instance": "prod",
+                "base_url": "",
+                "health_url": "https://www.example.com/custom-health",
+            }
+        )
+        profile = existing.model_copy(update={"lanes": (*existing.lanes, prod)})
+
+        plan, _, replacement, *_ = build_product_stable_lane_repair_plan(
+            record_store=_Store(profile=profile), request=_request()
+        )
+
+        self.assertEqual(plan.health_url, "https://www.example.com/custom-health")
+        self.assertEqual(replacement.lanes[-1].health_url, "https://www.example.com/custom-health")
+
+    def test_rejects_filling_a_lane_owned_by_another_context(self) -> None:
+        existing = _profile()
+        other_context_prod = existing.lanes[0].model_copy(
+            update={"instance": "prod", "context": "other-product", "base_url": ""}
+        )
+        profile = existing.model_copy(update={"lanes": (*existing.lanes, other_context_prod)})
+
+        with self.assertRaisesRegex(ProductStableLaneRepairBoundaryError, "same context"):
+            build_product_stable_lane_repair_plan(
+                record_store=_Store(profile=profile), request=_request()
+            )
+
     def test_rejects_profile_that_would_fail_write_validation(self) -> None:
         existing = _profile()
         testing_lane = existing.lanes[0].model_copy(

@@ -36,7 +36,7 @@ name: Product Onboarding Manifest (Advanced)
         default: ""
         type: string
       instance:
-        description: Missing stable lane instance for stable-lane-repair.
+        description: Stable lane instance that is missing or has no base_url, for stable-lane-repair.
         required: false
         default: ""
         type: string
