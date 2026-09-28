@@ -450,6 +450,15 @@ class RuntimeCloseOutEvaluationTests(unittest.TestCase):
                     expected_artifact_reference=original,
                 )
 
+    def test_docker_hub_official_image_aliases_are_the_same_repository(self) -> None:
+        original = "docker.io/library/nginx@sha256:" + "e" * 64
+        for alias in ("nginx:1.26", "docker.io/nginx:1.26", "index.docker.io/nginx:old"):
+            with self.subTest(alias), self.assertRaises(ValueError):
+                evaluate_generic_web_runtime_close_out(
+                    observation=_runtime(target=original, running=(original, alias)),
+                    expected_artifact_reference=original,
+                )
+
     def test_registry_port_is_not_mistaken_for_a_tag(self) -> None:
         original = "registry.example:5000/team/app@sha256:" + "c" * 64
         with self.assertRaises(ValueError):

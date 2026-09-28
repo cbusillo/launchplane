@@ -288,6 +288,8 @@ def _image_repository(image_reference: str) -> str:
         first_segment = "docker.io"
     elif "." not in first_segment and ":" not in first_segment and first_segment != "localhost":
         return f"docker.io/{repository}"
+    if first_segment == "docker.io" and "/" not in remainder:
+        return f"docker.io/library/{remainder}"
     return f"{first_segment}/{remainder}"
 
 
