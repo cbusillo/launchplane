@@ -915,6 +915,58 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         self.assertIn("ODOO_WEB_HOST_PORT", result.error_message)
         sync_source.assert_not_called()
 
+    def test_apply_refuses_platform_credential_before_provider_write(self) -> None:
+        store = _Store(
+            target_record=_target_record(),
+            target_id_record=_target_id_record(),
+            inventory=_inventory(),
+        )
+        initial_env = "\n".join(
+            (
+                *_DATABASE_ENV_LINES,
+                "ODOO_DATA_VOLUME=cm_testing_odoo_data",
+                "ODOO_LOG_VOLUME=cm_testing_odoo_logs",
+                "ODOO_DB_VOLUME=cm_testing_odoo_db",
+            )
+        )
+        with (
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_source.read_dokploy_config",
+                return_value=("host", "token"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.fetch_dokploy_target_payload",
+                return_value={"name": "cm-testing", "env": initial_env},
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.latest_deployment_for_target",
+                return_value={"deploymentId": "deploy-123", "status": "success"},
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_runtime_environments.resolve_runtime_environment_values",
+                return_value={"DOKPLOY_TOKEN": "record-deploy-token"},
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_compose.sync_dokploy_compose_raw_source"
+            ) as sync_source,
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.update_dokploy_target_env"
+            ) as update_env,
+        ):
+            result = execute_odoo_stable_target_replacement_apply(
+                control_plane_root=Path("."),
+                record_store=store,
+                request=OdooStableTargetReplacementApplyRequest(
+                    product=store.profile.product, instance="testing"
+                ),
+                dokploy_request=_request,
+            )
+        self.assertEqual(result.deploy_status, "fail")
+        self.assertIn("DOKPLOY_TOKEN", result.error_message)
+        self.assertNotIn("record-deploy-token", result.error_message)
+        sync_source.assert_not_called()
+        update_env.assert_not_called()
+
     def test_build_plan_blocks_upstream_restore_without_issue_backed_policy(self) -> None:
         with (
             patch(

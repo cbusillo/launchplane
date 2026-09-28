@@ -1512,11 +1512,11 @@ def execute_odoo_stable_target_replacement_apply(
             target_id=target_id_record.target_id,
         )
         runtime_environment_values = (
-            control_plane_runtime_environments.resolve_runtime_environment_values(
+            control_plane_runtime_environments.resolve_app_runtime_environment(
                 control_plane_root=control_plane_root,
                 context_name=plan.context,
                 instance_name=plan.instance,
-            )
+            ).values
         )
         unfiltered_runtime_values = dict(runtime_environment_values)
         try:

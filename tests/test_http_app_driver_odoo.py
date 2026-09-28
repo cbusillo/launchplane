@@ -31,6 +31,7 @@ from control_plane.contracts.runtime_identity import parse_runtime_identity_payl
 from control_plane.dokploy import DokploySourceOfTruth, DokployTargetDefinition
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.http_app import create_launchplane_fastapi_app, idempotency_scope
+from control_plane.workflows.launchplane import resolve_launchplane_github_token
 from control_plane.odoo_instance_overrides import (
     LAUNCHPLANE_INSTANCE_OVERRIDES_REQUIRED_ENV_KEY,
     LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY,
@@ -2157,6 +2158,136 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
             expected_runtime_identity.deployment_record_id,
             provider_operation_record.record_id,
         )
+
+    async def test_odoo_preview_env_withholds_launchplane_pr_comment_token(self) -> None:
+        # Launchplane keeps the token it uses for preview PR comments in the
+        # context's runtime records. The preview runs unmerged code, so its env
+        # must not carry that token, while Launchplane can still read it.
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            store = self._profile_store(database_url)
+            _write_odoo_preview_template_runtime_environment(store=store)
+            store.write_runtime_environment_record(
+                RuntimeEnvironmentRecord(
+                    scope="context",
+                    context="cm",
+                    env={"GITHUB_TOKEN": "context-record-comment-token"},
+                    updated_at="2026-05-09T12:25:00Z",
+                    source_label="test",
+                )
+            )
+            identity = self._identity(
+                repository="cbusillo/launchplane",
+                workflow_ref=(
+                    "cbusillo/launchplane/.github/workflows/odoo-preview-apply.yml@refs/heads/main"
+                ),
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(identity),
+                authz_policy=self._policy(
+                    actions=("odoo_preview_apply.execute",),
+                    repository="cbusillo/launchplane",
+                    workflow_ref=(
+                        "cbusillo/launchplane/.github/workflows/odoo-preview-apply.yml"
+                        "@refs/heads/main"
+                    ),
+                ),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+            plan_id = self._store_issued_preview_plan(
+                store=store,
+                identity=identity,
+                payload=_ready_odoo_preview_apply_payload(include_manifest=True),
+            )
+            with (
+                patch.dict(
+                    "os.environ",
+                    {
+                        control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key",
+                        "LAUNCHPLANE_DATABASE_URL": database_url,
+                    },
+                    clear=True,
+                ),
+                patch(
+                    "control_plane.odoo_preview_apply_http.refresh_odoo_preview_issued_plan",
+                    side_effect=lambda **kwargs: kwargs["request"],
+                ),
+                patch(
+                    "control_plane.odoo_preview_apply_http.execute_odoo_preview_dokploy_apply",
+                    return_value=OdooPreviewDokployApplyResult(
+                        status="pass",
+                        operation="refresh",
+                        product="odoo-tenant-cm",
+                        repository="cbusillo/odoo-tenant-cm",
+                        preview_slug="pr-42",
+                        preview_url="https://pr-42.cm-preview.example.test",
+                        domain_host="pr-42.cm-preview.example.test",
+                        compose_id="compose-cm-pr-42",
+                        compose_name="cm-odoo-preview-pr-42",
+                        created_compose=True,
+                        domain_id="domain-cm-pr-42",
+                    ),
+                ) as apply_driver,
+            ):
+                control_plane_secrets.write_secret_value(
+                    record_store=store,
+                    scope="context",
+                    integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
+                    name="github-token",
+                    plaintext_value="context-secret-comment-token",
+                    binding_key="GH_TOKEN",
+                    context_name="cm",
+                    actor="test",
+                    source_label="test",
+                )
+                response = await _post_odoo_preview_apply(
+                    app,
+                    {
+                        "schema_version": 1,
+                        "product": "odoo-tenant-cm",
+                        "apply": {
+                            "dry_run_plan": {
+                                "status": "ready",
+                                "operation": "refresh",
+                                "product": "odoo-tenant-cm",
+                                "repository": "cbusillo/odoo-tenant-cm",
+                                "preview_slug": "pr-42",
+                                "preview_url": "https://pr-42.cm-preview.example.test",
+                                "domain_host": "pr-42.cm-preview.example.test",
+                                "compose_ref": "${created.composeId:cm-odoo-preview-pr-42}",
+                                "compose_name": "cm-odoo-preview-pr-42",
+                                "environment_id": "env-cm-preview",
+                                "template_compose_id": "compose-cm-testing",
+                                "summary": "ready isolated Odoo preview apply",
+                            },
+                            "image_reference": _TEST_PREVIEW_IMAGE_REFERENCE,
+                            "manifest": {
+                                "artifact_id": "artifact-cm-preview",
+                                "source_commit": _TEST_PREVIEW_HEAD_SHA,
+                                "enterprise_base_digest": "sha256:enterprise",
+                                "image": {
+                                    "repository": "ghcr.io/cbusillo/odoo-tenant-cm",
+                                    "digest": f"sha256:{_TEST_PREVIEW_IMAGE_DIGEST}",
+                                },
+                            },
+                            "wait_for_deploy": False,
+                            "smoke_check": False,
+                        },
+                    },
+                    idempotency_key=plan_id,
+                )
+                launchplane_comment_token = resolve_launchplane_github_token(
+                    control_plane_root=root, context_name="cm"
+                )
+
+        self.assertEqual(response.status_code, 202, response.text)
+        applied_environment = apply_driver.call_args.kwargs["request"].environment_values
+        self.assertNotIn("GITHUB_TOKEN", applied_environment)
+        self.assertNotIn("GH_TOKEN", applied_environment)
+        self.assertEqual(applied_environment["ODOO_DB_PASSWORD"], "template-db-secret")
+        self.assertEqual(launchplane_comment_token, "context-record-comment-token")
 
     def test_odoo_preview_runtime_identity_rejects_non_exact_source_commit(self) -> None:
         payload = _ready_odoo_preview_apply_payload(include_manifest=True)
