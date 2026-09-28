@@ -15,6 +15,7 @@ RUNTIME_ENVIRONMENT_INTEGRATION = "runtime_environment"
 LAUNCHPLANE_WORKER_INTEGRATION = "launchplane_worker"
 LAUNCHPLANE_SERVICE_INTEGRATION = "launchplane_service"
 MISSPELLED_RUNTIME_ENVIRONMENT_INTEGRATION = "runtime-environment"
+COPIED_VERSION_SUFFIX = "-version-copied-from-global"
 SERVICE_BINDING_KEYS = ("GITHUB_TOKEN", "LAUNCHPLANE_ADVISORY_GITHUB_APP_PRIVATE_KEY")
 WORKER_BINDING_KEYS = (
     "PRODUCTION_BACKUP_SSH_PRIVATE_KEY",
@@ -247,25 +248,30 @@ def copy_global_secret_to_contexts(
     version: dict[str, object] = connection.execute(
         sa.select(_VERSIONS.c.payload).where(_VERSIONS.c.version_id == source["current_version_id"])
     ).scalar_one()
-    already = {
+    has_own_copy = {
         row.context
         for row in connection.execute(
-            sa.select(_SECRETS.c.context).where(
-                _SECRETS.c.integration == integration,
-                _SECRETS.c.scope == "context",
-                _SECRETS.c.name == source["name"],
-                _SECRETS.c.context.in_(contexts),
+            sa.select(_BINDINGS.c.context).where(
+                _BINDINGS.c.integration == integration,
+                _BINDINGS.c.binding_key == binding_key,
+                _BINDINGS.c.status == "configured",
+                _BINDINGS.c.context.in_(contexts),
+                _BINDINGS.c.instance == "",
             )
         )
     }
     copied: list[str] = []
     for context in contexts:
-        if context in already:
+        if context in has_own_copy:
             continue
         secret_id = "-".join(
             _slug(part) for part in ("secret", integration, source["name"], context)
         )
-        version_id = f"{secret_id}-version-copied-from-global"
+        if connection.execute(
+            sa.select(_SECRETS.c.secret_id).where(_SECRETS.c.secret_id == secret_id)
+        ).first():
+            continue
+        version_id = f"{secret_id}{COPIED_VERSION_SUFFIX}"
         binding_id = f"{secret_id}-binding-{_slug(binding_key)}"
         secret_payload = {
             **source,
@@ -357,20 +363,29 @@ def copy_global_secret_to_contexts(
 
 
 def remove_copied_secrets(
-    connection: sa.Connection, *, integration: str, binding_key: str, contexts: tuple[str, ...]
+    connection: sa.Connection, *, integration: str, contexts: tuple[str, ...]
 ) -> int:
-    """Remove only the copies ``copy_global_secret_to_contexts`` created; returns count."""
+    """Remove only the copies ``copy_global_secret_to_contexts`` created; returns count.
+
+    A copy is recognised by its migration-made current version, so one the operator has
+    rotated since is kept. Each record is locked while it is checked and deleted.
+    """
     removed = 0
-    for context in contexts:
-        secret_id = "-".join(_slug(part) for part in ("secret", integration, binding_key, context))
-        version_id = f"{secret_id}-version-copied-from-global"
-        still_the_copy = connection.execute(
-            sa.select(_SECRETS.c.secret_id).where(
-                _SECRETS.c.secret_id == secret_id,
-                _SECRETS.c.current_version_id == version_id,
-            )
+    candidates = connection.execute(
+        sa.select(_SECRETS.c.secret_id).where(
+            _SECRETS.c.integration == integration,
+            _SECRETS.c.scope == "context",
+            _SECRETS.c.context.in_(contexts),
+        )
+    ).all()
+    for candidate in candidates:
+        secret_id = candidate.secret_id
+        locked = connection.execute(
+            sa.select(_SECRETS.c.current_version_id)
+            .where(_SECRETS.c.secret_id == secret_id)
+            .with_for_update()
         ).first()
-        if still_the_copy is None:
+        if locked is None or locked.current_version_id != f"{secret_id}{COPIED_VERSION_SUFFIX}":
             continue
         for table in (_AUDIT_EVENTS, _BINDINGS, _VERSIONS, _SECRETS):
             connection.execute(table.delete().where(table.c.secret_id == secret_id))

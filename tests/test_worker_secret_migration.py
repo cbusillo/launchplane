@@ -384,6 +384,52 @@ class WorkerSecretMigrationTests(unittest.TestCase):
         self.assertEqual(rotated["action"], "rotated")
         self.assertEqual(self.site_secrets("cm", "prod")["ODOO_KEY"], "cm-key")
 
+    def write_named(
+        self, *, name: str, key: str, value: str, scope: str, context: str = ""
+    ) -> None:
+        control_plane_secrets.write_secret_value(
+            record_store=self.store,
+            scope=scope,  # type: ignore[arg-type]
+            integration=RUNTIME,
+            name=name,
+            plaintext_value=value,
+            binding_key=key,
+            context_name=context,
+            actor="test",
+        )
+
+    def test_a_site_copy_under_another_name_is_respected(self) -> None:
+        self.write_shared(integration=RUNTIME, key="ODOO_KEY", value="shared-key", scope="global")
+        self.write_named(
+            name="site-license", key="ODOO_KEY", value="cm-own", scope="context", context="cm"
+        )
+
+        self.assertEqual(self.copy_odoo_key(("cm",)), ())
+        self.assertEqual(self.site_secrets("cm", "prod")["ODOO_KEY"], "cm-own")
+
+    def test_a_taken_id_skips_the_site_instead_of_failing(self) -> None:
+        self.write_shared(integration=RUNTIME, key="ODOO_KEY", value="shared-key", scope="global")
+        self.write_named(
+            name="odoo-key", key="LEGACY_ODOO_KEY", value="other", scope="context", context="cm"
+        )
+
+        self.assertEqual(self.copy_odoo_key(("cm", "opw")), ("opw",))
+
+    def test_downgrade_removes_copies_of_a_differently_named_source(self) -> None:
+        self.write_named(name="odoo-license", key="ODOO_KEY", value="shared", scope="global")
+        self.assertEqual(self.copy_odoo_key(("cm",)), ("cm",))
+        engine = sa.create_engine(self.database_url)
+        try:
+            with engine.begin() as connection:
+                removed = remove_copied_secrets(
+                    connection, integration=RUNTIME_ENVIRONMENT_INTEGRATION, contexts=("cm",)
+                )
+        finally:
+            engine.dispose()
+
+        self.assertEqual(removed, 1)
+        self.assertEqual(self.site_secrets("cm", "prod"), {})
+
     def test_downgrade_removes_only_the_copies(self) -> None:
         self.write_shared(integration=RUNTIME, key="ODOO_KEY", value="shared-key", scope="global")
         self.write_shared(
@@ -396,7 +442,6 @@ class WorkerSecretMigrationTests(unittest.TestCase):
                 removed = remove_copied_secrets(
                     connection,
                     integration=RUNTIME_ENVIRONMENT_INTEGRATION,
-                    binding_key="ODOO_KEY",
                     contexts=("cm", "opw"),
                 )
         finally:

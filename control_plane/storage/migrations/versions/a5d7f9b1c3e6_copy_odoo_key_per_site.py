@@ -41,6 +41,5 @@ def downgrade() -> None:
     remove_copied_secrets(
         op.get_bind(),
         integration=RUNTIME_ENVIRONMENT_INTEGRATION,
-        binding_key="ODOO_KEY",
         contexts=ODOO_SITE_CONTEXTS,
     )
